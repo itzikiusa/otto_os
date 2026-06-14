@@ -1,0 +1,300 @@
+//! Connections REST router (contract endpoints #25–#30).
+
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Extension, Json, Router};
+use otto_core::api::{
+    MoveSectionReq, Problem, ReorderSectionsReq, TestConnectionResp, UpsertConnectionReq,
+    UpsertSectionReq,
+};
+use otto_core::auth::{AuthUser, RoleChecker};
+use otto_core::domain::{Connection, ConnectionSection, Session, User, WorkspaceRole};
+use otto_core::{Error, Id};
+use serde::Deserialize;
+
+use crate::service::{ConnectionsService, Spawner};
+
+/// Server-side context required by the connections routes.
+pub trait ConnectionsCtx: Clone + Send + Sync + 'static {
+    fn connections(&self) -> &Arc<ConnectionsService>;
+    fn roles(&self) -> &Arc<dyn RoleChecker>;
+    fn spawner(&self) -> &Arc<dyn Spawner>;
+}
+
+/// Local problem-details mapper (orphan rule: cannot impl IntoResponse for
+/// `otto_core::Error` here).
+pub(crate) struct ApiErr(pub Error);
+
+impl From<Error> for ApiErr {
+    fn from(e: Error) -> Self {
+        ApiErr(e)
+    }
+}
+
+impl IntoResponse for ApiErr {
+    fn into_response(self) -> Response {
+        let status = match &self.0 {
+            Error::NotFound(_) => StatusCode::NOT_FOUND,
+            Error::Unauthorized => StatusCode::UNAUTHORIZED,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
+            Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Invalid(_) => StatusCode::BAD_REQUEST,
+            Error::Upstream(_) => StatusCode::BAD_GATEWAY,
+            Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        let problem = Problem {
+            code: self.0.code().to_string(),
+            message: self.0.to_string(),
+        };
+        (status, Json(problem)).into_response()
+    }
+}
+
+type ApiResult<T> = std::result::Result<T, ApiErr>;
+
+/// Body of `POST /connections/{id}/open`. `workspace_id` is only needed for
+/// global connections (which have no workspace of their own).
+#[derive(Debug, Default, Deserialize)]
+pub struct OpenConnectionReq {
+    pub title: Option<String>,
+    pub workspace_id: Option<Id>,
+}
+
+/// REST routes; the server nests this under `/api/v1` and supplies the state.
+pub fn api_router<S: ConnectionsCtx>() -> Router<S> {
+    Router::new()
+        .route(
+            "/workspaces/{id}/connections",
+            get(list_connections::<S>).post(create_connection::<S>),
+        )
+        .route(
+            "/connections/{id}",
+            axum::routing::patch(update_connection::<S>).delete(delete_connection::<S>),
+        )
+        .route("/connections/{id}/open", post(open_connection::<S>))
+        .route("/connections/{id}/test", post(test_connection::<S>))
+        .route(
+            "/workspaces/{id}/connection-sections",
+            get(list_sections::<S>).post(create_section::<S>),
+        )
+        .route(
+            "/workspaces/{id}/connection-sections/reorder",
+            post(reorder_sections::<S>),
+        )
+        .route(
+            "/connection-sections/{id}",
+            axum::routing::patch(rename_section::<S>).delete(delete_section::<S>),
+        )
+        .route("/connection-sections/{id}/move", post(move_section::<S>))
+}
+
+/// Editor in the connection's workspace; for global connections: root only.
+async fn check_conn_role<S: ConnectionsCtx>(
+    ctx: &S,
+    user: &User,
+    conn: &Connection,
+    min: WorkspaceRole,
+) -> Result<(), Error> {
+    match &conn.workspace_id {
+        Some(ws) => ctx.roles().check(user, ws, min).await,
+        None => {
+            if user.is_root {
+                Ok(())
+            } else {
+                Err(Error::Forbidden(
+                    "global connections are managed by root".into(),
+                ))
+            }
+        }
+    }
+}
+
+/// #25 GET /workspaces/{id}/connections — viewer
+async fn list_connections<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+) -> ApiResult<Json<Vec<Connection>>> {
+    ctx.roles()
+        .check(&user, &ws_id, WorkspaceRole::Viewer)
+        .await?;
+    Ok(Json(ctx.connections().list(&ws_id).await?))
+}
+
+/// #26 POST /workspaces/{id}/connections — editor
+async fn create_connection<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+    Json(req): Json<UpsertConnectionReq>,
+) -> ApiResult<Json<Connection>> {
+    ctx.roles()
+        .check(&user, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    let conn = ctx.connections().create(Some(ws_id), &user.id, req).await?;
+    Ok(Json(conn))
+}
+
+/// #27 PATCH /connections/{id} — ws editor (global: root)
+async fn update_connection<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<UpsertConnectionReq>,
+) -> ApiResult<Json<Connection>> {
+    let conn = ctx.connections().get(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    Ok(Json(ctx.connections().update(&id, req).await?))
+}
+
+/// #28 DELETE /connections/{id} — ws editor (global: root)
+async fn delete_connection<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<StatusCode> {
+    let conn = ctx.connections().get(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    ctx.connections().delete(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// #29 POST /connections/{id}/open — editor → Session
+async fn open_connection<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    body: Option<Json<OpenConnectionReq>>,
+) -> ApiResult<Json<Session>> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let conn = ctx.connections().get(&id).await?;
+    let ws_id = conn
+        .workspace_id
+        .clone()
+        .or(req.workspace_id)
+        .ok_or_else(|| {
+            Error::Invalid("opening a global connection requires 'workspace_id'".into())
+        })?;
+    ctx.roles()
+        .check(&user, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    let session = ctx
+        .connections()
+        .open(&conn, &ws_id, &user.id, req.title, ctx.spawner().as_ref())
+        .await?;
+    Ok(Json(session))
+}
+
+/// #30 POST /connections/{id}/test — editor
+async fn test_connection<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<TestConnectionResp>> {
+    let conn = ctx.connections().get(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    Ok(Json(ctx.connections().test(&conn).await?))
+}
+
+// --- Connection sections ----------------------------------------------------
+
+/// GET /workspaces/{id}/connection-sections — viewer
+async fn list_sections<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+) -> ApiResult<Json<Vec<ConnectionSection>>> {
+    ctx.roles()
+        .check(&user, &ws_id, WorkspaceRole::Viewer)
+        .await?;
+    Ok(Json(ctx.connections().list_sections(&ws_id).await?))
+}
+
+/// POST /workspaces/{id}/connection-sections — editor
+async fn create_section<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+    Json(req): Json<UpsertSectionReq>,
+) -> ApiResult<Json<ConnectionSection>> {
+    ctx.roles()
+        .check(&user, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(ApiErr(Error::Invalid("section name required".into())));
+    }
+    Ok(Json(
+        ctx.connections()
+            .create_section(&ws_id, &user.id, req.parent_id.as_deref(), name)
+            .await?,
+    ))
+}
+
+/// PATCH /connection-sections/{id} — editor in the section's workspace
+async fn rename_section<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<UpsertSectionReq>,
+) -> ApiResult<Json<ConnectionSection>> {
+    let sec = ctx.connections().get_section(&id).await?;
+    ctx.roles()
+        .check(&user, &sec.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(ApiErr(Error::Invalid("section name required".into())));
+    }
+    Ok(Json(ctx.connections().rename_section(&id, name).await?))
+}
+
+/// DELETE /connection-sections/{id} — editor; connections fall back to ungrouped
+async fn delete_section<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<StatusCode> {
+    let sec = ctx.connections().get_section(&id).await?;
+    ctx.roles()
+        .check(&user, &sec.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    ctx.connections().delete_section(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /workspaces/{id}/connection-sections/reorder — editor
+async fn reorder_sections<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+    Json(req): Json<ReorderSectionsReq>,
+) -> ApiResult<StatusCode> {
+    ctx.roles()
+        .check(&user, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    ctx.connections().reorder_sections(&ws_id, &req.ids).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /connection-sections/{id}/move — editor; reparent (None = top-level)
+async fn move_section<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<MoveSectionReq>,
+) -> ApiResult<Json<ConnectionSection>> {
+    let sec = ctx.connections().get_section(&id).await?;
+    ctx.roles()
+        .check(&user, &sec.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    Ok(Json(
+        ctx.connections()
+            .reparent_section(&id, req.parent_id.as_deref())
+            .await?,
+    ))
+}

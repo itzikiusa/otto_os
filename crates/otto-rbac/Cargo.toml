@@ -1,0 +1,16 @@
+[package]
+name = "otto-rbac"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-core.workspace = true
+otto-state.workspace = true
+sqlx.workspace = true
+argon2.workspace = true
+sha2.workspace = true
+rand.workspace = true
+hex.workspace = true
+chrono.workspace = true
+tracing.workspace = true

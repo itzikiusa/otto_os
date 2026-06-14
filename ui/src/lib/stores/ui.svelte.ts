@@ -1,0 +1,194 @@
+// Shell UI state: rail, right panel, palette, theme, zoom. Persisted bits go
+// to localStorage.
+
+export type ThemeName = 'native' | 'pro-dark' | 'warm';
+export type SchemePref = 'auto' | 'light' | 'dark';
+export type RightTab = 'git' | 'files' | 'notes' | 'info' | 'browser' | 'api';
+
+const LS = {
+  rail: 'otto_rail_expanded',
+  right: 'otto_right_open',
+  rightTab: 'otto_right_tab',
+  rightWidth: 'otto_right_width',
+  railWidth: 'otto_rail_width',
+  theme: 'otto_theme',
+  scheme: 'otto_scheme',
+  accent: 'otto_accent',
+  zoom: 'otto_zoom',
+  termFont: 'otto_term_font',
+};
+
+export const RIGHT_MIN = 260;
+export const RIGHT_MAX = 760;
+export const RAIL_MIN = 190;
+export const RAIL_MAX = 420;
+
+export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+function lsGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function lsSet(key: string, val: string): void {
+  try {
+    localStorage.setItem(key, val);
+  } catch {
+    /* private mode */
+  }
+}
+
+function clampRight(px: number): number {
+  return Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, Math.round(px)));
+}
+function clampRail(px: number): number {
+  return Math.max(RAIL_MIN, Math.min(RAIL_MAX, Math.round(px)));
+}
+
+class UiStore {
+  railExpanded = $state(lsGet(LS.rail) !== '0');
+  rightOpen = $state(lsGet(LS.right) === '1');
+  rightTab: RightTab = $state((lsGet(LS.rightTab) as RightTab) ?? 'git');
+  rightWidth = $state(clampRight(Number(lsGet(LS.rightWidth)) || 300));
+  railWidth = $state(clampRail(Number(lsGet(LS.railWidth)) || 240));
+  paletteOpen = $state(false);
+  /** Which mode the palette should open in. */
+  paletteMode: 'commands' | 'english' = $state('commands');
+  /** Optional text to pre-fill the plain-English box with. */
+  palettePrefill = $state('');
+  newSessionOpen = $state(false);
+  newWorkspaceOpen = $state(false);
+
+  /** Count of open modal-style overlays (Modal.svelte registers itself). Used
+   *  so the native browser webview can hide while a modal is up — a native
+   *  webview always paints above the HTML and would otherwise cover it. */
+  modalCount = $state(0);
+  pushModal(): void {
+    this.modalCount += 1;
+  }
+  popModal(): void {
+    this.modalCount = Math.max(0, this.modalCount - 1);
+  }
+
+  /** True when any full-screen overlay (palette / modal / new-* sheet) is open. */
+  get overlayOpen(): boolean {
+    return (
+      this.paletteOpen || this.modalCount > 0 || this.newSessionOpen || this.newWorkspaceOpen
+    );
+  }
+
+  /** Open the palette, optionally in plain-English mode with a prefill. */
+  openPalette(mode: 'commands' | 'english' = 'commands', prefill = ''): void {
+    this.paletteMode = mode;
+    this.palettePrefill = prefill;
+    this.paletteOpen = true;
+  }
+
+  theme: ThemeName = $state((lsGet(LS.theme) as ThemeName) ?? 'native');
+  scheme: SchemePref = $state((lsGet(LS.scheme) as SchemePref) ?? 'auto');
+  accent: string = $state(lsGet(LS.accent) ?? '');
+
+  /** app-level zoom, 1 = 100% */
+  zoom = $state(Number(lsGet(LS.zoom) ?? '1') || 1);
+  /** terminal font size in px */
+  termFontSize = $state(Number(lsGet(LS.termFont) ?? '13') || 13);
+
+  /** resolved light|dark after applying `auto` */
+  resolvedScheme: 'light' | 'dark' = $state('dark');
+
+  private media: MediaQueryList | null = null;
+
+  toggleRail(): void {
+    this.railExpanded = !this.railExpanded;
+    lsSet(LS.rail, this.railExpanded ? '1' : '0');
+  }
+
+  toggleRight(): void {
+    this.rightOpen = !this.rightOpen;
+    lsSet(LS.right, this.rightOpen ? '1' : '0');
+  }
+
+  openRight(tab: RightTab): void {
+    this.rightTab = tab;
+    this.rightOpen = true;
+    lsSet(LS.right, '1');
+    lsSet(LS.rightTab, tab);
+  }
+
+  setRightWidth(px: number): void {
+    this.rightWidth = clampRight(px);
+    lsSet(LS.rightWidth, String(this.rightWidth));
+  }
+
+  setRailWidth(px: number): void {
+    this.railWidth = clampRail(px);
+    lsSet(LS.railWidth, String(this.railWidth));
+  }
+
+  setTheme(theme: ThemeName): void {
+    this.theme = theme;
+    lsSet(LS.theme, theme);
+    this.applyTheme();
+  }
+
+  setScheme(scheme: SchemePref): void {
+    this.scheme = scheme;
+    lsSet(LS.scheme, scheme);
+    this.applyTheme();
+  }
+
+  setAccent(accent: string): void {
+    this.accent = accent;
+    lsSet(LS.accent, accent);
+    this.applyTheme();
+  }
+
+  zoomIn(): void {
+    this.setZoom(Math.min(2, Math.round((this.zoom + 0.1) * 10) / 10));
+  }
+  zoomOut(): void {
+    this.setZoom(Math.max(0.6, Math.round((this.zoom - 0.1) * 10) / 10));
+  }
+  zoomReset(): void {
+    this.setZoom(1);
+  }
+  private setZoom(z: number): void {
+    this.zoom = z;
+    lsSet(LS.zoom, String(z));
+  }
+
+  termZoomIn(): void {
+    this.setTermFont(Math.min(28, this.termFontSize + 1));
+  }
+  termZoomOut(): void {
+    this.setTermFont(Math.max(8, this.termFontSize - 1));
+  }
+  termZoomReset(): void {
+    this.setTermFont(13);
+  }
+  private setTermFont(px: number): void {
+    this.termFontSize = px;
+    lsSet(LS.termFont, String(px));
+  }
+
+  /** Apply data-theme/data-scheme attrs and accent override on <html>. */
+  applyTheme(): void {
+    if (typeof document === 'undefined') return;
+    if (!this.media) {
+      this.media = window.matchMedia('(prefers-color-scheme: dark)');
+      this.media.addEventListener('change', () => this.applyTheme());
+    }
+    const resolved: 'light' | 'dark' =
+      this.scheme === 'auto' ? (this.media.matches ? 'dark' : 'light') : this.scheme;
+    this.resolvedScheme = resolved;
+    const el = document.documentElement;
+    el.setAttribute('data-theme', this.theme);
+    el.setAttribute('data-scheme', resolved);
+    if (this.accent) el.style.setProperty('--accent', this.accent);
+    else el.style.removeProperty('--accent');
+  }
+}
+
+export const ui = new UiStore();

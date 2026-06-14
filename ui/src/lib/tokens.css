@@ -1,0 +1,96 @@
+/* Otto design tokens. Themes: native | pro-dark | warm. Scheme: light | dark
+   (data-scheme on <html>; "auto" resolves via prefers-color-scheme in app code).
+   The terminal palette is set separately in Terminal.svelte per theme. */
+
+:root {
+  --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+
+  --radius-s: 5px;
+  --radius-m: 8px;
+  --radius-l: 12px;
+
+  --accent: #0a84ff;
+  --accent-contrast: #ffffff;
+
+  --status-working: #28c840;
+  --status-idle: #98989f;
+  --status-exited: #ff5f57;
+}
+
+/* ---------- Native theme (default) ---------- */
+
+html[data-theme='native'][data-scheme='light'] {
+  --bg: #f5f5f7;
+  --bg-sidebar: #ececf1;
+  --surface: #ffffff;
+  --surface-2: #f0f0f4;
+  --border: rgba(0, 0, 0, 0.1);
+  --text: #1d1d1f;
+  --text-dim: #6e6e73;
+  --term-bg: #1e1e24;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+}
+
+html[data-theme='native'][data-scheme='dark'] {
+  --bg: #1e1e23;
+  --bg-sidebar: #232328;
+  --surface: #2a2a30;
+  --surface-2: #323238;
+  --border: rgba(255, 255, 255, 0.1);
+  --text: #f2f2f5;
+  --text-dim: #98989f;
+  --term-bg: #131318;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- Pro Dark theme ---------- */
+
+html[data-theme='pro-dark'][data-scheme='light'],
+html[data-theme='pro-dark'][data-scheme='dark'] {
+  --bg: #16161c;
+  --bg-sidebar: #1c1c23;
+  --surface: #1f1f27;
+  --surface-2: #26262f;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #e8e8ee;
+  --text-dim: #9a9aa8;
+  --term-bg: #0f0f14;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+  --accent: #6c5ce7;
+}
+
+/* ---------- Warm theme ---------- */
+
+html[data-theme='warm'][data-scheme='light'] {
+  --bg: #faf9f7;
+  --bg-sidebar: #f3f1ed;
+  --surface: #ffffff;
+  --surface-2: #f0ede8;
+  --border: rgba(60, 50, 30, 0.12);
+  --text: #3d3a35;
+  --text-dim: #6b6760;
+  --term-bg: #23211d;
+  --shadow: 0 8px 30px rgba(60, 50, 30, 0.14);
+  --accent: #0f9d58;
+}
+
+html[data-theme='warm'][data-scheme='dark'] {
+  --bg: #211f1b;
+  --bg-sidebar: #262420;
+  --surface: #2c2a25;
+  --surface-2: #33312b;
+  --border: rgba(255, 245, 225, 0.1);
+  --text: #e8e4da;
+  --text-dim: #a09a8e;
+  --term-bg: #1a1916;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  --accent: #2bb673;
+}
+
+/* Sidebar translucency (vibrancy shows through in the Tauri window). */
+.sidebar-material {
+  background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+}

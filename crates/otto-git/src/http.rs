@@ -1,0 +1,1009 @@
+//! Axum router for contract endpoints #31–#56: git accounts, repos, local
+//! operations and pull requests. Mounted by otto-server under `/api/v1`.
+
+use std::collections::HashMap;
+use std::path::{Path as FsPath, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use axum::{Extension, Json, Router};
+use otto_core::api::{
+    AddRepoReq, BranchInfo, CheckoutReq, CommitInfo, CommitReq, ConflictFile, CreateGitAccountReq,
+    CreatePrReq, DiffResp, MergeBranchReq, MergeCommitReq, MergeConflictStatus, MergePrReq,
+    MergeResult, NewPrCommentReq, PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem,
+    RefsResp, RepoStatusResp, RequestChangesReq, ResolveConflictReq, StagePathsReq,
+    UpdateGitAccountReq, UpdatePrReq,
+};
+use otto_core::auth::{AuthUser, RoleChecker};
+use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
+use otto_core::event::Event;
+use otto_core::secrets::SecretStore;
+use otto_core::{new_id, Error, Id, Result};
+use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
+use serde::Deserialize;
+
+use crate::local::{DiffTarget, LocalGit};
+use crate::providers::{detect, make_provider, GitProvider, RemoteRef, RemoteRepoSummary};
+
+/// Dependencies the git router needs from the host application state.
+/// otto-server implements this on its `AppState`.
+pub trait GitCtx: Clone + Send + Sync + 'static {
+    fn store(&self) -> &GitStore;
+    /// Needed to resolve a workspace's `root_path` as the clone destination.
+    fn workspaces(&self) -> &WorkspacesRepo;
+    fn secrets(&self) -> &Arc<dyn SecretStore>;
+    fn roles(&self) -> &Arc<dyn RoleChecker>;
+    fn events(&self) -> &tokio::sync::broadcast::Sender<Event>;
+}
+
+/// Build the git router. Paths are relative to the `/api/v1` mount point.
+pub fn router<S: GitCtx>() -> Router<S> {
+    Router::new()
+        // accounts (#31–33)
+        .route(
+            "/git/accounts",
+            get(list_accounts::<S>).post(create_account::<S>),
+        )
+        .route(
+            "/git/accounts/{id}",
+            axum::routing::patch(update_account::<S>).delete(delete_account::<S>),
+        )
+        .route("/git/accounts/{id}/remote-repos", get(remote_repos::<S>))
+        // repos (#34–36)
+        .route(
+            "/workspaces/{id}/repos",
+            get(list_repos::<S>).post(add_repo::<S>),
+        )
+        .route("/workspaces/{id}/repos/detect", post(detect_repo::<S>))
+        .route("/repos/{id}", delete(delete_repo::<S>))
+        // local ops (#37–47)
+        .route("/repos/{id}/status", get(repo_status::<S>))
+        .route("/repos/{id}/branches", get(repo_branches::<S>))
+        .route("/repos/{id}/refs", get(repo_refs::<S>))
+        .route("/repos/{id}/log", get(repo_log::<S>))
+        .route("/repos/{id}/fetch", post(repo_fetch::<S>))
+        .route("/repos/{id}/diff", get(repo_diff::<S>))
+        .route("/repos/{id}/stage", post(repo_stage::<S>))
+        .route("/repos/{id}/unstage", post(repo_unstage::<S>))
+        .route("/repos/{id}/discard", post(repo_discard::<S>))
+        .route("/repos/{id}/commit", post(repo_commit::<S>))
+        .route("/repos/{id}/push", post(repo_push::<S>))
+        .route("/repos/{id}/pull", post(repo_pull::<S>))
+        .route("/repos/{id}/checkout", post(repo_checkout::<S>))
+        .route("/repos/{id}/stash", post(repo_stash::<S>))
+        // local merge + conflict resolution (#4)
+        .route("/repos/{id}/merge", post(repo_merge::<S>))
+        .route("/repos/{id}/merge/status", get(repo_merge_status::<S>))
+        .route("/repos/{id}/merge/abort", post(repo_merge_abort::<S>))
+        .route("/repos/{id}/merge/commit", post(repo_merge_commit::<S>))
+        .route("/repos/{id}/conflict", get(repo_conflict::<S>))
+        .route(
+            "/repos/{id}/conflict/resolve",
+            post(repo_conflict_resolve::<S>),
+        )
+        // PRs (#48–56)
+        .route("/repos/{id}/prs", get(pr_list::<S>).post(pr_create::<S>))
+        .route(
+            "/repos/{id}/prs/{number}",
+            get(pr_detail::<S>).patch(pr_update::<S>),
+        )
+        .route("/repos/{id}/prs/{number}/diff", get(pr_diff::<S>))
+        .route("/repos/{id}/prs/{number}/comments", post(pr_comment::<S>))
+        .route("/repos/{id}/prs/{number}/approve", post(pr_approve::<S>))
+        .route("/repos/{id}/prs/{number}/merge", post(pr_merge::<S>))
+        .route("/repos/{id}/prs/{number}/decline", post(pr_decline::<S>))
+        .route(
+            "/repos/{id}/prs/{number}/request-changes",
+            post(pr_request_changes::<S>),
+        )
+        .route("/repos/{id}/prs/{number}/commits", get(pr_commits::<S>))
+}
+
+// ---------------------------------------------------------------------------
+// Error → response
+// ---------------------------------------------------------------------------
+
+/// Local error wrapper: `otto_core::Error` → Problem JSON with the right status.
+pub struct ApiError(pub Error);
+
+impl From<Error> for ApiError {
+    fn from(e: Error) -> Self {
+        Self(e)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = match &self.0 {
+            Error::NotFound(_) => StatusCode::NOT_FOUND,
+            Error::Unauthorized => StatusCode::UNAUTHORIZED,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
+            Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Invalid(_) => StatusCode::BAD_REQUEST,
+            Error::Upstream(_) => StatusCode::BAD_GATEWAY,
+            Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        let body = Problem {
+            code: self.0.code().to_string(),
+            message: self.0.to_string(),
+        };
+        (status, Json(body)).into_response()
+    }
+}
+
+type ApiResult<T> = std::result::Result<T, ApiError>;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Load a repo, check the caller's workspace role, return a LocalGit handle.
+async fn repo_ctx<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    repo_id: &Id,
+    min: WorkspaceRole,
+) -> Result<(Repo, LocalGit)> {
+    let repo = s.store().get_repo(repo_id).await?;
+    s.roles().check(&user.0, &repo.workspace_id, min).await?;
+    let git = LocalGit::new(&repo.path);
+    Ok((repo, git))
+}
+
+/// Resolve the push/pull token for a repo's bound account (None when no
+/// account is bound — ssh remotes work through the user's agent).
+fn account_token<S: GitCtx>(s: &S, account: &GitAccount) -> Result<String> {
+    s.secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for git account {}", account.id)))
+}
+
+async fn optional_token<S: GitCtx>(s: &S, repo: &Repo) -> Option<String> {
+    let account_id = repo.git_account_id.as_ref()?;
+    let account = s.store().get_account(account_id).await.ok()?;
+    s.secrets().get(&account.token_ref).ok().flatten()
+}
+
+/// Resolve provider client + remote ref for PR routes (400 when not bound).
+async fn provider_ctx<S: GitCtx>(s: &S, repo: &Repo) -> Result<(Arc<dyn GitProvider>, RemoteRef)> {
+    let kind = repo
+        .provider
+        .ok_or_else(|| Error::Invalid("repo has no git provider".into()))?;
+    let account_id = repo
+        .git_account_id
+        .as_ref()
+        .ok_or_else(|| Error::Invalid("repo has no git account".into()))?;
+    let account = s.store().get_account(account_id).await?;
+    if account.provider != kind {
+        return Err(Error::Invalid(
+            "git account provider does not match repo provider".into(),
+        ));
+    }
+    let remote = repo
+        .remote_url
+        .as_deref()
+        .ok_or_else(|| Error::Invalid("repo has no remote url".into()))?;
+    let (_, remote_ref) =
+        detect(remote).ok_or_else(|| Error::Invalid(format!("unsupported remote: {remote}")))?;
+    let token = account_token(s, &account)?;
+    Ok((make_provider(&account, token), remote_ref))
+}
+
+fn notice(s: &impl GitCtx, level: &str, title: &str, body: &str) {
+    let _ = s.events().send(Event::Notice {
+        level: level.to_string(),
+        title: title.to_string(),
+        body: body.to_string(),
+    });
+}
+
+/// Process-wide registry of per-repo async locks. A merge is a multi-step
+/// sequence (checkout → merge → status); serialising all mutating merge/conflict
+/// operations on a given repo id prevents concurrent requests from interleaving
+/// and corrupting the in-progress merge state. Read-only GETs skip this.
+fn repo_locks() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    LOCKS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Return (creating if needed) the async mutex guarding repo `id`.
+fn repo_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = repo_locks().lock().expect("repo_locks poisoned");
+    map.entry(id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+// ---------------------------------------------------------------------------
+// Accounts (#31–33)
+// ---------------------------------------------------------------------------
+
+async fn list_accounts<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+) -> ApiResult<Json<Vec<GitAccount>>> {
+    let accounts = s.store().list_accounts(&user.0.id).await?;
+    Ok(Json(accounts))
+}
+
+async fn create_account<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Json(req): Json<CreateGitAccountReq>,
+) -> ApiResult<Json<GitAccount>> {
+    if req.token.trim().is_empty() {
+        return Err(Error::Invalid("token must not be empty".into()).into());
+    }
+    if req.username.trim().is_empty() {
+        return Err(Error::Invalid("username must not be empty".into()).into());
+    }
+    let token_ref = format!("gitacct-{}", new_id());
+    s.secrets().put(&token_ref, &req.token)?;
+    let created = s
+        .store()
+        .create_account(NewGitAccount {
+            user_id: user.0.id.clone(),
+            provider: req.provider,
+            label: req.label,
+            username: req.username,
+            token_ref: token_ref.clone(),
+            api_base_url: req.api_base_url,
+            namespace: req.namespace,
+            token_expires_at: req.token_expires_at,
+        })
+        .await;
+    match created {
+        Ok(a) => Ok(Json(a)),
+        Err(e) => {
+            // Don't leave an orphan secret behind.
+            let _ = s.secrets().delete(&token_ref);
+            Err(e.into())
+        }
+    }
+}
+
+async fn update_account<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<UpdateGitAccountReq>,
+) -> ApiResult<Json<GitAccount>> {
+    let account = s.store().get_account(&id).await?;
+    if account.user_id != user.0.id && !user.0.is_root {
+        return Err(Error::Forbidden("not the account owner".into()).into());
+    }
+
+    // Merge: absent field keeps current value; present field overwrites.
+    let label = req.label.as_deref().unwrap_or(&account.label);
+    let username = req.username.as_deref().unwrap_or(&account.username);
+
+    // namespace / api_base_url: absent → keep current; Some("") → clear (None); Some(v) → set.
+    let namespace: Option<String> = match req.namespace.as_deref() {
+        None => account.namespace.clone(),
+        Some("") => None,
+        Some(v) => Some(v.to_string()),
+    };
+    let api_base_url: Option<String> = match req.api_base_url.as_deref() {
+        None => account.api_base_url.clone(),
+        Some("") => None,
+        Some(v) => Some(v.to_string()),
+    };
+
+    // Token rotation: non-empty → store new ref, delete old; empty/absent → keep.
+    let token_ref = if let Some(tok) = req.token.as_deref().filter(|t| !t.is_empty()) {
+        let new_ref = format!("gitacct-{}", new_id());
+        s.secrets().put(&new_ref, tok)?;
+        // Best-effort cleanup of old secret; don't fail if it's already gone.
+        let _ = s.secrets().delete(&account.token_ref);
+        new_ref
+    } else {
+        account.token_ref.clone()
+    };
+
+    // token_expires_at: present → set; absent (None) → keep current.
+    let token_expires_at = req.token_expires_at.or(account.token_expires_at);
+
+    let updated = s
+        .store()
+        .update_account(
+            &id,
+            label,
+            username,
+            &token_ref,
+            namespace.as_deref(),
+            api_base_url.as_deref(),
+            token_expires_at,
+        )
+        .await?;
+    Ok(Json(updated))
+}
+
+async fn delete_account<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<StatusCode> {
+    let account = s.store().get_account(&id).await?;
+    if account.user_id != user.0.id && !user.0.is_root {
+        return Err(Error::Forbidden("not the account owner".into()).into());
+    }
+    let _ = s.secrets().delete(&account.token_ref);
+    s.store().delete_account(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Remote repo listing
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RemoteReposQuery {
+    q: Option<String>,
+}
+
+async fn remote_repos<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<RemoteReposQuery>,
+) -> ApiResult<Json<Vec<RemoteRepoSummary>>> {
+    let account = s.store().get_account(&id).await?;
+    if account.user_id != user.0.id && !user.0.is_root {
+        return Err(Error::Forbidden("not the account owner".into()).into());
+    }
+    let namespace = account
+        .namespace
+        .as_deref()
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| Error::Invalid("set a namespace on this account first".into()))?;
+    let token = account_token(&s, &account)?;
+    let provider = make_provider(&account, token);
+    let query = q.q.as_deref().filter(|s| !s.is_empty());
+    Ok(Json(provider.list_repos(namespace, query).await?))
+}
+
+// ---------------------------------------------------------------------------
+// Repos (#34–36)
+// ---------------------------------------------------------------------------
+
+async fn list_repos<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+) -> ApiResult<Json<Vec<Repo>>> {
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Viewer)
+        .await?;
+    Ok(Json(s.store().list_repos(&ws_id).await?))
+}
+
+async fn add_repo<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+    Json(req): Json<AddRepoReq>,
+) -> ApiResult<Json<Repo>> {
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    match (&req.path, &req.clone_url) {
+        (Some(path), None) => Ok(Json(register_repo(&s, &user, &ws_id, path, &req).await?)),
+        (None, Some(url)) => Ok(Json(
+            clone_into_workspace(&s, &user, &ws_id, url, &req).await?,
+        )),
+        _ => Err(Error::Invalid("provide exactly one of path | clone_url".into()).into()),
+    }
+}
+
+#[derive(Deserialize)]
+struct DetectRepoReq {
+    /// Any path inside a working tree (typically a session's cwd).
+    path: String,
+}
+
+/// POST /workspaces/{id}/repos/detect — resolve the git work-tree root that
+/// contains `path` and register it in the workspace (idempotent: a repo already
+/// registered at that root is returned as-is). Lets the UI surface git for the
+/// folder a session is running in without manual registration.
+async fn detect_repo<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+    Json(req): Json<DetectRepoReq>,
+) -> ApiResult<Json<Repo>> {
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    if req.path.trim().is_empty() {
+        return Err(Error::Invalid("path must not be empty".into()).into());
+    }
+    let top = LocalGit::new(&req.path).toplevel().await?;
+    // Already registered at this root? Return it.
+    let existing = s.store().list_repos(&ws_id).await?;
+    if let Some(found) = existing.into_iter().find(|r| r.path == top) {
+        return Ok(Json(found));
+    }
+    let add = AddRepoReq {
+        path: Some(top.clone()),
+        clone_url: None,
+        name: None,
+        git_account_id: None,
+    };
+    Ok(Json(register_repo(&s, &user, &ws_id, &top, &add).await?))
+}
+
+async fn register_repo<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    ws_id: &Id,
+    path: &str,
+    req: &AddRepoReq,
+) -> Result<Repo> {
+    let p = PathBuf::from(path);
+    let git_dir = p.join(".git");
+    if tokio::fs::metadata(&git_dir).await.is_err() {
+        return Err(Error::Invalid(format!("not a git repository: {path}")));
+    }
+    let git = LocalGit::new(&p);
+    let remote_url = git.remote_url().await;
+    let detected = remote_url.as_deref().and_then(detect);
+    let provider = detected.as_ref().map(|(k, _)| *k);
+    let account_id = resolve_account(s, user, req.git_account_id.as_ref(), provider).await?;
+    let name = req
+        .name
+        .clone()
+        .or_else(|| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+        .ok_or_else(|| Error::Invalid("cannot derive repo name from path".into()))?;
+    s.store()
+        .create_repo(NewRepo {
+            workspace_id: ws_id.clone(),
+            name,
+            path: p.to_string_lossy().into_owned(),
+            remote_url,
+            provider,
+            git_account_id: account_id,
+        })
+        .await
+}
+
+async fn clone_into_workspace<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    ws_id: &Id,
+    url: &str,
+    req: &AddRepoReq,
+) -> Result<Repo> {
+    let ws = s.workspaces().get(ws_id).await?;
+    let name = req
+        .name
+        .clone()
+        .or_else(|| derive_repo_name(url))
+        .ok_or_else(|| Error::Invalid("cannot derive repo name from clone url".into()))?;
+    let dest = FsPath::new(&ws.root_path).join(&name);
+    if tokio::fs::metadata(&dest).await.is_ok() {
+        return Err(Error::Conflict(format!(
+            "destination already exists: {}",
+            dest.display()
+        )));
+    }
+
+    let detected = detect(url);
+    let provider = detected.as_ref().map(|(k, _)| *k);
+    let account_id = resolve_account(s, user, req.git_account_id.as_ref(), provider).await?;
+
+    // Row first — the UI sees the repo immediately; Notice events track progress.
+    let repo = s
+        .store()
+        .create_repo(NewRepo {
+            workspace_id: ws_id.clone(),
+            name: name.clone(),
+            path: dest.to_string_lossy().into_owned(),
+            remote_url: Some(url.to_string()),
+            provider,
+            git_account_id: account_id.clone(),
+        })
+        .await?;
+
+    let token = match &account_id {
+        Some(aid) => {
+            let account = s.store().get_account(aid).await?;
+            s.secrets().get(&account.token_ref)?
+        }
+        None => None,
+    };
+
+    let task_state = s.clone();
+    let task_url = url.to_string();
+    let task_name = name.clone();
+    tokio::spawn(async move {
+        notice(
+            &task_state,
+            "info",
+            "Clone started",
+            &format!("Cloning {task_name} from {task_url}"),
+        );
+        let result = crate::local::clone_repo(&task_url, &dest, token.as_deref(), |line| {
+            tracing::debug!(repo = %task_name, "clone: {line}");
+        })
+        .await;
+        match result {
+            Ok(()) => notice(
+                &task_state,
+                "info",
+                "Clone finished",
+                &format!("{task_name} is ready"),
+            ),
+            Err(e) => notice(
+                &task_state,
+                "error",
+                "Clone failed",
+                &format!("{task_name}: {e}"),
+            ),
+        }
+    });
+
+    Ok(repo)
+}
+
+/// Validate an explicit account id, or auto-match the caller's first account
+/// for the detected provider.
+async fn resolve_account<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    explicit: Option<&Id>,
+    provider: Option<GitProviderKind>,
+) -> Result<Option<Id>> {
+    if let Some(id) = explicit {
+        let account = s.store().get_account(id).await?;
+        return Ok(Some(account.id));
+    }
+    let Some(kind) = provider else {
+        return Ok(None);
+    };
+    let accounts = s.store().list_accounts(&user.0.id).await?;
+    Ok(accounts
+        .into_iter()
+        .find(|a| a.provider == kind)
+        .map(|a| a.id))
+}
+
+fn derive_repo_name(url: &str) -> Option<String> {
+    let tail = url
+        .trim_end_matches('/')
+        .rsplit(['/', ':'])
+        .next()?
+        .trim_end_matches(".git");
+    if tail.is_empty() {
+        None
+    } else {
+        Some(tail.to_string())
+    }
+}
+
+async fn delete_repo<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<StatusCode> {
+    let repo = s.store().get_repo(&id).await?;
+    s.roles()
+        .check(&user.0, &repo.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    // Unregister only — never touch the files on disk.
+    s.store().delete_repo(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Local ops (#37–47)
+// ---------------------------------------------------------------------------
+
+async fn repo_status<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(git.status().await?))
+}
+
+async fn repo_branches<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Vec<BranchInfo>>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(git.branches().await?))
+}
+
+async fn repo_refs<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<RefsResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(git.refs().await?))
+}
+
+async fn repo_fetch<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let token = optional_token(&s, &repo).await;
+    git.fetch(token).await?;
+    Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct LogQuery {
+    limit: Option<u32>,
+    skip: Option<u32>,
+    all: Option<bool>,
+}
+
+async fn repo_log<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<LogQuery>,
+) -> ApiResult<Json<Vec<CommitInfo>>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let limit = q.limit.unwrap_or(50).min(500);
+    Ok(Json(
+        git.log(limit, q.skip.unwrap_or(0), q.all.unwrap_or(false))
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    target: Option<String>,
+}
+
+async fn repo_diff<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<DiffQuery>,
+) -> ApiResult<Json<DiffResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let target = match q.target.as_deref() {
+        None => DiffTarget::Worktree,
+        Some(t) => DiffTarget::parse(t)?,
+    };
+    Ok(Json(git.diff(target).await?))
+}
+
+async fn repo_stage<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<StagePathsReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.stage(&req.paths).await?;
+    Ok(Json(git.status().await?))
+}
+
+async fn repo_unstage<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<StagePathsReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.unstage(&req.paths).await?;
+    Ok(Json(git.status().await?))
+}
+
+async fn repo_discard<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<StagePathsReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.discard(&req.paths).await?;
+    Ok(Json(git.status().await?))
+}
+
+async fn repo_commit<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<CommitReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let sha = git.commit(&req.message, req.amend).await?;
+    Ok(Json(serde_json::json!({ "sha": sha })))
+}
+
+async fn repo_push<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let token = optional_token(&s, &repo).await;
+    let output = git.push(token).await?;
+    Ok(Json(serde_json::json!({ "output": output })))
+}
+
+async fn repo_pull<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let token = optional_token(&s, &repo).await;
+    let output = git.pull(token).await?;
+    Ok(Json(serde_json::json!({ "output": output })))
+}
+
+async fn repo_checkout<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<CheckoutReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.checkout(&req.branch, req.create).await?;
+    Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct StashReq {
+    op: String,
+}
+
+async fn repo_stash<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<StashReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    match req.op.as_str() {
+        "save" => {
+            git.stash_save().await?;
+        }
+        "pop" => {
+            git.stash_pop().await?;
+        }
+        other => return Err(Error::Invalid(format!("bad stash op: {other}")).into()),
+    }
+    Ok(Json(git.status().await?))
+}
+
+// ---------------------------------------------------------------------------
+// Local merge + conflict resolution (#4)
+// ---------------------------------------------------------------------------
+
+async fn repo_merge<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<MergeBranchReq>,
+) -> ApiResult<Json<MergeResult>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    Ok(Json(
+        git.merge_branch(&req.source, &req.target, req.strategy)
+            .await?,
+    ))
+}
+
+async fn repo_merge_status<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<MergeConflictStatus>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(git.merge_status().await?))
+}
+
+async fn repo_merge_abort<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    Ok(Json(git.merge_abort().await?))
+}
+
+async fn repo_merge_commit<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<MergeCommitReq>,
+) -> ApiResult<Json<MergeResult>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    Ok(Json(git.merge_commit(req.message).await?))
+}
+
+#[derive(Deserialize)]
+struct ConflictQuery {
+    path: String,
+}
+
+async fn repo_conflict<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<ConflictQuery>,
+) -> ApiResult<Json<ConflictFile>> {
+    if q.path.trim().is_empty() {
+        return Err(Error::Invalid("path must not be empty".into()).into());
+    }
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(git.conflict_file(&q.path).await?))
+}
+
+async fn repo_conflict_resolve<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<ResolveConflictReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    if req.path.trim().is_empty() {
+        return Err(Error::Invalid("path must not be empty".into()).into());
+    }
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.write_resolution(&req.path, &req.content).await?;
+    Ok(Json(git.status().await?))
+}
+
+// ---------------------------------------------------------------------------
+// PRs (#48–56)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PrListQuery {
+    state: Option<String>,
+}
+
+async fn pr_list<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<PrListQuery>,
+) -> ApiResult<Json<Vec<PrSummary>>> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let state = match q.state.as_deref() {
+        None | Some("open") => PrState::Open,
+        Some("merged") => PrState::Merged,
+        Some("declined") => PrState::Declined,
+        Some("all") => PrState::All,
+        Some(other) => return Err(Error::Invalid(format!("bad pr state: {other}")).into()),
+    };
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    Ok(Json(provider.list_prs(&remote, state).await?))
+}
+
+async fn pr_create<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<CreatePrReq>,
+) -> ApiResult<Json<PrSummary>> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    Ok(Json(provider.create_pr(&remote, &req).await?))
+}
+
+async fn pr_detail<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+) -> ApiResult<Json<PrDetail>> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    Ok(Json(provider.get_pr(&remote, number).await?))
+}
+
+async fn pr_update<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+    Json(req): Json<UpdatePrReq>,
+) -> ApiResult<StatusCode> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    provider.update_pr(&remote, number, &req).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pr_diff<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+) -> ApiResult<Json<DiffResp>> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    Ok(Json(provider.get_pr_diff(&remote, number).await?))
+}
+
+async fn pr_comment<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+    Json(req): Json<NewPrCommentReq>,
+) -> ApiResult<Json<PrComment>> {
+    if req.body.trim().is_empty() {
+        return Err(Error::Invalid("comment body must not be empty".into()).into());
+    }
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    Ok(Json(provider.comment(&remote, number, &req).await?))
+}
+
+async fn pr_approve<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+) -> ApiResult<StatusCode> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    provider.approve(&remote, number).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pr_merge<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+    Json(req): Json<MergePrReq>,
+) -> ApiResult<StatusCode> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    provider.merge(&remote, number, req.strategy).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pr_decline<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+) -> ApiResult<StatusCode> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    provider.decline(&remote, number).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pr_request_changes<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+    Json(req): Json<RequestChangesReq>,
+) -> ApiResult<StatusCode> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    provider
+        .request_changes(&remote, number, req.body.as_deref())
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pr_commits<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+) -> ApiResult<Json<Vec<PrCommit>>> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    Ok(Json(provider.list_pr_commits(&remote, number).await?))
+}

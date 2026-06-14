@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- launchd user-agent template for the Otto daemon.
+     The installer replaces __OTTOD_PATH__ with the absolute path of the
+     installed ottod binary before `launchctl bootstrap gui/$UID <plist>`. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.otto.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__OTTOD_PATH__</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/com.otto.daemon.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.otto.daemon.stderr.log</string>
+</dict>
+</plist>

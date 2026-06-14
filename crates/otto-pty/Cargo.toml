@@ -1,0 +1,13 @@
+[package]
+name = "otto-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vt100.workspace = true
+otto-core = { workspace = true }
+portable-pty = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }

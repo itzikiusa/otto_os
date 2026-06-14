@@ -1,0 +1,37 @@
+//! otto-state — SQLite persistence: pool bootstrap, migrations, repositories.
+//!
+//! Repositories map rows to `otto_core::domain` structs.
+
+pub mod api_client;
+pub mod connection_sections;
+pub mod connections;
+pub mod convert;
+pub mod db;
+pub mod git;
+pub mod improvements;
+pub mod integrations;
+pub mod issues;
+pub mod notifications;
+pub mod reviews;
+pub mod sessions;
+pub mod settings;
+pub mod users;
+pub mod workspaces;
+
+pub use api_client::{
+    ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,
+    NewApiRequest,
+};
+pub use connection_sections::ConnectionSectionsRepo;
+pub use connections::{ConnectionsRepo, NewConnection};
+pub use db::open;
+pub use git::{GitStore, NewGitAccount, NewRepo};
+pub use improvements::{ImprovementsRepo, NewEdit};
+pub use integrations::IntegrationsRepo;
+pub use issues::{IssuesRepo, NewIssueAccount};
+pub use notifications::{NewNotice, NotificationsRepo};
+pub use reviews::ReviewsRepo;
+pub use sessions::{NewSession, SessionsRepo};
+pub use settings::SettingsRepo;
+pub use users::{UserRecord, UsersRepo};
+pub use workspaces::{Member, WorkspacesRepo};

@@ -1,0 +1,258 @@
+//! Auto-overcome interactive "trust this folder / approve?" prompts so no agent
+//! session ever gets stuck waiting for a keystroke.
+//!
+//! This is the runtime *backstop*. The primary, deterministic mechanism is
+//! [`crate::trust::ensure_trusted`], which writes each CLI's trust config
+//! before spawn (called for every agent session in [`crate::manager`]). The
+//! guard catches what pre-trust can't: providers without a known trust config
+//! (e.g. `agy`), and unexpected first-run dialogs.
+//!
+//! It is an [`OutputScanner`]: it watches each session's PTY output, and when a
+//! known approval prompt for the provider appears it writes the accepting
+//! keystroke back into the PTY. Detection is intentionally narrow (specific
+//! full phrases) so it never injects keys into an agent's real work on a false
+//! positive, and it is time-debounced per session.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
+
+use otto_core::Id;
+
+use crate::manager::{OutputScanner, SessionManager};
+
+/// A known approval prompt: any `needle` (already lowercased) appearing in the
+/// recent screen text means the agent is blocked, and `keys` accepts it.
+struct Approval {
+    needles: &'static [&'static str],
+    keys: &'static [u8],
+}
+
+/// Carriage return — accepts the default (usually highlighted "Yes") option in
+/// the select-style trust dialogs all three CLIs use.
+const ENTER: &[u8] = b"\r";
+/// Select the first option ("1. Yes, …") then confirm. Harmless if Enter alone
+/// would have sufficed.
+const SELECT_YES: &[u8] = b"1\r";
+
+/// Per-provider approval table. Keystrokes are validated by the integration
+/// tests in `otto-server/tests`; update here if a CLI changes its wording.
+fn approvals_for(provider: &str) -> &'static [Approval] {
+    match provider {
+        "claude" => &[Approval {
+            needles: &["do you trust the files in this folder"],
+            keys: SELECT_YES,
+        }],
+        "codex" => &[Approval {
+            needles: &[
+                "do you trust the files in this folder",
+                "allow codex to work in this folder",
+                "trust this directory",
+            ],
+            keys: ENTER,
+        }],
+        "agy" => &[Approval {
+            needles: &[
+                "do you trust the files in this folder",
+                "trust this folder",
+                "allow access to this folder",
+                "grant access to this directory",
+            ],
+            keys: ENTER,
+        }],
+        _ => &[],
+    }
+}
+
+/// Pure: does `screen` (the recent PTY output, already lowercased) contain a
+/// known approval prompt for `provider`? Returns the bytes that accept it.
+///
+/// Kept pure + free of I/O so it is unit-testable without a real CLI.
+pub fn detect_approval(provider: &str, screen: &str) -> Option<&'static [u8]> {
+    for approval in approvals_for(provider) {
+        if approval.needles.iter().any(|n| screen.contains(n)) {
+            return Some(approval.keys);
+        }
+    }
+    None
+}
+
+/// Max retained tail bytes per session — long enough to hold a multi-line trust
+/// dialog, short enough to stay cheap.
+const TAIL_CAP: usize = 1024;
+/// Don't re-approve the same session more than once per window (avoid spamming
+/// keys if the prompt redraws while the CLI processes the first acceptance).
+const DEBOUNCE: Duration = Duration::from_secs(5);
+
+/// Runtime guard that auto-accepts known trust/approval prompts. Wire it into
+/// the `SessionManager` (see [`crate::CompositeScanner`]) and call
+/// [`PromptGuard::set_manager`] once the manager `Arc` exists.
+pub struct PromptGuard {
+    /// Set after construction (the manager owns the scanner, so this is a Weak
+    /// to avoid a reference cycle).
+    manager: OnceLock<Weak<SessionManager>>,
+    tails: Mutex<HashMap<Id, String>>,
+    last_approved: Mutex<HashMap<Id, Instant>>,
+}
+
+impl PromptGuard {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            manager: OnceLock::new(),
+            tails: Mutex::new(HashMap::new()),
+            last_approved: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Provide the manager handle used to write keystrokes back. Call once,
+    /// after the `Arc<SessionManager>` is built.
+    pub fn set_manager(&self, manager: Weak<SessionManager>) {
+        let _ = self.manager.set(manager);
+    }
+
+    /// True if we accepted a prompt for `id` within [`DEBOUNCE`].
+    fn recently_approved(&self, id: &Id) -> bool {
+        let guard = lock(&self.last_approved);
+        guard
+            .get(id)
+            .is_some_and(|t| t.elapsed() < DEBOUNCE)
+    }
+
+    fn mark_approved(&self, id: &Id) {
+        lock(&self.last_approved).insert(id.clone(), Instant::now());
+    }
+}
+
+impl OutputScanner for PromptGuard {
+    fn on_output(&self, session_id: &Id, provider: &str, chunk: &[u8]) {
+        // Cheap exit for providers we have no approvals for.
+        if approvals_for(provider).is_empty() {
+            return;
+        }
+        if self.recently_approved(session_id) {
+            return;
+        }
+
+        // Append to the rolling tail (prompts can straddle chunk boundaries).
+        let combined = {
+            let mut tails = lock(&self.tails);
+            let buf = tails.entry(session_id.clone()).or_default();
+            buf.push_str(&String::from_utf8_lossy(chunk).to_lowercase());
+            if buf.len() > TAIL_CAP {
+                let cut = buf.len() - TAIL_CAP;
+                *buf = buf[cut..].to_string();
+            }
+            buf.clone()
+        };
+
+        let Some(keys) = detect_approval(provider, &combined) else {
+            return;
+        };
+
+        // Debounce + clear the tail so the same dialog doesn't re-fire.
+        self.mark_approved(session_id);
+        lock(&self.tails).remove(session_id);
+
+        let Some(weak) = self.manager.get() else {
+            return;
+        };
+        let Some(manager) = weak.upgrade() else {
+            return;
+        };
+        let id = session_id.clone();
+        let provider = provider.to_string();
+        tokio::spawn(async move {
+            match manager.input(&id, keys).await {
+                Ok(()) => tracing::info!(
+                    session = %id,
+                    provider = %provider,
+                    "prompt-guard: auto-approved a trust/permission prompt"
+                ),
+                Err(e) => tracing::warn!(
+                    session = %id,
+                    provider = %provider,
+                    "prompt-guard: could not send approval keys: {e}"
+                ),
+            }
+        });
+    }
+}
+
+/// Fans `on_output` out to several scanners (the `SessionManager` exposes a
+/// single scanner slot). Use to run [`PromptGuard`] alongside other scanners.
+pub struct CompositeScanner {
+    scanners: Vec<Arc<dyn OutputScanner>>,
+}
+
+impl CompositeScanner {
+    pub fn new(scanners: Vec<Arc<dyn OutputScanner>>) -> Arc<Self> {
+        Arc::new(Self { scanners })
+    }
+}
+
+impl OutputScanner for CompositeScanner {
+    fn on_output(&self, session_id: &Id, provider: &str, chunk: &[u8]) {
+        for s in &self.scanners {
+            s.on_output(session_id, provider, chunk);
+        }
+    }
+}
+
+/// Lock helper that survives a poisoned mutex (a panicked holder shouldn't take
+/// the whole guard down — worst case we miss/repeat one approval).
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_claude_trust_prompt_and_selects_yes() {
+        let screen = "\n  Do you trust the files in this folder?\n  1. Yes, proceed\n  2. No, exit\n";
+        assert_eq!(
+            detect_approval("claude", &screen.to_lowercase()),
+            Some(SELECT_YES)
+        );
+    }
+
+    #[test]
+    fn detects_codex_and_agy_folder_prompts() {
+        assert_eq!(
+            detect_approval("codex", "allow codex to work in this folder? (y/n)"),
+            Some(ENTER)
+        );
+        assert_eq!(
+            detect_approval("agy", "trust this folder to continue"),
+            Some(ENTER)
+        );
+    }
+
+    #[test]
+    fn ignores_normal_output_and_unknown_providers() {
+        assert_eq!(detect_approval("claude", "running the test suite now…"), None);
+        assert_eq!(detect_approval("claude", "the folder structure looks fine"), None);
+        // A provider with no approval table never matches.
+        assert_eq!(detect_approval("shell", "do you trust the files in this folder"), None);
+    }
+
+    #[test]
+    fn composite_fans_out_to_each_scanner() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counter(Arc<AtomicUsize>);
+        impl OutputScanner for Counter {
+            fn on_output(&self, _id: &Id, _provider: &str, _chunk: &[u8]) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let n = Arc::new(AtomicUsize::new(0));
+        let c = CompositeScanner::new(vec![
+            Arc::new(Counter(Arc::clone(&n))),
+            Arc::new(Counter(Arc::clone(&n))),
+        ]);
+        c.on_output(&"s1".to_string(), "claude", b"hi");
+        assert_eq!(n.load(Ordering::SeqCst), 2);
+    }
+}

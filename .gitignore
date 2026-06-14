@@ -1,0 +1,47 @@
+# --- Build artifacts ---
+/target
+**/target/
+/dist
+**/dist/
+node_modules/
+**/node_modules/
+
+# Tauri generated (schemas/etc.) — capabilities/ is source and kept
+apps/desktop/src-tauri/gen/
+
+# --- Secrets / environment ---
+*.env
+.env*
+.loom.env
+# Belt-and-suspenders: never commit credential/key material or local DBs.
+secrets.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Logs / build info ---
+*.log
+*.tsbuildinfo
+
+# --- Internal AI planning docs (absolute paths + internal references; not part
+#     of the published project). Public API/WS contracts live in docs/contracts.
+docs/superpowers/
+
+# --- OS / editor cruft ---
+.DS_Store
+**/.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# --- Local tooling state ---
+.superpowers/
+
+# Prebuilt daemon binary bundled by the packaging step (built artifact)
+apps/desktop/src-tauri/binaries/

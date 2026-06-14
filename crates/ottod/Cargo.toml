@@ -1,0 +1,29 @@
+[package]
+name = "ottod"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Forwarded to otto-server to bake ui/dist into the binary.
+embed-ui = ["otto-server/embed-ui"]
+
+[dependencies]
+otto-core.workspace = true
+otto-state.workspace = true
+otto-rbac.workspace = true
+otto-keychain.workspace = true
+otto-server.workspace = true
+tokio.workspace = true
+axum.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+otto-sessions.workspace = true
+otto-connections.workspace = true
+otto-orchestrator.workspace = true
+otto-channels.workspace = true
+otto-improve.workspace = true
+otto-context.workspace = true

@@ -1,0 +1,78 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/otto-core",
+    "crates/otto-state",
+    "crates/otto-rbac",
+    "crates/otto-keychain",
+    "crates/otto-pty",
+    "crates/otto-sessions",
+    "crates/otto-connections",
+    "crates/otto-orchestrator",
+    "crates/otto-git",
+    "crates/otto-issues",
+    "crates/otto-channels",
+    "crates/otto-improve",
+    "crates/otto-context",
+    "crates/otto-server",
+    "crates/ottod",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+otto-core = { path = "crates/otto-core" }
+otto-state = { path = "crates/otto-state" }
+otto-rbac = { path = "crates/otto-rbac" }
+otto-keychain = { path = "crates/otto-keychain" }
+otto-pty = { path = "crates/otto-pty" }
+otto-sessions = { path = "crates/otto-sessions" }
+otto-connections = { path = "crates/otto-connections" }
+otto-orchestrator = { path = "crates/otto-orchestrator" }
+otto-git = { path = "crates/otto-git" }
+otto-issues = { path = "crates/otto-issues" }
+otto-channels = { path = "crates/otto-channels" }
+otto-improve = { path = "crates/otto-improve" }
+otto-context = { path = "crates/otto-context" }
+otto-server = { path = "crates/otto-server" }
+
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+ulid = "1"
+uuid = { version = "1", features = ["v4"] }
+argon2 = "0.5"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+keyring = { version = "3", features = ["apple-native"] }
+portable-pty = "0.9"
+bytes = "1"
+dashmap = "6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tempfile = "3"
+shell-words = "1"
+vt100 = "0.16"
+dirs = "6"
+
+[profile.release]
+lto = "thin"
+strip = true
