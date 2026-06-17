@@ -335,6 +335,8 @@ class DatabaseStore {
   childrenCache: Map<string, SchemaNode[]> = $state(new Map());
   /** Expanded node ids. */
   expanded: Set<string> = $state(new Set());
+  /** Per-node prefix filter (Redis keyspaces with many keys). Keyed by node id. */
+  nodeFilters: Map<string, string> = $state(new Map());
   /** Nodes whose children are currently loading. */
   loadingNodes: Set<string> = $state(new Set());
   schemaLoading = $state(false);
@@ -641,6 +643,7 @@ class DatabaseStore {
       this.childrenCache = new Map();
       this.builderTablesCache = new Map();
       this.expanded = new Set();
+      this.nodeFilters = new Map();
       this.loadingNodes = new Set();
       this.schemaLoading = false;
       this.objectDetail = null;
@@ -671,6 +674,7 @@ class DatabaseStore {
     this.childrenCache = new Map();
     this.builderTablesCache = new Map();
     this.expanded = new Set();
+    this.nodeFilters = new Map();
     this.loadingNodes = new Set();
     this.objectDetail = null;
     this.selectedObjectPath = null;
@@ -765,20 +769,53 @@ class DatabaseStore {
     this.expanded = new Set(this.expanded);
 
     if (this.childrenCache.has(node.id)) return; // already loaded
-    this.loadingNodes.add(node.id);
+    await this.loadChildren(id, node.id);
+  }
+
+  /** Current prefix filter typed for a node (empty string when none). */
+  nodeFilter(nodeId: string): string {
+    return this.nodeFilters.get(nodeId) ?? '';
+  }
+
+  /**
+   * Apply (or clear) a prefix filter on a node and reload its children. Used by
+   * the Redis keyspace filter so huge databases load a narrowed, bounded set
+   * instead of attempting to list every key.
+   */
+  async applyNodeFilter(node: SchemaNode, value: string): Promise<void> {
+    const id = this.selectedConnId;
+    if (!id) return;
+    const v = value.trim();
+    if (v) this.nodeFilters.set(node.id, v);
+    else this.nodeFilters.delete(node.id);
+    this.nodeFilters = new Map(this.nodeFilters);
+
+    // Bust the cache and (re)load with the new filter; keep the node expanded.
+    this.childrenCache.delete(node.id);
+    this.childrenCache = new Map(this.childrenCache);
+    this.expanded.add(node.id);
+    this.expanded = new Set(this.expanded);
+    await this.loadChildren(id, node.id);
+  }
+
+  /** Fetch a node's children (honouring any stored filter) into the cache. */
+  private async loadChildren(connId: string, nodeId: string): Promise<void> {
+    this.loadingNodes.add(nodeId);
     this.loadingNodes = new Set(this.loadingNodes);
     try {
-      const children = await api.post<SchemaNode[]>(`${this.connBase(id)}/schema/children`, {
-        path: node.id,
+      const filter = this.nodeFilters.get(nodeId);
+      const children = await api.post<SchemaNode[]>(`${this.connBase(connId)}/schema/children`, {
+        path: nodeId,
+        filter: filter || undefined,
       });
-      this.childrenCache.set(node.id, children);
+      this.childrenCache.set(nodeId, children);
       this.childrenCache = new Map(this.childrenCache);
     } catch (e) {
       toasts.error('Could not load children', errMsg(e));
-      this.expanded.delete(node.id);
+      this.expanded.delete(nodeId);
       this.expanded = new Set(this.expanded);
     } finally {
-      this.loadingNodes.delete(node.id);
+      this.loadingNodes.delete(nodeId);
       this.loadingNodes = new Set(this.loadingNodes);
     }
   }

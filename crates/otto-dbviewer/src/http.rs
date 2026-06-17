@@ -61,6 +61,9 @@ type ApiResult<T> = std::result::Result<T, ApiErr>;
 #[derive(Debug, Deserialize)]
 struct PathReq {
     path: String,
+    /// Optional prefix filter for lazy children (Redis keyspace key filtering).
+    #[serde(default)]
+    filter: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,7 +232,7 @@ async fn schema_children<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().schema_children(&id, &req.path).await?).into_response())
+    Ok(Json(ctx.db().schema_children(&id, &req.path, req.filter.as_deref()).await?).into_response())
 }
 
 async fn object_detail<S: DbViewerCtx>(

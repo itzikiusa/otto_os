@@ -30,11 +30,19 @@ use crate::types::{
     QueryStats, ResolvedConfig, SchemaNode, TestResult,
 };
 
-/// Cap on keys collected during a keyspace SCAN so the tree stays responsive
-/// on huge databases.
+/// Cap on keys sampled during a keyspace SCAN used to derive namespace groups,
+/// so the tree stays responsive on huge databases.
 const SCAN_KEY_CAP: usize = 3000;
+/// Cap on individual key nodes rendered in one listing (filtered or namespace
+/// expansion). Beyond this the listing is truncated with a hint to refine.
+const KEY_LIST_CAP: usize = 500;
+/// Hard cap on SCAN round-trips so a sparse filter never traverses an entire
+/// multi-hundred-thousand-key database before giving up.
+const SCAN_MAX_ROUNDS: usize = 80;
 /// COUNT hint for each SCAN round-trip.
 const SCAN_COUNT: usize = 200;
+/// Larger COUNT for filtered scans (fewer round-trips to gather matches).
+const SCAN_COUNT_FILTER: usize = 500;
 /// Cap on collection elements shown in an object-detail value preview.
 const PREVIEW_LIMIT: isize = 50;
 
@@ -158,6 +166,7 @@ impl Driver for RedisDriver {
         &self,
         cfg: &ResolvedConfig,
         parent: &NodePath,
+        filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
         let db = parent
             .get("kdb")
@@ -167,35 +176,33 @@ impl Driver for RedisDriver {
         let mut conn = self.connect(cfg).await?;
         select_db(&mut conn, db).await?;
 
-        match parent.get("ns") {
-            // Children of a namespace: keys matching `<prefix>:*`.
-            Some(prefix) => {
-                let pattern = format!("{prefix}:*");
-                let keys = scan_keys(&mut conn, Some(&pattern)).await?;
-                let mut nodes = Vec::with_capacity(keys.len());
-                for key in keys {
-                    let kind = type_of(&mut conn, &key).await;
-                    nodes.push(
-                        SchemaNode::new(
-                            format!("kdb:{db}/key:{key}"),
-                            key.clone(),
-                            NodeKind::Key,
-                        )
-                        .with_detail(kind),
-                    );
-                }
-                nodes.sort_by(|a, b| a.label.cmp(&b.label));
-                Ok(nodes)
+        match (parent.get("ns"), filter) {
+            // Children of a namespace: keys under `<prefix>:`, optionally narrowed
+            // further by the prefix filter. Flat, capped, type looked up in bulk.
+            (Some(ns), f) => {
+                let pattern = match f {
+                    Some(f) => format!("{}:{}*", glob_escape(ns), glob_escape(f)),
+                    None => format!("{}:*", glob_escape(ns)),
+                };
+                let scan = scan_keys(&mut conn, Some(&pattern), KEY_LIST_CAP).await?;
+                Ok(build_key_nodes(&mut conn, db, scan).await)
             }
-            // Children of the keyspace itself: namespaces (by prefix) + bare keys.
-            None => {
-                let keys = scan_keys(&mut conn, None).await?;
+            // Keyspace WITH a prefix filter: flat list of matching keys
+            // (`SCAN MATCH <filter>*`) — no namespace grouping, capped + bulk type.
+            (None, Some(f)) => {
+                let pattern = format!("{}*", glob_escape(f));
+                let scan = scan_keys(&mut conn, Some(&pattern), KEY_LIST_CAP).await?;
+                Ok(build_key_nodes(&mut conn, db, scan).await)
+            }
+            // Keyspace overview (no filter): a sampled SCAN grouped into namespaces
+            // (by the substring before the first `:`) plus any bare keys.
+            (None, None) => {
+                let scan = scan_keys(&mut conn, None, SCAN_KEY_CAP).await?;
 
-                // Group by the substring before the first ':'.
                 use std::collections::BTreeMap;
                 let mut namespaces: BTreeMap<String, usize> = BTreeMap::new();
                 let mut bare: Vec<String> = Vec::new();
-                for key in &keys {
+                for key in &scan.keys {
                     match key.split_once(':') {
                         Some((prefix, _)) => {
                             *namespaces.entry(prefix.to_string()).or_insert(0) += 1;
@@ -204,29 +211,26 @@ impl Driver for RedisDriver {
                     }
                 }
 
-                let mut nodes = Vec::with_capacity(namespaces.len() + bare.len());
+                let mut nodes = Vec::with_capacity(namespaces.len() + bare.len() + 1);
                 for (prefix, count) in namespaces {
+                    // Count is from the sample; mark it approximate when truncated.
+                    let detail = if scan.more { format!("{count}+") } else { count.to_string() };
                     nodes.push(
                         SchemaNode::new(
                             format!("kdb:{db}/ns:{prefix}"),
                             format!("{prefix}:*"),
                             NodeKind::KeyNamespace,
                         )
-                        .with_detail(count.to_string())
+                        .with_detail(detail)
                         .expandable(),
                     );
                 }
                 bare.sort();
-                for key in bare {
-                    let kind = type_of(&mut conn, &key).await;
-                    nodes.push(
-                        SchemaNode::new(
-                            format!("kdb:{db}/key:{key}"),
-                            key.clone(),
-                            NodeKind::Key,
-                        )
-                        .with_detail(kind),
-                    );
+                bare.truncate(KEY_LIST_CAP);
+                let bare_scan = ScanOutcome { more: scan.more, keys: bare };
+                nodes.extend(build_key_nodes(&mut conn, db, bare_scan).await);
+                if scan.more {
+                    nodes.push(truncation_hint(db, "Showing a sample — type a prefix to filter"));
                 }
                 Ok(nodes)
             }
@@ -328,10 +332,10 @@ impl Driver for RedisDriver {
 
         // Live key prefixes from a quick (best-effort) SCAN of the current db.
         if let Ok(mut conn) = self.connect(cfg).await {
-            if let Ok(keys) = scan_keys(&mut conn, None).await {
+            if let Ok(scan) = scan_keys(&mut conn, None, SCAN_KEY_CAP).await {
                 use std::collections::BTreeSet;
                 let mut prefixes: BTreeSet<String> = BTreeSet::new();
-                for key in keys {
+                for key in scan.keys {
                     if let Some((prefix, _)) = key.split_once(':') {
                         prefixes.insert(prefix.to_string());
                     }
@@ -462,32 +466,117 @@ async fn select_db(conn: &mut ConnectionManager, db: i64) -> Result<()> {
 
 // --- SCAN / type / length / preview ----------------------------------------
 
-/// Cursor-loop SCAN collecting up to [`SCAN_KEY_CAP`] keys, optionally filtered
-/// by `MATCH <pattern>`. Never uses `KEYS *`.
+/// Outcome of a bounded SCAN: the collected keys and whether more may exist
+/// (cap reached, or the round-trip budget was exhausted before a full sweep).
+struct ScanOutcome {
+    keys: Vec<String>,
+    more: bool,
+}
+
+/// Cursor-loop SCAN collecting up to `key_cap` keys, optionally filtered by
+/// `MATCH <pattern>`. Never uses `KEYS *`. Bounded on BOTH the key count and the
+/// number of round-trips ([`SCAN_MAX_ROUNDS`]), so a sparse filter on a huge
+/// keyspace can't stall the tree by traversing every key. `more` reports whether
+/// the listing is partial.
 async fn scan_keys(
     conn: &mut ConnectionManager,
     pattern: Option<&str>,
-) -> Result<Vec<String>> {
+    key_cap: usize,
+) -> Result<ScanOutcome> {
+    let count = if pattern.is_some() { SCAN_COUNT_FILTER } else { SCAN_COUNT };
     let mut cursor: u64 = 0;
     let mut keys: Vec<String> = Vec::new();
+    let mut rounds = 0usize;
+    let mut more = false;
     loop {
+        rounds += 1;
         let mut cmd = redis::cmd("SCAN");
         cmd.arg(cursor);
         if let Some(pat) = pattern {
             cmd.arg("MATCH").arg(pat);
         }
-        cmd.arg("COUNT").arg(SCAN_COUNT);
+        cmd.arg("COUNT").arg(count);
 
         let (next, batch): (u64, Vec<String>) =
             cmd.query_async(conn).await.map_err(types::upstream)?;
         keys.extend(batch);
         cursor = next;
-        if cursor == 0 || keys.len() >= SCAN_KEY_CAP {
+
+        if keys.len() >= key_cap {
+            keys.truncate(key_cap);
+            more = true;
+            break;
+        }
+        if cursor == 0 {
+            break; // full sweep complete
+        }
+        if rounds >= SCAN_MAX_ROUNDS {
+            more = true; // gave up early — listing is partial
             break;
         }
     }
-    keys.truncate(SCAN_KEY_CAP);
-    Ok(keys)
+    Ok(ScanOutcome { keys, more })
+}
+
+/// Build `Key` nodes for a scanned key set, looking up every key's type in a
+/// single pipelined batch (one round-trip instead of one TYPE per key). Appends
+/// a passive truncation hint when the listing was capped/partial.
+async fn build_key_nodes(
+    conn: &mut ConnectionManager,
+    db: i64,
+    mut scan: ScanOutcome,
+) -> Vec<SchemaNode> {
+    scan.keys.sort();
+    let types = types_of(conn, &scan.keys).await;
+    let mut nodes = Vec::with_capacity(scan.keys.len() + 1);
+    for (i, key) in scan.keys.iter().enumerate() {
+        let kind = types.get(i).cloned().unwrap_or_else(|| "unknown".into());
+        nodes.push(
+            SchemaNode::new(format!("kdb:{db}/key:{key}"), key.clone(), NodeKind::Key)
+                .with_detail(kind),
+        );
+    }
+    if scan.more {
+        nodes.push(truncation_hint(db, "More keys — refine the prefix"));
+    }
+    nodes
+}
+
+/// A passive (non-clickable, non-expandable) hint row appended to a truncated
+/// key listing. Rendered as a `Folder` so the tree treats it as a label only.
+fn truncation_hint(db: i64, msg: &str) -> SchemaNode {
+    SchemaNode::new(format!("kdb:{db}/hint:{msg}"), format!("⋯ {msg}"), NodeKind::Folder)
+}
+
+/// Escape Redis glob metacharacters (`* ? [ ] \`) so a user-typed prefix is
+/// matched literally before the trailing `*` is appended.
+fn glob_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Pipelined `TYPE` for many keys: one round-trip per [`KEY_LIST_CAP`]-sized
+/// chunk instead of one per key. Returns a vec aligned with `keys` (missing or
+/// failed lookups become "unknown").
+async fn types_of(conn: &mut ConnectionManager, keys: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(KEY_LIST_CAP) {
+        let mut pipe = redis::pipe();
+        for key in chunk {
+            pipe.cmd("TYPE").arg(key);
+        }
+        match pipe.query_async::<Vec<String>>(conn).await {
+            Ok(mut types) if types.len() == chunk.len() => out.append(&mut types),
+            _ => out.extend(chunk.iter().map(|_| "unknown".to_string())),
+        }
+    }
+    out
 }
 
 /// `TYPE key` → "string"/"hash"/... ("none" when missing).

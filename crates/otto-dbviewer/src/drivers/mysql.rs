@@ -124,6 +124,7 @@ impl Driver for MysqlDriver {
         &self,
         cfg: &ResolvedConfig,
         parent: &NodePath,
+        _filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
         let db = parent
             .get("db")

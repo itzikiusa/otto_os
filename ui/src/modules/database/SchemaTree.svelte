@@ -4,6 +4,7 @@
   // by depth, an icon per node kind, dimmed `detail`. Clicking a leaf object
   // opens its Structure; right-click offers "Explain with agent".
   import Icon from '../../lib/components/Icon.svelte';
+  import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { DbNodeKind, SchemaNode } from '../../lib/api/types';
@@ -200,6 +201,9 @@
     </button>
   </div>
   {#if open}
+    {#if node.kind === 'keyspace'}
+      <RedisKeyFilter {node} {depth} />
+    {/if}
     {@const children = database.childrenOf(node.id)}
     {#if children}
       {#each children as child (child.id)}

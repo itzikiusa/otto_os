@@ -78,7 +78,7 @@ async fn mongo_schema_tree() {
     // expand db:shopdb → contains the customers collection.
     let db_path = NodePath::parse("db:shopdb");
     let colls = d
-        .schema_children(&cfg, &db_path)
+        .schema_children(&cfg, &db_path, None)
         .await
         .expect("schema_children(db)");
     assert!(
@@ -90,7 +90,7 @@ async fn mongo_schema_tree() {
     // expand the collection → sampled fields include email.
     let coll_path = NodePath::parse("db:shopdb/coll:customers");
     let fields = d
-        .schema_children(&cfg, &coll_path)
+        .schema_children(&cfg, &coll_path, None)
         .await
         .expect("schema_children(coll)");
     assert!(

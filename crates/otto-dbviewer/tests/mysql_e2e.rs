@@ -74,7 +74,7 @@ async fn mysql_schema_tree() {
     // expand shopdb -> folder:tables.
     let shopdb = NodePath::parse("db:shopdb");
     let folders = d
-        .schema_children(&cfg, &shopdb)
+        .schema_children(&cfg, &shopdb, None)
         .await
         .expect("schema_children(db)");
     let tables_folder = folders
@@ -85,7 +85,7 @@ async fn mysql_schema_tree() {
     // expand folder:tables -> contains table 'orders'.
     let tables_path = NodePath::parse(&tables_folder.id);
     let tables = d
-        .schema_children(&cfg, &tables_path)
+        .schema_children(&cfg, &tables_path, None)
         .await
         .expect("schema_children(folder:tables)");
     assert!(
@@ -97,7 +97,7 @@ async fn mysql_schema_tree() {
     // expand db:shopdb/table:orders -> columns include customer_id.
     let orders_path = NodePath::parse("db:shopdb/table:orders");
     let columns = d
-        .schema_children(&cfg, &orders_path)
+        .schema_children(&cfg, &orders_path, None)
         .await
         .expect("schema_children(table:orders)");
     assert!(

@@ -25,9 +25,14 @@ pub trait Driver: Send + Sync {
     /// Top level of the object tree (databases / keyspaces / etc.).
     async fn schema_root(&self, cfg: &ResolvedConfig) -> Result<Vec<SchemaNode>>;
 
-    /// Children of a tree node (lazy expansion).
-    async fn schema_children(&self, cfg: &ResolvedConfig, parent: &NodePath)
-        -> Result<Vec<SchemaNode>>;
+    /// Children of a tree node (lazy expansion). `filter`, when set, narrows the
+    /// listing (used by Redis to `SCAN MATCH <filter>*`); SQL/Mongo ignore it.
+    async fn schema_children(
+        &self,
+        cfg: &ResolvedConfig,
+        parent: &NodePath,
+        filter: Option<&str>,
+    ) -> Result<Vec<SchemaNode>>;
 
     /// Full structure of a selected object (columns, keys, indexes, DDL).
     async fn object_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail>;

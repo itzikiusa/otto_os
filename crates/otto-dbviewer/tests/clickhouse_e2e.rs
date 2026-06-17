@@ -83,7 +83,7 @@ async fn clickhouse_schema_tree() {
     // expand db:analytics → lists the events table.
     let db_path = NodePath::parse("db:analytics");
     let tables = d
-        .schema_children(&cfg, &db_path)
+        .schema_children(&cfg, &db_path, None)
         .await
         .expect("schema_children of db:analytics");
     assert!(
@@ -95,7 +95,7 @@ async fn clickhouse_schema_tree() {
     // expand db:analytics/table:events → columns include event_type.
     let events_path = NodePath::parse("db:analytics/table:events");
     let columns = d
-        .schema_children(&cfg, &events_path)
+        .schema_children(&cfg, &events_path, None)
         .await
         .expect("schema_children of table:events");
     assert!(

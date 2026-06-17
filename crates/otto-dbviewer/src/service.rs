@@ -187,10 +187,17 @@ impl DbViewerService {
         r.driver.schema_root(&r.config).await
     }
 
-    pub async fn schema_children(&self, conn_id: &Id, path: &str) -> Result<Vec<SchemaNode>> {
+    pub async fn schema_children(
+        &self,
+        conn_id: &Id,
+        path: &str,
+        filter: Option<&str>,
+    ) -> Result<Vec<SchemaNode>> {
         let r = self.resolve(conn_id).await?;
         let node = NodePath::parse(path);
-        r.driver.schema_children(&r.config, &node).await
+        // An empty/whitespace filter is treated as "no filter".
+        let filter = filter.map(str::trim).filter(|s| !s.is_empty());
+        r.driver.schema_children(&r.config, &node, filter).await
     }
 
     pub async fn object_detail(&self, conn_id: &Id, path: &str) -> Result<ObjectDetail> {

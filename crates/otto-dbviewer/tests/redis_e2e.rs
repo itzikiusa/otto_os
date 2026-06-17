@@ -91,7 +91,7 @@ async fn redis_schema_tree() {
     // Expand the keyspace node — should yield namespaces/keys.
     let path = NodePath::parse(&keyspace.id);
     let children = d
-        .schema_children(&cfg, &path)
+        .schema_children(&cfg, &path, None)
         .await
         .expect("schema_children(keyspace) failed");
     assert!(
@@ -159,6 +159,74 @@ async fn redis_run() {
         blob.contains("ada@example.com"),
         "HGETALL customer:1 should include ada@example.com, got: {blob}"
     );
+}
+
+/// Prefix filter narrows a huge keyspace; broad matches are capped with a hint,
+/// and every key node carries a (bulk-looked-up) type. Validates the behaviour
+/// behind the Redis "filter by prefix / limit results" tree feature.
+#[tokio::test]
+#[ignore]
+async fn redis_prefix_filter_and_cap() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+
+    let d = RedisDriver::default();
+    let cfg = cfg();
+    let ks = NodePath::parse("kdb:0");
+
+    // Narrow filter → flat list of only user:* keys, typed, no truncation hint.
+    let users = d
+        .schema_children(&cfg, &ks, Some("user:"))
+        .await
+        .expect("filter user:");
+    assert!(!users.is_empty(), "user: filter should match seeded keys");
+    assert!(
+        users.iter().all(|n| n.kind == NodeKind::Key),
+        "a filtered listing is flat keys (no namespaces)"
+    );
+    assert!(
+        users.iter().all(|n| n.label.starts_with("user:")),
+        "every result must match the prefix"
+    );
+    assert!(
+        users.iter().all(|n| n.detail.as_deref() == Some("string")),
+        "bulk TYPE should label each key 'string'"
+    );
+    println!("filter user: -> {} keys", users.len());
+
+    // Broad filter (2000 keys) → capped at the per-listing cap (500) with a
+    // trailing truncation hint (a passive Folder node marked with ⋯).
+    let big = d
+        .schema_children(&cfg, &ks, Some("bigns:"))
+        .await
+        .expect("filter bigns:");
+    let keys = big.iter().filter(|n| n.kind == NodeKind::Key).count();
+    let hint = big.iter().find(|n| n.kind == NodeKind::Folder);
+    assert_eq!(keys, 500, "should fill the 500-key cap for 2000 matches");
+    assert!(
+        big.iter()
+            .filter(|n| n.kind == NodeKind::Key)
+            .all(|n| n.label.starts_with("bigns:")),
+        "every capped result must still match the prefix"
+    );
+    let hint = hint.expect("a truncation hint should be appended when capped");
+    assert!(hint.label.starts_with('⋯'), "hint label marked with ⋯");
+    assert!(!hint.has_children, "the hint is passive (not expandable)");
+    println!("filter bigns: -> {keys} keys + hint {:?}", hint.label);
+
+    // Overview (no filter) still groups by namespace prefix.
+    let overview = d
+        .schema_children(&cfg, &ks, None)
+        .await
+        .expect("overview");
+    assert!(
+        overview
+            .iter()
+            .any(|n| n.kind == NodeKind::KeyNamespace && n.label.starts_with("bigns")),
+        "overview should include a bigns namespace group"
+    );
+    println!("overview -> {} nodes", overview.len());
 }
 
 /// completion offers the GET command and a live key prefix.

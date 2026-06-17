@@ -126,6 +126,7 @@ impl Driver for MongoDriver {
         &self,
         cfg: &ResolvedConfig,
         parent: &NodePath,
+        _filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
         let client = self.connect(cfg).await?;
         let db_name = parent
