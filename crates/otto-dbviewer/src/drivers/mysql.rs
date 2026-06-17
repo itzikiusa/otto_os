@@ -253,11 +253,15 @@ impl Driver for MysqlDriver {
         let pool = self.pool(cfg).await?;
         let started = Instant::now();
 
+        // The active database (if the user selected one) scopes unqualified
+        // table names: we `USE` it on the connection before running the query.
+        let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
         let result = if is_read_statement(statement) {
             let limited = types::inject_row_limit(statement, max_rows.saturating_add(1));
-            run_read(&pool, &limited, max_rows).await
+            run_read(&pool, &limited, max_rows, active_db).await
         } else {
-            run_write(&pool, statement).await
+            run_write(&pool, statement, active_db).await
         };
         let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -658,9 +662,19 @@ async fn run_read(
     pool: &sqlx::MySqlPool,
     statement: &str,
     max_rows: usize,
+    active_db: Option<&str>,
 ) -> Result<QueryResult> {
+    // Acquire a single connection so the optional `USE <db>` and the statement
+    // share the same session — the default schema must apply to the query.
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    if let Some(db) = active_db {
+        sqlx::query(&format!("USE `{}`", esc_ident(db)))
+            .execute(&mut *conn)
+            .await
+            .map_err(types::upstream)?;
+    }
     let rows = sqlx::query(statement)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(types::upstream)?;
 
@@ -692,9 +706,21 @@ async fn run_read(
     })
 }
 
-async fn run_write(pool: &sqlx::MySqlPool, statement: &str) -> Result<QueryResult> {
+async fn run_write(
+    pool: &sqlx::MySqlPool,
+    statement: &str,
+    active_db: Option<&str>,
+) -> Result<QueryResult> {
+    // Same as run_read: `USE <db>` and the statement must share one session.
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    if let Some(db) = active_db {
+        sqlx::query(&format!("USE `{}`", esc_ident(db)))
+            .execute(&mut *conn)
+            .await
+            .map_err(types::upstream)?;
+    }
     let res = sqlx::query(statement)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .map_err(types::upstream)?;
     let affected = res.rows_affected();

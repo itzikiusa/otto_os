@@ -11,6 +11,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
   import { database } from '../../lib/stores/database.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { QueryResult } from '../../lib/api/types';
 
   interface Props {
@@ -167,10 +168,19 @@
   }
 
   // ── Cell rendering helpers ───────────────────────────────────────────────────
-  let viewer = $state<{ value: string } | null>(null);
+  // The expandable cell viewer. `raw` is the unformatted text; `formatted`
+  // holds a prettified copy (SQL or JSON) the user can toggle to.
+  let viewer = $state<{ raw: string; sql: boolean; formatted: boolean } | null>(null);
+  const viewerText = $derived(
+    viewer ? (viewer.formatted ? (viewer.sql ? formatSql(viewer.raw) : viewer.raw) : viewer.raw) : '',
+  );
 
   function isComplex(v: unknown): boolean {
     return v !== null && typeof v === 'object';
+  }
+  /** Heuristic: does this string look like a SQL statement (DDL/DML/EXPLAIN)? */
+  function looksLikeSql(s: string): boolean {
+    return /^\s*(create|select|insert|update|alter|with|explain|show|drop|attach|grant)\b/i.test(s);
   }
   function compactJson(v: unknown): string {
     try {
@@ -192,7 +202,149 @@
     return String(v);
   }
   function openCell(v: unknown): void {
-    viewer = { value: prettyJson(v) };
+    if (typeof v === 'string') {
+      viewer = { raw: v, sql: looksLikeSql(v), formatted: looksLikeSql(v) };
+    } else if (v === null || v === undefined) {
+      viewer = { raw: 'NULL', sql: false, formatted: false };
+    } else {
+      viewer = { raw: prettyJson(v), sql: false, formatted: false };
+    }
+  }
+
+  /** Lightweight SQL pretty-printer: newlines before major clauses and one
+   * column/arg per line inside the first paren group. String/backtick/comment
+   * spans are preserved verbatim. Best-effort and never throws. */
+  function formatSql(sql: string): string {
+    try {
+      const KW = [
+        'SELECT', 'FROM', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'OUTER JOIN', 'JOIN',
+        'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'UNION ALL', 'UNION',
+        'SETTINGS', 'PARTITION BY', 'PRIMARY KEY', 'ORDER BY', 'ENGINE', 'AS SELECT',
+      ];
+      let out = '';
+      let depth = 0;
+      let i = 0;
+      let line = '';
+      const flush = () => {
+        if (line.trim().length) out += (out ? '\n' : '') + line.replace(/\s+$/, '');
+        line = '';
+      };
+      while (i < sql.length) {
+        const ch = sql[i];
+        // Preserve quoted / backticked spans verbatim.
+        if (ch === "'" || ch === '"' || ch === '`') {
+          const q = ch;
+          let j = i + 1;
+          while (j < sql.length && sql[j] !== q) j++;
+          line += sql.slice(i, j + 1);
+          i = j + 1;
+          continue;
+        }
+        if (ch === '(') {
+          depth++;
+          line += ch;
+          // Break the column/arg list onto its own indented lines (depth 1 only).
+          if (depth === 1) {
+            flush();
+            line = '  ';
+          }
+          i++;
+          continue;
+        }
+        if (ch === ')') {
+          if (depth === 1) {
+            flush();
+            line = '';
+          }
+          depth = Math.max(0, depth - 1);
+          line += ch;
+          i++;
+          continue;
+        }
+        if (ch === ',' && depth === 1) {
+          line += ',';
+          flush();
+          line = '  ';
+          i++;
+          continue;
+        }
+        // Major keyword at depth 0 → start a new line.
+        if (depth === 0 && (i === 0 || /\s/.test(sql[i - 1]))) {
+          const rest = sql.slice(i).toUpperCase();
+          const kw = KW.find((k) => rest.startsWith(k + ' ') || rest === k || rest.startsWith(k + '\n'));
+          if (kw) {
+            flush();
+            line = sql.slice(i, i + kw.length);
+            i += kw.length;
+            continue;
+          }
+        }
+        line += ch;
+        i++;
+      }
+      flush();
+      return out || sql;
+    } catch {
+      return sql;
+    }
+  }
+
+  async function copyViewer(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(viewerText);
+      toasts.success('Copied', 'Full cell value copied');
+    } catch {
+      toasts.error('Copy failed');
+    }
+  }
+
+  async function copyText(s: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(s);
+    } catch {
+      toasts.error('Copy failed');
+    }
+  }
+
+  // ── Quick-filter context menus (cell + header) ───────────────────────────────
+  function shortLabel(v: unknown): string {
+    const s = v === null || v === undefined ? 'NULL' : isComplex(v) ? compactJson(v) : String(v);
+    return s.length > 28 ? s.slice(0, 28) + '…' : s;
+  }
+  function cellMenu(e: MouseEvent, ci: number, v: unknown): void {
+    if (mini) return;
+    const col = result?.columns[ci]?.name;
+    if (!col) return;
+    const short = shortLabel(v);
+    ctxMenu.show(e, [
+      { label: `Filter:  ${col} = ${short}`, icon: 'search', action: () => database.addQuickFilter(col, v, 'include') },
+      { label: `Exclude:  ${col} ≠ ${short}`, icon: 'x', action: () => database.addQuickFilter(col, v, 'exclude') },
+      { separator: true },
+      { label: 'Expand value', icon: 'maximize', action: () => openCell(v) },
+      { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : isComplex(v) ? compactJson(v) : String(v)) },
+    ]);
+  }
+  function headerMenu(e: MouseEvent, ci: number): void {
+    if (mini) return;
+    const col = result?.columns[ci]?.name;
+    if (!col) return;
+    ctxMenu.show(e, [
+      { label: 'Sort ascending', icon: 'arrowUp', action: () => { sortCol = ci; sortDir = 'asc'; } },
+      { label: 'Sort descending', icon: 'arrowDown', action: () => { sortCol = ci; sortDir = 'desc'; } },
+      { label: 'Clear sort', disabled: sortCol !== ci, action: () => { sortCol = null; sortDir = null; } },
+      { separator: true },
+      { label: `Filter by ${col}…`, icon: 'search', action: () => database.addColumnFilter(col) },
+      { label: 'Copy column name', icon: 'file', action: () => copyText(col) },
+    ]);
+  }
+
+  // Per-chip "add value" input text (keyed by chip index).
+  let addValText = $state<Record<number, string>>({});
+  function submitFilterValue(i: number): void {
+    const text = (addValText[i] ?? '').trim();
+    if (!text) return;
+    database.addFilterValue(i, text);
+    addValText[i] = '';
   }
 
   // Highlight the matched substring inside a plain cell value. Returns segments.
@@ -644,6 +796,45 @@
         <button class="tb-btn" onclick={exportJson} title="Export JSON{exportScope}"><Icon name="arrowDown" size={11} />JSON</button>
       </div>
     {/if}
+
+    {#if !mini && database.filters.length > 0}
+      <div class="filter-bar">
+        <span class="fb-label"><Icon name="search" size={11} />Filters</span>
+        {#each database.filters as cond, ci (ci)}
+          {#if cond.kind === 'raw'}
+            <span class="chip raw" title="Existing WHERE condition">
+              <span class="chip-text mono">{cond.text}</span>
+              <button class="chip-x" title="Remove" aria-label="Remove" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={9} /></button>
+            </span>
+          {:else}
+            <span class="chip" class:exclude={cond.op === 'not_in'}>
+              <button
+                class="chip-op"
+                title={cond.op === 'in' ? 'Include (click to exclude)' : 'Exclude (click to include)'}
+                onclick={() => database.toggleFilterMode(ci)}
+              >{cond.op === 'in' ? '=' : '≠'}</button>
+              <span class="chip-col mono">{cond.column}</span>
+              {#each cond.values as val, vi (vi)}
+                <span class="chip-val mono">
+                  {val.isNull ? 'NULL' : val.raw}
+                  <button class="val-x" aria-label="Remove value" onclick={() => database.removeFilterValue(ci, vi)}>×</button>
+                </span>
+              {/each}
+              <input
+                class="chip-add mono"
+                placeholder="+ value"
+                bind:value={addValText[ci]}
+                onkeydown={(e) => { if (e.key === 'Enter') submitFilterValue(ci); }}
+              />
+              <button class="chip-x" title="Remove filter" aria-label="Remove filter" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={9} /></button>
+            </span>
+          {/if}
+        {/each}
+        <button class="fb-clear" onclick={() => database.clearFilters()} title="Clear all filters">Clear all</button>
+        <span class="fb-hint">filters update the query — press Run to apply</span>
+      </div>
+    {/if}
+
     <div class="grid-scroll" bind:this={scrollEl} bind:clientHeight={viewportH} onscroll={onScroll}>
       <table class="grid mono" style="--last:{result.columns.length}">
         <thead>
@@ -651,12 +842,13 @@
             <th class="rownum">#</th>
             {#each result.columns as c, ci (ci)}
               <th
-                title={mini ? (c.type_hint ?? undefined) : `${c.name} — click to sort`}
+                title={mini ? (c.type_hint ?? undefined) : `${c.name} — click to sort, right-click for filters`}
                 class:pk={editable && editPkCols.includes(c.name)}
                 class:sortable={!mini}
                 class:sorted={sortCol === ci}
                 aria-sort={sortCol === ci ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
                 style="width:{widthFor(ci)}ch; max-width:{widthFor(ci)}ch;"
+                oncontextmenu={(e) => headerMenu(e, ci)}
               >
                 {#if mini}
                   <span class="th-inner">
@@ -729,6 +921,7 @@
                     title="NULL"
                     style="width:{w}ch; max-width:{w}ch;"
                     ondblclick={() => beginEdit(idx, ci)}
+                    oncontextmenu={(e) => cellMenu(e, ci, v)}
                   ><span class="null-glyph">∅</span></td>
                 {:else if isComplex(v)}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -737,7 +930,8 @@
                     title="Click to expand"
                     style="width:{w}ch; max-width:{w}ch;"
                     onclick={() => openCell(v)}
-                  >{compactJson(v)}</td>
+                    oncontextmenu={(e) => cellMenu(e, ci, v)}
+                  >{compactJson(v)}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v); }}><Icon name="maximize" size={9} /></button></td>
                 {:else}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                   <td
@@ -745,7 +939,8 @@
                     class:editable={isEditableCell(ci)}
                     style="width:{w}ch; max-width:{w}ch;"
                     ondblclick={() => beginEdit(idx, ci)}
-                  >{#if filtering}{#each highlightParts(cellText(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellText(v)}{/if}</td>
+                    oncontextmenu={(e) => cellMenu(e, ci, v)}
+                  >{#if filtering}{#each highlightParts(cellText(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellText(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v); }}><Icon name="maximize" size={9} /></button></td>
                 {/if}
               {/each}
             </tr>
@@ -811,9 +1006,21 @@
     <div class="cell-viewer" role="dialog" aria-modal="true" aria-label="Cell value">
       <div class="cv-head">
         <span>Cell value</span>
+        <span class="grow"></span>
+        {#if viewer.sql}
+          <button
+            class="tb-btn"
+            class:active={viewer.formatted}
+            onclick={() => (viewer && (viewer.formatted = !viewer.formatted))}
+            title="Toggle SQL formatting"
+          >
+            <Icon name="grid" size={11} />{viewer.formatted ? 'Formatted' : 'Raw'}
+          </button>
+        {/if}
+        <button class="tb-btn" onclick={copyViewer} title="Copy full value"><Icon name="file" size={11} />Copy</button>
         <button class="icon-btn" onclick={() => (viewer = null)} aria-label="Close">✕</button>
       </div>
-      <pre class="cv-body mono">{viewer.value}</pre>
+      <pre class="cv-body mono">{viewerText}</pre>
     </div>
   </div>
 {/if}
@@ -887,6 +1094,140 @@
     align-items: center;
     gap: 6px;
     padding: 4px 2px 8px;
+  }
+  /* ── Quick-filter bar ── */
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 8px;
+    margin-bottom: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--accent) 5%, var(--surface-2));
+  }
+  .fb-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 4px 0 0;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: 999px;
+    background: var(--surface);
+    font-size: 11px;
+  }
+  .chip.exclude {
+    border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
+  }
+  .chip.raw {
+    padding: 0 4px 0 9px;
+    border-style: dashed;
+  }
+  .chip-op {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin: 0 0 0 1px;
+    border: none;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .chip.exclude .chip-op {
+    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
+    color: var(--status-exited);
+  }
+  .chip-col {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chip-val {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 3px 0 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text);
+  }
+  .val-x {
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 1px;
+  }
+  .val-x:hover {
+    color: var(--status-exited);
+  }
+  .chip-add {
+    width: 64px;
+    height: 18px;
+    border: none;
+    border-bottom: 1px dashed var(--border);
+    background: transparent;
+    color: var(--text);
+    font-size: 11px;
+    outline: none;
+  }
+  .chip-text {
+    color: var(--text-dim);
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chip-x {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .chip-x:hover {
+    background: color-mix(in srgb, var(--status-exited) 20%, transparent);
+    color: var(--status-exited);
+  }
+  .fb-clear {
+    height: 20px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: 10.5px;
+    cursor: pointer;
+  }
+  .fb-clear:hover {
+    color: var(--status-exited);
+    border-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
+  }
+  .fb-hint {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    font-style: italic;
+    margin-left: auto;
   }
   .gt-search {
     display: inline-flex;
@@ -963,6 +1304,11 @@
   }
   .tb-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent);
+  }
+  .tb-btn.active {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent);
   }
   .tb-note {
@@ -1174,6 +1520,34 @@
   }
   .cell.json:hover {
     text-decoration: underline;
+  }
+  /* Expand-to-viewer affordance, revealed on cell hover (top-right corner). */
+  .grid td.cell {
+    position: relative;
+  }
+  .cell-expand {
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+    box-shadow: -3px 0 5px var(--surface);
+  }
+  .grid td.cell:hover .cell-expand {
+    display: inline-flex;
+  }
+  .cell-expand:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .cell.editable {
     cursor: text;

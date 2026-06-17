@@ -40,6 +40,11 @@
   function onClick(node: SchemaNode): void {
     if (OBJECT_KINDS.has(node.kind)) {
       void database.openObject(node);
+    } else if (node.kind === 'database') {
+      // Clicking a database makes it the active one (queries scope to it, like
+      // Workbench's bold default schema) and expands it.
+      database.setActiveDb(node.label);
+      if (node.has_children) void database.expand(node);
     } else if (node.has_children) {
       void database.expand(node);
     }
@@ -70,6 +75,16 @@
       database.capabilities?.sql === true && (node.kind === 'table' || node.kind === 'view');
 
     const items = [];
+
+    // Database node: set/clear the active database (queries scope to it).
+    if (node.kind === 'database' && database.capabilities?.sql) {
+      if (database.activeDb === node.label) {
+        items.push({ label: 'Clear active database', icon: 'db', action: () => database.setActiveDb(null) });
+      } else {
+        items.push({ label: 'Set as active database', icon: 'db', action: () => database.setActiveDb(node.label) });
+      }
+      items.push({ separator: true });
+    }
 
     // Workbench-style data actions for SQL tables/views.
     if (isSqlTable) {
@@ -142,6 +157,7 @@
   <div
     class="node"
     class:selected
+    class:active-db={node.kind === 'database' && node.label === database.activeDb}
     style="padding-left: {depth * 13 + 4}px"
     oncontextmenu={(e) => showMenu(e, node)}
   >
@@ -157,7 +173,11 @@
       <span class="caret-spacer"></span>
     {/if}
     <span class="node-icon {node.kind}"><Icon name={iconFor(node.kind)} size={12} /></span>
-    <button class="node-label" onclick={() => onClick(node)} title={node.detail ?? node.label}>
+    <button
+      class="node-label"
+      onclick={() => onClick(node)}
+      title={node.detail ? `${node.label} — ${node.detail}` : node.label}
+    >
       <span class="nl-text ellipsis">{node.label}</span>
       {#if node.detail}<span class="nl-detail ellipsis">{node.detail}</span>{/if}
     </button>
@@ -204,6 +224,14 @@
   }
   .node.selected {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  /* Active database = bold, like Workbench's default schema. */
+  .node.active-db .nl-text {
+    font-weight: 700;
+    color: var(--text);
+  }
+  .node.active-db .node-icon {
+    color: var(--accent);
   }
   .caret {
     display: grid;
@@ -262,12 +290,16 @@
   .nl-text {
     font-size: 12px;
     min-width: 0;
+    /* Name is the primary value: it only shrinks as a last resort. */
+    flex: 0 1 auto;
   }
   .nl-detail {
     font-size: 10.5px;
     color: var(--text-dim);
     min-width: 0;
-    flex-shrink: 1;
+    /* Engine/detail is secondary: shrinks (and ellipsises away) ~100× faster
+       than the name, so a long engine never crowds out the table name. */
+    flex: 0 100 auto;
   }
   .node-empty {
     font-size: 10.5px;

@@ -584,6 +584,15 @@ pub fn invalid(msg: impl Into<String>) -> Error {
 pub fn inject_row_limit(statement: &str, limit: usize) -> String {
     let trimmed = statement.trim().trim_end_matches(';').trim_end();
     let lower = trimmed.to_ascii_lowercase();
+    // Only SELECT (incl. `WITH … SELECT` and a parenthesized `(SELECT …)`)
+    // accepts a trailing LIMIT. Statements like SHOW / DESCRIBE / DESC / EXISTS
+    // / EXPLAIN are row-returning but REJECT a trailing LIMIT, so never touch
+    // them — appending `LIMIT n` there is a syntax error.
+    let head = strip_leading_comments(&lower);
+    let first_word: String = head.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    if first_word != "select" && first_word != "with" && !head.starts_with('(') {
+        return statement.to_string();
+    }
     // Multiple statements — too risky to rewrite.
     if trimmed.contains(';') {
         return statement.to_string();
@@ -605,6 +614,22 @@ pub fn inject_row_limit(statement: &str, limit: usize) -> String {
         }
     }
     format!("{trimmed} LIMIT {limit}")
+}
+
+/// Strip leading whitespace and SQL line (`--`) / block (`/* */`) comments,
+/// returning the remainder — used to find a statement's first keyword.
+fn strip_leading_comments(sql: &str) -> &str {
+    let mut s = sql.trim_start();
+    loop {
+        if let Some(rest) = s.strip_prefix("--") {
+            s = rest.splitn(2, '\n').nth(1).unwrap_or("").trim_start();
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            s = rest.splitn(2, "*/").nth(1).unwrap_or("").trim_start();
+        } else {
+            break;
+        }
+    }
+    s
 }
 
 /// True if `word` appears as a whole word (surrounded by non-alphanumeric/non-`_`
@@ -698,5 +723,27 @@ mod tests {
             inject_row_limit("SELECT 1; SELECT 2", 10),
             "SELECT 1; SELECT 2"
         );
+    }
+
+    #[test]
+    fn non_select_row_returning_statements_are_left_untouched() {
+        // These return rows but REJECT a trailing LIMIT — must never be rewritten.
+        for sql in [
+            "SHOW CREATE TABLE etl_aws.daily",
+            "show tables",
+            "DESCRIBE etl_aws.daily",
+            "DESC t",
+            "EXPLAIN SELECT * FROM t",
+            "EXISTS TABLE t",
+        ] {
+            assert_eq!(inject_row_limit(sql, 1000), sql, "must not touch: {sql}");
+        }
+    }
+
+    #[test]
+    fn injects_after_leading_comment_and_for_cte_and_paren() {
+        assert!(inject_row_limit("-- pick\nSELECT * FROM t", 10).ends_with(" LIMIT 10"));
+        assert!(inject_row_limit("WITH c AS (SELECT 1) SELECT * FROM c", 10).ends_with(" LIMIT 10"));
+        assert!(inject_row_limit("(SELECT * FROM t)", 10).ends_with(" LIMIT 10"));
     }
 }

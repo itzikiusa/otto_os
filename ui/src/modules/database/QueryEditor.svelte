@@ -243,6 +243,21 @@
       <Icon name="zap" size={11} />Explain
     </button>
     <span class="grow"></span>
+    {#if database.capabilities?.sql && database.databaseNames.length > 0}
+      <label class="qe-db" title="Active database — queries run scoped to it, so you don't need a db. prefix">
+        <Icon name="db" size={11} />
+        <select
+          class="input"
+          value={database.activeDb ?? ''}
+          onchange={(e) => database.setActiveDb((e.currentTarget as HTMLSelectElement).value || null)}
+        >
+          <option value="">No active DB</option>
+          {#each database.databaseNames as db (db)}
+            <option value={db}>{db}</option>
+          {/each}
+        </select>
+      </label>
+    {/if}
     <label class="qe-limit" title="Default row cap — an explicit LIMIT in your query overrides this">
       <span>Limit</span>
       <select
@@ -457,18 +472,21 @@
     border-radius: 999px;
     background: var(--surface-2);
   }
-  .qe-limit {
+  .qe-limit,
+  .qe-db {
     display: inline-flex;
     align-items: center;
     gap: 5px;
     font-size: 11px;
     color: var(--text-dim);
   }
-  .qe-limit select {
+  .qe-limit select,
+  .qe-db select {
     height: 24px;
     padding: 0 4px;
     font-size: 11px;
     width: auto;
+    max-width: 160px;
   }
   .save-bar {
     display: flex;

@@ -59,6 +59,154 @@ export function parseExplicitLimit(sql: string): number | null {
   return m[2] !== undefined ? Number(m[2]) : Number(m[1]);
 }
 
+// ── Quick-filter helpers (module-level) ──────────────────────────────────────
+
+/** Derive a filter value from a result cell value. */
+export function toFilterVal(value: unknown): FilterVal {
+  if (value === null || value === undefined) return { raw: 'NULL', numeric: false, isNull: true };
+  if (typeof value === 'number' || typeof value === 'bigint')
+    return { raw: String(value), numeric: true, isNull: false };
+  if (typeof value === 'boolean') return { raw: value ? '1' : '0', numeric: true, isNull: false };
+  if (typeof value === 'object') return { raw: JSON.stringify(value), numeric: false, isNull: false };
+  return { raw: String(value), numeric: false, isNull: false };
+}
+
+/** Parse a value typed into the filter bar (numbers stay bare, NULL → IS NULL). */
+export function parseFilterValText(text: string): FilterVal {
+  const t = text.trim();
+  if (t.toUpperCase() === 'NULL') return { raw: 'NULL', numeric: false, isNull: true };
+  if (/^-?\d+(\.\d+)?$/.test(t)) return { raw: t, numeric: true, isNull: false };
+  return { raw: text, numeric: false, isNull: false };
+}
+
+function quoteIdentSql(name: string): string {
+  return '`' + name.replace(/`/g, '``') + '`';
+}
+function quoteFilterVal(v: FilterVal): string {
+  return v.numeric ? v.raw : `'${v.raw.replace(/'/g, "''")}'`;
+}
+
+/** Render one filter condition as a SQL boolean expression (empty when it has
+ * no usable values). Equals collapse to `IN`; NULLs become `IS [NOT] NULL`. */
+export function condToSql(c: FilterCond): string {
+  if (c.kind === 'raw') return c.text.trim();
+  const col = quoteIdentSql(c.column);
+  const nonNull = c.values.filter((v) => !v.isNull);
+  const hasNull = c.values.some((v) => v.isNull);
+  const parts: string[] = [];
+  if (c.op === 'in') {
+    if (nonNull.length === 1) parts.push(`${col} = ${quoteFilterVal(nonNull[0])}`);
+    else if (nonNull.length > 1) parts.push(`${col} IN (${nonNull.map(quoteFilterVal).join(', ')})`);
+    if (hasNull) parts.push(`${col} IS NULL`);
+    if (parts.length === 0) return '';
+    return parts.length > 1 ? `(${parts.join(' OR ')})` : parts[0];
+  } else {
+    if (nonNull.length === 1) parts.push(`${col} <> ${quoteFilterVal(nonNull[0])}`);
+    else if (nonNull.length > 1) parts.push(`${col} NOT IN (${nonNull.map(quoteFilterVal).join(', ')})`);
+    if (hasNull) parts.push(`${col} IS NOT NULL`);
+    return parts.join(' AND ');
+  }
+}
+
+/** Human label for a filter chip (e.g. `currency = 'EUR'`, `id IN (1, 2)`). */
+export function condLabel(c: FilterCond): string {
+  if (c.kind === 'raw') return c.text;
+  return condToSql(c) || `${c.column} …`;
+}
+
+// Top-level clause keywords that terminate a WHERE / mark where one is inserted.
+const BOUNDARY_KW = [
+  'group by', 'order by', 'having', 'limit', 'window', 'qualify',
+  'union all', 'union', 'into', 'settings', 'format',
+];
+const SCAN_KW = ['from', 'where', 'prewhere', ...BOUNDARY_KW];
+
+/** Find top-level (depth-0, not in string/comment) clause-keyword hits. */
+function scanTopLevel(sql: string): { kw: string; idx: number; end: number }[] {
+  const hits: { kw: string; idx: number; end: number }[] = [];
+  const lower = sql.toLowerCase();
+  const n = sql.length;
+  let depth = 0;
+  let i = 0;
+  while (i < n) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const q = ch;
+      i++;
+      while (i < n) {
+        if (sql[i] === q) {
+          if (sql[i + 1] === q) { i += 2; continue; }
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (ch === '-' && sql[i + 1] === '-') { while (i < n && sql[i] !== '\n') i++; continue; }
+    if (ch === '/' && sql[i + 1] === '*') { i += 2; while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) i++; i += 2; continue; }
+    if (ch === '(') { depth++; i++; continue; }
+    if (ch === ')') { depth = Math.max(0, depth - 1); i++; continue; }
+    if (depth === 0 && (i === 0 || /\s/.test(sql[i - 1]))) {
+      const matched = SCAN_KW.find((kw) => {
+        if (!lower.startsWith(kw, i)) return false;
+        const after = sql[i + kw.length];
+        return after === undefined || /\s/.test(after) || after === '(';
+      });
+      if (matched) { hits.push({ kw: matched, idx: i, end: i + matched.length }); i += matched.length; continue; }
+    }
+    i++;
+  }
+  return hits;
+}
+
+/** Split a single SELECT into head / WHERE-body / tail. Returns null when it
+ * can't safely parse (no top-level FROM, a PREWHERE, or multiple statements). */
+function splitStatement(sql: string): { head: string; whereBody: string; tail: string } | null {
+  if (/;\s*\S/.test(sql)) return null; // a second statement after a semicolon
+  const hits = scanTopLevel(sql);
+  if (!hits.some((h) => h.kw === 'from')) return null;
+  if (hits.some((h) => h.kw === 'prewhere')) return null;
+  const from = hits.find((h) => h.kw === 'from')!;
+  const whereHit = hits.find((h) => h.kw === 'where');
+  const isBoundary = (kw: string) => BOUNDARY_KW.includes(kw);
+  if (whereHit) {
+    const tailHit = hits.find((h) => isBoundary(h.kw) && h.idx > whereHit.idx);
+    return {
+      head: sql.slice(0, whereHit.idx),
+      whereBody: sql.slice(whereHit.end, tailHit ? tailHit.idx : undefined).trim(),
+      tail: (tailHit ? sql.slice(tailHit.idx) : '').trim(),
+    };
+  }
+  const tailHit = hits.find((h) => isBoundary(h.kw) && h.idx > from.idx);
+  return {
+    head: tailHit ? sql.slice(0, tailHit.idx) : sql,
+    whereBody: '',
+    tail: (tailHit ? sql.slice(tailHit.idx) : '').trim(),
+  };
+}
+
+/** Replace the statement's WHERE with `newWhereBody` (removing WHERE when empty).
+ * Returns the original unchanged when it can't safely parse. */
+function rewriteWhere(sql: string, newWhereBody: string): string {
+  const trimmed = sql.trimEnd();
+  const hadSemi = trimmed.endsWith(';');
+  const core = hadSemi ? trimmed.slice(0, -1).trimEnd() : trimmed;
+  const parts = splitStatement(core);
+  if (!parts) return sql;
+  let out = parts.head.trimEnd();
+  if (newWhereBody.trim()) out += `\nWHERE ${newWhereBody.trim()}`;
+  if (parts.tail) out += `\n${parts.tail}`;
+  return hadSemi ? `${out};` : out;
+}
+
+/** Extract a statement's existing WHERE body (to preserve it as a raw chip). */
+function extractWhereBody(sql: string): string | null {
+  const core = sql.trim().replace(/;\s*$/, '');
+  const parts = splitStatement(core);
+  return parts && parts.whereBody ? parts.whereBody : null;
+}
+
 /** Glyph (Icon name) for a connection engine. */
 export function engineGlyph(kind: string): string {
   switch (kind) {
@@ -73,7 +221,23 @@ export function engineGlyph(kind: string): string {
   }
 }
 
-/** An open query tab: an editable statement + its last result. */
+/** A single value in a column filter condition. */
+export interface FilterVal {
+  /** Literal text (already SQL-unquoted); rendered quoted unless `numeric`. */
+  raw: string;
+  numeric: boolean;
+  isNull: boolean;
+}
+/**
+ * A quick-filter condition. `col` conditions group all values for one column +
+ * direction so repeated equals collapse into IN / NOT IN. `raw` preserves a
+ * pre-existing hand-written WHERE as a removable chip.
+ */
+export type FilterCond =
+  | { kind: 'col'; column: string; op: 'in' | 'not_in'; values: FilterVal[] }
+  | { kind: 'raw'; text: string };
+
+/** An open query tab: an editable statement + its last result + quick filters. */
 export interface QueryTab {
   id: number;
   name: string;
@@ -81,11 +245,21 @@ export interface QueryTab {
   result: QueryResult | null;
   running: boolean;
   error: string | null;
+  /** Quick-filter chips that own the statement's WHERE clause. */
+  filters: FilterCond[];
 }
 
 let nextTabId = 1;
 function blankTab(statement = ''): QueryTab {
-  return { id: nextTabId++, name: 'Query', statement, result: null, running: false, error: null };
+  return {
+    id: nextTabId++,
+    name: 'Query',
+    statement,
+    result: null,
+    running: false,
+    error: null,
+    filters: [],
+  };
 }
 
 /** Main-pane tabs of the DB page. */
@@ -107,6 +281,7 @@ export type DbSideTab = 'schema' | 'saved' | 'history';
 interface ConnSnapshot {
   capabilities: DbCapabilities | null;
   testResult: DbTestResult | null;
+  activeDb: string | null;
   schemaRoot: SchemaNode[];
   childrenCache: Map<string, SchemaNode[]>;
   expanded: Set<string>;
@@ -135,6 +310,12 @@ class DatabaseStore {
   testing = $state(false);
   /** Default row cap for statements without an explicit LIMIT (persisted). */
   rowLimit = $state(loadRowLimit());
+  /**
+   * Active database for the selected connection (SQL engines). When set, queries
+   * run scoped to it (sent as the request `node`), so unqualified table names
+   * resolve without a `db.` prefix. Per-connection (snapshotted).
+   */
+  activeDb: string | null = $state(null);
 
   /**
    * Per-connection working-set snapshots, keyed by connection id. Deliberately
@@ -301,6 +482,16 @@ class DatabaseStore {
     }
   }
 
+  /** Database names available on the active connection (from the schema root). */
+  get databaseNames(): string[] {
+    return this.schemaRoot.filter((n) => n.kind === 'database').map((n) => n.label);
+  }
+
+  /** Set the active database (queries scope to it). Empty string clears it. */
+  setActiveDb(name: string | null): void {
+    this.activeDb = name && name.length > 0 ? name : null;
+  }
+
   // ── Loading ───────────────────────────────────────────────────────────────
 
   /** Load DB-kind connections for the current workspace. */
@@ -353,6 +544,7 @@ class DatabaseStore {
     this.snapshots.set(id, {
       capabilities: this.capabilities,
       testResult: this.testResult,
+      activeDb: this.activeDb,
       schemaRoot: this.schemaRoot,
       childrenCache: this.childrenCache,
       expanded: this.expanded,
@@ -380,6 +572,7 @@ class DatabaseStore {
     if (!snap) return false;
     this.capabilities = snap.capabilities;
     this.testResult = snap.testResult;
+    this.activeDb = snap.activeDb;
     this.schemaRoot = snap.schemaRoot;
     this.childrenCache = snap.childrenCache;
     this.expanded = snap.expanded;
@@ -467,6 +660,7 @@ class DatabaseStore {
   private async loadConnectionFresh(id: Id): Promise<void> {
     this.selectedConnId = id;
     this.capabilities = null;
+    this.activeDb = null;
     this.schemaRoot = [];
     this.childrenCache = new Map();
     this.builderTablesCache = new Map();
@@ -700,7 +894,9 @@ class DatabaseStore {
         {
           statement: sql,
           max_rows: explicit ?? this.rowLimit,
-          node: node ?? null,
+          // Scope to the active database (so unqualified tables resolve) unless
+          // an explicit node was passed.
+          node: node ?? (this.activeDb || null),
         },
         controller.signal,
       );
@@ -802,6 +998,107 @@ class DatabaseStore {
     toasts.warn('Review before running', 'This will drop the object. Press Run to apply.');
   }
 
+  // ── Quick filters (chips that own the active tab's WHERE clause) ───────────
+  // Chips accumulate without running the query — the user adds more, then runs.
+  // Repeated equals on a column collapse into IN / NOT IN; include vs exclude
+  // are separate directions. Applying rewrites the statement's WHERE in place.
+
+  /** Quick-filter chips for the active tab. */
+  get filters(): FilterCond[] {
+    return this.tab?.filters ?? [];
+  }
+
+  /** On the first chip, fold any hand-written WHERE into a removable raw chip
+   * so chips can safely own the WHERE from then on. */
+  private absorbExistingWhere(t: QueryTab): void {
+    if (t.filters.length > 0) return;
+    const existing = extractWhereBody(t.statement);
+    if (existing && existing.trim()) t.filters.push({ kind: 'raw', text: existing.trim() });
+  }
+
+  /** Add a value-based filter from a cell (include = equals, exclude = not). */
+  addQuickFilter(column: string, value: unknown, mode: 'include' | 'exclude'): void {
+    const t = this.tab;
+    if (!t || !column) return;
+    this.absorbExistingWhere(t);
+    const op = mode === 'include' ? 'in' : 'not_in';
+    const fv = toFilterVal(value);
+    let cond = t.filters.find(
+      (c): c is Extract<FilterCond, { kind: 'col' }> =>
+        c.kind === 'col' && c.column === column && c.op === op,
+    );
+    if (!cond) {
+      cond = { kind: 'col', column, op, values: [] };
+      t.filters.push(cond);
+    }
+    if (!cond.values.some((v) => v.raw === fv.raw && v.isNull === fv.isNull)) cond.values.push(fv);
+    this.applyFilters();
+  }
+
+  /** Add an empty (value-less) filter on a column, to be filled in the bar. */
+  addColumnFilter(column: string): void {
+    const t = this.tab;
+    if (!t || !column) return;
+    this.absorbExistingWhere(t);
+    if (!t.filters.some((c) => c.kind === 'col' && c.column === column)) {
+      t.filters.push({ kind: 'col', column, op: 'in', values: [] });
+    }
+    this.applyFilters();
+  }
+
+  /** Add a typed value to an existing column chip. */
+  addFilterValue(condIndex: number, text: string): void {
+    const t = this.tab;
+    const c = t?.filters[condIndex];
+    if (!t || !c || c.kind !== 'col' || !text.trim()) return;
+    const fv = parseFilterValText(text);
+    if (!c.values.some((v) => v.raw === fv.raw && v.isNull === fv.isNull)) c.values.push(fv);
+    this.applyFilters();
+  }
+
+  removeFilterValue(condIndex: number, valIndex: number): void {
+    const t = this.tab;
+    const c = t?.filters[condIndex];
+    if (!t || !c || c.kind !== 'col') return;
+    c.values.splice(valIndex, 1);
+    this.applyFilters();
+  }
+
+  removeFilterCond(condIndex: number): void {
+    const t = this.tab;
+    if (!t) return;
+    t.filters.splice(condIndex, 1);
+    this.applyFilters();
+  }
+
+  /** Flip a column chip between include (IN) and exclude (NOT IN). */
+  toggleFilterMode(condIndex: number): void {
+    const t = this.tab;
+    const c = t?.filters[condIndex];
+    if (!t || !c || c.kind !== 'col') return;
+    c.op = c.op === 'in' ? 'not_in' : 'in';
+    this.applyFilters();
+  }
+
+  clearFilters(): void {
+    const t = this.tab;
+    if (!t) return;
+    t.filters = [];
+    this.applyFilters();
+  }
+
+  /** Rewrite the active statement's WHERE from the chips (does NOT run). */
+  private applyFilters(): void {
+    const t = this.tab;
+    if (!t) return;
+    const body = t.filters
+      .map(condToSql)
+      .filter((s) => s.trim())
+      .join(' AND ');
+    t.statement = rewriteWhere(t.statement, body);
+    this.persistTabs();
+  }
+
   /** Fetch completions for the text before the cursor. */
   async complete(prefix: string, node?: string): Promise<DbCompletionItem[]> {
     const id = this.selectedConnId;
@@ -809,7 +1106,9 @@ class DatabaseStore {
     try {
       const res = await api.post<{ items: DbCompletionItem[] }>(`${this.connBase(id)}/completion`, {
         prefix,
-        database: this.selectedConn?.params?.db ? String(this.selectedConn.params.db) : undefined,
+        database:
+          this.activeDb ??
+          (this.selectedConn?.params?.db ? String(this.selectedConn.params.db) : undefined),
         node: node ?? null,
       });
       return res.items ?? [];

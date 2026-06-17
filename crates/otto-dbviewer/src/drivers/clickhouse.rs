@@ -123,6 +123,9 @@ struct Conn {
     /// Session time zone (default UTC), sent as the `session_timezone` setting
     /// so DateTime values render in the user's configured zone.
     timezone: Option<String>,
+    /// Active database (if the user selected one), sent as the `database`
+    /// request param so unqualified table names resolve against it.
+    database: Option<String>,
 }
 
 /// The shape of a `FORMAT JSONCompact` reply.
@@ -178,9 +181,9 @@ impl ClickhouseDriver {
     }
 
     /// Build a [`Conn`] for one operation: the cached `reqwest::Client` plus the
-    /// base URL, auth headers, and session timezone (all derived cheaply from
-    /// `cfg`).
-    async fn connect(&self, cfg: &ResolvedConfig) -> Result<Conn> {
+    /// base URL, auth headers, session timezone, and optional active database
+    /// (all derived cheaply from `cfg`).
+    async fn connect(&self, cfg: &ResolvedConfig, active_db: Option<&str>) -> Result<Conn> {
         let client = self.client(cfg).await?;
 
         let scheme = if cfg.tls.enabled() { "https" } else { "http" };
@@ -215,6 +218,7 @@ impl ClickhouseDriver {
             base,
             headers,
             timezone,
+            database: active_db.map(str::to_string),
         })
     }
 
@@ -293,10 +297,28 @@ impl ClickhouseDriver {
     }
 
     /// Run a row-returning statement over whichever transport `cfg` selects.
+    /// Introspection/completion callers use this no-scope wrapper (they qualify
+    /// their own table names); `run` uses [`Self::query_rows_db`] to scope to the
+    /// active database.
     async fn query_rows(&self, cfg: &ResolvedConfig, sql: &str) -> Result<RawRows> {
+        self.query_rows_db(cfg, sql, None).await
+    }
+
+    /// Like [`Self::query_rows`] but scopes unqualified table names to
+    /// `active_db` (when `Some`). On the HTTP transport this sets the `database`
+    /// request param. NATIVE TRANSPORT TODO: the native client's default
+    /// database is fixed at connect time (cached per config), so active-db
+    /// scoping is not applied there yet — unqualified names resolve against the
+    /// profile's database. Most connections use HTTP.
+    async fn query_rows_db(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+    ) -> Result<RawRows> {
         match transport_for(cfg) {
             Transport::Http => {
-                let conn = self.connect(cfg).await?;
+                let conn = self.connect(cfg, active_db).await?;
                 Ok(conn.query_json(sql).await?.into_raw())
             }
             Transport::Native => self.native_query(cfg, sql).await,
@@ -305,11 +327,23 @@ impl ClickhouseDriver {
 
     /// Run a statement whose reply we want as raw text (DDL / `SHOW CREATE`).
     /// Over native there is no "raw text" format — we run it as a normal query
-    /// and join the single string column the server returns.
+    /// and join the single string column the server returns. No-scope wrapper;
+    /// `run` uses [`Self::query_text_db`].
     async fn query_text(&self, cfg: &ResolvedConfig, sql: &str) -> Result<String> {
+        self.query_text_db(cfg, sql, None).await
+    }
+
+    /// Like [`Self::query_text`] but scopes to `active_db` on the HTTP transport
+    /// (see [`Self::query_rows_db`] for the native-transport TODO).
+    async fn query_text_db(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+    ) -> Result<String> {
         match transport_for(cfg) {
             Transport::Http => {
-                let conn = self.connect(cfg).await?;
+                let conn = self.connect(cfg, active_db).await?;
                 conn.query_raw(sql).await
             }
             Transport::Native => {
@@ -381,6 +415,11 @@ impl Conn {
         if let Some(tz) = &self.timezone {
             // ClickHouse 23.4+ honours session_timezone as a request setting.
             req = req.query(&[("session_timezone", tz.as_str())]);
+        }
+        if let Some(db) = &self.database {
+            // The `database` request param sets the default DB for unqualified
+            // table names (the HTTP analogue of `USE <db>`).
+            req = req.query(&[("database", db.as_str())]);
         }
         let resp = req.body(body).send().await.map_err(req_err)?;
         let status = resp.status();
@@ -750,11 +789,13 @@ fn is_system_db(name: &str) -> bool {
     matches!(name, "system" | "INFORMATION_SCHEMA" | "information_schema")
 }
 
-/// Max characters kept for a single result cell. ClickHouse `AggregateFunction`
-/// / `*State` columns (from AggregatingMergeTree) serialize to JSON as large
-/// binary blobs; an un-capped megabyte cell would choke the grid. We truncate
-/// with a marker so such columns never break the UI — the query still succeeds.
-const MAX_CELL_CHARS: usize = 8192;
+/// Max characters kept for a single result cell. Set high (~1 MiB) so normal
+/// text/DDL/JSON cells pass through untouched — full values reach the grid and
+/// Copy/CSV/JSON exports. The cap only exists as a safety valve against a single
+/// pathological multi-MB binary blob (e.g. a ClickHouse `AggregateFunction` /
+/// `*State` column from AggregatingMergeTree) that could choke the grid or OOM
+/// us; such a cell is truncated with a marker while the query still succeeds.
+const MAX_CELL_CHARS: usize = 1_048_576;
 
 /// Recursively cap oversized string values in a result cell (covers nested
 /// Array/Tuple/Map columns too). Non-strings pass through unchanged.
@@ -886,6 +927,9 @@ impl Driver for ClickhouseDriver {
                     } else {
                         NodeKind::Table
                     };
+                    // Engine is shown as a secondary, space-permitting detail
+                    // (the tree layout gives the table name priority and lets
+                    // the engine truncate first; full engine is on hover).
                     Some(
                         SchemaNode::new(format!("db:{db}/table:{name}"), name, kind)
                             .with_detail(engine)
@@ -1027,9 +1071,13 @@ impl Driver for ClickhouseDriver {
         let max_rows = req.max_rows.unwrap_or(1000);
         let started = Instant::now();
 
+        // The active database (if the user selected one) scopes unqualified
+        // table names — see query_rows_db for how it's applied per transport.
+        let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
         if returns_rows(sql) {
             let limited = types::inject_row_limit(sql, max_rows.saturating_add(1));
-            let resp = self.query_rows(cfg, &limited).await?;
+            let resp = self.query_rows_db(cfg, &limited, active_db).await?;
             let duration_ms = started.elapsed().as_millis() as u64;
 
             let columns: Vec<Column> = resp
@@ -1064,7 +1112,7 @@ impl Driver for ClickhouseDriver {
             })
         } else {
             // Write / DDL statement: no rowset, just acknowledge.
-            self.query_text(cfg, sql).await?;
+            self.query_text_db(cfg, sql, active_db).await?;
             let duration_ms = started.elapsed().as_millis() as u64;
             let mut result = QueryResult::message("OK");
             result.rows_affected = None;
