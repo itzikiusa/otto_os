@@ -247,6 +247,13 @@
   });
 
   // ---- palette commands: sessions ----
+  // Apply the persisted zoom via native WKWebView page-zoom in Tauri (crisp;
+  // CSS `zoom` would blur the terminal). Re-runs whenever the zoom changes.
+  $effect(() => {
+    void ui.zoom; // track
+    void ui.applyNativeZoom();
+  });
+
   $effect(() => {
     const unreg = registry.register(
       'sessions',
@@ -298,7 +305,7 @@
   });
 </script>
 
-<div class="shell" style="zoom:{ui.zoom}">
+<div class="shell" style={isTauri ? undefined : `zoom:${ui.zoom}`}>
   <div class="shell-main">
     <div class="sidebar" class:tauri-top={isTauri}>
       {#if ui.railExpanded}

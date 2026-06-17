@@ -170,6 +170,25 @@ class UiStore {
   private setZoom(z: number): void {
     this.zoom = z;
     lsSet(LS.zoom, String(z));
+    void this.applyNativeZoom();
+  }
+
+  /**
+   * In Tauri, scale the page via the native WKWebView zoom instead of CSS
+   * `zoom`. CSS `zoom` rasterizes the WebGL terminal canvas at the unscaled
+   * size and then stretches it → blurry text at any zoom ≠ 100%. Native page
+   * zoom re-rasterizes everything (terminal included) at the proper resolution,
+   * so text stays crisp. No-op (and harmless) in the browser build, where the
+   * shell falls back to CSS `zoom`. macOS support relies on `macos-private-api`.
+   */
+  async applyNativeZoom(): Promise<void> {
+    if (!isTauri) return;
+    try {
+      const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+      await getCurrentWebview().setZoom(this.zoom);
+    } catch {
+      /* zoom permission/API unavailable — CSS fallback still applies in web */
+    }
   }
 
   termZoomIn(): void {
