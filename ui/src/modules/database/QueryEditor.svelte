@@ -295,6 +295,19 @@
           {/each}
         </select>
       </label>
+    {:else if database.isRedis && database.keyspaces.length > 0}
+      <label class="qe-db" title="Active Redis database — commands (GET, HGETALL, …) run against this DB">
+        <Icon name="db" size={11} />
+        <select
+          class="input"
+          value={database.activeDb ?? database.keyspaces[0]?.id ?? ''}
+          onchange={(e) => database.setActiveDb((e.currentTarget as HTMLSelectElement).value || null)}
+        >
+          {#each database.keyspaces as ks (ks.id)}
+            <option value={ks.id}>{ks.label}</option>
+          {/each}
+        </select>
+      </label>
     {/if}
     <label class="qe-limit" title="Default row cap — an explicit LIMIT in your query overrides this">
       <span>Limit</span>

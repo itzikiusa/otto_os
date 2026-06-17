@@ -46,6 +46,11 @@
       // Workbench's bold default schema) and expands it.
       database.setActiveDb(node.label);
       if (node.has_children) void database.expand(node);
+    } else if (node.kind === 'keyspace') {
+      // A Redis keyspace (db0/db1/…) IS the active DB — commands run against it.
+      // Clicking selects it (so it's clear which DB you're on) and expands.
+      database.setActiveDb(node.id);
+      if (node.has_children) void database.expand(node);
     } else if (node.has_children) {
       void database.expand(node);
     }
@@ -86,6 +91,30 @@
       } else {
         items.push({ label: 'Set as active database', icon: 'db', action: () => database.setActiveDb(node.label) });
       }
+      items.push({ separator: true });
+    }
+
+    // Redis keyspace (db0/db1/…): the active DB commands run against.
+    if (node.kind === 'keyspace' && database.activeDb !== node.id) {
+      items.push({ label: 'Set as active database', icon: 'db', action: () => database.setActiveDb(node.id) });
+      items.push({ separator: true });
+    }
+
+    // Redis key: read its value with the TYPE-correct command (GET only works on
+    // strings; a hash needs HGETALL, a list LRANGE, …). This is the reliable way
+    // to query a key — no guessing the command or retyping the full key name.
+    if (node.kind === 'key') {
+      const verb = database.redisReadCommand(node.detail, '').trim().split(' ')[0];
+      items.push({
+        label: `Get value (${verb})`,
+        icon: 'play',
+        action: () => void database.getRedisValue(node, { run: true }),
+      });
+      items.push({
+        label: 'Send to editor',
+        icon: 'send',
+        action: () => void database.getRedisValue(node, { run: false }),
+      });
       items.push({ separator: true });
     }
 
@@ -175,7 +204,8 @@
   <div
     class="node"
     class:selected
-    class:active-db={node.kind === 'database' && node.label === database.activeDb}
+    class:active-db={(node.kind === 'database' && node.label === database.activeDb) ||
+      (node.kind === 'keyspace' && node.id === database.activeDb)}
     style="padding-left: {depth * 13 + 4}px"
     oncontextmenu={(e) => showMenu(e, node)}
   >

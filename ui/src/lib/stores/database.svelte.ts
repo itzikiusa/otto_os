@@ -493,6 +493,19 @@ class DatabaseStore {
     return this.schemaRoot.filter((n) => n.kind === 'database').map((n) => n.label);
   }
 
+  /** Redis logical DBs (db0, db1, …) from the schema root. `id` is the keyspace
+   *  path (`kdb:N`) used as the active-DB scope; `label` is what's shown. */
+  get keyspaces(): { id: string; label: string }[] {
+    return this.schemaRoot
+      .filter((n) => n.kind === 'keyspace')
+      .map((n) => ({ id: n.id, label: n.label }));
+  }
+
+  /** Whether the active connection is Redis. */
+  get isRedis(): boolean {
+    return this.capabilities?.engine === 'redis';
+  }
+
   /** Set the active database (queries scope to it). Empty string clears it.
    * Persisted with the connection's tabs so it survives reopening. */
   setActiveDb(name: string | null): void {
@@ -707,6 +720,13 @@ class DatabaseStore {
     this.schemaLoading = true;
     try {
       this.schemaRoot = await api.get<SchemaNode[]>(`${this.connBase(id)}/schema`);
+      // Redis: default the active keyspace to the first DB (db0) so commands have
+      // a clear, visible target and the tree marks it. Won't override a restored
+      // selection. (`kind === 'keyspace'` only matches Redis.)
+      if (!this.activeDb) {
+        const ks = this.schemaRoot.find((n) => n.kind === 'keyspace');
+        if (ks) this.activeDb = ks.id;
+      }
     } catch (e) {
       toasts.error('Could not load schema', errMsg(e));
     } finally {
@@ -1042,11 +1062,55 @@ class DatabaseStore {
     return { ref, db, table };
   }
 
-  /** Open a statement in a new query tab; optionally run it immediately. */
-  async openInNewTab(sql: string, opts?: { run?: boolean; name?: string }): Promise<void> {
+  /** Open a statement in a new query tab; optionally run it immediately. `node`
+   *  scopes execution (e.g. a Redis keyspace `kdb:N` so the right DB is SELECTed). */
+  async openInNewTab(
+    sql: string,
+    opts?: { run?: boolean; name?: string; node?: string },
+  ): Promise<void> {
     this.newTab(sql);
     if (opts?.name) this.tab.name = opts.name;
-    if (opts?.run) await this.runQuery();
+    if (opts?.run) await this.runQuery(undefined, opts.node);
+  }
+
+  // ── Redis key actions ─────────────────────────────────────────────────────
+
+  /** Split a Redis key node id `kdb:<n>/key:<fullkey>` into its keyspace + key.
+   *  The key may itself contain ':' / '/', so we slice at the first `/key:`. */
+  redisKeyParts(node: SchemaNode): { key: string; keyspace: string } | null {
+    const i = node.id.indexOf('/key:');
+    if (i < 0) return null;
+    return { key: node.label, keyspace: node.id.slice(0, i) };
+  }
+
+  /** The correct read command for a Redis key, based on its value TYPE (carried
+   *  in the node's `detail`). GET only works on strings — hashes need HGETALL,
+   *  lists LRANGE, etc. (using GET on a hash is what returned `(nil)`). */
+  redisReadCommand(type: string | undefined, key: string): string {
+    const k = /\s|"/.test(key) ? `"${key.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : key;
+    switch ((type ?? '').toLowerCase()) {
+      case 'hash':
+        return `HGETALL ${k}`;
+      case 'list':
+        return `LRANGE ${k} 0 -1`;
+      case 'set':
+        return `SMEMBERS ${k}`;
+      case 'zset':
+        return `ZRANGE ${k} 0 -1 WITHSCORES`;
+      case 'stream':
+        return `XRANGE ${k} - +`;
+      default:
+        return `GET ${k}`;
+    }
+  }
+
+  /** New tab with the type-correct read command for a Redis key, scoped to its
+   *  keyspace; runs immediately unless `opts.run === false`. */
+  async getRedisValue(node: SchemaNode, opts?: { run?: boolean }): Promise<void> {
+    const r = this.redisKeyParts(node);
+    if (!r) return;
+    const cmd = this.redisReadCommand(node.detail, r.key);
+    await this.openInNewTab(cmd, { run: opts?.run ?? true, name: r.key, node: r.keyspace });
   }
 
   /** New tab: `SELECT * FROM <table>` and run it (server applies the row cap). */
