@@ -11,16 +11,231 @@
   import Dashboards from './Dashboards.svelte';
   import ConnectionForm from '../connections/ConnectionForm.svelte';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { Connection, ConnectionKind } from '../../lib/api/types';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { router } from '../../lib/router.svelte';
+  import type { Connection, ConnectionKind, ConnectionSection } from '../../lib/api/types';
 
   // DB connections are created/managed here (hidden from the Connections page).
   const DB_KINDS: ConnectionKind[] = ['mysql', 'redis', 'mongodb', 'clickhouse'];
   let connFormOpen = $state(false);
   let editingConn = $state<Connection | null>(null);
+
+  // Dock this connection as a pane in the Agents split (beside an agent), with
+  // the full DB Explorer. Right-clicked from a connection tab or sidebar row.
+  function openConnInAgents(c: Connection): void {
+    void database.openConnection(c.id);
+    ws.openInSplit(DB_PANE_ID);
+    router.go('agents');
+  }
+  // The folder path a connection sits under, e.g. "PLATFORM / STG" — so it's
+  // clear which environment (stg/prod) a connection belongs to.
+  function sectionPath(c: Connection): string {
+    if (!c.section_id) return '';
+    const byId = new Map(sections.map((s) => [s.id, s]));
+    const parts: string[] = [];
+    let cur = byId.get(c.section_id);
+    let guard = 0;
+    while (cur && guard++ < 20) {
+      parts.unshift(cur.name);
+      cur = cur.parent_id ? byId.get(cur.parent_id) : undefined;
+    }
+    return parts.join(' / ');
+  }
+  // The immediate folder (sub-section), e.g. "STG" — compact, for the tab badge.
+  function sectionLeaf(c: Connection): string {
+    if (!c.section_id) return '';
+    return sections.find((s) => s.id === c.section_id)?.name ?? '';
+  }
+  function connMenu(e: MouseEvent, c: Connection): void {
+    ctxMenu.show(e, [
+      { label: 'Open beside agents (split)', icon: 'split', action: () => openConnInAgents(c) },
+      { separator: true },
+      { label: 'Edit', icon: 'edit', action: () => editConnection(c) },
+      { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) },
+    ]);
+  }
+
+  // --- Section hierarchy (mirrors the Connections page tree) -----------------
+  interface TreeNode {
+    sec: ConnectionSection;
+    items: Connection[];
+    children: TreeNode[];
+  }
+  let sections = $state<ConnectionSection[]>([]);
+  let collapsed = $state<Record<string, boolean>>({});
+  let draggedConnId = $state<string | null>(null);
+  let draggedSectionId = $state<string | null>(null);
+
+  const sortByName = (a: Connection, b: Connection): number => a.name.localeCompare(b.name);
+
+  // Build the section tree from the flat list; `parentId = null` is the root.
+  function buildTree(parentId: string | null): TreeNode[] {
+    return sections
+      .filter((s) => (s.parent_id ?? null) === parentId)
+      .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
+      .map((sec) => ({
+        sec,
+        items: database.connections.filter((c) => c.section_id === sec.id).sort(sortByName),
+        children: buildTree(sec.id),
+      }));
+  }
+  const tree = $derived(buildTree(null));
+  // Known folder ids in the (global, shared) tree. A connection whose folder is
+  // not among them falls back to Ungrouped, so connections never vanish.
+  const knownSectionIds = $derived(new Set(sections.map((s) => s.id)));
+  const ungrouped = $derived(
+    database.connections
+      .filter((c) => !c.section_id || !knownSectionIds.has(c.section_id))
+      .sort(sortByName),
+  );
+
+  async function loadSections(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    try {
+      // One global tree shared with the Connections page.
+      sections = await api.get<ConnectionSection[]>(`/workspaces/${wsId}/connection-sections`);
+    } catch {
+      /* sections are optional — fall back to a flat list */
+    }
+  }
+
+  function toggleCollapse(id: string): void {
+    collapsed[id] = !collapsed[id];
+  }
+
+  async function createSection(parentId: string | null): Promise<void> {
+    if (!ws.currentId) return;
+    const name = await confirmer.promptText(parentId ? 'Sub-section name' : 'Section name', {
+      title: parentId ? 'New sub-section' : 'New section',
+      confirmLabel: 'Create',
+      placeholder: 'e.g. AWS · STG',
+    });
+    if (!name) return;
+    try {
+      const sec = await api.post<ConnectionSection>(
+        `/workspaces/${ws.currentId}/connection-sections`,
+        { name, parent_id: parentId },
+      );
+      sections = [...sections, sec];
+    } catch (e) {
+      toasts.error('Create section failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function renameSection(sec: ConnectionSection): Promise<void> {
+    const name = await confirmer.promptText('Rename section', {
+      title: 'Rename section',
+      confirmLabel: 'Rename',
+      initial: sec.name,
+    });
+    if (!name || name === sec.name) return;
+    try {
+      const updated = await api.patch<ConnectionSection>(`/connection-sections/${sec.id}`, { name });
+      sections = sections.map((s) => (s.id === sec.id ? updated : s));
+    } catch (e) {
+      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function deleteSection(sec: ConnectionSection): Promise<void> {
+    if (
+      !(await confirmer.ask(
+        `Delete section “${sec.name}”? Sub-sections are removed too and their connections become ungrouped.`,
+        { title: 'Delete section' },
+      ))
+    )
+      return;
+    try {
+      await api.del(`/connection-sections/${sec.id}`);
+      const removed = new Set<string>();
+      const collect = (id: string): void => {
+        removed.add(id);
+        for (const s of sections) if (s.parent_id === id) collect(s.id);
+      };
+      collect(sec.id);
+      sections = sections.filter((s) => !removed.has(s.id));
+      // Locally drop the section_id of any connection that fell out.
+      database.connections = database.connections.map((c) =>
+        c.section_id && removed.has(c.section_id) ? { ...c, section_id: null } : c,
+      );
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Move a connection into a folder (or null = ungrouped). Connections are
+  // global, so all are assignable. Reuses the PATCH endpoint, updates in place.
+  async function moveConn(c: Connection, sectionId: string | null): Promise<void> {
+    if ((c.section_id ?? null) === sectionId) return;
+    try {
+      const saved = await api.patch<Connection>(`/connections/${c.id}`, {
+        name: c.name,
+        kind: c.kind,
+        params: c.params,
+        first_command: c.first_command,
+        section_id: sectionId,
+      });
+      database.connections = database.connections.map((x) => (x.id === c.id ? saved : x));
+    } catch (e) {
+      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function isDescendantOf(nodeId: string, ancestorId: string): boolean {
+    let cur = sections.find((s) => s.id === nodeId);
+    while (cur?.parent_id) {
+      if (cur.parent_id === ancestorId) return true;
+      cur = sections.find((s) => s.id === cur!.parent_id);
+    }
+    return false;
+  }
+
+  async function reparentSection(id: string, parentId: string | null): Promise<void> {
+    const sec = sections.find((s) => s.id === id);
+    if (!sec || (sec.parent_id ?? null) === parentId) return;
+    if (parentId && (parentId === id || isDescendantOf(parentId, id))) {
+      toasts.error('Invalid move', 'Cannot nest a section inside itself');
+      return;
+    }
+    try {
+      const updated = await api.post<ConnectionSection>(`/connection-sections/${id}/move`, {
+        parent_id: parentId,
+      });
+      sections = sections.map((s) => (s.id === id ? updated : s));
+    } catch (e) {
+      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // A drop onto a section: a dragged connection files into it; a dragged
+  // section nests under it. A drop onto the root zone reverses both.
+  function onSectionDrop(sectionId: string): void {
+    if (draggedConnId) {
+      const c = database.connections.find((x) => x.id === draggedConnId);
+      draggedConnId = null;
+      if (c) void moveConn(c, sectionId);
+    } else if (draggedSectionId) {
+      const src = draggedSectionId;
+      draggedSectionId = null;
+      void reparentSection(src, sectionId);
+    }
+  }
+  function onRootDrop(): void {
+    if (draggedConnId) {
+      const c = database.connections.find((x) => x.id === draggedConnId);
+      draggedConnId = null;
+      if (c) void moveConn(c, null);
+    } else if (draggedSectionId) {
+      const src = draggedSectionId;
+      draggedSectionId = null;
+      void reparentSection(src, null);
+    }
+  }
 
   function newConnection(): void {
     editingConn = null;
@@ -55,6 +270,7 @@
   $effect(() => {
     if (ws.currentId) {
       void database.loadConnections();
+      void loadSections();
       void database.loadSavedQueries();
       void database.loadDashboards();
     }
@@ -91,38 +307,53 @@
     <!-- Connection picker + management -->
     <div class="conn-head">
       <span class="conn-head-title">Connections</span>
-      <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection">
-        <Icon name="plus" size={13} />
-      </button>
+      <div class="head-btns">
+        <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section">
+          <Icon name="folder" size={13} />
+        </button>
+        <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection">
+          <Icon name="plus" size={13} />
+        </button>
+      </div>
     </div>
     <div class="conn-list">
-      {#if database.connections.length === 0}
+      {#if database.connections.length === 0 && sections.length === 0}
         <div class="conn-empty">
           No database connections.
           <button class="link" onclick={newConnection}>New connection →</button>
         </div>
       {:else}
-        {#each database.connections as c (c.id)}
-          <div
-            class="conn-row"
-            class:active={database.selectedConnId === c.id}
-            class:open={database.openConnIds.includes(c.id)}
-          >
-            <button class="conn-item" onclick={() => database.openConnection(c.id)} title={c.name}>
-              <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={13} /></span>
-              <span class="conn-name ellipsis">{c.name}</span>
-              <span class="conn-kind">{c.kind}</span>
-            </button>
-            <div class="conn-actions">
-              <button class="icon-btn" aria-label="Edit connection" title="Edit" onclick={() => editConnection(c)}>
-                <Icon name="edit" size={11} />
-              </button>
-              <button class="icon-btn" aria-label="Delete connection" title="Delete" onclick={() => deleteConnection(c)}>
-                <Icon name="trash" size={11} />
-              </button>
-            </div>
-          </div>
+        {#each tree as node (node.sec.id)}
+          {@render sectionNode(node, 0)}
         {/each}
+
+        {#if sections.length > 0}
+          <!-- Ungrouped doubles as the root / no-section drop target. -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="sec-head plain"
+            class:drop-target={draggedConnId || draggedSectionId}
+            ondragover={(e) => {
+              if (draggedConnId || draggedSectionId) e.preventDefault();
+            }}
+            ondrop={(e) => {
+              e.preventDefault();
+              onRootDrop();
+            }}
+            title="Drop here to remove from a section / make a section top-level"
+          >
+            <span class="caret-spacer"></span>
+            <span class="sec-name grow">Ungrouped</span>
+            {#if ungrouped.length > 0}<span class="count">{ungrouped.length}</span>{/if}
+          </div>
+          {#each ungrouped as c (c.id)}
+            {@render connRow(c, 1)}
+          {/each}
+        {:else}
+          {#each ungrouped as c (c.id)}
+            {@render connRow(c, 0)}
+          {/each}
+        {/if}
       {/if}
     </div>
 
@@ -187,9 +418,10 @@
       <!-- Top-level connection tabs (one per open connection) -->
       <div class="conn-tabs" role="tablist" aria-label="Open connections">
         {#each openConns as c (c.id)}
-          <div class="conn-tab" class:active={database.selectedConnId === c.id} role="tab" aria-selected={database.selectedConnId === c.id}>
-            <button class="conn-tab-main" onclick={() => database.openConnection(c.id)} title={c.name}>
+          <div class="conn-tab" class:active={database.selectedConnId === c.id} role="tab" tabindex="-1" aria-selected={database.selectedConnId === c.id} oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
+            <button class="conn-tab-main" onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
+              {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
               <span class="conn-tab-name ellipsis">{c.name}</span>
             </button>
             <button
@@ -241,6 +473,87 @@
     {/if}
   </div>
 </div>
+
+{#snippet sectionNode(node: TreeNode, depth: number)}
+  {@const isOpen = !collapsed[node.sec.id]}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="sec-head"
+    class:drop-target={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedConnId}
+    style="padding-left: {depth * 14 + 2}px"
+    draggable="true"
+    ondragstart={(e) => {
+      draggedSectionId = node.sec.id;
+      e.stopPropagation();
+    }}
+    ondragend={() => (draggedSectionId = null)}
+    ondragover={(e) => {
+      if (draggedConnId || (draggedSectionId && draggedSectionId !== node.sec.id)) e.preventDefault();
+    }}
+    ondrop={(e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSectionDrop(node.sec.id);
+    }}
+  >
+    <button class="caret" onclick={() => toggleCollapse(node.sec.id)} aria-label="Toggle section">
+      <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+    </button>
+    <Icon name="folder" size={12} />
+    <span class="sec-name grow ellipsis">{node.sec.name}</span>
+    <span class="count">{node.items.length}</span>
+    <div class="sec-actions">
+      <button class="icon-btn" title="Add sub-section" aria-label="Add sub-section" onclick={() => createSection(node.sec.id)}>
+        <Icon name="plus" size={11} />
+      </button>
+      <button class="icon-btn" title="Rename section" aria-label="Rename section" onclick={() => renameSection(node.sec)}>
+        <Icon name="edit" size={11} />
+      </button>
+      <button class="icon-btn" title="Delete section" aria-label="Delete section" onclick={() => deleteSection(node.sec)}>
+        <Icon name="trash" size={11} />
+      </button>
+    </div>
+  </div>
+  {#if isOpen}
+    {#each node.items as c (c.id)}
+      {@render connRow(c, depth + 1)}
+    {/each}
+    {#each node.children as child (child.sec.id)}
+      {@render sectionNode(child, depth + 1)}
+    {/each}
+  {/if}
+{/snippet}
+
+{#snippet connRow(c: Connection, depth: number)}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="conn-row"
+    class:active={database.selectedConnId === c.id}
+    class:open={database.openConnIds.includes(c.id)}
+    class:dragging={draggedConnId === c.id}
+    style="padding-left: {depth * 14}px"
+    draggable="true"
+    ondragstart={(e) => {
+      draggedConnId = c.id;
+      e.stopPropagation();
+    }}
+    ondragend={() => (draggedConnId = null)}
+    oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}
+  >
+    <button class="conn-item" onclick={() => database.openConnection(c.id)} title="{c.name} · {c.kind} — right-click to open beside agents">
+      <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={13} /></span>
+      <span class="conn-name ellipsis">{c.name}</span>
+    </button>
+    <div class="conn-actions">
+      <button class="icon-btn" aria-label="Edit connection" title="Edit" onclick={() => editConnection(c)}>
+        <Icon name="edit" size={11} />
+      </button>
+      <button class="icon-btn" aria-label="Delete connection" title="Delete" onclick={() => deleteConnection(c)}>
+        <Icon name="trash" size={11} />
+      </button>
+    </div>
+  </div>
+{/snippet}
 
 {#if connFormOpen}
   <ConnectionForm
@@ -324,6 +637,80 @@
     letter-spacing: 0.05em;
     color: var(--text-dim);
   }
+  .head-btns {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+  }
+  /* --- Section hierarchy rows --- */
+  .sec-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 28px;
+    padding: 0 6px;
+    border-radius: var(--radius-s);
+    cursor: grab;
+    user-select: none;
+    color: var(--text-dim);
+  }
+  .sec-head:hover {
+    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  }
+  .sec-head.plain {
+    cursor: default;
+    margin-top: 4px;
+  }
+  .sec-head.drop-target {
+    outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+    outline-offset: -1px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .sec-name {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+  }
+  .caret {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .caret:hover {
+    color: var(--text);
+  }
+  .caret-spacer {
+    width: 16px;
+    flex-shrink: 0;
+  }
+  .count {
+    font-size: 9.5px;
+    color: var(--text-dim);
+    min-width: 14px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .sec-actions {
+    display: flex;
+    gap: 0;
+    flex-shrink: 0;
+    opacity: 0;
+  }
+  .sec-head:hover .sec-actions {
+    opacity: 1;
+  }
+  .conn-row.dragging {
+    opacity: 0.5;
+  }
   .conn-row {
     display: flex;
     align-items: center;
@@ -367,12 +754,6 @@
     min-width: 0;
     font-size: 12.5px;
     font-weight: 500;
-  }
-  .conn-kind {
-    font-size: 9.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    color: var(--text-dim);
   }
   .side-switch {
     display: flex;
@@ -495,6 +876,17 @@
   .conn-tabs::-webkit-scrollbar {
     display: none;
   }
+  .conn-tab-path {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-radius: 999px;
+    padding: 1px 6px;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
   .conn-tab {
     display: flex;
     align-items: center;
@@ -505,7 +897,7 @@
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
-    max-width: 200px;
+    max-width: 320px;
     flex-shrink: 0;
     transition: background 120ms ease-out, color 120ms ease-out;
   }
@@ -552,7 +944,7 @@
   }
   .conn-tab-name {
     min-width: 0;
-    max-width: 140px;
+    max-width: 220px;
   }
   .conn-tab-close {
     display: grid;

@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
-    MoveSectionReq, Problem, ReorderSectionsReq, TestConnectionResp, UpsertConnectionReq,
-    UpsertSectionReq,
+    MoveSectionReq, Problem, ReorderSectionsReq, SectionScopeQuery, TestConnectionResp,
+    UpsertConnectionReq, UpsertSectionReq,
 };
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{Connection, ConnectionSection, Session, User, WorkspaceRole};
@@ -135,7 +135,9 @@ async fn create_connection<S: ConnectionsCtx>(
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Editor)
         .await?;
-    let conn = ctx.connections().create(Some(ws_id), &user.id, req).await?;
+    // Connections are a global library — created workspace-independent. The
+    // path workspace is used only to authorize the caller.
+    let conn = ctx.connections().create(None, &user.id, req).await?;
     Ok(Json(conn))
 }
 
@@ -202,16 +204,30 @@ async fn test_connection<S: ConnectionsCtx>(
 
 // --- Connection sections ----------------------------------------------------
 
-/// GET /workspaces/{id}/connection-sections — viewer
+/// Sections live in one of two independent trees. Absent/unknown → the default
+/// Connections-page tree; the Database Explorer passes "db".
+fn norm_scope(scope: Option<&str>) -> ApiResult<&'static str> {
+    match scope.map(str::trim) {
+        None | Some("") | Some("connections") => Ok("connections"),
+        Some("db") => Ok("db"),
+        Some(_) => Err(ApiErr(Error::Invalid("unknown section scope".into()))),
+    }
+}
+
+/// GET /workspaces/{id}/connection-sections — viewer.
+/// Returns the single global section tree (the `scope` query param is accepted
+/// for backward compatibility but ignored — both pages share one tree). The
+/// path workspace is used only to authorize the caller.
 async fn list_sections<S: ConnectionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(ws_id): Path<Id>,
+    Query(_q): Query<SectionScopeQuery>,
 ) -> ApiResult<Json<Vec<ConnectionSection>>> {
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Viewer)
         .await?;
-    Ok(Json(ctx.connections().list_sections(&ws_id).await?))
+    Ok(Json(ctx.connections().list_sections().await?))
 }
 
 /// POST /workspaces/{id}/connection-sections — editor
@@ -228,9 +244,10 @@ async fn create_section<S: ConnectionsCtx>(
     if name.is_empty() {
         return Err(ApiErr(Error::Invalid("section name required".into())));
     }
+    let scope = norm_scope(req.scope.as_deref())?;
     Ok(Json(
         ctx.connections()
-            .create_section(&ws_id, &user.id, req.parent_id.as_deref(), name)
+            .create_section(&ws_id, &user.id, req.parent_id.as_deref(), name, scope)
             .await?,
     ))
 }

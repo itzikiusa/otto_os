@@ -73,11 +73,13 @@
     const isObject = OBJECT_KINDS.has(node.kind);
     const isSqlTable =
       database.capabilities?.sql === true && (node.kind === 'table' || node.kind === 'view');
+    const isMongoCollection = node.kind === 'collection';
 
     const items = [];
 
-    // Database node: set/clear the active database (queries scope to it).
-    if (node.kind === 'database' && database.capabilities?.sql) {
+    // Database node: set/clear the active database (queries scope to it). For
+    // Mongo this is required so `db.<coll>...` resolves to the right database.
+    if (node.kind === 'database') {
       if (database.activeDb === node.label) {
         items.push({ label: 'Clear active database', icon: 'db', action: () => database.setActiveDb(null) });
       } else {
@@ -97,6 +99,21 @@
         label: 'Send to SQL Editor',
         icon: 'send',
         action: () => void database.sendSelectToEditor(node),
+      });
+      items.push({ separator: true });
+    }
+
+    // Data actions for Mongo collections: find({}) capped at the row limit.
+    if (isMongoCollection) {
+      items.push({
+        label: `Find Rows (Limit ${fmtNum(database.rowLimit)})`,
+        icon: 'play',
+        action: () => void database.findRows(node),
+      });
+      items.push({
+        label: 'Send to Editor',
+        icon: 'send',
+        action: () => void database.sendFindToEditor(node),
       });
       items.push({ separator: true });
     }

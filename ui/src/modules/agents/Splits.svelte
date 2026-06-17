@@ -2,7 +2,8 @@
   // Split layout: 1 pane full, 2 panes split on ws.splitAxis, 3–4 panes in a
   // 2×2 grid. Gutters are draggable (adjust col/row fractions).
   import SessionView from './SessionView.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import DatabasePage from '../database/DatabasePage.svelte';
+  import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
 
   let host: HTMLDivElement;
 
@@ -51,13 +52,22 @@
 <div class="splits" bind:this={host}>
   <div class="grid" style={gridStyle}>
     {#each ws.panes as paneId, i (i)}
-      <SessionView
-        sessionId={paneId}
-        focused={ws.focusedPane === i && ws.panes.length > 1}
-        showClose={ws.panes.length > 1}
-        onfocus={() => ws.focusPane(i)}
-        onclosepane={() => ws.closePane(i)}
-      />
+      {#if paneId === DB_PANE_ID}
+        <div class="db-pane" role="group" aria-label="Database" class:focused={ws.focusedPane === i && ws.panes.length > 1} onpointerdown={() => ws.focusPane(i)}>
+          {#if ws.panes.length > 1}
+            <button class="db-pane-close" title="Close pane" aria-label="Close pane" onclick={() => ws.closePane(i)}>✕</button>
+          {/if}
+          <DatabasePage />
+        </div>
+      {:else}
+        <SessionView
+          sessionId={paneId}
+          focused={ws.focusedPane === i && ws.panes.length > 1}
+          showClose={ws.panes.length > 1}
+          onfocus={() => ws.focusPane(i)}
+          onclosepane={() => ws.closePane(i)}
+        />
+      {/if}
     {/each}
   </div>
 
@@ -91,6 +101,35 @@
     display: grid;
     gap: 8px;
     height: 100%;
+  }
+  .db-pane {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    overflow: hidden;
+  }
+  .db-pane.focused {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  .db-pane-close {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    z-index: 25;
+    width: 20px;
+    height: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1;
+  }
+  .db-pane-close:hover {
+    color: var(--text);
   }
   .gutter {
     position: absolute;

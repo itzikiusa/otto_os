@@ -445,13 +445,16 @@ class DatabaseStore {
         JSON.stringify({
           tabs: this.tabs.map((t) => ({ name: t.name, statement: t.statement })),
           activeTab: this.activeTab,
+          activeDb: this.activeDb,
         }),
       );
     } catch {
       /* storage full / unavailable — non-fatal */
     }
   }
-  private restoreTabs(connId: Id): { tabs: QueryTab[]; activeTab: number } | null {
+  private restoreTabs(
+    connId: Id,
+  ): { tabs: QueryTab[]; activeTab: number; activeDb: string | null } | null {
     if (typeof localStorage === 'undefined') return null;
     const key = this.tabsKey(connId);
     if (!key) return null;
@@ -461,6 +464,7 @@ class DatabaseStore {
       const p = JSON.parse(raw) as {
         tabs?: { name?: string; statement?: string }[];
         activeTab?: number;
+        activeDb?: string | null;
       };
       const tabs = (p.tabs ?? []).map((t) => ({
         ...blankTab(t.statement ?? ''),
@@ -468,7 +472,7 @@ class DatabaseStore {
       }));
       if (!tabs.length) return null;
       const activeTab = Math.min(Math.max(0, p.activeTab ?? 0), tabs.length - 1);
-      return { tabs, activeTab };
+      return { tabs, activeTab, activeDb: p.activeDb ?? null };
     } catch {
       return null;
     }
@@ -487,9 +491,11 @@ class DatabaseStore {
     return this.schemaRoot.filter((n) => n.kind === 'database').map((n) => n.label);
   }
 
-  /** Set the active database (queries scope to it). Empty string clears it. */
+  /** Set the active database (queries scope to it). Empty string clears it.
+   * Persisted with the connection's tabs so it survives reopening. */
   setActiveDb(name: string | null): void {
     this.activeDb = name && name.length > 0 ? name : null;
+    this.persistTabs();
   }
 
   // ── Loading ───────────────────────────────────────────────────────────────
@@ -675,6 +681,9 @@ class DatabaseStore {
     const restored = this.restoreTabs(id);
     this.tabs = restored?.tabs ?? [blankTab()];
     this.activeTab = restored?.activeTab ?? 0;
+    // Restore the active database too, so the first query after reopening a
+    // connection is still scoped (otherwise Mongo/SQL error on an unscoped run).
+    this.activeDb = restored?.activeDb ?? null;
     this.mainTab = 'query';
     this.sideTab = 'schema';
     await Promise.all([this.loadCapabilities(id), this.loadSchemaRoot(id), this.loadHistory(id)]);
@@ -922,6 +931,42 @@ class DatabaseStore {
     }
   }
 
+  /**
+   * Run a real query plan for the active tab's statement: SQL engines prepend
+   * `EXPLAIN`; Mongo sends the `explain` flag (server `explain` command). The
+   * plan replaces the tab's result.
+   */
+  async runExplain(): Promise<QueryResult | null> {
+    const id = this.selectedConnId;
+    const t = this.tab;
+    if (!id) {
+      toasts.error('No connection selected');
+      return null;
+    }
+    const stmt = t.statement.trim();
+    if (!stmt) {
+      toasts.error('Statement is empty');
+      return null;
+    }
+    const isSql = this.capabilities?.sql === true;
+    t.running = true;
+    t.error = null;
+    try {
+      const body: Record<string, unknown> = isSql
+        ? { statement: `EXPLAIN ${stmt}`, max_rows: this.rowLimit, node: this.activeDb || null }
+        : { statement: stmt, max_rows: this.rowLimit, node: this.activeDb || null, explain: true };
+      const result = await api.post<QueryResult>(`${this.connBase(id)}/query`, body);
+      t.result = result;
+      return result;
+    } catch (e) {
+      t.error = errMsg(e);
+      toasts.error('Explain failed', errMsg(e));
+      return null;
+    } finally {
+      t.running = false;
+    }
+  }
+
   /** Abort the in-flight query for a tab (defaults to the active tab). */
   abortQuery(tabId?: number): void {
     const id = tabId ?? this.tab?.id;
@@ -979,6 +1024,34 @@ class DatabaseStore {
     const r = this.tableRefFromNode(node);
     if (!r) return;
     await this.openInNewTab(`SELECT * FROM ${r.ref}`, { name: r.table });
+  }
+
+  /** Resolve a Mongo collection node to its `{ db, coll }`. */
+  collectionRefFromNode(node: SchemaNode): { db: string | null; coll: string } | null {
+    const segs = node.id.split('/').map((s) => {
+      const i = s.indexOf(':');
+      return i < 0 ? ([s, ''] as const) : ([s.slice(0, i), s.slice(i + 1)] as const);
+    });
+    const find = (k: string) => segs.find(([kk]) => kk === k)?.[1];
+    const coll = find('coll') ?? find('collection');
+    if (!coll) return null;
+    return { db: find('db') ?? null, coll };
+  }
+
+  /** New tab: `db.<coll>.find({})` scoped to the collection's database, then run. */
+  async findRows(node: SchemaNode): Promise<void> {
+    const r = this.collectionRefFromNode(node);
+    if (!r) return;
+    if (r.db) this.setActiveDb(r.db);
+    await this.openInNewTab(`db.${r.coll}.find({})`, { run: true, name: r.coll });
+  }
+
+  /** New tab: `db.<coll>.find({})` without running (Send to editor). */
+  async sendFindToEditor(node: SchemaNode): Promise<void> {
+    const r = this.collectionRefFromNode(node);
+    if (!r) return;
+    if (r.db) this.setActiveDb(r.db);
+    await this.openInNewTab(`db.${r.coll}.find({})`, { name: r.coll });
   }
 
   /** New tab pre-filled with a TRUNCATE — NOT run; the user reviews + runs it. */

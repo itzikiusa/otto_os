@@ -69,6 +69,8 @@ export interface ConnectionSection {
   parent_id: Id | null;
   name: string;
   position: number;
+  /** Which tree this section belongs to: 'connections' (Connections page) or 'db' (DB Explorer). */
+  scope: string;
   created_by: Id;
   created_at: string;
 }

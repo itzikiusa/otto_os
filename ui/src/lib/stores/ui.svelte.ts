@@ -16,6 +16,8 @@ const LS = {
   accent: 'otto_accent',
   zoom: 'otto_zoom',
   termFont: 'otto_term_font',
+  dbDock: 'otto_db_dock',
+  dbDockWidth: 'otto_db_dock_width',
 };
 
 export const RIGHT_MIN = 260;
@@ -53,6 +55,9 @@ class UiStore {
   rightTab: RightTab = $state((lsGet(LS.rightTab) as RightTab) ?? 'git');
   rightWidth = $state(clampRight(Number(lsGet(LS.rightWidth)) || 300));
   railWidth = $state(clampRail(Number(lsGet(LS.railWidth)) || 240));
+  // DB dock: the DB Explorer docked beside the agent panes (side-by-side).
+  dbDockOpen = $state(lsGet(LS.dbDock) === '1');
+  dbDockWidth = $state(Math.min(900, Math.max(320, Number(lsGet(LS.dbDockWidth)) || 480)));
   paletteOpen = $state(false);
   /** Which mode the palette should open in. */
   paletteMode: 'commands' | 'english' = $state('commands');
@@ -125,6 +130,14 @@ class UiStore {
   setRailWidth(px: number): void {
     this.railWidth = clampRail(px);
     lsSet(LS.railWidth, String(this.railWidth));
+  }
+  toggleDbDock(): void {
+    this.dbDockOpen = !this.dbDockOpen;
+    lsSet(LS.dbDock, this.dbDockOpen ? '1' : '0');
+  }
+  setDbDockWidth(px: number): void {
+    this.dbDockWidth = Math.min(900, Math.max(320, Math.round(px)));
+    lsSet(LS.dbDockWidth, String(this.dbDockWidth));
   }
 
   setTheme(theme: ThemeName): void {

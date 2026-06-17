@@ -41,6 +41,8 @@
   let collapsed: Record<string, boolean> = $state({});
   let draggedConnId: string | null = $state(null);
   let draggedSectionId: string | null = $state(null);
+  // Which connection's "open in workspace…" menu is showing (null = none).
+  let openMenuFor: string | null = $state(null);
 
   const kindIcons: Record<ConnectionKind, string> = {
     ssh: 'key',
@@ -64,10 +66,12 @@
       }));
   }
   const tree = $derived(buildTree(null));
+  // A connection whose folder is unknown falls back to Ungrouped, so nothing
+  // ever vanishes. Connections are global, so all of them can be filed.
+  const knownSectionIds = $derived(new Set(sections.map((s) => s.id)));
   const ungrouped = $derived(
-    conns.filter((c) => c.workspace_id !== null && !c.section_id).sort(sortByName),
+    conns.filter((c) => !c.section_id || !knownSectionIds.has(c.section_id)).sort(sortByName),
   );
-  const globals = $derived(conns.filter((c) => c.workspace_id === null).sort(sortByName));
 
   $effect(() => {
     const wsId = ws.currentId;
@@ -155,7 +159,7 @@
   // Move a connection into a section (or null = ungrouped). Global connections
   // are not assignable. Reuses the connection PATCH endpoint.
   async function moveConn(c: Connection, sectionId: string | null): Promise<void> {
-    if (c.workspace_id === null || (c.section_id ?? null) === sectionId) return;
+    if ((c.section_id ?? null) === sectionId) return;
     try {
       const saved = await api.patch<Connection>(`/connections/${c.id}`, {
         name: c.name,
@@ -256,13 +260,30 @@
     }
   }
 
-  async function open(c: Connection): Promise<void> {
+  // Open the connection as a terminal session attached to a workspace. The
+  // attachment is per-session and temporary (the connection itself is global):
+  // closing the session ends it. `targetWsId` defaults to the current workspace
+  // but the row's dropdown can pick any workspace.
+  async function open(c: Connection, targetWsId?: string): Promise<void> {
+    const wsId = targetWsId ?? ws.currentId;
+    openMenuFor = null;
+    if (!wsId) {
+      toasts.error('No workspace', 'Create or select a workspace to attach the session to');
+      return;
+    }
     opening[c.id] = true;
     try {
-      const session = await api.post<Session>(`/connections/${c.id}/open`, {});
-      ws.addSession(session);
+      const session = await api.post<Session>(`/connections/${c.id}/open`, { workspace_id: wsId });
+      if (wsId === ws.currentId) {
+        ws.addSession(session);
+      } else {
+        // Switch to the target workspace so its new session is visible.
+        await ws.select(wsId);
+        ws.openSession(session.id);
+      }
       router.go('agents');
-      toasts.success('Connection opened', c.name);
+      const wsName = ws.workspaces.find((w) => w.id === wsId)?.name;
+      toasts.success('Connection opened', wsName ? `${c.name} → ${wsName}` : c.name);
     } catch (e) {
       toasts.error('Open failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -275,8 +296,15 @@
   // next to an agent. Respects the 1–4 pane cap.
   async function openBeside(c: Connection): Promise<void> {
     openingSplit[c.id] = true;
+    if (!ws.currentId) {
+      toasts.error('No workspace', 'Select a workspace to attach the session to');
+      openingSplit[c.id] = false;
+      return;
+    }
     try {
-      const session = await api.post<Session>(`/connections/${c.id}/open`, {});
+      const session = await api.post<Session>(`/connections/${c.id}/open`, {
+        workspace_id: ws.currentId,
+      });
       // Register + drop into a NEW split pane (not the active tab) in one step,
       // so the connection sits beside the current session rather than replacing it.
       const placed = ws.addSessionInSplit(session);
@@ -372,20 +400,14 @@
       {#each ungrouped as c (c.id)}
         {@render connRow(c, 1)}
       {/each}
-
-      {#if globals.length > 0}
-        <div class="section-head plain">
-          <span class="caret-spacer"></span>
-          <span class="section-name grow">Global</span>
-          <span class="count">{globals.length}</span>
-        </div>
-        {#each globals as c (c.id)}
-          {@render connRow(c, 1)}
-        {/each}
-      {/if}
     </div>
   {/if}
 </div>
+
+{#if openMenuFor}
+  <!-- Click-away backdrop for the open-in-workspace menu. -->
+  <button class="menu-backdrop" aria-label="Close menu" onclick={() => (openMenuFor = null)}></button>
+{/if}
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
   {@const isOpen = !collapsed[node.sec.id]}
@@ -442,7 +464,7 @@
     class="conn-row"
     class:dragging={draggedConnId === c.id}
     style="padding-left: {depth * 16 + 8}px"
-    draggable={c.workspace_id !== null}
+    draggable="true"
     ondragstart={(e) => {
       draggedConnId = c.id;
       e.stopPropagation();
@@ -457,10 +479,7 @@
     title={c.first_command ? `${c.name} · ▸ ${c.first_command} — double-click to open` : `${c.name} — double-click to open`}
   >
     <span class="conn-dot"><Icon name={kindIcons[c.kind]} size={13} /></span>
-    <span class="conn-name ellipsis">
-      {c.name}
-      {#if c.workspace_id === null}<span class="chip">global</span>{/if}
-    </span>
+    <span class="conn-name ellipsis">{c.name}</span>
     <span class="conn-desc mono ellipsis">{describe(c)}</span>
     <span class="grow"></span>
     {#if c.kind === 'clickhouse'}
@@ -471,10 +490,36 @@
         {r.ok ? `ok · ${r.latency_ms}ms` : 'failed'}
       </span>
     {/if}
-    <button class="btn small primary" disabled={opening[c.id]} onclick={() => open(c)}>
-      <Icon name="play" size={11} />
-      {opening[c.id] ? 'Opening…' : 'Open'}
-    </button>
+    <!-- Open as a session attached to a workspace; the caret picks which one. -->
+    <div class="open-split">
+      <button class="btn small primary open-main" disabled={opening[c.id]} onclick={() => open(c)}>
+        <Icon name="play" size={11} />
+        {opening[c.id] ? 'Opening…' : 'Open'}
+      </button>
+      <button
+        class="btn small primary open-caret"
+        title="Open in a specific workspace…"
+        aria-label="Open in workspace"
+        disabled={opening[c.id]}
+        onclick={(e) => {
+          e.stopPropagation();
+          openMenuFor = openMenuFor === c.id ? null : c.id;
+        }}
+      >
+        <Icon name="chevronDown" size={11} />
+      </button>
+      {#if openMenuFor === c.id}
+        <div class="open-menu">
+          <div class="open-menu-title">Attach session to…</div>
+          {#each ws.workspaces as w (w.id)}
+            <button class="open-menu-item" onclick={() => open(c, w.id)}>
+              <span class="ellipsis">{w.name}</span>
+              {#if w.id === ws.currentId}<span class="cur">current</span>{/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
     <button
       class="btn small icon-only"
       title="Open beside — adds this terminal as a split pane next to the current session"
@@ -633,5 +678,77 @@
   }
   .btn.small.icon-only:hover {
     color: var(--text);
+  }
+  /* Split "Open ▾" — primary button + workspace-picker caret. */
+  .open-split {
+    position: relative;
+    display: inline-flex;
+    align-items: stretch;
+  }
+  .open-main {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .open-caret {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    padding: 0 5px;
+    margin-left: 1px;
+  }
+  .open-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 50;
+    min-width: 180px;
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+  .open-menu-title {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    padding: 4px 8px 6px;
+  }
+  .open-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    height: 30px;
+    padding: 0 8px;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    border-radius: var(--radius-s);
+    font-size: 12.5px;
+    text-align: left;
+  }
+  .open-menu-item:hover {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .open-menu-item .cur {
+    margin-left: auto;
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--accent);
+  }
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: default;
   }
 </style>

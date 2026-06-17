@@ -225,6 +225,18 @@ pub struct UpsertSectionReq {
     pub name: String,
     #[serde(default)]
     pub parent_id: Option<Id>,
+    /// Tree this section lives in on create: "connections" (default) or "db".
+    /// Ignored on rename. See [`crate::domain::ConnectionSection::scope`].
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+/// Query string for `GET /workspaces/{id}/connection-sections?scope=…`.
+/// Absent → "connections" (the Connections page tree).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SectionScopeQuery {
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// `POST /api/v1/workspaces/{id}/connection-sections/reorder`

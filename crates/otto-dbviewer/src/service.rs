@@ -312,8 +312,7 @@ impl DbViewerService {
         let req = QueryRequest {
             statement: widget.statement,
             max_rows: Some(5000),
-            params: None,
-            node: None,
+            ..Default::default()
         };
         self.run(&widget.connection_id, &req).await
     }

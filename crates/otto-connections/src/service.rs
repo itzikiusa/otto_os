@@ -65,9 +65,10 @@ impl ConnectionsService {
 
     // --- Sections -----------------------------------------------------------
 
-    /// Sections defined in a workspace, ordered by position.
-    pub async fn list_sections(&self, ws: &Id) -> Result<Vec<ConnectionSection>> {
-        self.sections.list_for_ws(ws).await
+    /// The single global section tree (all workspaces + scopes), ordered by
+    /// position. Both the Connections page and the DB Explorer share it.
+    pub async fn list_sections(&self) -> Result<Vec<ConnectionSection>> {
+        self.sections.list_all().await
     }
 
     pub async fn get_section(&self, id: &Id) -> Result<ConnectionSection> {
@@ -80,43 +81,35 @@ impl ConnectionsService {
         user_id: &Id,
         parent_id: Option<&str>,
         name: &str,
+        scope: &str,
     ) -> Result<ConnectionSection> {
-        // A sub-section must live under a section in the same workspace.
-        if let Some(pid) = parent_id {
-            let parent = self.sections.get(&pid.to_string()).await?;
-            if &parent.workspace_id != ws {
-                return Err(Error::Invalid(
-                    "parent section belongs to another workspace".into(),
-                ));
-            }
-        }
-        self.sections.create(ws, parent_id, name, user_id).await
+        // One global tree: a section may nest under any existing section. The
+        // FK guarantees the parent exists.
+        self.sections
+            .create(ws, parent_id, name, scope, user_id)
+            .await
     }
 
     pub async fn rename_section(&self, id: &Id, name: &str) -> Result<ConnectionSection> {
         self.sections.rename(id, name).await
     }
 
-    /// Reparent a section (None = top-level), rejecting cycles and
-    /// cross-workspace moves.
+    /// Reparent a section (None = top-level) in the single global tree,
+    /// rejecting cycles.
     pub async fn reparent_section(
         &self,
         id: &Id,
         parent_id: Option<&str>,
     ) -> Result<ConnectionSection> {
-        let sec = self.sections.get(id).await?;
+        // Validate the section exists before moving it.
+        self.sections.get(id).await?;
         if let Some(pid) = parent_id {
             if pid == id.as_str() {
                 return Err(Error::Invalid("a section cannot be its own parent".into()));
             }
-            let parent = self.sections.get(&pid.to_string()).await?;
-            if parent.workspace_id != sec.workspace_id {
-                return Err(Error::Invalid(
-                    "cannot move a section into another workspace".into(),
-                ));
-            }
-            // Reject moving a section under one of its own descendants.
-            let all = self.sections.list_for_ws(&sec.workspace_id).await?;
+            // Reject moving a section under one of its own descendants (one
+            // global tree, so consider every section).
+            let all = self.sections.list_all().await?;
             let mut cursor = Some(pid.to_string());
             while let Some(cur) = cursor {
                 if cur == id.as_str() {

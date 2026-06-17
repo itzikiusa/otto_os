@@ -2,7 +2,7 @@
   // CodeMirror 6 editor with LSP hover/diagnostics/completion/definitions.
   // readOnly=true by default (Files viewer is read-only; LSP still works).
   import { onDestroy } from 'svelte';
-  import { EditorView, lineNumbers, keymap } from '@codemirror/view';
+  import { EditorView, lineNumbers, keymap, drawSelection } from '@codemirror/view';
   import { EditorState, Compartment } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
   import { search, searchKeymap } from '@codemirror/search';
@@ -31,7 +31,32 @@
   import { api, baseUrl } from '../api/client';
   import type { LspCapabilities } from '../api/types';
   import { ws } from '../stores/workspace.svelte';
+  import { ui } from '../stores/ui.svelte';
   import { toasts } from '../toast.svelte';
+
+  // Editor theme follows the app scheme: oneDark for dark, a light theme keyed to
+  // the app's CSS variables for light (so the editor + its selection are visible).
+  const themeCompartment = new Compartment();
+  const lightTheme = EditorView.theme(
+    {
+      '&': { color: 'var(--text)', backgroundColor: 'transparent' },
+      '.cm-content': { caretColor: 'var(--text)' },
+      '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--text)' },
+      '.cm-selectionBackground': {
+        backgroundColor: 'color-mix(in srgb, var(--accent) 30%, transparent)',
+      },
+      '&.cm-focused .cm-selectionBackground': {
+        backgroundColor: 'color-mix(in srgb, var(--accent) 40%, transparent)',
+      },
+      '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--text-dim) 8%, transparent)' },
+      '.cm-gutters': { backgroundColor: 'transparent', color: 'var(--text-dim)', border: 'none' },
+      '.cm-activeLineGutter': { backgroundColor: 'transparent' },
+    },
+    { dark: false },
+  );
+  function themeExt(scheme: 'light' | 'dark'): Extension {
+    return scheme === 'dark' ? oneDark : lightTheme;
+  }
 
   // ── Props ──────────────────────────────────────────────────────────────────
 
@@ -302,9 +327,10 @@
       indentOnInput(),
       bracketMatching(),
       lintGutter(),
+      drawSelection(),
       completionCompartment.of(completionExt()),
       search({ top: false }),
-      oneDark,
+      themeCompartment.of(themeExt(ui.resolvedScheme)),
       lspCompartment.of([]),
       selectionListener,
       changeListener,
@@ -380,6 +406,12 @@
     if (src === prevCompletion) return;
     prevCompletion = src;
     view.dispatch({ effects: completionCompartment.reconfigure(completionExt()) });
+  });
+
+  // Re-theme live when the app scheme (light/dark) changes.
+  $effect(() => {
+    const scheme = ui.resolvedScheme;
+    if (view) view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme)) });
   });
 
   onDestroy(() => {

@@ -12,6 +12,7 @@
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
+  import { ws } from '../stores/workspace.svelte';
   import { keyContext } from '../keys';
 
   interface Props {
@@ -189,7 +190,7 @@
       cursorBlink: true,
       allowProposedApi: true,
       scrollback: 10_000,
-      theme: untrack(() => terminalTheme(ui.theme)),
+      theme: untrack(() => terminalTheme(ui.theme, ui.resolvedScheme)),
       macOptionIsMeta: true,
     });
     fit = new FitAddon();
@@ -336,10 +337,20 @@
     }
   });
 
-  // react to theme switches
+  // react to theme + light/dark scheme switches
   $effect(() => {
-    const theme = terminalTheme(ui.theme);
+    const theme = terminalTheme(ui.theme, ui.resolvedScheme);
     if (term) term.options.theme = theme;
+  });
+
+  // Apply programmatic input injected into this session (e.g. DB rows → a running
+  // agent), wrapped in bracketed paste so multi-line content isn't auto-submitted.
+  let lastInjN = 0;
+  $effect(() => {
+    const inj = ws.injections[sessionId];
+    if (!inj || readOnly || inj.n <= lastInjN) return;
+    lastInjN = inj.n;
+    sendJson({ type: 'input', data: textToBase64(`\x1b[200~${inj.text}\x1b[201~`) });
   });
 
   export function focus(): void {

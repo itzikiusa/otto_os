@@ -19,6 +19,7 @@ fn row_to_section(r: &sqlx::sqlite::SqliteRow) -> Result<ConnectionSection> {
         parent_id: r.get("parent_id"),
         name: r.get("name"),
         position: r.get("position"),
+        scope: r.get("scope"),
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
     })
@@ -34,30 +35,33 @@ impl ConnectionSectionsRepo {
         ws: &Id,
         parent_id: Option<&str>,
         name: &str,
+        scope: &str,
         created_by: &Id,
     ) -> Result<ConnectionSection> {
         let id = new_id();
         let now = fmt(Utc::now());
-        // Position is scoped to the sibling group (same workspace + parent).
+        // Position is scoped to the sibling group (same workspace + parent + scope).
         let pos: i64 = sqlx::query(
             "SELECT COALESCE(MAX(position) + 1, 0) AS p FROM connection_sections
-             WHERE workspace_id = ? AND parent_id IS ?",
+             WHERE workspace_id = ? AND parent_id IS ? AND scope = ?",
         )
         .bind(ws)
         .bind(parent_id)
+        .bind(scope)
         .fetch_one(&self.pool)
         .await
         .map_err(dberr("section position"))?
         .get("p");
         sqlx::query(
-            "INSERT INTO connection_sections (id, workspace_id, parent_id, name, position, created_by, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO connection_sections (id, workspace_id, parent_id, name, position, scope, created_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(ws)
         .bind(parent_id)
         .bind(name)
         .bind(pos)
+        .bind(scope)
         .bind(created_by)
         .bind(&now)
         .execute(&self.pool)
@@ -87,14 +91,26 @@ impl ConnectionSectionsRepo {
         row_to_section(&r)
     }
 
-    pub async fn list_for_ws(&self, ws: &Id) -> Result<Vec<ConnectionSection>> {
+    pub async fn list_for_ws(&self, ws: &Id, scope: &str) -> Result<Vec<ConnectionSection>> {
         let rows = sqlx::query(
-            "SELECT * FROM connection_sections WHERE workspace_id = ? ORDER BY position, name",
+            "SELECT * FROM connection_sections WHERE workspace_id = ? AND scope = ?
+             ORDER BY position, name",
         )
         .bind(ws)
+        .bind(scope)
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("sections"))?;
+        rows.iter().map(row_to_section).collect()
+    }
+
+    /// Every section, across all workspaces and scopes — the single global tree
+    /// shared by the Connections page and the DB Explorer.
+    pub async fn list_all(&self) -> Result<Vec<ConnectionSection>> {
+        let rows = sqlx::query("SELECT * FROM connection_sections ORDER BY position, name")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("sections"))?;
         rows.iter().map(row_to_section).collect()
     }
 
@@ -195,20 +211,43 @@ mod tests {
         let (ws, user) = seed_ws(&pool).await;
         let repo = ConnectionSectionsRepo::new(pool.clone());
 
-        let a = repo.create(&ws, None, "Platform", &user).await.unwrap();
-        let b = repo.create(&ws, None, "Staging", &user).await.unwrap();
+        let a = repo
+            .create(&ws, None, "Platform", "connections", &user)
+            .await
+            .unwrap();
+        let b = repo
+            .create(&ws, None, "Staging", "connections", &user)
+            .await
+            .unwrap();
         assert_eq!(a.position, 0);
         assert_eq!(b.position, 1);
         assert_eq!(a.parent_id, None);
+        assert_eq!(a.scope, "connections");
 
         // Sub-sections nest under a parent and have their own position scope.
-        let aws = repo.create(&ws, Some(&a.id), "AWS", &user).await.unwrap();
-        let ams = repo.create(&ws, Some(&a.id), "AMS", &user).await.unwrap();
+        let aws = repo
+            .create(&ws, Some(&a.id), "AWS", "connections", &user)
+            .await
+            .unwrap();
+        let ams = repo
+            .create(&ws, Some(&a.id), "AMS", "connections", &user)
+            .await
+            .unwrap();
         assert_eq!(aws.parent_id.as_deref(), Some(a.id.as_str()));
         assert_eq!(aws.position, 0);
         assert_eq!(ams.position, 0 + 1);
 
-        let list = repo.list_for_ws(&ws).await.unwrap();
+        // A "db"-scoped section is a separate tree: its top-level position
+        // restarts at 0 and it never shows up in the "connections" listing.
+        let db_top = repo.create(&ws, None, "Clusters", "db", &user).await.unwrap();
+        assert_eq!(db_top.scope, "db");
+        assert_eq!(db_top.position, 0);
+        assert_eq!(repo.list_for_ws(&ws, "db").await.unwrap().len(), 1);
+
+        // The global tree spans every scope (4 connections-scoped + 1 db).
+        assert_eq!(repo.list_all().await.unwrap().len(), 5);
+
+        let list = repo.list_for_ws(&ws, "connections").await.unwrap();
         assert_eq!(list.len(), 4);
 
         repo.reorder(&ws, &[b.id.clone(), a.id.clone()])
@@ -227,7 +266,7 @@ mod tests {
 
         // Deleting "Prod" cascades to its child "AWS".
         repo.delete(&a.id).await.unwrap();
-        let remaining = repo.list_for_ws(&ws).await.unwrap();
+        let remaining = repo.list_for_ws(&ws, "connections").await.unwrap();
         let ids: Vec<&str> = remaining.iter().map(|s| s.id.as_str()).collect();
         assert!(!ids.contains(&a.id.as_str()));
         assert!(!ids.contains(&aws.id.as_str()));

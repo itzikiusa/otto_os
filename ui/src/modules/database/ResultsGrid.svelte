@@ -11,6 +11,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
   import { database } from '../../lib/stores/database.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { QueryResult } from '../../lib/api/types';
 
@@ -53,8 +54,17 @@
   // Render only the rows in (or near) the viewport, with spacer rows preserving
   // the full scroll height. Row height is fixed in CSS (see ROW_H), so the math
   // is exact and we can scroll smoothly through 100k+ rows.
-  const ROW_H = 26; // must match `.grid tbody td` height in CSS
+  // "Expand JSON" mode pretty-prints complex cells inline; rows grow to a fixed
+  // taller height so the virtualization math stays exact.
+  let expandJson = $state(false);
+  const ROW_H = $derived(expandJson ? 168 : 26); // must match `.grid tbody td` height
   const OVERSCAN = 12;
+
+  // Result view mode: columnar grid (default), a JSON array, or a vertical
+  // row-per-record layout (like Postgres `\x` / ClickHouse FORMAT Vertical).
+  type ViewMode = 'grid' | 'json' | 'vertical';
+  let viewMode = $state<ViewMode>('grid');
+  const VIEW_CAP = 500; // non-grid views aren't virtualized — cap for responsiveness
   let scrollEl = $state<HTMLDivElement | null>(null);
   let scrollTop = $state(0);
   let viewportH = $state(0);
@@ -150,6 +160,18 @@
       })
       .map((d) => d.entry);
   });
+
+  // Filtered/sorted rows as plain objects (for the JSON / vertical views), capped.
+  const objRows = $derived.by<Record<string, unknown>[]>(() => {
+    if (!result || viewMode === 'grid') return [];
+    const cols = result.columns;
+    return viewRows.slice(0, VIEW_CAP).map(({ row }) => {
+      const o: Record<string, unknown> = {};
+      cols.forEach((c, i) => (o[c.name] = row[i]));
+      return o;
+    });
+  });
+  const viewTruncated = $derived(viewMode !== 'grid' && viewRows.length > VIEW_CAP);
 
   // The visible window over viewRows, plus the spacer heights above/below it.
   const total = $derived(viewRows.length);
@@ -458,6 +480,43 @@
     return { db: null, table: m[1] };
   }
 
+  /** Collection name for an editable Mongo result: a `db.<coll>.find(...)` or a
+   * single-collection SELECT (which translates to a find). Null otherwise. */
+  function mongoCollectionForEdit(s: string): string | null {
+    const t = s.trim();
+    const m = t.match(/^db\.([A-Za-z0-9_$.-]+)\.find\s*\(/i);
+    if (m) return m[1];
+    return parseSimpleSelect(t)?.table ?? null;
+  }
+
+  /** JSON-encode a value typed into a Mongo cell editor: keep numbers/bools when
+   * the prior value was one; valid JSON when editing a nested object/array;
+   * empty → null; else a quoted string. */
+  function mongoLiteral(raw: string, prev: unknown): string {
+    if (raw === '') return 'null';
+    if (typeof prev === 'number' && /^-?\d+(\.\d+)?$/.test(raw)) return raw;
+    if (typeof prev === 'boolean' && (raw === 'true' || raw === 'false')) return raw;
+    if (isComplex(prev)) {
+      try {
+        JSON.parse(raw);
+        return raw;
+      } catch {
+        /* not valid JSON — fall through to a string */
+      }
+    }
+    return JSON.stringify(raw);
+  }
+
+  /** `{"_id": …}` filter for a row — ObjectId hex → `{"$oid": …}`, else raw. */
+  function mongoIdFilter(rowIdx: number): string {
+    const idIdx = result!.columns.findIndex((c) => c.name === '_id');
+    const idVal = liveRows[rowIdx][idIdx];
+    if (typeof idVal === 'string' && /^[a-f0-9]{24}$/i.test(idVal)) {
+      return `{"_id": {"$oid": ${JSON.stringify(idVal)}}}`;
+    }
+    return `{"_id": ${JSON.stringify(idVal)}}`;
+  }
+
   // Resolve the primary key whenever statement/connection/result changes.
   $effect(() => {
     // dependencies
@@ -469,6 +528,28 @@
     editPkCols = [];
     editReason = null;
     if (!sql || !conn || !cols || cols.length === 0) return;
+
+    // Mongo: a single-collection find/SELECT is editable by `_id` — no
+    // object_detail lookup (which would error on a SQL-style node path).
+    if (engine === 'mongodb') {
+      const coll = mongoCollectionForEdit(sql);
+      if (!coll) {
+        editReason = 'Editing needs a single-collection find or SELECT (no aggregate/join).';
+        return;
+      }
+      if (!cols.some((c) => c.name === '_id')) {
+        editReason = 'Include _id in the result to enable editing.';
+        return;
+      }
+      editTable = coll;
+      editPkCols = ['_id'];
+      editDb = database.activeDb;
+      editReason = null;
+      return;
+    }
+
+    // SQL engines only beyond here (Redis etc. aren't editable).
+    if (database.capabilities?.sql !== true) return;
 
     const parsed = parseSimpleSelect(sql);
     if (!parsed) {
@@ -578,6 +659,13 @@
       editing = null; // no change → nothing to review
       return;
     }
+    // Mongo: build an updateOne targeting `_id` and open the review modal.
+    if (engine === 'mongodb') {
+      const cmd = `db.${editTable}.updateOne(${mongoIdFilter(rowIdx)}, {"$set": {${JSON.stringify(colName)}: ${mongoLiteral(value, prev)}}})`;
+      editing = null;
+      openReview('Review updateOne', cmd);
+      return;
+    }
     const asNumber = typeof prev === 'number';
     const setExpr = `\`${colName}\` = ${sqlLiteral(value, asNumber)}`;
     const where = whereByPk(rowIdx);
@@ -594,6 +682,17 @@
    * column so the user can adjust the key in the review SQL. */
   function duplicateRow(rowIdx: number): void {
     if (!result || !editTable || editPkCols.length === 0) return;
+    // Mongo: insertOne of the row's fields, omitting `_id` so a fresh one is
+    // generated; opens the review modal like the SQL path.
+    if (engine === 'mongodb') {
+      const obj: Record<string, unknown> = {};
+      result.columns.forEach((c, i) => {
+        if (c.name === '_id') return;
+        obj[c.name] = liveRows[rowIdx][i];
+      });
+      openReview('Review insertOne (duplicate row)', `db.${editTable}.insertOne(${JSON.stringify(obj)})`);
+      return;
+    }
     const omitPk = editPkCols.length === 1;
     const cols: string[] = [];
     const vals: string[] = [];
@@ -634,7 +733,11 @@
     if (!sql) return;
     runningReview = true;
     try {
-      await api.post(`/connections/${connectionId}/db/query`, { statement: sql });
+      // Scope to the active database (Mongo needs it to resolve `db.coll.…`).
+      await api.post(`/connections/${connectionId}/db/query`, {
+        statement: sql,
+        node: database.activeDb || null,
+      });
       toasts.success('Applied', 'Statement ran successfully');
       reviewSql = null;
       // Refresh from the DB by re-running the active tab's query.
@@ -732,6 +835,34 @@
     download(toJson(), 'result.json', 'application/json');
   }
 
+  // Paste the query + result rows into the running agent's input (bracketed
+  // paste, not auto-submitted) so it can act on the real DB state.
+  function sendToRunningAgent(): void {
+    const agentId = ws.targetAgentId;
+    if (!agentId) {
+      toasts.error('No running agent', 'Open a claude/codex session in this workspace first');
+      return;
+    }
+    if (!result) return;
+    const cols = result.columns.map((c) => c.name);
+    const cap = 50;
+    const rowsObj = viewRows.slice(0, cap).map(({ row }) => {
+      const o: Record<string, unknown> = {};
+      cols.forEach((c, i) => (o[c] = row[i]));
+      return o;
+    });
+    const connName =
+      (connectionId ? database.connections.find((c) => c.id === connectionId)?.name : null) ?? 'db';
+    const more = viewRows.length > cap ? `, first ${cap} shown` : '';
+    const text =
+      `Here is the current database state from "${connName}":\n\n` +
+      (statement ? `Query:\n${statement}\n\n` : '') +
+      `Result (${viewRows.length} row${viewRows.length === 1 ? '' : 's'}${more}):\n` +
+      `${JSON.stringify(rowsObj, null, 2)}\n`;
+    ws.injectInput(agentId, text);
+    toasts.success('Sent to running agent', 'Pasted into the agent — press Enter to send');
+  }
+
   // Autofocus + select the inline editor input on open. Svelte actions can't be
   // async, so defer the focus/select to a microtask after mount.
   function focusEditor(node: HTMLInputElement): void {
@@ -764,6 +895,9 @@
   </div>
 {:else}
   <div class="grid-wrap" class:mini>
+    {#if result.message && !mini}
+      <div class="grid-notice mono" title={result.message}>{result.message}</div>
+    {/if}
     {#if !mini}
       <div class="grid-toolbar">
         <div class="gt-search">
@@ -791,6 +925,20 @@
             <Icon name="edit" size={10} />double-click to edit
           </span>
         {/if}
+        <div class="view-seg" role="tablist" aria-label="Result view">
+          <button class="vs" class:on={viewMode === 'grid'} role="tab" aria-selected={viewMode === 'grid'} onclick={() => (viewMode = 'grid')} title="Columnar grid">Grid</button>
+          <button class="vs" class:on={viewMode === 'vertical'} role="tab" aria-selected={viewMode === 'vertical'} onclick={() => (viewMode = 'vertical')} title="One record per block (field: value)">Vertical</button>
+          <button class="vs" class:on={viewMode === 'json'} role="tab" aria-selected={viewMode === 'json'} onclick={() => (viewMode = 'json')} title="JSON array">JSON</button>
+        </div>
+        {#if viewMode === 'grid'}
+          <button
+            class="tb-btn"
+            class:on={expandJson}
+            onclick={() => (expandJson = !expandJson)}
+            title="Expand all nested JSON cells inline (instead of clicking each)"
+          ><Icon name={expandJson ? 'minimize' : 'maximize'} size={11} />{expandJson ? 'Collapse' : 'Expand'} JSON</button>
+        {/if}
+        <button class="tb-btn" onclick={sendToRunningAgent} title="Paste this query + result into your running agent (so it sees the real DB state)"><Icon name="comment" size={11} />→ Agent</button>
         <button class="tb-btn" onclick={copyTsv} title="Copy as TSV{exportScope}"><Icon name="file" size={11} />Copy</button>
         <button class="tb-btn" onclick={exportCsv} title="Export CSV{exportScope}"><Icon name="arrowDown" size={11} />CSV</button>
         <button class="tb-btn" onclick={exportJson} title="Export JSON{exportScope}"><Icon name="arrowDown" size={11} />JSON</button>
@@ -835,8 +983,29 @@
       </div>
     {/if}
 
+    {#if viewMode === 'json'}
+      <div class="alt-view">
+        {#if viewTruncated}<div class="alt-note dim">Showing first {VIEW_CAP} of {viewRows.length} rows.</div>{/if}
+        <pre class="alt-json mono">{JSON.stringify(objRows, null, 2)}</pre>
+      </div>
+    {:else if viewMode === 'vertical'}
+      <div class="alt-view">
+        {#if viewTruncated}<div class="alt-note dim">Showing first {VIEW_CAP} of {viewRows.length} rows.</div>{/if}
+        {#each objRows as obj, ri (ri)}
+          <div class="vrec">
+            <div class="vrec-head mono">#{ri + 1}</div>
+            {#each result.columns as c (c.name)}
+              <div class="vrow">
+                <span class="vk mono">{c.name}</span>
+                <span class="vv mono">{obj[c.name] === null || obj[c.name] === undefined ? '∅' : isComplex(obj[c.name]) ? compactJson(obj[c.name]) : String(obj[c.name])}</span>
+              </div>
+            {/each}
+          </div>
+        {/each}
+      </div>
+    {:else}
     <div class="grid-scroll" bind:this={scrollEl} bind:clientHeight={viewportH} onscroll={onScroll}>
-      <table class="grid mono" style="--last:{result.columns.length}">
+      <table class="grid mono" class:expanded={expandJson} style="--last:{result.columns.length}; --row-h:{ROW_H}px">
         <thead>
           <tr>
             <th class="rownum">#</th>
@@ -927,11 +1096,12 @@
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                   <td
                     class="cell json"
+                    class:wrap={expandJson}
                     title="Click to expand"
                     style="width:{w}ch; max-width:{w}ch;"
                     onclick={() => openCell(v)}
                     oncontextmenu={(e) => cellMenu(e, ci, v)}
-                  >{compactJson(v)}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v); }}><Icon name="maximize" size={9} /></button></td>
+                  >{expandJson ? prettyJson(v) : compactJson(v)}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v); }}><Icon name="maximize" size={9} /></button></td>
                 {:else}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                   <td
@@ -951,6 +1121,7 @@
         </tbody>
       </table>
     </div>
+    {/if}
     {#if !mini}
       <div class="grid-foot">
         {#if filtering}
@@ -1094,6 +1265,19 @@
     align-items: center;
     gap: 6px;
     padding: 4px 2px 8px;
+  }
+  /* Notice shown above results (e.g. the Mongo command a SQL query translated to). */
+  .grid-notice {
+    font-size: 11px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    border-radius: var(--radius-s);
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* ── Quick-filter bar ── */
   .filter-bar {
@@ -1289,6 +1473,78 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     cursor: help;
   }
+  .view-seg {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow: hidden;
+  }
+  .vs {
+    height: 22px;
+    padding: 0 9px;
+    border: none;
+    border-right: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .vs:last-child {
+    border-right: none;
+  }
+  .vs.on {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  .alt-view {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 4px 2px;
+  }
+  .alt-note {
+    font-size: 11px;
+    padding: 4px 6px 8px;
+  }
+  .alt-json {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    color: var(--text);
+  }
+  .vrec {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    margin-bottom: 8px;
+    overflow: hidden;
+  }
+  .vrec-head {
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 3px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .vrow {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.3fr) 1fr;
+    gap: 10px;
+    padding: 3px 8px;
+    font-size: 12px;
+  }
+  .vrow:nth-child(even) {
+    background: color-mix(in srgb, var(--text-dim) 4%, transparent);
+  }
+  .vk {
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .vv {
+    color: var(--text);
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
   .tb-btn {
     display: inline-flex;
     align-items: center;
@@ -1301,6 +1557,11 @@
     color: var(--text);
     font-size: 11.5px;
     cursor: pointer;
+  }
+  .tb-btn.on {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
   }
   .tb-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
@@ -1455,6 +1716,17 @@
   .grid tbody td {
     box-sizing: border-box;
     height: 26px;
+  }
+  /* Expand-JSON mode: taller uniform rows (matches ROW_H via --row-h) so the
+     virtualization math stays exact; complex cells pretty-print + wrap. */
+  .grid.expanded tbody tr:not(.spacer) td {
+    height: var(--row-h);
+    vertical-align: top;
+  }
+  .grid.expanded .cell.json.wrap {
+    white-space: pre-wrap;
+    overflow: auto;
+    line-height: 1.4;
   }
   /* Stripe by data-row index (not :nth-child) so the pattern stays stable as
      the virtualized window scrolls. */

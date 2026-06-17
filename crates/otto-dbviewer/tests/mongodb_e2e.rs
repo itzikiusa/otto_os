@@ -148,8 +148,7 @@ async fn mongo_run() {
     let req = QueryRequest {
         statement: "db.customers.find({})".into(),
         max_rows: Some(100),
-        params: None,
-        node: None,
+        ..Default::default()
     };
     let result = d.run(&cfg, &req).await.expect("run(find)");
     assert!(
@@ -167,8 +166,7 @@ async fn mongo_run() {
     let json_req = QueryRequest {
         statement: r#"{"collection":"customers","op":"find","filter":{}}"#.into(),
         max_rows: Some(100),
-        params: None,
-        node: None,
+        ..Default::default()
     };
     let json_result = d.run(&cfg, &json_req).await.expect("run(json find)");
     assert!(json_result.rows.len() >= 4, "json find should return >=4 rows");

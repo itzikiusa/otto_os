@@ -225,6 +225,9 @@ pub struct ConnectionSection {
     pub parent_id: Option<Id>,
     pub name: String,
     pub position: i64,
+    /// Which tree this section belongs to: "connections" (the Connections page)
+    /// or "db" (the Database Explorer). Keeps the two hierarchies independent.
+    pub scope: String,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
 }

@@ -22,7 +22,39 @@ const base: ITheme = {
   brightWhite: '#ffffff',
 };
 
-export function terminalTheme(theme: ThemeName): ITheme {
+// ANSI palette tuned for a light background (darker, higher-contrast colors).
+const lightBase: ITheme = {
+  black: '#1a1a1a',
+  red: '#c41a16',
+  green: '#0f8a16',
+  yellow: '#a86500',
+  blue: '#0a64c8',
+  magenta: '#9b1ea0',
+  cyan: '#0087a8',
+  white: '#3a3a44',
+  brightBlack: '#6a6a76',
+  brightRed: '#d70000',
+  brightGreen: '#16a016',
+  brightYellow: '#b87800',
+  brightBlue: '#1478e6',
+  brightMagenta: '#bf20c0',
+  brightCyan: '#0098c0',
+  brightWhite: '#1a1a1a',
+};
+
+export function terminalTheme(theme: ThemeName, scheme: 'light' | 'dark' = 'dark'): ITheme {
+  // Light scheme: one light palette for all themes, accent-tinted cursor/selection.
+  if (scheme === 'light') {
+    const accent = theme === 'pro-dark' ? '#6c5ce7' : theme === 'warm' ? '#2bb673' : '#0a64c8';
+    return {
+      ...lightBase,
+      background: '#fbfbfd',
+      foreground: '#1d1d22',
+      cursor: accent,
+      selectionBackground: 'rgba(10, 100, 200, 0.2)',
+      blue: accent,
+    };
+  }
   switch (theme) {
     case 'pro-dark':
       return {

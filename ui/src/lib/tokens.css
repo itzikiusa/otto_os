@@ -28,7 +28,7 @@ html[data-theme='native'][data-scheme='light'] {
   --border: rgba(0, 0, 0, 0.1);
   --text: #1d1d1f;
   --text-dim: #6e6e73;
-  --term-bg: #1e1e24;
+  --term-bg: #fbfbfd;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
 }
 
@@ -70,7 +70,7 @@ html[data-theme='warm'][data-scheme='light'] {
   --border: rgba(60, 50, 30, 0.12);
   --text: #3d3a35;
   --text-dim: #6b6760;
-  --term-bg: #23211d;
+  --term-bg: #fbfaf7;
   --shadow: 0 8px 30px rgba(60, 50, 30, 0.14);
   --accent: #0f9d58;
 }

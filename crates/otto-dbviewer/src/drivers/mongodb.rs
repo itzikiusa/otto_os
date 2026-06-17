@@ -20,6 +20,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
+use crate::drivers::mongo_sql;
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, Column, CompletionContext, CompletionItem, CompletionKind,
@@ -227,19 +228,70 @@ impl Driver for MongoDriver {
         if let Some(validator) = collection_validator(&db, coll_name).await {
             extra.insert("validator".into(), bson_to_json(&validator));
         }
+        // Collection stats (best-effort): doc count, data/storage size, index sizes.
+        if let Ok(stats) = db
+            .run_command(doc! { "collStats": coll_name, "scale": 1 })
+            .await
+        {
+            let mut s = Map::new();
+            for k in [
+                "count",
+                "size",
+                "storageSize",
+                "avgObjSize",
+                "nindexes",
+                "totalIndexSize",
+                "totalSize",
+            ] {
+                if let Some(v) = stats.get(k) {
+                    s.insert(k.to_string(), bson_to_json(v));
+                }
+            }
+            match stats.get("count") {
+                Some(Bson::Int64(c)) => detail.row_count = Some(*c),
+                Some(Bson::Int32(c)) => detail.row_count = Some(*c as i64),
+                Some(Bson::Double(c)) => detail.row_count = Some(*c as i64),
+                _ => {}
+            }
+            if !s.is_empty() {
+                extra.insert("stats".into(), Value::Object(s));
+            }
+        }
         detail.extra = Value::Object(extra);
 
         Ok(detail)
     }
 
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
-        let parsed = parse_command(&req.statement)?;
+        // A `SELECT …` is translated to Mongo shorthand and run as such; the
+        // generated command is surfaced back to the user. Anything else is the
+        // native `db.coll.…` shorthand or a JSON command.
+        let translated = if mongo_sql::looks_like_sql(&req.statement) {
+            Some(mongo_sql::translate(&req.statement)?)
+        } else {
+            None
+        };
+        let parsed = parse_command(translated.as_deref().unwrap_or(&req.statement))?;
+        // The active database arrives in `req.node` as a plain name (the UI's
+        // active-DB selector, e.g. "promotions"), matching how SQL engines treat
+        // `node`. Tolerate a structured NodePath (`db:<name>/…`) too. Fall back to
+        // the connection's configured default database.
         let db_name = cfg
             .database
             .clone()
-            .or_else(|| req.node.as_deref().and_then(|n| {
-                NodePath::parse(n).get("db").map(str::to_string)
-            }))
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                req.node
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|n| {
+                        NodePath::parse(n)
+                            .get("db")
+                            .map(str::to_string)
+                            .unwrap_or_else(|| n.to_string())
+                    })
+            })
             .ok_or_else(|| types::invalid("no database selected for this connection"))?;
 
         let client = self.connect(cfg).await?;
@@ -248,7 +300,12 @@ impl Driver for MongoDriver {
         let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
         let started = Instant::now();
 
-        match parsed.op {
+        // `.explain()` (or the request's explain flag) → return the query plan.
+        if parsed.explain || req.explain {
+            return explain_plan(&db, &parsed, started).await;
+        }
+
+        let mut result = match parsed.op {
             MongoOp::Count => {
                 let filter = parsed.filter.unwrap_or_default();
                 let n = coll
@@ -276,14 +333,97 @@ impl Driver for MongoDriver {
                 let limit = parsed.limit.unwrap_or(max_rows as i64).min(max_rows as i64);
                 action = action.limit(limit + 1);
                 let cursor = action.await.map_err(types::upstream)?;
-                collect_docs(cursor, max_rows, started).await
+                // Cap collection at the effective limit (not just max_rows) so an
+                // explicit `.limit(n)` is honored; the extra fetched row flags truncation.
+                collect_docs(cursor, limit as usize, started).await
             }
             MongoOp::Aggregate => {
                 let pipeline = parsed.pipeline.unwrap_or_default();
                 let cursor = coll.aggregate(pipeline).await.map_err(types::upstream)?;
                 collect_docs(cursor, max_rows, started).await
             }
+            MongoOp::UpdateOne | MongoOp::UpdateMany => {
+                let filter = parsed.filter.unwrap_or_default();
+                let update = parsed
+                    .update
+                    .ok_or_else(|| types::invalid("update requires an update document"))?;
+                let res = if matches!(parsed.op, MongoOp::UpdateOne) {
+                    coll.update_one(filter, update).await
+                } else {
+                    coll.update_many(filter, update).await
+                }
+                .map_err(types::upstream)?;
+                Ok(write_result(
+                    res.modified_count,
+                    format!(
+                        "matched {}, modified {}",
+                        res.matched_count, res.modified_count
+                    ),
+                    started,
+                ))
+            }
+            MongoOp::InsertOne | MongoOp::InsertMany => {
+                let docs = parsed.documents.unwrap_or_default();
+                if docs.is_empty() {
+                    return Err(types::invalid("insert requires at least one document"));
+                }
+                let n = if matches!(parsed.op, MongoOp::InsertOne) {
+                    coll.insert_one(docs.into_iter().next().unwrap())
+                        .await
+                        .map_err(types::upstream)?;
+                    1
+                } else {
+                    coll.insert_many(&docs).await.map_err(types::upstream)?;
+                    docs.len() as u64
+                };
+                Ok(write_result(n, format!("inserted {n}"), started))
+            }
+            MongoOp::DeleteOne | MongoOp::DeleteMany => {
+                let filter = parsed.filter.unwrap_or_default();
+                let res = if matches!(parsed.op, MongoOp::DeleteOne) {
+                    coll.delete_one(filter).await
+                } else {
+                    coll.delete_many(filter).await
+                }
+                .map_err(types::upstream)?;
+                Ok(write_result(
+                    res.deleted_count,
+                    format!("deleted {}", res.deleted_count),
+                    started,
+                ))
+            }
+            MongoOp::CreateIndex => {
+                let keys = parsed
+                    .index_keys
+                    .ok_or_else(|| types::invalid("createIndex requires a key spec"))?;
+                let name = index_name_for(&keys);
+                let mut spec = doc! { "key": keys, "name": &name };
+                if let Some(opts) = parsed.index_options {
+                    for (k, v) in opts {
+                        spec.insert(k, v);
+                    }
+                }
+                db.run_command(doc! { "createIndexes": &parsed.collection, "indexes": [spec] })
+                    .await
+                    .map_err(types::upstream)?;
+                Ok(write_result(1, format!("created index {name}"), started))
+            }
+            MongoOp::DropIndex => {
+                let name = parsed
+                    .index_name
+                    .ok_or_else(|| types::invalid("dropIndex requires an index name"))?;
+                db.run_command(doc! { "dropIndexes": &parsed.collection, "index": &name })
+                    .await
+                    .map_err(types::upstream)?;
+                Ok(write_result(1, format!("dropped index {name}"), started))
+            }
+        }?;
+
+        // Show the user the Mongo command we ran on their behalf.
+        if let Some(t) = translated {
+            result.message = Some(format!("Translated from SQL → {t}"));
         }
+        Ok(result)
     }
 
     async fn completion(
@@ -297,6 +437,16 @@ impl Driver for MongoDriver {
                 CompletionItem::detailed(*label, CompletionKind::Operator, *detail)
             })
             .collect();
+
+        // Collection operations (the `db.<coll>.<op>(…)` verbs) so typing after a
+        // collection offers find/aggregate/count/distinct.
+        for (label, detail) in MONGO_METHODS {
+            items.push(CompletionItem::detailed(
+                *label,
+                CompletionKind::Command,
+                *detail,
+            ));
+        }
 
         // Live collection + sampled-field identifiers, best-effort (never fail
         // completion if the connection is momentarily unavailable).
@@ -422,6 +572,14 @@ enum MongoOp {
     Find,
     Aggregate,
     Count,
+    UpdateOne,
+    UpdateMany,
+    InsertOne,
+    InsertMany,
+    DeleteOne,
+    DeleteMany,
+    CreateIndex,
+    DropIndex,
 }
 
 #[derive(Debug, Default)]
@@ -433,6 +591,18 @@ struct ParsedCommand {
     sort: Option<Document>,
     limit: Option<i64>,
     pipeline: Option<Vec<Document>>,
+    /// Update modifications for update{One,Many} (e.g. `{ "$set": {…} }`).
+    update: Option<Document>,
+    /// Documents to insert for insert{One,Many}.
+    documents: Option<Vec<Document>>,
+    /// Index key spec for createIndex (e.g. `{ "field": 1 }`).
+    index_keys: Option<Document>,
+    /// Index options for createIndex (e.g. `{ "unique": true }`).
+    index_options: Option<Document>,
+    /// Index name (or key spec as a string) for dropIndex.
+    index_name: Option<String>,
+    /// True when `.explain()` was chained — return the query plan, don't execute.
+    explain: bool,
 }
 
 /// A fully-resolved command (op is known). [`ParsedCommand`] is the mutable
@@ -445,6 +615,12 @@ struct Parsed {
     sort: Option<Document>,
     limit: Option<i64>,
     pipeline: Option<Vec<Document>>,
+    update: Option<Document>,
+    documents: Option<Vec<Document>>,
+    index_keys: Option<Document>,
+    index_options: Option<Document>,
+    index_name: Option<String>,
+    explain: bool,
 }
 
 /// Parse a statement into a normalized command. Supports a JSON command object
@@ -477,6 +653,12 @@ fn parse_command(statement: &str) -> Result<Parsed> {
         sort: parsed.sort,
         limit: parsed.limit,
         pipeline: parsed.pipeline,
+        update: parsed.update,
+        documents: parsed.documents,
+        index_keys: parsed.index_keys,
+        index_options: parsed.index_options,
+        index_name: parsed.index_name,
+        explain: parsed.explain,
     })
 }
 
@@ -521,6 +703,20 @@ fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
         _ => None,
     };
 
+    let documents = match obj.get("documents") {
+        Some(Value::Array(arr)) => {
+            let mut docs = Vec::with_capacity(arr.len());
+            for d in arr {
+                docs.push(json_to_document(d)?);
+            }
+            Some(docs)
+        }
+        _ => match obj.get("document") {
+            Some(v) if !v.is_null() => Some(vec![json_to_document(v)?]),
+            _ => None,
+        },
+    };
+
     Ok(ParsedCommand {
         collection,
         op_kind,
@@ -529,6 +725,12 @@ fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
         sort: to_doc(obj.get("sort"))?,
         limit: obj.get("limit").and_then(Value::as_i64),
         pipeline,
+        update: to_doc(obj.get("update"))?,
+        documents,
+        index_keys: to_doc(obj.get("index_keys"))?,
+        index_options: to_doc(obj.get("index_options"))?,
+        index_name: obj.get("index_name").and_then(Value::as_str).map(str::to_string),
+        explain: obj.get("explain").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -560,8 +762,17 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
         match method.as_str() {
             "find" => {
                 cmd.op_kind = Some(MongoOp::Find);
-                if !arg.trim().is_empty() {
-                    cmd.filter = Some(parse_doc_arg(&arg)?);
+                // `find(filter)` or `find(filter, projection)` (mongosh 2-arg form).
+                let parts = split_top_level_args(&arg);
+                if let Some(f) = parts.first() {
+                    if !f.trim().is_empty() {
+                        cmd.filter = Some(parse_doc_arg(f)?);
+                    }
+                }
+                if let Some(p) = parts.get(1) {
+                    if !p.trim().is_empty() {
+                        cmd.projection = Some(parse_doc_arg(p)?);
+                    }
                 }
             }
             "aggregate" => {
@@ -573,6 +784,62 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
                 if !arg.trim().is_empty() {
                     cmd.filter = Some(parse_doc_arg(&arg)?);
                 }
+            }
+            "updateOne" | "updateMany" => {
+                cmd.op_kind = Some(if method == "updateOne" {
+                    MongoOp::UpdateOne
+                } else {
+                    MongoOp::UpdateMany
+                });
+                let parts = split_top_level_args(&arg);
+                let filter = parts
+                    .first()
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| types::invalid("update requires a filter"))?;
+                let update = parts
+                    .get(1)
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| types::invalid("update requires an update document"))?;
+                cmd.filter = Some(parse_doc_arg(filter)?);
+                cmd.update = Some(parse_doc_arg(update)?);
+            }
+            "insertOne" => {
+                cmd.op_kind = Some(MongoOp::InsertOne);
+                cmd.documents = Some(vec![parse_doc_arg(&arg)?]);
+            }
+            "insertMany" => {
+                cmd.op_kind = Some(MongoOp::InsertMany);
+                cmd.documents = Some(parse_pipeline_arg(&arg)?);
+            }
+            "deleteOne" | "deleteMany" => {
+                cmd.op_kind = Some(if method == "deleteOne" {
+                    MongoOp::DeleteOne
+                } else {
+                    MongoOp::DeleteMany
+                });
+                if !arg.trim().is_empty() {
+                    cmd.filter = Some(parse_doc_arg(&arg)?);
+                }
+            }
+            "createIndex" => {
+                cmd.op_kind = Some(MongoOp::CreateIndex);
+                let parts = split_top_level_args(&arg);
+                let keys = parts
+                    .first()
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| types::invalid("createIndex requires a key spec"))?;
+                cmd.index_keys = Some(parse_doc_arg(keys)?);
+                if let Some(opts) = parts.get(1).filter(|s| !s.trim().is_empty()) {
+                    cmd.index_options = Some(parse_doc_arg(opts)?);
+                }
+            }
+            "dropIndex" => {
+                cmd.op_kind = Some(MongoOp::DropIndex);
+                cmd.index_name = Some(arg.trim().trim_matches('"').trim_matches('\'').to_string());
+            }
+            "explain" => {
+                // A trailing `.explain()` modifies the preceding find/aggregate.
+                cmd.explain = true;
             }
             "limit" => {
                 cmd.limit = arg.trim().parse::<i64>().ok();
@@ -628,6 +895,37 @@ fn extract_balanced(s: &str) -> Result<(String, &str)> {
     Err(types::invalid("unbalanced parentheses in statement"))
 }
 
+/// Split a call's argument string on top-level commas (ignoring commas inside
+/// `{}`/`[]`/`()` or string literals), e.g. `find(filter, projection)`.
+fn split_top_level_args(arg: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_str: Option<u8> = None;
+    let mut start = 0usize;
+    let bytes = arg.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match in_str {
+            Some(q) => {
+                if b == q {
+                    in_str = None;
+                }
+            }
+            None => match b {
+                b'"' | b'\'' => in_str = Some(b),
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b',' if depth == 0 => {
+                    parts.push(arg[start..i].to_string());
+                    start = i + 1;
+                }
+                _ => {}
+            },
+        }
+    }
+    parts.push(arg[start..].to_string());
+    parts
+}
+
 fn parse_doc_arg(arg: &str) -> Result<Document> {
     let value: Value = serde_json::from_str(arg.trim())
         .map_err(|e| types::invalid(format!("invalid JSON argument: {e}")))?;
@@ -648,6 +946,14 @@ fn op_from_str(op: &str) -> Result<MongoOp> {
         "find" => Ok(MongoOp::Find),
         "aggregate" => Ok(MongoOp::Aggregate),
         "count" | "countDocuments" => Ok(MongoOp::Count),
+        "updateOne" => Ok(MongoOp::UpdateOne),
+        "updateMany" => Ok(MongoOp::UpdateMany),
+        "insertOne" => Ok(MongoOp::InsertOne),
+        "insertMany" => Ok(MongoOp::InsertMany),
+        "deleteOne" => Ok(MongoOp::DeleteOne),
+        "deleteMany" => Ok(MongoOp::DeleteMany),
+        "createIndex" => Ok(MongoOp::CreateIndex),
+        "dropIndex" => Ok(MongoOp::DropIndex),
         other => Err(types::invalid(format!("unsupported op '{other}'"))),
     }
 }
@@ -656,9 +962,35 @@ fn op_from_str(op: &str) -> Result<MongoOp> {
 
 /// Convert a JSON value into a BSON `Document` (the value must be an object).
 fn json_to_document(v: &Value) -> Result<Document> {
-    match mongodb::bson::to_bson(v).map_err(types::upstream)? {
+    match json_to_bson(v)? {
         Bson::Document(d) => Ok(d),
         _ => Err(types::invalid("expected a JSON object")),
+    }
+}
+
+/// JSON → BSON, honoring the `{"$oid": "<hex>"}` extended-JSON form so edits can
+/// target an `_id` (rendered to the grid as a hex string) by its real ObjectId.
+fn json_to_bson(v: &Value) -> Result<Bson> {
+    match v {
+        Value::Object(map) => {
+            if map.len() == 1 {
+                if let Some(Value::String(hex)) = map.get("$oid") {
+                    return mongodb::bson::oid::ObjectId::parse_str(hex)
+                        .map(Bson::ObjectId)
+                        .map_err(|e| types::invalid(format!("invalid $oid: {e}")));
+                }
+            }
+            let mut doc = Document::new();
+            for (k, val) in map {
+                doc.insert(k.clone(), json_to_bson(val)?);
+            }
+            Ok(Bson::Document(doc))
+        }
+        Value::Array(arr) => {
+            let items: Result<Vec<Bson>> = arr.iter().map(json_to_bson).collect();
+            Ok(Bson::Array(items?))
+        }
+        _ => mongodb::bson::to_bson(v).map_err(types::upstream),
     }
 }
 
@@ -794,6 +1126,86 @@ async fn collection_validator(db: &mongodb::Database, coll_name: &str) -> Option
 
 /// Drain a document cursor into a tabular [`QueryResult`]. Columns are the union
 /// of top-level keys (stable order, `_id` first). Sets `truncated` when capped.
+/// Mongo's default index name for a key spec, e.g. `{a:1,b:-1}` → `a_1_b_-1`.
+fn index_name_for(keys: &Document) -> String {
+    keys.iter()
+        .map(|(k, v)| {
+            let dir = v
+                .as_i32()
+                .map(|i| i.to_string())
+                .or_else(|| v.as_i64().map(|i| i.to_string()))
+                .or_else(|| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "1".to_string());
+            format!("{k}_{dir}")
+        })
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+/// Run the server `explain` command (queryPlanner verbosity) for a find/aggregate
+/// and return the plan document as a single JSON cell.
+async fn explain_plan(
+    db: &mongodb::Database,
+    parsed: &Parsed,
+    started: Instant,
+) -> Result<QueryResult> {
+    let inner = match parsed.op {
+        MongoOp::Find => {
+            let mut d = doc! { "find": &parsed.collection };
+            if let Some(f) = &parsed.filter {
+                d.insert("filter", f.clone());
+            }
+            if let Some(p) = &parsed.projection {
+                d.insert("projection", p.clone());
+            }
+            if let Some(s) = &parsed.sort {
+                d.insert("sort", s.clone());
+            }
+            if let Some(l) = parsed.limit {
+                d.insert("limit", l);
+            }
+            d
+        }
+        MongoOp::Aggregate => {
+            let stages: Vec<Bson> = parsed
+                .pipeline
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(Bson::Document)
+                .collect();
+            doc! { "aggregate": &parsed.collection, "pipeline": Bson::Array(stages), "cursor": {} }
+        }
+        _ => return Err(types::invalid("explain supports find and aggregate")),
+    };
+    let plan = db
+        .run_command(doc! { "explain": inner, "verbosity": "queryPlanner" })
+        .await
+        .map_err(types::upstream)?;
+    let mut result = QueryResult::empty();
+    result.columns = vec![Column::typed("queryPlan", "json")];
+    result.rows = vec![vec![bson_to_json(&Bson::Document(plan))]];
+    result.stats = QueryStats {
+        duration_ms: started.elapsed().as_millis() as u64,
+        row_count: 1,
+        bytes_read: None,
+    };
+    result.message = Some("Query plan (explain · queryPlanner)".into());
+    Ok(result)
+}
+
+/// Build a `QueryResult` for a write op (no rows, just affected count + note).
+fn write_result(affected: u64, message: String, started: Instant) -> QueryResult {
+    let mut result = QueryResult::message(message);
+    result.rows_affected = Some(affected);
+    result.stats = QueryStats {
+        duration_ms: started.elapsed().as_millis() as u64,
+        row_count: 0,
+        bytes_read: None,
+    };
+    result
+}
+
 async fn collect_docs(
     mut cursor: mongodb::Cursor<Document>,
     max_rows: usize,
@@ -851,6 +1263,13 @@ async fn collect_docs(
 }
 
 // --- aggregation operator/stage catalog for completion ----------------------
+
+/// Collection operations supported by the runner's `db.<coll>.<op>(…)` shorthand.
+const MONGO_METHODS: &[(&str, &str)] = &[
+    ("find", "read documents matching a filter"),
+    ("aggregate", "run an aggregation pipeline"),
+    ("countDocuments", "count documents matching a filter"),
+];
 
 const MONGO_OPERATORS: &[(&str, &str)] = &[
     // pipeline stages
@@ -983,5 +1402,244 @@ mod tests {
         assert_eq!(obj.get("n").unwrap(), &json!(42));
         assert_eq!(obj.get("active").unwrap(), &Value::Bool(true));
         assert_eq!(obj.get("tags").unwrap(), &json!(["x", "y"]));
+    }
+}
+
+/// End-to-end SQL → Mongo over a real MongoDB Docker container. Ignored by
+/// default (needs Docker). Run with:
+///   cargo test -p otto-dbviewer --lib -- --ignored --nocapture sql_to_mongo_e2e
+#[cfg(test)]
+mod sql_e2e {
+    use super::*;
+    use crate::driver::Driver;
+    use crate::types::{Engine, QueryRequest, ResolvedConfig, TlsConfig};
+    use mongodb::bson::{doc, Document};
+    use mongodb::Client;
+    use std::process::Command;
+    use std::time::Duration;
+
+    const PORT: u16 = 47019;
+    const CONTAINER: &str = "otto-mongo-e2e";
+    const IMAGE: &str = "mongo:8.2";
+
+    /// Removes the container even if an assertion panics.
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", CONTAINER]).output();
+        }
+    }
+
+    fn cfg() -> ResolvedConfig {
+        ResolvedConfig {
+            engine: Engine::Mongodb,
+            host: "127.0.0.1".into(),
+            port: PORT,
+            user: None,
+            password: None,
+            database: Some("shop".into()),
+            tls: TlsConfig::default(),
+            params: serde_json::json!({}),
+        }
+    }
+
+    async fn run_sql(d: &MongoDriver, sql: &str) -> QueryResult {
+        d.run(
+            &cfg(),
+            &QueryRequest {
+                statement: sql.into(),
+                max_rows: Some(1000),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("run failed for `{sql}`: {e:?}"))
+    }
+
+    fn cell<'a>(r: &'a QueryResult, row: usize, col: &str) -> &'a Value {
+        let idx = r
+            .columns
+            .iter()
+            .position(|c| c.name == col)
+            .unwrap_or_else(|| panic!("missing column `{col}`"));
+        &r.rows[row][idx]
+    }
+
+    async fn wait_for_mongo(uri: &str) -> Client {
+        for _ in 0..60 {
+            if let Ok(c) = Client::with_uri_str(uri).await {
+                if c.database("admin").run_command(doc! {"ping": 1}).await.is_ok() {
+                    return c;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        panic!("mongo container never became ready");
+    }
+
+    async fn seed(client: &Client) {
+        let db = client.database("shop");
+        db.collection::<Document>("players").drop().await.ok();
+        db.collection::<Document>("accounts").drop().await.ok();
+        db.collection::<Document>("players")
+            .insert_many(vec![
+                doc! {"id": 1, "name": "alice", "age": 35, "country": "US"},
+                doc! {"id": 2, "name": "bob", "age": 42, "country": "US"},
+                doc! {"id": 3, "name": "carol", "age": 28, "country": "CA"},
+                doc! {"id": 4, "name": "dave", "age": 51, "country": "UK"},
+                doc! {"id": 5, "name": "amy", "age": 25, "country": "US"},
+            ])
+            .await
+            .unwrap();
+        db.collection::<Document>("accounts")
+            .insert_many(vec![
+                doc! {"player_id": 1, "balance": 500},
+                doc! {"player_id": 2, "balance": 50},
+                doc! {"player_id": 3, "balance": 150},
+            ])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker"]
+    async fn sql_to_mongo_e2e() {
+        let _ = Command::new("docker").args(["rm", "-f", CONTAINER]).output();
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--name",
+                CONTAINER,
+                "-p",
+                &format!("{PORT}:27017"),
+                IMAGE,
+            ])
+            .output()
+            .expect("docker run");
+        assert!(
+            out.status.success(),
+            "docker run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _cleanup = Cleanup;
+
+        let client = wait_for_mongo(&format!("mongodb://127.0.0.1:{PORT}")).await;
+        seed(&client).await;
+        let d = MongoDriver::default();
+
+        // 1. plain find — all rows.
+        assert_eq!(run_sql(&d, "SELECT * FROM players").await.rows.len(), 5);
+
+        // 2. projection + `>` + ORDER BY DESC + LIMIT (and the SQL banner).
+        let r = run_sql(
+            &d,
+            "SELECT name, age FROM players WHERE age > 30 ORDER BY age DESC LIMIT 2",
+        )
+        .await;
+        assert_eq!(r.rows.len(), 2);
+        assert_eq!(cell(&r, 0, "name"), &json!("dave")); // 51 first
+        assert_eq!(cell(&r, 1, "name"), &json!("bob")); // then 42
+        assert!(r
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("Translated from SQL"));
+
+        // 3. COUNT(*) + `=`.
+        assert_eq!(
+            run_sql(&d, "SELECT COUNT(*) FROM players WHERE country = 'US'").await.rows[0][0],
+            json!(3)
+        );
+
+        // 4–8. IN / NOT IN / LIKE / NOT(...) / BETWEEN.
+        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE country IN ('CA','UK')").await.rows.len(), 2);
+        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE country NOT IN ('US')").await.rows.len(), 2);
+        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE name LIKE 'a%'").await.rows.len(), 2);
+        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE NOT (country = 'US')").await.rows.len(), 2);
+        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE age BETWEEN 26 AND 36").await.rows.len(), 2);
+
+        // 9. GROUP BY aggregate → 3 country groups.
+        assert_eq!(
+            run_sql(&d, "SELECT country, COUNT(*) AS n FROM players GROUP BY country").await.rows.len(),
+            3
+        );
+
+        // 10. global aggregate (no GROUP BY).
+        assert_eq!(run_sql(&d, "SELECT AVG(age) AS avg_age FROM players").await.rows.len(), 1);
+
+        // 11. INNER JOIN — only accounts with balance > 100 (alice 500, carol 150).
+        assert_eq!(
+            run_sql(
+                &d,
+                "SELECT p.name, a.balance FROM players p JOIN accounts a ON p.id = a.player_id WHERE a.balance > 100",
+            )
+            .await
+            .rows
+            .len(),
+            2
+        );
+
+        // 12. LEFT JOIN — every player kept, even those without an account.
+        assert_eq!(
+            run_sql(
+                &d,
+                "SELECT * FROM players p LEFT JOIN accounts a ON p.id = a.player_id",
+            )
+            .await
+            .rows
+            .len(),
+            5
+        );
+
+        // 13. updateOne by field — value actually changes.
+        run_sql(&d, r#"db.players.updateOne({"id": 1}, {"$set": {"age": 99}})"#).await;
+        assert_eq!(
+            run_sql(&d, "SELECT age FROM players WHERE id = 1").await.rows[0]
+                [run_sql(&d, "SELECT age FROM players WHERE id = 1")
+                    .await
+                    .columns
+                    .iter()
+                    .position(|c| c.name == "age")
+                    .unwrap()],
+            json!(99)
+        );
+
+        // 14. insertOne then deleteOne — row count round-trips.
+        run_sql(
+            &d,
+            r#"db.players.insertOne({"id": 6, "name": "zoe", "age": 30, "country": "US"})"#,
+        )
+        .await;
+        assert_eq!(run_sql(&d, "SELECT * FROM players").await.rows.len(), 6);
+        run_sql(&d, r#"db.players.deleteOne({"id": 6})"#).await;
+        assert_eq!(run_sql(&d, "SELECT * FROM players").await.rows.len(), 5);
+
+        // 15. updateOne targeting `_id` via `{$oid}` — the cell-edit path.
+        let all = run_sql(&d, "SELECT * FROM players").await;
+        let id_idx = all.columns.iter().position(|c| c.name == "_id").unwrap();
+        let oid = all.rows[0][id_idx].as_str().unwrap().to_string();
+        run_sql(
+            &d,
+            &format!(
+                r#"db.players.updateOne({{"_id": {{"$oid": "{oid}"}}}}, {{"$set": {{"country": "ZZ"}}}})"#
+            ),
+        )
+        .await;
+        assert_eq!(
+            run_sql(&d, "SELECT * FROM players WHERE country = 'ZZ'").await.rows.len(),
+            1
+        );
+
+        // 16. createIndex / dropIndex.
+        let r = run_sql(&d, r#"db.players.createIndex({"country": 1})"#).await;
+        assert!(r.message.as_deref().unwrap_or("").contains("created index"));
+        let r = run_sql(&d, r#"db.players.dropIndex("country_1")"#).await;
+        assert!(r.message.as_deref().unwrap_or("").contains("dropped index"));
+
+        // 17. explain returns a single query-plan row.
+        let r = run_sql(&d, r#"db.players.find({"country": "US"}).explain()"#).await;
+        assert_eq!(r.rows.len(), 1);
+        assert!(r.columns.iter().any(|c| c.name == "queryPlan"));
     }
 }

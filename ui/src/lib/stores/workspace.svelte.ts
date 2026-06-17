@@ -16,12 +16,19 @@ import { toasts } from '../toast.svelte';
 const LS_CURRENT = 'otto_workspace';
 const LS_TABS = 'otto_tabs_'; // + workspace id
 
+/** Sentinel tab/pane id for the docked DB Explorer (not a real session). Lets
+ *  the DB Explorer live as a pane in the Agents split, beside an agent. */
+export const DB_PANE_ID = '__db_explorer__';
+
 export type SplitAxis = 'col' | 'row';
 
 class WorkspaceStore {
   workspaces: WorkspaceWithRole[] = $state([]);
   currentId: Id | null = $state(null);
   sessions: Session[] = $state([]);
+  /** Programmatic PTY input keyed by session id, with a bump counter so the
+   *  Terminal applies each injection exactly once (e.g. DB rows → running agent). */
+  injections: Record<Id, { text: string; n: number }> = $state({});
   sessionsLoading = $state(false);
 
   /** view mode for Agent Mode: tabbed (one at a time) or tiled (grid). */
@@ -144,7 +151,8 @@ class WorkspaceStore {
     // restore tabs for this workspace
     const raw = localStorage.getItem(LS_TABS + id);
     const ids: Id[] = raw ? JSON.parse(raw) : [];
-    const valid = ids.filter((t) => this.sessions.some((s) => s.id === t));
+    // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
+    const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
     this.openTabs = valid;
     this.panes = valid.length > 0 ? [valid[0]] : [];
     this.focusedPane = 0;
@@ -180,6 +188,22 @@ class WorkspaceStore {
       this.panes[this.focusedPane] = id;
       this.panes = [...this.panes];
     }
+  }
+
+  /** Inject text into a session's PTY (the Terminal for `sessionId` applies it). */
+  injectInput(sessionId: Id, text: string): void {
+    const prev = this.injections[sessionId]?.n ?? 0;
+    this.injections = { ...this.injections, [sessionId]: { text, n: prev + 1 } };
+  }
+
+  /** Best agent session to receive injected input: the focused pane if it's an
+   *  agent, else the most-recently-active agent in this workspace (or null). */
+  get targetAgentId(): Id | null {
+    const active = this.activeSessionId;
+    const cur = active ? this.sessions.find((s) => s.id === active) : null;
+    if (cur && cur.kind === 'agent' && !cur.archived) return cur.id;
+    const agents = this.sessions.filter((s) => !s.archived && s.kind === 'agent');
+    return agents.length ? agents[agents.length - 1].id : null;
   }
 
   /** Add a freshly created session object and open it. */

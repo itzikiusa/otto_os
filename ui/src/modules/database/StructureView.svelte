@@ -4,11 +4,13 @@
   // Mongo collections (no columns) it renders the `extra` JSON.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import TableDesigner from './TableDesigner.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { toasts } from '../../lib/toast.svelte';
 
   const detail = $derived(database.objectDetail);
   let ddlOpen = $state(false);
+  let designerOpen = $state(false);
 
   function prettyExtra(extra: unknown): string {
     try {
@@ -39,6 +41,64 @@
       `Explain ${detail.name}`,
     );
   }
+
+  // ── Index builder (per-engine) ──────────────────────────────────────────────
+  const isSql = $derived(database.capabilities?.sql === true);
+  const canIndex = $derived(
+    !!detail && (isSql ? detail.kind === 'table' : detail.kind === 'collection'),
+  );
+  const indexFields = $derived.by(() => {
+    if (!detail) return [] as string[];
+    if (isSql) return detail.columns.map((c) => c.name);
+    const sampled = (detail.extra as Record<string, unknown> | null)?.sampled_fields as
+      | Record<string, unknown>
+      | undefined;
+    return ['_id', ...Object.keys(sampled ?? {}).filter((f) => f !== '_id')];
+  });
+  let idxOpen = $state(false);
+  let idxCols = $state<string[]>([]);
+  let idxUnique = $state(false);
+
+  function toggleIdxCol(c: string): void {
+    idxCols = idxCols.includes(c) ? idxCols.filter((x) => x !== c) : [...idxCols, c];
+  }
+  // Prepare a CREATE INDEX / createIndex statement and open it in a query tab
+  // for the user to review and run (never auto-applied).
+  function buildIndex(): void {
+    if (!detail || idxCols.length === 0) return;
+    const name = `idx_${detail.name}_${idxCols.join('_')}`.replace(/[^A-Za-z0-9_]/g, '_');
+    const stmt = isSql
+      ? `CREATE ${idxUnique ? 'UNIQUE ' : ''}INDEX ${name} ON ${detail.name} (${idxCols.join(', ')});`
+      : `db.${detail.name}.createIndex({ ${idxCols.map((c) => `"${c}": 1`).join(', ')} }${idxUnique ? ', { "unique": true }' : ''})`;
+    void database.openInNewTab(stmt);
+    idxOpen = false;
+    idxCols = [];
+    idxUnique = false;
+  }
+
+  // ── Stats (Mongo collStats) ─────────────────────────────────────────────────
+  const SIZE_KEYS = new Set(['size', 'storageSize', 'avgObjSize', 'totalIndexSize', 'totalSize']);
+  function fmtBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    const u = ['KB', 'MB', 'GB', 'TB'];
+    let v = n / 1024;
+    let i = 0;
+    while (v >= 1024 && i < u.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return `${v.toFixed(1)} ${u[i]}`;
+  }
+  const mongoStats = $derived.by(() => {
+    const s = (detail?.extra as Record<string, unknown> | null)?.stats as
+      | Record<string, unknown>
+      | undefined;
+    if (!s) return null;
+    return Object.entries(s).map(
+      ([k, v]) =>
+        [k, SIZE_KEYS.has(k) && typeof v === 'number' ? fmtBytes(v) : String(v)] as [string, string],
+    );
+  });
 </script>
 
 <div class="structure">
@@ -56,7 +116,14 @@
           <span class="rowcount">{detail.row_count.toLocaleString()} rows</span>
         {/if}
       </div>
-      <button class="btn small ghost" onclick={explain}><Icon name="zap" size={11} />Explain</button>
+      <div class="st-head-actions">
+        {#if isSql && detail.kind === 'table'}
+          <button class="btn small ghost" onclick={() => (designerOpen = true)} title="Edit columns → generates ALTER TABLE for review">
+            <Icon name="edit" size={11} />Design
+          </button>
+        {/if}
+        <button class="btn small ghost" onclick={explain}><Icon name="zap" size={11} />Explain</button>
+      </div>
     </div>
 
     {#if detail.columns.length > 0}
@@ -99,20 +166,62 @@
       </div>
     {/if}
 
-    {#if detail.indexes.length > 0}
+    {#if detail.indexes.length > 0 || canIndex}
       <div class="block">
-        <div class="block-title">Indexes <span class="count">{detail.indexes.length}</span></div>
-        <ul class="idx-list">
-          {#each detail.indexes as idx, i (i)}
-            <li class="idx">
-              <Icon name="key" size={11} />
-              <span class="idx-name mono">{idx.name}</span>
-              {#if idx.unique}<span class="tag unique">unique</span>{/if}
-              {#if idx.method}<span class="tag">{idx.method}</span>{/if}
-              <span class="idx-cols mono">({idx.columns.join(', ')})</span>
-            </li>
+        <div class="block-title">
+          Indexes <span class="count">{detail.indexes.length}</span>
+          <span class="grow"></span>
+          {#if canIndex}
+            <button class="mini-btn" onclick={() => (idxOpen = !idxOpen)}>
+              <Icon name="plus" size={11} />New index
+            </button>
+          {/if}
+        </div>
+        {#if detail.indexes.length > 0}
+          <ul class="idx-list">
+            {#each detail.indexes as idx, i (i)}
+              <li class="idx">
+                <Icon name="key" size={11} />
+                <span class="idx-name mono">{idx.name}</span>
+                {#if idx.unique}<span class="tag unique">unique</span>{/if}
+                {#if idx.method}<span class="tag">{idx.method}</span>{/if}
+                <span class="idx-cols mono">({idx.columns.join(', ')})</span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if idxOpen}
+          <div class="idx-builder">
+            <div class="ib-fields">
+              {#each indexFields as f (f)}
+                <button
+                  class="ib-chip mono"
+                  class:on={idxCols.includes(f)}
+                  onclick={() => toggleIdxCol(f)}
+                >{idxCols.includes(f) ? `${idxCols.indexOf(f) + 1}· ` : ''}{f}</button>
+              {/each}
+            </div>
+            <label class="ib-unique"><input type="checkbox" bind:checked={idxUnique} /> Unique</label>
+            <div class="ib-actions">
+              <button class="btn small" onclick={() => (idxOpen = false)}>Cancel</button>
+              <button class="btn small primary" disabled={idxCols.length === 0} onclick={buildIndex}>
+                Prepare {isSql ? 'CREATE INDEX' : 'createIndex'} →
+              </button>
+            </div>
+            <div class="ib-hint dim">Opens the statement in a query tab for you to review and run.</div>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    {#if mongoStats}
+      <div class="block">
+        <div class="block-title">Stats</div>
+        <div class="stats-grid">
+          {#each mongoStats as [k, v] (k)}
+            <div class="stat"><span class="sk mono">{k}</span><span class="sv mono">{v}</span></div>
           {/each}
-        </ul>
+        </div>
       </div>
     {/if}
 
@@ -163,6 +272,14 @@
   {/if}
 </div>
 
+{#if designerOpen && detail && detail.kind === 'table'}
+  <TableDesigner
+    table={detail.name}
+    columns={detail.columns}
+    onclose={() => (designerOpen = false)}
+  />
+{/if}
+
 <style>
   .structure {
     height: 100%;
@@ -176,6 +293,11 @@
     padding: 24px;
     color: var(--text-dim);
     font-size: 12.5px;
+  }
+  .st-head-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
   }
   .st-head {
     display: flex;
@@ -224,6 +346,89 @@
     letter-spacing: 0.05em;
     color: var(--text-dim);
     margin-bottom: 8px;
+  }
+  .grow {
+    flex: 1;
+  }
+  .mini-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 11px;
+    cursor: pointer;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .mini-btn:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent);
+  }
+  .idx-builder {
+    margin-top: 8px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .ib-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .ib-chip {
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .ib-chip.on {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  .ib-unique {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .ib-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .ib-hint {
+    font-size: 11px;
+  }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 6px;
+  }
+  .stat {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    font-size: 11.5px;
+  }
+  .stat .sk {
+    color: var(--text-dim);
   }
   .ddl-head {
     display: flex;

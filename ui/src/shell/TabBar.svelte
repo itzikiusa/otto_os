@@ -3,7 +3,7 @@
   // ⌃Tab cycles (handled in keys.ts → workspace store).
   import Icon from '../lib/components/Icon.svelte';
   import StatusDot from '../lib/components/StatusDot.svelte';
-  import { ws } from '../lib/stores/workspace.svelte';
+  import { ws, DB_PANE_ID } from '../lib/stores/workspace.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { router } from '../lib/router.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
@@ -21,6 +21,7 @@
   }
 
   function title(id: string): string {
+    if (id === DB_PANE_ID) return 'Database';
     return ws.sessions.find((s) => s.id === id)?.title ?? '…';
   }
 
@@ -37,7 +38,7 @@
   const SUSPENDED_TIP = 'Suspended to save memory — opens instantly';
 
   function startRename(id: string): void {
-    if (ws.myRole === 'viewer') return;
+    if (ws.myRole === 'viewer' || id === DB_PANE_ID) return;
     renamingId = id;
     draft = title(id);
   }
@@ -88,7 +89,9 @@
           },
         ])}
       >
-        {#if isResumable(id)}
+        {#if id === DB_PANE_ID}
+          <Icon name="db" size={11} />
+        {:else if isResumable(id)}
           <span class="susp-dot" title={SUSPENDED_TIP} aria-hidden="true">
             <Icon name="refresh" size={8} />
           </span>

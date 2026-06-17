@@ -124,6 +124,36 @@
     void database.runQuery();
   }
 
+  // Draggable split between the editor and the results (persisted px height).
+  let editorH = $state(loadEditorH());
+  let resizing = $state(false);
+  function loadEditorH(): number {
+    if (typeof localStorage === 'undefined') return 240;
+    const v = Number(localStorage.getItem('db.editorH'));
+    return Number.isFinite(v) && v > 80 ? v : 240;
+  }
+  function startResize(e: PointerEvent): void {
+    e.preventDefault();
+    resizing = true;
+    const startY = e.clientY;
+    const startH = editorH;
+    const onMove = (ev: PointerEvent): void => {
+      editorH = Math.max(100, Math.min(900, startH + (ev.clientY - startY)));
+    };
+    const onUp = (): void => {
+      resizing = false;
+      try {
+        localStorage.setItem('db.editorH', String(Math.round(editorH)));
+      } catch {
+        /* ignore */
+      }
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
   // ── Save query ──────────────────────────────────────────────────────────
   let saving = $state(false);
   let saveName = $state('');
@@ -239,8 +269,16 @@
         <Icon name="check" size={11} />Save
       </button>
     {/if}
-    <button class="btn small ghost" onclick={explain} disabled={!tab.statement.trim()} title="Send to an agent for explanation">
+    <button
+      class="btn small ghost"
+      onclick={() => void database.runExplain()}
+      disabled={!tab.statement.trim() || tab.running}
+      title="Run the real query plan (EXPLAIN / Mongo explain)"
+    >
       <Icon name="zap" size={11} />Explain
+    </button>
+    <button class="btn small ghost" onclick={explain} disabled={!tab.statement.trim()} title="Ask an agent to explain this query">
+      <Icon name="comment" size={11} />Ask AI
     </button>
     <span class="grow"></span>
     {#if database.capabilities?.sql && database.databaseNames.length > 0}
@@ -291,7 +329,7 @@
     </div>
   {/if}
 
-  <div class="qe-edit">
+  <div class="qe-edit" style="height: {editorH}px">
     <CodeEditor
       path={editorPath}
       content={tab.statement}
@@ -304,6 +342,17 @@
       onsubmit={run}
     />
   </div>
+
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="qe-splitter"
+    class:resizing
+    role="separator"
+    aria-orientation="horizontal"
+    aria-label="Drag to resize editor and results"
+    title="Drag to resize"
+    onpointerdown={startResize}
+  ><span class="qe-grip"></span></div>
 
   <div class="qe-results">
     <ResultsGrid
@@ -496,16 +545,35 @@
   }
   .qe-edit {
     flex: 0 0 auto;
-    height: 38%;
-    min-height: 120px;
+    min-height: 100px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     overflow: hidden;
   }
+  /* Draggable divider between editor and results. */
+  .qe-splitter {
+    flex: 0 0 auto;
+    height: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: row-resize;
+    touch-action: none;
+  }
+  .qe-grip {
+    width: 40px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border);
+    transition: background 120ms ease-out;
+  }
+  .qe-splitter:hover .qe-grip,
+  .qe-splitter.resizing .qe-grip {
+    background: var(--accent);
+  }
   .qe-results {
     flex: 1;
     min-height: 0;
-    margin-top: 10px;
     display: flex;
     flex-direction: column;
   }

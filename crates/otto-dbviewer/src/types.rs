@@ -373,7 +373,7 @@ impl ObjectDetail {
 
 /// A query/command to run. SQL engines: `statement` is SQL. Redis: one command
 /// per line. Mongo: a JSON command or `db.coll.find(...)` shorthand.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueryRequest {
     pub statement: String,
     /// Soft cap on returned rows (the driver should apply or enforce it).
@@ -385,6 +385,9 @@ pub struct QueryRequest {
     /// Optional node context (e.g. the selected database) to scope execution.
     #[serde(default)]
     pub node: Option<String>,
+    /// Return the query plan instead of running (Mongo: server `explain`).
+    #[serde(default)]
+    pub explain: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

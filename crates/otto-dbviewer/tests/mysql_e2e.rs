@@ -29,8 +29,7 @@ fn query(stmt: &str) -> QueryRequest {
     QueryRequest {
         statement: stmt.into(),
         max_rows: None,
-        params: None,
-        node: None,
+        ..Default::default()
     }
 }
 
