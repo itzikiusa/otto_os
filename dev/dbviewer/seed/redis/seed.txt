@@ -1,0 +1,13 @@
+SET app:name "Otto Shop"
+SET app:version "1.4.2"
+SET session:abc123 "{\"user\":\"ada\",\"ts\":1718500000}"
+SET session:def456 "{\"user\":\"grace\",\"ts\":1718500900}"
+SETEX cache:product:1 3600 "Mechanical Keyboard"
+HSET customer:1 email ada@example.com name "Ada Lovelace" country GB
+HSET customer:2 email alan@example.com name "Alan Turing" country GB
+RPUSH queue:emails "welcome:1" "welcome:2" "receipt:4"
+SADD countries GB US FI DE
+ZADD leaderboard 4200 ada 3900 grace 5100 linus
+INCR counter:visits
+INCR counter:visits
+INCR counter:visits

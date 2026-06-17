@@ -20,7 +20,9 @@ body {
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  user-select: none;
+  /* Text is selectable everywhere (copy / search / mouse-marking on any page). */
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 #app {

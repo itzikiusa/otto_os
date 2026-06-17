@@ -370,6 +370,202 @@ pub enum NoticeAction {
     Reauth { target: String },
 }
 
+// ---------------------------------------------------------------------------
+// Agent activity: per-session live trail + normalized task tracker
+// ---------------------------------------------------------------------------
+
+/// Who produced a trail entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrailSource {
+    /// A human action in Otto (e.g. a note, or an injected command).
+    User,
+    /// The agent CLI (a tool it ran, a skill it loaded, its reply).
+    Agent,
+    /// Otto itself (lifecycle: session spawned, resumed, archived).
+    Otto,
+}
+
+impl TrailSource {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "user" => Some(Self::User),
+            "agent" => Some(Self::Agent),
+            "otto" => Some(Self::Otto),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Otto => "otto",
+        }
+    }
+}
+
+/// Coarse category of a trail entry — drives the UI icon and grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrailKind {
+    /// Session lifecycle (started, resumed, finished, archived).
+    Session,
+    /// A user prompt submitted to the agent.
+    Prompt,
+    /// A skill was loaded/invoked.
+    Skill,
+    /// A shell command was run.
+    Command,
+    /// A generic tool call (MCP tool, Task sub-agent, …).
+    Tool,
+    /// A file was read/written/edited.
+    File,
+    /// A web fetch/search.
+    Web,
+    /// A change to the task tracker.
+    Task,
+    /// A free-form note (typically authored by a human).
+    Note,
+    Other,
+}
+
+impl TrailKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "session" => Some(Self::Session),
+            "prompt" => Some(Self::Prompt),
+            "skill" => Some(Self::Skill),
+            "command" => Some(Self::Command),
+            "tool" => Some(Self::Tool),
+            "file" => Some(Self::File),
+            "web" => Some(Self::Web),
+            "task" => Some(Self::Task),
+            "note" => Some(Self::Note),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Prompt => "prompt",
+            Self::Skill => "skill",
+            Self::Command => "command",
+            Self::Tool => "tool",
+            Self::File => "file",
+            Self::Web => "web",
+            Self::Task => "task",
+            Self::Note => "note",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Severity of a trail entry — drives row coloring and notification raising.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrailLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+impl TrailLevel {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "info" => Some(Self::Info),
+            "warn" => Some(Self::Warn),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// One entry in a session's live activity trail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrailEvent {
+    pub id: Id,
+    pub session_id: Id,
+    pub workspace_id: Id,
+    pub ts: DateTime<Utc>,
+    pub source: TrailSource,
+    pub kind: TrailKind,
+    pub level: TrailLevel,
+    /// One-line human summary ("$ cargo build", "Loaded skill: brainstorming").
+    pub summary: String,
+    /// Optional structured payload (raw tool input, etc.). `null` when absent.
+    pub detail: Option<Value>,
+}
+
+/// Status of a tracked agent task — the union over provider-native states
+/// (Claude TodoWrite `pending|in_progress|completed`, plus blocked/cancelled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Blocked,
+    Cancelled,
+}
+
+impl TaskStatus {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "in_progress" => Some(Self::InProgress),
+            "completed" | "done" => Some(Self::Completed),
+            "blocked" => Some(Self::Blocked),
+            "cancelled" | "canceled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Blocked => "blocked",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// A compact per-session roll-up of the task tracker + trail, for the
+/// multi-agent overview (sidebar chips). Built by `ActivityRepo::workspace_summary`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionActivitySummary {
+    pub session_id: Id,
+    pub total: i64,
+    pub done: i64,
+    /// Title of the first in-progress task, if any (what the agent is doing now).
+    pub in_progress: Option<String>,
+    /// Timestamp of the most recent trail entry, if any.
+    pub last_ts: Option<DateTime<Utc>>,
+}
+
+/// One task in a session's normalized task tracker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTask {
+    pub id: Id,
+    pub session_id: Id,
+    pub workspace_id: Id,
+    /// Provider-native id when the source supplies a stable one (else `None`).
+    pub ext_id: Option<String>,
+    pub title: String,
+    pub status: TaskStatus,
+    pub position: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A Jira project (key + display name) returned by the project listing endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueProject {
@@ -627,6 +823,171 @@ pub struct Review {
     /// Live state of each configured agent (populated during the run).
     #[serde(default)]
     pub agents: Vec<ReviewAgentState>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Skills Evaluator (test-and-improve a skill across scored iterations)
+// ---------------------------------------------------------------------------
+
+/// Overall lifecycle status of a skill-evaluation run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillEvalStatus {
+    Running,
+    Done,
+    Error,
+    Cancelled,
+}
+
+impl SkillEvalStatus {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "running" => Some(Self::Running),
+            "done" => Some(Self::Done),
+            "error" => Some(Self::Error),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// A single problem a validation agent found, with the concrete fix it suggests.
+/// This is the unit the UI renders ("what was wrong" + "how to fix it").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalFinding {
+    /// "info" | "warn" | "fail". `fail` findings fail the validation.
+    pub severity: String,
+    /// What is wrong or missing.
+    pub issue: String,
+    /// The concrete suggested fix for this issue.
+    #[serde(default)]
+    pub suggestion: String,
+    /// Optional location/context (e.g. a file path or symbol name).
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
+/// Live state of one validation agent (one validation × one provider) within an
+/// iteration. Stored inside the iteration's `agents_json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalValidationState {
+    /// The validation this agent runs (e.g. "logs", "docs", "naming").
+    pub validation: String,
+    /// Display name, e.g. "logs · claude" when one validation fans across CLIs.
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    /// "pending" | "running" | "waiting" | "done" | "error".
+    pub status: String,
+    /// Short note: a preview, "N issues", or an error message.
+    pub note: String,
+    /// Whether the validation passed (no `fail`-severity findings).
+    #[serde(default)]
+    pub passed: bool,
+    /// 0–100 score this validation gives the produced code/skill.
+    #[serde(default)]
+    pub score: f64,
+    /// Live session this agent runs in (openable in the UI).
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// The issues this validation found, each with a suggested fix.
+    #[serde(default)]
+    pub findings: Vec<EvalFinding>,
+}
+
+/// One iteration (round) of a skill evaluation: the skill copy used, the
+/// implementation it produced, the validations' findings, a score, and the
+/// improvement the improver applied to seed the next iteration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalIteration {
+    pub id: Id,
+    pub eval_id: Id,
+    /// 1-based iteration number.
+    pub iter: u32,
+    /// Iteration this one's skill was derived from (None for the first).
+    #[serde(default)]
+    pub base_iter: Option<u32>,
+    /// Name of the temporary skill copy used this iteration
+    /// (e.g. `golang-feature-implementation-run-ab12-iter2`).
+    pub skill_name: String,
+    /// The skill content used (and tested) this iteration.
+    pub skill_before: String,
+    /// The improved skill content produced for the NEXT iteration (None when
+    /// this is the last iteration or no improvement was made).
+    #[serde(default)]
+    pub skill_after: Option<String>,
+    /// Provider that ran the implementation.
+    pub impl_provider: String,
+    /// Live implementation session (openable in the UI).
+    #[serde(default)]
+    pub impl_session_id: Option<String>,
+    /// Short summary the implementation agent reported.
+    #[serde(default)]
+    pub impl_summary: String,
+    /// Filesystem path of the git worktree this iteration ran in.
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    /// "pending" | "implementing" | "validating" | "improving" | "done" | "error".
+    pub status: String,
+    #[serde(default)]
+    pub note: String,
+    /// 0–100 aggregate score for this iteration (mean of its validations).
+    #[serde(default)]
+    pub score: f64,
+    /// Per-validation live state + findings.
+    #[serde(default)]
+    pub agents: Vec<EvalValidationState>,
+    /// What the improver changed and why (seeds the next iteration).
+    #[serde(default)]
+    pub improvement_summary: String,
+    /// Unified-ish diff between this iteration's skill and the improved one.
+    #[serde(default)]
+    pub skill_diff: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A complete skill-evaluation run: a skill tested against a task and a set of
+/// validations across one or more scored, self-improving iterations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillEval {
+    pub id: Id,
+    pub workspace_id: Id,
+    /// The original skill's display name.
+    pub source_skill: String,
+    /// The task the implementation agent was asked to perform.
+    pub task: String,
+    /// The single CLI that performed the implementation.
+    pub impl_cli: String,
+    /// Number of iterations requested.
+    pub target_iterations: u32,
+    pub status: SkillEvalStatus,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Final human-readable summary of the run.
+    #[serde(default)]
+    pub summary: String,
+    /// Iteration that scored highest.
+    #[serde(default)]
+    pub best_iteration: Option<u32>,
+    #[serde(default)]
+    pub best_score: Option<f64>,
+    /// All iterations, oldest first.
+    #[serde(default)]
+    pub iterations: Vec<EvalIteration>,
+    /// The original `StartSkillEvalReq` JSON (task, validations, improver, …) so
+    /// a single validation can be re-run and the run can be relaunched.
+    #[serde(default)]
+    pub config: Value,
     pub created_at: DateTime<Utc>,
 }
 

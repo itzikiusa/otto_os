@@ -46,14 +46,21 @@
 
   async function create(): Promise<void> {
     if (!canEdit) return;
-    const name = prompt('Environment name')?.trim();
+    const name = await confirmer.promptText('Environment name', {
+      title: 'New environment',
+      confirmLabel: 'Create',
+    });
     if (!name) return;
     await apiClient.saveEnvironment({ name }, undefined);
   }
 
   async function rename(env: ApiEnvironment): Promise<void> {
     if (!canEdit) return;
-    const name = prompt('Rename environment', env.name)?.trim();
+    const name = await confirmer.promptText('Rename environment', {
+      title: 'Rename environment',
+      confirmLabel: 'Rename',
+      initial: env.name,
+    });
     if (!name || name === env.name) return;
     await apiClient.saveEnvironment({ name, variables: env.variables }, env.id);
   }

@@ -28,7 +28,9 @@ use otto_state::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::api_helpers::{collection_to_openapi, eval_assertion, json_path, parse_curl};
+use crate::api_helpers::{
+    collection_to_openapi, eval_assertion, json_path, parse_curl, percent_decode,
+};
 use crate::auth::{require_ws_role, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
@@ -45,15 +47,50 @@ fn repo(ctx: &ServerCtx) -> ApiClientRepo {
 
 /// Shared outbound HTTP client (built once). Follows redirects, generous body
 /// timeout enforced per-request via `.timeout()`.
+/// Daemon-global cookie jar shared by the API client (captures Set-Cookie and
+/// resends on matching requests, so login/session flows just work).
+fn cookie_jar() -> std::sync::Arc<reqwest_cookie_store::CookieStoreMutex> {
+    static JAR: OnceLock<std::sync::Arc<reqwest_cookie_store::CookieStoreMutex>> = OnceLock::new();
+    JAR.get_or_init(|| {
+        std::sync::Arc::new(reqwest_cookie_store::CookieStoreMutex::new(
+            reqwest_cookie_store::CookieStore::default(),
+        ))
+    })
+    .clone()
+}
+
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .user_agent("Otto-ApiClient/1.0")
             .redirect(reqwest::redirect::Policy::limited(10))
+            .cookie_provider(cookie_jar())
             .build()
             .unwrap_or_default()
     })
+}
+
+/// Build a one-off client when per-request settings deviate from the defaults
+/// (disable redirects, skip TLS verification). `None` → use the shared client.
+fn build_settings_client(req: &ExecuteApiReq) -> Option<reqwest::Client> {
+    let no_redirect = req.follow_redirects == Some(false);
+    let no_verify = req.verify_ssl == Some(false);
+    if !no_redirect && !no_verify {
+        return None;
+    }
+    let mut builder = reqwest::Client::builder()
+        .user_agent("Otto-ApiClient/1.0")
+        .cookie_provider(cookie_jar());
+    builder = if no_redirect {
+        builder.redirect(reqwest::redirect::Policy::none())
+    } else {
+        builder.redirect(reqwest::redirect::Policy::limited(10))
+    };
+    if no_verify {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder.build().ok()
 }
 
 // ===========================================================================
@@ -368,6 +405,119 @@ pub async fn import_curl(
     Ok(Json(parse_curl(&req.curl)?))
 }
 
+/// `GET /workspaces/{wid}/api-client/cookies` — list the shared cookie jar.
+pub async fn list_cookies(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Value>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    let jar = cookie_jar();
+    let store = jar.lock().map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?;
+    let cookies: Vec<Value> = store
+        .iter_any()
+        .map(|c| {
+            json!({
+                "name": c.name(),
+                "value": c.value(),
+                "domain": c.domain().unwrap_or(""),
+                "path": c.path().unwrap_or("/"),
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(cookies)))
+}
+
+/// `DELETE /workspaces/{wid}/api-client/cookies` — clear the shared cookie jar.
+pub async fn clear_cookies(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<StatusCode> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    let jar = cookie_jar();
+    jar.lock()
+        .map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?
+        .clear();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct OAuth2TokenReq {
+    grant: String,
+    token_url: String,
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    client_secret: String,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    refresh_token: String,
+}
+
+/// `POST /workspaces/{wid}/api-client/oauth2/token` — perform an OAuth 2.0
+/// token request (client_credentials / password / refresh_token) server-side
+/// and return the token JSON. Authorization-code grant (browser redirect) is
+/// not handled here.
+pub async fn oauth2_token(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<OAuth2TokenReq>,
+) -> ApiResult<Json<Value>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+
+    let mut form: Vec<(&str, &str)> = Vec::new();
+    match req.grant.as_str() {
+        "client_credentials" => form.push(("grant_type", "client_credentials")),
+        "password" => {
+            form.push(("grant_type", "password"));
+            form.push(("username", &req.username));
+            form.push(("password", &req.password));
+        }
+        "refresh_token" => {
+            form.push(("grant_type", "refresh_token"));
+            form.push(("refresh_token", &req.refresh_token));
+        }
+        other => return Err(ApiError(Error::Invalid(format!("unsupported grant: {other}")))),
+    }
+    if !req.scope.is_empty() {
+        form.push(("scope", &req.scope));
+    }
+    if !req.client_id.is_empty() {
+        form.push(("client_id", &req.client_id));
+    }
+    if !req.client_secret.is_empty() {
+        form.push(("client_secret", &req.client_secret));
+    }
+
+    let resp = http_client()
+        .post(&req.token_url)
+        .header("Accept", "application/json")
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| ApiError(Error::Upstream(describe_reqwest_error(&e))))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if status >= 400 || parsed.get("access_token").is_none() {
+        let msg = parsed
+            .get("error_description")
+            .or_else(|| parsed.get("error"))
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(|| format!("token endpoint returned {status}: {text}"));
+        return Err(ApiError(Error::Upstream(msg)));
+    }
+    Ok(Json(parsed))
+}
+
 // ===========================================================================
 // Execute
 // ===========================================================================
@@ -387,8 +537,14 @@ pub async fn execute(
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let repo = repo(&ctx);
 
-    // Resolve the environment variable map.
-    let vars = resolve_variables(&repo, &wid, req.environment_id.as_ref()).await?;
+    // Resolve the environment variable map, then layer runtime overrides
+    // (from post-response scripts / chaining) on top.
+    let mut vars = resolve_variables(&repo, &wid, req.environment_id.as_ref()).await?;
+    if let Some(Value::Object(overrides)) = &req.vars {
+        for (k, v) in overrides {
+            vars.insert(k.clone(), v.clone());
+        }
+    }
 
     // Snapshot of the request as executed (post-substitution view recorded too).
     let request_snapshot = json!({
@@ -458,6 +614,90 @@ async fn resolve_variables(
 
 /// Build the outbound request and send it, returning an `ApiResponse` or an
 /// error message string (never panics).
+/// One multipart/form-data field as encoded by the UI. A `file` field carries
+/// the file's bytes base64-encoded in `value`.
+#[derive(Deserialize)]
+struct MultipartField {
+    #[serde(default)]
+    key: String,
+    #[serde(default, rename = "type")]
+    field_type: String,
+    #[serde(default)]
+    value: String,
+    #[serde(default)]
+    filename: String,
+}
+
+/// Build a reqwest multipart form from the request body. Accepts either a JSON
+/// array of [`MultipartField`]s or the legacy `k=v&...` text encoding.
+fn build_multipart(body: &str, vars: &serde_json::Map<String, Value>) -> reqwest::multipart::Form {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+
+    let mut form = reqwest::multipart::Form::new();
+    if body.trim_start().starts_with('[') {
+        if let Ok(fields) = serde_json::from_str::<Vec<MultipartField>>(body) {
+            for f in fields {
+                let key = substitute(&f.key, vars);
+                if key.trim().is_empty() {
+                    continue;
+                }
+                if f.field_type == "file" {
+                    let bytes = B64.decode(f.value.trim()).unwrap_or_default();
+                    let filename = if f.filename.is_empty() {
+                        "file".to_string()
+                    } else {
+                        f.filename.clone()
+                    };
+                    let mut part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
+                    if let Some(mime) = guess_mime(&f.filename) {
+                        // guess_mime only returns valid static MIME strings.
+                        part = part.mime_str(mime).expect("valid static mime");
+                    }
+                    form = form.part(key, part);
+                } else {
+                    form = form.text(key, substitute(&f.value, vars));
+                }
+            }
+            return form;
+        }
+    }
+    // Legacy `k=v&...` (percent-encoded) text fields.
+    for pair in body.split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = match pair.split_once('=') {
+            Some((k, v)) => (percent_decode(k), percent_decode(v)),
+            None => (percent_decode(pair), String::new()),
+        };
+        let key = substitute(&k, vars);
+        if key.trim().is_empty() {
+            continue;
+        }
+        form = form.text(key, substitute(&v, vars));
+    }
+    form
+}
+
+/// Minimal filename-extension → MIME guess for common upload types.
+fn guess_mime(filename: &str) -> Option<&'static str> {
+    let ext = filename.rsplit('.').next()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "txt" => "text/plain",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "html" | "htm" => "text/html",
+        _ => return None,
+    })
+}
+
 async fn build_and_send(
     req: &ExecuteApiReq,
     vars: &serde_json::Map<String, Value>,
@@ -493,8 +733,15 @@ async fn build_and_send(
     // --- auth ---
     apply_auth(&req.auth, vars, &mut headers, &mut query)?;
 
-    let client = http_client();
-    let mut builder = client.request(method, &url).timeout(EXECUTE_TIMEOUT);
+    // Per-request settings: a custom client when any non-default is set,
+    // otherwise the shared pooled client.
+    let custom_client = build_settings_client(req);
+    let client = custom_client.as_ref().unwrap_or_else(|| http_client());
+    let timeout = req
+        .timeout_ms
+        .map(Duration::from_millis)
+        .unwrap_or(EXECUTE_TIMEOUT);
+    let mut builder = client.request(method, &url).timeout(timeout);
 
     // --- body per body_mode ---
     match req.body_mode.as_str() {
@@ -523,6 +770,16 @@ async fn build_and_send(
             }
             builder = builder.body(body);
         }
+        // multipart/form-data: the body is either a JSON array of fields
+        // (`[{key,type,value,filename}]`, where a `file` field's value is the
+        // base64 of the file's bytes) or the legacy `k=v&...` text encoding.
+        // reqwest sets the `Content-Type: multipart/form-data; boundary=…`
+        // itself, so any explicit Content-Type must be dropped.
+        "multipart" => {
+            let body = substitute(&req.body, vars);
+            headers.remove(CONTENT_TYPE);
+            builder = builder.multipart(build_multipart(&body, vars));
+        }
         // raw or any other mode → send as text verbatim.
         _ => {
             let body = substitute(&req.body, vars);
@@ -536,13 +793,38 @@ async fn build_and_send(
     if !query.is_empty() {
         builder = builder.query(&query);
     }
+    let header_count = headers.len();
     builder = builder.headers(headers);
 
+    // Trace: resolved request + per-phase timing for the response "Trace" tab.
+    let method_str = req.method.to_uppercase();
+    let body_desc = match req.body_mode.as_str() {
+        "none" | "" => String::new(),
+        m => format!(", {m} body"),
+    };
+    let mut trace: Vec<otto_core::api::TraceStep> = vec![
+        trace_step("Request", &format!("{method_str} {url}"), None, "info"),
+        trace_step(
+            "Sent request",
+            &format!("{header_count} header(s){body_desc}"),
+            None,
+            "info",
+        ),
+    ];
+
     let started = Instant::now();
-    let resp = builder
-        .send()
-        .await
-        .map_err(|e| describe_reqwest_error(&e))?;
+    let resp = builder.send().await.map_err(|e| describe_reqwest_error(&e))?;
+    let ttfb_ms = started.elapsed().as_millis() as i64;
+    let final_url = resp.url().to_string();
+    trace.push(trace_step(
+        "Waiting (TTFB)",
+        "time to first response byte (includes connect + TLS)",
+        Some(ttfb_ms),
+        "timing",
+    ));
+    if final_url != url {
+        trace.push(trace_step("Redirected", &format!("→ {final_url}"), None, "redirect"));
+    }
     let status = resp.status();
     let status_code = status.as_u16();
     let status_text = status
@@ -567,21 +849,78 @@ async fn build_and_send(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Body: read bytes, render as UTF-8 text (lossy for binary).
+    // Body: keep the full bytes (base64) for preview/save and a UTF-8 (lossy)
+    // text rendering capped for display. Beyond MAX_INLINE we keep neither.
+    const MAX_INLINE: usize = 25 * 1024 * 1024; // 25 MB raw → base64 inlined
+    const MAX_TEXT_DISPLAY: usize = 512 * 1024; // 512 KB rendered as text
+    let dl_start = Instant::now();
     let bytes = resp.bytes().await.map_err(|e| describe_reqwest_error(&e))?;
+    let download_ms = dl_start.elapsed().as_millis() as i64;
     let size_bytes = bytes.len() as i64;
-    let body = String::from_utf8_lossy(&bytes).into_owned();
     let duration_ms = started.elapsed().as_millis() as i64;
+    trace.push(trace_step(
+        "Downloaded",
+        &human_bytes(bytes.len()),
+        Some(download_ms),
+        "timing",
+    ));
+    trace.push(trace_step(
+        "Completed",
+        &format!("{status_code} {status_text}"),
+        Some(duration_ms),
+        if status.is_success() { "success" } else { "error" },
+    ));
+
+    let (body, body_base64, truncated, too_large) = if bytes.len() > MAX_INLINE {
+        (String::new(), String::new(), false, true)
+    } else {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine;
+        let b64 = B64.encode(&bytes);
+        let text = String::from_utf8_lossy(&bytes);
+        if text.len() > MAX_TEXT_DISPLAY {
+            let mut end = MAX_TEXT_DISPLAY;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            (text[..end].to_string(), b64, true, false)
+        } else {
+            (text.into_owned(), b64, false, false)
+        }
+    };
 
     Ok(ApiResponse {
         status: status_code,
         status_text,
         headers: Value::Array(resp_headers),
         body,
+        body_base64,
+        truncated,
+        too_large,
         duration_ms,
         size_bytes,
         content_type,
+        trace,
     })
+}
+
+fn trace_step(label: &str, detail: &str, ms: Option<i64>, level: &str) -> otto_core::api::TraceStep {
+    otto_core::api::TraceStep {
+        label: label.to_string(),
+        detail: detail.to_string(),
+        ms,
+        level: level.to_string(),
+    }
+}
+
+fn human_bytes(n: usize) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    }
 }
 
 /// Apply the `auth` object to headers/query. Shapes:
@@ -603,6 +942,24 @@ fn apply_auth(
             if !token.is_empty() {
                 let hv = HeaderValue::from_str(&format!("Bearer {token}"))
                     .map_err(|_| "invalid bearer token".to_string())?;
+                headers.insert(AUTHORIZATION, hv);
+            }
+        }
+        "oauth2" => {
+            // The token is fetched separately (POST .../oauth2/token) and stored
+            // on the auth object; here we just attach it.
+            let token = substitute(
+                auth.get("access_token").and_then(Value::as_str).unwrap_or(""),
+                vars,
+            );
+            let ttype = auth
+                .get("token_type")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Bearer");
+            if !token.is_empty() {
+                let hv = HeaderValue::from_str(&format!("{ttype} {token}"))
+                    .map_err(|_| "invalid oauth2 token".to_string())?;
                 headers.insert(AUTHORIZATION, hv);
             }
         }
@@ -872,6 +1229,10 @@ fn request_to_execute(request: &ApiRequest) -> ExecuteApiReq {
         auth: request.auth.clone(),
         // Variables are supplied by the runner's chained map, not an env id.
         environment_id: None,
+        timeout_ms: None,
+        follow_redirects: None,
+        verify_ssl: None,
+        vars: None,
     }
 }
 
@@ -945,7 +1306,9 @@ fn substitute(input: &str, vars: &serde_json::Map<String, Value>) -> String {
         if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
             if let Some(end) = input[i + 2..].find("}}") {
                 let name = input[i + 2..i + 2 + end].trim();
-                if let Some(v) = vars.get(name) {
+                if let Some(dynamic) = resolve_dynamic_var(name) {
+                    out.push_str(&dynamic);
+                } else if let Some(v) = vars.get(name) {
                     out.push_str(&value_to_string(v));
                 } else {
                     // leave placeholder as-is
@@ -968,6 +1331,25 @@ fn value_to_string(v: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
         other => other.to_string(),
+    }
+}
+
+/// Resolve Postman-style dynamic variables (`{{$guid}}`, `{{$timestamp}}`, …).
+/// Returns `None` for anything that isn't a known dynamic name.
+fn resolve_dynamic_var(name: &str) -> Option<String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match name {
+        "$guid" | "$randomUUID" => Some(uuid::Uuid::new_v4().to_string()),
+        "$timestamp" => Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                .to_string(),
+        ),
+        "$isoTimestamp" => Some(chrono::Utc::now().to_rfc3339()),
+        "$randomInt" => Some((rand::random::<u32>() % 1000).to_string()),
+        _ => None,
     }
 }
 

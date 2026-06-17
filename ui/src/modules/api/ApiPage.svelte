@@ -62,6 +62,16 @@
   </aside>
 
   <div class="api-main">
+    <div class="req-tabs" role="tablist">
+      {#each apiClient.tabs as t, i (i)}
+        <div class="req-tab" class:active={apiClient.activeTab === i} role="tab" tabindex="0" aria-selected={apiClient.activeTab === i} onclick={() => apiClient.switchTab(i)} onkeydown={(e) => { if (e.key === 'Enter') apiClient.switchTab(i); }}>
+          <span class="req-tab-method {(t.method || 'GET').toLowerCase()}">{t.method}</span>
+          <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
+          <button class="req-tab-close" title="Close tab" aria-label="Close tab" onclick={(e) => { e.stopPropagation(); apiClient.closeTab(i); }}>×</button>
+        </div>
+      {/each}
+      <button class="req-tab-new" title="New request (⌘T)" aria-label="New request tab" onclick={() => apiClient.newDraft()}>+</button>
+    </div>
     <div class="builder-pane">
       <RequestBuilder />
     </div>
@@ -87,23 +97,26 @@
   }
   .side-tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: 2px;
-    padding: 10px 10px 8px;
+    padding: 10px 8px 8px;
     border-bottom: 1px solid var(--border);
+    overflow: hidden;
   }
   .side-tab {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 26px;
-    padding: 0 9px;
+    padding: 0 7px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 500;
     cursor: pointer;
+    white-space: nowrap;
   }
   .side-tab:hover {
     background: var(--surface-2);
@@ -133,6 +146,70 @@
     flex-direction: column;
     min-height: 0;
   }
+  .req-tabs {
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    padding: 6px 8px 0;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    flex-shrink: 0;
+  }
+  .req-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 180px;
+    padding: 6px 8px 6px 10px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: var(--radius-s) var(--radius-s) 0 0;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .req-tab:hover { background: var(--surface-2); }
+  .req-tab.active {
+    background: var(--surface-2);
+    border-color: var(--border);
+    color: var(--text);
+  }
+  .req-tab-method {
+    font-family: var(--font-mono, monospace);
+    font-weight: 700;
+    font-size: 10px;
+    color: var(--accent);
+  }
+  .req-tab-method.post { color: var(--status-working); }
+  .req-tab-method.delete { color: var(--status-exited); }
+  .req-tab-method.put, .req-tab-method.patch { color: #d2691e; }
+  .req-tab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .req-tab-close {
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1;
+    padding: 0 2px;
+    border-radius: 4px;
+  }
+  .req-tab-close:hover { background: var(--border); color: var(--text); }
+  .req-tab-new {
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 18px;
+    padding: 0 10px;
+    border-radius: var(--radius-s);
+  }
+  .req-tab-new:hover { background: var(--surface-2); color: var(--accent); }
   .builder-pane {
     padding: 14px 16px;
     border-bottom: 1px solid var(--border);

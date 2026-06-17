@@ -8,12 +8,14 @@ members = [
     "crates/otto-pty",
     "crates/otto-sessions",
     "crates/otto-connections",
+    "crates/otto-dbviewer",
     "crates/otto-orchestrator",
     "crates/otto-git",
     "crates/otto-issues",
     "crates/otto-channels",
     "crates/otto-improve",
     "crates/otto-context",
+    "crates/otto-usage",
     "crates/otto-server",
     "crates/ottod",
 ]
@@ -31,12 +33,14 @@ otto-keychain = { path = "crates/otto-keychain" }
 otto-pty = { path = "crates/otto-pty" }
 otto-sessions = { path = "crates/otto-sessions" }
 otto-connections = { path = "crates/otto-connections" }
+otto-dbviewer = { path = "crates/otto-dbviewer" }
 otto-orchestrator = { path = "crates/otto-orchestrator" }
 otto-git = { path = "crates/otto-git" }
 otto-issues = { path = "crates/otto-issues" }
 otto-channels = { path = "crates/otto-channels" }
 otto-improve = { path = "crates/otto-improve" }
 otto-context = { path = "crates/otto-context" }
+otto-usage = { path = "crates/otto-usage" }
 otto-server = { path = "crates/otto-server" }
 
 tokio = { version = "1", features = ["full"] }
@@ -59,7 +63,7 @@ keyring = { version = "3", features = ["apple-native"] }
 portable-pty = "0.9"
 bytes = "1"
 dashmap = "6"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream", "cookies"] }
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -72,6 +76,12 @@ tempfile = "3"
 shell-words = "1"
 vt100 = "0.16"
 dirs = "6"
+protox = "0.7"
+prost = "0.13"
+prost-reflect = { version = "0.14", features = ["serde"] }
+prost-types = "0.13"
+tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"] }
+reqwest_cookie_store = "0.8"
 
 [profile.release]
 lto = "thin"

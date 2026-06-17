@@ -1,0 +1,100 @@
+# Dev database stack for the Otto DB Explorer feature.
+# High, non-standard host ports so this never clashes with the user's own
+# local MySQL/Redis (groove on 3310, redis on 6379) or anything else.
+#
+#   MySQL 8        -> 127.0.0.1:13306   (user: otto / pass: ottopw,  root: rootpw)
+#   Redis 7        -> 127.0.0.1:16379   (auth: ottoredis)
+#   MongoDB 7      -> 127.0.0.1:17017   (user: otto / pass: ottopw,  replica set rs0)
+#   ClickHouse 24  -> 127.0.0.1:18123 (http) / 19000 (native)  (user: otto / pass: ottopw)
+#
+# Bring up:   docker compose -f dev/dbviewer/docker-compose.yml up -d
+# Tear down:  docker compose -f dev/dbviewer/docker-compose.yml down -v
+name: otto-dbviewer-dev
+
+services:
+  mysql:
+    image: mysql:9.7
+    container_name: otto-dbv-mysql
+    # MySQL 9.x removed the mysql_native_password plugin and the
+    # --default-authentication-plugin option; the default caching_sha2_password
+    # is used (sqlx supports it via RSA public-key exchange over plaintext).
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_DATABASE: shopdb
+      MYSQL_USER: otto
+      MYSQL_PASSWORD: ottopw
+    ports:
+      - "127.0.0.1:13306:3306"
+    volumes:
+      - ./seed/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-prootpw"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:8.8
+    container_name: otto-dbv-redis
+    command: ["redis-server", "--requirepass", "ottoredis"]
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - ./seed/redis:/seed:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "ottoredis", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Seeds Redis once after it's healthy, then exits.
+  redis-seed:
+    image: redis:8.8
+    container_name: otto-dbv-redis-seed
+    depends_on:
+      redis:
+        condition: service_healthy
+    entrypoint: ["sh", "-c", "redis-cli -h redis -a ottoredis < /seed/seed.txt || true; echo seeded"]
+    volumes:
+      - ./seed/redis:/seed:ro
+    restart: "no"
+
+  mongo:
+    image: mongo:8.2
+    container_name: otto-dbv-mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: otto
+      MONGO_INITDB_ROOT_PASSWORD: ottopw
+      MONGO_INITDB_DATABASE: shopdb
+    ports:
+      - "127.0.0.1:17017:27017"
+    volumes:
+      - ./seed/mongo:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "-u", "otto", "-p", "ottopw", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.4
+    container_name: otto-dbv-clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+      CLICKHOUSE_USER: otto
+      CLICKHOUSE_PASSWORD: ottopw
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "127.0.0.1:18123:8123"
+      - "127.0.0.1:19000:9000"
+    volumes:
+      - ./seed/clickhouse:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20

@@ -34,6 +34,13 @@ Slack/Telegram bridges so an agent can work a ticket from a chat thread.
   relayed back. One agent per ticket, auto-archived when idle.
 - **Connections** — open SSH / MySQL / Redis / MongoDB / ClickHouse sessions
   side-by-side with agents.
+- **Database Explorer** — a TablePlus-class browser for MySQL, Redis, MongoDB,
+  and ClickHouse over plaintext, TLS/SSL, or SSH tunnels: a lazy schema tree,
+  per-engine autocomplete, multiple query tabs, a virtualized results grid
+  (client-side filter/sort + approval-gated inline editing), a Navicat-style
+  visual JOIN builder, Superset-style dashboards/widgets for ClickHouse, and
+  "examine this schema with an agent". Read queries get an automatic row `LIMIT`
+  so a huge table is never fully scanned, and any running query is cancelable.
 - **Self-improvement** — an optional, gated engine that reflects on recent
   sessions and proposes edits to the workspace's skills/memory (tiered autonomy:
   safe edits auto-apply, risky ones queue for approval). Can run on multiple

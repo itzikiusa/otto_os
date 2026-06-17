@@ -12,6 +12,7 @@ pub mod hooks;
 pub mod id;
 pub mod provider;
 pub mod secrets;
+pub mod workflows;
 
 pub use error::{Error, Result};
 pub use id::{new_id, Id};

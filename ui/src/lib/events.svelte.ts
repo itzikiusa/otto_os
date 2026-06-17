@@ -5,6 +5,7 @@ import { wsUrl } from './api/client';
 import type { OttoEvent } from './api/types';
 import { ws } from './stores/workspace.svelte';
 import { notifications } from './stores/notifications.svelte';
+import { activity } from './stores/activity.svelte';
 
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
@@ -48,7 +49,10 @@ class EventsClient {
         const parsed = JSON.parse(ev.data) as OttoEvent;
         if (parsed.type === 'notification') {
           notifications.ingest(parsed.notice);
+        } else if (parsed.type === 'trail_appended' || parsed.type === 'tasks_updated') {
+          activity.applyEvent(parsed);
         } else {
+          if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);
         }
       } catch {

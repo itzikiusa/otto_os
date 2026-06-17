@@ -6,12 +6,14 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use otto_core::api::CreateSessionReq;
-use otto_core::domain::{Session, SessionKind, SessionStatus, Workspace};
+use otto_core::domain::{
+    Session, SessionKind, SessionStatus, TrailKind, TrailLevel, TrailSource, Workspace,
+};
 use otto_core::event::Event;
 use otto_core::hooks::PreSpawnHook;
 use otto_core::{new_id, Error, Id, Result};
 use otto_pty::{CommandSpec, PtyHandle};
-use otto_state::{NewSession, SessionsRepo};
+use otto_state::{ActivityRepo, NewSession, NewTrail, SessionsRepo};
 use tokio::sync::broadcast;
 
 use crate::providers::ProviderRegistry;
@@ -35,6 +37,18 @@ fn add_dir_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
             }
         }
     }
+    out
+}
+
+/// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
+/// Used for one-line trail summaries.
+fn trail_clip(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
     out
 }
 
@@ -88,6 +102,10 @@ impl Drop for AttachGuard {
     }
 }
 
+/// Default daemon base URL agent hooks post activity back to. Overridden via
+/// [`SessionManager::with_ingest_base`] (ottod sets it from its bind port).
+const DEFAULT_INGEST_BASE: &str = "http://127.0.0.1:7700";
+
 /// Owns live sessions: PTY handles keyed by session id plus persistence.
 pub struct SessionManager {
     /// Shared so the per-session status task can evict an exited handle
@@ -111,6 +129,16 @@ pub struct SessionManager {
     /// detection). When set, each session's status task subscribes to its PTY
     /// output and forwards chunks here.
     output_scanner: Option<Arc<dyn OutputScanner>>,
+    /// Daemon base URL that injected agent hooks post their activity back to.
+    ingest_base: String,
+    /// Per-session ingest tokens. An agent's hooks present this token to the
+    /// (otherwise unauthenticated) `/ingest/*` endpoints; the route verifies it
+    /// against this map. Minted at spawn, dropped when the session is removed.
+    ingest_tokens: Arc<DashMap<Id, String>>,
+    /// Optional activity store: records Otto-side lifecycle and user actions to
+    /// the session trail (so the trail is populated for every provider, not just
+    /// ones with native hooks).
+    activity: Option<ActivityRepo>,
 }
 
 impl SessionManager {
@@ -128,7 +156,126 @@ impl SessionManager {
             providers,
             pre_spawn_hook: None,
             output_scanner: None,
+            ingest_base: std::env::var("OTTO_INGEST_BASE")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_INGEST_BASE.to_string()),
+            ingest_tokens: Arc::new(DashMap::new()),
+            activity: None,
         }
+    }
+
+    /// Attach the activity store so lifecycle + user actions are recorded to the
+    /// session trail. Builder-style; without it the recording calls are no-ops.
+    pub fn with_activity_repo(mut self, activity: ActivityRepo) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+
+    /// Best-effort: persist a trail entry and broadcast it. Fire-and-forget so
+    /// callers (lifecycle methods) never block on the DB. No-op without an
+    /// activity store.
+    fn record_trail(
+        &self,
+        session_id: &Id,
+        workspace_id: &Id,
+        source: TrailSource,
+        kind: TrailKind,
+        level: TrailLevel,
+        summary: String,
+    ) {
+        let Some(repo) = self.activity.clone() else {
+            return;
+        };
+        let events = self.events.clone();
+        let (sid, wid) = (session_id.clone(), workspace_id.clone());
+        tokio::spawn(async move {
+            let new = NewTrail {
+                session_id: sid.clone(),
+                workspace_id: wid.clone(),
+                source,
+                kind,
+                level,
+                summary,
+                detail: None,
+            };
+            match repo.append_trail(new).await {
+                Ok(event) => {
+                    let _ = events.send(Event::TrailAppended {
+                        workspace_id: wid,
+                        session_id: sid,
+                        event,
+                    });
+                }
+                Err(e) => tracing::warn!(session = %sid, "record trail: {e}"),
+            }
+        });
+    }
+
+    /// Record an Otto-side lifecycle entry (spawn/suspend/archive/…) for an
+    /// agent session. Skips connection sessions to keep the trail agent-focused.
+    fn record_lifecycle(&self, session: &Session, summary: impl Into<String>) {
+        if session.kind != SessionKind::Agent {
+            return;
+        }
+        self.record_trail(
+            &session.id,
+            &session.workspace_id,
+            TrailSource::Otto,
+            TrailKind::Session,
+            TrailLevel::Info,
+            summary.into(),
+        );
+    }
+
+    /// Record a user-authored message relayed into a session (channel relay,
+    /// orchestrator command). Surfaces the "by user" side of the trail for every
+    /// provider. Best-effort; loads the session to resolve its workspace.
+    pub async fn record_user_message(&self, session_id: &Id, text: &str) {
+        if self.activity.is_none() {
+            return;
+        }
+        let Ok(session) = self.repo.get(session_id).await else {
+            return;
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let summary = trail_clip(trimmed, 200);
+        self.record_trail(
+            session_id,
+            &session.workspace_id,
+            TrailSource::User,
+            TrailKind::Prompt,
+            TrailLevel::Info,
+            summary,
+        );
+    }
+
+    /// Prune the activity trail to the newest `keep_per_session` rows per
+    /// session. No-op without an activity store. Returns rows pruned.
+    pub async fn prune_activity_trail(&self, keep_per_session: i64) -> u64 {
+        let Some(repo) = self.activity.as_ref() else {
+            return 0;
+        };
+        match repo.prune_trail(keep_per_session).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("prune activity trail: {e}");
+                0
+            }
+        }
+    }
+
+    /// Set the daemon base URL agent hooks post activity back to (ottod passes
+    /// its actual bind URL). Builder-style.
+    pub fn with_ingest_base(mut self, base: impl Into<String>) -> Self {
+        let base = base.into();
+        if !base.trim().is_empty() {
+            self.ingest_base = base;
+        }
+        self
     }
 
     /// Attach a pre-spawn hook (context provisioning). Builder-style so existing
@@ -147,6 +294,33 @@ impl SessionManager {
 
     pub fn providers(&self) -> &ProviderRegistry {
         &self.providers
+    }
+
+    /// Verify an agent hook's ingest token for `session_id`. Returns false when
+    /// the session has no token (not an agent / not spawned by this daemon) or
+    /// the token doesn't match. Used by the unauthenticated `/ingest/*` routes.
+    pub fn verify_ingest_token(&self, session_id: &Id, token: &str) -> bool {
+        !token.is_empty()
+            && self
+                .ingest_tokens
+                .get(session_id)
+                .is_some_and(|t| t.as_str() == token)
+    }
+
+    /// Mint (or reuse) the ingest token for `session_id` and return the env vars
+    /// that wire an agent's injected hooks back to this daemon. Pushed onto the
+    /// spawned PTY's environment so hook subprocesses inherit them.
+    fn ingest_env(&self, session_id: &Id) -> Vec<(String, String)> {
+        let token = self
+            .ingest_tokens
+            .entry(session_id.clone())
+            .or_insert_with(|| uuid::Uuid::new_v4().simple().to_string())
+            .clone();
+        vec![
+            ("OTTO_INGEST_BASE".to_string(), self.ingest_base.clone()),
+            ("OTTO_SESSION_ID".to_string(), session_id.to_string()),
+            ("OTTO_INGEST_TOKEN".to_string(), token),
+        ]
     }
 
     /// All `(provider_name, update_command)` pairs for providers that have an
@@ -177,7 +351,7 @@ impl SessionManager {
     ) -> Result<Session> {
         let cwd = req.cwd.clone().unwrap_or_else(|| ws.root_path.clone());
 
-        let (provider, spec, provider_session_id) = match spec_override {
+        let (provider, mut spec, provider_session_id) = match spec_override {
             Some(spec) => {
                 let provider = req
                     .provider
@@ -266,6 +440,10 @@ impl SessionManager {
                     hook.before_spawn(ws, &session.cwd, &session.provider);
                 }
             }
+            // Wire this session's injected hooks back to the daemon: the
+            // provisioner wrote a hooks config that reads these env vars and
+            // posts trail/task activity to the per-session ingest endpoint.
+            spec.env.extend(self.ingest_env(&session.id));
         }
 
         let handle = match PtyHandle::spawn(&spec) {
@@ -286,6 +464,7 @@ impl SessionManager {
         let _ = self.events.send(Event::SessionCreated {
             session: session.clone(),
         });
+        self.record_lifecycle(&session, format!("Session started · {}", session.provider));
         Ok(session)
     }
 
@@ -401,7 +580,13 @@ impl SessionManager {
         }
         let merged = serde_json::Value::Object(base);
         self.repo.set_meta(id, &merged).await?;
-        self.repo.get(id).await
+        let updated = self.repo.get(id).await?;
+        let _ = self.events.send(Event::SessionMetaUpdated {
+            session_id: updated.id.clone(),
+            workspace_id: updated.workspace_id.clone(),
+            meta: updated.meta.clone(),
+        });
+        Ok(updated)
     }
 
     /// Kill the PTY (if live) and mark the session exited.
@@ -411,6 +596,7 @@ impl SessionManager {
             let _ = handle.kill();
         }
         self.repo.update_status(id, SessionStatus::Exited).await?;
+        self.record_lifecycle(&session, "Killed");
         let _ = self.events.send(Event::SessionStatus {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
@@ -447,6 +633,7 @@ impl SessionManager {
         // Drop the suspend flag last; the status task only reads it, and a late
         // read after this point is harmless (it would also pick Reconnectable).
         self.suspending.remove(id);
+        self.record_lifecycle(&session, "Suspended (idle — freed memory, still resumable)");
         let _ = self.events.send(Event::SessionStatus {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
@@ -608,6 +795,7 @@ impl SessionManager {
         }
         self.repo.set_archived(id, true).await?;
         self.repo.update_status(id, SessionStatus::Exited).await?;
+        self.record_lifecycle(&session, "Archived");
         // Clients refresh on this event and move the row to the archive.
         let _ = self.events.send(Event::SessionStatus {
             session_id: id.clone(),
@@ -684,7 +872,9 @@ impl SessionManager {
         self.repo
             .update_status(id, SessionStatus::Reconnectable)
             .await?;
-        self.repo.get(id).await
+        let session = self.repo.get(id).await?;
+        self.record_lifecycle(&session, "Unarchived");
+        Ok(session)
     }
 
     /// Kill the PTY, delete the DB row and emit `SessionRemoved`.
@@ -694,6 +884,7 @@ impl SessionManager {
             let _ = handle.kill();
         }
         self.repo.delete(id).await?;
+        self.ingest_tokens.remove(id);
         let _ = self.events.send(Event::SessionRemoved {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
@@ -710,7 +901,7 @@ impl SessionManager {
             let _ = handle.kill();
         }
 
-        let spec = match spec_override {
+        let mut spec = match spec_override {
             Some(s) => s,
             None => {
                 if session.kind != SessionKind::Agent {
@@ -734,6 +925,9 @@ impl SessionManager {
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
             crate::trust::ensure_trusted(&session.provider, &session.cwd);
+            // Re-wire the per-session ingest env (the hooks config persists in
+            // the workspace from the initial spawn).
+            spec.env.extend(self.ingest_env(&session.id));
         }
         let handle = Arc::new(PtyHandle::spawn(&spec)?);
         self.live.insert(id.clone(), Arc::clone(&handle));
@@ -743,6 +937,7 @@ impl SessionManager {
             workspace_id: session.workspace_id.clone(),
             status: SessionStatus::Running,
         });
+        self.record_lifecycle(&session, "Session resumed");
         self.start_status_task(id.clone(), session.workspace_id, session.provider, handle);
         self.repo.get(id).await
     }

@@ -3,16 +3,17 @@
 use std::sync::Arc;
 
 use otto_connections::{ConnectionsService, Spawner};
+use otto_dbviewer::DbViewerService;
 use otto_improve::ImprovementEngine;
 use otto_core::auth::{RoleChecker, TokenAuthenticator};
 use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
 use otto_orchestrator::Orchestrator;
 use otto_sessions::SessionManager;
-use otto_core::domain::Notice;
+use otto_core::domain::{AgentTask, Notice, TrailEvent};
 use otto_state::{
-    GitStore, IntegrationsRepo, IssuesRepo, NewNotice, NotificationsRepo, ReviewsRepo,
-    WorkspacesRepo,
+    ActivityRepo, GitStore, IntegrationsRepo, IssuesRepo, NewNotice, NewTask, NewTrail,
+    NotificationsRepo, ReviewsRepo, SkillEvalsRepo, WorkspacesRepo,
 };
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
@@ -32,14 +33,21 @@ pub struct ServerCtx {
     pub manager: Arc<SessionManager>,
     pub workspaces: WorkspacesRepo,
     pub connections: Arc<ConnectionsService>,
+    /// Native data-access layer for the DB Explorer (browse/query/schema).
+    pub db_explorer: Arc<DbViewerService>,
     pub spawner: Arc<dyn Spawner>,
     pub git_store: GitStore,
     pub issues_store: IssuesRepo,
     pub integrations_store: IntegrationsRepo,
     pub reviews_store: ReviewsRepo,
+    pub skill_evals_store: SkillEvalsRepo,
+    /// Per-run cancellation flags for in-flight skill evaluations.
+    pub skill_eval_cancels: crate::skill_eval::CancelRegistry,
     pub orchestrator: Arc<Orchestrator>,
     pub improve_engine: Arc<ImprovementEngine>,
     pub context_library: otto_context::Library,
+    /// Embedded ClickHouse usage + metrics store (no-op when unavailable).
+    pub usage: Arc<otto_usage::UsageEngine>,
 }
 
 impl ServerCtx {
@@ -53,6 +61,61 @@ impl ServerCtx {
             repo: NotificationsRepo::new(self.pool.clone()),
             events: self.events.clone(),
         }
+    }
+
+    /// Agent-activity service (live trail + task tracker) bound to this
+    /// context's DB pool and event bus. Persists an entry and pushes the
+    /// matching live event in one call.
+    pub fn activity(&self) -> ActivityService {
+        ActivityService {
+            repo: ActivityRepo::new(self.pool.clone()),
+            events: self.events.clone(),
+        }
+    }
+}
+
+/// Persists agent-activity rows and broadcasts the matching live event. Cheap
+/// to construct (clones a pool handle + broadcast sender); created on demand via
+/// [`ServerCtx::activity`].
+#[derive(Clone)]
+pub struct ActivityService {
+    repo: ActivityRepo,
+    events: broadcast::Sender<Event>,
+}
+
+impl ActivityService {
+    /// Append a trail entry and broadcast `Event::TrailAppended`.
+    pub async fn append_trail(&self, new: NewTrail) -> otto_core::Result<TrailEvent> {
+        let workspace_id = new.workspace_id.clone();
+        let session_id = new.session_id.clone();
+        let event = self.repo.append_trail(new).await?;
+        let _ = self.events.send(Event::TrailAppended {
+            workspace_id,
+            session_id,
+            event: event.clone(),
+        });
+        Ok(event)
+    }
+
+    /// Replace a session's task list and broadcast `Event::TasksUpdated`.
+    pub async fn put_tasks(
+        &self,
+        session_id: &otto_core::Id,
+        workspace_id: &otto_core::Id,
+        tasks: &[NewTask],
+    ) -> otto_core::Result<Vec<AgentTask>> {
+        let tasks = self.repo.replace_tasks(session_id, workspace_id, tasks).await?;
+        let _ = self.events.send(Event::TasksUpdated {
+            workspace_id: workspace_id.clone(),
+            session_id: session_id.clone(),
+            tasks: tasks.clone(),
+        });
+        Ok(tasks)
+    }
+
+    /// Direct repo access (list operations).
+    pub fn repo(&self) -> &ActivityRepo {
+        &self.repo
     }
 }
 

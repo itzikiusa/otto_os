@@ -7,6 +7,7 @@
   import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
   import { search, searchKeymap } from '@codemirror/search';
   import { autocompletion, completionKeymap } from '@codemirror/autocomplete';
+  import type { CompletionSource } from '@codemirror/autocomplete';
   import { lintGutter, lintKeymap } from '@codemirror/lint';
   import { indentOnInput, bracketMatching, foldGutter, foldKeymap } from '@codemirror/language';
   import { oneDark } from '@codemirror/theme-one-dark';
@@ -22,6 +23,7 @@
   import { css } from '@codemirror/lang-css';
   import { markdown } from '@codemirror/lang-markdown';
   import { java } from '@codemirror/lang-java';
+  import { sql } from '@codemirror/lang-sql';
 
   // LSP — use the all-in-one factory that manages the WS transport internally
   import { languageServer } from '@marimo-team/codemirror-languageserver';
@@ -41,15 +43,39 @@
     readOnly?: boolean;
     /** Fired with the full document text on every edit (only when !readOnly). */
     onchange?: (value: string) => void;
+    /**
+     * Optional custom autocompletion source. When set, it overrides the default
+     * completion (and suppresses LSP for the doc) — used by the DB query editor
+     * to surface server-driven SQL/Redis/Mongo completions. Reapplied live via a
+     * Compartment so callers can toggle it without remounting the editor.
+     */
+    completionSource?: CompletionSource | null;
+    /** Hide the gutters (line numbers + fold) for a leaner single-statement editor. */
+    minimal?: boolean;
+    /** Run handler bound to Cmd/Ctrl+Enter (e.g. execute the query). */
+    onsubmit?: () => void;
   }
 
-  let { path, content, root, language, readOnly = true, onchange }: Props = $props();
+  let {
+    path,
+    content,
+    root,
+    language,
+    readOnly = true,
+    onchange,
+    completionSource = null,
+    minimal = false,
+    onsubmit,
+  }: Props = $props();
 
   // ── Container ─────────────────────────────────────────────────────────────
 
   let container: HTMLDivElement | undefined = $state();
   let view: EditorView | null = null;
   let lspCompartment = new Compartment();
+  // Holds either the default autocompletion() or one overridden with the
+  // caller's completionSource (DB query editor). Reconfigured reactively.
+  let completionCompartment = new Compartment();
 
   // ── Language extension map ─────────────────────────────────────────────────
 
@@ -69,12 +95,14 @@
     jsonc:() => json(),
     html: () => html(),
     htm:  () => html(),
+    xml:  () => html(),
     css:  () => css(),
     scss: () => css(),
     less: () => css(),
     md:   () => markdown(),
     mdx:  () => markdown(),
     java: () => java(),
+    sql:  () => sql(),
   };
 
   // LSP language IDs (maps file extension → LSP lang id)
@@ -239,26 +267,48 @@
 
   // ── Build and mount EditorView ─────────────────────────────────────────────
 
+  /** The autocompletion extension for the current completionSource (if any). */
+  function completionExt(): Extension {
+    return completionSource
+      ? autocompletion({ override: [completionSource], activateOnTyping: true })
+      : autocompletion();
+  }
+
+  /** Submit keybinding (Cmd/Ctrl+Enter) — used by the DB query editor. */
+  const submitKeymap = keymap.of([
+    {
+      key: 'Mod-Enter',
+      run: () => {
+        if (onsubmit) {
+          onsubmit();
+          return true;
+        }
+        return false;
+      },
+    },
+  ]);
+
   function buildEditor(el: HTMLDivElement, filePath: string, fileContent: string, rootPath: string): void {
     teardownEditor();
     lspCompartment = new Compartment();
+    completionCompartment = new Compartment();
 
     const langExt = cmLangFor(filePath, language);
     // Reset selection when a new file is opened
     sel = null;
 
     const baseExtensions: Extension[] = [
-      lineNumbers(),
-      foldGutter(),
+      ...(minimal ? [] : [lineNumbers(), foldGutter()]),
       indentOnInput(),
       bracketMatching(),
       lintGutter(),
-      autocompletion(),
+      completionCompartment.of(completionExt()),
       search({ top: false }),
       oneDark,
       lspCompartment.of([]),
       selectionListener,
       changeListener,
+      submitKeymap,
       EditorState.readOnly.of(readOnly),
       keymap.of([
         ...defaultKeymap,
@@ -279,8 +329,9 @@
 
     view = new EditorView({ state, parent: el });
 
-    // Attach LSP without awaiting — failures are swallowed inside
-    void attachLsp(view, filePath, rootPath);
+    // A caller-supplied completion source replaces LSP for this doc; only attach
+    // the language server when no custom source is wired.
+    if (!completionSource) void attachLsp(view, filePath, rootPath);
   }
 
   // ── Reactive effects ───────────────────────────────────────────────────────
@@ -311,7 +362,24 @@
       prevContent = curContent;
     }
 
-    return () => teardownEditor();
+    // NOTE: deliberately no cleanup returned here. A Svelte 5 $effect cleanup
+    // runs *before every re-run* (not only on unmount), so tearing the editor
+    // down here destroyed the view on every keystroke — `content` echoes back
+    // our own edit, the effect re-runs, the (now-destroyed) view fails the
+    // `!view` guard and rebuilds, dropping focus after a single character.
+    // Teardown on unmount is handled by onDestroy; rebuilds are handled by
+    // buildEditor() (which tears down first).
+  });
+
+  // Reconfigure the completion source live (no remount) when it changes — the
+  // DB query editor swaps it as the active connection/engine changes.
+  let prevCompletion: CompletionSource | null = null;
+  $effect(() => {
+    const src = completionSource;
+    if (!view) return;
+    if (src === prevCompletion) return;
+    prevCompletion = src;
+    view.dispatch({ effects: completionCompartment.reconfigure(completionExt()) });
   });
 
   onDestroy(() => {

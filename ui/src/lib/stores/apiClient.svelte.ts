@@ -25,12 +25,40 @@ import type {
 } from '../api/types';
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
+import { runPreRequest, runPostResponse, type PreRequestReq, type TestResult } from '../api/scripts';
+import { detectAndParse, collectionToPostman, type ImportedCollection } from '../api/importers';
+
+/** Request transport: classic HTTP, server-sent events, WebSocket, or gRPC. */
+export type ApiRequestKind = 'http' | 'sse' | 'websocket' | 'grpc';
+
+/** Per-request execution settings (Settings tab). */
+export interface ApiSettings {
+  /** Request timeout in ms; null = daemon default (60s). */
+  timeout_ms: number | null;
+  follow_redirects: boolean;
+  /** Verify TLS certificates (off = accept self-signed / invalid). */
+  verify_ssl: boolean;
+}
+
+export function defaultSettings(): ApiSettings {
+  return { timeout_ms: null, follow_redirects: true, verify_ssl: true };
+}
+
+/** A cookie from the daemon-global jar. */
+export interface ApiCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+}
 
 /** The editable request the builder/panel work on (a request not yet saved). */
 export interface ApiDraft {
   /** When the draft came from a saved request, its id (for "Save" = update). */
   requestId: Id | null;
   name: string;
+  /** Transport kind (UI-only; HTTP executes via /execute, others stream). */
+  kind: ApiRequestKind;
   method: string;
   url: string;
   headers: ApiKeyVal[];
@@ -38,6 +66,20 @@ export interface ApiDraft {
   body_mode: ApiBodyMode;
   body: string;
   auth: ApiAuth;
+  /** gRPC: the uploaded .proto source (parsed by the daemon on demand). */
+  proto?: string;
+  /** gRPC: selected "package.Service/Method". */
+  grpc_method?: string;
+  /** Per-request execution settings (optional; defaults applied when absent). */
+  settings?: ApiSettings;
+  /** Pre-request JS (runs before send; can mutate request + set variables). */
+  pre_request_script?: string;
+  /** Post-response JS (runs after; reads response, sets variables, tests). */
+  post_response_script?: string;
+  /** GraphQL variables (JSON) — combined with the query body when body_mode=graphql. */
+  graphql_variables?: string;
+  /** Free-form Markdown documentation for this request. */
+  docs?: string;
 }
 
 export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
@@ -46,6 +88,7 @@ function blankDraft(): ApiDraft {
   return {
     requestId: null,
     name: '',
+    kind: 'http',
     method: 'GET',
     url: '',
     headers: [],
@@ -53,6 +96,8 @@ function blankDraft(): ApiDraft {
     body_mode: 'none',
     body: '',
     auth: { type: 'none' },
+    proto: '',
+    grpc_method: '',
   };
 }
 
@@ -77,8 +122,48 @@ class ApiClientStore {
   /** In-flight automation run. */
   running = $state(false);
 
-  /** The request currently in the builder. */
-  draft: ApiDraft = $state(blankDraft());
+  /** Open request tabs; the active one is edited via `draft`. */
+  tabs: ApiDraft[] = $state([blankDraft()]);
+  activeTab = $state(0);
+  /** The request currently in the builder (proxies the active tab). */
+  get draft(): ApiDraft {
+    return this.tabs[this.activeTab] ?? this.tabs[0];
+  }
+  set draft(d: ApiDraft) {
+    this.tabs[this.activeTab] = d;
+  }
+  /** A short label for a tab. */
+  tabLabel(d: ApiDraft): string {
+    if (d.name?.trim()) return d.name;
+    try {
+      const u = new URL(d.url);
+      return `${d.method} ${u.pathname || u.host}`;
+    } catch {
+      return d.url?.trim() ? `${d.method} ${d.url}` : 'New Request';
+    }
+  }
+  openTab(d: ApiDraft = blankDraft()): void {
+    this.tabs = [...this.tabs, d];
+    this.activeTab = this.tabs.length - 1;
+    this.lastResponse = null;
+  }
+  switchTab(i: number): void {
+    if (i >= 0 && i < this.tabs.length) {
+      this.activeTab = i;
+      this.lastResponse = null;
+    }
+  }
+  closeTab(i: number): void {
+    if (this.tabs.length === 1) {
+      this.tabs = [blankDraft()];
+      this.activeTab = 0;
+    } else {
+      this.tabs = this.tabs.filter((_, idx) => idx !== i);
+      if (this.activeTab >= this.tabs.length) this.activeTab = this.tabs.length - 1;
+      else if (i < this.activeTab) this.activeTab -= 1;
+    }
+    this.lastResponse = null;
+  }
   /** Last execute() result, shown in the ResponseViewer. */
   lastResponse: ApiResponse | null = $state(null);
   /** In-flight send. */
@@ -164,6 +249,29 @@ class ApiClientStore {
     }
   }
 
+  // ── Cookie jar (daemon-global) ────────────────────────────────────────────
+  cookies: ApiCookie[] = $state([]);
+  async loadCookies(): Promise<void> {
+    const base = this.base();
+    if (!base) return;
+    try {
+      this.cookies = await api.get<ApiCookie[]>(`${base}/cookies`);
+    } catch (e) {
+      toasts.error('Could not load cookies', errMsg(e));
+    }
+  }
+  async clearCookies(): Promise<void> {
+    const base = this.base();
+    if (!base) return;
+    try {
+      await api.del(`${base}/cookies`);
+      this.cookies = [];
+      toasts.success('Cookies cleared');
+    } catch (e) {
+      toasts.error('Clear cookies failed', errMsg(e));
+    }
+  }
+
   // ── Collections ─────────────────────────────────────────────────────────
 
   async saveCollection(req: UpsertApiCollectionReq, id?: Id): Promise<ApiCollection | null> {
@@ -181,6 +289,75 @@ class ApiClientStore {
     } catch (e) {
       toasts.error('Save collection failed', errMsg(e));
       return null;
+    }
+  }
+
+  /** Create a collection (+ nested folders + requests) from an imported doc. */
+  async importParsed(parsed: ImportedCollection): Promise<void> {
+    if (ws.myRole === 'viewer') {
+      toasts.error('Read-only', 'You have viewer access to this workspace');
+      return;
+    }
+    const root = await this.saveCollection({ name: parsed.name, parent_id: null });
+    if (!root) return;
+    const folderCache = new Map<string, Id>();
+    for (const req of parsed.requests) {
+      let parentId: Id = root.id;
+      let pathKey = '';
+      for (const folder of req.folderPath) {
+        pathKey += '/' + folder;
+        if (!folderCache.has(pathKey)) {
+          const f = await this.saveCollection({ name: folder, parent_id: parentId });
+          if (f) folderCache.set(pathKey, f.id);
+        }
+        parentId = folderCache.get(pathKey) ?? parentId;
+      }
+      await this.saveRequest({
+        collection_id: parentId, name: req.name, method: req.method, url: req.url,
+        headers: req.headers, query: req.query, body_mode: req.body_mode, body: req.body, auth: req.auth,
+      });
+    }
+    await this.loadRequests();
+    toasts.success('Imported', `${parsed.name} · ${parsed.requests.length} request(s) (${parsed.format})`);
+  }
+
+  /** Pull Postman collection files from a connected git repo and import them. */
+  async gitPullCollections(repoId: Id): Promise<void> {
+    try {
+      const res = await api.post<{ files: { name: string; content: string }[] }>(`/repos/${repoId}/api-collections/pull`, {});
+      let imported = 0;
+      for (const f of res.files) {
+        try {
+          await this.importParsed(detectAndParse(f.content, f.name));
+          imported++;
+        } catch { /* skip non-collection json */ }
+      }
+      toasts.success('Pulled from git', `${imported} collection file(s)`);
+    } catch (e) {
+      toasts.error('Git pull failed', errMsg(e));
+    }
+  }
+
+  /** Export all root collections to Postman files and push them to a git repo. */
+  async gitPushCollections(repoId: Id, message: string, branch: string | null): Promise<boolean> {
+    const roots = this.collections.filter((c) => (c.parent_id ?? null) === null);
+    if (roots.length === 0) {
+      toasts.error('Nothing to push', 'No collections to export.');
+      return false;
+    }
+    const files = roots.map((c) => ({
+      name: `${c.name.replace(/[^\w.-]+/g, '_')}.postman_collection.json`,
+      content: JSON.stringify(collectionToPostman(c.id, this.collections, this.requests), null, 2),
+    }));
+    try {
+      const res = await api.post<{ commit: string; files: number }>(`/repos/${repoId}/api-collections/push`, {
+        files, message: message || 'Update API collections', branch: branch || null,
+      });
+      toasts.success('Pushed to git', `${res.files} file(s) · ${res.commit.slice(0, 8)}`);
+      return true;
+    } catch (e) {
+      toasts.error('Git push failed', errMsg(e));
+      return false;
     }
   }
 
@@ -302,6 +479,29 @@ class ApiClientStore {
 
   // ── Execute ─────────────────────────────────────────────────────────────
 
+  /** Runtime/session variables (set by scripts or by hand) sent as overrides. */
+  runtimeVars: Record<string, string> = $state({});
+  setRuntimeVar(key: string, value: string): void {
+    this.runtimeVars = { ...this.runtimeVars, [key]: value };
+  }
+  renameRuntimeVar(oldKey: string, newKey: string): void {
+    if (oldKey === newKey) return;
+    const next = { ...this.runtimeVars };
+    const v = next[oldKey] ?? '';
+    delete next[oldKey];
+    if (newKey.trim()) next[newKey] = v;
+    this.runtimeVars = next;
+  }
+  removeRuntimeVar(key: string): void {
+    const next = { ...this.runtimeVars };
+    delete next[key];
+    this.runtimeVars = next;
+  }
+  /** Combined pre/post script console output for the last run. */
+  scriptLogs: string[] = $state([]);
+  /** Post-response test results for the last run. */
+  testResults: TestResult[] = $state([]);
+
   /** Send the given draft through the daemon. Sets lastResponse + refreshes history. */
   async execute(draft: ApiDraft = this.draft): Promise<ApiResponse | null> {
     const base = this.base();
@@ -313,27 +513,115 @@ class ApiClientStore {
       toasts.error('URL is empty');
       return null;
     }
-    const body: ExecuteApiReq = {
+
+    const logs: string[] = [];
+    this.testResults = [];
+
+    // Working copy the pre-request script may mutate.
+    const reqCtx: PreRequestReq = {
       method: draft.method,
       url: draft.url,
-      headers: liveKv(draft.headers),
+      headers: draft.headers.map((h) => ({ ...h })),
+      body: draft.body,
+    };
+    if (draft.pre_request_script?.trim()) {
+      const pre = runPreRequest(draft.pre_request_script, reqCtx, this.runtimeVars);
+      logs.push(...pre.logs.map((l) => `[pre] ${l}`));
+      if (pre.error) {
+        this.scriptLogs = [...logs, `[pre] error: ${pre.error}`];
+        toasts.error('Pre-request script failed', pre.error);
+        return null;
+      }
+    }
+
+    // GraphQL: combine the query body + variables into the standard JSON payload.
+    let effectiveBody = reqCtx.body;
+    if (draft.body_mode === 'graphql') {
+      let variables: unknown = {};
+      try {
+        variables = draft.graphql_variables?.trim() ? JSON.parse(draft.graphql_variables) : {};
+      } catch {
+        variables = {};
+      }
+      effectiveBody = JSON.stringify({ query: reqCtx.body, variables });
+    }
+
+    const s = draft.settings;
+    const body: ExecuteApiReq = {
+      method: reqCtx.method,
+      url: reqCtx.url,
+      headers: liveKv(reqCtx.headers),
       query: liveKv(draft.query),
       body_mode: draft.body_mode,
-      body: draft.body,
+      body: effectiveBody,
       auth: draft.auth,
       environment_id: this.activeEnv?.id ?? null,
+      timeout_ms: s?.timeout_ms ?? null,
+      follow_redirects: s?.follow_redirects ?? true,
+      verify_ssl: s?.verify_ssl ?? true,
+      vars: Object.keys(this.runtimeVars).length ? this.runtimeVars : undefined,
     };
     this.sending = true;
     try {
       const resp = await api.post<ApiResponse>(`${base}/execute`, body);
       this.lastResponse = resp;
       void this.loadHistory();
+
+      // Post-response script: chaining (set vars) + tests.
+      if (draft.post_response_script?.trim()) {
+        const headersObj: Record<string, string> = {};
+        for (const h of resp.headers) headersObj[h.key.toLowerCase()] = h.value;
+        const post = runPostResponse(
+          draft.post_response_script,
+          { code: resp.status, status: resp.status_text, responseTime: resp.duration_ms, headers: headersObj, bodyText: resp.body },
+          this.runtimeVars,
+        );
+        logs.push(...post.logs.map((l) => `[test] ${l}`));
+        this.testResults = post.tests;
+        if (post.error) logs.push(`[test] error: ${post.error}`);
+        this.runtimeVars = { ...this.runtimeVars };
+      }
+      this.scriptLogs = logs;
       return resp;
     } catch (e) {
+      this.scriptLogs = logs;
       toasts.error('Request failed', errMsg(e));
       return null;
     } finally {
       this.sending = false;
+    }
+  }
+
+  /** Introspected GraphQL schema (types + fields), or null. */
+  graphqlSchema: { name: string; kind: string; fields: string[] }[] | null = $state(null);
+  graphqlIntrospecting = $state(false);
+
+  /** Run a GraphQL introspection query against the draft URL. */
+  async graphqlIntrospect(): Promise<void> {
+    const base = this.base();
+    if (!base || !this.draft.url.trim()) {
+      toasts.error('No URL', 'Enter the GraphQL endpoint URL first.');
+      return;
+    }
+    const q = `query{__schema{queryType{name}mutationType{name}types{name kind fields{name}}}}`;
+    this.graphqlIntrospecting = true;
+    try {
+      const resp = await api.post<ApiResponse>(`${base}/execute`, {
+        method: 'POST', url: this.draft.url,
+        headers: [{ key: 'Content-Type', value: 'application/json', enabled: true }],
+        query: [], body_mode: 'json', body: JSON.stringify({ query: q }),
+        auth: this.draft.auth, environment_id: this.activeEnv?.id ?? null,
+      });
+      const data = JSON.parse(resp.body) as { data?: { __schema?: { types?: { name: string; kind: string; fields?: { name: string }[] }[] } } };
+      const types = (data.data?.__schema?.types ?? [])
+        .filter((t) => !t.name.startsWith('__') && (t.kind === 'OBJECT' || t.kind === 'INPUT_OBJECT' || t.kind === 'ENUM' || t.kind === 'INTERFACE'))
+        .map((t) => ({ name: t.name, kind: t.kind, fields: (t.fields ?? []).map((f) => f.name) }));
+      this.graphqlSchema = types;
+      toasts.success('Schema introspected', `${types.length} types`);
+    } catch (e) {
+      toasts.error('Introspection failed', errMsg(e));
+    } finally {
+      this.graphqlIntrospecting = false;
     }
   }
 
@@ -348,6 +636,7 @@ class ApiClientStore {
       this.draft = {
         requestId: null,
         name: this.draft.name,
+        kind: 'http',
         method: p.method,
         url: p.url,
         headers: p.headers,
@@ -355,6 +644,8 @@ class ApiClientStore {
         body_mode: p.body_mode,
         body: p.body,
         auth: p.auth,
+        proto: '',
+        grpc_method: '',
       };
       toasts.success('Imported curl', `${p.method} ${p.url}`);
       return true;
@@ -409,6 +700,18 @@ class ApiClientStore {
           parts.push('-H', sh('Content-Type: application/json'));
         }
         parts.push('--data', sh(draft.body));
+      } else if (draft.body_mode === 'multipart') {
+        // multipart/form-data → -F per field; files as -F key=@filename.
+        try {
+          const rows = JSON.parse(draft.body) as { key: string; type?: string; value: string; filename?: string }[];
+          for (const r of rows) {
+            if (!r.key) continue;
+            if (r.type === 'file') parts.push('-F', sh(`${r.key}=@${r.filename || 'file'}`));
+            else parts.push('-F', sh(`${r.key}=${r.value}`));
+          }
+        } catch {
+          parts.push('--data', sh(draft.body));
+        }
       } else if (draft.body_mode === 'form') {
         parts.push('--data', sh(draft.body));
       } else {
@@ -497,10 +800,9 @@ class ApiClientStore {
 
   // ── Draft helpers ─────────────────────────────────────────────────────────
 
-  /** Replace the draft with a blank one. */
+  /** Open a fresh request in a new tab. */
   newDraft(): void {
-    this.draft = blankDraft();
-    this.lastResponse = null;
+    this.openTab(blankDraft());
   }
 
   /** Load a saved request into the builder. */
@@ -508,6 +810,7 @@ class ApiClientStore {
     this.draft = {
       requestId: r.id,
       name: r.name,
+      kind: 'http',
       method: r.method,
       url: r.url,
       headers: r.headers.map((h) => ({ ...h })),
@@ -515,6 +818,8 @@ class ApiClientStore {
       body_mode: r.body_mode,
       body: r.body,
       auth: { ...r.auth },
+      proto: '',
+      grpc_method: '',
     };
     this.lastResponse = null;
   }
@@ -525,6 +830,7 @@ class ApiClientStore {
     this.draft = {
       requestId: null,
       name: '',
+      kind: 'http',
       method: snap.method ?? h.method,
       url: snap.url ?? h.url,
       headers: (snap.headers ?? []).map((x) => ({ ...x })),
@@ -532,6 +838,8 @@ class ApiClientStore {
       body_mode: snap.body_mode ?? 'none',
       body: snap.body ?? '',
       auth: snap.auth ?? { type: 'none' },
+      proto: '',
+      grpc_method: '',
     };
     this.lastResponse = null;
   }

@@ -95,12 +95,17 @@ async fn allowed(
             workspace_id
         }
         Event::SessionCreated { session } => &session.workspace_id,
+        Event::SessionMetaUpdated { workspace_id, .. } => workspace_id,
         // Improvement (self-reflection) events are workspace-scoped — gate them
         // on viewer access to that workspace, like session events.
         Event::ImprovementRunStarted { workspace_id, .. }
         | Event::ImprovementRunFinished { workspace_id, .. }
         | Event::ImprovementEditApplied { workspace_id, .. }
-        | Event::ImprovementApprovalPending { workspace_id, .. } => workspace_id,
+        | Event::ImprovementApprovalPending { workspace_id, .. }
+        // Session activity-trail / task events are workspace-scoped, like the
+        // session status events above.
+        | Event::TrailAppended { workspace_id, .. }
+        | Event::TasksUpdated { workspace_id, .. } => workspace_id,
     };
     if let Some(&ok) = cache.get(workspace_id) {
         return ok;

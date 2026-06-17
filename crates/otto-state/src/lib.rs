@@ -2,11 +2,13 @@
 //!
 //! Repositories map rows to `otto_core::domain` structs.
 
+pub mod activity;
 pub mod api_client;
 pub mod connection_sections;
 pub mod connections;
 pub mod convert;
 pub mod db;
+pub mod db_explorer;
 pub mod git;
 pub mod improvements;
 pub mod integrations;
@@ -15,9 +17,12 @@ pub mod notifications;
 pub mod reviews;
 pub mod sessions;
 pub mod settings;
+pub mod skill_evals;
 pub mod users;
+pub mod workflows;
 pub mod workspaces;
 
+pub use activity::{ActivityRepo, NewTask, NewTrail};
 pub use api_client::{
     ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,
     NewApiRequest,
@@ -25,6 +30,9 @@ pub use api_client::{
 pub use connection_sections::ConnectionSectionsRepo;
 pub use connections::{ConnectionsRepo, NewConnection};
 pub use db::open;
+pub use db_explorer::{
+    Dashboard, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery, Widget,
+};
 pub use git::{GitStore, NewGitAccount, NewRepo};
 pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
@@ -33,5 +41,7 @@ pub use notifications::{NewNotice, NotificationsRepo};
 pub use reviews::ReviewsRepo;
 pub use sessions::{NewSession, SessionsRepo};
 pub use settings::SettingsRepo;
+pub use skill_evals::SkillEvalsRepo;
+pub use workflows::WorkflowsRepo;
 pub use users::{UserRecord, UsersRepo};
 pub use workspaces::{Member, WorkspacesRepo};

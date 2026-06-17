@@ -33,7 +33,7 @@
     try {
       let q = path ? `?path=${encodeURIComponent(path)}` : '';
       if (files) {
-        q = q ? `${q}&files=1` : '?files=1';
+        q = q ? `${q}&files=true` : '?files=true';
       }
       view = await api.get<FsBrowse>(`/fs/browse${q}`);
     } catch (e) {

@@ -9,7 +9,53 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { ApiCollection, ApiRequest } from '../../lib/api/types';
+  import { detectAndParse } from '../../lib/api/importers';
+  import type { ApiCollection, ApiRequest, Repo } from '../../lib/api/types';
+
+  async function importFile(input: HTMLInputElement): Promise<void> {
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const parsed = detectAndParse(await file.text(), file.name);
+      await apiClient.importParsed(parsed);
+    } catch (e) {
+      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // ── Git sync ────────────────────────────────────────────────────────────────
+  let gitOpen = $state(false);
+  let repos = $state<Repo[]>([]);
+  let repoId = $state('');
+  let commitMsg = $state('Update API collections');
+  let branch = $state('');
+  let syncing = $state(false);
+
+  async function toggleGit(): Promise<void> {
+    gitOpen = !gitOpen;
+    if (gitOpen && repos.length === 0 && ws.currentId) {
+      try {
+        repos = await api.get<Repo[]>(`/workspaces/${ws.currentId}/repos`);
+        if (repos.length && !repoId) repoId = repos[0].id;
+      } catch (e) {
+        toasts.error('Could not load repos', e instanceof Error ? e.message : String(e));
+      }
+    }
+  }
+  async function gitPull(): Promise<void> {
+    if (!repoId) return;
+    syncing = true;
+    await apiClient.gitPullCollections(repoId);
+    syncing = false;
+  }
+  async function gitPush(): Promise<void> {
+    if (!repoId) return;
+    syncing = true;
+    const ok = await apiClient.gitPushCollections(repoId, commitMsg, branch.trim() || null);
+    syncing = false;
+    if (ok) gitOpen = false;
+  }
 
   interface TreeNode {
     col: ApiCollection;
@@ -43,14 +89,21 @@
 
   async function newCollection(parentId: string | null): Promise<void> {
     if (!canEdit) return;
-    const name = prompt(parentId ? 'Folder name' : 'Collection name')?.trim();
+    const name = await confirmer.promptText(parentId ? 'Folder name' : 'Collection name', {
+      title: parentId ? 'New folder' : 'New collection',
+      confirmLabel: 'Create',
+    });
     if (!name) return;
     await apiClient.saveCollection({ name, parent_id: parentId }, undefined);
   }
 
   async function renameCollection(col: ApiCollection): Promise<void> {
     if (!canEdit) return;
-    const name = prompt('Rename collection', col.name)?.trim();
+    const name = await confirmer.promptText('Rename collection', {
+      title: 'Rename collection',
+      confirmLabel: 'Rename',
+      initial: col.name,
+    });
     if (!name || name === col.name) return;
     await apiClient.saveCollection({ name, parent_id: col.parent_id }, col.id);
   }
@@ -109,9 +162,41 @@
         <button class="icon-btn" title="New collection" aria-label="New collection" onclick={() => newCollection(null)}>
           <Icon name="folder" size={13} />
         </button>
+        <label class="icon-btn" title="Import (Postman / OpenAPI / HAR)" aria-label="Import collection">
+          <Icon name="external" size={13} />
+          <input type="file" accept=".json,.har,.yaml,.yml" hidden onchange={(e) => importFile(e.currentTarget as HTMLInputElement)} />
+        </label>
+        <button class="icon-btn" class:active={gitOpen} title="Sync with Git" aria-label="Sync collections with Git" onclick={toggleGit}>
+          <Icon name="branch" size={13} />
+        </button>
       {/if}
     </div>
   </div>
+
+  {#if gitOpen}
+    <div class="git-sync">
+      {#if repos.length === 0}
+        <div class="git-empty">No git repos connected in this workspace. Add one in the Git tab.</div>
+      {:else}
+        <select class="input git-repo" value={repoId} onchange={(e) => (repoId = (e.currentTarget as HTMLSelectElement).value)} aria-label="Repository">
+          {#each repos as r (r.id)}<option value={r.id}>{r.name}</option>{/each}
+        </select>
+        <div class="git-row">
+          <input class="input git-msg" bind:value={commitMsg} placeholder="Commit message" />
+          <input class="input git-branch" bind:value={branch} placeholder="branch (optional)" />
+        </div>
+        <div class="git-actions">
+          <button class="btn small ghost" onclick={gitPull} disabled={syncing}>
+            <Icon name="refresh" size={11} />Pull
+          </button>
+          <button class="btn small primary" onclick={gitPush} disabled={syncing}>
+            <Icon name="branch" size={11} />Commit &amp; Push
+          </button>
+        </div>
+        <div class="git-hint">Collections are stored as Postman files under <code>collections/</code>. Use a branch to open a PR afterwards from the Git tab.</div>
+      {/if}
+    </div>
+  {/if}
 
   {#if apiClient.collections.length === 0 && apiClient.requests.length === 0}
     <EmptyState
@@ -187,6 +272,43 @@
 {/snippet}
 
 <style>
+  .git-sync {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .git-empty,
+  .git-hint {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .git-repo {
+    width: 100%;
+  }
+  .git-row {
+    display: flex;
+    gap: 6px;
+  }
+  .git-msg {
+    flex: 1;
+    min-width: 0;
+  }
+  .git-branch {
+    flex: 0 0 110px;
+    min-width: 0;
+  }
+  .git-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  .icon-btn.active {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
   .tree-wrap {
     display: flex;
     flex-direction: column;

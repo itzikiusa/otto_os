@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Notice, Session, SessionStatus};
+use crate::domain::{AgentTask, Notice, Session, SessionStatus, TrailEvent};
 use crate::Id;
 
 /// Daemon-wide event. Serialized as JSON with a `type` tag, one per WS message.
@@ -17,6 +17,13 @@ pub enum Event {
     },
     /// A session was created (by any client or by the orchestrator).
     SessionCreated { session: Session },
+    /// A session's `meta` changed. Carries the full merged meta so clients can
+    /// update their cached session in place (e.g. live handover-progress flags).
+    SessionMetaUpdated {
+        session_id: Id,
+        workspace_id: Id,
+        meta: serde_json::Value,
+    },
     /// A session was removed.
     SessionRemoved { session_id: Id, workspace_id: Id },
     /// Free-form notice surfaced as a toast/notification.
@@ -54,5 +61,17 @@ pub enum Event {
         run_id: Id,
         edit_id: Id,
         target_ref: String,
+    },
+    /// A new entry was appended to a session's activity trail.
+    TrailAppended {
+        workspace_id: Id,
+        session_id: Id,
+        event: TrailEvent,
+    },
+    /// A session's task tracker changed; carries the full current task list.
+    TasksUpdated {
+        workspace_id: Id,
+        session_id: Id,
+        tasks: Vec<AgentTask>,
     },
 }

@@ -7,8 +7,16 @@
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
+  import { activity } from '../lib/stores/activity.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import type { Session, SessionStatus } from '../lib/api/types';
+
+  // Load the per-session task roll-up for the current workspace (sidebar chips);
+  // it then stays fresh from the events WS (tasks_updated / trail_appended).
+  $effect(() => {
+    const w = ws.currentId;
+    if (w) void activity.loadSummary(w);
+  });
 
   // A session is "suspended / resumable" — parked to save memory, but its
   // provider session is intact so opening it auto-resumes (`--resume`).
@@ -282,6 +290,40 @@
         <span class="grow">API</span>
       </button>
 
+      <button class="nav-item" class:active={router.module === 'database'} onclick={() => router.go('database')}>
+        <Icon name="db" size={14} />
+        <span class="grow">Database</span>
+      </button>
+
+      <button
+        class="nav-item"
+        class:active={router.module === 'workflows'}
+        onclick={() => router.go('workflows')}
+      >
+        <Icon name="split" size={14} />
+        <span class="grow">Workflows</span>
+      </button>
+
+      <button
+        class="nav-item"
+        class:active={router.module === 'skills-eval'}
+        onclick={() => router.go('skills-eval')}
+      >
+        <Icon name="zap" size={14} />
+        <span class="grow">Skills Evaluator</span>
+      </button>
+
+      {#if auth.isRoot}
+        <button
+          class="nav-item"
+          class:active={router.module === 'usage'}
+          onclick={() => router.go('usage')}
+        >
+          <Icon name="chart" size={14} />
+          <span class="grow">Usage</span>
+        </button>
+      {/if}
+
       {#if ws.archivedSessions.length > 0}
         <button class="nav-item subtle" onclick={() => (archivedOpen = !archivedOpen)}>
           <Icon name="archive" size={14} />
@@ -389,6 +431,7 @@
 {#snippet sessionRow(s: Session)}
   {@const status = ws.statusMap[s.id] ?? s.status}
   {@const resumable = isResumable(s, status)}
+  {@const sum = activity.summary(s.id)}
   <div class="nested-row">
     {#if renamingId === s.id}
       <!-- svelte-ignore a11y_autofocus -->
@@ -429,6 +472,14 @@
           <StatusDot {status} />
         {/if}
         <span class="grow ellipsis">{s.title}</span>
+        {#if sum && sum.total > 0}
+          <span
+            class="task-chip"
+            class:done={sum.done === sum.total}
+            class:active={sum.in_progress != null}
+            title={sum.in_progress ? `Now: ${sum.in_progress}` : `${sum.done}/${sum.total} tasks done`}
+          >{sum.done}/{sum.total}</span>
+        {/if}
         {#if resumable}
           <span class="susp-pill" title={SUSPENDED_TIP}>resumable</span>
         {/if}
@@ -711,6 +762,28 @@
   .provider {
     font-size: 10px;
     color: var(--text-dim);
+  }
+  /* Per-session task roll-up: "done/total". Accent while a task is in progress,
+     green when all complete. */
+  .task-chip {
+    flex-shrink: 0;
+    padding: 0 5px;
+    height: 14px;
+    line-height: 14px;
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+  }
+  .task-chip.active {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .task-chip.done {
+    color: var(--status-working, #3fb950);
+    background: color-mix(in srgb, var(--status-working, #3fb950) 16%, transparent);
   }
   .ellipsis {
     overflow: hidden;

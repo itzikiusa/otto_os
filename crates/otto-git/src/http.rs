@@ -73,6 +73,8 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/push", post(repo_push::<S>))
         .route("/repos/{id}/pull", post(repo_pull::<S>))
         .route("/repos/{id}/checkout", post(repo_checkout::<S>))
+        .route("/repos/{id}/api-collections/pull", post(repo_collections_pull::<S>))
+        .route("/repos/{id}/api-collections/push", post(repo_collections_push::<S>))
         .route("/repos/{id}/stash", post(repo_stash::<S>))
         // local merge + conflict resolution (#4)
         .route("/repos/{id}/merge", post(repo_merge::<S>))
@@ -744,6 +746,81 @@ async fn repo_pull<S: GitCtx>(
     let token = optional_token(&s, &repo).await;
     let output = git.pull(token).await?;
     Ok(Json(serde_json::json!({ "output": output })))
+}
+
+/// `POST /repos/{id}/api-collections/pull` — pull the repo, then read every
+/// `collections/*.json` (Postman collection files) and return their contents
+/// for the API client to import.
+async fn repo_collections_pull<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let token = optional_token(&s, &repo).await;
+    let _ = git.pull(token).await; // best-effort; report read result regardless
+    let dir = std::path::Path::new(&repo.path).join("collections");
+    let mut files: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("json") {
+                if let Ok(content) = std::fs::read_to_string(&p) {
+                    files.push(serde_json::json!({
+                        "name": p.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                        "content": content,
+                    }));
+                }
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({ "files": files })))
+}
+
+#[derive(serde::Deserialize)]
+struct CollectionFile {
+    name: String,
+    content: String,
+}
+
+#[derive(serde::Deserialize)]
+struct PushCollectionsReq {
+    files: Vec<CollectionFile>,
+    message: String,
+    #[serde(default)]
+    branch: Option<String>,
+}
+
+/// `POST /repos/{id}/api-collections/push` — write the given Postman collection
+/// files into `collections/`, stage + commit, and push (optionally onto a new
+/// branch so the user can open a PR).
+async fn repo_collections_push<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<PushCollectionsReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    if let Some(branch) = req.branch.as_deref().filter(|b| !b.is_empty()) {
+        git.checkout(branch, true).await?;
+    }
+    let base = std::path::Path::new(&repo.path);
+    std::fs::create_dir_all(base.join("collections"))
+        .map_err(|e| otto_core::Error::Upstream(format!("create collections dir: {e}")))?;
+    let mut staged: Vec<String> = Vec::new();
+    for f in &req.files {
+        let safe = f.name.replace(['/', '\\'], "_");
+        let safe = if safe.ends_with(".json") { safe } else { format!("{safe}.json") };
+        let rel = format!("collections/{safe}");
+        std::fs::write(base.join(&rel), &f.content)
+            .map_err(|e| otto_core::Error::Upstream(format!("write {rel}: {e}")))?;
+        staged.push(rel);
+    }
+    git.stage(&staged).await?;
+    let sha = git.commit(&req.message, false).await?;
+    let token = optional_token(&s, &repo).await;
+    let push_out = git.push(token).await?;
+    Ok(Json(serde_json::json!({ "commit": sha, "push": push_out, "files": staged.len() })))
 }
 
 async fn repo_checkout<S: GitCtx>(

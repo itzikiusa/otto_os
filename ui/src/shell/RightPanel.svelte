@@ -6,6 +6,7 @@
   import InfoPanel from '../modules/panels/InfoPanel.svelte';
   import BrowserPanel from '../modules/panels/BrowserPanel.svelte';
   import FilesPanel from '../modules/panels/FilesPanel.svelte';
+  import ActivityPanel from '../modules/panels/ActivityPanel.svelte';
   import ApiPanel from '../modules/api/ApiPanel.svelte';
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -36,6 +37,7 @@
     { id: 'git', icon: 'branch', label: 'Git' },
     { id: 'files', icon: 'file', label: 'Files' },
     { id: 'notes', icon: 'note', label: 'Notes' },
+    { id: 'activity', icon: 'zap', label: 'Activity' },
     { id: 'info', icon: 'info', label: 'Info' },
     { id: 'browser', icon: 'globe', label: 'Browser' },
     { id: 'api', icon: 'send', label: 'API' },
@@ -109,6 +111,8 @@
         <GitPanel />
       {:else if ui.rightTab === 'files'}
         <FilesPanel />
+      {:else if ui.rightTab === 'activity'}
+        <ActivityPanel />
       {:else if ui.rightTab === 'info'}
         <InfoPanel />
       {:else if ui.rightTab === 'browser'}

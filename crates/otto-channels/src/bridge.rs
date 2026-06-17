@@ -472,6 +472,10 @@ impl Bridge {
         // not stall the Slack/Telegram socket. submit_to_agent waits for
         // readiness, pastes, submits, then monitors that the agent actually
         // started (retrying Enter once if not).
+        // Record the human's message on the session's activity trail (the
+        // "by user" side), before the trusted-context wrapping.
+        self.manager.record_user_message(&session_id, &msg.text).await;
+
         let input = agent_paste_input(&text);
         tokio::spawn(submit_to_agent(
             Arc::clone(&self.manager),

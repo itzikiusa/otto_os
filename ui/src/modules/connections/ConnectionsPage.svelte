@@ -25,6 +25,10 @@
     children: TreeNode[];
   }
 
+  // DB engines are managed in the Database section; this page handles the rest.
+  const DB_CONN_KINDS = ['mysql', 'redis', 'mongodb', 'clickhouse'];
+  const NON_DB_KINDS = ['ssh', 'custom'] as const;
+
   let conns: Connection[] = $state([]);
   let sections: ConnectionSection[] = $state([]);
   let loading = $state(true);
@@ -71,7 +75,9 @@
     loading = true;
     void api
       .get<Connection[]>(`/workspaces/${wsId}/connections`)
-      .then((c) => (conns = c))
+      // DB connections (mysql/redis/mongodb/clickhouse) live in the Database
+      // section now — keep this page to SSH / custom clients only.
+      .then((c) => (conns = c.filter((x) => !DB_CONN_KINDS.includes(x.kind))))
       .catch((e) => toasts.error('Could not load connections', e instanceof Error ? e.message : ''))
       .finally(() => (loading = false));
     void api
@@ -84,7 +90,11 @@
 
   async function createSection(parentId: string | null): Promise<void> {
     if (!ws.currentId) return;
-    const name = prompt(parentId ? 'Sub-section name' : 'Section name')?.trim();
+    const name = await confirmer.promptText(parentId ? 'Sub-section name' : 'Section name', {
+      title: parentId ? 'New sub-section' : 'New section',
+      confirmLabel: 'Create',
+      placeholder: 'e.g. Production',
+    });
     if (!name) return;
     try {
       const sec = await api.post<ConnectionSection>(
@@ -98,7 +108,11 @@
   }
 
   async function renameSection(sec: ConnectionSection): Promise<void> {
-    const name = prompt('Rename section', sec.name)?.trim();
+    const name = await confirmer.promptText('Rename section', {
+      title: 'Rename section',
+      confirmLabel: 'Rename',
+      initial: sec.name,
+    });
     if (!name || name === sec.name) return;
     try {
       const updated = await api.patch<ConnectionSection>(`/connection-sections/${sec.id}`, { name });
@@ -490,7 +504,12 @@
 {/snippet}
 
 {#if formOpen}
-  <ConnectionForm existing={editing} onclose={() => (formOpen = false)} onsaved={onSaved} />
+  <ConnectionForm
+    existing={editing}
+    kinds={[...NON_DB_KINDS]}
+    onclose={() => (formOpen = false)}
+    onsaved={onSaved}
+  />
 {/if}
 
 <style>

@@ -16,7 +16,7 @@ use crate::state::ServerCtx;
 /// Current API contract version.
 pub const API_VERSION: u32 = 1;
 
-const DETECTED_TOOLS: [&str; 4] = ["claude", "codex", "agy", "git"];
+const DETECTED_TOOLS: [&str; 5] = ["claude", "codex", "agy", "git", "clickhouse"];
 
 /// `GET /api/v1/health`
 pub async fn health() -> Json<Value> {

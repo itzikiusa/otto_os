@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use otto_core::api::{LibrarySkill, MaterializeProviderResult, WorkspaceContextConfig};
+use serde_json::{json, Value};
 
 use crate::library::Library;
 use crate::merge;
@@ -164,10 +165,123 @@ fn provision_claude(
         files_written.push(claude_md.to_string_lossy().into_owned());
     }
 
+    // Wire Otto's activity hooks into .claude/settings.local.json so the agent
+    // forwards skills/commands/tools/prompts/tasks to the per-session ingest
+    // endpoint (the "live trail" + task tracker). Best-effort.
+    if let Some(p) = write_claude_hooks(cwd) {
+        files_written.push(p);
+    }
+
     MaterializeProviderResult {
         provider: "claude".to_string(),
         files_written,
         skipped: false,
+    }
+}
+
+/// Sentinel present in every Otto-managed hook command, used to detect and
+/// reconcile our entries without disturbing user-authored hooks.
+const OTTO_HOOK_SENTINEL: &str = "OTTO_INGEST_TOKEN";
+
+/// The single shell command every Otto hook runs: forward the hook's JSON
+/// payload (on stdin) to the per-session ingest endpoint. It reads the daemon
+/// URL + session id + token from env vars Otto sets on the agent's PTY, never
+/// blocks the tool (always `exit 0`), and is a no-op when run outside Otto
+/// (env unset → the `[ -n … ]` guard short-circuits).
+fn otto_hook_command() -> String {
+    "[ -n \"$OTTO_INGEST_TOKEN\" ] && curl -sS -m 3 -X POST \
+     \"$OTTO_INGEST_BASE/api/v1/ingest/claude\" \
+     -H \"X-Otto-Session: $OTTO_SESSION_ID\" -H \"X-Otto-Token: $OTTO_INGEST_TOKEN\" \
+     -H \"Content-Type: application/json\" --data-binary @- >/dev/null 2>&1; exit 0"
+        .to_string()
+}
+
+/// True when `group` is an Otto-managed hook matcher-group (its command carries
+/// our sentinel) — so reconciliation can drop+rewrite ours and keep the rest.
+fn is_otto_group(group: &Value) -> bool {
+    group
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .is_some_and(|hooks| {
+            hooks.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|c| c.contains(OTTO_HOOK_SENTINEL))
+            })
+        })
+}
+
+/// One Otto matcher-group. `with_matcher` is set for tool-name events
+/// (PostToolUse) so it fires for every tool; omitted for the others.
+fn otto_hook_group(with_matcher: bool) -> Value {
+    let entry = json!({ "type": "command", "command": otto_hook_command(), "timeout": 5 });
+    if with_matcher {
+        json!({ "matcher": "*", "hooks": [entry] })
+    } else {
+        json!({ "hooks": [entry] })
+    }
+}
+
+/// Merge Otto's activity hooks into `<cwd>/.claude/settings.local.json`,
+/// preserving every other setting and any user-authored hooks. Idempotent:
+/// re-running replaces only Otto's groups. Returns the file path on success.
+fn write_claude_hooks(cwd: &str) -> Option<String> {
+    let path = Path::new(cwd).join(".claude").join("settings.local.json");
+
+    let mut doc: Value = match fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s).unwrap_or_else(|e| {
+            tracing::warn!(path = %path.display(), error = %e, "settings.local.json is not valid JSON; leaving hooks unset");
+            Value::Null
+        }),
+        _ => json!({}),
+    };
+    // Don't risk clobbering a malformed file we couldn't parse.
+    if !doc.is_object() {
+        if doc.is_null() {
+            return None;
+        }
+        doc = json!({});
+    }
+
+    let obj = doc.as_object_mut()?;
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()?;
+
+    // (event name, fire for every tool via matcher "*")
+    const EVENTS: &[(&str, bool)] = &[
+        ("PostToolUse", true),
+        ("UserPromptSubmit", false),
+        ("SessionStart", false),
+        ("Stop", false),
+        ("Notification", false),
+    ];
+    for (event, with_matcher) in EVENTS {
+        let arr = hooks
+            .entry(event.to_string())
+            .or_insert_with(|| json!([]));
+        if !arr.is_array() {
+            *arr = json!([]);
+        }
+        let groups = arr.as_array_mut()?;
+        groups.retain(|g| !is_otto_group(g));
+        groups.push(otto_hook_group(*with_matcher));
+    }
+
+    if let Some(parent) = path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            tracing::warn!(path = %path.display(), error = %e, "create .claude dir failed");
+            return None;
+        }
+    }
+    let body = serde_json::to_string_pretty(&doc).ok()?;
+    match fs::write(&path, body) {
+        Ok(()) => Some(path.to_string_lossy().into_owned()),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "write settings.local.json failed");
+            None
+        }
     }
 }
 
@@ -229,6 +343,54 @@ mod tests {
     fn enc_replaces_non_alphanumeric() {
         assert_eq!(enc_project("/Users/x/my proj"), "-Users-x-my-proj");
         assert_eq!(enc_project("abc123"), "abc123");
+    }
+
+    #[test]
+    fn claude_hooks_are_added_preserved_and_idempotent() {
+        let (_l, cwd, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        let settings = cwd.path().join(".claude").join("settings.local.json");
+
+        // Pre-seed a user-authored settings file with a top-level key AND a
+        // user PostToolUse hook that Otto must never disturb.
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            r#"{ "model": "opus", "hooks": { "PostToolUse": [
+                { "matcher": "Bash", "hooks": [ { "type": "command", "command": "echo mine" } ] }
+            ] } }"#,
+        )
+        .unwrap();
+
+        // Provision twice — the second run must not duplicate Otto's groups.
+        provision(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude");
+        provision(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude");
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+
+        // User settings survive.
+        assert_eq!(doc["model"], "opus");
+
+        let post = doc["hooks"]["PostToolUse"].as_array().unwrap();
+        let user_groups = post
+            .iter()
+            .filter(|g| g["hooks"][0]["command"] == "echo mine")
+            .count();
+        let otto_groups = post
+            .iter()
+            .filter(|g| {
+                g["hooks"][0]["command"]
+                    .as_str()
+                    .is_some_and(|c| c.contains(OTTO_HOOK_SENTINEL))
+            })
+            .count();
+        assert_eq!(user_groups, 1, "user hook preserved");
+        assert_eq!(otto_groups, 1, "exactly one Otto group (idempotent)");
+
+        // Other lifecycle events got an Otto hook too.
+        assert!(doc["hooks"]["UserPromptSubmit"].is_array());
+        assert!(doc["hooks"]["Stop"].is_array());
     }
 
     #[test]

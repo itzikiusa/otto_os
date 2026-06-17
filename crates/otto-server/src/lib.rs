@@ -11,8 +11,10 @@ pub mod modules;
 pub mod monitor;
 pub mod review_session;
 pub mod routes;
+pub mod skill_eval;
 pub mod spa;
 pub mod state;
+pub mod workflow_engine;
 pub mod ws_events;
 
 use axum::routing::get;
@@ -22,7 +24,10 @@ use tower_http::trace::TraceLayer;
 
 pub use auth::{require_ws_role, CurrentUser};
 pub use error::{ApiError, ApiResult};
-pub use monitor::{spawn_session_event_listener, AuthScanner, CredentialMonitor};
+pub use monitor::{
+    spawn_metrics_sampler, spawn_session_event_listener, spawn_usage_recorder, AuthScanner,
+    CredentialMonitor,
+};
 pub use state::ServerCtx;
 
 /// Build the full daemon router.

@@ -37,7 +37,12 @@ export function setToken(token: string | null): void {
   else localStorage.setItem('otto_token', token);
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -47,6 +52,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
 
   // Surface provider/upstream outages (daemon maps provider failures to 502).
@@ -68,12 +74,18 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>('GET', path),
-  post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
+  get: <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal),
+  post: <T>(path: string, body?: unknown, signal?: AbortSignal) =>
+    request<T>('POST', path, body, signal),
   patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   del: <T>(path: string) => request<T>('DELETE', path),
 };
+
+/** True when an error is a fetch abort (caller cancelled via AbortSignal). */
+export function isAbortError(e: unknown): boolean {
+  return e instanceof DOMException && e.name === 'AbortError';
+}
 
 /** Build a WS URL with the auth token, e.g. wsUrl('/ws/term/SESSION_ID'). */
 export function wsUrl(path: string): string {

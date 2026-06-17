@@ -392,6 +392,88 @@ fn issue_provider_label(_a: &IssueAccount) -> &'static str {
 // Session-progress notices (event-bus listener)
 // ---------------------------------------------------------------------------
 
+/// Subscribe to the event bus and record a usage row for every meaningful
+/// activity-trail entry — the automatic side of usage tracking. Token counts /
+/// model / cost are mined from each entry's `detail` when the provider reports
+/// them (e.g. via `/ingest/usage`); otherwise the row still captures the action
+/// as a per-provider/session/day activity count. The session's provider is
+/// resolved once and cached. Cheap no-op while the engine is unavailable, so it
+/// starts working the moment ClickHouse is installed (no restart needed).
+pub fn spawn_usage_recorder(ctx: ServerCtx) {
+    let mut rx = ctx.events.subscribe();
+    tokio::spawn(async move {
+        let mut providers: HashMap<Id, String> = HashMap::new();
+        loop {
+            match rx.recv().await {
+                Ok(Event::TrailAppended {
+                    workspace_id,
+                    session_id,
+                    event,
+                }) => {
+                    let provider = match providers.get(&session_id) {
+                        Some(p) => p.clone(),
+                        None => {
+                            let p = ctx
+                                .manager
+                                .get(&session_id)
+                                .await
+                                .map(|s| s.provider)
+                                .unwrap_or_default();
+                            providers.insert(session_id.clone(), p.clone());
+                            p
+                        }
+                    };
+                    if let Some(ev) = crate::routes::usage::trail_to_usage(
+                        &workspace_id,
+                        &session_id,
+                        &provider,
+                        &event,
+                    ) {
+                        ctx.usage.record(ev);
+                    }
+                }
+                Ok(Event::SessionRemoved { session_id, .. }) => {
+                    providers.remove(&session_id);
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Periodically sample host/process CPU + RAM into the usage engine's
+/// `system_metrics` table. Re-reads the configured interval each tick so a
+/// settings change takes effect without a restart. The sample itself is
+/// blocking (it sleeps a CPU-refresh window), so it runs on a blocking thread.
+pub fn spawn_metrics_sampler(ctx: ServerCtx) {
+    tokio::spawn(async move {
+        // A quick first sample so the dashboard has a data point seconds after
+        // open, then sample on the configured cadence (re-read each loop so a
+        // settings change takes effect within one interval).
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        loop {
+            if ctx.usage.available() {
+                let active = ctx.manager.live_count() as u32;
+                match tokio::task::spawn_blocking(move || {
+                    otto_usage::MetricsSampler::new().sample(active)
+                })
+                .await
+                {
+                    Ok(metric) => {
+                        if let Err(e) = ctx.usage.store_metric(&metric).await {
+                            tracing::warn!("usage: store metric failed: {e}");
+                        }
+                    }
+                    Err(e) => tracing::warn!("usage: metrics sampler join error: {e}"),
+                }
+            }
+            tokio::time::sleep(ctx.usage.metrics_interval()).await;
+        }
+    });
+}
+
 /// Subscribe to the event bus and emit `Session` notices on meaningful status
 /// transitions, gated by the `session_events` setting (re-read per event so a
 /// settings change takes effect without restart). De-dupe is via the notice

@@ -5,6 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import AttachIssue from './AttachIssue.svelte';
+  import Handover from './Handover.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -35,10 +36,22 @@
   let renaming = $state(false);
   let draftTitle = $state('');
   let attachIssueOpen = $state(false);
+  let handoverOpen = $state(false);
 
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
   );
+
+  // Handover breadcrumb (source session) + live "preparing brief" badge.
+  const handoverFromId = $derived(
+    typeof session?.meta?.handover_from === 'string'
+      ? (session.meta.handover_from as string)
+      : null,
+  );
+  const handoverFrom = $derived(
+    handoverFromId ? (ws.sessions.find((s) => s.id === handoverFromId) ?? null) : null,
+  );
+  const handoverPending = $derived(session?.meta?.handover_pending === true);
 
   // --- Additional directories editor (meta.extra_dirs → `--add-dir` args) -----
   // Only agent sessions launch a CLI that honors `--add-dir`.
@@ -166,6 +179,11 @@
     menuOpen = false;
     attachIssueOpen = true;
   }
+
+  function openHandover(): void {
+    menuOpen = false;
+    handoverOpen = true;
+  }
 </script>
 
 <svelte:window onclick={() => (menuOpen = false)} />
@@ -197,6 +215,7 @@
         oncontextmenu={!readOnly ? (e) => ctxMenu.show(e, [
           { label: 'Rename…', icon: 'edit', action: startRename },
           ...(isAgent ? [{ label: 'Additional directories…', icon: 'folder', action: openDirs }] : []),
+          ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover }] : []),
           { separator: true },
           { label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…', icon: 'ticket', action: openAttachIssue },
           ...(attachedIssue ? [{ label: 'Detach issue', icon: 'link', action: detachIssue }] : []),
@@ -207,6 +226,17 @@
       >{session?.title ?? sessionId}</span>
     {/if}
     <span class="chip provider-chip">{session?.provider ?? '?'}</span>
+    {#if handoverFromId}
+      <button
+        class="handover-crumb"
+        title="Open the session this was handed over from"
+        onmousedown={(e) => e.stopPropagation()}
+        onclick={() => ws.openSession(handoverFromId)}
+      >↰ {handoverFrom?.title ?? 'source'}</button>
+    {/if}
+    {#if handoverPending}
+      <span class="handover-pending" title="Preparing the handover brief…">⏳ handover…</span>
+    {/if}
     {#if session?.cwd}<span class="pane-cwd mono" title={session.cwd}>{session.cwd}</span>{/if}
     <span class="grow"></span>
     {#if showZoom}
@@ -232,6 +262,7 @@
             <button role="menuitem" onclick={startRename}>Rename…</button>
             {#if isAgent}
               <button role="menuitem" onclick={openDirs}>Additional directories…</button>
+              <button role="menuitem" onclick={openHandover}>Hand over to…</button>
             {/if}
             <button role="menuitem" onclick={openAttachIssue}>
               {attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…'}
@@ -258,6 +289,10 @@
 
 {#if attachIssueOpen}
   <AttachIssue {sessionId} onclose={() => (attachIssueOpen = false)} />
+{/if}
+
+{#if handoverOpen}
+  <Handover {sessionId} onclose={() => (handoverOpen = false)} />
 {/if}
 
 {#if dirsOpen}
@@ -344,6 +379,33 @@
     font-size: 9.5px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  .handover-crumb {
+    flex-shrink: 0;
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: 10.5px;
+    padding: 1px 7px;
+    border-radius: 99px;
+    cursor: pointer;
+  }
+  .handover-crumb:hover {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  .handover-pending {
+    flex-shrink: 0;
+    font-size: 10.5px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    padding: 1px 7px;
+    border-radius: 99px;
+    white-space: nowrap;
   }
   .pane-cwd {
     font-size: 10.5px;

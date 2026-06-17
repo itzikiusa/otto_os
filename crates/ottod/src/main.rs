@@ -17,12 +17,14 @@ use otto_orchestrator::Orchestrator;
 use otto_rbac::{RbacAuthenticator, RbacRoleChecker};
 use otto_server::modules::{module_routers, PtySpawner};
 use otto_server::{
-    build_router, spawn_session_event_listener, AuthScanner, CredentialMonitor, ServerCtx,
+    build_router, spawn_metrics_sampler, spawn_session_event_listener, spawn_usage_recorder,
+    AuthScanner, CredentialMonitor, ServerCtx,
 };
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, GitStore, ImprovementsRepo, IntegrationsRepo,
-    IssuesRepo, ReviewsRepo, SessionsRepo, SettingsRepo, UsersRepo, WorkspacesRepo,
+    ActivityRepo, ConnectionSectionsRepo, ConnectionsRepo, GitStore, ImprovementsRepo,
+    IntegrationsRepo, IssuesRepo, ReviewsRepo, SessionsRepo, SettingsRepo, SkillEvalsRepo,
+    UsersRepo, WorkspacesRepo,
 };
 use tokio::sync::{broadcast, watch};
 use tracing_subscriber::layer::SubscriberExt;
@@ -94,6 +96,17 @@ async fn run(cfg: Config) -> Result<(), String> {
         .map_err(|e| format!("read providers setting: {e}"))?;
     let providers = ProviderRegistry::new(provider_overrides.as_ref());
 
+    // Embedded ClickHouse usage + metrics store. Config lives in the settings
+    // table (`usage` key); degrades to a no-op when the binary isn't installed.
+    let usage_config = otto_usage::UsageConfig::from_json(
+        settings
+            .get("usage")
+            .await
+            .map_err(|e| format!("read usage setting: {e}"))?
+            .as_ref(),
+    );
+    let usage = otto_usage::UsageEngine::start(usage_config, cfg.data_dir.clone()).await;
+
     // Otto context library (skills/souls/context) lives under the data dir; the
     // Provisioner materializes a workspace's active set into each CLI at spawn.
     let library_root = cfg.data_dir.join("library");
@@ -117,7 +130,11 @@ async fn run(cfg: Config) -> Result<(), String> {
             .with_pre_spawn_hook(Arc::new(otto_context::Provisioner::new(
                 context_library.clone(),
             )))
-            .with_output_scanner(scanner),
+            .with_output_scanner(scanner)
+            // Agent activity hooks post back to this loopback daemon.
+            .with_ingest_base(format!("http://127.0.0.1:{}", cfg.port))
+            // Record Otto-side lifecycle + user actions to the activity trail.
+            .with_activity_repo(ActivityRepo::new(pool.clone())),
     );
     // The guard writes keystrokes back via the manager; wire the (weak) handle
     // now that the Arc exists.
@@ -128,6 +145,13 @@ async fn run(cfg: Config) -> Result<(), String> {
         ConnectionsRepo::new(pool.clone()),
         ConnectionSectionsRepo::new(pool.clone()),
         secrets_arc,
+    ));
+    // Native data-access layer for the DB Explorer: reuses connection profiles +
+    // keychain secrets, persists saved queries / history / dashboards.
+    let db_explorer = Arc::new(otto_dbviewer::DbViewerService::new(
+        ConnectionsRepo::new(pool.clone()),
+        secrets.clone(),
+        otto_state::DbExplorerRepo::new(pool.clone()),
     ));
     let spawner = Arc::new(PtySpawner {
         manager: Arc::clone(&manager),
@@ -164,14 +188,18 @@ async fn run(cfg: Config) -> Result<(), String> {
         manager: Arc::clone(&manager),
         workspaces: workspaces.clone(),
         connections,
+        db_explorer,
         spawner,
         git_store: GitStore::new(pool.clone()),
         issues_store: IssuesRepo::new(pool.clone()),
         integrations_store: IntegrationsRepo::new(pool.clone()),
         reviews_store: ReviewsRepo::new(pool.clone()),
+        skill_evals_store: SkillEvalsRepo::new(pool.clone()),
+        skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         orchestrator: Arc::clone(&orchestrator),
         improve_engine: Arc::clone(&improve_engine),
         context_library: context_library.clone(),
+        usage: Arc::clone(&usage),
     };
 
     // Restore sessions from the previous daemon run: resumable agent
@@ -200,6 +228,16 @@ async fn run(cfg: Config) -> Result<(), String> {
         Ok(n) if n > 0 => tracing::info!("review recovery: marked {n} orphaned review(s) as error"),
         Ok(_) => {}
         Err(e) => tracing::warn!("review recovery: {e}"),
+    }
+
+    // Same recovery for orphaned skill-evaluation runs.
+    match SkillEvalsRepo::new(pool.clone())
+        .fail_running("Interrupted by a daemon restart — re-run the evaluation.")
+        .await
+    {
+        Ok(n) if n > 0 => tracing::info!("skill-eval recovery: marked {n} orphaned run(s) as error"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("skill-eval recovery: {e}"),
     }
 
     // Periodically auto-archive idle channel (ticket/chat) sessions so they
@@ -275,6 +313,23 @@ async fn run(cfg: Config) -> Result<(), String> {
         });
     }
 
+    // Activity-trail retention: cap each session's trail at the newest N rows so
+    // long-lived sessions don't grow it unbounded. Runs at startup then hourly.
+    {
+        let manager = Arc::clone(&manager);
+        const KEEP_PER_SESSION: i64 = 1_000;
+        let interval = std::time::Duration::from_secs(60 * 60); // hourly
+        tokio::spawn(async move {
+            loop {
+                let n = manager.prune_activity_trail(KEEP_PER_SESSION).await;
+                if n > 0 {
+                    tracing::info!("pruned {n} old activity-trail row(s)");
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
     // --- Channel Manager (Telegram-first, Slack-ready) ---
     // Resolve the root user id for spawning agent sessions on behalf of
     // incoming channel messages.  We use the first root user in the DB;
@@ -339,6 +394,18 @@ async fn run(cfg: Config) -> Result<(), String> {
     CredentialMonitor::new(ctx.clone()).spawn();
     spawn_session_event_listener(ctx.clone());
     tracing::info!("credential monitor + session-event notices started");
+
+    // --- Usage tracking + system metrics (embedded ClickHouse) ---
+    // The recorder mines usage from the activity-trail event stream; the sampler
+    // periodically writes CPU/RAM. Both are cheap no-ops until ClickHouse is
+    // available, so they're always started.
+    spawn_usage_recorder(ctx.clone());
+    spawn_metrics_sampler(ctx.clone());
+    if usage.available() {
+        tracing::info!("usage tracking started (embedded clickhouse)");
+    } else {
+        tracing::info!("usage tracking idle (clickhouse not installed)");
+    }
 
     let (api_extras, root_extras) = module_routers(&ctx);
     let router = build_router(ctx, api_extras, root_extras);
@@ -430,6 +497,8 @@ fn augment_path() {
         format!("{home}/.claude/local"),
         format!("{home}/.cargo/bin"),
         format!("{home}/bin"),
+        // Otto's own bin dir, where the usage feature installs `clickhouse`.
+        format!("{home}/Library/Application Support/Otto/bin"),
         "/opt/homebrew/bin".to_string(),
         "/usr/local/bin".to_string(),
     ];

@@ -66,7 +66,9 @@ class WorkspaceStore {
   mainSessions: Session[] = $derived(
     this.activeSessions.filter(
       (s) =>
-        (s.meta.source !== 'channel' && s.meta.source !== 'review') ||
+        (s.meta.source !== 'channel' &&
+          s.meta.source !== 'review' &&
+          s.meta.source !== 'skilleval') ||
         this.openTabs.includes(s.id),
     ),
   );
@@ -102,7 +104,10 @@ class WorkspaceStore {
    *  sidebar "Agents" group. Review agents are reached via the Review panel. */
   plainAgentSessions: Session[] = $derived(
     this.agentSessions.filter(
-      (s) => s.meta.source !== 'channel' && s.meta.source !== 'review',
+      (s) =>
+        s.meta.source !== 'channel' &&
+        s.meta.source !== 'review' &&
+        s.meta.source !== 'skilleval',
     ),
   );
 
@@ -118,7 +123,8 @@ class WorkspaceStore {
         !s.archived &&
         this.statusMap[s.id] === 'working' &&
         s.meta.source !== 'review' &&
-        s.meta.source !== 'channel',
+        s.meta.source !== 'channel' &&
+        s.meta.source !== 'skilleval',
     ).length,
   );
 
@@ -383,6 +389,13 @@ class WorkspaceStore {
         if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
           this.sessions = [...this.sessions, s];
         }
+        break;
+      }
+      case 'session_meta_updated': {
+        // Replace the cached session's meta in place (e.g. live handover flags).
+        this.sessions = this.sessions.map((s) =>
+          s.id === ev.session_id ? { ...s, meta: ev.meta } : s,
+        );
         break;
       }
       case 'session_removed': {

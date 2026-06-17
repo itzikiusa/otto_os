@@ -59,6 +59,15 @@ impl otto_connections::ConnectionsCtx for ServerCtx {
     }
 }
 
+impl otto_dbviewer::DbViewerCtx for ServerCtx {
+    fn db(&self) -> &Arc<otto_dbviewer::DbViewerService> {
+        &self.db_explorer
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+}
+
 impl otto_git::GitCtx for ServerCtx {
     fn store(&self) -> &GitStore {
         &self.git_store
@@ -318,6 +327,7 @@ impl PlanIo for ExecHelper {
                         tracing::warn!(session = %s.id, "broadcast failed: {e}");
                         continue;
                     }
+                    self.ctx.manager.record_user_message(&s.id, text).await;
                     hit.push(s.id);
                 }
             }
@@ -336,7 +346,9 @@ impl PlanIo for ExecHelper {
             self.ctx
                 .manager
                 .input(session_id, format!("{text}\n").as_bytes())
-                .await
+                .await?;
+            self.ctx.manager.record_user_message(session_id, text).await;
+            Ok(())
         })
     }
 }
@@ -1920,19 +1932,124 @@ async fn browser_proxy(
 // Assembly
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// DB Explorer: "examine schema / result with an agent"
+// ---------------------------------------------------------------------------
+
+/// Body of `POST /connections/{id}/db/explain-with-agent`. The UI sends the
+/// schema text or result JSON it already has plus an optional question; we spawn
+/// an agent session seeded with a prompt built from them.
+#[derive(Debug, Deserialize)]
+struct DbExplainReq {
+    /// Pre-rendered context (schema DDL, structure, or result rows) to analyze.
+    content: String,
+    /// Optional user question; defaults to a general "explain this" prompt.
+    #[serde(default)]
+    question: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    /// Needed only for global connections (which have no workspace of their own).
+    #[serde(default)]
+    workspace_id: Option<Id>,
+}
+
+/// Route: spawn an agent to explain/analyze a database schema or query result.
+pub fn db_explorer_routes() -> Router<ServerCtx> {
+    Router::new().route(
+        "/connections/{id}/db/explain-with-agent",
+        post(db_explain_with_agent),
+    )
+}
+
+async fn db_explain_with_agent(
+    Path(conn_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<DbExplainReq>,
+) -> ApiResult<Json<Session>> {
+    let conn = ctx.db_explorer.get_connection(&conn_id).await.map_err(ApiError)?;
+    let ws_id = conn
+        .workspace_id
+        .clone()
+        .or(body.workspace_id)
+        .ok_or_else(|| ApiError(Error::Invalid("a workspace_id is required".into())))?;
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
+
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let default_provider = otto_core::provider::resolve_provider(&[
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
+    otto_sessions::trust::ensure_trusted(&default_provider, &ws.root_path);
+
+    let question = body
+        .question
+        .as_deref()
+        .filter(|q| !q.trim().is_empty())
+        .unwrap_or(
+            "Explain this database schema/result: describe each table/field, the relationships, \
+             and anything notable (indexing, normalization, possible issues). Then suggest a few \
+             useful queries.",
+        );
+    let prompt = format!(
+        "You are a database expert. A user is exploring the `{}` ({}) connection in Otto.\n\n\
+         {}\n\n--- DATABASE CONTEXT ---\n{}\n",
+        conn.name,
+        conn.kind.as_str(),
+        question,
+        body.content
+    );
+
+    let req = CreateSessionReq {
+        kind: SessionKind::Agent,
+        provider: Some(default_provider),
+        title: Some(body.title.unwrap_or_else(|| format!("Explain {}", conn.name))),
+        cwd: Some(ws.root_path.clone()),
+        connection_id: None,
+        meta: None,
+    };
+    let session = ctx
+        .manager
+        .create(&ws, &user.id, req, None)
+        .await
+        .map_err(ApiError)?;
+
+    let manager = Arc::clone(&ctx.manager);
+    let session_id = session.id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        if let Err(e) = manager
+            .input(&session_id, format!("{prompt}\n").as_bytes())
+            .await
+        {
+            tracing::warn!(session = %session_id, "db explain prompt write failed: {e}");
+        }
+    });
+
+    Ok(Json(session))
+}
+
 /// All module routers: `(api_extras, root_extras)` for [`crate::build_router`].
 pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) {
     let api = vec![
         otto_sessions::api_router::<ServerCtx>(),
         otto_connections::api_router::<ServerCtx>(),
+        otto_dbviewer::api_router::<ServerCtx>(),
         otto_git::router::<ServerCtx>(),
         otto_issues::router::<ServerCtx>(),
         otto_channels::router::<ServerCtx>(),
         otto_improve::router::<ServerCtx>(),
         otto_context::router::<ServerCtx>(),
         orchestrator_routes(),
+        db_explorer_routes(),
         pr_review_routes(),
         review_config_routes(),
+        crate::skill_eval::routes(),
         provider_routes(),
         session_input_routes(),
         crate::lsp::api_router(),
@@ -1940,6 +2057,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
     let root = vec![
         otto_sessions::ws_router(ctx.authenticator.clone(), ctx.clone()),
         crate::lsp::ws_router(ctx.authenticator.clone(), ctx.clone()),
+        crate::routes::api_stream::ws_router(ctx.authenticator.clone()),
         browser_proxy_router(ctx.authenticator.clone()),
     ];
     (api, root)

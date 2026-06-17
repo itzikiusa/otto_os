@@ -18,10 +18,15 @@
     existing: Connection | null;
     onclose: () => void;
     onsaved: (c: Connection) => void;
+    /** Restrict the kind selector (e.g. DB-only in the Database module). */
+    kinds?: ConnectionKind[];
   }
-  let { existing, onclose, onsaved }: Props = $props();
-
-  const kinds: ConnectionKind[] = ['ssh', 'mysql', 'redis', 'mongodb', 'clickhouse', 'custom'];
+  let {
+    existing,
+    onclose,
+    onsaved,
+    kinds = ['ssh', 'mysql', 'redis', 'mongodb', 'clickhouse', 'custom'],
+  }: Props = $props();
 
   // Which kinds support the db field
   const hasDatabaseField = new Set<ConnectionKind>(['mysql', 'clickhouse', 'redis', 'mongodb']);
@@ -33,7 +38,7 @@
   // svelte-ignore state_referenced_locally
   let name = $state(existing?.name ?? '');
   // svelte-ignore state_referenced_locally
-  let kind: ConnectionKind = $state(existing?.kind ?? 'ssh');
+  let kind: ConnectionKind = $state(existing?.kind ?? kinds[0] ?? 'ssh');
 
   // Initialise individual fields from existing params so they survive kind switches.
   // svelte-ignore state_referenced_locally
@@ -46,6 +51,8 @@
   // svelte-ignore state_referenced_locally
   let fDb         = $state((existing?.params?.db          as string)  ?? '');
   // svelte-ignore state_referenced_locally
+  let fTimezone   = $state((existing?.params?.timezone    as string)  ?? 'UTC');
+  // svelte-ignore state_referenced_locally
   let fConnString = $state((existing?.params?.conn_string as string)  ?? '');
   // svelte-ignore state_referenced_locally
   let fTemplate   = $state((existing?.params?.command_template as string) ?? '');
@@ -57,6 +64,43 @@
   // svelte-ignore state_referenced_locally
   let firstCommand = $state(existing?.first_command ?? '');
   let busy         = $state(false);
+
+  // ── TLS + SSH-tunnel (DB engines) ──────────────────────────────────────────
+  // These write structured objects into params.tls / params.ssh for the four DB
+  // kinds, on top of the existing flat jump/identity_file fields (left intact).
+  const tlsKinds = new Set<ConnectionKind>(['mysql', 'redis', 'mongodb', 'clickhouse']);
+  // Engines with a meaningful session time zone (renders datetimes in this zone).
+  const tzKinds = new Set<ConnectionKind>(['mysql', 'clickhouse']);
+  type TlsMode = 'disabled' | 'preferred' | 'required';
+  // svelte-ignore state_referenced_locally
+  const existingTls = (existing?.params?.tls as Record<string, unknown> | undefined) ?? undefined;
+  // svelte-ignore state_referenced_locally
+  const existingSsh = (existing?.params?.ssh as Record<string, unknown> | undefined) ?? undefined;
+
+  // svelte-ignore state_referenced_locally
+  let tlsMode = $state<TlsMode>(((existingTls?.mode as TlsMode) ?? 'disabled'));
+  // svelte-ignore state_referenced_locally
+  let tlsVerify = $state(existingTls?.verify !== undefined ? !!existingTls.verify : true);
+  // svelte-ignore state_referenced_locally
+  let tlsCaCert = $state((existingTls?.ca_cert as string) ?? '');
+  // svelte-ignore state_referenced_locally
+  let tlsClientCert = $state((existingTls?.client_cert as string) ?? '');
+  // svelte-ignore state_referenced_locally
+  let tlsClientKey = $state((existingTls?.client_key as string) ?? '');
+  // svelte-ignore state_referenced_locally
+  let tlsServerName = $state((existingTls?.server_name as string) ?? '');
+
+  // svelte-ignore state_referenced_locally
+  let tunnelOpen = $state(!!existingSsh);
+  // svelte-ignore state_referenced_locally
+  let tunHost = $state((existingSsh?.host as string) ?? '');
+  // svelte-ignore state_referenced_locally
+  let tunPort = $state((existingSsh?.port as string | number | undefined) != null ? String(existingSsh!.port) : '');
+  // svelte-ignore state_referenced_locally
+  let tunUser = $state((existingSsh?.user as string) ?? '');
+  // svelte-ignore state_referenced_locally
+  let tunIdentity = $state((existingSsh?.identity_file as string) ?? '');
+  let showTunnelFilePicker = $state(false);
 
   // Section assignment (workspace connections only). `''` = ungrouped.
   // svelte-ignore state_referenced_locally
@@ -142,10 +186,35 @@
       if (hasDatabaseField.has(kind) && fDb) p['db'] = fDb;
     }
 
+    // Session time zone (default UTC) for engines that honor it.
+    if (tzKinds.has(kind)) {
+      const tz = fTimezone.trim();
+      if (tz && tz.toUpperCase() !== 'UTC') p['timezone'] = tz;
+    }
+
     // SSH section fields (only when SSH toggle is on)
     if (sshEnabled) {
       if (fJump)     p['jump']           = fJump;
       if (fIdentity) p['identity_file']  = fIdentity;
+    }
+
+    // TLS (DB engines only). Persist when explicitly enabled with a mode.
+    if (tlsKinds.has(kind) && tlsMode !== 'disabled') {
+      const tls: Record<string, unknown> = { mode: tlsMode, verify: tlsVerify };
+      if (tlsCaCert)     tls['ca_cert']     = tlsCaCert;
+      if (tlsClientCert) tls['client_cert'] = tlsClientCert;
+      if (tlsClientKey)  tls['client_key']  = tlsClientKey;
+      if (tlsServerName) tls['server_name'] = tlsServerName;
+      p['tls'] = tls;
+    }
+
+    // SSH tunnel (DB engines only). Requires at least a host.
+    if (tlsKinds.has(kind) && tunnelOpen && tunHost.trim()) {
+      const ssh: Record<string, unknown> = { host: tunHost.trim() };
+      if (tunPort !== '') ssh['port'] = Number(tunPort);
+      if (tunUser)        ssh['user'] = tunUser;
+      if (tunIdentity)    ssh['identity_file'] = tunIdentity;
+      p['ssh'] = ssh;
     }
 
     return p;
@@ -290,8 +359,11 @@
           class="input mono"
           type="number"
           bind:value={fPort}
-          placeholder={kind === 'ssh' ? '22' : kind === 'redis' ? '6379' : kind === 'clickhouse' ? '9000' : '3306'}
+          placeholder={kind === 'ssh' ? '22' : kind === 'redis' ? '6379' : kind === 'clickhouse' ? '8443' : '3306'}
         />
+        {#if kind === 'clickhouse'}
+          <span class="hint">Use the HTTP interface — 8123 (plain) or 8443 (TLS). The native ports 9000 / 9440 aren't supported.</span>
+        {/if}
       </div>
       <div class="field grow">
         <label for="cf-user">User <span class="dim">(optional)</span></label>
@@ -322,6 +394,32 @@
     {/if}
   {/if}
 
+  <!-- Session time zone (mysql / clickhouse) -->
+  {#if tzKinds.has(kind)}
+    <div class="field">
+      <label for="cf-tz">Timezone <span class="dim">(session; default UTC)</span></label>
+      <input
+        id="cf-tz"
+        class="input mono"
+        list="cf-tz-list"
+        bind:value={fTimezone}
+        placeholder="UTC"
+        spellcheck="false"
+      />
+      <datalist id="cf-tz-list">
+        <option value="UTC"></option>
+        <option value="+00:00"></option>
+        <option value="+03:00"></option>
+        <option value="-05:00"></option>
+        <option value="Europe/London"></option>
+        <option value="Europe/Moscow"></option>
+        <option value="America/New_York"></option>
+        <option value="Asia/Jerusalem"></option>
+      </datalist>
+      <span class="hint">View datetimes as the DB treats them — offset (e.g. +03:00) or a named zone. MySQL: <code>SET time_zone</code>; ClickHouse: <code>session_timezone</code>.</span>
+    </div>
+  {/if}
+
   <!-- Password (not for ssh kind) -->
   {#if hasPasswordField.has(kind)}
     <div class="field">
@@ -340,6 +438,80 @@
       />
       <span class="hint">Stored in the macOS Keychain — never in the database.</span>
     </div>
+  {/if}
+
+  <!-- TLS / SSL (DB engines) — single control; "Disabled" = no encryption -->
+  {#if tlsKinds.has(kind)}
+    <div class="field">
+      <label for="cf-tls-mode">TLS / SSL</label>
+      <select id="cf-tls-mode" class="input" bind:value={tlsMode}>
+        <option value="disabled">Disabled (no encryption)</option>
+        <option value="preferred">Preferred (use if available)</option>
+        <option value="required">Required</option>
+      </select>
+    </div>
+    {#if tlsMode !== 'disabled'}
+      <div class="ssh-section">
+        <div class="field">
+          <label class="toggle-label">
+            <input type="checkbox" bind:checked={tlsVerify} />
+            Verify server certificate
+          </label>
+          <span class="hint">Turn off to accept self-signed / invalid certificates.</span>
+        </div>
+        <div class="field">
+          <label for="cf-tls-ca">CA certificate path <span class="dim">(optional)</span></label>
+          <input id="cf-tls-ca" class="input mono" bind:value={tlsCaCert} placeholder="~/certs/ca.pem" spellcheck="false" />
+        </div>
+        <div class="field-row">
+          <div class="field grow">
+            <label for="cf-tls-cert">Client cert <span class="dim">(optional)</span></label>
+            <input id="cf-tls-cert" class="input mono" bind:value={tlsClientCert} placeholder="~/certs/client.pem" spellcheck="false" />
+          </div>
+          <div class="field grow">
+            <label for="cf-tls-key">Client key <span class="dim">(optional)</span></label>
+            <input id="cf-tls-key" class="input mono" bind:value={tlsClientKey} placeholder="~/certs/client-key.pem" spellcheck="false" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="cf-tls-sni">Server name (SNI) <span class="dim">(optional)</span></label>
+          <input id="cf-tls-sni" class="input mono" bind:value={tlsServerName} placeholder="db.example.com" spellcheck="false" />
+        </div>
+      </div>
+    {/if}
+
+    <!-- SSH tunnel (structured) -->
+    <div class="field ssh-toggle-row">
+      <label class="toggle-label">
+        <input type="checkbox" bind:checked={tunnelOpen} />
+        SSH tunnel <span class="dim">(reach the DB through a bastion)</span>
+      </label>
+    </div>
+    {#if tunnelOpen}
+      <div class="ssh-section">
+        <div class="field-row">
+          <div class="field grow">
+            <label for="cf-tun-host">Tunnel host</label>
+            <input id="cf-tun-host" class="input mono" bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" />
+          </div>
+          <div class="field tun-port">
+            <label for="cf-tun-port">Port <span class="dim">(opt)</span></label>
+            <input id="cf-tun-port" class="input mono" type="number" bind:value={tunPort} placeholder="22" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="cf-tun-user">Tunnel user <span class="dim">(optional)</span></label>
+          <input id="cf-tun-user" class="input mono" bind:value={tunUser} placeholder="ec2-user" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="cf-tun-identity">Identity file <span class="dim">(optional)</span></label>
+          <div class="file-input-row">
+            <input id="cf-tun-identity" class="input mono grow" bind:value={tunIdentity} placeholder="~/.ssh/id_rsa" spellcheck="false" />
+            <button class="btn browse-btn" onclick={() => (showTunnelFilePicker = true)}>Browse…</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   {/if}
 
   <!-- SSH toggle -->
@@ -418,6 +590,17 @@
   />
 {/if}
 
+<!-- SSH tunnel identity file picker -->
+{#if showTunnelFilePicker}
+  <FolderPicker
+    title="Choose Identity File"
+    start={tunIdentity ? tunIdentity.replace(/\/[^/]+$/, '') : ''}
+    files={true}
+    onpick={(path) => { tunIdentity = path; showTunnelFilePicker = false; }}
+    onclose={() => (showTunnelFilePicker = false)}
+  />
+{/if}
+
 <style>
   .kind-row {
     display: flex;
@@ -490,6 +673,9 @@
   .browse-btn {
     flex-shrink: 0;
     white-space: nowrap;
+  }
+  .tun-port {
+    flex: 0 0 90px;
   }
   .section-row,
   .section-new {

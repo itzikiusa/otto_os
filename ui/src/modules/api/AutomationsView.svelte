@@ -58,7 +58,10 @@
 
   async function create(): Promise<void> {
     if (!canEdit) return;
-    const n = prompt('Automation name')?.trim();
+    const n = await confirmer.promptText('Automation name', {
+      title: 'New automation',
+      confirmLabel: 'Create',
+    });
     if (!n) return;
     const saved = await apiClient.saveAutomation({ name: n, steps: [] });
     if (saved) loadInto(saved);
@@ -66,7 +69,11 @@
 
   async function rename(a: ApiAutomation): Promise<void> {
     if (!canEdit) return;
-    const n = prompt('Rename automation', a.name)?.trim();
+    const n = await confirmer.promptText('Rename automation', {
+      title: 'Rename automation',
+      confirmLabel: 'Rename',
+      initial: a.name,
+    });
     if (!n || n === a.name) return;
     const saved = await apiClient.saveAutomation({ name: n, steps: a.steps }, a.id);
     if (saved && saved.id === selectedId) name = saved.name;

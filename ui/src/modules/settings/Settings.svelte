@@ -9,6 +9,7 @@
   import Channels from './Channels.svelte';
   import Notifications from './Notifications.svelte';
   import SelfImprovement from './SelfImprovement.svelte';
+  import SkillEvalSettings from './SkillEvalSettings.svelte';
   import ContextSoul from './ContextSoul.svelte';
   import ContextLibrary from './ContextLibrary.svelte';
   import Logs from './Logs.svelte';
@@ -30,6 +31,7 @@
     { id: 'language-servers', label: 'Language Servers' },
     ...(auth.isRoot
       ? [
+          { id: 'skill-eval', label: 'Skills Evaluator' },
           { id: 'context-library', label: 'Context Library' },
           { id: 'providers', label: 'Providers' },
           { id: 'users', label: 'Users' },
@@ -70,6 +72,8 @@
       <Notifications />
     {:else if page === 'self-improvement'}
       <SelfImprovement />
+    {:else if page === 'skill-eval' && auth.isRoot}
+      <SkillEvalSettings />
     {:else if page === 'context-soul'}
       <ContextSoul />
     {:else if page === 'language-servers'}

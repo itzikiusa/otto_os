@@ -3,7 +3,7 @@
 
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
-export type RightTab = 'git' | 'files' | 'notes' | 'info' | 'browser' | 'api';
+export type RightTab = 'git' | 'files' | 'notes' | 'activity' | 'info' | 'browser' | 'api';
 
 const LS = {
   rail: 'otto_rail_expanded',

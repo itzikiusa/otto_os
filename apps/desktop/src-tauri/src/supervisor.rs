@@ -131,20 +131,40 @@ fn install_daemon() -> Result<String, String> {
     std::fs::write(&pp, plist).map_err(|e| e.to_string())?;
 
     let uid = libc_getuid();
-    // Re-bootstrap: ignore boot-out failure (agent may not be loaded yet).
+    // Re-bootstrap: boot out any existing instance, then bootstrap the new one.
+    // `launchctl bootout` is ASYNCHRONOUS — an immediate `bootstrap` of the same
+    // label races with launchd's teardown and fails ("Input/output error"),
+    // leaving NO agent loaded. Retry bootstrap with a short backoff until the
+    // old instance has finished unloading.
     let _ = std::process::Command::new("launchctl")
         .args(["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
         .output();
-    let out = std::process::Command::new("launchctl")
-        .args(["bootstrap", &format!("gui/{uid}"), pp.to_str().unwrap()])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!(
-            "launchctl bootstrap failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+    let mut last_err = String::new();
+    let mut bootstrapped = false;
+    for _ in 0..12 {
+        std::thread::sleep(Duration::from_millis(300));
+        let out = std::process::Command::new("launchctl")
+            .args(["bootstrap", &format!("gui/{uid}"), pp.to_str().unwrap()])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            bootstrapped = true;
+            break;
+        }
+        last_err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // The other side of the race: it's already loaded — that's fine.
+        if last_err.contains("already bootstrapped") {
+            bootstrapped = true;
+            break;
+        }
     }
+    if !bootstrapped {
+        return Err(format!("launchctl bootstrap failed: {last_err}"));
+    }
+    // RunAtLoad starts it, but kickstart guarantees it's running right now.
+    let _ = std::process::Command::new("launchctl")
+        .args(["kickstart", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
+        .output();
     Ok("installed and started".into())
 }
 

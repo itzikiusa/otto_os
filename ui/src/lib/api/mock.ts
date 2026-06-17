@@ -75,6 +75,12 @@ const users: User[] = [
   },
 ];
 
+// In-memory API-client collections/requests (for import + create in mock mode).
+let gitCollectionFiles: { name: string; content: string }[] = [];
+let apiSeq = 0;
+const apiCollections: Record<string, unknown>[] = [];
+const apiRequests: Record<string, unknown>[] = [];
+
 const workspaces: Workspace[] = [
   {
     id: 'wsp_otto',
@@ -811,6 +817,186 @@ const routes: Route[] = [
     },
   },
 
+  // ── API client (mock) ──────────────────────────────────────────────────────
+  { method: 'GET', re: /^\/workspaces\/([^/]+)\/api-client\/collections$/, handle: (m) => ({ json: apiCollections.filter((c) => c.workspace_id === m[1]) }) },
+  {
+    method: 'POST',
+    re: /^\/workspaces\/([^/]+)\/api-client\/collections$/,
+    handle: (m, body) => {
+      const b = body as { name?: string; parent_id?: string | null };
+      const c = { id: `col-${++apiSeq}`, workspace_id: m[1], parent_id: b.parent_id ?? null, name: b.name ?? 'Collection', position: apiSeq, created_by: 'u1', created_at: '2026-01-01T00:00:00Z' };
+      apiCollections.push(c);
+      return { json: c };
+    },
+  },
+  { method: 'GET', re: /^\/workspaces\/([^/]+)\/api-client\/requests$/, handle: (m) => ({ json: apiRequests.filter((r) => r.workspace_id === m[1]) }) },
+  {
+    method: 'POST',
+    re: /^\/workspaces\/([^/]+)\/api-client\/requests$/,
+    handle: (m, body) => {
+      const b = body as Record<string, unknown>;
+      const r = { id: `req-${++apiSeq}`, workspace_id: m[1], collection_id: b.collection_id ?? null, name: b.name ?? 'Request', method: b.method ?? 'GET', url: b.url ?? '', headers: b.headers ?? [], query: b.query ?? [], body_mode: b.body_mode ?? 'none', body: b.body ?? '', auth: b.auth ?? { type: 'none' }, position: apiSeq, created_at: '2026-01-01T00:00:00Z' };
+      apiRequests.push(r);
+      return { json: r };
+    },
+  },
+  { method: 'GET', re: /^\/workspaces\/([^/]+)\/api-client\/environments$/, handle: () => ({ json: [] }) },
+  { method: 'GET', re: /^\/workspaces\/([^/]+)\/api-client\/history$/, handle: () => ({ json: [] }) },
+  { method: 'GET', re: /^\/workspaces\/([^/]+)\/api-client\/automations$/, handle: () => ({ json: [] }) },
+  {
+    method: 'POST',
+    re: /^\/workspaces\/([^/]+)\/api-client\/execute$/,
+    handle: (_m, body) => {
+      const url = String((body as { url?: string })?.url ?? '');
+      const method = String((body as { method?: string })?.method ?? 'GET');
+      if (/\.png(\?|$)|image/i.test(url)) {
+        // 1×1 transparent PNG, so the preview pane has something to render.
+        const b64 =
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/IzeAAAAAElFTkSuQmCC';
+        const size = atob(b64).length;
+        return {
+          json: {
+            status: 200, status_text: 'OK',
+            headers: [{ key: 'Content-Type', value: 'image/png' }, { key: 'Content-Length', value: String(size) }],
+            body: '', body_base64: b64, truncated: false, too_large: false,
+            duration_ms: 12, size_bytes: size, content_type: 'image/png',
+            trace: [
+              { label: 'Request', detail: `GET ${url}`, ms: null, level: 'info' },
+              { label: 'Sent request', detail: '0 header(s)', ms: null, level: 'info' },
+              { label: 'Waiting (TTFB)', detail: 'time to first response byte', ms: 9, level: 'timing' },
+              { label: 'Downloaded', detail: `${size} B`, ms: 1, level: 'timing' },
+              { label: 'Completed', detail: '200 OK', ms: 12, level: 'success' },
+            ],
+          },
+        };
+      }
+      const reqBody = String((body as { body?: string })?.body ?? '');
+      if (reqBody.includes('__schema')) {
+        const schema = JSON.stringify({ data: { __schema: { queryType: { name: 'Query' }, types: [
+          { name: 'Query', kind: 'OBJECT', fields: [{ name: 'players' }, { name: 'tournament' }] },
+          { name: 'Player', kind: 'OBJECT', fields: [{ name: 'id' }, { name: 'name' }, { name: 'balance' }] },
+        ] } } });
+        return { json: {
+          status: 200, status_text: 'OK',
+          headers: [{ key: 'Content-Type', value: 'application/json' }],
+          body: schema, body_base64: btoa(unescape(encodeURIComponent(schema))), truncated: false, too_large: false,
+          duration_ms: 15, size_bytes: schema.length, content_type: 'application/json',
+          trace: [{ label: 'Completed', detail: '200 OK', ms: 15, level: 'success' }],
+        } };
+      }
+      const payload = JSON.stringify({ ok: true, echo: { method, url } });
+      const b64 = btoa(unescape(encodeURIComponent(payload)));
+      return {
+        json: {
+          status: 200, status_text: 'OK',
+          headers: [{ key: 'Content-Type', value: 'application/json' }, { key: 'Content-Length', value: String(payload.length) }],
+          body: payload, body_base64: b64, truncated: false, too_large: false,
+          duration_ms: 18, size_bytes: payload.length, content_type: 'application/json',
+          trace: [
+            { label: 'Request', detail: `${method} ${url}`, ms: null, level: 'info' },
+            { label: 'Sent request', detail: '0 header(s)', ms: null, level: 'info' },
+            { label: 'Waiting (TTFB)', detail: 'time to first response byte', ms: 14, level: 'timing' },
+            { label: 'Downloaded', detail: `${payload.length} B`, ms: 2, level: 'timing' },
+            { label: 'Completed', detail: '200 OK', ms: 18, level: 'success' },
+          ],
+        },
+      };
+    },
+  },
+
+  { method: 'GET', re: /^\/workspaces\/([^/]+)\/api-client\/cookies$/, handle: () => ({ json: [{ name: 'session', value: 'mock-abc123', domain: 'example.com', path: '/' }] }) },
+  { method: 'DELETE', re: /^\/workspaces\/([^/]+)\/api-client\/cookies$/, handle: () => ({ status: 204 }) },
+  {
+    method: 'POST',
+    re: /^\/workspaces\/([^/]+)\/api-client\/oauth2\/token$/,
+    handle: (_m, body) => {
+      const grant = String((body as { grant?: string })?.grant ?? 'client_credentials');
+      return { json: { access_token: `mock-token-${grant}-abc123`, token_type: 'Bearer', expires_in: 3600, refresh_token: 'mock-refresh-xyz', scope: 'read write' } };
+    },
+  },
+  {
+    method: 'POST',
+    re: /^\/api-client\/import-curl$/,
+    handle: (_m, body) => {
+      const curl = String((body as { curl?: string })?.curl ?? '');
+      const urlMatch = curl.match(/https?:\/\/[^\s'"]+/);
+      const methodMatch = curl.match(/-X\s+(\w+)/i);
+      return {
+        json: {
+          method: (methodMatch?.[1] ?? 'GET').toUpperCase(),
+          url: urlMatch?.[0] ?? 'https://example.com',
+          headers: [], query: [], body_mode: 'none', body: '', auth: { type: 'none' },
+        },
+      };
+    },
+  },
+  {
+    method: 'POST',
+    re: /^\/workspaces\/([^/]+)\/api-client\/grpc\/describe$/,
+    handle: () => ({
+      json: {
+        services: [
+          {
+            name: 'demo.Greeter',
+            methods: [
+              {
+                name: 'SayHello',
+                full: '/demo.Greeter/SayHello',
+                input_type: 'demo.HelloRequest',
+                output_type: 'demo.HelloReply',
+                input_schema: '{\n  "name": "",\n  "count": 0\n}',
+                client_streaming: false,
+                server_streaming: false,
+              },
+            ],
+          },
+        ],
+      },
+    }),
+  },
+  {
+    method: 'POST',
+    re: /^\/workspaces\/([^/]+)\/api-client\/grpc\/reflect$/,
+    handle: () => ({
+      json: {
+        services: [
+          {
+            name: 'demo.Greeter',
+            methods: [
+              { name: 'SayHello', full: '/demo.Greeter/SayHello', input_type: 'demo.HelloRequest', output_type: 'demo.HelloReply', input_schema: '{\n  "name": ""\n}', client_streaming: false, server_streaming: false },
+              { name: 'StreamHellos', full: '/demo.Greeter/StreamHellos', input_type: 'demo.HelloRequest', output_type: 'demo.HelloReply', input_schema: '{\n  "name": ""\n}', client_streaming: false, server_streaming: true },
+            ],
+          },
+        ],
+      },
+    }),
+  },
+  {
+    method: 'POST',
+    re: /^\/workspaces\/([^/]+)\/api-client\/grpc\/invoke$/,
+    handle: (_m, body) => {
+      const reqBody = (body as { body?: string })?.body ?? '{}';
+      let name = 'world';
+      try { name = JSON.parse(reqBody).name || 'world'; } catch { /* ignore */ }
+      const payload = JSON.stringify({ message: `Hello, ${name}!`, tags: ['mock'] }, null, 2);
+      return {
+        json: {
+          status: 200, status_text: 'OK',
+          headers: [{ key: 'grpc-status', value: '0' }, { key: 'content-type', value: 'application/grpc+json' }],
+          body: payload, body_base64: btoa(unescape(encodeURIComponent(payload))),
+          truncated: false, too_large: false, duration_ms: 22, size_bytes: payload.length,
+          content_type: 'application/grpc+json',
+          trace: [
+            { label: 'Request', detail: 'gRPC /demo.Greeter/SayHello', ms: null, level: 'info' },
+            { label: 'Connected', detail: 'mock', ms: 8, level: 'timing' },
+            { label: 'Response', detail: 'message received', ms: 12, level: 'timing' },
+            { label: 'Completed', detail: 'OK (grpc-status 0)', ms: 22, level: 'success' },
+          ],
+        },
+      };
+    },
+  },
+
   {
     method: 'GET',
     re: /^\/workspaces\/([^/]+)\/connections$/,
@@ -953,6 +1139,20 @@ const routes: Route[] = [
       if (i >= 0) repos.splice(i, 1);
       return { status: 204 };
     },
+  },
+  {
+    method: 'POST',
+    re: /^\/repos\/([^/]+)\/api-collections\/push$/,
+    handle: (_m, body) => {
+      const files = ((body as { files?: { name: string; content: string }[] })?.files ?? []);
+      gitCollectionFiles = files;
+      return { json: { commit: 'abc1234def', push: 'pushed', files: files.length } };
+    },
+  },
+  {
+    method: 'POST',
+    re: /^\/repos\/([^/]+)\/api-collections\/pull$/,
+    handle: () => ({ json: { files: gitCollectionFiles } }),
   },
   { method: 'GET', re: /^\/repos\/([^/]+)\/status$/, handle: (m) => ({ json: repoStatus[m[1]] ?? problemStatus() }) },
   { method: 'GET', re: /^\/repos\/([^/]+)\/branches$/, handle: (m) => ({ json: branches[m[1]] ?? [] }) },
@@ -1204,6 +1404,57 @@ function handleApi(method: string, pathWithQuery: string, body: unknown): { stat
   return { status: 404, body: JSON.stringify({ code: 'not_found', message: `${method} ${path}` }) };
 }
 
+// Simulates the daemon's /ws/api-client/stream relay (SSE + WebSocket).
+class MockStreamSocket {
+  onopen: ((ev: Event) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  onclose: ((ev: CloseEvent) => void) | null = null;
+  onerror: ((ev: Event) => void) | null = null;
+  readyState = 0;
+  private closed = false;
+  private timers: ReturnType<typeof setTimeout>[] = [];
+
+  constructor(_url: string) {
+    this.later(30, () => {
+      this.readyState = 1;
+      this.onopen?.(new Event('open'));
+    });
+  }
+  private later(ms: number, fn: () => void): void {
+    this.timers.push(setTimeout(() => !this.closed && fn(), ms));
+  }
+  private emit(obj: unknown): void {
+    this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(obj) }));
+  }
+  send(raw: string): void {
+    let msg: { action?: string; kind?: string; data?: string };
+    try { msg = JSON.parse(raw); } catch { return; }
+    if (msg.action === 'open') {
+      if (msg.kind === 'sse') {
+        this.later(40, () => this.emit({ type: 'open', detail: '200 — streaming events (mock)' }));
+        for (let i = 1; i <= 3; i++) {
+          this.later(120 * i, () => this.emit({ type: 'event', event: 'tick', data: `event ${i}`, id: String(i) }));
+        }
+        this.later(120 * 4, () => this.emit({ type: 'closed', detail: 'stream ended' }));
+      } else {
+        this.later(40, () => this.emit({ type: 'open', detail: 'connected (mock echo)' }));
+      }
+    } else if (msg.action === 'send') {
+      this.emit({ type: 'message', dir: 'out', data: msg.data ?? '', binary: false });
+      this.later(60, () => this.emit({ type: 'message', dir: 'in', data: `echo: ${msg.data ?? ''}`, binary: false }));
+    } else if (msg.action === 'close') {
+      this.emit({ type: 'closed', detail: 'disconnected' });
+      this.close();
+    }
+  }
+  close(): void {
+    this.closed = true;
+    this.timers.forEach(clearTimeout);
+    this.readyState = 3;
+    this.onclose?.(new CloseEvent('close'));
+  }
+}
+
 class MockTermSocket {
   // WebSocket-ish surface used by Terminal.svelte
   onopen: ((ev: Event) => void) | null = null;
@@ -1384,6 +1635,7 @@ export function setupMock(): void {
     const u = String(url);
     if (u.includes('/ws/term/')) return new MockTermSocket(u) as unknown as WebSocket;
     if (u.includes('/ws/events')) return new MockEventsSocket() as unknown as WebSocket;
+    if (u.includes('/ws/api-client/stream')) return new MockStreamSocket(u) as unknown as WebSocket;
     return new RealWS(url, protocols);
   } as unknown as typeof WebSocket;
   (Patched as { prototype: WebSocket }).prototype = RealWS.prototype;

@@ -8,6 +8,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { marked } from 'marked';
   import type { FsBrowse, FsEntry, FsRead } from '../../lib/api/types';
 
   interface Props {
@@ -117,6 +118,7 @@
     viewerLoading = true;
     viewerName = entry.name;
     viewerFile = null;
+    previewMode = true; // previewable files default to rendered view
     try {
       const data = await api.get<FsRead>(`/fs/read?path=${encodeURIComponent(entry.path)}`);
       viewerFile = data;
@@ -133,6 +135,35 @@
     viewerFile = null;
     viewerName = '';
   }
+
+  // ── Markdown / HTML preview ────────────────────────────────────────────────
+  let previewMode = $state(true);
+  const viewerExt = $derived((viewerName.split('.').pop() ?? '').toLowerCase());
+  const canPreview = $derived(['md', 'markdown', 'mdx', 'html', 'htm'].includes(viewerExt));
+  const isMarkdown = $derived(['md', 'markdown', 'mdx'].includes(viewerExt));
+  // Rendered HTML wrapped for a sandboxed iframe (no scripts run).
+  const previewSrcdoc = $derived.by(() => {
+    if (!viewerFile || !canPreview) return '';
+    const inner = isMarkdown ? renderMarkdown(viewerFile.content) : viewerFile.content;
+    return `<!doctype html><html><head><meta charset="utf-8"><style>${PREVIEW_CSS}</style></head><body>${inner}</body></html>`;
+  });
+  function renderMarkdown(src: string): string {
+    try {
+      return marked.parse(src, { async: false, gfm: true, breaks: true }) as string;
+    } catch {
+      return `<pre>${src.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
+    }
+  }
+  const PREVIEW_CSS = `
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 16px; color: #ddd; background: transparent; }
+    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid #ffffff22; padding-bottom: .2em; }
+    a { color: #6ea8fe; } code { background: #ffffff14; padding: .15em .35em; border-radius: 4px; font-family: ui-monospace, monospace; }
+    pre { background: #ffffff10; padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; } th,td { border: 1px solid #ffffff22; padding: 4px 8px; }
+    blockquote { border-left: 3px solid #ffffff33; margin: 0; padding-left: 12px; color: #aaa; }
+    img { max-width: 100%; }
+  `;
 
   // Collect flattened visible nodes for rendering (DFS walk).
   function flatten(nodes: TreeNode[]): TreeNode[] {
@@ -252,6 +283,12 @@
             {#if viewerFile?.truncated}
               <span class="truncated-badge dim" title="File truncated at ~400 KB">truncated</span>
             {/if}
+            {#if canPreview}
+              <div class="preview-toggle">
+                <button class="pv" class:active={!previewMode} onclick={() => (previewMode = false)}>Source</button>
+                <button class="pv" class:active={previewMode} onclick={() => (previewMode = true)}>Preview</button>
+              </div>
+            {/if}
             <button class="close-btn icon-btn" onclick={closeViewer} title="Close viewer" aria-label="Close viewer">
               <Icon name="x" size={12} />
             </button>
@@ -259,14 +296,18 @@
           {#if viewerLoading}
             <div class="loading dim">Loading…</div>
           {:else if viewerFile}
-            <div class="code-scroll">
-              <CodeEditor
-                path={viewerFile.path}
-                content={viewerFile.content}
-                root={effectiveRoot}
-                readOnly
-              />
-            </div>
+            {#if canPreview && previewMode}
+              <iframe class="preview-frame" title="Preview" sandbox="allow-same-origin" srcdoc={previewSrcdoc}></iframe>
+            {:else}
+              <div class="code-scroll">
+                <CodeEditor
+                  path={viewerFile.path}
+                  content={viewerFile.content}
+                  root={effectiveRoot}
+                  readOnly
+                />
+              </div>
+            {/if}
           {/if}
         </div>
       {/if}
@@ -460,6 +501,32 @@
     flex: 1;
     overflow: hidden;
     min-height: 0;
+  }
+  .preview-toggle {
+    display: inline-flex;
+    gap: 2px;
+    margin-left: auto;
+  }
+  .pv {
+    height: 20px;
+    padding: 0 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+    border-radius: var(--radius-s);
+  }
+  .pv.active {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  .preview-frame {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    border: none;
+    background: var(--surface-1, #1a1a1a);
   }
 
   /* ── misc ─────────────────────────────── */

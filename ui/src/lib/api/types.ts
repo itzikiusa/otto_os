@@ -113,15 +113,96 @@ export interface Repo {
 }
 
 // ---------------------------------------------------------------------------
+// Agent activity (live trail + task tracker) — mirrors otto_core::domain
+// ---------------------------------------------------------------------------
+
+export type TrailSource = 'user' | 'agent' | 'otto';
+export type TrailKind =
+  | 'session'
+  | 'prompt'
+  | 'skill'
+  | 'command'
+  | 'tool'
+  | 'file'
+  | 'web'
+  | 'task'
+  | 'note'
+  | 'other';
+
+/** One entry in a session's live activity trail. */
+export type TrailLevel = 'info' | 'warn' | 'error';
+
+export interface TrailEvent {
+  id: Id;
+  session_id: Id;
+  workspace_id: Id;
+  ts: string;
+  source: TrailSource;
+  kind: TrailKind;
+  level: TrailLevel;
+  summary: string;
+  detail: unknown | null;
+}
+
+/** Per-session task roll-up for the multi-agent overview (sidebar chips). */
+export interface SessionActivitySummary {
+  session_id: Id;
+  total: number;
+  done: number;
+  in_progress: string | null;
+  last_ts: string | null;
+}
+
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'cancelled';
+
+/** One task in a session's normalized task tracker. */
+export interface AgentTask {
+  id: Id;
+  session_id: Id;
+  workspace_id: Id;
+  ext_id: string | null;
+  title: string;
+  status: TaskStatus;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AppendTrailReq {
+  source?: TrailSource;
+  kind?: TrailKind;
+  summary: string;
+  detail?: unknown;
+}
+
+export interface TaskInput {
+  ext_id?: string | null;
+  title: string;
+  status: TaskStatus;
+}
+
+export interface PutTasksReq {
+  tasks: TaskInput[];
+}
+
+// ---------------------------------------------------------------------------
 // Events (WS /ws/events)
 // ---------------------------------------------------------------------------
 
 export type OttoEvent =
   | { type: 'session_status'; session_id: Id; workspace_id: Id; status: SessionStatus }
   | { type: 'session_created'; session: Session }
+  | {
+      type: 'session_meta_updated';
+      session_id: Id;
+      workspace_id: Id;
+      meta: Record<string, unknown>;
+    }
   | { type: 'session_removed'; session_id: Id; workspace_id: Id }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; title: string; body: string }
-  | { type: 'notification'; notice: Notice };
+  | { type: 'notification'; notice: Notice }
+  | { type: 'trail_appended'; workspace_id: Id; session_id: Id; event: TrailEvent }
+  | { type: 'tasks_updated'; workspace_id: Id; session_id: Id; tasks: AgentTask[] };
 
 // ---------------------------------------------------------------------------
 // Notifications (notification center)
@@ -712,6 +793,44 @@ export interface HandoffReq {
   comment_ids?: string[] | null;
 }
 
+/** Where a handover brief is delivered. */
+export type HandoverTarget =
+  | { kind: 'new_agent'; provider: string }
+  | { kind: 'existing_session'; session_id: Id };
+
+/** POST /sessions/{id}/handover — pass one agent's context into another agent. */
+export interface HandoverReq {
+  target: HandoverTarget;
+  /** What the receiving agent should focus on (weights the generated brief). */
+  focus?: string | null;
+  /** Title for the new session (new_agent only). */
+  title?: string | null;
+  /** Pre-reviewed brief; when present the server skips summarization. */
+  brief?: string | null;
+  /** Include git state in the generated brief. Defaults to true. */
+  include_git?: boolean | null;
+  /** Summarize with a fast model. Defaults to false. */
+  fast?: boolean | null;
+  /** Archive the source session after handover. Defaults to false. */
+  archive_source?: boolean | null;
+}
+
+/** POST /sessions/{id}/handover/brief — generate the brief for review. */
+export interface HandoverBriefReq {
+  focus?: string | null;
+  include_git?: boolean | null;
+  fast?: boolean | null;
+}
+
+export interface HandoverBriefResp {
+  /** The generated brief (markdown); empty when there was no context. */
+  brief: string;
+  /** True when summarization was unavailable and `brief` is raw context. */
+  fallback: boolean;
+  /** True when some source context (transcript/scrollback/git) was found. */
+  had_context: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Issue tracking (Jira)
 // ---------------------------------------------------------------------------
@@ -855,7 +974,7 @@ export interface UpdateSelfImprovementReq {
   lookback_hours: number;
   skill_allowlist: string[];
   autonomy: Autonomy;
-  model: string;
+  providers: string[];
   live_evolve: boolean;
 }
 
@@ -966,9 +1085,22 @@ export type ApiAuth =
   | { type: 'none' }
   | { type: 'bearer'; token: string }
   | { type: 'basic'; username: string; password: string }
-  | { type: 'api_key'; key: string; value: string; in: 'header' | 'query' };
+  | { type: 'api_key'; key: string; value: string; in: 'header' | 'query' }
+  | {
+      type: 'oauth2';
+      grant: 'client_credentials' | 'password' | 'refresh_token';
+      token_url: string;
+      client_id: string;
+      client_secret: string;
+      scope: string;
+      username: string;
+      password: string;
+      refresh_token: string;
+      access_token: string;
+      token_type: string;
+    };
 
-export type ApiBodyMode = 'none' | 'json' | 'raw' | 'form' | 'graphql';
+export type ApiBodyMode = 'none' | 'json' | 'raw' | 'form' | 'multipart' | 'graphql';
 
 export interface ApiCollection {
   id: Id;
@@ -1048,6 +1180,10 @@ export interface ExecuteApiReq {
   body?: string;
   auth?: ApiAuth;
   environment_id?: Id | null;
+  timeout_ms?: number | null;
+  follow_redirects?: boolean | null;
+  verify_ssl?: boolean | null;
+  vars?: Record<string, string> | null;
 }
 
 export interface ApiResponse {
@@ -1055,9 +1191,25 @@ export interface ApiResponse {
   status_text: string;
   headers: ApiKeyVal[];
   body: string;
+  /** Full response bytes, base64 (binary preview + save to disk). Empty when too_large. */
+  body_base64: string;
+  /** `body` was truncated for display (full bytes still in body_base64). */
+  truncated: boolean;
+  /** Body exceeded the inline cap: body + body_base64 are empty, only save-from-server unavailable. */
+  too_large: boolean;
   duration_ms: number;
   size_bytes: number;
   content_type: string | null;
+  /** Per-phase execution trace for the response "Trace" tab. */
+  trace: TraceStep[];
+}
+
+export interface TraceStep {
+  label: string;
+  detail: string;
+  ms: number | null;
+  /** info | timing | redirect | success | error */
+  level: string;
 }
 
 export interface ImportCurlReq {
@@ -1122,4 +1274,432 @@ export interface ApiRunResult {
   automation_id: Id;
   steps: ApiRunStepResult[];
   passed: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Skills Evaluator
+// ---------------------------------------------------------------------------
+
+export type SkillEvalStatus = 'running' | 'done' | 'error' | 'cancelled';
+export type EvalAgentStatus = 'pending' | 'running' | 'waiting' | 'done' | 'error';
+export type EvalIterStatus =
+  | 'pending'
+  | 'implementing'
+  | 'validating'
+  | 'improving'
+  | 'done'
+  | 'error';
+
+/** One problem a validation found, with the concrete suggested fix. */
+export interface EvalFinding {
+  /** 'info' | 'warn' | 'fail' */
+  severity: string;
+  issue: string;
+  suggestion: string;
+  location?: string | null;
+}
+
+/** Live state of one validation agent (validation × provider) in an iteration. */
+export interface EvalValidationState {
+  validation: string;
+  name: string;
+  provider: string;
+  model: string;
+  status: EvalAgentStatus;
+  note: string;
+  passed: boolean;
+  score: number;
+  session_id?: string | null;
+  findings: EvalFinding[];
+}
+
+/** One iteration (round) of a skill evaluation. */
+export interface EvalIteration {
+  id: Id;
+  eval_id: Id;
+  iter: number;
+  base_iter?: number | null;
+  skill_name: string;
+  skill_before: string;
+  skill_after?: string | null;
+  impl_provider: string;
+  impl_session_id?: string | null;
+  impl_summary: string;
+  worktree_path?: string | null;
+  status: EvalIterStatus;
+  note: string;
+  score: number;
+  agents: EvalValidationState[];
+  improvement_summary: string;
+  skill_diff: string;
+  created_at: string;
+}
+
+/** A complete skill-evaluation run. */
+export interface SkillEval {
+  id: Id;
+  workspace_id: Id;
+  source_skill: string;
+  task: string;
+  impl_cli: string;
+  target_iterations: number;
+  status: SkillEvalStatus;
+  error?: string | null;
+  summary: string;
+  best_iteration?: number | null;
+  best_score?: number | null;
+  iterations: EvalIteration[];
+  /** The original StartSkillEvalReq JSON (for per-validation retry + display). */
+  config?: unknown;
+  created_at: string;
+}
+
+/** One configurable validation dimension. */
+export interface SkillEvalValidationCfg {
+  name: string;
+  criteria: string;
+  /** CLIs to run this validation on (one agent each). */
+  providers: string[];
+  model: string;
+}
+
+export interface SkillEvalImproverCfg {
+  provider: string;
+  model: string;
+}
+
+export interface SkillEvalConfig {
+  validations: SkillEvalValidationCfg[];
+  improver: SkillEvalImproverCfg;
+  iterations: number;
+  /** Validation passes to average (1–3) — reduces grader noise. */
+  validator_passes: number;
+}
+
+/** Where the skill under test comes from. */
+export interface SkillSourceReq {
+  /** 'library' | 'path' | 'provider' */
+  kind: string;
+  reference: string;
+  provider?: string | null;
+}
+
+export interface StartSkillEvalReq {
+  source: SkillSourceReq;
+  task: string;
+  impl_cli: string;
+  validations: SkillEvalValidationCfg[];
+  iterations: number;
+  improver?: SkillEvalImproverCfg | null;
+  base_ref?: string | null;
+  /** Validation passes to average (1–3). */
+  validator_passes?: number;
+}
+
+export interface PromoteSkillReq {
+  iteration_id: Id;
+  /** 'tested' = the skill that iteration ran with; 'improved' = its edited version. */
+  source: 'tested' | 'improved';
+  name: string;
+}
+
+export interface ImplDiffResp {
+  diff: string;
+  truncated: boolean;
+}
+
+export interface SkillSourceInfo {
+  /** 'library' | 'provider' */
+  kind: string;
+  name: string;
+  description: string;
+  provider?: string | null;
+}
+
+export interface SkillSourcesResp {
+  sources: SkillSourceInfo[];
+}
+
+// ---------------------------------------------------------------------------
+// Workflow engine (mirrors otto_core::workflows)
+// ---------------------------------------------------------------------------
+
+export interface WorkflowNode {
+  id: string;
+  kind: string;
+  name: string;
+  x: number;
+  y: number;
+  params: unknown;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  source: string;
+  target: string;
+}
+
+export interface WorkflowGraph {
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+}
+
+export interface Workflow {
+  id: Id;
+  workspace_id: Id;
+  name: string;
+  description: string;
+  graph: WorkflowGraph;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export type RunStatus = 'pending' | 'running' | 'success' | 'error' | 'canceled';
+export type NodeStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped';
+
+export interface NodeRunState {
+  node_id: string;
+  status: NodeStatus;
+  output?: unknown;
+  error?: string | null;
+  logs: string[];
+  duration_ms?: number | null;
+}
+
+export interface WorkflowRun {
+  id: Id;
+  workflow_id: Id;
+  workspace_id: Id;
+  status: RunStatus;
+  input: unknown;
+  nodes: NodeRunState[];
+  error?: string | null;
+  started_at: string;
+  finished_at?: string | null;
+}
+
+export interface NodeTypeSpec {
+  kind: string;
+  label: string;
+  category: string;
+  description: string;
+  inputs: number;
+  outputs: number;
+  color: string;
+  icon: string;
+}
+
+export interface CreateWorkflowReq {
+  name: string;
+  description?: string | null;
+  graph?: WorkflowGraph | null;
+}
+
+export interface GenerateWorkflowReq {
+  description: string;
+  name?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Database Explorer (DB module) — mirrors crates/otto-* DB endpoints.
+// ---------------------------------------------------------------------------
+
+/** Database engines the explorer can talk to (subset of ConnectionKind). */
+export type DbEngine = 'mysql' | 'redis' | 'mongodb' | 'clickhouse';
+
+/** Schema-tree node taxonomy across SQL / Redis / Mongo. */
+export type DbNodeKind =
+  | 'database'
+  | 'schema'
+  | 'table'
+  | 'view'
+  | 'column'
+  | 'index'
+  | 'collection'
+  | 'field'
+  | 'keyspace'
+  | 'key_namespace'
+  | 'key'
+  | 'folder';
+
+/** One lazy node in the schema tree (databases → tables → columns, etc.). */
+export interface SchemaNode {
+  id: string;
+  label: string;
+  kind: DbNodeKind;
+  detail?: string;
+  has_children: boolean;
+}
+
+export interface DbColumnDef {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+  default?: string | null;
+  key?: string | null;
+  extra?: string | null;
+  comment?: string | null;
+}
+
+export interface DbIndexDef {
+  name: string;
+  columns: string[];
+  unique: boolean;
+  method?: string | null;
+}
+
+export interface DbForeignKey {
+  name: string;
+  columns: string[];
+  ref_table: string;
+  ref_columns: string[];
+  ref_schema?: string | null;
+}
+
+/** Full detail for a selected object (table / view / collection / key). */
+export interface ObjectDetail {
+  name: string;
+  kind: DbNodeKind;
+  columns: DbColumnDef[];
+  primary_key: string[];
+  indexes: DbIndexDef[];
+  foreign_keys: DbForeignKey[];
+  ddl?: string | null;
+  row_count?: number | null;
+  extra?: unknown;
+}
+
+/** A column in a query result set. */
+export interface DbColumn {
+  name: string;
+  type_hint?: string | null;
+}
+
+export interface QueryStats {
+  duration_ms: number;
+  row_count: number;
+  bytes_read?: number | null;
+}
+
+/** Result of running a statement: tabular rows + stats. */
+export interface QueryResult {
+  columns: DbColumn[];
+  rows: unknown[][];
+  rows_affected?: number | null;
+  stats: QueryStats;
+  message?: string | null;
+  truncated: boolean;
+}
+
+export type DbCompletionKind =
+  | 'keyword'
+  | 'function'
+  | 'table'
+  | 'view'
+  | 'column'
+  | 'database'
+  | 'collection'
+  | 'field'
+  | 'command'
+  | 'operator';
+
+export interface DbCompletionItem {
+  label: string;
+  kind: DbCompletionKind;
+  detail?: string | null;
+  insert_text?: string | null;
+}
+
+/** What a given engine supports — drives the UI affordances. */
+export interface DbCapabilities {
+  engine: DbEngine;
+  sql: boolean;
+  joins: boolean;
+  transactions: boolean;
+  multi_statement: boolean;
+  default_port: number;
+  schema_levels: string[];
+  query_language: 'sql' | 'redis' | 'mongo';
+}
+
+export interface DbTestResult {
+  ok: boolean;
+  latency_ms?: number | null;
+  message: string;
+  server_version?: string | null;
+}
+
+export interface DbSavedQuery {
+  id: string;
+  workspace_id: string;
+  connection_id?: string | null;
+  name: string;
+  statement: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface DbHistoryEntry {
+  id: string;
+  connection_id: string;
+  statement: string;
+  ok: boolean;
+  duration_ms: number;
+  row_count: number;
+  error?: string | null;
+  created_at: string;
+}
+
+/** Supported widget visualizations. */
+export type DbViz = 'table' | 'line' | 'bar' | 'area' | 'pie' | 'number';
+
+/** Maps result columns onto a chart's axes/series. */
+export interface DbWidgetMapping {
+  x?: string;
+  y?: string[];
+  category?: string;
+  value?: string;
+}
+
+export interface DbWidget {
+  id: string;
+  workspace_id: string;
+  dashboard_id?: string | null;
+  connection_id: string;
+  title: string;
+  statement: string;
+  viz: DbViz;
+  mapping: DbWidgetMapping;
+  options: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One tile placement on a dashboard grid. */
+export interface DbLayoutItem {
+  widget_id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface DbDashboard {
+  id: string;
+  workspace_id: string;
+  name: string;
+  layout: DbLayoutItem[];
+  refresh_secs?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A ready-made example workflow (e.g. a game pipeline: agent design + engine). */
+export interface WorkflowTemplate {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  graph: WorkflowGraph;
 }

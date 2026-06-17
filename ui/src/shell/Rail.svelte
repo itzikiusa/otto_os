@@ -6,12 +6,17 @@
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
 
-  const modules = [
+  const modules = $derived([
     { id: 'agents', icon: 'terminal', label: 'Agents' },
     { id: 'connections', icon: 'plug', label: 'Connections' },
     { id: 'git', icon: 'branch', label: 'Git' },
     { id: 'api', icon: 'send', label: 'API' },
-  ];
+    { id: 'database', icon: 'db', label: 'Database' },
+    { id: 'workflows', icon: 'split', label: 'Workflows' },
+    { id: 'skills-eval', icon: 'zap', label: 'Skills Evaluator' },
+    // Usage analytics aggregate across all workspaces — root only.
+    ...(auth.isRoot ? [{ id: 'usage', icon: 'chart', label: 'Usage' }] : []),
+  ]);
 </script>
 
 <nav class="rail sidebar-material" aria-label="Modules">

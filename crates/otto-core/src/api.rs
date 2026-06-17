@@ -808,6 +808,70 @@ pub struct HandoffReq {
     pub comment_ids: Option<Vec<String>>,
 }
 
+/// Where a handover brief is delivered: a freshly spawned agent, or an existing
+/// running agent in the same workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HandoverTarget {
+    /// Spawn a new agent of `provider` ("claude" | "codex" | "agy" | …).
+    NewAgent { provider: String },
+    /// Inject into an existing agent session already in this workspace.
+    ExistingSession { session_id: Id },
+}
+
+/// `POST /api/v1/sessions/{id}/handover` — pass the source agent's working
+/// context (summarized best-effort, optionally with git state) into the target
+/// agent, so it can continue the work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoverReq {
+    /// Where to deliver the brief.
+    pub target: HandoverTarget,
+    /// Free-text note describing what the receiving agent should focus on. The
+    /// generated brief is weighted toward this.
+    #[serde(default)]
+    pub focus: Option<String>,
+    /// Title for the new session (NewAgent only). Defaults to "Handover from <source>".
+    #[serde(default)]
+    pub title: Option<String>,
+    /// A pre-generated/edited brief. When present, the server skips
+    /// summarization and injects this verbatim (the "review before sending" flow).
+    #[serde(default)]
+    pub brief: Option<String>,
+    /// Include the repo's git state (branch, changed files, recent commits) in
+    /// the generated brief. Ignored when `brief` is supplied. Defaults to true.
+    #[serde(default)]
+    pub include_git: Option<bool>,
+    /// Summarize with a fast model (haiku) instead of the default. Ignored when
+    /// `brief` is supplied. Defaults to false.
+    #[serde(default)]
+    pub fast: Option<bool>,
+    /// Archive the source session once the handover is sent. Defaults to false.
+    #[serde(default)]
+    pub archive_source: Option<bool>,
+}
+
+/// `POST /api/v1/sessions/{id}/handover/brief` — generate the handover brief
+/// (synchronously) so the user can review/edit it before sending.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoverBriefReq {
+    #[serde(default)]
+    pub focus: Option<String>,
+    #[serde(default)]
+    pub include_git: Option<bool>,
+    #[serde(default)]
+    pub fast: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoverBriefResp {
+    /// The generated brief (markdown). Empty when there was no context at all.
+    pub brief: String,
+    /// True when summarization was unavailable and `brief` is raw context.
+    pub fallback: bool,
+    /// True when some source context (transcript/scrollback/git) was found.
+    pub had_context: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Session input
 // ---------------------------------------------------------------------------
@@ -1081,6 +1145,15 @@ pub struct ExecuteApiReq {
     pub auth: Value,
     #[serde(default)]
     pub environment_id: Option<Id>,
+    /// Per-request execution settings (timeout, redirects, TLS verification).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub follow_redirects: Option<bool>,
+    #[serde(default)]
+    pub verify_ssl: Option<bool>,
+    #[serde(default)]
+    pub vars: Option<Value>,
 }
 
 /// Response of `POST .../api-client/execute`.
@@ -1090,10 +1163,38 @@ pub struct ApiResponse {
     pub status_text: String,
     /// `[{ "key", "value" }]`
     pub headers: Value,
+    /// UTF-8 (lossy) body for display, truncated to a display cap when large.
     pub body: String,
+    /// Full response bytes, base64-encoded — used for binary preview (images)
+    /// and "save to disk". Empty when the response is `too_large`.
+    #[serde(default)]
+    pub body_base64: String,
+    /// `body` was cut to the display cap (full bytes still in `body_base64`).
+    #[serde(default)]
+    pub truncated: bool,
+    /// Body exceeded the inline cap: neither `body` nor `body_base64` is set.
+    #[serde(default)]
+    pub too_large: bool,
     pub duration_ms: i64,
     pub size_bytes: i64,
     pub content_type: Option<String>,
+    /// Per-phase trace of the request lifecycle (resolved request, TTFB,
+    /// download, redirects, completion) for the response "Trace" tab.
+    #[serde(default)]
+    pub trace: Vec<TraceStep>,
+}
+
+/// One step in a request's execution trace (see [`ApiResponse::trace`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceStep {
+    pub label: String,
+    pub detail: String,
+    /// Duration of this phase in milliseconds, when measured.
+    #[serde(default)]
+    pub ms: Option<i64>,
+    /// One of: info | timing | redirect | success | error (UI styling hint).
+    #[serde(default)]
+    pub level: String,
 }
 
 /// `POST /api-client/import-curl` — parse a curl command into request fields.
@@ -1143,4 +1244,174 @@ pub struct ApiRunResult {
     pub steps: Vec<ApiRunStepResult>,
     /// True when every step was `ok`.
     pub passed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Skills Evaluator
+// ---------------------------------------------------------------------------
+
+/// One validation the evaluator runs against the produced implementation. Each
+/// validation fans out to one agent per entry in `providers` (so a single
+/// validation can be cross-checked by several CLIs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillEvalValidationCfg {
+    /// Short identifier, e.g. "logs", "docs", "naming".
+    pub name: String,
+    /// What this validation checks and how to judge it. Passed to the agent.
+    pub criteria: String,
+    /// CLIs to run this validation on (one agent each). Empty falls back to the
+    /// run's implementation CLI.
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// Model hint ("haiku" | "sonnet" | "opus" | ""). Empty = provider default.
+    #[serde(default)]
+    pub model: String,
+}
+
+/// Config for the agent that edits/improves the skill between iterations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillEvalImproverCfg {
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+/// Persisted defaults for the Skills Evaluator (settings key `skill_eval`).
+/// `GET /api/v1/settings/skill-eval` and `PUT /api/v1/settings/skill-eval`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillEvalConfig {
+    /// Default validations offered when starting a new evaluation.
+    pub validations: Vec<SkillEvalValidationCfg>,
+    /// Default improver agent.
+    pub improver: SkillEvalImproverCfg,
+    /// Default number of iterations.
+    #[serde(default = "default_iterations")]
+    pub iterations: u32,
+    /// Default validation passes (averaged) — see `StartSkillEvalReq`.
+    #[serde(default = "default_validator_passes")]
+    pub validator_passes: u32,
+}
+
+fn default_iterations() -> u32 {
+    2
+}
+
+/// Where the skill under test comes from.
+/// - `kind = "library"`: `reference` is the Otto library skill name.
+/// - `kind = "path"`: `reference` is an absolute path to a skill folder, a
+///   `SKILL.md`/`.md` file, or a `.zip`/`.gz`/`.tgz` archive containing one.
+/// - `kind = "provider"`: `reference` is a skill name under
+///   `~/.<provider>/skills/<name>/SKILL.md` (provider in `provider`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSourceReq {
+    pub kind: String,
+    pub reference: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// `POST /api/v1/workspaces/{id}/skill-evaluations` — start an evaluation run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartSkillEvalReq {
+    pub source: SkillSourceReq,
+    /// The task to implement using the skill (e.g. "add endpoint X").
+    pub task: String,
+    /// The single CLI that implements the task.
+    pub impl_cli: String,
+    /// Validations to run after each implementation.
+    pub validations: Vec<SkillEvalValidationCfg>,
+    /// Total iterations (rounds). >= 1. Round 1 is the baseline; each later
+    /// round improves the skill and re-runs.
+    pub iterations: u32,
+    /// Agent that edits the skill between iterations (defaults to the impl CLI).
+    #[serde(default)]
+    pub improver: Option<SkillEvalImproverCfg>,
+    /// Git ref to create each iteration's worktree from (defaults to HEAD).
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    /// How many times to run each validation and average — higher reduces the
+    /// noise from nondeterministic graders. 1–3, defaults to 1.
+    #[serde(default = "default_validator_passes")]
+    pub validator_passes: u32,
+}
+
+fn default_validator_passes() -> u32 {
+    1
+}
+
+/// `POST /api/v1/skill-evaluations/{id}/promote` — save an iteration's skill
+/// back into the Otto library under `name`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteSkillReq {
+    pub iteration_id: Id,
+    /// "tested" = the skill that iteration ran with; "improved" = the edited
+    /// version it produced for the next round.
+    pub source: String,
+    /// Target library skill name (safe segment).
+    pub name: String,
+}
+
+/// `GET /api/v1/skill-evaluations/{id}/iterations/{iter_id}/diff` — the code the
+/// implementation agent produced in that iteration's worktree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImplDiffResp {
+    pub diff: String,
+    pub truncated: bool,
+}
+
+/// A discoverable skill source the UI can offer in the start form.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSourceInfo {
+    /// "library" | "provider".
+    pub kind: String,
+    /// Skill name.
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Set for `kind = "provider"` (claude/codex/agy).
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// `GET /api/v1/workspaces/{id}/skill-sources` — skills the user can pick from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSourcesResp {
+    pub sources: Vec<SkillSourceInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent activity (live trail + task tracker)
+// ---------------------------------------------------------------------------
+
+/// `POST /workspaces/{wid}/sessions/{sid}/trail` — append one trail entry.
+/// `source`/`kind` are lowercase strings (default `user`/`note`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppendTrailReq {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// `info | warn | error` (default `info`).
+    #[serde(default)]
+    pub level: Option<String>,
+    pub summary: String,
+    #[serde(default)]
+    pub detail: Option<Value>,
+}
+
+/// One task in a [`PutTasksReq`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskInput {
+    #[serde(default)]
+    pub ext_id: Option<String>,
+    pub title: String,
+    /// `pending | in_progress | completed | blocked | cancelled`.
+    pub status: String,
+}
+
+/// `PUT /workspaces/{wid}/sessions/{sid}/tasks` — replace the whole task list
+/// (the task tracker is provider-synced; each push is the source of truth).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PutTasksReq {
+    pub tasks: Vec<TaskInput>,
 }

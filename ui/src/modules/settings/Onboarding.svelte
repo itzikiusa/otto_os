@@ -28,6 +28,11 @@
   );
   const pwValid = $derived(password.length >= 10 && password === password2);
 
+  // ClickHouse powers usage tracking; surface whether it's already present so
+  // the user knows what to expect (install happens from the Usage dashboard
+  // after setup, since it needs an authenticated session).
+  const clickhouse = $derived(auth.meta?.tools?.find((t) => t.name === 'clickhouse'));
+
   async function finish(): Promise<void> {
     if (busy) return;
     busy = true;
@@ -54,7 +59,7 @@
 <div class="ob-wrap">
   <div class="ob-card card">
     <div class="ob-progress">
-      {#each Array(4) as _, i (i)}
+      {#each Array(5) as _, i (i)}
         <span class="ob-dot" class:done={i <= step}></span>
       {/each}
     </div>
@@ -133,6 +138,40 @@
           </button>
         </div>
       </div>
+    {:else if step === 3}
+      <div class="ob-body">
+        <h1>Usage tracking</h1>
+        <p>
+          Otto can track token usage, cost, and system metrics in an embedded
+          <strong>ClickHouse</strong> engine — a full <em>Usage</em> dashboard, kept locally for
+          up to 180 days (configurable). No server or port; it runs as
+          <span class="mono">clickhouse local</span>.
+        </p>
+
+        <div class="tools">
+          <div class="tool-row">
+            <span class="tool-status" class:ok={clickhouse?.found}>
+              {#if clickhouse?.found}<Icon name="check" size={12} />{:else}<Icon name="x" size={11} />{/if}
+            </span>
+            <span class="mono">clickhouse</span>
+            <span class="grow"></span>
+            <span class="dim">{clickhouse?.found ? (clickhouse.version ?? 'found') : 'not installed'}</span>
+          </div>
+        </div>
+        <p class="hint-line">
+          {#if clickhouse?.found}
+            Detected — usage tracking will turn on automatically.
+          {:else}
+            Install it later with one click from <strong>Usage → Install ClickHouse</strong>
+            (<span class="mono">curl https://clickhouse.com/ | sh</span>).
+          {/if}
+        </p>
+
+        <div class="ob-actions">
+          <button class="btn" onclick={() => (step = 2)}>Back</button>
+          <button class="btn primary" onclick={() => (step = 4)}>Continue</button>
+        </div>
+      </div>
     {:else}
       <div class="ob-body">
         <h1>Tool check</h1>
@@ -156,7 +195,7 @@
         {#if error}<div class="hint err">{error}</div>{/if}
 
         <div class="ob-actions">
-          <button class="btn" onclick={() => (step = 2)}>Back</button>
+          <button class="btn" onclick={() => (step = 3)}>Back</button>
           <button class="btn primary big" disabled={busy} onclick={finish}>
             {busy ? 'Setting up…' : 'Finish Setup'}
           </button>
@@ -259,6 +298,16 @@
   }
   .hint.err {
     color: var(--status-exited);
+  }
+  .hint-line {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    text-align: center;
+    margin: 10px 0 0;
+    line-height: 1.5;
+  }
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .tools {
     display: flex;
