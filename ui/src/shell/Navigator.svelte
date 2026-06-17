@@ -614,9 +614,16 @@
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
   }
   .nav-item.active {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-    font-weight: 500;
+    /* Explicit high-contrast selection: a light-green fill with black text/
+       icons. Independent of --accent (which is a dark blue that read as
+       "black text on dark blue" — invisible). Reads clearly on dark AND light. */
+    background: #7ee787;
+    color: #0a0a0a;
+    font-weight: 600;
+    box-shadow: inset 3px 0 0 #2ea043;
+  }
+  .nav-item.active :global(svg) {
+    color: #0a0a0a;
   }
   .nav-item.active-ws {
     font-weight: 600;
