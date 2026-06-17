@@ -159,6 +159,7 @@ impl Driver for RedisDriver {
                     .expandable(),
             );
         }
+
         Ok(nodes)
     }
 
@@ -322,35 +323,16 @@ impl Driver for RedisDriver {
 
     async fn completion(
         &self,
-        cfg: &ResolvedConfig,
+        _cfg: &ResolvedConfig,
         _ctx: &CompletionContext,
     ) -> Result<CompletionResponse> {
-        let mut items: Vec<CompletionItem> = REDIS_COMMANDS
+        // Commands ONLY — a static list, returned instantly. We deliberately do
+        // NOT scan the keyspace for live key prefixes here: that round-tripped on
+        // every keystroke and stalled completion for seconds on large databases.
+        let items: Vec<CompletionItem> = REDIS_COMMANDS
             .iter()
             .map(|(name, summary)| CompletionItem::detailed(*name, CompletionKind::Command, *summary))
             .collect();
-
-        // Live key prefixes from a quick (best-effort) SCAN of the current db.
-        if let Ok(mut conn) = self.connect(cfg).await {
-            if let Ok(scan) = scan_keys(&mut conn, None, SCAN_KEY_CAP).await {
-                use std::collections::BTreeSet;
-                let mut prefixes: BTreeSet<String> = BTreeSet::new();
-                for key in scan.keys {
-                    if let Some((prefix, _)) = key.split_once(':') {
-                        prefixes.insert(prefix.to_string());
-                    }
-                }
-                for prefix in prefixes {
-                    // No dedicated "Key" completion kind exists; a live key
-                    // namespace maps best onto `Field`.
-                    items.push(CompletionItem::detailed(
-                        format!("{prefix}:"),
-                        CompletionKind::Field,
-                        "key namespace",
-                    ));
-                }
-            }
-        }
 
         Ok(CompletionResponse { items })
     }

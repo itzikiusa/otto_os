@@ -251,11 +251,13 @@ async fn redis_completion() {
             .any(|c| c.label == "GET" && c.kind == CompletionKind::Command),
         "completion should include the GET command"
     );
+    // Completion is commands-only by design — it must NOT scan the keyspace for
+    // live key prefixes (that stalled typing for seconds on large databases).
     assert!(
-        completions.items.iter().any(|c| {
-            c.kind == CompletionKind::Field
-                && (c.label.starts_with("customer") || c.label.starts_with("session"))
-        }),
-        "completion should include a live key prefix (customer:/session:)"
+        completions
+            .items
+            .iter()
+            .all(|c| c.kind == CompletionKind::Command),
+        "completion should be commands-only (no key-prefix Field items)"
     );
 }
