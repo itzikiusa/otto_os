@@ -29,3 +29,4 @@ otto-channels.workspace = true
 otto-improve.workspace = true
 otto-context.workspace = true
 otto-usage.workspace = true
+otto-product.workspace = true

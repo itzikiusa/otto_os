@@ -18,6 +18,7 @@ members = [
     "crates/otto-usage",
     "crates/otto-server",
     "crates/ottod",
+    "crates/otto-product",
 ]
 
 [workspace.package]
@@ -42,6 +43,7 @@ otto-improve = { path = "crates/otto-improve" }
 otto-context = { path = "crates/otto-context" }
 otto-usage = { path = "crates/otto-usage" }
 otto-server = { path = "crates/otto-server" }
+otto-product = { path = "crates/otto-product" }
 
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }

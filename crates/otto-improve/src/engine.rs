@@ -496,6 +496,111 @@ impl ImprovementEngine {
         });
     }
 
+    /// On-demand self-improvement triggered by a product narrative (e.g. PO
+    /// approved/changed test cases). Builds ONE synthetic `SessionDigest` from
+    /// `narrative`, uses `target_skills` as both the candidate set and the
+    /// allow-list, and otherwise mirrors `execute_run`'s producer loop +
+    /// `process_edits`. Does NOT touch the cron schedule.
+    pub async fn run_for_narrative(
+        &self,
+        ws_id: &Id,
+        title: &str,
+        narrative: &str,
+        target_skills: &[String],
+        trigger: ImprovementTrigger,
+    ) -> Result<Id> {
+        let run = self.improvements.create_run(ws_id, trigger).await?;
+        let id = run.id.clone();
+        let _ = self.events.send(Event::ImprovementRunStarted {
+            workspace_id: ws_id.clone(),
+            run_id: id.clone(),
+        });
+
+        let ws = self.workspaces.get(ws_id).await?;
+        let cfg = effective_config(&ws.settings);
+
+        // Build ONE synthetic digest from the narrative.
+        let digest = crate::digest::SessionDigest {
+            session_id: "product-narrative".into(),
+            title: title.into(),
+            turns: 0,
+            skills_used: target_skills.to_vec(),
+            tool_errors: 0,
+            text: narrative.into(),
+        };
+
+        // Read skills with target_skills as both the "used" set and the allow-list,
+        // so only the targeted skills are candidates.
+        let current_skills = self.read_candidate_skills(&ws.root_path, target_skills, target_skills);
+        let current_memory = self.read_memory(&ws.root_path);
+        let skill_instructions = load_skill_instructions(&ws.root_path);
+        let prompt = build_prompt(
+            &skill_instructions,
+            &ws.name,
+            std::slice::from_ref(&digest),
+            &current_skills,
+            &current_memory,
+            target_skills,
+        );
+
+        // Run the same multi-provider loop as execute_run.
+        let providers = effective_providers(&cfg.providers);
+        let mut edits: Vec<crate::proposal::ProposedEdit> = Vec::new();
+        let mut summaries: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        for provider in &providers {
+            match self.producer.produce(&prompt, &ws.root_path, provider).await {
+                Ok(mut p) => {
+                    for e in &mut p.edits {
+                        e.rationale = label_provider(provider, &e.rationale);
+                    }
+                    if !p.run_summary.trim().is_empty() {
+                        summaries.push(format!("[{provider}] {}", p.run_summary.trim()));
+                    }
+                    edits.extend(p.edits);
+                }
+                Err(e) => {
+                    tracing::warn!(provider, "run_for_narrative: provider produced no proposal: {e}");
+                    errors.push(format!("{provider}: {e}"));
+                }
+            }
+        }
+
+        // All providers failed → mark failed.
+        if edits.is_empty() && summaries.is_empty() && !errors.is_empty() {
+            let msg = errors.join("; ");
+            self.improvements
+                .finish_run(&id, ImprovementRunStatus::Failed, "", 1, 0, 0, Some(&msg))
+                .await?;
+            self.emit_finished(ws_id, &id, "failed", 0, 0);
+            return Ok(id);
+        }
+
+        let proposal = crate::proposal::ImprovementProposal {
+            run_summary: summaries.join("\n"),
+            edits,
+        };
+
+        // Allow-list = target_skills so targeted skills' low-risk edits auto-apply
+        // per the workspace autonomy setting.
+        let (applied, pending) = self
+            .process_edits(ws_id, &ws.root_path, &id, &proposal, target_skills, cfg.autonomy)
+            .await;
+
+        let mut summary = proposal.run_summary.clone();
+        if !errors.is_empty() {
+            summary.push_str(&format!("\n\n(skipped: {})", errors.join("; ")));
+        }
+        self.improvements
+            .finish_run(&id, ImprovementRunStatus::Done, &summary, 1, applied, pending, None)
+            .await?;
+        self.emit_finished(ws_id, &id, "done", applied, pending);
+
+        // Note: we deliberately do NOT advance the scheduler — this is an
+        // on-demand run, not a scheduled one.
+        Ok(id)
+    }
+
     /// Read allow-listed skills that were actually used in-window. (Allow-list
     /// scoping keeps the prompt focused and bounds blast radius.)
     fn read_candidate_skills(

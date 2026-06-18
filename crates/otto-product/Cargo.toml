@@ -1,0 +1,26 @@
+[package]
+name = "otto-product"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-core = { workspace = true }
+otto-state = { workspace = true }
+otto-issues = { workspace = true }
+otto-context = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+include_dir = "0.7"
+
+[dev-dependencies]
+tokio = { workspace = true }
+sqlx = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+wiremock = "0.6"
+tempfile = { workspace = true }

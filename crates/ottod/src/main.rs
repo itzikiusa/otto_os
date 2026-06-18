@@ -5,6 +5,7 @@
 //! optional 0.0.0.0 listener controlled by the `network_listener` setting).
 
 mod config;
+mod usage_tailer;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -111,6 +112,11 @@ async fn run(cfg: Config) -> Result<(), String> {
     // Provisioner materializes a workspace's active set into each CLI at spawn.
     let library_root = cfg.data_dir.join("library");
     let context_library = otto_context::Library::new(library_root.clone());
+    // Seed the product-analysis skills into the library (write-if-absent, so user
+    // and self-improvement edits are preserved across restarts).
+    if let Err(e) = otto_product::seed_skills(&context_library) {
+        tracing::warn!("failed to seed product skills: {e}");
+    }
 
     // Mid-session re-auth detector: scans live PTY output for re-auth prompts
     // and raises a Credential notice. Attached to the manager so each session's
@@ -178,6 +184,13 @@ async fn run(cfg: Config) -> Result<(), String> {
         library_root: library_root.clone(),
     });
 
+    let product_repo = otto_state::ProductRepo::new(pool.clone());
+    let product = std::sync::Arc::new(otto_product::service::ProductService::new(
+        product_repo.clone(),
+        IssuesRepo::new(pool.clone()),
+        secrets.clone(),
+    ));
+
     let ctx = ServerCtx {
         pool: pool.clone(),
         secrets: secrets.clone(),
@@ -200,6 +213,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         improve_engine: Arc::clone(&improve_engine),
         context_library: context_library.clone(),
         usage: Arc::clone(&usage),
+        product,
+        product_repo,
     };
 
     // Restore sessions from the previous daemon run: resumable agent
@@ -357,6 +372,21 @@ async fn run(cfg: Config) -> Result<(), String> {
         None
     };
 
+    // --- Story watcher (polls watched stories for new comments) ---
+    let _watcher_handle = {
+        let watcher = otto_server::product_watcher::WatcherManager::new(
+            otto_state::ProductRepo::new(pool.clone()),
+            Arc::clone(&ctx.product),
+            Arc::clone(&orchestrator),
+            Arc::clone(&improve_engine),
+            events.clone(),
+            "claude".to_string(),
+        );
+        let handle = watcher.start();
+        tracing::info!("story watcher: supervisor started");
+        handle
+    };
+
     // --- Self-improvement (scheduler + live skill evolver) ---
     // Gated by OTTO_SELF_IMPROVE so it can be killed without a rebuild: enabled
     // by default; set OTTO_SELF_IMPROVE=0 (or false/off) to disable both the
@@ -406,6 +436,23 @@ async fn run(cfg: Config) -> Result<(), String> {
     } else {
         tracing::info!("usage tracking idle (clickhouse not installed)");
     }
+
+    // --- Usage tailer: real token usage from Claude + Codex CLI transcripts ---
+    // Tails the CLIs' on-disk JSONL transcripts and records exact per-turn token
+    // usage/cost into the usage store (a persistent byte-offset cursor prevents
+    // double-counting; pre-existing history is skipped to avoid misdated rows).
+    // agy is unsupported (its on-disk usage is encrypted).
+    let _usage_tailer_handle = {
+        let tailer = usage_tailer::UsageTailer::new(
+            Arc::clone(&ctx.usage),
+            pool.clone(),
+            cfg.data_dir.clone(),
+            dirs::home_dir().unwrap_or_else(|| cfg.data_dir.clone()),
+        );
+        let handle = tailer.start();
+        tracing::info!("usage tailer: started (claude+codex; agy unsupported)");
+        handle
+    };
 
     let (api_extras, root_extras) = module_routers(&ctx);
     let router = build_router(ctx, api_extras, root_extras);

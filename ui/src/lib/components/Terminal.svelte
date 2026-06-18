@@ -21,9 +21,15 @@
     /** When true a "Resume" button is shown on the exited overlay; clicking it
      *  reconnects the WS — the daemon's ensure_live will resume the session. */
     resumable?: boolean;
+    /** When true, force the xterm palette and host background to dark regardless
+     *  of the app's current light/dark scheme. Use for embedded agent CLIs
+     *  (claude, codex) that render their own dark TUI canvas. */
+    forceDark?: boolean;
     onstatus?: (status: SessionStatus) => void;
   }
-  let { sessionId, readOnly = false, resumable = false, onstatus }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, forceDark = false, onstatus }: Props = $props();
+
+  const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
   let container: HTMLDivElement;
   let term: Terminal | null = null;
@@ -190,7 +196,7 @@
       cursorBlink: true,
       allowProposedApi: true,
       scrollback: 10_000,
-      theme: untrack(() => terminalTheme(ui.theme, ui.resolvedScheme)),
+      theme: untrack(() => terminalTheme(ui.theme, untrack(() => effScheme))),
       macOptionIsMeta: true,
     });
     fit = new FitAddon();
@@ -337,9 +343,9 @@
     }
   });
 
-  // react to theme + light/dark scheme switches
+  // react to theme + light/dark scheme switches (respects forceDark override)
   $effect(() => {
-    const theme = terminalTheme(ui.theme, ui.resolvedScheme);
+    const theme = terminalTheme(ui.theme, effScheme);
     if (term) term.options.theme = theme;
   });
 
@@ -358,7 +364,7 @@
   }
 </script>
 
-<div class="term-wrap">
+<div class="term-wrap" class:force-dark-wrap={forceDark}>
   {#if findOpen}
     <div class="find-bar">
       <input
@@ -376,7 +382,7 @@
     </div>
   {/if}
 
-  <div class="term-host" bind:this={container}></div>
+  <div class="term-host" class:force-dark={forceDark} bind:this={container}></div>
 
   {#if exitCode !== null}
     <div class="term-overlay">
@@ -412,9 +418,17 @@
     background: var(--term-bg);
     overflow: hidden;
   }
+  /* Force dark: override the host wrapper and xterm host bg so the entire
+     embedded terminal reads as one dark widget regardless of app scheme. */
+  .term-wrap.force-dark-wrap {
+    background: #131318;
+  }
   .term-host {
     position: absolute;
     inset: 6px 0 4px 8px;
+  }
+  .term-host.force-dark {
+    background: #131318;
   }
   .find-bar {
     position: absolute;

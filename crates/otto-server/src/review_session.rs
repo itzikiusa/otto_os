@@ -27,15 +27,15 @@ use tokio::sync::Mutex;
 const TUI_STARTUP_WAIT: Duration = Duration::from_secs(40);
 const TUI_POLL: Duration = Duration::from_millis(250);
 const TUI_SETTLE: Duration = Duration::from_millis(600);
-const PASTE_TO_ENTER: Duration = Duration::from_millis(250);
+pub const PASTE_TO_ENTER: Duration = Duration::from_millis(250);
 // After submitting, confirm the agent actually started (output advanced); if
 // not, re-send Enter once — a freshly-spawned CLI under load can drop the first.
 const DISPATCH_WAIT: Duration = Duration::from_secs(6);
 const DISPATCH_POLL: Duration = Duration::from_millis(250);
-const FINDINGS_POLL: Duration = Duration::from_millis(1000);
+pub const FINDINGS_POLL: Duration = Duration::from_millis(1000);
 /// After this much silence with no findings yet, assume the agent may be
 /// blocked on a prompt the guard couldn't auto-accept and flag it "waiting".
-const WAITING_IDLE: Duration = Duration::from_secs(45);
+pub const WAITING_IDLE: Duration = Duration::from_secs(45);
 
 /// Absolute temp path an agent writes its findings JSON to (unique per run).
 pub fn findings_path(review_id: &str, agent_index: usize) -> PathBuf {
@@ -288,7 +288,7 @@ pub async fn run_agent_session(
     result
 }
 
-fn bracketed_paste(text: &str) -> Vec<u8> {
+pub fn bracketed_paste(text: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(text.len() + 16);
     v.extend_from_slice(b"\x1b[200~");
     v.extend_from_slice(text.as_bytes());
@@ -296,7 +296,7 @@ fn bracketed_paste(text: &str) -> Vec<u8> {
     v
 }
 
-async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
+pub async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
     let deadline = Instant::now() + TUI_STARTUP_WAIT;
     loop {
         let Some(handle) = manager.live_handle(sid) else {
@@ -318,7 +318,7 @@ async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> boo
 /// True if the session produced fresh output after `before` within
 /// [`DISPATCH_WAIT`] — i.e. the submitted prompt was accepted and the agent
 /// started working.
-async fn dispatched(
+pub async fn dispatched(
     manager: &Arc<SessionManager>,
     sid: &otto_core::Id,
     before: Option<std::time::Instant>,

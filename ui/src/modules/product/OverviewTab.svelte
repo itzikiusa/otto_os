@@ -1,0 +1,2270 @@
+<script lang="ts">
+  // Overview tab — shows the selected story's detail: title, source link, stage
+  // badge, issue_type, a version dropdown (with body_md rendering), Refresh
+  // button, watch toggle, and (for Jira stories) a rich section with status,
+  // assignee, details, linked issues, comments, history, and attachments.
+  import Icon from '../../lib/components/Icon.svelte';
+  import { product } from '../../lib/stores/product.svelte';
+  import { renderMarkdown } from '../../lib/md';
+  import { toasts } from '../../lib/toast.svelte';
+  import { api, authedBlobUrl } from '../../lib/api/client';
+  import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser } from './types';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import PublishDialog from './PublishDialog.svelte';
+  import type { ProductTranscript } from './types';
+
+  // Version picker state — null means "show current (source) version".
+  let viewingVersion = $state<ProductStoryVersion | null>(null);
+  let versionsLoaded = $state(false);
+  let versionLoading = $state(false);
+  let refreshing = $state(false);
+  let watchWorking = $state(false);
+
+  // The detail object for the currently selected story.
+  const detail = $derived(product.detail);
+  const story = $derived(detail?.story ?? null);
+  const source = $derived(detail?.source ?? null);
+
+  // Rendered markdown: version override wins over the live source body.
+  const bodyMd = $derived((viewingVersion ?? source)?.body_md ?? '');
+  const renderedBody = $derived(bodyMd ? renderMarkdown(bodyMd) : '');
+
+  // ── Jira section state ────────────────────────────────────────────────────
+  let issueFull = $state<IssueFull | null>(null);
+  let issueLoading = $state(false);
+  let issueError = $state<string | null>(null);
+
+  // Status transition
+  let transitions = $state<JiraTransition[]>([]);
+  let transitionsLoading = $state(false);
+  let transitionsLoaded = $state(false);
+  let transitionWorking = $state(false);
+  let statusOpen = $state(false);
+
+  // Assignee
+  let assignables = $state<JiraUser[]>([]);
+  let assignablesLoading = $state(false);
+  let assignablesLoaded = $state(false);
+  let assigneeWorking = $state(false);
+  let assigneeOpen = $state(false);
+
+  // Collapsible sections
+  let collapsed = $state<Record<string, boolean>>({
+    details: false,
+    links: false,
+    comments: false,
+    history: true,
+    attachments: false,
+  });
+
+  // Attachment object URL cache: id → url
+  let attachmentUrls = $state<Record<string, string>>({});
+  let attachmentLoading = $state<Record<string, boolean>>({});
+  // Track all created object URLs for revocation on unmount.
+  let createdObjectUrls: string[] = [];
+
+  const isJira = $derived(story?.source_kind === 'jira');
+  const isDraft = $derived(story?.source_kind === 'draft');
+  const isConfluence = $derived(story?.source_kind === 'confluence');
+
+  // ── Draft edit state ─────────────────────────────────────────────────────
+  let draftTitle = $state('');
+  let draftBody = $state('');
+  let draftSaving = $state(false);
+
+  // ── Transcript state ──────────────────────────────────────────────────────
+  let transcriptsLoaded = $state(false);
+  let newTranscriptTitle = $state('');
+  let newTranscriptBody = $state('');
+  let addingTranscript = $state(false);
+  let expandedTranscripts = $state<Record<string, boolean>>({});
+
+  // ── Add comment state ─────────────────────────────────────────────────────
+  let newCommentBody = $state('');
+  let postingComment = $state(false);
+
+  // ── Publish dialog state ──────────────────────────────────────────────────
+  let publishDialogMode = $state<'story' | 'rfc' | null>(null);
+
+  // ── Tags state ────────────────────────────────────────────────────────────
+  let tagInput = $state('');
+  let tagSaving = $state(false);
+
+  /** Parse comma-separated tags string → deduplicated, trimmed, non-empty array. */
+  function parseTags(csv: string): string[] {
+    return [...new Set(csv.split(',').map((t) => t.trim()).filter(Boolean))];
+  }
+
+  /** Join tag array back to canonical csv. */
+  function joinTags(tags: string[]): string {
+    return tags.join(',');
+  }
+
+  /** Current tags as array (derived from live story). */
+  const currentTags = $derived(parseTags(story?.tags ?? ''));
+
+  /** Related stories: share ≥1 tag with current story, from the stories list. */
+  const relatedStories = $derived(
+    currentTags.length === 0
+      ? []
+      : product.stories.filter(
+          (s) =>
+            s.id !== story?.id &&
+            parseTags(s.tags).some((t) => currentTags.includes(t)),
+        ),
+  );
+
+  async function addTag(): Promise<void> {
+    const tag = tagInput.trim();
+    if (!tag || !story) return;
+    const updated = joinTags([...new Set([...currentTags, tag])]);
+    tagSaving = true;
+    tagInput = '';
+    try {
+      await product.updateStory({ tags: updated });
+    } catch (e) {
+      toasts.error('Could not save tag', product.errMsg(e));
+    } finally {
+      tagSaving = false;
+    }
+  }
+
+  async function removeTag(tag: string): Promise<void> {
+    if (!story) return;
+    const updated = joinTags(currentTags.filter((t) => t !== tag));
+    try {
+      await product.updateStory({ tags: updated });
+    } catch (e) {
+      toasts.error('Could not remove tag', product.errMsg(e));
+    }
+  }
+
+  // ── Load IssueFull on tab mount when Jira ────────────────────────────────
+
+  $effect(() => {
+    // Track selectedId so this re-runs on story change.
+    product.selectedId;
+    viewingVersion = null;
+    versionsLoaded = false;
+    // Reset Jira state.
+    issueFull = null;
+    issueError = null;
+    transitions = [];
+    transitionsLoaded = false;
+    assignables = [];
+    assignablesLoaded = false;
+    statusOpen = false;
+    assigneeOpen = false;
+    collapsed = { details: false, links: false, comments: false, history: true, attachments: false };
+    newCommentBody = '';
+    postingComment = false;
+    // Revoke old object URLs.
+    for (const url of createdObjectUrls) {
+      URL.revokeObjectURL(url);
+    }
+    createdObjectUrls = [];
+    attachmentUrls = {};
+    attachmentLoading = {};
+  });
+
+  $effect(() => {
+    if (isJira && story && !issueFull && !issueLoading) {
+      void loadIssueFull();
+    }
+  });
+
+  // Cleanup object URLs on unmount.
+  $effect(() => {
+    return () => {
+      for (const url of createdObjectUrls) {
+        URL.revokeObjectURL(url);
+      }
+    };
+  });
+
+  $effect(() => {
+    // Seed draft edit fields from the live source version.
+    if (isDraft && story && source) {
+      draftTitle = story.title;
+      draftBody = source.body_md ?? '';
+    }
+    // Reset transcript state.
+    transcriptsLoaded = false;
+    newTranscriptTitle = '';
+    newTranscriptBody = '';
+    expandedTranscripts = {};
+  });
+
+  $effect(() => {
+    if (isDraft && story && !transcriptsLoaded) {
+      transcriptsLoaded = true;
+      void product.loadTranscripts();
+    }
+  });
+
+  async function loadIssueFull(): Promise<void> {
+    if (!story) return;
+    issueLoading = true;
+    issueError = null;
+    try {
+      issueFull = await api.get<IssueFull>(
+        `/issue/${story.account_id}/${story.source_key}/full`,
+      );
+    } catch (e) {
+      issueError = e instanceof Error ? e.message : String(e);
+    } finally {
+      issueLoading = false;
+    }
+  }
+
+  async function loadTransitions(): Promise<void> {
+    if (transitionsLoaded || !story) return;
+    transitionsLoading = true;
+    try {
+      transitions = await api.get<JiraTransition[]>(
+        `/issue/${story.account_id}/${story.source_key}/transitions`,
+      );
+      transitionsLoaded = true;
+    } catch (e) {
+      toasts.error('Could not load transitions', e instanceof Error ? e.message : String(e));
+    } finally {
+      transitionsLoading = false;
+    }
+  }
+
+  async function applyTransition(tid: string): Promise<void> {
+    if (!story) return;
+    transitionWorking = true;
+    statusOpen = false;
+    try {
+      await api.post(`/issue/${story.account_id}/${story.source_key}/transitions`, {
+        transition_id: tid,
+      });
+      toasts.info('Status updated');
+      await loadIssueFull();
+      await product.refresh();
+    } catch (e) {
+      toasts.error('Transition failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      transitionWorking = false;
+    }
+  }
+
+  async function loadAssignables(): Promise<void> {
+    if (assignablesLoaded || !story) return;
+    assignablesLoading = true;
+    try {
+      assignables = await api.get<JiraUser[]>(
+        `/issue/${story.account_id}/${story.source_key}/assignable`,
+      );
+      assignablesLoaded = true;
+    } catch (e) {
+      toasts.error('Could not load assignable users', e instanceof Error ? e.message : String(e));
+    } finally {
+      assignablesLoading = false;
+    }
+  }
+
+  async function assignUser(accountId: string): Promise<void> {
+    if (!story) return;
+    assigneeWorking = true;
+    assigneeOpen = false;
+    try {
+      await api.put(`/issue/${story.account_id}/${story.source_key}/assignee`, {
+        account_id: accountId,
+      });
+      toasts.info('Assignee updated');
+      await loadIssueFull();
+    } catch (e) {
+      toasts.error('Assign failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      assigneeWorking = false;
+    }
+  }
+
+  async function loadAttachmentUrl(attId: string): Promise<void> {
+    if (!story || attachmentUrls[attId] || attachmentLoading[attId]) return;
+    attachmentLoading = { ...attachmentLoading, [attId]: true };
+    try {
+      const url = await authedBlobUrl(
+        `/issue/${story.account_id}/${story.source_key}/attachment/${attId}`,
+      );
+      createdObjectUrls.push(url);
+      attachmentUrls = { ...attachmentUrls, [attId]: url };
+    } catch (e) {
+      console.warn('[OverviewTab] attachment load failed', attId, e);
+    } finally {
+      attachmentLoading = { ...attachmentLoading, [attId]: false };
+    }
+  }
+
+  function toggleSection(key: string): void {
+    collapsed = { ...collapsed, [key]: !collapsed[key] };
+    // Lazy-load attachment previews when section opens.
+    if (key === 'attachments' && !collapsed[key] && issueFull) {
+      for (const att of issueFull.attachments) {
+        if (att.mime.startsWith('image/') || att.mime === 'application/pdf') {
+          void loadAttachmentUrl(att.id);
+        }
+      }
+    }
+  }
+
+  async function loadVersions(): Promise<void> {
+    if (versionsLoaded) return;
+    try {
+      await product.loadVersions();
+      versionsLoaded = true;
+    } catch (e) {
+      toasts.error('Could not load versions', product.errMsg(e));
+    }
+  }
+
+  async function onVersionChange(e: Event): Promise<void> {
+    const vid = (e.target as HTMLSelectElement).value;
+    if (!vid) {
+      viewingVersion = null;
+      return;
+    }
+    versionLoading = true;
+    try {
+      viewingVersion = await product.getVersion(vid);
+    } catch (err) {
+      toasts.error('Could not load version', product.errMsg(err));
+    } finally {
+      versionLoading = false;
+    }
+  }
+
+  async function refresh(): Promise<void> {
+    refreshing = true;
+    try {
+      await product.refresh();
+      viewingVersion = null;
+      toasts.info('Story refreshed');
+      // Re-fetch IssueFull after refresh.
+      if (isJira) await loadIssueFull();
+    } catch (e) {
+      toasts.error('Refresh failed', product.errMsg(e));
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  async function saveDraft(): Promise<void> {
+    draftSaving = true;
+    try {
+      await product.updateDraft({ title: draftTitle, body_md: draftBody });
+      toasts.success('Draft saved');
+    } catch (e) {
+      toasts.error('Save failed', product.errMsg(e));
+    } finally {
+      draftSaving = false;
+    }
+  }
+
+  async function doAddTranscript(): Promise<void> {
+    if (!newTranscriptBody.trim()) return;
+    addingTranscript = true;
+    try {
+      await product.addTranscript({
+        title: newTranscriptTitle.trim() || null,
+        body: newTranscriptBody.trim(),
+      });
+      newTranscriptTitle = '';
+      newTranscriptBody = '';
+      toasts.success('Transcript added');
+    } catch (e) {
+      toasts.error('Add transcript failed', product.errMsg(e));
+    } finally {
+      addingTranscript = false;
+    }
+  }
+
+  async function doDeleteTranscript(t: ProductTranscript): Promise<void> {
+    const ok = await confirmer.ask(
+      `Remove transcript "${t.title || 'untitled'}"?`,
+      { title: 'Remove transcript', confirmLabel: 'Remove', danger: true },
+    );
+    if (!ok) return;
+    try {
+      await product.deleteTranscript(t.id);
+      toasts.info('Transcript removed');
+    } catch (e) {
+      toasts.error('Remove failed', product.errMsg(e));
+    }
+  }
+
+  function toggleTranscript(id: string): void {
+    expandedTranscripts = { ...expandedTranscripts, [id]: !expandedTranscripts[id] };
+  }
+
+  async function toggleWatch(): Promise<void> {
+    if (!story) return;
+    watchWorking = true;
+    try {
+      await product.updateStory({ watch_enabled: !story.watch_enabled });
+    } catch (e) {
+      toasts.error('Could not update watch', product.errMsg(e));
+    } finally {
+      watchWorking = false;
+    }
+  }
+
+  async function addComment(): Promise<void> {
+    if (!story || !newCommentBody.trim()) return;
+    postingComment = true;
+    try {
+      await api.post(`/issue/${story.account_id}/${story.source_key}/comment`, {
+        body: newCommentBody.trim(),
+      });
+      newCommentBody = '';
+      toasts.success('Comment posted');
+      await loadIssueFull();
+    } catch (e) {
+      toasts.error('Could not post comment', e instanceof Error ? e.message : String(e));
+    } finally {
+      postingComment = false;
+    }
+  }
+
+  function stageColor(stage: string): string {
+    switch (stage) {
+      case 'draft': return 'stage-draft';
+      case 'review': return 'stage-review';
+      case 'approved': return 'stage-approved';
+      case 'done': return 'stage-done';
+      default: return 'stage-other';
+    }
+  }
+
+  function fmtBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function relDate(iso: string): string {
+    try {
+      const diff = Date.now() - new Date(iso).getTime();
+      const s = Math.floor(diff / 1000);
+      if (s < 60) return 'just now';
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m ago`;
+      const h = Math.floor(m / 60);
+      if (h < 24) return `${h}h ago`;
+      const d = Math.floor(h / 24);
+      if (d < 30) return `${d}d ago`;
+      return new Date(iso).toLocaleDateString();
+    } catch {
+      return iso;
+    }
+  }
+</script>
+
+{#if product.loadingDetail}
+  <div class="loading">Loading…</div>
+{:else if !detail || !story}
+  <div class="muted">No story selected.</div>
+{:else}
+  <div class="overview">
+    <!-- ── Story header (full width) ────────────────────────────── -->
+    <div class="story-header">
+      <div class="story-meta-row">
+        <span class="stage-badge {stageColor(story.stage)}">{story.stage}</span>
+        {#if story.issue_type}
+          <span class="chip">{story.issue_type}</span>
+        {/if}
+        {#if story.url}
+          <a class="source-link mono" href={story.url} target="_blank" rel="noopener noreferrer" title="Open in source">
+            {story.source_key}
+            <Icon name="external" size={11} />
+          </a>
+        {:else}
+          <span class="source-key mono">{story.source_key}</span>
+        {/if}
+      </div>
+      <h1 class="story-title">{story.title}</h1>
+
+      <!-- counts row -->
+      <div class="counts-row">
+        <span class="count-chip" title="Versions"><Icon name="archive" size={11} />{detail.counts.versions} version{detail.counts.versions !== 1 ? 's' : ''}</span>
+        <span class="count-chip" title="Analyses"><Icon name="gauge" size={11} />{detail.counts.analyses} anal.</span>
+        <span class="count-chip" title="Open questions"><Icon name="comment" size={11} />{detail.counts.open_questions} Q</span>
+        <span class="count-chip" title="Notes"><Icon name="note" size={11} />{detail.counts.notes} notes</span>
+        <span class="count-chip" title="Test cases"><Icon name="check" size={11} />{detail.counts.testcases} tests</span>
+      </div>
+
+      <!-- tags row -->
+      <div class="tags-row">
+        {#each currentTags as tag (tag)}
+          <span class="tag-chip">
+            {tag}
+            <button
+              class="tag-remove"
+              onclick={() => removeTag(tag)}
+              aria-label="Remove tag {tag}"
+              title="Remove tag"
+            >×</button>
+          </span>
+        {/each}
+        <form
+          class="tag-add-form"
+          onsubmit={(e) => { e.preventDefault(); void addTag(); }}
+        >
+          <input
+            class="tag-input"
+            bind:value={tagInput}
+            placeholder="+ tag"
+            disabled={tagSaving}
+            aria-label="Add tag"
+            spellcheck="false"
+          />
+        </form>
+      </div>
+    </div>
+
+    <!-- ── Toolbar (full width) ───────────────────────────────────── -->
+    <div class="toolbar">
+      <!-- Version picker -->
+      <div class="version-sel">
+        <!-- svelte-ignore a11y_label_has_associated_control -->
+        <label class="ver-label">Version</label>
+        <select
+          class="ver-select"
+          onchange={onVersionChange}
+          onfocus={loadVersions}
+          disabled={versionLoading}
+        >
+          <option value="">Current ({source ? `v${source.version_no}` : 'none'})</option>
+          {#each product.versions as v (v.id)}
+            {#if v.id !== source?.id}
+              <option value={v.id}>v{v.version_no} — {v.kind} ({new Date(v.created_at).toLocaleDateString()})</option>
+            {/if}
+          {/each}
+        </select>
+        {#if versionLoading}
+          <span class="ver-loading">…</span>
+        {/if}
+      </div>
+
+      <span class="grow"></span>
+
+      <!-- Watch toggle -->
+      <button
+        class="toolbar-btn"
+        class:active={story.watch_enabled}
+        onclick={toggleWatch}
+        disabled={watchWorking}
+        title={story.watch_enabled ? 'Watching — click to disable' : 'Click to watch this story'}
+        aria-label="Toggle watch"
+      >
+        <Icon name="eye" size={13} />
+        {story.watch_enabled ? 'Watching' : 'Watch'}
+      </button>
+
+      <!-- Refresh -->
+      <button
+        class="toolbar-btn"
+        onclick={refresh}
+        disabled={refreshing}
+        title="Pull latest content from source"
+        aria-label="Refresh story"
+      >
+        <Icon name="refresh" size={13} />
+        {refreshing ? 'Refreshing…' : 'Refresh'}
+      </button>
+    </div>
+
+    <!-- ── Body area ──────────────────────────────────────────────── -->
+    {#if isDraft}
+      <!-- ── DRAFT: two-column layout (editor left, transcripts right) ── -->
+      <div class="two-col draft-layout">
+        <!-- Left: title + body editor + save + publish bar -->
+        <div class="col-left">
+          <div class="draft-section">
+            <div class="draft-hint">
+              Refine this draft with the Analysis / Questions / Rewrite tabs, then publish when ready.
+            </div>
+
+            <div class="field">
+              <label class="label" for="draft-title">Title</label>
+              <input
+                id="draft-title"
+                class="input"
+                bind:value={draftTitle}
+                placeholder="Story title…"
+                spellcheck="false"
+              />
+            </div>
+
+            <div class="field">
+              <label class="label" for="draft-body">Body (Markdown)</label>
+              <textarea
+                id="draft-body"
+                class="textarea"
+                bind:value={draftBody}
+                rows={14}
+                placeholder="Write your story or paste notes here…"
+                spellcheck="false"
+              ></textarea>
+            </div>
+
+            <div class="draft-save-row">
+              <button
+                class="toolbar-btn save-btn"
+                onclick={saveDraft}
+                disabled={draftSaving}
+              >
+                {draftSaving ? 'Saving…' : 'Save draft'}
+              </button>
+            </div>
+
+            <!-- ── Publish bar ─────────────────────────────────────── -->
+            <div class="publish-bar">
+              <button
+                class="publish-btn"
+                onclick={() => (publishDialogMode = 'story')}
+              >
+                Publish as Jira Story
+              </button>
+              <button
+                class="publish-btn secondary"
+                onclick={() => (publishDialogMode = 'rfc')}
+              >
+                Publish as Confluence RFC
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Transcripts -->
+        <div class="col-right">
+          <div class="transcripts-section">
+            <div class="transcripts-header">
+              <span class="section-title">Transcripts</span>
+            </div>
+
+            {#if product.loadingTranscripts}
+              <div class="muted">Loading transcripts…</div>
+            {:else if product.transcripts.length === 0}
+              <div class="muted">No transcripts yet. Paste a conversation below.</div>
+            {:else}
+              <div class="transcript-list">
+                {#each product.transcripts as t (t.id)}
+                  <div class="transcript-item">
+                    <div class="transcript-header">
+                      <button
+                        class="transcript-toggle"
+                        onclick={() => toggleTranscript(t.id)}
+                        aria-expanded={expandedTranscripts[t.id] ?? false}
+                      >
+                        <span class="coll-arrow">{expandedTranscripts[t.id] ? '▼' : '▶'}</span>
+                        <span class="transcript-title">{t.title || 'Untitled transcript'}</span>
+                        <span class="transcript-date">{relDate(t.created_at)}</span>
+                      </button>
+                      <button
+                        class="del-transcript-btn"
+                        onclick={() => doDeleteTranscript(t)}
+                        title="Remove transcript"
+                        aria-label="Remove transcript"
+                      >✕</button>
+                    </div>
+                    {#if expandedTranscripts[t.id]}
+                      <div class="transcript-body">{t.body}</div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
+            <!-- Add transcript form -->
+            <div class="add-transcript-form">
+              <input
+                class="input"
+                bind:value={newTranscriptTitle}
+                placeholder="Title (optional)"
+                spellcheck="false"
+              />
+              <textarea
+                class="textarea"
+                bind:value={newTranscriptBody}
+                rows={5}
+                placeholder="Paste conversation or notes here…"
+                spellcheck="false"
+              ></textarea>
+              <button
+                class="toolbar-btn"
+                onclick={doAddTranscript}
+                disabled={addingTranscript || !newTranscriptBody.trim()}
+              >
+                {addingTranscript ? 'Adding…' : 'Add transcript'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    {:else if isJira}
+      <!-- ── JIRA: two-column layout (body left, metadata right) ──── -->
+      <div class="two-col jira-layout">
+        <!-- Left: story body -->
+        <div class="col-left">
+          <div class="body-wrap">
+            {#if viewingVersion}
+              <div class="version-banner">
+                Viewing v{viewingVersion.version_no} ({viewingVersion.kind})
+                — {new Date(viewingVersion.created_at).toLocaleString()}
+                {#if viewingVersion.change_notes}
+                  <span class="change-notes">· {viewingVersion.change_notes}</span>
+                {/if}
+              </div>
+            {/if}
+
+            {#if renderedBody}
+              <!-- renderMarkdown escapes all input before rendering — safe to inject. -->
+              <div class="md-body">{@html renderedBody}</div>
+            {:else}
+              <div class="muted">No content yet. Use Refresh to pull from source.</div>
+            {/if}
+          </div>
+        </div>
+
+        <!-- Right: Jira metadata panel -->
+        <div class="col-right">
+          <div class="jira-section">
+            {#if issueLoading}
+              <div class="jira-loading">Loading Jira details…</div>
+            {:else if issueError}
+              <div class="jira-error">Could not load Jira details: {issueError}</div>
+            {:else if issueFull}
+
+              <!-- ── Status + Transition ──────────────────────────── -->
+              <div class="jira-card">
+                <div class="jira-card-header">
+                  <span class="jira-section-label">Status</span>
+                  <div class="status-control">
+                    <span class="status-badge">{issueFull.status}</span>
+                    <div class="transition-wrap">
+                      <button
+                        class="change-btn"
+                        onclick={async () => {
+                          if (!statusOpen) {
+                            await loadTransitions();
+                            statusOpen = true;
+                          } else {
+                            statusOpen = false;
+                          }
+                        }}
+                        disabled={transitionWorking}
+                        title="Change status"
+                      >
+                        {transitionWorking ? 'Working…' : 'Transition ▾'}
+                      </button>
+                      {#if statusOpen}
+                        <div class="dropdown-menu">
+                          {#if transitionsLoading}
+                            <div class="dropdown-loading">Loading…</div>
+                          {:else if transitions.length === 0}
+                            <div class="dropdown-empty">No transitions available</div>
+                          {:else}
+                            {#each transitions as t (t.id)}
+                              <button
+                                class="dropdown-item"
+                                onclick={() => applyTransition(t.id)}
+                              >
+                                {t.name}
+                                <span class="dropdown-item-sub">→ {t.to_status}</span>
+                              </button>
+                            {/each}
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ── Assignee ─────────────────────────────────────── -->
+              <div class="jira-card">
+                <div class="jira-card-header">
+                  <span class="jira-section-label">Assignee</span>
+                  <div class="assignee-control">
+                    {#if issueFull.assignee}
+                      <div class="user-row">
+                        {#if issueFull.assignee.avatar_url}
+                          <img class="avatar" src={issueFull.assignee.avatar_url} alt={issueFull.assignee.display_name} />
+                        {:else}
+                          <span class="avatar-placeholder">{issueFull.assignee.display_name.slice(0, 1).toUpperCase()}</span>
+                        {/if}
+                        <span class="user-name">{issueFull.assignee.display_name}</span>
+                      </div>
+                    {:else}
+                      <span class="unassigned">Unassigned</span>
+                    {/if}
+                    <div class="transition-wrap">
+                      <button
+                        class="change-btn"
+                        onclick={async () => {
+                          if (!assigneeOpen) {
+                            await loadAssignables();
+                            assigneeOpen = true;
+                          } else {
+                            assigneeOpen = false;
+                          }
+                        }}
+                        disabled={assigneeWorking}
+                        title="Change assignee"
+                      >
+                        {assigneeWorking ? 'Working…' : 'Change ▾'}
+                      </button>
+                      {#if assigneeOpen}
+                        <div class="dropdown-menu">
+                          {#if assignablesLoading}
+                            <div class="dropdown-loading">Loading…</div>
+                          {:else if assignables.length === 0}
+                            <div class="dropdown-empty">No users found</div>
+                          {:else}
+                            <button class="dropdown-item" onclick={() => assignUser('')}>
+                              <span class="unassigned-opt">Unassign</span>
+                            </button>
+                            {#each assignables as u (u.account_id)}
+                              <button class="dropdown-item" onclick={() => assignUser(u.account_id)}>
+                                {#if u.avatar_url}
+                                  <img class="avatar-sm" src={u.avatar_url} alt={u.display_name} />
+                                {/if}
+                                {u.display_name}
+                              </button>
+                            {/each}
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ── Details ─────────────────────────────────────── -->
+              <div class="jira-card collapsible-card">
+                <button
+                  class="jira-coll-trigger"
+                  onclick={() => toggleSection('details')}
+                  aria-expanded={!collapsed.details}
+                >
+                  <span class="coll-arrow">{collapsed.details ? '▶' : '▼'}</span>
+                  <span class="jira-section-label">Details</span>
+                </button>
+                {#if !collapsed.details}
+                  <div class="details-grid">
+                    {#if issueFull.reporter}
+                      <span class="detail-key">Reporter</span>
+                      <span class="detail-val">
+                        <div class="user-row-sm">
+                          {#if issueFull.reporter.avatar_url}
+                            <img class="avatar-sm" src={issueFull.reporter.avatar_url} alt={issueFull.reporter.display_name} />
+                          {/if}
+                          {issueFull.reporter.display_name}
+                        </div>
+                      </span>
+                    {/if}
+                    {#if issueFull.priority}
+                      <span class="detail-key">Priority</span>
+                      <span class="detail-val">{issueFull.priority}</span>
+                    {/if}
+                    {#if issueFull.estimate}
+                      <span class="detail-key">Estimate</span>
+                      <span class="detail-val"><span class="estimate-chip">{issueFull.estimate}</span></span>
+                    {/if}
+                    {#if issueFull.labels && issueFull.labels.length > 0}
+                      <span class="detail-key">Labels</span>
+                      <span class="detail-val">
+                        <div class="label-chips">
+                          {#each issueFull.labels as lbl (lbl)}
+                            <span class="label-chip">{lbl}</span>
+                          {/each}
+                        </div>
+                      </span>
+                    {/if}
+                    {#each issueFull.fields.filter((f) => f.value && f.value.trim() !== '') as field (field.key)}
+                      <span class="detail-key">{field.name}</span>
+                      <span class="detail-val">{field.value}</span>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+
+              <!-- ── Linked Issues ───────────────────────────────── -->
+              {#if issueFull.links && issueFull.links.length > 0}
+                <div class="jira-card collapsible-card">
+                  <button
+                    class="jira-coll-trigger"
+                    onclick={() => toggleSection('links')}
+                    aria-expanded={!collapsed.links}
+                  >
+                    <span class="coll-arrow">{collapsed.links ? '▶' : '▼'}</span>
+                    <span class="jira-section-label">Linked Issues</span>
+                    <span class="section-count">({issueFull.links.length})</span>
+                  </button>
+                  {#if !collapsed.links}
+                    <div class="links-list">
+                      {#each issueFull.links as lnk (lnk.key)}
+                        <div class="link-row">
+                          <span class="link-rel">{lnk.rel}</span>
+                          <span class="link-key mono-sm">{lnk.key}</span>
+                          <span class="link-type chip-sm">{lnk.issue_type}</span>
+                          <span class="link-summary">{lnk.summary}</span>
+                          <span class="link-status status-sm">{lnk.status}</span>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+
+              <!-- ── Comments ─────────────────────────────────────── -->
+              <div class="jira-card collapsible-card">
+                <button
+                  class="jira-coll-trigger"
+                  onclick={() => toggleSection('comments')}
+                  aria-expanded={!collapsed.comments}
+                >
+                  <span class="coll-arrow">{collapsed.comments ? '▶' : '▼'}</span>
+                  <span class="jira-section-label">Comments</span>
+                  <span class="section-count">({issueFull.comments.length})</span>
+                </button>
+                {#if !collapsed.comments}
+                  <div class="comments-list">
+                    {#if issueFull.comments.length === 0}
+                      <div class="comments-empty">No comments yet.</div>
+                    {:else}
+                      {#each issueFull.comments as comment (comment.id)}
+                        <div class="comment-item">
+                          <div class="comment-meta">
+                            <span class="comment-author">{comment.author}</span>
+                            <span class="comment-date">{relDate(comment.created)}</span>
+                          </div>
+                          <div class="comment-body md-body">{@html renderMarkdown(comment.body_md)}</div>
+                        </div>
+                      {/each}
+                    {/if}
+                  </div>
+                  <!-- Add comment form -->
+                  <div class="add-comment-form">
+                    <textarea
+                      class="textarea comment-textarea"
+                      bind:value={newCommentBody}
+                      rows={3}
+                      placeholder="Add a comment…"
+                      spellcheck="true"
+                      disabled={postingComment}
+                    ></textarea>
+                    <div class="add-comment-row">
+                      <button
+                        class="toolbar-btn comment-submit-btn"
+                        onclick={addComment}
+                        disabled={postingComment || !newCommentBody.trim()}
+                      >
+                        {postingComment ? 'Posting…' : 'Comment'}
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </div>
+
+              <!-- ── History ─────────────────────────────────────── -->
+              {#if issueFull.history && issueFull.history.length > 0}
+                <div class="jira-card collapsible-card">
+                  <button
+                    class="jira-coll-trigger"
+                    onclick={() => toggleSection('history')}
+                    aria-expanded={!collapsed.history}
+                  >
+                    <span class="coll-arrow">{collapsed.history ? '▶' : '▼'}</span>
+                    <span class="jira-section-label">History</span>
+                    <span class="section-count">({issueFull.history.length} entries)</span>
+                  </button>
+                  {#if !collapsed.history}
+                    <div class="history-list">
+                      {#each issueFull.history as entry, i (i)}
+                        <div class="history-entry">
+                          <div class="history-meta">
+                            <span class="history-author">{entry.author}</span>
+                            <span class="history-date">{relDate(entry.created)}</span>
+                          </div>
+                          {#each entry.items as item, j (j)}
+                            <div class="history-change">
+                              changed <span class="history-field">{item.field}</span>
+                              {#if item.from}
+                                from <span class="history-val">{item.from}</span>
+                              {/if}
+                              to <span class="history-val">{item.to ?? '(empty)'}</span>
+                            </div>
+                          {/each}
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+
+              <!-- ── Attachments ─────────────────────────────────── -->
+              {#if issueFull.attachments && issueFull.attachments.length > 0}
+                <div class="jira-card collapsible-card">
+                  <button
+                    class="jira-coll-trigger"
+                    onclick={() => toggleSection('attachments')}
+                    aria-expanded={!collapsed.attachments}
+                  >
+                    <span class="coll-arrow">{collapsed.attachments ? '▶' : '▼'}</span>
+                    <span class="jira-section-label">Attachments</span>
+                    <span class="section-count">({issueFull.attachments.length})</span>
+                  </button>
+                  {#if !collapsed.attachments}
+                    <div class="attachments-grid">
+                      {#each issueFull.attachments as att (att.id)}
+                        <div class="attachment-card">
+                          <div class="att-header">
+                            <span class="att-filename" title={att.filename}>{att.filename}</span>
+                            <span class="att-meta">{fmtBytes(att.size)} · {att.mime}</span>
+                          </div>
+
+                          {#if att.mime.startsWith('image/')}
+                            <div class="att-preview">
+                              {#if attachmentUrls[att.id]}
+                                <img
+                                  class="att-img"
+                                  src={attachmentUrls[att.id]}
+                                  alt={att.filename}
+                                />
+                              {:else}
+                                <button
+                                  class="att-load-btn"
+                                  onclick={() => loadAttachmentUrl(att.id)}
+                                  disabled={attachmentLoading[att.id]}
+                                >
+                                  {attachmentLoading[att.id] ? 'Loading…' : 'Load preview'}
+                                </button>
+                              {/if}
+                            </div>
+                          {:else if att.mime === 'application/pdf'}
+                            <div class="att-preview">
+                              {#if attachmentUrls[att.id]}
+                                <iframe
+                                  class="att-pdf"
+                                  src={attachmentUrls[att.id]}
+                                  title={att.filename}
+                                ></iframe>
+                              {:else}
+                                <button
+                                  class="att-load-btn"
+                                  onclick={() => loadAttachmentUrl(att.id)}
+                                  disabled={attachmentLoading[att.id]}
+                                >
+                                  {attachmentLoading[att.id] ? 'Loading…' : 'Preview PDF'}
+                                </button>
+                              {/if}
+                            </div>
+                          {:else}
+                            <div class="att-download">
+                              {#if attachmentUrls[att.id]}
+                                <a
+                                  class="att-dl-link"
+                                  href={attachmentUrls[att.id]}
+                                  download={att.filename}
+                                >
+                                  Download
+                                </a>
+                              {:else}
+                                <button
+                                  class="att-load-btn"
+                                  onclick={() => loadAttachmentUrl(att.id)}
+                                  disabled={attachmentLoading[att.id]}
+                                >
+                                  {attachmentLoading[att.id] ? 'Preparing…' : 'Download'}
+                                </button>
+                              {/if}
+                            </div>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+
+            {/if}
+          </div>
+        </div>
+      </div>
+
+    {:else}
+      <!-- ── CONFLUENCE / other: single-column read-only body ──────── -->
+      <div class="body-wrap">
+        {#if viewingVersion}
+          <div class="version-banner">
+            Viewing v{viewingVersion.version_no} ({viewingVersion.kind})
+            — {new Date(viewingVersion.created_at).toLocaleString()}
+            {#if viewingVersion.change_notes}
+              <span class="change-notes">· {viewingVersion.change_notes}</span>
+            {/if}
+          </div>
+        {/if}
+
+        {#if renderedBody}
+          <!-- renderMarkdown escapes all input before rendering — safe to inject. -->
+          <div class="md-body">{@html renderedBody}</div>
+        {:else}
+          <div class="muted">No content yet. Use Refresh to pull from source.</div>
+        {/if}
+      </div>
+
+      {#if isConfluence}
+        <div class="publish-bar">
+          <button
+            class="publish-btn"
+            onclick={() => (publishDialogMode = 'story')}
+          >
+            Convert to Jira Story
+          </button>
+        </div>
+      {/if}
+    {/if}
+
+    <!-- ── Related by tag ───────────────────────────────────────── -->
+    {#if relatedStories.length > 0}
+      <div class="related-section">
+        <span class="section-label-sm">Related stories</span>
+        <div class="related-list">
+          {#each relatedStories as rel (rel.id)}
+            <button
+              class="related-item"
+              onclick={() => void product.select(rel.id)}
+              title={rel.source_key}
+            >
+              <span class="related-title">{rel.title}</span>
+              <span class="related-tags">
+                {#each parseTags(rel.tags).filter((t) => currentTags.includes(t)) as sharedTag (sharedTag)}
+                  <span class="tag-chip-sm">{sharedTag}</span>
+                {/each}
+              </span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+  </div>
+{/if}
+
+{#if publishDialogMode}
+  <PublishDialog
+    mode={publishDialogMode}
+    onclose={() => (publishDialogMode = null)}
+  />
+{/if}
+
+<style>
+  .loading,
+  .muted {
+    padding: 24px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  .overview {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  /* ── Two-column grid ───────────────────────────────────────── */
+  .two-col {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    gap: 20px;
+    align-items: start;
+  }
+  .col-left {
+    min-width: 0;
+  }
+  .col-right {
+    min-width: 0;
+  }
+
+  /* Responsive: collapse to single column below 900px */
+  @media (max-width: 900px) {
+    .two-col {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  /* ── Tags ──────────────────────────────────────────────────── */
+  .tags-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 8px;
+  }
+  .tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px 2px 9px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 500;
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .tag-remove {
+    background: none;
+    border: none;
+    padding: 0 1px;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    color: var(--accent);
+    opacity: 0.6;
+    transition: opacity 100ms;
+  }
+  .tag-remove:hover {
+    opacity: 1;
+  }
+  .tag-add-form {
+    display: inline-flex;
+  }
+  .tag-input {
+    border: 1px dashed var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 10.5px;
+    padding: 2px 9px;
+    width: 72px;
+    outline: none;
+    transition: border-color 120ms, width 120ms;
+  }
+  .tag-input:focus {
+    border-color: var(--accent);
+    color: var(--text);
+    width: 100px;
+  }
+  .tag-input::placeholder {
+    color: var(--text-dim);
+    opacity: 0.7;
+  }
+
+  /* ── Related section ────────────────────────────────────────── */
+  .related-section {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .section-label-sm {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    display: block;
+    margin-bottom: 6px;
+  }
+  .related-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .related-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 4px);
+    padding: 5px 10px;
+    cursor: pointer;
+    text-align: left;
+    font-size: 12.5px;
+    color: var(--text);
+    transition: background 100ms;
+  }
+  .related-item:hover {
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+  }
+  .related-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .related-tags {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .tag-chip-sm {
+    font-size: 9.5px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+
+  /* Story header */
+  .story-header {
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+  .story-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .story-title {
+    margin: 0 0 10px;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.25;
+    color: var(--text);
+  }
+  .stage-badge {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    flex-shrink: 0;
+  }
+  .stage-draft {
+    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    color: var(--text-dim);
+  }
+  .stage-review {
+    background: color-mix(in srgb, #f59e0b 18%, transparent);
+    color: #b45309;
+  }
+  .stage-approved {
+    background: color-mix(in srgb, var(--status-working) 18%, transparent);
+    color: var(--status-working);
+  }
+  .stage-done {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+  .stage-other {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text-dim);
+  }
+  .chip {
+    font-size: 10.5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text-dim);
+  }
+  .source-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11.5px;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .source-link:hover {
+    text-decoration: underline;
+  }
+  .source-key {
+    font-size: 11.5px;
+    color: var(--text-dim);
+  }
+  .counts-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .count-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 9%, transparent);
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+
+  /* Toolbar */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 12px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .version-sel {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ver-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+  .ver-select {
+    background: var(--surface-raised, var(--surface));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    color: var(--text);
+    font-size: 12px;
+    padding: 4px 8px;
+    max-width: 280px;
+  }
+  .ver-loading {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .grow {
+    flex: 1;
+  }
+  .toolbar-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 110ms, border-color 110ms, color 110ms;
+    white-space: nowrap;
+  }
+  .toolbar-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text);
+  }
+  .toolbar-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .toolbar-btn.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+
+  /* Body */
+  .body-wrap {
+    flex: 1;
+  }
+  .version-banner {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-radius: var(--radius-s);
+    padding: 6px 12px;
+    margin-bottom: 12px;
+  }
+  .change-notes {
+    font-style: italic;
+  }
+  .md-body {
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: var(--text);
+  }
+  /* Markdown element styling */
+  .md-body :global(h1),
+  .md-body :global(h2),
+  .md-body :global(h3),
+  .md-body :global(h4) {
+    margin: 1.2em 0 0.4em;
+    font-weight: 700;
+    line-height: 1.25;
+    color: var(--text);
+  }
+  .md-body :global(h1) { font-size: 1.35em; }
+  .md-body :global(h2) { font-size: 1.2em; }
+  .md-body :global(h3) { font-size: 1.05em; }
+  .md-body :global(p) {
+    margin: 0 0 0.75em;
+  }
+  .md-body :global(ul),
+  .md-body :global(ol) {
+    padding-left: 1.5em;
+    margin: 0 0 0.75em;
+  }
+  .md-body :global(li) {
+    margin-bottom: 0.25em;
+  }
+  .md-body :global(code) {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.88em;
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .md-body :global(pre) {
+    background: var(--surface-raised, var(--surface));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 0 0 0.75em;
+  }
+  .md-body :global(pre code) {
+    background: none;
+    padding: 0;
+    font-size: 0.86em;
+  }
+  .md-body :global(blockquote) {
+    border-left: 3px solid var(--border);
+    padding-left: 12px;
+    color: var(--text-dim);
+    margin: 0 0 0.75em;
+    font-style: italic;
+  }
+  .md-body :global(a) {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .md-body :global(a:hover) {
+    text-decoration: underline;
+  }
+  .mono {
+    font-family: var(--font-mono, monospace);
+  }
+
+  /* ── Jira section (right column) ──────────────────────────── */
+  .jira-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .jira-loading,
+  .jira-error {
+    font-size: 12.5px;
+    color: var(--text-dim);
+    font-style: italic;
+    padding: 8px 0;
+  }
+  .jira-error {
+    color: #b91c1c;
+    font-style: normal;
+  }
+
+  /* ── Jira card ─────────────────────────────────────────────── */
+  .jira-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 10px 14px;
+    background: var(--surface-raised, var(--surface));
+  }
+  .collapsible-card {
+    padding: 0;
+  }
+  .jira-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .jira-section-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+  }
+
+  /* ── Collapsible trigger ───────────────────────────────────── */
+  .jira-coll-trigger {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 10px 14px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--text-dim);
+    font-size: 12px;
+    border-radius: var(--radius-s);
+    transition: background 100ms;
+  }
+  .jira-coll-trigger:hover {
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+  }
+  .coll-arrow {
+    font-size: 9px;
+    flex-shrink: 0;
+  }
+  .section-count {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-dim);
+    margin-left: 2px;
+  }
+
+  /* ── Status control ────────────────────────────────────────── */
+  .status-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .status-badge {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+  }
+
+  /* ── Assignee control ──────────────────────────────────────── */
+  .assignee-control {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .user-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .user-row-sm {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12.5px;
+  }
+  .avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+  .avatar-sm {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+  .avatar-placeholder {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .user-name {
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .unassigned {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  .unassigned-opt {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  /* ── Dropdown ──────────────────────────────────────────────── */
+  .transition-wrap {
+    position: relative;
+  }
+  .change-btn {
+    height: 24px;
+    padding: 0 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 100ms, color 100ms;
+  }
+  .change-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text);
+  }
+  .change-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .dropdown-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 50;
+    background: var(--surface-raised, var(--surface));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    min-width: 180px;
+    max-height: 240px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .dropdown-loading,
+  .dropdown-empty {
+    font-size: 12px;
+    color: var(--text-dim);
+    padding: 10px 12px;
+    font-style: italic;
+  }
+  .dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px;
+    background: none;
+    border: none;
+    text-align: left;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: pointer;
+    transition: background 80ms;
+    white-space: nowrap;
+  }
+  .dropdown-item:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--accent);
+  }
+  .dropdown-item-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-left: 4px;
+  }
+
+  /* ── Details grid ──────────────────────────────────────────── */
+  .details-grid {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 16px;
+    padding: 0 14px 12px;
+    align-items: start;
+  }
+  .detail-key {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-dim);
+    white-space: nowrap;
+    padding-top: 1px;
+  }
+  .detail-val {
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 1.4;
+  }
+  .label-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .label-chip {
+    font-size: 10.5px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text-dim);
+  }
+
+  /* ── Links ─────────────────────────────────────────────────── */
+  .links-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 0 14px 10px;
+  }
+  .link-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .link-rel {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    min-width: 70px;
+  }
+  .link-key {
+    font-size: 11.5px;
+    color: var(--accent);
+    font-family: var(--font-mono, monospace);
+  }
+  .chip-sm {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    color: var(--text-dim);
+  }
+  .link-summary {
+    font-size: 12.5px;
+    color: var(--text);
+    flex: 1;
+    min-width: 120px;
+  }
+  .status-sm {
+    font-size: 10.5px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+  }
+  .mono-sm {
+    font-family: var(--font-mono, monospace);
+    font-size: 11.5px;
+  }
+
+  /* ── Comments ──────────────────────────────────────────────── */
+  .comments-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 0 14px 10px;
+  }
+  .comment-item {
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+  .comment-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .comment-author {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .comment-date {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .comment-body {
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+  .comments-empty {
+    padding: 10px 14px 6px;
+    font-size: 12px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  .add-comment-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 14px 12px;
+    border-top: 1px solid var(--border);
+  }
+  .comment-textarea {
+    font-family: inherit;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .add-comment-row {
+    display: flex;
+    justify-content: flex-end;
+  }
+  .comment-submit-btn {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .comment-submit-btn:hover:not(:disabled) {
+    opacity: 0.88;
+    background: var(--accent);
+    color: #fff;
+  }
+
+  /* ── Estimate chip ─────────────────────────────────────────── */
+  .estimate-chip {
+    display: inline-block;
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: color-mix(in srgb, #f59e0b 15%, transparent);
+    color: #b45309;
+    border: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+  }
+
+  /* ── History ────────────────────────────────────────────────── */
+  .history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 0 14px 10px;
+  }
+  .history-entry {
+    padding: 8px 0;
+    border-top: 1px solid var(--border);
+  }
+  .history-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .history-author {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .history-date {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .history-change {
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .history-field {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .history-val {
+    font-weight: 500;
+    color: var(--text);
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    padding: 0 4px;
+    border-radius: 3px;
+  }
+
+  /* ── Attachments ───────────────────────────────────────────── */
+  .attachments-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 14px 12px;
+  }
+  .attachment-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 8px 10px;
+    background: color-mix(in srgb, var(--text-dim) 4%, transparent);
+  }
+  .att-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .att-filename {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 320px;
+  }
+  .att-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .att-preview {
+    margin-top: 4px;
+  }
+  .att-img {
+    max-width: 100%;
+    max-height: 320px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+    display: block;
+    object-fit: contain;
+  }
+  .att-pdf {
+    width: 100%;
+    height: 400px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+  }
+  .att-download {
+    margin-top: 4px;
+  }
+  .att-load-btn {
+    height: 24px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: background 100ms, color 100ms;
+  }
+  .att-load-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .att-load-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .att-dl-link {
+    font-size: 12px;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .att-dl-link:hover {
+    text-decoration: underline;
+  }
+
+  /* ── Draft editing ─────────────────────────────────────────── */
+  .draft-section {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-top: 4px;
+  }
+  .draft-hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    border-radius: var(--radius-s);
+    padding: 8px 12px;
+    line-height: 1.5;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .input {
+    background: var(--surface-raised, var(--surface));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    color: var(--text);
+    font-size: 13px;
+    padding: 6px 10px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .input:focus {
+    border-color: var(--accent);
+  }
+  .textarea {
+    background: var(--surface-raised, var(--surface));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    color: var(--text);
+    font-size: 12.5px;
+    font-family: var(--font-mono, monospace);
+    padding: 8px 10px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    line-height: 1.55;
+  }
+  .textarea:focus {
+    border-color: var(--accent);
+  }
+  .draft-save-row {
+    display: flex;
+    justify-content: flex-end;
+  }
+  .save-btn {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .save-btn:hover:not(:disabled) {
+    opacity: 0.88;
+  }
+
+  /* ── Transcripts (right column in draft mode) ──────────────── */
+  .transcripts-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-top: 4px;
+  }
+  .transcripts-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+  }
+  .transcript-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .transcript-item {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow: hidden;
+  }
+  .transcript-header {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .transcript-toggle {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    padding: 8px 10px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--text);
+    font-size: 12.5px;
+    transition: background 80ms;
+  }
+  .transcript-toggle:hover {
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+  }
+  .transcript-title {
+    flex: 1;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .transcript-date {
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .del-transcript-btn {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--text-dim);
+    transition: color 80ms, background 80ms;
+    margin-right: 4px;
+    border-radius: var(--radius-s);
+  }
+  .del-transcript-btn:hover {
+    color: #ef4444;
+    background: color-mix(in srgb, #ef4444 12%, transparent);
+  }
+  .transcript-body {
+    padding: 8px 12px 10px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    color: var(--text-dim);
+    line-height: 1.55;
+    border-top: 1px solid var(--border);
+    background: color-mix(in srgb, var(--text-dim) 3%, transparent);
+    font-family: var(--font-mono, monospace);
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .add-transcript-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-s);
+  }
+
+  /* ── Publish bar ───────────────────────────────────────────── */
+  .publish-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .publish-btn {
+    height: 32px;
+    padding: 0 16px;
+    border-radius: var(--radius-s);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    transition: opacity 110ms;
+    white-space: nowrap;
+  }
+  .publish-btn:hover {
+    opacity: 0.88;
+  }
+  .publish-btn.secondary {
+    background: transparent;
+    color: var(--accent);
+  }
+  .publish-btn.secondary:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    opacity: 1;
+  }
+</style>

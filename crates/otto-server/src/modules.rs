@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use otto_connections::{ConnectionsService, Spawner};
@@ -16,7 +17,7 @@ use otto_core::api::{
 use otto_core::auth::{BoxFuture, RoleChecker};
 use otto_core::domain::{
     CommentSeverity, CommentState, Connection, Review, ReviewAgentCfg, ReviewAgentState,
-    ReviewComment, ReviewStatus, Session, SessionKind, SessionStatus, User, Workspace, WorkspaceRole,
+    ReviewComment, ReviewStatus, Session, SessionKind, User, Workspace, WorkspaceRole,
 };
 use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
@@ -134,6 +135,18 @@ impl otto_context::ContextCtx for ServerCtx {
     }
 }
 
+impl otto_product::ProductCtx for ServerCtx {
+    fn product(&self) -> &Arc<otto_product::ProductService> {
+        &self.product
+    }
+    fn product_repo(&self) -> &otto_state::ProductRepo {
+        &self.product_repo
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Connection spawner: ConnectionsService -> SessionManager bridge
 // ---------------------------------------------------------------------------
@@ -189,13 +202,45 @@ impl Spawner for PtySpawner {
 // Orchestrator routes (contract #23, #24)
 // ---------------------------------------------------------------------------
 
-/// Routes: POST /workspaces/{id}/orchestrate and .../orchestrate/execute.
+/// Routes: POST /workspaces/{id}/orchestrate, .../orchestrate/execute, and the
+/// dedicated AI-free .../broadcast.
 pub fn orchestrator_routes() -> Router<ServerCtx> {
     Router::new()
         .route("/workspaces/{id}/orchestrate", post(orchestrate))
         .route(
             "/workspaces/{id}/orchestrate/execute",
             post(orchestrate_execute),
+        )
+        .route("/workspaces/{id}/broadcast", post(workspace_broadcast))
+        .route(
+            "/workspaces/{id}/product/stories/{sid}/analyze",
+            post(analyze),
+        )
+        .route(
+            "/workspaces/{id}/product/stories/{sid}/rewrite",
+            post(rewrite),
+        )
+        .route(
+            "/workspaces/{id}/product/stories/{sid}/testcases/generate",
+            post(generate_tests),
+        )
+        .route(
+            "/workspaces/{id}/product/stories/{sid}/plan/generate",
+            post(generate_plan),
+        )
+        .route(
+            "/workspaces/{id}/product/stories/{sid}/plan",
+            post(save_plan),
+        )
+        // Approve lives here (not in otto-product) so it can trigger self-improvement.
+        .route(
+            "/product/testcase-runs/{rid}/approve",
+            post(approve_testcase_run),
+        )
+        // Per-agent retry: re-run a single failed/stuck analysis lens agent.
+        .route(
+            "/product/analyses/{aid}/agents/{agent_id}/retry",
+            post(retry_analysis_agent),
         )
 }
 
@@ -258,6 +303,436 @@ async fn orchestrate_execute(
     Ok(Json(execute(&req.plan, &helper, &helper).await))
 }
 
+/// `POST /workspaces/{id}/broadcast` — relay a literal message to live agent
+/// sessions. Dedicated, AI-free path: no parsing, no orchestrator, no fallback.
+/// `session_ids` (when present) targets a subset; absent/empty hits all live
+/// agents. Returns the sessions that actually received it.
+async fn workspace_broadcast(
+    Path(ws_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<otto_core::api::BroadcastReq>,
+) -> ApiResult<Json<otto_core::api::BroadcastResp>> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(ApiError(Error::Invalid("broadcast text is empty".into())));
+    }
+    // Treat an empty target list the same as "no targets" → broadcast to all.
+    let targets = req.session_ids.filter(|ids| !ids.is_empty());
+    let session_ids = ctx
+        .manager
+        .broadcast_message(&ws_id, text, targets.as_deref())
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(otto_core::api::BroadcastResp { session_ids }))
+}
+
+/// `POST /workspaces/{id}/product/stories/{sid}/analyze` — create a
+/// `ProductAnalysis` row and spawn the multi-agent fan-out in the background.
+async fn analyze(
+    Path((ws_id, sid)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<otto_product::types::AnalyzeReq>,
+) -> ApiResult<Json<otto_state::ProductAnalysis>> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+
+    // Load story and verify it belongs to the requested workspace.
+    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
+    if story.workspace_id != ws_id {
+        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+    }
+
+    // Resolve default provider (workspace → global → "claude"), mirroring the
+    // `orchestrate` handler exactly.
+    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let default_provider = otto_core::provider::resolve_provider(&[
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
+
+    // Build the flat AgentSpec list: one entry per (lens × provider). Each lens
+    // can be analyzed by multiple providers (claude/codex/agy), each as its own
+    // real, openable session — exactly like a PR-review fan-out.
+    let specs: Vec<crate::product_run::AgentSpec> = if !req.agents.is_empty() {
+        req.agents
+            .into_iter()
+            .flat_map(|a| {
+                let name = a.name.clone().unwrap_or_else(|| a.skill.clone());
+                // An agent with no providers defaults to the default provider.
+                let providers = if a.providers.is_empty() {
+                    vec![default_provider.clone()]
+                } else {
+                    a.providers.clone()
+                };
+                let skill = a.skill.clone();
+                let model = a.model.clone();
+                providers
+                    .into_iter()
+                    .filter(|p| !p.trim().is_empty())
+                    .map(move |provider| crate::product_run::AgentSpec {
+                        provider,
+                        model: model.clone(),
+                        skill: skill.clone(),
+                        name: name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    } else {
+        // Default three-lens set, each on the resolved default provider.
+        [
+            ("po-story-overview", "PO Overview"),
+            ("story-architecture-overview", "Architecture"),
+            ("story-clarifying-questions", "Clarifying Questions"),
+        ]
+        .iter()
+        .map(|(skill, name)| crate::product_run::AgentSpec {
+            provider: default_provider.clone(),
+            model: None,
+            skill: skill.to_string(),
+            name: name.to_string(),
+        })
+        .collect()
+    };
+
+    // Summarizer provider: request override → default provider.
+    let summarizer_provider = req
+        .summarizer_provider
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| default_provider.clone());
+
+    // Resolve cwd: req → story.cwd → temp dir.
+    let cwd = req
+        .cwd
+        .or_else(|| story.cwd.clone())
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+
+    // Latest source version id for the analysis row.
+    let source_version_id = ctx
+        .product_repo
+        .latest_source_version(&sid)
+        .await
+        .map_err(ApiError)?
+        .map(|v| v.id);
+
+    // Persist the analysis row (status = "running").
+    let analysis = ctx
+        .product_repo
+        .create_analysis(otto_state::NewAnalysis {
+            story_id: sid.clone(),
+            source_version_id,
+            status: "running".to_string(),
+            created_by: user.id.clone(),
+        })
+        .await
+        .map_err(ApiError)?;
+
+    // Spawn the fan-out; errors are isolated inside run_analysis. Each lens
+    // (and the summarizer) runs as a real session on behalf of the current
+    // user, mirroring the PR-review mechanism.
+    tokio::spawn(crate::product_run::run_analysis(
+        ctx.clone(),
+        ws.clone(),
+        user.id.clone(),
+        sid.clone(),
+        analysis.id.clone(),
+        specs,
+        summarizer_provider,
+        cwd,
+        req.focus,
+    ));
+
+    Ok(Json(analysis))
+}
+
+/// `POST /workspaces/{id}/product/stories/{sid}/rewrite` — spawn the writer
+/// agent as a background task and return 202 Accepted immediately.
+async fn rewrite(
+    Path((ws_id, sid)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    body: Option<Json<otto_product::types::RewriteReq>>,
+) -> ApiResult<StatusCode> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+
+    let req = body.map(|b| b.0).unwrap_or_default();
+
+    // Load story and verify it belongs to this workspace.
+    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
+    if story.workspace_id != ws_id {
+        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+    }
+
+    // Resolve default provider (workspace → global → "claude"), mirroring analyze.
+    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let default_provider = otto_core::provider::resolve_provider(&[
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
+    let provider = req.provider.clone().unwrap_or(default_provider);
+
+    // Resolve cwd: req → story.cwd → temp dir.
+    let cwd = req
+        .cwd
+        .or_else(|| story.cwd.clone())
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+
+    // Spawn background task; errors are isolated inside run_rewrite.
+    tokio::spawn(crate::product_run::run_rewrite(
+        ctx.clone(),
+        ws.clone(),
+        user.id.clone(),
+        sid,
+        provider,
+        req.model,
+        cwd,
+        req.focus,
+    ));
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// `POST /workspaces/{id}/product/stories/{sid}/testcases/generate` — spawn
+/// the test-case generation agent as a background task and return 202 Accepted.
+async fn generate_tests(
+    Path((ws_id, sid)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    body: Option<Json<otto_product::types::GenerateTestsReq>>,
+) -> ApiResult<StatusCode> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+
+    let req = body.map(|b| b.0).unwrap_or_default();
+
+    // Load story and verify it belongs to this workspace.
+    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
+    if story.workspace_id != ws_id {
+        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+    }
+
+    // Resolve default provider (workspace → global → "claude"), mirroring rewrite.
+    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let default_provider = otto_core::provider::resolve_provider(&[
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
+    let provider = req.provider.clone().unwrap_or(default_provider);
+
+    // Resolve cwd: req → story.cwd → temp dir.
+    let cwd = req
+        .cwd
+        .or_else(|| story.cwd.clone())
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+
+    // Spawn background task; errors are isolated inside run_generate_tests.
+    tokio::spawn(crate::product_run::run_generate_tests(
+        ctx.clone(),
+        ws.clone(),
+        user.id.clone(),
+        sid,
+        provider,
+        req.model,
+        cwd,
+        req.focus,
+    ));
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// `POST /workspaces/{id}/product/stories/{sid}/plan/generate` — spawn the
+/// task-breakdown agent as a background task and return 202 Accepted. Mirrors
+/// `rewrite`/`generate_tests`.
+async fn generate_plan(
+    Path((ws_id, sid)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    body: Option<Json<otto_product::types::GeneratePlanReq>>,
+) -> ApiResult<StatusCode> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+
+    let req = body.map(|b| b.0).unwrap_or_default();
+
+    // Load story and verify it belongs to this workspace.
+    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
+    if story.workspace_id != ws_id {
+        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+    }
+
+    // Resolve default provider (workspace → global → "claude"), mirroring rewrite.
+    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let default_provider = otto_core::provider::resolve_provider(&[
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
+    let provider = req.provider.clone().unwrap_or(default_provider);
+
+    // Resolve cwd: req → story.cwd → temp dir.
+    let cwd = req
+        .cwd
+        .or_else(|| story.cwd.clone())
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+
+    // Spawn background task; errors are isolated inside run_generate_plan.
+    tokio::spawn(crate::product_run::run_generate_plan(
+        ctx.clone(),
+        ws.clone(),
+        user.id.clone(),
+        sid,
+        provider,
+        req.model,
+        cwd,
+        req.focus,
+    ));
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// `POST /workspaces/{id}/product/stories/{sid}/plan` — persist PO checkbox
+/// toggles by overwriting the latest `kind="plan"` version's body in place (no
+/// new version, so we never spam the version history). Returns 204 No Content.
+async fn save_plan(
+    Path((ws_id, sid)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<otto_product::types::SavePlanReq>,
+) -> ApiResult<StatusCode> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+
+    // Load story and verify it belongs to this workspace.
+    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
+    if story.workspace_id != ws_id {
+        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+    }
+
+    // Find the latest plan version and overwrite its body in place (preserving
+    // its existing title — reuses the 3-arg update_version_body repo method).
+    let plan = ctx
+        .product_repo
+        .latest_plan_version(&sid)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound("no plan version for story".into())))?;
+
+    ctx.product_repo
+        .update_version_body(&plan.id, &plan.title, &req.body_md)
+        .await
+        .map_err(ApiError)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /product/testcase-runs/{rid}/approve` — approve all testcases in the
+/// run and trigger a background self-improvement pass on the `story-test-cases`
+/// skill using the PO's review outcomes as the learning signal.
+///
+/// This handler lives in otto-server (not otto-product) so it can access the
+/// `ImprovementEngine`. The otto-product router no longer registers this route
+/// to avoid an axum duplicate-route panic.
+async fn approve_testcase_run(
+    Path(rid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<otto_state::ProductTestcaseRun>> {
+    // Resolve workspace via run → story, then role-check.
+    let run = ctx.product_repo.get_testcase_run(&rid).await.map_err(ApiError)?;
+    let story = ctx.product_repo.get_story(&run.story_id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
+
+    // Flip all testcases in this run to "approved", and mark the run row approved
+    // so clients can read the run's aggregate status (spec: approve "marks the run approved").
+    ctx.product_repo.approve_run_testcases(&rid).await.map_err(ApiError)?;
+    ctx.product_repo
+        .set_testcase_run(&rid, Some("approved"), None, None)
+        .await
+        .map_err(ApiError)?;
+
+    // Fetch the cases (now approved) for the improvement narrative.
+    let cases = ctx.product_repo.list_testcases(&rid).await.map_err(ApiError)?;
+
+    // Build the narrative describing what the PO did with the test cases.
+    let narrative = crate::product_run::build_improve_narrative_from_tests(&story, &cases);
+
+    // Spawn background self-improvement — don't block the response.
+    let engine = Arc::clone(&ctx.improve_engine);
+    let ws_id = story.workspace_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = engine
+            .run_for_narrative(
+                &ws_id,
+                "test-cases",
+                &narrative,
+                &["story-test-cases".to_string()],
+                otto_core::domain::ImprovementTrigger::Manual,
+            )
+            .await
+        {
+            tracing::warn!("test-case skill improvement failed: {e}");
+        }
+    });
+
+    // Return the (now-approved) run row.
+    let updated = ctx.product_repo.get_testcase_run(&rid).await.map_err(ApiError)?;
+    Ok(Json(updated))
+}
+
+/// `POST /product/analyses/{aid}/agents/{agent_id}/retry` — re-run a single
+/// failed or stuck analysis lens agent without re-running the full analysis.
+///
+/// Resolves the workspace via agent → analysis → story → workspace, performs
+/// an Editor role check, then spawns `retry_analysis_agent` as a background
+/// task and returns 202 Accepted immediately (exactly like a PR-review retry).
+async fn retry_analysis_agent(
+    Path((aid, agent_id)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<StatusCode> {
+    // Resolve workspace: agent → analysis → story → workspace, then role-check.
+    let analysis = ctx.product_repo.get_analysis(&aid).await.map_err(ApiError)?;
+    let story = ctx
+        .product_repo
+        .get_story(&analysis.story_id)
+        .await
+        .map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
+
+    // Resolve workspace domain object (needed by run_lens_session → session create).
+    let ws = ctx.workspaces.get(&story.workspace_id).await.map_err(ApiError)?;
+
+    // Spawn background retry; errors are isolated inside retry_analysis_agent.
+    tokio::spawn(crate::product_run::retry_analysis_agent(
+        ctx.clone(),
+        ws,
+        user.id.clone(),
+        aid,
+        agent_id,
+    ));
+
+    Ok(StatusCode::ACCEPTED)
+}
+
 /// Per-request plan executor scoped to one workspace and acting user.
 struct ExecHelper {
     ctx: ServerCtx,
@@ -309,29 +784,13 @@ impl PlanSpawner for ExecHelper {
 
 impl PlanIo for ExecHelper {
     fn broadcast<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<Id>>> {
+        // Funnel through the one shared implementation so the AI/palette path and
+        // the dedicated /broadcast endpoint can't drift. `None` = all live agents.
         Box::pin(async move {
-            let sessions = self.ctx.manager.list_by_workspace(&self.ws_id).await?;
-            let mut hit = Vec::new();
-            for s in sessions {
-                let live = matches!(
-                    s.status,
-                    SessionStatus::Running | SessionStatus::Working | SessionStatus::Idle
-                );
-                if s.kind == SessionKind::Agent && live {
-                    if let Err(e) = self
-                        .ctx
-                        .manager
-                        .input(&s.id, format!("{text}\n").as_bytes())
-                        .await
-                    {
-                        tracing::warn!(session = %s.id, "broadcast failed: {e}");
-                        continue;
-                    }
-                    self.ctx.manager.record_user_message(&s.id, text).await;
-                    hit.push(s.id);
-                }
-            }
-            Ok(hit)
+            self.ctx
+                .manager
+                .broadcast_message(&self.ws_id, text, None)
+                .await
         })
     }
 
@@ -343,10 +802,9 @@ impl PlanIo for ExecHelper {
                     "session belongs to another workspace".into(),
                 ));
             }
-            self.ctx
-                .manager
-                .input(session_id, format!("{text}\n").as_bytes())
-                .await?;
+            // Submit as a real keypress (paste + Enter), not "{text}\n" in one
+            // burst — otherwise bracketed-paste TUIs paste the text but never send.
+            self.ctx.manager.submit_text(session_id, text).await?;
             self.ctx.manager.record_user_message(session_id, text).await;
             Ok(())
         })
@@ -2034,12 +2492,172 @@ async fn db_explain_with_agent(
     Ok(Json(session))
 }
 
+// ---------------------------------------------------------------------------
+// Inject-session route
+// ---------------------------------------------------------------------------
+
+/// `POST /workspaces/{id}/product/stories/{sid}/inject-session`
+///
+/// Builds the inject bundle for the story and spawns an Agent session that
+/// receives the bundle as its initial prompt (after a short settle delay).
+async fn inject_session(
+    Path((ws_id, sid)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<otto_product::types::InjectSessionReq>,
+) -> ApiResult<Json<Session>> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+
+    // Load story and verify it belongs to the requested workspace.
+    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
+    if story.workspace_id != ws_id {
+        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+    }
+
+    // Resolve default provider (workspace → global → "claude"), mirroring analyze.
+    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let default_provider = otto_core::provider::resolve_provider(&[
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
+    let provider = req.provider.clone().unwrap_or(default_provider);
+
+    // Resolve cwd: req → story.cwd → temp dir.
+    let cwd = req
+        .cwd
+        .or_else(|| story.cwd.clone())
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+
+    // Build the inject bundle.
+    let bundle = ctx.product.build_inject_bundle(&sid).await.map_err(ApiError)?;
+
+    // Spawn the agent session.
+    let create_req = CreateSessionReq {
+        kind: SessionKind::Agent,
+        provider: Some(provider),
+        title: Some(format!("Implement {}", story.source_key)),
+        cwd: Some(cwd),
+        connection_id: None,
+        meta: None,
+    };
+    let session = ctx
+        .manager
+        .create(&ws, &user.id, create_req, None)
+        .await
+        .map_err(ApiError)?;
+
+    // Write the bundle into the session after a short settle delay.
+    let manager = Arc::clone(&ctx.manager);
+    let session_id = session.id.clone();
+    let payload = bundle.markdown.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        if let Err(e) = manager
+            .input(&session_id, format!("{payload}\n").as_bytes())
+            .await
+        {
+            tracing::warn!(session = %session_id, "inject bundle write failed: {e}");
+        }
+    });
+
+    // Record an inject event.
+    ctx.product_repo
+        .add_event(otto_state::NewEvent {
+            story_id: sid,
+            section: "inject".into(),
+            kind: "inject_session".into(),
+            summary: format!("Injected bundle into session {}", session.id),
+            actor_id: Some(user.id),
+            meta_json: None,
+        })
+        .await
+        .ok();
+
+    Ok(Json(session))
+}
+
+/// Routes for the inject-session endpoint.
+pub fn inject_session_routes() -> Router<ServerCtx> {
+    Router::new().route(
+        "/workspaces/{id}/product/stories/{sid}/inject-session",
+        post(inject_session),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Attach-product-story route (injects bundle into a running session)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+struct AttachProductReq {
+    story_id: Id,
+}
+
+/// `POST /sessions/{session_id}/attach-product`
+///
+/// Loads the story (verifying it belongs to the session's workspace), builds
+/// the inject bundle, pushes it into the live PTY, and tags the session meta
+/// with `product_story: { id, title }` so the UI can badge the attachment.
+async fn attach_product_story(
+    Path(session_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<AttachProductReq>,
+) -> ApiResult<Json<Session>> {
+    // Resolve the session and its workspace.
+    let session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &session.workspace_id, WorkspaceRole::Editor).await?;
+
+    // Load story and verify it belongs to the same workspace.
+    let story = ctx.product_repo.get_story(&req.story_id).await.map_err(ApiError)?;
+    if story.workspace_id != session.workspace_id {
+        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+    }
+
+    // Build the inject bundle.
+    let bundle = ctx.product.build_inject_bundle(&req.story_id).await.map_err(ApiError)?;
+
+    // Push the bundle into the live PTY after a short settle delay.
+    let manager = Arc::clone(&ctx.manager);
+    let sid = session_id.clone();
+    let payload = bundle.markdown.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if let Err(e) = manager.input(&sid, format!("{payload}\n").as_bytes()).await {
+            tracing::warn!(session = %sid, "attach-product bundle write failed: {e}");
+        }
+    });
+
+    // Tag the session meta with the attached story.
+    let updated = ctx
+        .manager
+        .update_meta(
+            &session_id,
+            serde_json::json!({ "product_story": { "id": story.id, "title": story.title } }),
+        )
+        .await
+        .map_err(ApiError)?;
+
+    Ok(Json(updated))
+}
+
+/// Routes for the attach-product-story endpoint.
+pub fn attach_product_routes() -> Router<ServerCtx> {
+    Router::new().route("/sessions/{session_id}/attach-product", post(attach_product_story))
+}
+
 /// All module routers: `(api_extras, root_extras)` for [`crate::build_router`].
 pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) {
     let api = vec![
         otto_sessions::api_router::<ServerCtx>(),
         otto_connections::api_router::<ServerCtx>(),
         otto_dbviewer::api_router::<ServerCtx>(),
+        otto_product::router::<ServerCtx>(),
         otto_git::router::<ServerCtx>(),
         otto_issues::router::<ServerCtx>(),
         otto_channels::router::<ServerCtx>(),
@@ -2052,6 +2670,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::skill_eval::routes(),
         provider_routes(),
         session_input_routes(),
+        inject_session_routes(),
+        attach_product_routes(),
         crate::lsp::api_router(),
     ];
     let root = vec![

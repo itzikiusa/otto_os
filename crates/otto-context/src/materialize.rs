@@ -117,6 +117,35 @@ fn build_block(
     sections.join("\n\n")
 }
 
+/// Recursively copy all files from `src` into `dest`, creating parent
+/// directories as needed. Returns the list of destination paths written.
+/// On Unix, `.sh` files receive the executable bit (0o755).
+fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<Vec<String>> {
+    let mut written = Vec::new();
+    fs::create_dir_all(dest)?;
+
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+
+        if src_path.is_dir() {
+            written.extend(copy_dir_all(&src_path, &dest_path)?);
+        } else {
+            fs::write(&dest_path, fs::read(&src_path)?)?;
+
+            #[cfg(unix)]
+            if dest_path.extension().and_then(|e| e.to_str()) == Some("sh") {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&dest_path, fs::Permissions::from_mode(0o755))?;
+            }
+
+            written.push(dest_path.to_string_lossy().into_owned());
+        }
+    }
+    Ok(written)
+}
+
 fn provision_claude(
     library: &Library,
     cfg: &WorkspaceContextConfig,
@@ -126,18 +155,40 @@ fn provision_claude(
     let skills = active_skills(library, cfg);
     let skills_dir = Path::new(cwd).join(".claude").join("skills");
 
-    // Write each active skill's SKILL.md (overwrite — library is source).
+    // Write each active skill: prefer a full recursive dir copy from the library
+    // when the library skill dir exists (multi-file skills with references/
+    // assets/ scripts/). Fall back to writing skill.body as SKILL.md alone for
+    // legacy skills that have only a SKILL.md in the library (or were created via
+    // put_skill) — backward-compatible.
     let active_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
     for skill in &skills {
-        let dir = skills_dir.join(&skill.name);
-        if let Err(e) = fs::create_dir_all(&dir) {
-            tracing::warn!(skill = %skill.name, error = %e, "create skill dir failed");
-            continue;
-        }
-        let path = dir.join("SKILL.md");
-        match fs::write(&path, &skill.body) {
-            Ok(()) => files_written.push(path.to_string_lossy().into_owned()),
-            Err(e) => tracing::warn!(path = %path.display(), error = %e, "write skill failed"),
+        let dest_dir = skills_dir.join(&skill.name);
+        let lib_skill_dir = library.root.join("skills").join(&skill.name);
+
+        if lib_skill_dir.is_dir() {
+            // Multi-file skill: remove the old managed copy and re-copy the whole
+            // library dir so references/ assets/ scripts/ stay in sync.
+            if dest_dir.exists() {
+                if let Err(e) = fs::remove_dir_all(&dest_dir) {
+                    tracing::warn!(skill = %skill.name, error = %e, "remove existing skill dir failed");
+                    continue;
+                }
+            }
+            match copy_dir_all(&lib_skill_dir, &dest_dir) {
+                Ok(copied) => files_written.extend(copied),
+                Err(e) => tracing::warn!(skill = %skill.name, error = %e, "copy skill dir failed"),
+            }
+        } else {
+            // Legacy / in-memory skill: write only SKILL.md.
+            if let Err(e) = fs::create_dir_all(&dest_dir) {
+                tracing::warn!(skill = %skill.name, error = %e, "create skill dir failed");
+                continue;
+            }
+            let path = dest_dir.join("SKILL.md");
+            match fs::write(&path, &skill.body) {
+                Ok(()) => files_written.push(path.to_string_lossy().into_owned()),
+                Err(e) => tracing::warn!(path = %path.display(), error = %e, "write skill failed"),
+            }
         }
     }
 

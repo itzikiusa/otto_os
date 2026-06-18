@@ -7,6 +7,7 @@
   import RightPanel from './RightPanel.svelte';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
+  import BroadcastModal from '../lib/components/BroadcastModal.svelte';
   import NotificationBell from './NotificationBell.svelte';
   import { serviceHealth } from '../lib/stores/serviceHealth.svelte';
   import AgentsPage from '../modules/agents/AgentsPage.svelte';
@@ -25,6 +26,7 @@
   import UsagePage from '../modules/usage/UsagePage.svelte';
   import Settings from '../modules/settings/Settings.svelte';
   import Walkthroughs from '../modules/help/Walkthroughs.svelte';
+  import ProductPage from '../modules/product/ProductPage.svelte';
   import { router } from '../lib/router.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -114,7 +116,7 @@
           void updateAllCLIs();
           break;
         case 'broadcast':
-          ui.openPalette('english', 'broadcast ');
+          ui.openBroadcast();
           break;
         case 'toggleRail':
           ui.toggleRail();
@@ -203,7 +205,7 @@
     const unreg = registry.register('core', [
       { id: 'core.new-session', title: 'New Session', group: 'Sessions', shortcut: '⌘T', keywords: 'spawn agent terminal claude codex shell', run: () => (ui.newSessionOpen = true) },
       { id: 'core.ask-otto', title: 'Ask Otto (plain English)', group: 'Sessions', shortcut: '⌘I', keywords: 'orchestrate natural language command free text', run: () => ui.openPalette('english') },
-      { id: 'core.broadcast', title: 'Broadcast to all sessions', group: 'Sessions', shortcut: '⌘⇧B', keywords: 'send message every agent tell', run: () => ui.openPalette('english', 'broadcast ') },
+      { id: 'core.broadcast', title: 'Broadcast message to sessions', group: 'Sessions', shortcut: '⌘⇧B', keywords: 'send message every agent tell all selected', run: () => ui.openBroadcast() },
       { id: 'core.close-tab', title: 'Close Tab', group: 'Sessions', shortcut: '⌘W', run: () => ws.closeActiveTab() },
       { id: 'core.next-session', title: 'Next Session', group: 'Sessions', shortcut: '⌘]', keywords: 'switch tab forward cycle', run: () => ws.cycleTab(1) },
       { id: 'core.prev-session', title: 'Previous Session', group: 'Sessions', shortcut: '⌘[', keywords: 'switch tab back cycle', run: () => ws.cycleTab(-1) },
@@ -219,6 +221,7 @@
       { id: 'core.go-usage', title: 'Go to Usage & Metrics', group: 'Navigate', keywords: 'module usage cost tokens clickhouse metrics cpu ram billing analytics', run: () => router.go('usage') },
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
       { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
+      { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle Right Panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
@@ -353,13 +356,15 @@
           <Settings />
         {:else if moduleName === 'walkthroughs'}
           <Walkthroughs />
+        {:else if moduleName === 'product'}
+          <ProductPage />
         {:else}
           <AgentsPage />
         {/if}
       </div>
     </div>
 
-    {#if moduleName === 'agents' && ws.singleSessionView}
+    {#if moduleName === 'agents' && ws.singleSessionView && ws.activeSession !== null}
       <RightPanel />
     {/if}
   </div>
@@ -368,6 +373,10 @@
 </div>
 
 <Palette />
+
+{#if ui.broadcastOpen}
+  <BroadcastModal />
+{/if}
 
 {#if ui.newSessionOpen}
   <NewSession onclose={() => (ui.newSessionOpen = false)} />

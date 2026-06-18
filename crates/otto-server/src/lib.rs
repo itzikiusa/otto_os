@@ -9,6 +9,8 @@ pub mod error;
 pub mod lsp;
 pub mod modules;
 pub mod monitor;
+pub mod product_run;
+pub mod product_watcher;
 pub mod review_session;
 pub mod routes;
 pub mod skill_eval;

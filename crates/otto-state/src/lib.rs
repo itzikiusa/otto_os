@@ -10,6 +10,7 @@ pub mod convert;
 pub mod db;
 pub mod db_explorer;
 pub mod git;
+pub mod product;
 pub mod improvements;
 pub mod integrations;
 pub mod issues;
@@ -30,16 +31,20 @@ pub use api_client::{
 pub use connection_sections::ConnectionSectionsRepo;
 pub use connections::{ConnectionsRepo, NewConnection};
 pub use db::open;
+// Re-exported so daemon-side background tasks can name the pool type without
+// taking a direct sqlx dependency.
+pub use sqlx::SqlitePool;
 pub use db_explorer::{
     Dashboard, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery, Widget,
 };
 pub use git::{GitStore, NewGitAccount, NewRepo};
+pub use product::*;
 pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
 pub use issues::{IssuesRepo, NewIssueAccount};
 pub use notifications::{NewNotice, NotificationsRepo};
 pub use reviews::ReviewsRepo;
-pub use sessions::{NewSession, SessionsRepo};
+pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
 pub use settings::SettingsRepo;
 pub use skill_evals::SkillEvalsRepo;
 pub use workflows::WorkflowsRepo;

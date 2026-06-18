@@ -347,6 +347,18 @@ export type Action =
 
 export type ActionPlan = Action[];
 
+/** POST /workspaces/{id}/broadcast — dedicated, AI-free relay to sessions. */
+export interface BroadcastReq {
+  text: string;
+  /** Target sessions; omit/empty to hit every live agent session. */
+  session_ids?: Id[];
+}
+
+export interface BroadcastResp {
+  /** The sessions that actually received the message. */
+  session_ids: Id[];
+}
+
 export interface OrchestrateReq {
   text: string;
   optimize: boolean;

@@ -75,7 +75,8 @@ class WorkspaceStore {
       (s) =>
         (s.meta.source !== 'channel' &&
           s.meta.source !== 'review' &&
-          s.meta.source !== 'skilleval') ||
+          s.meta.source !== 'skilleval' &&
+          s.meta.source !== 'product-analysis') ||
         this.openTabs.includes(s.id),
     ),
   );
@@ -114,7 +115,8 @@ class WorkspaceStore {
       (s) =>
         s.meta.source !== 'channel' &&
         s.meta.source !== 'review' &&
-        s.meta.source !== 'skilleval',
+        s.meta.source !== 'skilleval' &&
+        s.meta.source !== 'product-analysis',
     ),
   );
 
@@ -131,7 +133,8 @@ class WorkspaceStore {
         this.statusMap[s.id] === 'working' &&
         s.meta.source !== 'review' &&
         s.meta.source !== 'channel' &&
-        s.meta.source !== 'skilleval',
+        s.meta.source !== 'skilleval' &&
+        s.meta.source !== 'product-analysis',
     ).length,
   );
 
@@ -445,6 +448,13 @@ class WorkspaceStore {
 
   async detachIssue(sessionId: Id): Promise<void> {
     const s = await api.patch<Session>(`/sessions/${sessionId}`, { meta: { issue: null } });
+    this.sessions = this.sessions.map((x) => (x.id === sessionId ? s : x));
+  }
+
+  async attachProductStory(sessionId: Id, storyId: Id): Promise<void> {
+    const s = await api.post<Session>(`/sessions/${sessionId}/attach-product`, {
+      story_id: storyId,
+    });
     this.sessions = this.sessions.map((x) => (x.id === sessionId ? s : x));
   }
 

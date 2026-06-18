@@ -285,6 +285,11 @@
         <span class="grow">Git</span>
       </button>
 
+      <button class="nav-item" class:active={router.module === 'product'} onclick={() => router.go('product')}>
+        <Icon name="note" size={14} />
+        <span class="grow">Product</span>
+      </button>
+
       <button class="nav-item" class:active={router.module === 'api'} onclick={() => router.go('api')}>
         <Icon name="send" size={14} />
         <span class="grow">API</span>

@@ -58,7 +58,11 @@ async function request<T>(
   // Surface provider/upstream outages (daemon maps provider failures to 502).
   serviceHealth.report(resp.status);
 
-  if (resp.status === 204) return undefined as T;
+  // No-content responses: 204, async-accepted 202, or any explicitly empty body.
+  // (Avoids resp.json() throwing on bodyless endpoints like rewrite/testcase-generate.)
+  if (resp.status === 204 || resp.status === 202 || resp.headers.get('content-length') === '0') {
+    return undefined as T;
+  }
 
   if (!resp.ok) {
     let problem: Problem = { code: 'internal', message: resp.statusText };
@@ -85,6 +89,23 @@ export const api = {
 /** True when an error is a fetch abort (caller cancelled via AbortSignal). */
 export function isAbortError(e: unknown): boolean {
   return e instanceof DOMException && e.name === 'AbortError';
+}
+
+/**
+ * Fetch a binary resource from /api/v1<path> with the stored Bearer token,
+ * then return a revocable object URL. The caller is responsible for calling
+ * URL.revokeObjectURL() when done (e.g. on component unmount).
+ */
+export async function authedBlobUrl(path: string): Promise<string> {
+  const token = getToken();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { headers });
+  if (!resp.ok) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try { problem = await resp.json(); } catch { /* non-JSON error body */ }
+    throw new ApiError(resp.status, problem);
+  }
+  return URL.createObjectURL(await resp.blob());
 }
 
 /** Build a WS URL with the auth token, e.g. wsUrl('/ws/term/SESSION_ID'). */

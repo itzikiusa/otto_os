@@ -5,6 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import AttachIssue from './AttachIssue.svelte';
+  import AttachProductStory from './AttachProductStory.svelte';
   import Handover from './Handover.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -36,6 +37,7 @@
   let renaming = $state(false);
   let draftTitle = $state('');
   let attachIssueOpen = $state(false);
+  let attachProductOpen = $state(false);
   let handoverOpen = $state(false);
 
   const attachedIssue = $derived(
@@ -180,6 +182,11 @@
     attachIssueOpen = true;
   }
 
+  function openAttachProductStory(): void {
+    menuOpen = false;
+    attachProductOpen = true;
+  }
+
   function openHandover(): void {
     menuOpen = false;
     handoverOpen = true;
@@ -219,6 +226,7 @@
           { separator: true },
           { label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…', icon: 'ticket', action: openAttachIssue },
           ...(attachedIssue ? [{ label: 'Detach issue', icon: 'link', action: detachIssue }] : []),
+          { label: 'Attach product story…', icon: 'file', action: openAttachProductStory },
           { separator: true },
           { label: 'Archive', icon: 'archive', action: archive },
           { label: 'Delete', icon: 'trash', danger: true as const, action: del },
@@ -270,6 +278,7 @@
             {#if attachedIssue}
               <button role="menuitem" onclick={detachIssue}>Detach issue</button>
             {/if}
+            <button role="menuitem" onclick={openAttachProductStory}>Attach product story…</button>
             <button role="menuitem" onclick={archive}>Archive</button>
             <button role="menuitem" class="danger" onclick={del}>Delete</button>
           </div>
@@ -289,6 +298,10 @@
 
 {#if attachIssueOpen}
   <AttachIssue {sessionId} onclose={() => (attachIssueOpen = false)} />
+{/if}
+
+{#if attachProductOpen}
+  <AttachProductStory {sessionId} onclose={() => (attachProductOpen = false)} />
 {/if}
 
 {#if handoverOpen}

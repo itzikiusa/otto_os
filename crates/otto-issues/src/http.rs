@@ -4,10 +4,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch};
+use axum::routing::{get, patch, post, put};
 use axum::{Extension, Json, Router};
 use otto_core::api::{CreateIssueAccountReq, Problem, UpdateIssueAccountReq};
 use otto_core::auth::AuthUser;
@@ -16,7 +17,9 @@ use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Error, Id};
 use otto_state::{IssuesRepo, NewIssueAccount};
 
-use crate::jira::JiraClient;
+use crate::confluence::ConfluenceClient;
+use crate::confluence::{ConfluencePageSummary, ConfluenceSpace};
+use crate::jira::{CommentRef, IssueFull, JiraClient, JiraTransition, JiraUser};
 
 /// Dependencies the issues router needs from the host application state.
 pub trait IssuesCtx: Clone + Send + Sync + 'static {
@@ -74,7 +77,29 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
         )
         .route("/issue/projects", get(list_projects::<S>))
         .route("/issue/search", get(search_issues::<S>))
+        .route("/issue/confluence/spaces", get(list_spaces_cf::<S>))
+        .route("/issue/confluence/search", get(search_pages_cf::<S>))
         .route("/issue/{account_id}/{key}", get(get_issue::<S>))
+        // Extended issue view + write operations
+        .route("/issue/{account_id}/{key}/full", get(get_issue_full::<S>))
+        .route(
+            "/issue/{account_id}/{key}/transitions",
+            get(list_transitions::<S>).post(do_transition::<S>),
+        )
+        .route("/issue/{account_id}/{key}/assignable", get(list_assignable::<S>))
+        .route("/issue/{account_id}/{key}/assignee", put(assign_issue::<S>))
+        .route(
+            "/issue/{account_id}/{key}/attachment/{attachment_id}",
+            get(get_attachment::<S>),
+        )
+        .route(
+            "/issue/{account_id}/{project_key}/issue-types",
+            get(list_issue_types_handler::<S>),
+        )
+        .route(
+            "/issue/{account_id}/{key}/comment",
+            post(add_comment::<S>),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -237,4 +262,239 @@ async fn get_issue<S: IssuesCtx>(
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let detail = client.get_issue(&key).await?;
     Ok(Json(detail))
+}
+
+async fn list_spaces_cf<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Vec<ConfluenceSpace>>> {
+    let account_id: Id = params
+        .get("account_id")
+        .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
+        .clone();
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+    let spaces = client.list_spaces().await?;
+    Ok(Json(spaces))
+}
+
+async fn search_pages_cf<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Vec<ConfluencePageSummary>>> {
+    let account_id: Id = params
+        .get("account_id")
+        .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
+        .clone();
+    let q = params
+        .get("q")
+        .ok_or_else(|| Error::Invalid("q query param required".into()))?
+        .clone();
+    let space = params
+        .get("space")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+    let results = client.search_pages(space.as_deref(), &q).await?;
+    Ok(Json(results))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extended issue view + write handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `GET /issue/{account_id}/{key}/full`
+///
+/// Returns a fully-expanded [`IssueFull`] containing description, comments,
+/// changelog, attachments, links, and all non-empty fields with display labels.
+async fn get_issue_full<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+) -> ApiResult<Json<IssueFull>> {
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    let full = client.get_issue_full(&key).await?;
+    Ok(Json(full))
+}
+
+/// `GET /issue/{account_id}/{key}/transitions`
+///
+/// Returns the list of status transitions available for the issue.
+async fn list_transitions<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+) -> ApiResult<Json<Vec<JiraTransition>>> {
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    let transitions = client.list_transitions(&key).await?;
+    Ok(Json(transitions))
+}
+
+/// `POST /issue/{account_id}/{key}/transitions`
+///
+/// Body: `{"transition_id": "21"}` — move the issue to the target status.
+/// Returns `204 No Content` on success.
+async fn do_transition<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<StatusCode> {
+    let transition_id = body
+        .get("transition_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::Invalid("transition_id is required".into()))?
+        .to_string();
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    client.transition_issue(&key, &transition_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /issue/{account_id}/{key}/assignable`
+///
+/// Returns users that can be assigned to the issue.
+async fn list_assignable<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+) -> ApiResult<Json<Vec<JiraUser>>> {
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    let users = client.list_assignable(&key).await?;
+    Ok(Json(users))
+}
+
+/// `PUT /issue/{account_id}/{key}/assignee`
+///
+/// Body: `{"account_id": "..."}` — assign the issue to a user.
+/// Pass `"-1"` as the account_id value to unassign.
+/// Returns `204 No Content` on success.
+async fn assign_issue<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<StatusCode> {
+    let assignee_account_id = body
+        .get("account_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::Invalid("account_id is required".into()))?
+        .to_string();
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    client.assign_issue(&key, &assignee_account_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /issue/{account_id}/{key}/attachment/{attachment_id}`
+///
+/// Proxies the attachment bytes from Jira (keeping the auth token server-side).
+/// Sets the correct `Content-Type` header from the upstream response so the
+/// browser can render images / PDFs directly.
+async fn get_attachment<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Path((account_id, _key, attachment_id)): Path<(Id, String, String)>,
+) -> ApiResult<Response> {
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    let (mime, bytes) = client.attachment_bytes(&attachment_id).await?;
+
+    let content_type = HeaderValue::from_str(&mime)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .unwrap()
+        });
+
+    Ok(response)
+}
+
+/// `GET /issue/{account_id}/{project_key}/issue-types`
+///
+/// Returns the non-subtask issue types for a Jira project (e.g. "Story", "Task", "Bug").
+async fn list_issue_types_handler<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Path((account_id, project_key)): Path<(Id, String)>,
+) -> ApiResult<Json<Vec<String>>> {
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    let types = client.list_issue_types(&project_key).await?;
+    Ok(Json(types))
+}
+
+/// `POST /issue/{account_id}/{key}/comment`
+///
+/// Body: `{"body": "Comment text"}` — post a comment on the issue.
+/// Returns a [`CommentRef`] containing the new comment's `id` and optional URL.
+async fn add_comment<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(_user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Json<CommentRef>> {
+    let comment_body = body
+        .get("body")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::Invalid("body is required".into()))?
+        .to_string();
+    let account = s.issues().get_account(&account_id).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    let comment_ref = client.add_comment(&key, &comment_body).await?;
+    Ok(Json(comment_ref))
 }

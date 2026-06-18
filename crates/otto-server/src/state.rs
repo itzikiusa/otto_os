@@ -48,6 +48,8 @@ pub struct ServerCtx {
     pub context_library: otto_context::Library,
     /// Embedded ClickHouse usage + metrics store (no-op when unavailable).
     pub usage: Arc<otto_usage::UsageEngine>,
+    pub product: std::sync::Arc<otto_product::ProductService>,
+    pub product_repo: otto_state::ProductRepo,
 }
 
 impl ServerCtx {
