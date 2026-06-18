@@ -47,6 +47,50 @@ use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_
 use crate::state::ServerCtx;
 
 // ---------------------------------------------------------------------------
+// Per-session cwd attribution (codex usage tracking)
+// ---------------------------------------------------------------------------
+
+/// Resolve the cwd a product agent session should run in, making it unique when
+/// it would otherwise be the shared system temp-dir fallback.
+///
+/// WHY: the usage tailer attributes codex sessions by their cwd (1:1 `by_cwd`).
+/// Product sessions (analysis fan-out, rewrite, test-gen, plan-gen) fall back to
+/// `std::env::temp_dir()` when a story has no real cwd. Multiple codex sessions
+/// then share `/tmp` (or `$TMPDIR`) and collide → all attributed to "external"
+/// instead of the workspace. Giving each session its own temp subdir restores a
+/// 1:1 cwd→session mapping. (Claude attributes by its own session id, so it's
+/// unaffected — but a unique dir is harmless for it.)
+///
+/// A REAL story cwd (the user's repo) passes through UNCHANGED — the architecture
+/// lens needs the real repo. Only the shared-temp fallback is rewritten, to a
+/// freshly-created unique child of the temp dir.
+fn session_cwd(requested: &str) -> String {
+    let temp = std::env::temp_dir();
+
+    // Compare against the shared temp-dir fallback. Canonicalize both so e.g.
+    // /var vs /private/var (macOS) or a trailing slash don't defeat the match;
+    // fall back to a raw path compare if canonicalization fails.
+    let requested_path = std::path::Path::new(requested);
+    let is_shared_temp = match (requested_path.canonicalize(), temp.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => requested_path == temp.as_path(),
+    };
+
+    if !is_shared_temp {
+        // Real story cwd — leave it untouched.
+        return requested.to_string();
+    }
+
+    // Shared-temp fallback → unique per-session subdir so codex usage attributes
+    // 1:1 by cwd instead of colliding on the shared temp dir.
+    let unique = temp.join(format!("otto-product-{}", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::create_dir_all(&unique) {
+        tracing::debug!("product_run: create session cwd {}: {e}", unique.display());
+    }
+    unique.to_string_lossy().to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -717,7 +761,11 @@ pub async fn run_analysis(
         let analysis_id = analysis_id.clone();
         let _story_title = story_title.clone();
         let context_path_str = context_path_str.clone();
-        let cwd = cwd.clone();
+        // Per-spec session cwd: when the story has no real cwd we fell back to the
+        // shared temp dir; give EACH lens session its own unique temp subdir so the
+        // codex usage tailer attributes them 1:1 by cwd instead of colliding. A real
+        // story cwd passes through unchanged (the architecture lens needs the repo).
+        let cwd = session_cwd(&cwd);
 
         set.spawn(async move {
             // Create the agent row (status = "running"). The display name
@@ -924,12 +972,15 @@ pub async fn run_analysis(
         let base = build_summarizer_prompt(&summarizer_skill_body, &story_title, &successful);
         let prompt = augment_with_out_path(&base, &out_path.to_string_lossy());
 
+        // Own unique session cwd for the summarizer (same temp-fallback fix as the
+        // lenses); a real story cwd passes through unchanged.
+        let summarizer_cwd = session_cwd(&cwd);
         let result = run_agent_with_recovery(
             &ctx,
             &ws,
             &user_id,
             &summarizer_provider,
-            &cwd,
+            &summarizer_cwd,
             &prompt,
             &out_path,
             SUMMARIZER_TIMEOUT,
@@ -1234,10 +1285,12 @@ pub async fn retry_analysis_agent(
     // empty string is better than the old error text for the UI.
     // (No separate "clear_error" API; the empty string approach is idiomatic here.)
 
-    // 5. Pre-trust provider.
-    let cwd = story.cwd.clone().unwrap_or_else(|| {
+    // 5. Pre-trust provider. As in the fan-out, a missing story cwd falls back to
+    // the shared temp dir; rewrite that to a unique per-session subdir so codex
+    // usage attributes this retry 1:1 by cwd. A real story cwd passes unchanged.
+    let cwd = session_cwd(&story.cwd.clone().unwrap_or_else(|| {
         std::env::temp_dir().to_string_lossy().to_string()
-    });
+    }));
     otto_sessions::trust::ensure_trusted(&agent.provider, &cwd);
 
     // 6. Rebuild context file (shared with this analysis's context path, or fresh).
@@ -1513,6 +1566,12 @@ pub async fn run_rewrite(
     cwd: String,
     focus: Option<String>,
 ) {
+    // Per-invocation session cwd: when there's no real story cwd we fell back to
+    // the shared temp dir; give this rewrite session its own unique temp subdir so
+    // the codex usage tailer attributes it 1:1 by cwd (re-running rewrite for the
+    // same story never collides). A real story cwd passes through unchanged.
+    let cwd = session_cwd(&cwd);
+
     // 1. Load story
     let story = match ctx.product_repo.get_story(&story_id).await {
         Ok(s) => s,
@@ -1803,6 +1862,12 @@ pub async fn run_generate_tests(
     cwd: String,
     focus: Option<String>,
 ) {
+    // Per-invocation session cwd: when there's no real story cwd we fell back to
+    // the shared temp dir; give this test-gen session its own unique temp subdir so
+    // the codex usage tailer attributes it 1:1 by cwd. A real story cwd passes
+    // through unchanged.
+    let cwd = session_cwd(&cwd);
+
     // 1. Load story
     let story = match ctx.product_repo.get_story(&story_id).await {
         Ok(s) => s,
@@ -2092,6 +2157,12 @@ pub async fn run_generate_plan(
     cwd: String,
     focus: Option<String>,
 ) {
+    // Per-invocation session cwd: when there's no real story cwd we fell back to
+    // the shared temp dir; give this plan-gen session its own unique temp subdir so
+    // the codex usage tailer attributes it 1:1 by cwd. A real story cwd passes
+    // through unchanged.
+    let cwd = session_cwd(&cwd);
+
     // 1. Load story
     let story = match ctx.product_repo.get_story(&story_id).await {
         Ok(s) => s,
@@ -2504,6 +2575,54 @@ pub fn build_improve_narrative_from_clarifications(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // session_cwd — per-session cwd attribution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_cwd_passes_real_path_through_unchanged() {
+        // A real directory (use the manifest dir of this crate, which surely
+        // exists and is NOT the temp dir) must pass through verbatim — the
+        // architecture lens needs the actual repo cwd.
+        let real = env!("CARGO_MANIFEST_DIR");
+        let out = session_cwd(real);
+        assert_eq!(out, real, "a real story cwd must pass through unchanged");
+    }
+
+    #[test]
+    fn session_cwd_rewrites_shared_temp_fallback_to_existing_child() {
+        // The fallback string used by the handlers.
+        let fallback = std::env::temp_dir().to_string_lossy().to_string();
+        let out = session_cwd(&fallback);
+
+        // It must NOT be the shared temp dir itself.
+        assert_ne!(out, fallback, "shared temp fallback must be rewritten");
+
+        let out_path = std::path::Path::new(&out);
+        // It must be a child of the temp dir...
+        assert!(
+            out_path.starts_with(std::env::temp_dir()),
+            "rewritten cwd must live under the temp dir; got {out}"
+        );
+        // ...and it must actually exist on disk (created by the helper).
+        assert!(out_path.exists(), "rewritten cwd must exist on disk; got {out}");
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(out_path);
+    }
+
+    #[test]
+    fn session_cwd_two_calls_yield_distinct_dirs() {
+        let fallback = std::env::temp_dir().to_string_lossy().to_string();
+        let a = session_cwd(&fallback);
+        let b = session_cwd(&fallback);
+        assert_ne!(a, b, "two fallback rewrites must yield distinct dirs");
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
 
     // -----------------------------------------------------------------------
     // extract_json_block
