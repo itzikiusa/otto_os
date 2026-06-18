@@ -190,11 +190,17 @@
   }
 
   $effect(() => {
+    // Tracked read: toggling the experimental RTL mode re-runs this effect so the
+    // terminal is rebuilt with the correct renderer (WebGL vs DOM — see below).
+    const rtl = ui.rtlBidi;
     term = new Terminal({
-      fontFamily: "'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
+      fontFamily: untrack(() => ui.termFontStack),
       fontSize: untrack(() => ui.termFontSize),
       cursorBlink: true,
       allowProposedApi: true,
+      // Keep fallback-font glyphs (e.g. Hebrew from Cousine) inside their grid
+      // cell when their advance width differs from the primary font's cell.
+      rescaleOverlappingGlyphs: true,
       scrollback: 10_000,
       theme: untrack(() => terminalTheme(ui.theme, untrack(() => effScheme))),
       macOptionIsMeta: true,
@@ -204,10 +210,18 @@
     term.loadAddon(fit);
     term.loadAddon(search);
     term.open(container);
-    try {
-      term.loadAddon(new WebglAddon());
-    } catch {
-      // WebGL unavailable — xterm falls back to its default renderer
+    // Experimental RTL: skip the WebGL renderer. The WebGL/canvas renderer draws
+    // each grid cell in raw logical order with no bidi, so Hebrew comes out
+    // letter-reversed. xterm's DOM renderer instead emits each text run as an
+    // inline `unicode-bidi: isolate` span, which the browser bidi-reorders — so
+    // Hebrew letters read correctly within each word. (Trade-off: no GPU
+    // rendering; word order still flows left-to-right — a terminal-grid limit.)
+    if (!rtl) {
+      try {
+        term.loadAddon(new WebglAddon());
+      } catch {
+        // WebGL unavailable — xterm falls back to its default renderer
+      }
     }
     // NOTE: do NOT fit() here. The container has no real size yet on first open
     // (grid/flex layout isn't resolved this tick). The ResizeObserver below
@@ -339,6 +353,15 @@
     const size = ui.termFontSize;
     if (term && term.options.fontSize !== size) {
       term.options.fontSize = size;
+      if (safeFit()) sendResize();
+    }
+  });
+
+  // react to terminal font-family choice (live, no rebuild needed)
+  $effect(() => {
+    const family = ui.termFontStack;
+    if (term && term.options.fontFamily !== family) {
+      term.options.fontFamily = family;
       if (safeFit()) sendResize();
     }
   });

@@ -5,6 +5,24 @@ export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
 export type RightTab = 'git' | 'files' | 'notes' | 'activity' | 'info' | 'browser' | 'api';
 
+/** Terminal font choice. 'Cousine' supplies Hebrew glyphs in every stack so RTL
+ *  text stays crisp; 'system' keeps SF Mono primary (no change for English). */
+export type TermFontKey = 'system' | 'cousine' | 'menlo';
+
+export const TERM_FONT_OPTIONS: { id: TermFontKey; name: string; desc: string }[] = [
+  { id: 'system', name: 'System', desc: 'Apple SF Mono — Hebrew via Cousine' },
+  { id: 'cousine', name: 'Cousine', desc: 'Uniform mono with full Hebrew coverage' },
+  { id: 'menlo', name: 'Menlo', desc: 'Classic macOS mono — Hebrew via Cousine' },
+];
+
+const TERM_FONT_STACKS: Record<TermFontKey, string> = {
+  // 'Cousine' sits after the Latin fonts: the browser only falls through to it
+  // for codepoints SF Mono/Menlo lack (i.e. Hebrew), so Latin/code is unchanged.
+  system: "'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cousine', 'Courier New', monospace",
+  cousine: "'Cousine', 'SF Mono', SFMono-Regular, Menlo, monospace",
+  menlo: "Menlo, Monaco, 'Cousine', 'Courier New', monospace",
+};
+
 const LS = {
   rail: 'otto_rail_expanded',
   right: 'otto_right_open',
@@ -16,6 +34,8 @@ const LS = {
   accent: 'otto_accent',
   zoom: 'otto_zoom',
   termFont: 'otto_term_font',
+  termFontFamily: 'otto_term_font_family',
+  rtlBidi: 'otto_term_rtl_bidi',
   dbDock: 'otto_db_dock',
   dbDockWidth: 'otto_db_dock_width',
 };
@@ -110,6 +130,16 @@ class UiStore {
   zoom = $state(Number(lsGet(LS.zoom) ?? '1') || 1);
   /** terminal font size in px */
   termFontSize = $state(Number(lsGet(LS.termFont) ?? '13') || 13);
+  /** terminal font family choice (see TERM_FONT_STACKS) */
+  termFontFamily: TermFontKey = $state((lsGet(LS.termFontFamily) as TermFontKey) ?? 'system');
+  /** experimental: reorder RTL (Hebrew) runs right-to-left via the browser's
+   *  bidi engine. Forces xterm's DOM renderer (no WebGL) — may distort TUIs. */
+  rtlBidi = $state(lsGet(LS.rtlBidi) === '1');
+
+  /** Resolved CSS font-family stack for the terminal, per the current choice. */
+  get termFontStack(): string {
+    return TERM_FONT_STACKS[this.termFontFamily] ?? TERM_FONT_STACKS.system;
+  }
 
   /** resolved light|dark after applying `auto` */
   resolvedScheme: 'light' | 'dark' = $state('dark');
@@ -214,6 +244,16 @@ class UiStore {
   private setTermFont(px: number): void {
     this.termFontSize = px;
     lsSet(LS.termFont, String(px));
+  }
+
+  setTermFontFamily(key: TermFontKey): void {
+    this.termFontFamily = key;
+    lsSet(LS.termFontFamily, key);
+  }
+
+  setRtlBidi(on: boolean): void {
+    this.rtlBidi = on;
+    lsSet(LS.rtlBidi, on ? '1' : '0');
   }
 
   /** Apply data-theme/data-scheme attrs and accent override on <html>. */

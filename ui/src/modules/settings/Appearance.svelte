@@ -1,6 +1,11 @@
 <script lang="ts">
   // Theme (native / pro-dark / warm), scheme (auto / light / dark), accent.
-  import { ui, type SchemePref, type ThemeName } from '../../lib/stores/ui.svelte';
+  import {
+    ui,
+    TERM_FONT_OPTIONS,
+    type SchemePref,
+    type ThemeName,
+  } from '../../lib/stores/ui.svelte';
 
   const themes: { id: ThemeName; name: string; desc: string }[] = [
     { id: 'native', name: 'Native', desc: 'macOS vibrancy, system accent' },
@@ -65,6 +70,37 @@
       <button class="btn small" onclick={() => ui.setAccent('')}>Reset</button>
     {/if}
   </div>
+
+  <div class="section-title">Terminal font</div>
+  <div class="segmented">
+    {#each TERM_FONT_OPTIONS as f (f.id)}
+      <button
+        class:active={ui.termFontFamily === f.id}
+        title={f.desc}
+        onclick={() => ui.setTermFontFamily(f.id)}>{f.name}</button
+      >
+    {/each}
+  </div>
+  <p class="hint-line">
+    Hebrew &amp; other right-to-left text renders crisply via the bundled Cousine font in every
+    option. Change applies to open terminals instantly.
+  </p>
+
+  <div class="section-title">Right-to-left text <span class="exp-tag">Experimental</span></div>
+  <label class="switch-row">
+    <input
+      type="checkbox"
+      checked={ui.rtlBidi}
+      onchange={(e) => ui.setRtlBidi(e.currentTarget.checked)}
+    />
+    <span>Fix Hebrew letter order in the terminal</span>
+  </label>
+  <p class="hint-line warn">
+    ⚠ Switches the terminal to a non-GPU renderer so the browser can lay out Hebrew letters in the
+    correct order within each word (the GPU renderer draws them reversed). Word order still flows
+    left-to-right — full right-to-left reordering isn't supported in a terminal grid. Toggling
+    reloads open terminals.
+  </p>
 </div>
 
 <style>
@@ -124,6 +160,37 @@
     font-size: 11.5px;
     color: var(--text-dim);
     margin: 8px 0 0;
+    max-width: 620px;
+  }
+  .hint-line.warn {
+    color: var(--status-exited);
+  }
+  .switch-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+  }
+  .switch-row input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .exp-tag {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: 999px;
+    padding: 1px 6px;
+    margin-left: 6px;
+    vertical-align: middle;
   }
   .accent-input {
     width: 36px;
