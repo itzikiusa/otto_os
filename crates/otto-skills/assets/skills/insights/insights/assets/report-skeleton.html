@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<!--
+  Otto Insights — fill-in report skeleton.
+  Replace every {{PLACEHOLDER}} and the <!-- FILL: ... --> regions with real data from the
+  collector JSON. Keep it self-contained (inline CSS/JS, file:// openable).
+  Render order: Trend + Action Plan first, then Combined view, then per-provider behind the
+  switcher. Every narrative item uses the four-part .finding card (Evidence/threshold →
+  Action → Effect). See references/html-template.md for the full CSS and per-section markup.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Insights — {{PERIOD_LABEL}}</title>
+<style>
+/* PASTE the full CSS block from references/html-template.md here (base + Otto extensions). */
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>Insights — {{PERIOD_LABEL}}</h1>
+  <p class="subtitle">{{PERIOD_START}} → {{PERIOD_END}} · providers: {{PROVIDERS_PRESENT}} ·
+     {{TOTAL_SESSIONS}} sessions · {{TOTAL_MESSAGES}} messages · {{ACTIVE_DAYS}} active days</p>
+
+  <!-- FILL: At a Glance golden box — 4 action-first sections -->
+  <div class="at-a-glance">
+    <div class="glance-title">At a Glance</div>
+    <div class="glance-sections">
+      <div class="glance-section"><strong>What's working:</strong> {{...}}</div>
+      <div class="glance-section"><strong>What's hindering you:</strong> {{...}}</div>
+      <div class="glance-section"><strong>Quick wins to try:</strong> {{...}}</div>
+      <div class="glance-section"><strong>Ambitious workflows:</strong> {{...}}</div>
+    </div>
+  </div>
+
+  <!-- Nav TOC -->
+  <nav class="nav-toc">
+    <a href="#trend">Trend</a><a href="#action-plan">Action Plan</a>
+    <a href="#work">What You Work On</a><a href="#how">How You Use It</a>
+    <a href="#wins">Wins</a><a href="#friction">Where Things Go Wrong</a>
+  </nav>
+
+  <!-- Stats row -->
+  <div class="stats-row">
+    <div class="stat"><div class="stat-value">{{TOTAL_MESSAGES}}</div><div class="stat-label">Messages</div></div>
+    <div class="stat"><div class="stat-value">+{{LINES_ADDED}}/-{{LINES_REMOVED}}</div><div class="stat-label">Lines</div></div>
+    <div class="stat"><div class="stat-value">{{FILES_MODIFIED}}</div><div class="stat-label">Files</div></div>
+    <div class="stat"><div class="stat-value">{{ACTIVE_DAYS}}</div><div class="stat-label">Active Days</div></div>
+    <div class="stat"><div class="stat-value">{{MSGS_PER_DAY}}</div><div class="stat-label">Msgs/Day</div></div>
+  </div>
+
+  <!-- ============ TREND (new) ============ -->
+  <h2 id="trend">Trend</h2>
+  <!-- FILL: if no previous_metrics_path → <div class="trend-empty">No prior period to compare …</div>
+       else → <table class="trend-table"> one row per headline metric with ▲/▼/▬ deltas -->
+
+  <!-- ============ ACTION PLAN (new) ============ -->
+  <h2 id="action-plan">Action Plan</h2>
+  <div class="action-plan">
+    <!-- FILL: top ~5 .action-item rows ranked by impact × effort, each with target metric,
+         current → target, effort, and carried-forward status (open/improved/closed). -->
+  </div>
+
+  <!-- ============ PROVIDER SWITCHER ============ -->
+  <div class="provider-tabs">
+    <button class="provider-tab active" onclick="showProvider('combined')">Combined</button>
+    <!-- FILL: one tab per provider in providers_present (claude=full, codex/agy=basic) -->
+  </div>
+
+  <!-- COMBINED VIEW (the full original section set) -->
+  <section id="view-combined" class="provider-view active">
+    <h2 id="work">What You Work On</h2>
+    <div class="project-areas"><!-- FILL: 3–5 project-area cards --></div>
+
+    <div class="charts-row">
+      <div class="chart-card"><div class="chart-title">What You Wanted</div><!-- goal_categories bars --></div>
+      <div class="chart-card"><div class="chart-title">Top Tools Used</div><!-- tool_counts bars --></div>
+    </div>
+    <div class="charts-row">
+      <div class="chart-card"><div class="chart-title">Languages</div><!-- languages bars --></div>
+      <div class="chart-card"><div class="chart-title">Session Types</div><!-- session_types bars --></div>
+    </div>
+
+    <h2 id="how">How You Use Your Agents</h2>
+    <div class="narrative"><!-- FILL: 2–3 action-first paragraphs + .key-insight box --></div>
+
+    <div class="chart-card" style="margin:24px 0;"><div class="chart-title">Response Time Distribution</div>
+      <!-- response_time_buckets bars; show median/average --></div>
+
+    <!-- Multi-Clauding block here only if multi_clauding.overlap_events > 0 -->
+
+    <div class="charts-row">
+      <div class="chart-card"><div class="chart-title">Time of Day</div><!-- hour chart + tz select --></div>
+      <div class="chart-card"><div class="chart-title">Tool Errors</div><!-- tool_error_categories bars --></div>
+    </div>
+
+    <h2 id="wins">Impressive Things You Did</h2>
+    <div class="big-wins"><!-- FILL: 2–3 .big-win cards, each ending in a next-level action --></div>
+
+    <div class="charts-row">
+      <div class="chart-card"><div class="chart-title">What Helped Most</div><!-- success_types --></div>
+      <div class="chart-card"><div class="chart-title">Outcomes</div><!-- outcomes --></div>
+    </div>
+
+    <h2 id="friction">Where Things Go Wrong</h2>
+    <div class="friction-categories"><!-- FILL: 2–3 friction cards, each with action + target --></div>
+
+    <div class="charts-row">
+      <div class="chart-card"><div class="chart-title">Primary Friction Types</div><!-- friction_types --></div>
+      <div class="chart-card"><div class="chart-title">Inferred Satisfaction</div><!-- satisfaction --></div>
+    </div>
+
+    <div class="fun-ending">
+      <div class="fun-headline">{{FUN_HEADLINE}}</div>
+      <div class="fun-detail">{{FUN_DETAIL}}</div>
+    </div>
+  </section>
+
+  <!-- PER-PROVIDER VIEWS -->
+  <!-- FILL: <section id="view-claude" …> all sections; <section id="view-codex"/agy …>
+       behavioral subset + .provider-banner.basic noting no facet/narrative signal. -->
+
+</div>
+<script>
+function showProvider(id){
+  document.querySelectorAll('.provider-view').forEach(v=>v.classList.remove('active'));
+  document.querySelectorAll('.provider-tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('view-'+id).classList.add('active');
+  event.target.closest('.provider-tab').classList.add('active');
+}
+// rawHourCounts + renderHourChart(tzOffset) for the Time-of-Day chart go here.
+function copyText(btn){const c=btn.previousElementSibling;navigator.clipboard.writeText(c.textContent).then(()=>{btn.textContent='Copied!';setTimeout(()=>btn.textContent='Copy',2000);});}
+</script>
+</body>
+</html>
