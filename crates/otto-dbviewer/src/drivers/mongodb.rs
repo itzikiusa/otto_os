@@ -13,7 +13,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use mongodb::bson::{doc, Bson, Document};
-use mongodb::options::{ClientOptions, Credential, ServerAddress, Tls, TlsOptions};
+use mongodb::options::{ClientOptions, Credential, ServerAddress, Socks5Proxy, Tls, TlsOptions};
 use mongodb::{Client, Collection};
 use otto_core::Result;
 use serde_json::{json, Map, Value};
@@ -516,15 +516,46 @@ impl MongoDriver {
 
     /// Assemble `ClientOptions`: a full `conn_string` wins (with `{secret}`
     /// substitution); otherwise host/port + credential + replica_set + TLS.
+    /// When tunnelled, every server connection is routed through the SSH SOCKS5
+    /// proxy (see below).
     async fn client_options(&self, cfg: &ResolvedConfig) -> Result<ClientOptions> {
-        if let Some(conn_string) = cfg.param_str("conn_string") {
-            let uri = match cfg.password.as_deref() {
-                Some(secret) => conn_string.replace("{secret}", secret),
-                None => conn_string,
-            };
-            return ClientOptions::parse(&uri).await.map_err(types::upstream);
+        let mut opts = match cfg.param_str("conn_string") {
+            // A full connection string (e.g. `mongodb+srv://…` for Atlas) wins.
+            // SRV discovery + replica-set topology happen inside the driver, so
+            // host/port and TLS come from the URI — we only layer the SOCKS proxy
+            // on below.
+            Some(conn_string) => {
+                let uri = match cfg.password.as_deref() {
+                    Some(secret) => conn_string.replace("{secret}", secret),
+                    None => conn_string,
+                };
+                ClientOptions::parse(&uri).await.map_err(types::upstream)?
+            }
+            None => self.host_port_options(cfg)?,
+        };
+
+        // Tunnelled (service::resolve set `__socks_port`): dial every server
+        // through the SSH dynamic SOCKS5 proxy on 127.0.0.1. This is what makes a
+        // `mongodb+srv` Atlas cluster reachable via a bastion — the driver
+        // resolves the real shard hosts (public SRV) and connects to each through
+        // the proxy, preserving the real SNI so Atlas's load balancer routes the
+        // TLS handshake. It also fixes plain replica sets, whose SDAM would
+        // otherwise dial member hostnames directly and bypass a local forward.
+        if let Some(port) = cfg.params.get("__socks_port").and_then(Value::as_u64) {
+            opts.socks5_proxy = Some(
+                Socks5Proxy::builder()
+                    .host("127.0.0.1")
+                    .port(Some(port as u16))
+                    .build(),
+            );
         }
 
+        Ok(opts)
+    }
+
+    /// Build `ClientOptions` from discrete host/port + credential + replica_set
+    /// + TLS (the non-`conn_string` path).
+    fn host_port_options(&self, cfg: &ResolvedConfig) -> Result<ClientOptions> {
         let mut opts = ClientOptions::default();
         opts.hosts = vec![ServerAddress::Tcp {
             host: cfg.host.clone(),

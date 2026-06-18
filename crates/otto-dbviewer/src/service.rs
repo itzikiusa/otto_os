@@ -104,31 +104,49 @@ impl DbViewerService {
             None => None,
         };
         let parsed = config::parse(&conn, secret)?;
-        let driver = self.registry.get(parsed.config.engine);
+        let engine = parsed.config.engine;
+        let driver = self.registry.get(engine);
         let mut config = parsed.config;
         let tunnel = match parsed.ssh {
-            Some(ssh) => Some(self.tunnel_for(conn_id, &ssh, &config).await?),
+            Some(ssh) => Some(self.tunnel_for(conn_id, &ssh, &config, engine).await?),
             None => None,
         };
-        // Point the driver at the (cached) local forward, but stash the ORIGINAL
-        // host/port in params so TLS-sensitive drivers (e.g. ClickHouse over
-        // HTTPS to an SNI-routed managed service like Yandex/clickhouse.cloud)
-        // can still present the real hostname for SNI/Host while the TCP goes
-        // through the tunnel. Without this we'd send SNI=127.0.0.1 and the
-        // managed frontend can't route it → the TLS handshake stalls.
         if let Some(t) = &tunnel {
-            let real_host = config.host.clone();
-            let real_port = config.port;
-            config.host = t.local_host().to_string();
-            config.port = t.local_port();
-            if let Value::Object(map) = &mut config.params {
-                map.insert("__tunnel_host".into(), Value::from(real_host));
-                map.insert("__tunnel_port".into(), Value::from(real_port));
+            if engine == Engine::Mongodb {
+                // MongoDB tunnels via a dynamic SOCKS5 forward, NOT a local
+                // forward: a `mongodb+srv` (Atlas) profile resolves its replica
+                // set's real shard hosts at runtime via SRV/SDAM, so there's no
+                // single endpoint to rewrite, and Atlas's load balancer routes by
+                // SNI. We leave host/port (and any conn_string) untouched and just
+                // hand the driver the SOCKS proxy port — it then dials each real
+                // host through the bastion with the real SNI preserved.
+                let socks_port = t.local_port();
+                if let Value::Object(map) = &mut config.params {
+                    map.insert("__socks_port".into(), Value::from(socks_port));
+                } else {
+                    config.params = serde_json::json!({ "__socks_port": socks_port });
+                }
             } else {
-                config.params = serde_json::json!({
-                    "__tunnel_host": real_host,
-                    "__tunnel_port": real_port,
-                });
+                // Single-endpoint engines: point the driver at the (cached) local
+                // forward, but stash the ORIGINAL host/port in params so
+                // TLS-sensitive drivers (e.g. ClickHouse over HTTPS to an
+                // SNI-routed managed service like Yandex/clickhouse.cloud) can
+                // still present the real hostname for SNI/Host while the TCP goes
+                // through the tunnel. Without this we'd send SNI=127.0.0.1 and the
+                // managed frontend can't route it → the TLS handshake stalls.
+                let real_host = config.host.clone();
+                let real_port = config.port;
+                config.host = t.local_host().to_string();
+                config.port = t.local_port();
+                if let Value::Object(map) = &mut config.params {
+                    map.insert("__tunnel_host".into(), Value::from(real_host));
+                    map.insert("__tunnel_port".into(), Value::from(real_port));
+                } else {
+                    config.params = serde_json::json!({
+                        "__tunnel_host": real_host,
+                        "__tunnel_port": real_port,
+                    });
+                }
             }
         }
         Ok(Resolved {
@@ -148,6 +166,7 @@ impl DbViewerService {
         conn_id: &Id,
         ssh: &crate::types::SshTunnelConfig,
         config: &ResolvedConfig,
+        engine: Engine,
     ) -> Result<Arc<SshTunnel>> {
         let now = Instant::now();
         let mut tunnels = self.tunnels.lock().await;
@@ -165,8 +184,14 @@ impl DbViewerService {
             tunnels.remove(conn_id);
         }
 
-        // Open a fresh tunnel to the profile's real endpoint and cache it.
-        let tunnel = Arc::new(SshTunnel::open(ssh, &config.host, config.port).await?);
+        // Open a fresh tunnel and cache it. MongoDB uses a dynamic SOCKS5 proxy
+        // (the driver dials real hosts through it — see `resolve`); the
+        // single-endpoint engines use a local forward to the profile's endpoint.
+        let tunnel = Arc::new(if engine == Engine::Mongodb {
+            SshTunnel::open_socks(ssh).await?
+        } else {
+            SshTunnel::open(ssh, &config.host, config.port).await?
+        });
         tunnels.insert(
             conn_id.clone(),
             CachedTunnel {

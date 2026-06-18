@@ -19,7 +19,7 @@ base64 = { workspace = true }
 reqwest = { workspace = true }
 sqlx = { workspace = true, features = ["mysql", "tls-rustls", "bigdecimal", "time", "uuid"] }
 redis = { version = "1.2.3", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"] }
-mongodb = "3.7.0"
+mongodb = { version = "3.7.0", features = ["socks5-proxy"] }
 sqlparser = "0.62.0"
 clickhouse = { version = "0.15.1", features = ["rustls-tls"] }
 klickhouse = { version = "0.15.3", features = ["tls"] }
