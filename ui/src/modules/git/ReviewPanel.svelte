@@ -20,7 +20,28 @@
   import Modal from '../../lib/components/Modal.svelte';
   import JiraIssuePicker from '../agents/JiraIssuePicker.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { router } from '../../lib/router.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
+
+  // --- Installed-skill metadata (library API; category + version are new) ----
+  // Defined locally so this panel can read the extended fields without touching
+  // the shared LibrarySkill type.
+  interface LibrarySkillMeta {
+    name: string;
+    description: string;
+    category?: string | null;
+    version?: number | null;
+    body?: string;
+  }
+  type BundledState = 'not_installed' | 'up_to_date' | 'update_available' | 'ahead';
+  interface BundledSkill {
+    name: string;
+    category?: string | null;
+    version?: number | null;
+    description?: string;
+    installed_version?: number | null;
+    state: BundledState;
+  }
 
   interface Props {
     repoId: string;
@@ -106,12 +127,72 @@
   const PROVIDER_OPTIONS = ['claude', 'codex', 'agy'];
   const MAX_POLLS = 600; // ~20 min at 2s — covers long multi-agent live reviews
 
+  // --- Data-driven review-skill presets ------------------------------------
+  // One-click lenses derived from the installed `review`-category skills. Each
+  // becomes a review agent that runs as a session with the skill materialized,
+  // so "Apply the `<skill>` skill" makes it follow the skill's full method.
+  let skillPresets: { name: string; focus: string }[] = $state([]);
+  // Pre-check: review skills that are missing or have a newer bundled version.
+  let missingReviewSkills = $state(0);
+  let outdatedReviewSkills = $state(0);
+  let precheckDismissed = $state(false);
+
+  const showPrecheck = $derived(
+    !precheckDismissed && (missingReviewSkills > 0 || outdatedReviewSkills > 0),
+  );
+
+  /** Prettify a skill name for display: "security-review" -> "Security review". */
+  function prettifySkillName(name: string): string {
+    const spaced = name.replace(/[-_]+/g, ' ').trim();
+    if (spaced === '') return name;
+    return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+  }
+
+  /** Build a preset whose lens applies the named skill (materialized in-session). */
+  function presetFromSkill(s: LibrarySkillMeta): { name: string; focus: string } {
+    const desc = (s.description ?? '').trim();
+    return {
+      name: prettifySkillName(s.name),
+      focus: `Apply the \`${s.name}\` skill (it is available to you): ${desc} ${JSON_INSTR}`,
+    };
+  }
+
   $effect(() => {
     void load(repoId, prNumber);
     return () => {
       if (pollTimer !== null) clearTimeout(pollTimer);
     };
   });
+
+  // Load installed review skills (primary one-click lenses) + the missing/
+  // outdated pre-check. Non-blocking: failures just leave the fallback presets.
+  $effect(() => {
+    void loadReviewSkills();
+  });
+
+  async function loadReviewSkills(): Promise<void> {
+    try {
+      const skills = await api.get<LibrarySkillMeta[]>('/library/skills');
+      skillPresets = skills
+        .filter((s) => s.category === 'review')
+        .map((s) => presetFromSkill(s));
+    } catch {
+      // Library unreachable: keep skillPresets empty -> hardcoded fallback shows.
+    }
+    try {
+      const bundled = await api.get<BundledSkill[]>('/library/bundled');
+      const review = bundled.filter((b) => b.category === 'review');
+      missingReviewSkills = review.filter((b) => b.state === 'not_installed').length;
+      outdatedReviewSkills = review.filter((b) => b.state === 'update_available').length;
+    } catch {
+      // Pre-check is best-effort; absence simply hides the banner.
+    }
+  }
+
+  // Open Settings → Skills (the bundled-skill install/update panel).
+  function openSkillSettings(): void {
+    router.go('settings/skills');
+  }
 
   async function load(rid: string, num: number): Promise<void> {
     loading = true;
@@ -386,7 +467,11 @@
 
   function openPresetMenu(e: MouseEvent): void {
     const taken = new Set(editAgents.map((a) => a.name));
-    const builtinItems = REVIEWER_PRESETS.map((p) => ({
+    // Primary lenses: installed `review`-category skills. Fall back to the
+    // hardcoded presets only when no review skills are installed, so the menu
+    // is never empty.
+    const lensPresets = skillPresets.length > 0 ? skillPresets : REVIEWER_PRESETS;
+    const builtinItems = lensPresets.map((p) => ({
       label: p.name,
       disabled: taken.has(p.name),
       action: () => addPreset(p),
@@ -494,6 +579,24 @@
 </script>
 
 <div class="rp">
+  <!-- Non-blocking pre-check: review skills missing or with available updates.
+       The user can still run a review with whatever is installed. -->
+  {#if showPrecheck}
+    <div class="rp-precheck" role="status">
+      <span class="rp-precheck-icon">&#9888;</span>
+      <span class="rp-precheck-msg">
+        {#if missingReviewSkills > 0}{missingReviewSkills} review skill{missingReviewSkills === 1 ? " isn't" : "s aren't"} installed{/if}{#if missingReviewSkills > 0 && outdatedReviewSkills > 0} · {/if}{#if outdatedReviewSkills > 0}{outdatedReviewSkills} {outdatedReviewSkills === 1 ? 'has an update' : 'have updates'}{/if}
+      </span>
+      <button class="btn small ghost rp-precheck-btn" onclick={openSkillSettings}>
+        Settings → Skills
+      </button>
+      <button
+        class="rp-precheck-dismiss"
+        onclick={() => (precheckDismissed = true)}
+        aria-label="Dismiss"
+      >&#10005;</button>
+    </div>
+  {/if}
   {#if loading}
     <div style="padding: 16px"><Skeleton rows={4} height={36} /></div>
   {:else if !review}
@@ -865,6 +968,47 @@
 <style>
   .rp {
     padding: 4px 0 32px;
+  }
+
+  /* Pre-check banner: missing / outdated review skills */
+  .rp-precheck {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    margin: 0 0 10px;
+    border: 1px solid color-mix(in srgb, #e0a000 35%, var(--border));
+    background: color-mix(in srgb, #e0a000 10%, transparent);
+    border-radius: var(--radius-s, 4px);
+    font-size: 11.5px;
+    line-height: 1.4;
+  }
+  .rp-precheck-icon {
+    color: #b07d00;
+    flex-shrink: 0;
+  }
+  .rp-precheck-msg {
+    flex: 1;
+    color: var(--text);
+    min-width: 0;
+  }
+  .rp-precheck-btn {
+    flex-shrink: 0;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .rp-precheck-dismiss {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .rp-precheck-dismiss:hover {
+    color: var(--text);
   }
 
   /* No-review state with configure button */

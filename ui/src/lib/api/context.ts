@@ -5,7 +5,10 @@
 
 import { api } from './client';
 import type {
+  BundledSkill,
   GlobalSoulResp,
+  InstallAllBundledResp,
+  InstallBundledResp,
   LibraryContext,
   LibrarySkill,
   LibrarySoul,
@@ -26,6 +29,19 @@ export const contextApi = {
     } satisfies UpsertLibraryEntryReq),
   deleteSkill: (name: string) =>
     api.del<void>(`/library/skills/${encodeURIComponent(name)}`),
+
+  // --- Bundled skills (ship with Otto; install/update into the library) ------
+  listBundled: () => api.get<BundledSkill[]>('/library/bundled'),
+  installBundled: (name: string) =>
+    api.post<InstallBundledResp>(
+      `/library/bundled/${encodeURIComponent(name)}/install?backup=true`,
+    ),
+  installAllBundled: (category?: string) =>
+    api.post<InstallAllBundledResp>(
+      `/library/bundled/install-all${
+        category ? `?category=${encodeURIComponent(category)}` : ''
+      }`,
+    ),
 
   // --- Library: souls -------------------------------------------------------
   listSouls: () => api.get<LibrarySoul[]>('/library/souls'),

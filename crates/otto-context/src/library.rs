@@ -31,32 +31,50 @@ fn is_safe_segment(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Parse the `description:` value out of a YAML frontmatter block, if present.
-///
-/// Only looks inside a leading `---` / `---` fenced block, takes the first
-/// `description:` key it finds, and strips surrounding quotes. Returns `""`
-/// when there is no frontmatter or no description.
-fn parse_description(body: &str) -> String {
+/// Parse a single scalar `<key>:` value out of a YAML frontmatter block, if
+/// present. Only looks inside a leading `---` / `---` fenced block, takes the
+/// first matching key, and strips surrounding quotes. Returns `None` when there
+/// is no frontmatter or the key is absent.
+fn parse_frontmatter(body: &str, key: &str) -> Option<String> {
     let mut lines = body.lines();
     if lines.next().map(str::trim) != Some("---") {
-        return String::new();
+        return None;
     }
+    let prefix = format!("{key}:");
     for line in lines {
         let trimmed = line.trim();
         if trimmed == "---" {
-            break;
+            return None;
         }
-        if let Some(rest) = trimmed.strip_prefix("description:") {
+        if let Some(rest) = trimmed.strip_prefix(&prefix) {
             let val = rest.trim();
             let val = val
                 .strip_prefix('"')
                 .and_then(|v| v.strip_suffix('"'))
                 .or_else(|| val.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
                 .unwrap_or(val);
-            return val.to_string();
+            return Some(val.to_string());
         }
     }
-    String::new()
+    None
+}
+
+/// Parse the `description:` value from frontmatter; `""` when absent.
+fn parse_description(body: &str) -> String {
+    parse_frontmatter(body, "description").unwrap_or_default()
+}
+
+/// Parse the `category:` value from frontmatter; `""` when absent.
+fn parse_category(body: &str) -> String {
+    parse_frontmatter(body, "category").unwrap_or_default()
+}
+
+/// Parse the `version:` value from frontmatter; defaults to `1` when absent or
+/// unparseable.
+fn parse_version(body: &str) -> u32 {
+    parse_frontmatter(body, "version")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
 }
 
 impl Library {
@@ -103,8 +121,12 @@ impl Library {
         let path = self.skill_path(name)?;
         let body = fs::read_to_string(&path).ok()?;
         let description = parse_description(&body);
+        let category = parse_category(&body);
+        let version = parse_version(&body);
         Some(LibrarySkill {
             name: name.to_string(),
+            category,
+            version,
             description,
             body,
         })
@@ -270,12 +292,14 @@ mod tests {
     #[test]
     fn skill_round_trip_and_description() {
         let (_d, lib) = lib();
-        let body = "---\ndescription: Triage support tickets\n---\n# body\n";
+        let body = "---\ndescription: Triage support tickets\ncategory: review\nversion: 4\n---\n# body\n";
         lib.put_skill("support-triage", body).unwrap();
 
         let got = lib.get_skill("support-triage").unwrap();
         assert_eq!(got.name, "support-triage");
         assert_eq!(got.description, "Triage support tickets");
+        assert_eq!(got.category, "review");
+        assert_eq!(got.version, 4);
         assert_eq!(got.body, body);
 
         let listed = lib.list_skills();
@@ -291,7 +315,10 @@ mod tests {
     fn skill_without_frontmatter_has_empty_description() {
         let (_d, lib) = lib();
         lib.put_skill("plain", "# just markdown\n").unwrap();
-        assert_eq!(lib.get_skill("plain").unwrap().description, "");
+        let got = lib.get_skill("plain").unwrap();
+        assert_eq!(got.description, "");
+        assert_eq!(got.category, "");
+        assert_eq!(got.version, 1);
     }
 
     #[test]

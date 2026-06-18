@@ -2756,6 +2756,7 @@ dependencies = [
  "otto-pty",
  "otto-rbac",
  "otto-sessions",
+ "otto-skills",
  "otto-state",
  "otto-usage",
  "prost",
@@ -2804,8 +2805,12 @@ dependencies = [
 name = "otto-skills"
 version = "0.1.0"
 dependencies = [
+ "axum 0.8.9",
  "include_dir",
  "otto-context",
+ "otto-core",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
@@ -2855,6 +2860,7 @@ dependencies = [
  "otto-rbac",
  "otto-server",
  "otto-sessions",
+ "otto-skills",
  "otto-state",
  "otto-usage",
  "serde_json",

@@ -12,6 +12,7 @@
   import SkillEvalSettings from './SkillEvalSettings.svelte';
   import ContextSoul from './ContextSoul.svelte';
   import ContextLibrary from './ContextLibrary.svelte';
+  import SkillsLibrary from './SkillsLibrary.svelte';
   import Logs from './Logs.svelte';
   import LanguageServers from './LanguageServers.svelte';
   import { router } from '../../lib/router.svelte';
@@ -31,6 +32,7 @@
     { id: 'language-servers', label: 'Language Servers' },
     ...(auth.isRoot
       ? [
+          { id: 'skills', label: 'Skills' },
           { id: 'skill-eval', label: 'Skills Evaluator' },
           { id: 'context-library', label: 'Context Library' },
           { id: 'providers', label: 'Providers' },
@@ -72,6 +74,8 @@
       <Notifications />
     {:else if page === 'self-improvement'}
       <SelfImprovement />
+    {:else if page === 'skills' && auth.isRoot}
+      <SkillsLibrary />
     {:else if page === 'skill-eval' && auth.isRoot}
       <SkillEvalSettings />
     {:else if page === 'context-soul'}

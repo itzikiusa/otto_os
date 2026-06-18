@@ -16,6 +16,8 @@ use std::path::Path;
 use include_dir::{include_dir, Dir};
 use otto_context::Library;
 
+pub mod http;
+
 /// The embedded skill tree: `assets/skills/<category>/<name>/{SKILL.md,…}`.
 static BUNDLED: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/skills");
 

@@ -28,5 +28,6 @@ otto-orchestrator.workspace = true
 otto-channels.workspace = true
 otto-improve.workspace = true
 otto-context.workspace = true
+otto-skills.workspace = true
 otto-usage.workspace = true
 otto-product.workspace = true

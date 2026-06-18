@@ -1775,11 +1775,10 @@ async fn promote_skill(
     ctx.context_library
         .put_skill(name, &body)
         .map_err(|e| ApiError(Error::Internal(format!("write skill: {e}"))))?;
-    Ok(Json(LibrarySkill {
-        name: name.to_string(),
-        description: parse_frontmatter_description(&body),
-        body,
-    }))
+    ctx.context_library
+        .get_skill(name)
+        .map(Json)
+        .ok_or_else(|| ApiError(Error::Internal("skill not found after promote".into())))
 }
 
 async fn impl_diff(

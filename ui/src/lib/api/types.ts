@@ -1053,6 +1053,41 @@ export interface UpsertLibraryEntryReq {
   body: string;
 }
 
+// --- Bundled skills library (Settings → Skills) ----------------------------
+
+/** Install state of a bundled skill vs. the installed library copy. */
+export type BundledSkillState =
+  | 'not_installed'
+  | 'up_to_date'
+  | 'update_available'
+  | 'ahead';
+
+/** A skill shipped with Otto, with its state relative to the installed copy. */
+export interface BundledSkill {
+  name: string;
+  category: string;
+  version: number;
+  description: string;
+  /** Version of the currently-installed copy, or null if not installed. */
+  installed_version: number | null;
+  state: BundledSkillState;
+}
+
+/** Result of installing a single bundled skill. */
+export interface InstallBundledResp {
+  name: string;
+  installed: boolean;
+  backed_up: boolean;
+  /** Path of the backup taken before overwriting, when backed_up is true. */
+  backup_path: string | null;
+}
+
+/** Result of installing every bundled skill (optionally a single category). */
+export interface InstallAllBundledResp {
+  installed: string[];
+  backed_up: string[];
+}
+
 export interface GlobalSoulReq {
   name: string;
 }

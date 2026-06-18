@@ -1023,6 +1023,8 @@ pub struct RunNowResp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibrarySkill {
     pub name: String,
+    pub category: String,
+    pub version: u32,
     pub description: String,
     pub body: String,
 }

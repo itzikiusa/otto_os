@@ -2663,6 +2663,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_channels::router::<ServerCtx>(),
         otto_improve::router::<ServerCtx>(),
         otto_context::router::<ServerCtx>(),
+        otto_skills::http::router::<ServerCtx>(),
         orchestrator_routes(),
         db_explorer_routes(),
         pr_review_routes(),
