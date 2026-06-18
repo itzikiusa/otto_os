@@ -17,6 +17,11 @@ directory is laid out so trend comparison stays cheap no matter how long history
   for any session missing from session-meta (keeps the original's two-source logic).
 - **Yields:** everything — volume, tools, languages, hours, response times **plus** the
   narrative facets. Claude is the only provider whose findings can be narrative.
+- **Reality check:** on most machines `~/.claude/usage-data/facets/` (and `session-meta/`)
+  is **empty** — that instrumentation ships with Claude Code's own `/insights`, not Otto. When
+  it's empty the collector falls back to parsing the raw JSONL, which yields volume/tools/hours
+  but **no** narrative. To recover the narrative, the skill generates facets itself and caches
+  them (see "Otto-generated facets" below).
 
 ### codex — BASIC signal
 - **Transcripts:** `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`.
@@ -155,3 +160,72 @@ is surfaced as `history.already_generated` in the output.
 
 This makes the collector/skill safe to invoke for any specific past period, repeatedly,
 without duplicating work — exactly what the catch-up scheduler needs.
+
+## Otto-generated facets (cache for sessions Claude Code never faceted)
+
+Claude's narrative facets live in `~/.claude/usage-data/facets/<sid>.json` and are produced by
+Claude Code's own `/insights`. On most machines that dir is **empty**, and Codex/agy have no
+facets at all — so the report loses its narrative and degrades to counts/durations. To recover
+it, the skill **classifies a facet-less session itself from the transcript and caches it**, and
+the collector merges the cache back in. This is a documented two-step (SKILL.md Step 1b).
+
+### Cache location & shape
+
+```
+~/Library/Application Support/Otto/insights/facets/
+  claude/<session_id>.json      ← Otto-generated facet for a Claude session
+  codex/<session_id>.json       ← Otto-generated facet for a Codex session
+  agy/<session_id>.json         ← (if/when agy sessions are classified)
+```
+
+Provider-namespaced under a single cache root (default
+`~/Library/Application Support/Otto/insights/facets`, override via `--extra-facets-dir`). Each
+file is the **same JSON shape the collector already reads** for real Claude facets:
+
+```json
+{
+  "goal_categories":   {"feature_work": 1},
+  "friction_counts":   {"unclear_request": 1},
+  "outcome":           "fully_achieved",
+  "primary_success":   "shipped_feature",
+  "session_type":      "implementation",
+  "brief_summary":     "One-line summary.",
+  "claude_helpfulness":"high"
+}
+```
+
+Because the shape matches, generated facets light up the **same** charts as real facets
+(goal_categories, outcomes, friction_types, success_types, helpfulness, achievement_rate) — no
+special rendering path. **These files NEVER go into `~/.claude`.**
+
+### The two collector flags (Step 1b)
+
+- **`--emit-unfaceted`** — instead of the full report, prints the in-window sessions that have
+  **no** facet (neither a real Claude facet nor an already-cached generated one), each with a
+  **compact, capped** extraction from its transcript: `first_user`, `last_user`, a few
+  `sample_user` messages, `tool_mix`, `tool_call_count`, `tool_error_count` + `error_samples`,
+  `git_commits`/`git_pushes`, `user_msg_count`. Caps live in the script (`EXTRACT_*` constants)
+  so a session's extraction is tiny — it never dumps a whole transcript. The payload also
+  carries `cache_dir`, the expected `facet_shape`, the `cap`, per-session `cache_path`, the
+  `counts` block, and a `left_unclassified` list. The agent classifies each item and writes a
+  cached facet to its `cache_path`.
+- **`--extra-facets-dir <root>`** — on a normal (report) run, merges cached facets from
+  `<root>/<provider>/<sid>.json` into both `combined` and `per_provider`. **Precedence: a real
+  Claude facet always wins; a generated facet only fills a gap** (`_merge_facet()` returns the
+  real facet untouched when present). Applies to all providers, so a Codex session can carry a
+  generated facet too.
+
+### Precedence, idempotency, and the cost cap
+
+- **Precedence (real > generated).** When both a real `~/.claude` facet and a cached generated
+  facet exist for a session, the real one is used and the generated one is ignored. Generated
+  facets only ever fill gaps.
+- **Idempotency (classify once).** `--emit-unfaceted` emits a session **only** if it has no
+  facet *and* no cached facet yet; the `counts.already_faceted_skipped` field reports how many
+  were skipped for already having one. So re-running the skill never reclassifies a session —
+  it only picks up newly-missing ones. The cache is the durable record.
+- **Cost cap.** `--emit-unfaceted` emits at most `--emit-cap` sessions (default
+  `DEFAULT_EMIT_CAP = 40`), **newest first**. Everything beyond the cap is reported in
+  `left_unclassified` (and `counts.left_unclassified`). The skill classifies only the emitted
+  set, notes any leftover in the report, and the leftover sessions are caught on a later run.
+  This bounds classification cost no matter how many facet-less sessions a window contains.

@@ -1,7 +1,7 @@
 ---
 description: Generate an action-first coding-agent usage report across ALL providers Otto uses (Claude, Codex, agy/Gemini) for a chosen period (day/week/month or explicit range), compare it to the previous comparable period for trends, and emit a self-contained HTML report where every finding — even the good ones — carries Evidence/threshold → Action → Expected effect. Use when the user wants a usage/productivity insights report, a weekly/daily/monthly review, or trend tracking of how they work with AI agents.
 category: insights
-version: 1
+version: 2
 ---
 
 # Insights
@@ -22,9 +22,9 @@ Two principles drive everything:
 > Reference files sit alongside this SKILL.md — load them as you work:
 > - `references/actionability-contract.md` — the Finding→Evidence/threshold→Action→Effect shape, the default thresholds table, the "level-up the good" rule, and vague-vs-actionable examples. **Load before writing any narrative.**
 > - `references/html-template.md` — the extended HTML: provider switcher, Trend section, Action Plan, plus the original CSS/charts. **Load before rendering.**
-> - `references/data-and-history.md` — provider transcript locations, what signal each yields, the history-dir layout, the three-artifact-per-period scheme, and how trend comparison reads prior runs cheaply. **Load before Step 1 and Step 3.**
+> - `references/data-and-history.md` — provider transcript locations, what signal each yields, the history-dir layout, the three-artifact-per-period scheme, how trend comparison reads prior runs cheaply, **and the Otto-generated-facets cache (path/shape/precedence/idempotency/cap)**. **Load before Step 1, Step 1b, and Step 3.**
 > - `assets/report-skeleton.html` — the fill-in HTML scaffold you populate.
-> - `scripts/collect_insights.py` — the multi-provider, date-range, history-writing collector. **Run it; never re-implement it.**
+> - `scripts/collect_insights.py` — the multi-provider, date-range, history-writing collector. **Run it; never re-implement it.** Flags include `--emit-unfaceted` (list facet-less sessions + a compact capped extraction) and `--extra-facets-dir` (merge your cached facets back in; real Claude facets win) — both used by Step 1b.
 
 ---
 
@@ -80,6 +80,75 @@ The JSON shape:
 
 The collector has **already written** this run's compact metrics JSON. It did **not** write
 the HTML or summary — that's you, in Step 5.
+
+### Step 1b — Generate missing facets (cached), then re-collect
+
+The rich narrative (goal/friction/outcome/summary) comes from Claude Code's own facet files
+at `~/.claude/usage-data/facets/<sid>.json`. **On most machines that dir is EMPTY** (that
+instrumentation ships with Claude Code's own `/insights`), and Codex/agy never have facets at
+all. Without facets the report degrades to bare counts/durations — the failure mode this
+skill exists to avoid. So when a session lacks a facet, **you classify it yourself from the
+transcript and CACHE the result**, and future runs reuse the cache instead of reclassifying.
+
+This is a documented two-step you perform here, before any analysis:
+
+**1) Ask the collector which sessions need a facet (compact, capped extraction):**
+
+```bash
+python3 <skill-dir>/scripts/collect_insights.py --period week --offset 1 --emit-unfaceted
+```
+
+This prints `unfaceted_sessions` — the in-window sessions that have **no** facet (neither a
+real Claude facet nor an already-cached one), each with a **small capped** extraction from its
+transcript: `first_user`, `last_user`, a few `sample_user` messages, `tool_mix`,
+`tool_call_count`, `tool_error_count` + `error_samples`, `git_commits`/`git_pushes`, and
+`user_msg_count`. It is intentionally tiny (caps in the script) so classifying one session is
+cheap — it never dumps a whole transcript. It also returns `cache_dir`, the `facet_shape` to
+produce, the per-run `cap`, the `counts` (`unfaceted_total`/`emitted`/`left_unclassified`),
+and a `left_unclassified` list. **Use the same `--period`/`--offset`/range you used in Step 1.**
+
+**2) Classify each emitted session and write a cached facet JSON** with exactly this shape
+(same keys the collector already reads), to the session's `cache_path`:
+
+```
+~/Library/Application Support/Otto/insights/facets/<provider>/<session_id>.json
+```
+
+```json
+{
+  "goal_categories":   {"feature_work": 1},          // 1+ category : weight
+  "friction_counts":   {"unclear_request": 1},       // friction type : count ({} if none)
+  "outcome":           "fully_achieved",              // fully_achieved | mostly_achieved | partially_achieved | not_achieved
+  "primary_success":   "shipped_feature",             // short tag of what landed
+  "session_type":      "implementation",              // implementation | debugging | review | research | ops | ...
+  "brief_summary":     "One-line plain-English summary of the session.",
+  "claude_helpfulness":"high"                          // high | medium | low
+}
+```
+
+Infer these from the extraction: the goal from `first_user`; `outcome`/`primary_success` from
+outcome signals (`git_commits`/`git_pushes` > 0 and low `tool_error_count` → achieved; a
+frustrated/abandoning `last_user` → lower); `friction_counts` from `error_samples` and
+repeated retries; `session_type` from the `tool_mix`. Write to **that cache dir only — NEVER
+to `~/.claude`.** Apply this to **codex** too (codex has no facets at all) — same cache,
+provider-namespaced (`.../facets/codex/<sid>.json`).
+
+**Cost cap.** `--emit-unfaceted` emits only the newest `--emit-cap` sessions (default 40) and
+reports the rest in `left_unclassified` / `counts.left_unclassified`. Classify only what was
+emitted. **If `counts.left_unclassified > 0`, note in the report that N sessions were left
+unclassified this run (cost-bounded) and will be picked up next run** — do not exceed the cap.
+
+**3) Re-run the collector pointing at the cache** so the generated facets flow into the report:
+
+```bash
+python3 <skill-dir>/scripts/collect_insights.py --period week --offset 1 \
+  --extra-facets-dir "$HOME/Library/Application Support/Otto/insights/facets"
+```
+
+The collector merges cached facets in, **preferring a real Claude facet whenever one exists**
+(generated only fills gaps). Use *this* re-collected JSON for Steps 2–5. **Idempotency:** a
+session that already has a real or cached facet is skipped by `--emit-unfaceted`, so you never
+reclassify — re-running this step only ever classifies the newly-missing sessions.
 
 ### Step 2 — Load history & compute the Trend (cheap reads ONLY)
 
@@ -168,6 +237,9 @@ Tell the user:
 | A summary.md over 10 sentences | Breaks the cheap-read contract; the cap is hard. |
 | Mixing providers without saying so | Combined facet sections reflect Claude only — say which signal came from where. |
 | One threshold for everyone, never tuned | Thresholds are defaults; tune to the data — but always print the number you used. |
+| Writing generated facets into `~/.claude` | Generated facets go **only** to the Otto cache (`~/Library/Application Support/Otto/insights/facets/<provider>/`). Never pollute Claude Code's own facets dir. |
+| Reclassifying sessions that already have a facet | `--emit-unfaceted` skips real/cached facets; only classify what it emits. Re-doing cached ones wastes tokens and breaks idempotency. |
+| Classifying past the per-run cap | The cap (`--emit-cap`, default 40) bounds cost. If `left_unclassified > 0`, note it in the report — don't blow the budget classifying everything at once. |
 
 ## Quality bar
 

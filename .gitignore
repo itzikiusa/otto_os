@@ -45,3 +45,4 @@ docs/superpowers/
 
 # Prebuilt daemon binary bundled by the packaging step (built artifact)
 apps/desktop/src-tauri/binaries/
+**/__pycache__/

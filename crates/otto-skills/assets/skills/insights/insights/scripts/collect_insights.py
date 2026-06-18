@@ -36,6 +36,17 @@ Usage
   collect_insights.py --start 2026-06-01 --end 2026-06-07   # explicit range (inclusive)
   collect_insights.py --period day --offset 1 --no-history  # don't write history
 
+  # Otto-generated facets (two-step; see SKILL.md "Generate missing facets"):
+  collect_insights.py --period week --emit-unfaceted   # list in-window sessions
+                                                       # WITHOUT a facet + a small
+                                                       # capped transcript extraction
+                                                       # for the agent to classify
+  collect_insights.py --period week \
+      --extra-facets-dir "~/Library/Application Support/Otto/insights/facets"
+                                                       # merge the agent's cached
+                                                       # facets back in (real Claude
+                                                       # facets always win over generated)
+
 Week convention: Monday 00:00 .. Sunday 23:59:59 (ISO week, Mon-Sun).
 
 Output shape
@@ -92,6 +103,26 @@ AGY_CANDIDATE_DIRS = [
 HISTORY_ROOT = os.path.join(
     HOME, "Library", "Application Support", "Otto", "insights"
 )
+
+# Otto-generated facets cache. When a session has NO real Claude facet (the
+# ~/.claude/usage-data/facets/ instrumentation is empty on most machines, and
+# codex/agy have no facets at all), the skill classifies the session itself from
+# the transcript and caches the resulting facet JSON here, provider-namespaced, so
+# future runs reuse it instead of reclassifying. This never pollutes ~/.claude.
+GENERATED_FACETS_ROOT = os.path.join(HISTORY_ROOT, "facets")
+
+# Default cap on how many unfaceted sessions `--emit-unfaceted` emits per run. The
+# newest N are emitted (classification cost is bounded); the rest are reported as
+# "left unclassified this run" so the agent can note it and they get picked up next
+# run. Override with --emit-cap.
+DEFAULT_EMIT_CAP = 40
+
+# How much of each transcript the compact extraction keeps. Small + capped so
+# classifying one session is cheap — never dump a whole transcript.
+EXTRACT_MAX_REP_MESSAGES = 6   # representative user messages (besides first/last)
+EXTRACT_MSG_CHARS = 240        # max chars kept per user message
+EXTRACT_MAX_TOOLS = 10         # distinct tools kept in the tool-mix
+EXTRACT_MAX_ERRORS = 5         # sample tool-error snippets kept
 
 
 # ----------------------------------------------------------------------------- time
@@ -448,9 +479,66 @@ def aggregate(sessions, provider, depth, note, start, end):
     return out
 
 
+# ----------------------------------------------------------------------------- facet merge (real Claude wins; generated fills gaps)
+def _load_generated_facet(extra_facets_dir, provider, session_id):
+    """Load an Otto-generated (cached) facet for a session, or {} if none.
+
+    `extra_facets_dir` is the cache root passed via --extra-facets-dir. Facets are
+    provider-namespaced: <root>/<provider>/<session_id>.json. Returns {} on any
+    miss/parse error so a bad cache file never breaks collection.
+    """
+    if not extra_facets_dir or not session_id:
+        return {}
+    path = os.path.join(extra_facets_dir, provider, str(session_id) + ".json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _merge_facet(real_facet, extra_facets_dir, provider, session_id):
+    """Pick the facet for a session: a REAL Claude facet always wins; otherwise the
+    Otto-generated cached facet (if any) fills the gap. Returns (facet, generated?).
+    """
+    if real_facet:  # real Claude facet present → never override with generated
+        return real_facet, False
+    gen = _load_generated_facet(extra_facets_dir, provider, session_id)
+    return (gen, True) if gen else ({}, False)
+
+
+_CLAUDE_TRANSCRIPT_INDEX = None
+
+
+def _claude_transcript_for(session_id):
+    """Best-effort: locate the `<session_id>.jsonl` transcript under the projects
+    dir. Built lazily and cached for the process (only needed by --emit-unfaceted).
+    Returns the path or None.
+    """
+    global _CLAUDE_TRANSCRIPT_INDEX
+    if _CLAUDE_TRANSCRIPT_INDEX is None:
+        _CLAUDE_TRANSCRIPT_INDEX = {}
+        if os.path.isdir(CLAUDE_PROJECTS_DIR):
+            for jf in glob.glob(
+                os.path.join(CLAUDE_PROJECTS_DIR, "*", "*.jsonl")
+            ):
+                _CLAUDE_TRANSCRIPT_INDEX.setdefault(
+                    os.path.basename(jf).replace(".jsonl", ""), jf
+                )
+    return _CLAUDE_TRANSCRIPT_INDEX.get(str(session_id))
+
+
 # ----------------------------------------------------------------------------- claude collector (FULL)
-def collect_claude(start, end):
-    """Port of the original collector: session-meta + facets + JSONL fallback."""
+def collect_claude(start, end, extra_facets_dir=None):
+    """Port of the original collector: session-meta + facets + JSONL fallback.
+
+    `extra_facets_dir` (optional): when a session has NO real Claude facet, merge in
+    an Otto-generated cached facet from <dir>/claude/<sid>.json. Real facets always
+    win — generated only fills gaps.
+    """
     sessions = []
     if os.path.isdir(CLAUDE_META_DIR):
         for f in glob.glob(os.path.join(CLAUDE_META_DIR, "*.json")):
@@ -483,6 +571,7 @@ def collect_claude(start, end):
                 if os.path.exists(facet_path):
                     with open(facet_path) as fh2:
                         facet = json.load(fh2)
+                facet, _gen = _merge_facet(facet, extra_facets_dir, "claude", sid)
 
                 in_window_ts = []
                 effective_date = st
@@ -498,6 +587,10 @@ def collect_claude(start, end):
                 if in_window_ts:
                     meta["user_message_timestamps"] = in_window_ts
                     meta["user_message_count"] = len(in_window_ts)
+                if "transcript_path" not in meta:
+                    tp = _claude_transcript_for(sid)
+                    if tp:
+                        meta["transcript_path"] = tp
                 sessions.append(
                     {
                         "meta": meta,
@@ -531,6 +624,7 @@ def collect_claude(start, end):
                     if os.path.exists(fp):
                         with open(fp) as fh2:
                             facet = json.load(fh2)
+                    facet, _gen = _merge_facet(facet, extra_facets_dir, "claude", sid)
                     sessions.append(
                         {
                             "meta": meta,
@@ -606,12 +700,13 @@ def _parse_claude_jsonl(path, project_dir, start, end):
         "duration_minutes": int((last_ts - first_ts).total_seconds() / 60),
         "project_path": project_dir,
         "tool_counts": dict(tool_counts),
+        "transcript_path": path,
         "_source": "jsonl",
     }
 
 
 # ----------------------------------------------------------------------------- codex collector (BASIC)
-def collect_codex(start, end):
+def collect_codex(start, end, extra_facets_dir=None):
     """Parse ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl into basic metrics.
 
     Format (confirmed in this codebase):
@@ -630,10 +725,13 @@ def collect_codex(start, end):
     ):
         meta = _parse_codex_jsonl(jf, start, end)
         if meta:
+            facet, _gen = _merge_facet(
+                {}, extra_facets_dir, "codex", meta["session_id"]
+            )
             sessions.append(
                 {
                     "meta": meta,
-                    "facet": {},
+                    "facet": facet,
                     "date": parse_date(meta["start_time"]).isoformat(),
                     "provider": "codex",
                 }
@@ -710,12 +808,13 @@ def _parse_codex_jsonl(path, start, end):
         "project_path": cwd or "unknown",
         "tool_counts": dict(tool_counts),
         "user_response_times": response_times,
+        "transcript_path": path,
         "_source": "codex",
     }
 
 
 # ----------------------------------------------------------------------------- agy collector (PLUGGABLE STUB)
-def collect_agy(start, end):
+def collect_agy(start, end, extra_facets_dir=None):
     """Adapter STUB for agy / gemini.
 
     The transcript path for agy is NOT confirmed in this codebase, so we probe a
@@ -736,10 +835,13 @@ def collect_agy(start, end):
         for jf in glob.glob(os.path.join(d, "**", "*.jsonl"), recursive=True):
             meta = _parse_generic_basic_jsonl(jf, start, end, provider="agy")
             if meta:
+                facet, _gen = _merge_facet(
+                    {}, extra_facets_dir, "agy", meta["session_id"]
+                )
                 sessions.append(
                     {
                         "meta": meta,
-                        "facet": {},
+                        "facet": facet,
                         "date": parse_date(meta["start_time"]).isoformat(),
                         "provider": "agy",
                     }
@@ -818,6 +920,7 @@ def _parse_generic_basic_jsonl(path, start, end, provider):
         "duration_minutes": int((last_ts - first_ts).total_seconds() / 60),
         "project_path": cwd or "unknown",
         "tool_counts": dict(tool_counts),
+        "transcript_path": path,
         "_source": provider,
     }
 
@@ -984,6 +1087,296 @@ def update_index(kind, start, end, label, combined):
     return index_path
 
 
+# ----------------------------------------------------------------------------- Otto-generated facets: compact extraction (--emit-unfaceted)
+def _clip(text, limit=EXTRACT_MSG_CHARS):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _extract_claude_transcript(path):
+    """Compact, capped extraction from a Claude transcript for classification.
+
+    Returns {first_user, last_user, sample_user[], tool_mix{}, user_msg_count,
+    tool_call_count, tool_error_count, error_samples[], git_commits, git_pushes}.
+    Caps everything (see EXTRACT_* constants) so it stays tiny — never the whole
+    transcript.
+    """
+    user_msgs = []
+    tool_counts = defaultdict(int)
+    tool_calls = 0
+    tool_errors = 0
+    error_samples = []
+    git_commits = 0
+    git_pushes = 0
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = obj.get("type", "")
+                msg = obj.get("message", {})
+                if t == "user" and isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        if content.strip():
+                            user_msgs.append(content.strip())
+                    elif isinstance(content, list):
+                        parts = [
+                            b.get("text", "")
+                            for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        ]
+                        results = [
+                            b
+                            for b in content
+                            if isinstance(b, dict) and b.get("type") == "tool_result"
+                        ]
+                        for b in results:
+                            if b.get("is_error"):
+                                tool_errors += 1
+                                if len(error_samples) < EXTRACT_MAX_ERRORS:
+                                    snippet = b.get("content", "")
+                                    if isinstance(snippet, list):
+                                        snippet = " ".join(
+                                            x.get("text", "")
+                                            for x in snippet
+                                            if isinstance(x, dict)
+                                        )
+                                    error_samples.append(_clip(snippet, 160))
+                        if parts and not results:
+                            joined = " ".join(parts).strip()
+                            if joined:
+                                user_msgs.append(joined)
+                elif t == "assistant" and isinstance(msg, dict):
+                    for b in msg.get("content", []) or []:
+                        if isinstance(b, dict) and b.get("type") == "tool_use":
+                            name = b.get("name", "unknown")
+                            if name.startswith("mcp__"):
+                                name = name.split("__")[-1]
+                            tool_counts[name] += 1
+                            tool_calls += 1
+                            if name == "Bash":
+                                cmd = (b.get("input", {}) or {}).get("command", "")
+                                if "git commit" in cmd:
+                                    git_commits += 1
+                                if "git push" in cmd:
+                                    git_pushes += 1
+    except (IOError, OSError):
+        return None
+    return _build_extract(
+        user_msgs, tool_counts, tool_calls, tool_errors, error_samples,
+        git_commits, git_pushes,
+    )
+
+
+def _extract_codex_transcript(path):
+    """Compact, capped extraction from a Codex rollout transcript."""
+    user_msgs = []
+    tool_counts = defaultdict(int)
+    tool_calls = 0
+    git_commits = 0
+    git_pushes = 0
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                outer = obj.get("type")
+                payload = obj.get("payload", {})
+                if not isinstance(payload, dict):
+                    continue
+                ptype = payload.get("type")
+                if outer == "event_msg" and ptype == "user_message":
+                    m = payload.get("message", "")
+                    if isinstance(m, str) and m.strip():
+                        user_msgs.append(m.strip())
+                elif outer == "response_item" and ptype in (
+                    "function_call", "custom_tool_call",
+                ):
+                    name = payload.get("name", "unknown") or "unknown"
+                    tool_counts[name] += 1
+                    tool_calls += 1
+                    args = str(payload.get("arguments", ""))
+                    if "git commit" in args:
+                        git_commits += 1
+                    if "git push" in args:
+                        git_pushes += 1
+    except (IOError, OSError):
+        return None
+    return _build_extract(
+        user_msgs, tool_counts, tool_calls, 0, [], git_commits, git_pushes,
+    )
+
+
+def _extract_generic_transcript(path):
+    """Compact extraction from an unknown (agy) transcript — best effort."""
+    user_msgs = []
+    tool_counts = defaultdict(int)
+    tool_calls = 0
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = obj.get("payload", {})
+                if not isinstance(payload, dict):
+                    payload = {}
+                ptype = payload.get("type")
+                otype = obj.get("type", "")
+                role = obj.get("role") or payload.get("role")
+                if (
+                    role == "user"
+                    or "user_message" in str(ptype)
+                    or otype == "user"
+                ):
+                    m = (
+                        payload.get("message")
+                        or obj.get("text")
+                        or obj.get("display")
+                        or ""
+                    )
+                    if isinstance(m, str) and m.strip():
+                        user_msgs.append(m.strip())
+                if "tool" in str(ptype or "").lower():
+                    name = payload.get("name")
+                    if name:
+                        tool_counts[name] += 1
+                        tool_calls += 1
+    except (IOError, OSError):
+        return None
+    return _build_extract(user_msgs, tool_counts, tool_calls, 0, [], 0, 0)
+
+
+def _build_extract(user_msgs, tool_counts, tool_calls, tool_errors,
+                   error_samples, git_commits, git_pushes):
+    """Assemble the small, capped extraction dict shared by all providers."""
+    first_user = _clip(user_msgs[0]) if user_msgs else ""
+    last_user = _clip(user_msgs[-1]) if user_msgs else ""
+    # representative middle messages (skip first/last), evenly sampled, capped
+    middle = user_msgs[1:-1] if len(user_msgs) > 2 else []
+    sample = []
+    if middle:
+        step = max(1, len(middle) // EXTRACT_MAX_REP_MESSAGES)
+        for i in range(0, len(middle), step):
+            sample.append(_clip(middle[i]))
+            if len(sample) >= EXTRACT_MAX_REP_MESSAGES:
+                break
+    tool_mix = dict(
+        sorted(tool_counts.items(), key=lambda x: -x[1])[:EXTRACT_MAX_TOOLS]
+    )
+    return {
+        "first_user": first_user,
+        "last_user": last_user,
+        "sample_user": sample,
+        "user_msg_count": len(user_msgs),
+        "tool_mix": tool_mix,
+        "tool_call_count": tool_calls,
+        "tool_error_count": tool_errors,
+        "error_samples": error_samples,
+        "git_commits": git_commits,
+        "git_pushes": git_pushes,
+    }
+
+
+def _extract_for_provider(provider, path):
+    if not path or not os.path.exists(path):
+        return None
+    if provider == "claude":
+        return _extract_claude_transcript(path)
+    if provider == "codex":
+        return _extract_codex_transcript(path)
+    return _extract_generic_transcript(path)
+
+
+def emit_unfaceted(by_provider, period, extra_facets_dir, cap):
+    """Build the --emit-unfaceted payload: the in-window sessions that have NO facet
+    (neither a real Claude facet nor an already-cached Otto-generated one), each with
+    a small capped transcript extraction for the agent to classify.
+
+    Sessions are sorted newest-first and capped at `cap`; any beyond the cap are
+    reported in `left_unclassified` so the agent can note them (and they'll be picked
+    up on a future run). Idempotent: a session already carrying a (real or cached)
+    facet is skipped, so it's never reclassified.
+    """
+    cache_dir = extra_facets_dir or GENERATED_FACETS_ROOT
+    candidates = []
+    skipped_with_facet = 0
+    for provider, sessions in by_provider.items():
+        for s in sessions:
+            sid = s["meta"].get("session_id")
+            # already has a facet (real Claude facet merged in collect_*, OR a
+            # cached generated one) → never reclassify
+            if s.get("facet"):
+                skipped_with_facet += 1
+                continue
+            if _load_generated_facet(cache_dir, provider, sid):
+                skipped_with_facet += 1
+                continue
+            candidates.append((provider, s))
+
+    # newest first (by session date)
+    candidates.sort(key=lambda ps: ps[1].get("date", ""), reverse=True)
+    chosen = candidates[:cap]
+    left = candidates[cap:]
+
+    items = []
+    for provider, s in chosen:
+        meta = s["meta"]
+        extraction = _extract_for_provider(
+            provider, meta.get("transcript_path")
+        )
+        items.append({
+            "provider": provider,
+            "session_id": meta.get("session_id"),
+            "date": s.get("date"),
+            "project": str(meta.get("project_path", "unknown")).split("/")[-1],
+            "duration_minutes": meta.get("duration_minutes", 0),
+            "user_message_count": meta.get("user_message_count", 0),
+            "cache_path": os.path.join(
+                cache_dir, provider, str(meta.get("session_id")) + ".json"
+            ),
+            "transcript_available": bool(extraction),
+            "extraction": extraction or {},
+        })
+
+    return {
+        "period": period,
+        "cache_dir": cache_dir,
+        "cap": cap,
+        "facet_shape": [
+            "goal_categories", "friction_counts", "outcome", "primary_success",
+            "session_type", "brief_summary", "claude_helpfulness",
+        ],
+        "counts": {
+            "unfaceted_total": len(candidates),
+            "emitted": len(items),
+            "left_unclassified": len(left),
+            "already_faceted_skipped": skipped_with_facet,
+        },
+        "left_unclassified": [
+            {"provider": p, "session_id": s["meta"].get("session_id"),
+             "date": s.get("date")}
+            for p, s in left
+        ],
+        "unfaceted_sessions": items,
+    }
+
+
 # ----------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Multi-provider insights collector")
@@ -1000,7 +1393,26 @@ def main():
     ap.add_argument("--force", action="store_true",
                     help="regenerate even if this period was already generated "
                          "(idempotency override for the catch-up scheduler)")
+    ap.add_argument("--extra-facets-dir",
+                    help="merge Otto-generated (cached) facets from this dir "
+                         "(<dir>/<provider>/<session_id>.json). Real Claude facets "
+                         "always win; generated facets only fill gaps. Defaults to "
+                         "the Otto facets cache when --emit-unfaceted is used.")
+    ap.add_argument("--emit-unfaceted", action="store_true",
+                    help="instead of the full report, list the in-window sessions "
+                         "WITHOUT a facet, each with a small capped transcript "
+                         "extraction for the agent to classify and cache. Step 1 of "
+                         "the 'Generate missing facets' flow (see SKILL.md).")
+    ap.add_argument("--emit-cap", type=int, default=DEFAULT_EMIT_CAP,
+                    help=f"max unfaceted sessions to emit per run "
+                         f"(newest first; default {DEFAULT_EMIT_CAP}). The rest are "
+                         f"reported as left_unclassified to bound classification cost.")
     args = ap.parse_args()
+
+    extra_facets_dir = (
+        os.path.expanduser(args.extra_facets_dir)
+        if args.extra_facets_dir else None
+    )
 
     kind, start, end, label = resolve_window(args)
 
@@ -1009,7 +1421,7 @@ def main():
     for name, fn in (("claude", collect_claude), ("codex", collect_codex),
                      ("agy", collect_agy)):
         try:
-            by_provider[name] = fn(start, end)
+            by_provider[name] = fn(start, end, extra_facets_dir)
         except Exception as e:  # never let one provider crash the whole run
             sys.stderr.write(f"[insights] {name} collector failed: {e}\n")
             by_provider[name] = []
@@ -1017,16 +1429,30 @@ def main():
     all_sessions = [s for lst in by_provider.values() for s in lst]
     providers_present = [p for p, lst in by_provider.items() if lst]
 
+    period_block = {
+        "kind": kind, "start": start.strftime("%Y-%m-%d"),
+        "end": end.strftime("%Y-%m-%d"), "label": label,
+        "offset": args.offset or 0,
+    }
+
     if not all_sessions:
         print(json.dumps({
             "error": f"No sessions found for {label} "
                      f"({start.date()}..{end.date()}) in any provider "
                      f"(claude/codex/agy).",
-            "period": {"kind": kind, "start": start.strftime("%Y-%m-%d"),
-                       "end": end.strftime("%Y-%m-%d"), "label": label,
-                       "offset": args.offset or 0},
+            "period": period_block,
             "providers_present": [],
         }))
+        return
+
+    # --- Otto-generated facets, step 1: emit the in-window sessions lacking a facet
+    #     with a compact capped extraction for the agent to classify + cache.
+    if args.emit_unfaceted:
+        print(json.dumps(
+            emit_unfaceted(by_provider, period_block, extra_facets_dir,
+                           max(args.emit_cap, 0)),
+            indent=2,
+        ))
         return
 
     # --- per-provider notes / depth
