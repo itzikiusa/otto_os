@@ -74,6 +74,12 @@ pub struct ProviderUsage {
     pub events: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Cached (cache-read) input tokens — the "cached" hits.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Cache-creation (cache-write) tokens.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
     pub total_tokens: u64,
     pub cost_usd: f64,
 }
@@ -85,6 +91,10 @@ pub struct DailyUsage {
     pub events: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
     pub total_tokens: u64,
     pub cost_usd: f64,
 }
@@ -101,6 +111,14 @@ pub struct SessionUsage {
     pub workspace_id: String,
     pub provider: String,
     pub events: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
     pub total_tokens: u64,
     pub cost_usd: f64,
     pub last_active: String,
@@ -137,6 +155,10 @@ pub struct UsageSummary {
     pub total_events: u64,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    #[serde(default)]
+    pub total_cache_read_tokens: u64,
+    #[serde(default)]
+    pub total_cache_write_tokens: u64,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
     pub providers: Vec<ProviderUsage>,

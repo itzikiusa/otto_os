@@ -83,8 +83,49 @@
   const memSeries = $derived(usage.metrics.map((p) => p.mem_pct));
   const latest = $derived(usage.metrics.at(-1) ?? null);
 
-  // Provider bar colors (stable by index).
-  const PROVIDER_COLORS = ['var(--accent)', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4'];
+  // ── Token category breakdown (input · cache-write · cache-read · output) ────
+  // One shared model so the headline, provider bars, daily chart, and session
+  // rows all split tokens the same way and use the same colors (see legend).
+  type TokenParts = {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+  };
+  const TOKEN_CATS = [
+    { label: 'Input', color: 'var(--accent)', pick: (o: TokenParts) => o.input_tokens },
+    { label: 'Cache write', color: '#f59e0b', pick: (o: TokenParts) => o.cache_write_tokens },
+    { label: 'Cache read', color: '#10b981', pick: (o: TokenParts) => o.cache_read_tokens },
+    { label: 'Output', color: '#8b5cf6', pick: (o: TokenParts) => o.output_tokens },
+  ] as const;
+
+  type Seg = { label: string; color: string; v: number; pct: number };
+  function tokenSegs(o: TokenParts): Seg[] {
+    const total = o.input_tokens + o.output_tokens + o.cache_read_tokens + o.cache_write_tokens;
+    return TOKEN_CATS.map((c) => {
+      const v = c.pick(o);
+      return { label: c.label, color: c.color, v, pct: total > 0 ? (v / total) * 100 : 0 };
+    });
+  }
+  function breakdownTitle(o: TokenParts): string {
+    return tokenSegs(o)
+      .map((s) => `${s.label} ${s.v.toLocaleString()}`)
+      .join(' · ');
+  }
+  // The summary carries the same four numbers under total_* names.
+  function summaryParts(s: {
+    total_input_tokens: number;
+    total_output_tokens: number;
+    total_cache_read_tokens: number;
+    total_cache_write_tokens: number;
+  }): TokenParts {
+    return {
+      input_tokens: s.total_input_tokens,
+      output_tokens: s.total_output_tokens,
+      cache_read_tokens: s.total_cache_read_tokens,
+      cache_write_tokens: s.total_cache_write_tokens,
+    };
+  }
 </script>
 
 <div class="usage">
@@ -178,9 +219,11 @@
           <div class="stat card">
             <span class="stat-label">Total tokens</span>
             <span class="stat-value">{fmtNum(usage.summary.total_tokens)}</span>
-            <span class="stat-sub">
-              {fmtNum(usage.summary.total_input_tokens)} in · {fmtNum(usage.summary.total_output_tokens)} out
-            </span>
+            <div class="seg-bar" title={breakdownTitle(summaryParts(usage.summary))}>
+              {#each tokenSegs(summaryParts(usage.summary)) as s (s.label)}
+                {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
+              {/each}
+            </div>
           </div>
           <div class="stat card">
             <span class="stat-label">Est. cost</span>
@@ -200,6 +243,36 @@
         </div>
       {/if}
 
+      <!-- Token breakdown: input · cache-write · cache-read · output -->
+      {#if usage.summary && usage.summary.total_tokens > 0}
+        {@const parts = summaryParts(usage.summary)}
+        <div class="panel card">
+          <div class="panel-head">
+            <h3>Token breakdown</h3>
+            <div class="legend">
+              {#each tokenSegs(parts) as s (s.label)}
+                <span class="lg"><i style="background: {s.color}"></i>{s.label}</span>
+              {/each}
+            </div>
+          </div>
+          <div class="seg-bar big" title={breakdownTitle(parts)}>
+            {#each tokenSegs(parts) as s (s.label)}
+              {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
+            {/each}
+          </div>
+          <div class="bd-list">
+            {#each tokenSegs(parts) as s (s.label)}
+              <div class="bd-item">
+                <i class="chip" style="background: {s.color}"></i>
+                <span class="bd-label">{s.label}</span>
+                <span class="bd-val">{fmtNum(s.v)}</span>
+                <span class="bd-pct dim">{s.pct.toFixed(0)}%</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
       <div class="grid">
         <!-- Provider breakdown -->
         <div class="panel card">
@@ -207,14 +280,15 @@
           {#if usage.summary && usage.summary.providers.length > 0}
             {@const pmax = Math.max(1, ...usage.summary.providers.map((p) => p.total_tokens))}
             <div class="bars">
-              {#each usage.summary.providers as p, i (p.provider)}
+              {#each usage.summary.providers as p (p.provider)}
                 <div class="bar-row">
                   <span class="bar-name" title={p.provider}>{p.provider}</span>
                   <div class="bar-track">
-                    <div
-                      class="bar-fill"
-                      style="width: {(p.total_tokens / pmax) * 100}%; background: {PROVIDER_COLORS[i % PROVIDER_COLORS.length]}"
-                    ></div>
+                    <div class="bar-fill stacked" style="width: {(p.total_tokens / pmax) * 100}%" title={breakdownTitle(p)}>
+                      {#each tokenSegs(p) as s (s.label)}
+                        {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
+                      {/each}
+                    </div>
                   </div>
                   <span class="bar-val">{fmtNum(p.total_tokens)}</span>
                   <span class="bar-cost dim">{fmtCost(p.cost_usd)}</span>
@@ -232,8 +306,12 @@
           {#if usage.summary && usage.summary.daily.length > 0}
             <div class="daily">
               {#each usage.summary.daily as d (d.day)}
-                <div class="daily-col" title="{d.day}: {d.total_tokens.toLocaleString()} tokens · {fmtCost(d.cost_usd)}">
-                  <div class="daily-bar" style="height: {Math.max(2, (d.total_tokens / dailyMax) * 100)}%"></div>
+                <div class="daily-col" title="{d.day}: {breakdownTitle(d)} · {fmtCost(d.cost_usd)}">
+                  <div class="daily-bar" style="height: {Math.max(2, (d.total_tokens / dailyMax) * 100)}%">
+                    {#each tokenSegs(d) as s (s.label)}
+                      {#if s.pct > 0}<div class="daily-seg" style="height: {s.pct}%; background: {s.color}"></div>{/if}
+                    {/each}
+                  </div>
                   <span class="daily-label">{shortDay(d.day)}</span>
                 </div>
               {/each}
@@ -306,7 +384,16 @@
                   <td class="dim ellip">{s.workspace_name ?? '—'}</td>
                   <td>{s.provider}</td>
                   <td class="num">{fmtNum(s.events)}</td>
-                  <td class="num">{fmtNum(s.total_tokens)}</td>
+                  <td class="num">
+                    <div class="sess-tok">
+                      <span>{fmtNum(s.total_tokens)}</span>
+                      <div class="seg-bar mini" title={breakdownTitle(s)}>
+                        {#each tokenSegs(s) as seg (seg.label)}
+                          {#if seg.pct > 0}<div style="width: {seg.pct}%; background: {seg.color}"></div>{/if}
+                        {/each}
+                      </div>
+                    </div>
+                  </td>
                   <td class="num">{fmtCost(s.cost_usd)}</td>
                   <td class="dim">{fmtLastActive(s.last_active)}</td>
                 </tr>
@@ -494,6 +581,82 @@
     color: var(--text-dim);
   }
 
+  /* Stacked token-composition bar (input · cache-write · cache-read · output) */
+  .seg-bar {
+    display: flex;
+    height: 6px;
+    margin-top: 7px;
+    border-radius: 3px;
+    overflow: hidden;
+    background: var(--surface-2);
+  }
+  .seg-bar > div {
+    height: 100%;
+    flex-shrink: 0;
+  }
+  .seg-bar.big {
+    height: 13px;
+    margin: 2px 0 14px;
+    border-radius: 6px;
+  }
+  .seg-bar.mini {
+    height: 5px;
+    width: 70px;
+    margin-top: 3px;
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+  }
+  .lg {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .lg i {
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  .bd-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 8px 18px;
+  }
+  .bd-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+  }
+  .bd-item .chip {
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .bd-label {
+    color: var(--text-dim);
+  }
+  .bd-val {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .bd-pct {
+    min-width: 32px;
+    text-align: right;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+
   .grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -549,6 +712,16 @@
     border-radius: 4px;
     transition: width 200ms ease-out;
   }
+  /* Stacked variant: width = provider share of max; segments = composition. */
+  .bar-fill.stacked {
+    display: flex;
+    overflow: hidden;
+    min-width: 2px;
+  }
+  .bar-fill.stacked > div {
+    height: 100%;
+    flex-shrink: 0;
+  }
   .bar-val {
     text-align: right;
     font-variant-numeric: tabular-nums;
@@ -578,9 +751,15 @@
   .daily-bar {
     width: 100%;
     max-width: 22px;
-    background: var(--accent);
     border-radius: 3px 3px 0 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column-reverse;
     transition: height 200ms ease-out;
+  }
+  .daily-seg {
+    width: 100%;
+    flex-shrink: 0;
   }
   .daily-label {
     font-size: 9px;
@@ -641,6 +820,16 @@
     padding: 5px 8px;
     border-bottom: 1px solid var(--surface-2);
     color: var(--text);
+  }
+  /* Session Tokens cell: total over a compact composition mini-bar. */
+  .sess-tok {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 1px;
+  }
+  .sess-tok .seg-bar.mini {
+    margin-top: 2px;
   }
   .ellip {
     max-width: 130px;

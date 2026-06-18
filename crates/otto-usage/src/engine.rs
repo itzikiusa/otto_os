@@ -239,6 +239,8 @@ impl UsageEngine {
                     count() AS events,
                     sum(input_tokens) AS input_tokens,
                     sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd
              FROM usage_events
@@ -258,6 +260,8 @@ impl UsageEngine {
                     count() AS events,
                     sum(input_tokens) AS input_tokens,
                     sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd
              FROM usage_events
@@ -277,6 +281,10 @@ impl UsageEngine {
                     any(workspace_id) AS workspace_id,
                     any(provider) AS provider,
                     count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd,
                     toString(max(ts)) AS last_active
@@ -305,6 +313,8 @@ impl UsageEngine {
         let total_events = providers.iter().map(|p| p.events).sum();
         let total_input_tokens = providers.iter().map(|p| p.input_tokens).sum();
         let total_output_tokens = providers.iter().map(|p| p.output_tokens).sum();
+        let total_cache_read_tokens = providers.iter().map(|p| p.cache_read_tokens).sum();
+        let total_cache_write_tokens = providers.iter().map(|p| p.cache_write_tokens).sum();
         let total_tokens = providers.iter().map(|p| p.total_tokens).sum();
         let total_cost_usd = providers.iter().map(|p| p.cost_usd).sum();
 
@@ -313,6 +323,8 @@ impl UsageEngine {
             total_events,
             total_input_tokens,
             total_output_tokens,
+            total_cache_read_tokens,
+            total_cache_write_tokens,
             total_tokens,
             total_cost_usd,
             providers,

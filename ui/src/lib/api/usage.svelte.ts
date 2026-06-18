@@ -10,6 +10,8 @@ export interface ProviderUsage {
   events: number;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   total_tokens: number;
   cost_usd: number;
 }
@@ -19,6 +21,8 @@ export interface DailyUsage {
   events: number;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   total_tokens: number;
   cost_usd: number;
 }
@@ -28,6 +32,10 @@ export interface SessionUsage {
   workspace_id: string;
   provider: string;
   events: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   total_tokens: number;
   cost_usd: number;
   last_active: string;
@@ -56,6 +64,8 @@ export interface UsageSummary {
   total_events: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_cache_read_tokens: number;
+  total_cache_write_tokens: number;
   total_tokens: number;
   total_cost_usd: number;
   providers: ProviderUsage[];
