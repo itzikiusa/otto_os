@@ -3,8 +3,9 @@
 **An agentic development environment.** Otto is a macOS desktop app that runs
 coding-agent CLIs (Claude Code, Codex, and others) as first-class, openable
 sessions — and wires them into the rest of your workflow: git & pull requests,
-multi-agent code review, SSH/database connections, an HTTP API client, and
-Slack/Telegram bridges so an agent can work a ticket from a chat thread.
+multi-agent code review, Jira/Confluence product workflows, SSH/database
+connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
+bridges so an agent can work a ticket from a chat thread.
 
 > Status: early / actively evolving (v0.1). macOS-only for now. Expect rough edges.
 
@@ -29,9 +30,21 @@ Slack/Telegram bridges so an agent can work a ticket from a chat thread.
 - **AI code review** — fan out several review agents (one per provider/lens)
   over a PR *or* your local working tree. Each runs as an openable session with
   live progress, per-agent findings, retry, and a configurable grace period.
+- **Product (Jira / Confluence)** — import a Jira issue or Confluence page
+  (search by project or space — no key prefix needed) and run a product-owner
+  workflow over it: multi-agent, multi-provider **analysis** with a summarizer
+  and **open questions** you can post back as comments; a suggested **rewrite**;
+  **test-case** generation with approval published to a linked Confluence page;
+  **discovery** drafts (start blank, drop in ideas or call transcripts, then
+  publish as an RFC or a Jira story); plus versioning, sectioned history, tags,
+  a **Plan/Tasks** breakdown, and a recurring-patterns **learnings** base. A
+  background watcher polls for new comments/updates, and you can inject a story's
+  full refined context into any running agent.
 - **Channels** — bridge a Slack or Telegram thread to an agent session: messages
   (and file attachments) are relayed in, the agent's reply (and any file) is
   relayed back. One agent per ticket, auto-archived when idle.
+- **Broadcast** — send one literal message to many live agent sessions at once
+  (no AI in the loop) — e.g. tell every working agent to "wrap up and commit."
 - **Connections** — open SSH / MySQL / Redis / MongoDB / ClickHouse sessions
   side-by-side with agents.
 - **Database Explorer** — a TablePlus-class browser for MySQL, Redis, MongoDB,
@@ -45,6 +58,16 @@ Slack/Telegram bridges so an agent can work a ticket from a chat thread.
   sessions and proposes edits to the workspace's skills/memory (tiered autonomy:
   safe edits auto-apply, risky ones queue for approval). Can run on multiple
   providers for varied suggestions.
+- **Skills library** — a bundled, versioned skill library (`otto-skills`) you
+  can browse and install/update from Settings; skills drive review lenses,
+  product analysis, and insights, and the self-improvement engine refines them
+  from your sessions.
+- **Insights** — scheduled, multi-provider "catch-up" reports that turn recent
+  activity into action-first summaries, generated on demand and cached.
+- **Usage & cost** — an embedded ClickHouse engine records real per-turn token
+  usage and cost by tailing Claude and Codex transcripts (no manual
+  instrumentation), with per-provider / day / session rollups and configurable
+  retention.
 - **API client** — a built-in REST workbench (collections, environments, history).
 
 ## Architecture
@@ -72,10 +95,12 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   TS types mirror it.
 - **Rust crates** (`crates/`): `otto-core` (domain/API), `otto-state` (SQLite),
   `otto-sessions` (session manager + PTY + trust + prompt-guard), `otto-pty`,
-  `otto-orchestrator`, `otto-git`, `otto-issues`, `otto-channels`,
-  `otto-connections`, `otto-improve`, `otto-context`, `otto-rbac`,
-  `otto-keychain` (macOS Keychain secret storage), `otto-server` (routes),
-  `ottod` (binary).
+  `otto-orchestrator`, `otto-git`, `otto-issues` (Jira/Confluence),
+  `otto-channels`, `otto-connections`, `otto-dbviewer` (Database Explorer),
+  `otto-product` (Jira/Confluence story workflows), `otto-improve`
+  (self-improvement), `otto-usage` (ClickHouse usage/metrics), `otto-skills`
+  (bundled skill library), `otto-context`, `otto-rbac`, `otto-keychain` (macOS
+  Keychain secret storage), `otto-server` (routes), `ottod` (binary).
 
 ## Prerequisites
 
