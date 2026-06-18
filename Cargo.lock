@@ -2801,6 +2801,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-skills"
+version = "0.1.0"
+dependencies = [
+ "include_dir",
+ "otto-context",
+ "tempfile",
+]
+
+[[package]]
 name = "otto-state"
 version = "0.1.0"
 dependencies = [
