@@ -210,12 +210,13 @@
     term.loadAddon(fit);
     term.loadAddon(search);
     term.open(container);
-    // Experimental RTL: skip the WebGL renderer. The WebGL/canvas renderer draws
-    // each grid cell in raw logical order with no bidi, so Hebrew comes out
-    // letter-reversed. xterm's DOM renderer instead emits each text run as an
-    // inline `unicode-bidi: isolate` span, which the browser bidi-reorders — so
-    // Hebrew letters read correctly within each word. (Trade-off: no GPU
-    // rendering; word order still flows left-to-right — a terminal-grid limit.)
+    // Experimental RTL: skip the WebGL renderer. WebGL/canvas draws cells in raw
+    // logical order with no bidi (Hebrew comes out reversed). xterm's DOM
+    // renderer instead emits per-run spans that the `.rtl-bidi` CSS rules re-flow
+    // into a single bidi paragraph per line, so the browser applies the full
+    // Unicode Bidi Algorithm — Hebrew reads right-to-left with English embedded
+    // LTR. (Trade-off: no GPU renderer, and the grid no longer aligns to exact
+    // columns — fine for prose, imperfect for TUI tables/boxes.)
     if (!rtl) {
       try {
         term.loadAddon(new WebglAddon());
@@ -405,7 +406,12 @@
     </div>
   {/if}
 
-  <div class="term-host" class:force-dark={forceDark} bind:this={container}></div>
+  <div
+    class="term-host"
+    class:force-dark={forceDark}
+    class:rtl-bidi={ui.rtlBidi}
+    bind:this={container}
+  ></div>
 
   {#if exitCode !== null}
     <div class="term-overlay">
@@ -452,6 +458,23 @@
   }
   .term-host.force-dark {
     background: #131318;
+  }
+  /* Experimental RTL (ui.rtlBidi, DOM renderer only). xterm renders each run as
+     a fixed-width `inline-block` span, which is atomic to the bidi algorithm —
+     so words stay left-to-right. Forcing the spans back to inline flow makes the
+     whole row one bidi paragraph; `unicode-bidi: plaintext` then gives each line
+     a per-line base direction (RTL when it starts with Hebrew). The browser then
+     lays the line out exactly like native bidi: Hebrew right-to-left with English
+     embedded left-to-right. Cost: the monospace grid no longer aligns to exact
+     columns (fine for prose, imperfect for TUI tables/boxes). */
+  .term-host.rtl-bidi :global(.xterm-rows > div) {
+    unicode-bidi: plaintext;
+  }
+  .term-host.rtl-bidi :global(.xterm-rows > div span) {
+    display: inline !important;
+    unicode-bidi: normal !important;
+    width: auto !important;
+    letter-spacing: 0 !important;
   }
   .find-bar {
     position: absolute;

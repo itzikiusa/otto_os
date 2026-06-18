@@ -93,13 +93,13 @@
       checked={ui.rtlBidi}
       onchange={(e) => ui.setRtlBidi(e.currentTarget.checked)}
     />
-    <span>Fix Hebrew letter order in the terminal</span>
+    <span>Right-to-left text in the terminal</span>
   </label>
   <p class="hint-line warn">
-    ⚠ Switches the terminal to a non-GPU renderer so the browser can lay out Hebrew letters in the
-    correct order within each word (the GPU renderer draws them reversed). Word order still flows
-    left-to-right — full right-to-left reordering isn't supported in a terminal grid. Toggling
-    reloads open terminals.
+    ⚠ Lays out Hebrew right-to-left with English embedded left-to-right, using the browser's bidi
+    engine (switches the terminal off the GPU renderer). Because text is reflowed for reading, the
+    monospace grid no longer lines up exactly — great for chat-style output, imperfect for TUI
+    tables or box art. Toggling reloads open terminals.
   </p>
 </div>
 
