@@ -65,6 +65,8 @@ class UiStore {
   palettePrefill = $state('');
   newSessionOpen = $state(false);
   newWorkspaceOpen = $state(false);
+  /** Dedicated broadcast composer (separate from the ⌘K AI orchestrator). */
+  broadcastOpen = $state(false);
 
   /** Count of open modal-style overlays (Modal.svelte registers itself). Used
    *  so the native browser webview can hide while a modal is up — a native
@@ -80,7 +82,11 @@ class UiStore {
   /** True when any full-screen overlay (palette / modal / new-* sheet) is open. */
   get overlayOpen(): boolean {
     return (
-      this.paletteOpen || this.modalCount > 0 || this.newSessionOpen || this.newWorkspaceOpen
+      this.paletteOpen ||
+      this.modalCount > 0 ||
+      this.newSessionOpen ||
+      this.newWorkspaceOpen ||
+      this.broadcastOpen
     );
   }
 
@@ -89,6 +95,11 @@ class UiStore {
     this.paletteMode = mode;
     this.palettePrefill = prefill;
     this.paletteOpen = true;
+  }
+
+  /** Open the dedicated broadcast composer. */
+  openBroadcast(): void {
+    this.broadcastOpen = true;
   }
 
   theme: ThemeName = $state((lsGet(LS.theme) as ThemeName) ?? 'native');

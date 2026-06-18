@@ -253,6 +253,60 @@ impl SessionManager {
         );
     }
 
+    /// Submit a message to a live session as if a human typed it and pressed
+    /// Enter. Sends the text inside a bracketed-paste pair (so multi-line text
+    /// stays intact and interactive TUIs treat it as pasted content rather than
+    /// keystrokes), waits briefly for the TUI to finish handling the paste, then
+    /// sends a real carriage return to submit.
+    ///
+    /// This is the reliable "actually send" path: writing `"{text}\n"` in one
+    /// burst makes bracketed-paste TUIs (Claude Code, Codex) treat the trailing
+    /// newline as pasted content — it inserts a newline instead of submitting,
+    /// so the message is pasted but never sent. Mirrors the handover injector.
+    pub async fn submit_text(&self, id: &Id, text: &str) -> Result<()> {
+        let paste = format!("\x1b[200~{text}\x1b[201~");
+        self.input(id, paste.as_bytes()).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        self.input(id, b"\r").await
+    }
+
+    /// Relay `text` verbatim to live agent sessions in workspace `ws`. When
+    /// `targets` is `Some`, only those sessions are considered; otherwise every
+    /// live agent session is. A session is eligible when it is an agent (not a
+    /// connection) and its status is live (`Running | Working | Idle`).
+    ///
+    /// Each message is submitted via [`Self::submit_text`] (paste + Enter) and
+    /// recorded on the session trail. Per-session failures are logged and
+    /// skipped — they never abort the rest. Returns the ids that received it.
+    ///
+    /// Deliberately free of any AI/orchestrator involvement: it sends the literal
+    /// text, nothing else.
+    pub async fn broadcast_message(
+        &self,
+        ws: &Id,
+        text: &str,
+        targets: Option<&[Id]>,
+    ) -> Result<Vec<Id>> {
+        let sessions = self.list_by_workspace(ws).await?;
+        let mut hit = Vec::new();
+        for s in sessions {
+            let live = matches!(
+                s.status,
+                SessionStatus::Running | SessionStatus::Working | SessionStatus::Idle
+            );
+            let targeted = targets.map_or(true, |ids| ids.iter().any(|t| t == &s.id));
+            if s.kind == SessionKind::Agent && live && targeted {
+                if let Err(e) = self.submit_text(&s.id, text).await {
+                    tracing::warn!(session = %s.id, "broadcast failed: {e}");
+                    continue;
+                }
+                self.record_user_message(&s.id, text).await;
+                hit.push(s.id);
+            }
+        }
+        Ok(hit)
+    }
+
     /// Prune the activity trail to the newest `keep_per_session` rows per
     /// session. No-op without an activity store. Returns rows pruned.
     pub async fn prune_activity_trail(&self, keep_per_session: i64) -> u64 {

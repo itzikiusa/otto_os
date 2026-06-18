@@ -201,6 +201,30 @@ pub enum Action {
 }
 
 // ---------------------------------------------------------------------------
+// Broadcast (dedicated, AI-free relay to multiple sessions)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/workspaces/{id}/broadcast` — relay `text` verbatim to live
+/// agent sessions. This is deliberately separate from the orchestrator: no
+/// parsing, no AI, no fallback — it always broadcasts the literal text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BroadcastReq {
+    /// The message to send. Submitted as if typed + Enter.
+    pub text: String,
+    /// Sessions to target. `None`/absent (or empty) → every live agent session
+    /// in the workspace. When `Some`, only the listed sessions that are live
+    /// agents receive it.
+    #[serde(default)]
+    pub session_ids: Option<Vec<Id>>,
+}
+
+/// Result of a broadcast: the sessions that actually received the message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BroadcastResp {
+    pub session_ids: Vec<Id>,
+}
+
+// ---------------------------------------------------------------------------
 // Connections
 // ---------------------------------------------------------------------------
 
