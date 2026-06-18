@@ -15,6 +15,7 @@
     { file: 'Connections.mp4', title: 'Connections',        desc: 'Save SSH / MySQL / Redis / ClickHouse and open them in a click.' },
     { file: 'GitPr.mp4',       title: 'Git & Pull Requests', desc: 'Branches, commit graph, and AI review agents.' },
     { file: 'Api.mp4',         title: 'API Client',         desc: 'A Postman-class workbench: HTTP/SSE/WS/gRPC, OAuth2, scripts, import & Git sync.' },
+    { file: 'Product.mp4',     title: 'Product',            desc: 'Turn a Jira/Confluence ticket into a build-ready spec — analyze, ask, rewrite, plan, then inject into a coding agent.' },
     { file: 'Settings.mp4',    title: 'Settings',           desc: 'Themes, providers, accounts, channels — make it yours.' },
   ];
 
