@@ -333,18 +333,31 @@
     const s = v === null || v === undefined ? 'NULL' : isComplex(v) ? compactJson(v) : String(v);
     return s.length > 28 ? s.slice(0, 28) + '…' : s;
   }
-  function cellMenu(e: MouseEvent, ci: number, v: unknown): void {
+  function cellMenu(e: MouseEvent, ci: number, v: unknown, rowIdx: number): void {
     if (mini) return;
     const col = result?.columns[ci]?.name;
     if (!col) return;
     const short = shortLabel(v);
-    ctxMenu.show(e, [
+    const items: import('../../lib/contextmenu.svelte').MenuItem[] = [
       { label: `Filter:  ${col} = ${short}`, icon: 'search', action: () => database.addQuickFilter(col, v, 'include') },
       { label: `Exclude:  ${col} ≠ ${short}`, icon: 'x', action: () => database.addQuickFilter(col, v, 'exclude') },
       { separator: true },
       { label: 'Expand value', icon: 'maximize', action: () => openCell(v) },
       { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : isComplex(v) ? compactJson(v) : String(v)) },
-    ]);
+    ];
+    // Delete actions — only for editable results (single table/collection with a
+    // resolved key). Builds a statement and opens the review modal; never runs
+    // immediately.
+    if (editable) {
+      items.push({ separator: true });
+      if (selected.size > 0) {
+        items.push({ label: `Delete selected (${selected.size})…`, icon: 'trash', danger: true, action: () => deleteSelected() });
+      }
+      if (!selected.has(rowIdx)) {
+        items.push({ label: 'Delete this row…', icon: 'trash', danger: true, action: () => deleteRows([rowIdx]) });
+      }
+    }
+    ctxMenu.show(e, items);
   }
   function headerMenu(e: MouseEvent, ci: number): void {
     if (mini) return;
@@ -759,6 +772,112 @@
     }
   }
 
+  // ── Row selection & delete (review-gated) ────────────────────────────────────
+  // Selection is tracked by stable liveRows index. It's only meaningful when the
+  // result is editable (single table/collection with a resolved key). Deleting
+  // builds a statement and opens the SAME review modal as edits — nothing runs
+  // until the user confirms there.
+  let selected = $state<Set<number>>(new Set());
+  let lastClickedIdx = $state<number | null>(null);
+
+  // Clear the selection whenever the upstream result changes (incl. the re-query
+  // after a delete runs).
+  $effect(() => {
+    void result;
+    selected = new Set();
+    lastClickedIdx = null;
+  });
+
+  const allInViewSelected = $derived(
+    viewRows.length > 0 && viewRows.every((r) => selected.has(r.idx)),
+  );
+
+  function toggleRow(idx: number, e: MouseEvent): void {
+    e.stopPropagation();
+    const next = new Set(selected);
+    if (e.shiftKey && lastClickedIdx !== null) {
+      // Range over the CURRENT visible order, so it stays intuitive with a sort
+      // or filter active.
+      const order = viewRows.map((r) => r.idx);
+      const a = order.indexOf(lastClickedIdx);
+      const b = order.indexOf(idx);
+      if (a !== -1 && b !== -1) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        for (let k = lo; k <= hi; k++) next.add(order[k]);
+        selected = next;
+        lastClickedIdx = idx;
+        return;
+      }
+    }
+    if (next.has(idx)) next.delete(idx);
+    else next.add(idx);
+    selected = next;
+    lastClickedIdx = idx;
+  }
+
+  function toggleAllInView(): void {
+    const next = new Set(selected);
+    if (allInViewSelected) viewRows.forEach((r) => next.delete(r.idx));
+    else viewRows.forEach((r) => next.add(r.idx));
+    selected = next;
+  }
+
+  function clearSelection(): void {
+    selected = new Set();
+    lastClickedIdx = null;
+  }
+
+  /** `{"$oid": "hex"}` (or raw JSON) for a row's `_id` — Mongo delete targeting. */
+  function mongoIdValue(rowIdx: number): string {
+    const idIdx = result!.columns.findIndex((c) => c.name === '_id');
+    const idVal = liveRows[rowIdx][idIdx];
+    if (typeof idVal === 'string' && /^[a-f0-9]{24}$/i.test(idVal)) {
+      return `{"$oid": ${JSON.stringify(idVal)}}`;
+    }
+    return JSON.stringify(idVal);
+  }
+
+  /** Build a DELETE / deleteMany targeting the given rows (by liveRows index). */
+  function buildDelete(indices: number[]): { title: string; sql: string } | null {
+    if (!result || !editable || indices.length === 0) return null;
+    const n = indices.length;
+    const noun = `${n} row${n === 1 ? '' : 's'}`;
+    if (engine === 'mongodb') {
+      const ids = indices.map(mongoIdValue).join(', ');
+      return {
+        title: `Review deleteMany (${noun})`,
+        sql: `db.${editTable}.deleteMany({"_id": {"$in": [${ids}]}})`,
+      };
+    }
+    let where: string;
+    if (editPkCols.length === 1) {
+      const pk = editPkCols[0];
+      const ci = result.columns.findIndex((c) => c.name === pk);
+      const list = indices.map((i) => valueLiteral(liveRows[i][ci])).join(', ');
+      where = `\`${pk}\` IN (${list})`;
+    } else {
+      // Composite key: OR a per-row AND of every key column.
+      where = indices.map((i) => `(${whereByPk(i)})`).join(' OR ');
+    }
+    const sql =
+      engine === 'clickhouse'
+        ? `ALTER TABLE ${tableRef()} DELETE WHERE ${where};`
+        : `DELETE FROM ${tableRef()} WHERE ${where};`;
+    return {
+      title:
+        engine === 'clickhouse' ? `Review ALTER … DELETE (${noun})` : `Review DELETE (${noun})`,
+      sql,
+    };
+  }
+
+  function deleteRows(indices: number[]): void {
+    const built = buildDelete(indices);
+    if (built) openReview(built.title, built.sql);
+  }
+  function deleteSelected(): void {
+    deleteRows([...selected].filter((i) => i >= 0 && i < liveRows.length));
+  }
+
   // ── Export / copy (reflect the current filtered + sorted view) ───────────────
   function exportText(v: unknown): string {
     if (v === null || v === undefined) return '';
@@ -945,6 +1064,17 @@
       </div>
     {/if}
 
+    {#if !mini && selected.size > 0}
+      <div class="sel-bar">
+        <span class="sel-count">{selected.size} selected</span>
+        <button class="sel-del" onclick={deleteSelected} title="Delete selected rows (you review before it runs)">
+          <Icon name="trash" size={11} />Delete…
+        </button>
+        <button class="sel-clear" onclick={clearSelection}>Clear</button>
+        <span class="sel-hint">you'll review the statement before it runs</span>
+      </div>
+    {/if}
+
     {#if !mini && database.filters.length > 0}
       <div class="filter-bar">
         <span class="fb-label"><Icon name="search" size={11} />Filters</span>
@@ -1008,7 +1138,18 @@
       <table class="grid mono" class:expanded={expandJson} style="--last:{result.columns.length}; --row-h:{ROW_H}px">
         <thead>
           <tr>
-            <th class="rownum">#</th>
+            <th class="rownum">
+              {#if editable}
+                <input
+                  class="sel-box"
+                  type="checkbox"
+                  checked={allInViewSelected}
+                  onchange={toggleAllInView}
+                  title="Select all rows in view"
+                  aria-label="Select all rows"
+                />
+              {:else}#{/if}
+            </th>
             {#each result.columns as c, ci (ci)}
               <th
                 title={mini ? (c.type_hint ?? undefined) : `${c.name} — click to sort, right-click for filters`}
@@ -1054,8 +1195,18 @@
             <tr class="spacer" aria-hidden="true"><td colspan={result.columns.length + 1} style="height:{padTop}px"></td></tr>
           {/if}
           {#each windowRows as { row, idx } (idx)}
-            <tr class:odd={idx % 2 === 1}>
+            <tr class:odd={idx % 2 === 1} class:selected={selected.has(idx)}>
               <td class="rownum">
+                {#if editable}
+                  <input
+                    class="sel-box"
+                    type="checkbox"
+                    checked={selected.has(idx)}
+                    onclick={(e) => toggleRow(idx, e)}
+                    title="Select row (shift-click for a range)"
+                    aria-label="Select row {idx + 1}"
+                  />
+                {/if}
                 <span class="rownum-n">{idx + 1}</span>
                 {#if editable}
                   <button
@@ -1090,7 +1241,7 @@
                     title="NULL"
                     style="width:{w}ch; max-width:{w}ch;"
                     ondblclick={() => beginEdit(idx, ci)}
-                    oncontextmenu={(e) => cellMenu(e, ci, v)}
+                    oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
                   ><span class="null-glyph">∅</span></td>
                 {:else if isComplex(v)}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -1100,7 +1251,7 @@
                     title="Click to expand"
                     style="width:{w}ch; max-width:{w}ch;"
                     onclick={() => openCell(v)}
-                    oncontextmenu={(e) => cellMenu(e, ci, v)}
+                    oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
                   >{expandJson ? prettyJson(v) : compactJson(v)}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v); }}><Icon name="maximize" size={9} /></button></td>
                 {:else}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -1109,7 +1260,7 @@
                     class:editable={isEditableCell(ci)}
                     style="width:{w}ch; max-width:{w}ch;"
                     ondblclick={() => beginEdit(idx, ci)}
-                    oncontextmenu={(e) => cellMenu(e, ci, v)}
+                    oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
                   >{#if filtering}{#each highlightParts(cellText(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellText(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v); }}><Icon name="maximize" size={9} /></button></td>
                 {/if}
               {/each}
@@ -1760,10 +1911,14 @@
   .rownum-n {
     display: inline-block;
   }
-  /* Per-row duplicate action: revealed on row hover, anchored over the # cell. */
+  /* Per-row duplicate action: revealed on row hover, anchored to the RIGHT of the
+   * # cell so it never covers the selection checkbox. */
   .row-dup {
     position: absolute;
-    inset: 0;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 2.2ch;
     display: none;
     align-items: center;
     justify-content: center;
@@ -1778,6 +1933,71 @@
   }
   .row-dup:hover {
     background: color-mix(in srgb, var(--accent) 26%, var(--surface-2));
+  }
+  /* Selection checkbox in the # column (only present for editable results). */
+  .rownum:has(.sel-box) {
+    width: 6ch;
+    max-width: 6ch;
+    text-align: left;
+    padding-left: 5px;
+  }
+  .sel-box {
+    width: 12px;
+    height: 12px;
+    margin: 0 4px 0 0;
+    vertical-align: middle;
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
+  .grid tbody tr.selected td {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .grid tbody tr.selected:not(.spacer):hover td {
+    background: color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+  /* Selection action bar (shown when ≥1 row is selected). */
+  .sel-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
+    font-size: 11px;
+  }
+  .sel-count {
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .sel-del {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 5px;
+    border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 50%, transparent);
+    background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
+    color: var(--danger, #e5484d);
+    cursor: pointer;
+  }
+  .sel-del:hover {
+    background: color-mix(in srgb, var(--danger, #e5484d) 24%, transparent);
+  }
+  .sel-clear {
+    padding: 3px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .sel-clear:hover {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  }
+  .sel-hint {
+    color: var(--text-dim);
+    font-size: 10.5px;
   }
   .cell.null {
     text-align: center;

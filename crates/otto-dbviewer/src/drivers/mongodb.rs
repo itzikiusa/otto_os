@@ -12,7 +12,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use mongodb::bson::{doc, Bson, Document};
+use mongodb::bson::{
+    doc, Bson, DateTime as BsonDateTime, Decimal128, Document, Regex as BsonRegex, Uuid as BsonUuid,
+};
 use mongodb::options::{ClientOptions, Credential, ServerAddress, Socks5Proxy, Tls, TlsOptions};
 use mongodb::{Client, Collection};
 use otto_core::Result;
@@ -20,7 +22,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
-use crate::drivers::mongo_sql;
+use crate::drivers::{mongo_parse, mongo_sql};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, Column, CompletionContext, CompletionItem, CompletionKind,
@@ -264,9 +266,69 @@ impl Driver for MongoDriver {
     }
 
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
-        // A `SELECT …` is translated to Mongo shorthand and run as such; the
-        // generated command is surfaced back to the user. Anything else is the
-        // native `db.coll.…` shorthand or a JSON command.
+        // A pasted script may hold several statements (e.g. a `deleteOne(...)`
+        // followed by an `insertOne(...)`). Split on top-level `;` and run each
+        // in order; a single statement takes the fast path unchanged.
+        let statements = split_statements(&req.statement);
+        if statements.len() <= 1 {
+            let stmt = statements.into_iter().next().unwrap_or_default();
+            let single = QueryRequest {
+                statement: stmt,
+                ..req.clone()
+            };
+            return self.run_one(cfg, &single).await;
+        }
+        self.run_many(cfg, req, statements).await
+    }
+
+    async fn completion(
+        &self,
+        cfg: &ResolvedConfig,
+        ctx: &CompletionContext,
+    ) -> Result<CompletionResponse> {
+        self.completion_impl(cfg, ctx).await
+    }
+}
+
+// --- statement execution -----------------------------------------------------
+
+impl MongoDriver {
+    /// Run every statement from a multi-statement paste in order. Returns the
+    /// last statement's result, with a per-statement summary in `message`
+    /// (e.g. "[1] deleted 1   ·   [2] inserted 1").
+    async fn run_many(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &QueryRequest,
+        statements: Vec<String>,
+    ) -> Result<QueryResult> {
+        let total = statements.len();
+        let mut summaries: Vec<String> = Vec::with_capacity(total);
+        let mut last: Option<QueryResult> = None;
+        for (i, stmt) in statements.into_iter().enumerate() {
+            let single = QueryRequest {
+                statement: stmt,
+                ..req.clone()
+            };
+            let r = self
+                .run_one(cfg, &single)
+                .await
+                .map_err(|e| types::invalid(format!("statement {}/{}: {e}", i + 1, total)))?;
+            let note = r
+                .message
+                .clone()
+                .unwrap_or_else(|| format!("{} row(s)", r.stats.row_count));
+            summaries.push(format!("[{}] {note}", i + 1));
+            last = Some(r);
+        }
+        let mut result = last.unwrap_or_else(|| QueryResult::message("no statements"));
+        result.message = Some(summaries.join("   ·   "));
+        Ok(result)
+    }
+
+    /// Run one already-split statement: optional SQL→Mongo translation, command
+    /// parse, then execute against the active database.
+    async fn run_one(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
         let translated = if mongo_sql::looks_like_sql(&req.statement) {
             Some(mongo_sql::translate(&req.statement)?)
         } else {
@@ -427,7 +489,7 @@ impl Driver for MongoDriver {
         Ok(result)
     }
 
-    async fn completion(
+    async fn completion_impl(
         &self,
         cfg: &ResolvedConfig,
         ctx: &CompletionContext,
@@ -655,6 +717,86 @@ struct Parsed {
     explain: bool,
 }
 
+/// Split a pasted script into individual statements on top-level `;`,
+/// respecting string literals (`'`, `"`, `` ` ``), bracket depth, and `//` /
+/// `/* */` comments. Each piece is cleaned of surrounding trivia; blank /
+/// comment-only pieces are dropped. A paste with no top-level `;` yields one
+/// statement (the whole input).
+fn split_statements(input: &str) -> Vec<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut depth: i32 = 0;
+    let mut in_str: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        match in_str {
+            Some(q) => {
+                if b == b'\\' {
+                    i += 2; // skip escaped char (incl. an escaped quote)
+                    continue;
+                }
+                if b == q {
+                    in_str = None;
+                }
+                i += 1;
+            }
+            None => {
+                if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+                    i += 2;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                } else if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    i += 2;
+                    while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                        i += 1;
+                    }
+                    i += 2; // consume the closing */
+                } else {
+                    match b {
+                        b'"' | b'\'' | b'`' => in_str = Some(b),
+                        b'{' | b'[' | b'(' => depth += 1,
+                        b'}' | b']' | b')' => depth -= 1,
+                        b';' if depth <= 0 => {
+                            if let Some(s) = clean_statement(&input[start..i]) {
+                                out.push(s);
+                            }
+                            start = i + 1;
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+    if let Some(s) = clean_statement(&input[start..]) {
+        out.push(s);
+    }
+    out
+}
+
+/// Trim a raw statement slice: strip leading whitespace + `//` / `/* */`
+/// comments (so the shorthand parser starts at `db.`/`{`) and surrounding
+/// whitespace. `None` when nothing meaningful remains.
+fn clean_statement(slice: &str) -> Option<String> {
+    let mut s = slice.trim();
+    loop {
+        if let Some(rest) = s.strip_prefix("//") {
+            s = rest.splitn(2, '\n').nth(1).unwrap_or("").trim_start();
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            s = rest.splitn(2, "*/").nth(1).unwrap_or("").trim_start();
+        } else {
+            break;
+        }
+    }
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 /// Parse a statement into a normalized command. Supports a JSON command object
 /// (`{collection, op, filter, projection, sort, limit, pipeline}`) and a
 /// `db.<coll>.find({...})` / `.aggregate([...])` / `.countDocuments({...})`
@@ -695,8 +837,7 @@ fn parse_command(statement: &str) -> Result<Parsed> {
 }
 
 fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
-    let value: Value =
-        serde_json::from_str(raw).map_err(|e| types::invalid(format!("invalid JSON command: {e}")))?;
+    let value = mongo_parse::parse_value(raw)?;
     let obj = value
         .as_object()
         .ok_or_else(|| types::invalid("command must be a JSON object"))?;
@@ -911,7 +1052,9 @@ fn extract_balanced(s: &str) -> Result<(String, &str)> {
                 }
             }
             None => match b {
-                b'"' | b'\'' => in_str = Some(b),
+                // Backtick included so a `query: \`…SQL…\`` template's embedded
+                // parens/quotes don't corrupt the depth count.
+                b'"' | b'\'' | b'`' => in_str = Some(b),
                 b'(' | b'[' | b'{' => depth += 1,
                 b')' | b']' | b'}' => {
                     depth -= 1;
@@ -943,7 +1086,7 @@ fn split_top_level_args(arg: &str) -> Vec<String> {
                 }
             }
             None => match b {
-                b'"' | b'\'' => in_str = Some(b),
+                b'"' | b'\'' | b'`' => in_str = Some(b),
                 b'(' | b'[' | b'{' => depth += 1,
                 b')' | b']' | b'}' => depth -= 1,
                 b',' if depth == 0 => {
@@ -959,14 +1102,12 @@ fn split_top_level_args(arg: &str) -> Vec<String> {
 }
 
 fn parse_doc_arg(arg: &str) -> Result<Document> {
-    let value: Value = serde_json::from_str(arg.trim())
-        .map_err(|e| types::invalid(format!("invalid JSON argument: {e}")))?;
+    let value = mongo_parse::parse_value(arg.trim())?;
     json_to_document(&value)
 }
 
 fn parse_pipeline_arg(arg: &str) -> Result<Vec<Document>> {
-    let value: Value = serde_json::from_str(arg.trim())
-        .map_err(|e| types::invalid(format!("invalid pipeline JSON: {e}")))?;
+    let value = mongo_parse::parse_value(arg.trim())?;
     let arr = value
         .as_array()
         .ok_or_else(|| types::invalid("aggregate expects an array pipeline"))?;
@@ -1000,16 +1141,15 @@ fn json_to_document(v: &Value) -> Result<Document> {
     }
 }
 
-/// JSON → BSON, honoring the `{"$oid": "<hex>"}` extended-JSON form so edits can
-/// target an `_id` (rendered to the grid as a hex string) by its real ObjectId.
+/// JSON → BSON, decoding the MongoDB Extended JSON sentinels that
+/// [`mongo_parse`] emits for mongosh constructors (`{"$oid": …}`, `{"$date":
+/// …}`, `{"$numberLong": …}`, …) into their real BSON types.
 fn json_to_bson(v: &Value) -> Result<Bson> {
     match v {
         Value::Object(map) => {
             if map.len() == 1 {
-                if let Some(Value::String(hex)) = map.get("$oid") {
-                    return mongodb::bson::oid::ObjectId::parse_str(hex)
-                        .map(Bson::ObjectId)
-                        .map_err(|e| types::invalid(format!("invalid $oid: {e}")));
+                if let Some(decoded) = decode_ejson(map) {
+                    return decoded;
                 }
             }
             let mut doc = Document::new();
@@ -1024,6 +1164,106 @@ fn json_to_bson(v: &Value) -> Result<Bson> {
         }
         _ => mongodb::bson::to_bson(v).map_err(types::upstream),
     }
+}
+
+/// Decode a single-key MongoDB Extended JSON sentinel into its BSON type.
+/// Returns `None` when the key isn't a recognized sentinel, so the object is
+/// treated as a normal document — that's also why update operators like
+/// `{"$set": …}` pass through untouched (`$set` isn't a sentinel).
+fn decode_ejson(map: &Map<String, Value>) -> Option<Result<Bson>> {
+    let (key, val) = map.iter().next()?;
+    let decoded = match key.as_str() {
+        "$oid" => ejson_str(val, "$oid").and_then(|s| {
+            mongodb::bson::oid::ObjectId::parse_str(&s)
+                .map(Bson::ObjectId)
+                .map_err(|e| types::invalid(format!("invalid $oid: {e}")))
+        }),
+        "$date" => decode_date(val),
+        "$numberLong" => ejson_i64(val, "$numberLong").map(Bson::Int64),
+        "$numberInt" => ejson_i64(val, "$numberInt").and_then(|n| {
+            i32::try_from(n)
+                .map(Bson::Int32)
+                .map_err(|_| types::invalid("$numberInt out of range"))
+        }),
+        "$numberDecimal" => ejson_str(val, "$numberDecimal").and_then(|s| {
+            s.parse::<Decimal128>()
+                .map(Bson::Decimal128)
+                .map_err(|e| types::invalid(format!("invalid $numberDecimal: {e:?}")))
+        }),
+        "$uuid" => ejson_str(val, "$uuid").and_then(|s| {
+            BsonUuid::parse_str(&s)
+                .map(Bson::from)
+                .map_err(|e| types::invalid(format!("invalid $uuid: {e}")))
+        }),
+        "$regularExpression" => decode_regex(val),
+        _ => return None,
+    };
+    Some(decoded)
+}
+
+fn ejson_str(v: &Value, what: &str) -> Result<String> {
+    v.as_str()
+        .map(str::to_string)
+        .ok_or_else(|| types::invalid(format!("{what} expects a string")))
+}
+
+fn ejson_i64(v: &Value, what: &str) -> Result<i64> {
+    match v {
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| types::invalid(format!("{what} is not an integer"))),
+        Value::String(s) => s
+            .parse::<i64>()
+            .map_err(|_| types::invalid(format!("{what} is not an integer"))),
+        _ => Err(types::invalid(format!(
+            "{what} expects a number or numeric string"
+        ))),
+    }
+}
+
+/// `$date` accepts an RFC-3339 string, a date-only `YYYY-MM-DD`, epoch millis as
+/// a number, or the canonical `{"$numberLong": "<ms>"}` wrapper.
+fn decode_date(v: &Value) -> Result<Bson> {
+    match v {
+        Value::String(s) => {
+            if let Ok(dt) = BsonDateTime::parse_rfc3339_str(s) {
+                return Ok(Bson::DateTime(dt));
+            }
+            // Tolerate a date-only `YYYY-MM-DD` by assuming midnight UTC.
+            if let Ok(dt) = BsonDateTime::parse_rfc3339_str(&format!("{s}T00:00:00Z")) {
+                return Ok(Bson::DateTime(dt));
+            }
+            Err(types::invalid(format!("invalid $date string '{s}'")))
+        }
+        Value::Number(n) => {
+            let ms = n
+                .as_i64()
+                .ok_or_else(|| types::invalid("$date millis must be an integer"))?;
+            Ok(Bson::DateTime(BsonDateTime::from_millis(ms)))
+        }
+        Value::Object(inner) => {
+            let ms = ejson_i64(inner.get("$numberLong").unwrap_or(&Value::Null), "$date")?;
+            Ok(Bson::DateTime(BsonDateTime::from_millis(ms)))
+        }
+        _ => Err(types::invalid("invalid $date")),
+    }
+}
+
+fn decode_regex(v: &Value) -> Result<Bson> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| types::invalid("$regularExpression expects an object"))?;
+    let pattern = obj
+        .get("pattern")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let options = obj
+        .get("options")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Ok(Bson::RegularExpression(BsonRegex { pattern, options }))
 }
 
 /// Convert a `bson::Bson` to a clean `serde_json::Value`. ObjectId renders as
@@ -1397,6 +1637,48 @@ mod tests {
         let p = parse_command(r#"db.users.countDocuments({"active":true})"#).unwrap();
         assert_eq!(p.collection, "users");
         assert_eq!(p.op, MongoOp::Count);
+    }
+
+    #[test]
+    fn splits_multi_statement_paste_with_comments() {
+        let src = r#"
+            // header comment
+            db.dashboards.deleteOne({ dashboardId: "x" });
+            db.dashboards.insertOne({ dashboardId: "x", note: "a; b inside a string" });
+        "#;
+        let stmts = split_statements(src);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].starts_with("db.dashboards.deleteOne"));
+        assert!(stmts[1].starts_with("db.dashboards.insertOne"));
+    }
+
+    #[test]
+    fn single_statement_without_semicolon_is_one() {
+        assert_eq!(split_statements("db.players.find({})").len(), 1);
+        // Comment-only / blank input yields no statements.
+        assert!(split_statements("// just a comment\n").is_empty());
+    }
+
+    #[test]
+    fn parses_mongosh_insert_with_date_and_backtick() {
+        // The exact troublesome shape: unquoted keys, new Date(), a backtick SQL
+        // template with parens + single quotes, nested array, trailing commas.
+        let p = parse_command(
+            "db.dashboards.insertOne({ dashboardId: \"player-activities\", createdAt: new Date(), \
+             widgets: [{ id: \"w1\", query: `SELECT a FROM t WHERE x IN ('A','B')` },], })",
+        )
+        .unwrap();
+        assert_eq!(p.collection, "dashboards");
+        assert_eq!(p.op, MongoOp::InsertOne);
+        let docs = p.documents.unwrap();
+        assert_eq!(docs.len(), 1);
+        let doc = &docs[0];
+        assert_eq!(doc.get_str("dashboardId").unwrap(), "player-activities");
+        // new Date() decoded to a real BSON DateTime, not a string/object.
+        assert!(matches!(doc.get("createdAt"), Some(Bson::DateTime(_))));
+        // Backtick SQL preserved verbatim inside the nested widget.
+        let w0 = doc.get_array("widgets").unwrap()[0].as_document().unwrap();
+        assert!(w0.get_str("query").unwrap().contains("IN ('A','B')"));
     }
 
     #[test]
