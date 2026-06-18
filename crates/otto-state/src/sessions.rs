@@ -12,6 +12,22 @@ pub struct SessionsRepo {
     pool: SqlitePool,
 }
 
+/// Minimal read-only projection used by the usage tailer to attribute on-disk
+/// transcript turns back to Otto sessions. Deliberately *not* filtered by
+/// status or `archived`: analysis/agent sessions finish quickly (status
+/// `exited`) yet their transcripts keep growing as the user resumes them, and
+/// usage from those turns still belongs to the original workspace/session.
+#[derive(Debug, Clone)]
+pub struct UsageAttrRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub provider: String,
+    pub cwd: String,
+    /// The CLI's own session uuid (= Claude transcript filename stem). `None`
+    /// for sessions that never got a provider id.
+    pub provider_session_id: Option<String>,
+}
+
 /// Insert payload for a new session row.
 pub struct NewSession {
     pub workspace_id: Id,
@@ -268,6 +284,26 @@ impl SessionsRepo {
         rows.iter().map(row_to_session).collect()
     }
 
+    /// All sessions projected to the fields the usage tailer needs to attribute
+    /// on-disk transcript turns. Read-only and unfiltered (see [`UsageAttrRow`]).
+    pub async fn list_usage_attribution(&self) -> sqlx::Result<Vec<UsageAttrRow>> {
+        let rows = sqlx::query(
+            "SELECT id, workspace_id, provider, cwd, provider_session_id FROM sessions",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| UsageAttrRow {
+                id: r.get("id"),
+                workspace_id: r.get("workspace_id"),
+                provider: r.get("provider"),
+                cwd: r.get("cwd"),
+                provider_session_id: r.get("provider_session_id"),
+            })
+            .collect())
+    }
+
     /// Count of sessions in a workspace for a provider (for "claude #N" titles).
     pub async fn count_by_provider(&self, ws: &Id, provider: &str) -> Result<i64> {
         let r = sqlx::query(
@@ -389,6 +425,35 @@ mod tests {
         let mut want = vec![exited.as_str(), recon.as_str()];
         want.sort();
         assert_eq!(ids, want);
+    }
+
+    #[tokio::test]
+    async fn list_usage_attribution_returns_all_sessions_unfiltered() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+
+        // A live claude session with a provider id.
+        let live = insert_session_full(&pool, &ws, &user, "claude", "running", Some("psid-1"), 0).await;
+        // An exited+archived codex session with NO provider id — must still be
+        // returned (analysis sessions finish fast but transcripts keep growing).
+        let exited = insert_session_full(&pool, &ws, &user, "codex", "exited", None, 1).await;
+
+        let got = repo.list_usage_attribution().await.unwrap();
+        let mut ids: Vec<&str> = got.iter().map(|r| r.id.as_str()).collect();
+        ids.sort();
+        let mut want = vec![live.as_str(), exited.as_str()];
+        want.sort();
+        assert_eq!(ids, want);
+
+        let live_row = got.iter().find(|r| r.id == live).unwrap();
+        assert_eq!(live_row.provider, "claude");
+        assert_eq!(live_row.workspace_id, ws);
+        assert_eq!(live_row.provider_session_id.as_deref(), Some("psid-1"));
+
+        let exited_row = got.iter().find(|r| r.id == exited).unwrap();
+        assert_eq!(exited_row.provider, "codex");
+        assert_eq!(exited_row.provider_session_id, None);
     }
 
     #[tokio::test]

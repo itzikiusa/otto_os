@@ -24,12 +24,17 @@ mod engine;
 mod metrics;
 mod pricing;
 mod schema;
+pub mod tailer;
 mod types;
 
 pub use clickhouse::ClickHouse;
 pub use engine::UsageEngine;
 pub use metrics::{Metric, MetricsSampler};
 pub use pricing::estimate_cost;
+pub use tailer::{
+    parse_claude_line, parse_codex_line, parse_codex_session_meta, CodexMeta, CursorStore,
+    ParsedUsage,
+};
 pub use types::{
     DailyUsage, MetricPoint, ProviderUsage, SessionUsage, UsageConfig, UsageEvent, UsageStatus,
     UsageSummary,
