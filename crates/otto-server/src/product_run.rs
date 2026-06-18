@@ -15,8 +15,10 @@
 //! are NOT killed when done — they stay live/openable so the PO can inspect
 //! each lens's terminal afterward.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Extra settle time for codex (model-loading burst can last >1s after TUI ready).
@@ -40,9 +42,8 @@ use otto_state::{
 };
 use tracing::warn;
 
-use crate::review_session::{
-    bracketed_paste, dispatched, wait_for_tui, FINDINGS_POLL, PASTE_TO_ENTER, WAITING_IDLE,
-};
+use crate::agent_run::{run_with_recovery, watch_for_result, FailReason, RunOutcome, WatchStatus};
+use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
 use crate::state::ServerCtx;
 
 // ---------------------------------------------------------------------------
@@ -89,7 +90,10 @@ pub struct FoundLearning {
 // Session-based, provider-honoring lens runner (mirrors review_session)
 // ---------------------------------------------------------------------------
 
-/// Outcome of one lens (or the summarizer) running as a real session.
+/// Outcome of one lens (or the summarizer) running as a real session. This is the
+/// caller-facing shape; the run mechanics return [`crate::agent_run::RunOutcome`]
+/// which `run_agent_with_recovery` flattens into this (keeping `reason` as a
+/// stable `&str` for the existing notification/error-note code).
 pub struct LensRunResult {
     /// Raw text the agent wrote to its out file (or the claude transcript turn).
     pub raw: Option<String>,
@@ -97,6 +101,21 @@ pub struct LensRunResult {
     pub session_id: Option<Id>,
     /// True if the agent never produced output (timeout / exit / start failure).
     pub errored: bool,
+    /// Short reason when `errored` ("stuck", "timeout", "exited", "session-gone",
+    /// "create-failed", "stopped") — surfaced in notifications and the agent error
+    /// field. `None` on success.
+    pub reason: Option<&'static str>,
+}
+
+impl From<RunOutcome> for LensRunResult {
+    fn from(o: RunOutcome) -> Self {
+        Self {
+            errored: o.errored(),
+            reason: o.reason.map(|r| r.as_str()),
+            raw: o.raw,
+            session_id: o.session_id,
+        }
+    }
 }
 
 /// Spawn `provider` as a live agent session in `cwd`, inject `prompt`, and wait
@@ -108,6 +127,13 @@ pub struct LensRunResult {
 ///
 /// The `prompt` MUST already instruct the agent to write its JSON to `out_path`
 /// (use [`augment_with_out_path`] / the prompt builders, which append that).
+///
+/// When `agent_id` is `Some`, the freshly-created session id is persisted to that
+/// analysis-agent row IMMEDIATELY (before the agent does any work), mirroring
+/// `review_session::run_agent_session`. That's what lets the UI show "Open" and
+/// stream the live terminal *while the agent is running* — not only once it
+/// finishes — and keeps the session replayable afterward as history. Callers with
+/// no agent row (rewrite / generate-tests / generate-plan) pass `None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_lens_session(
     ctx: &ServerCtx,
@@ -118,7 +144,8 @@ pub async fn run_lens_session(
     prompt: &str,
     out_path: &Path,
     timeout: Duration,
-) -> LensRunResult {
+    agent_id: Option<&Id>,
+) -> RunOutcome {
     // Clear any stale output from a previous run.
     let _ = std::fs::remove_file(out_path);
 
@@ -135,10 +162,18 @@ pub async fn run_lens_session(
         Ok(s) => s,
         Err(e) => {
             warn!("product_run: create session ({provider}): {e}");
-            return LensRunResult { raw: None, session_id: None, errored: true };
+            return RunOutcome::failed(None, FailReason::CreateFailed);
         }
     };
     let sid = session.id.clone();
+
+    // Persist the session id NOW (mirrors review_session) so the agent is
+    // openable live while it runs, not only after it finishes.
+    if let Some(aid) = agent_id {
+        if let Err(e) = ctx.product_repo.set_agent_session(aid, &sid).await {
+            warn!("product_run: early set_agent_session {aid}: {e}");
+        }
+    }
 
     // Inject the prompt once the TUI has drawn + settled.
     if wait_for_tui(&ctx.manager, &sid).await {
@@ -243,57 +278,34 @@ pub async fn run_lens_session(
         }
     }
 
-    // Watch for the out file (or, for claude, its JSONL transcript turn),
-    // detecting exit / idle / timeout. We never kill the session.
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Ok(text) = std::fs::read_to_string(out_path) {
-            let _ = std::fs::remove_file(out_path);
-            return LensRunResult { raw: Some(text), session_id: Some(sid), errored: false };
-        }
-
-        // claude-transcript fallback: codex/agy write no transcript, so the file
-        // is their reliable path; claude's JSONL is a backstop if it skipped the
-        // file write but produced a completed turn that parses as our Findings.
-        if provider == "claude" {
-            if let Some(psid) = session.provider_session_id.as_deref() {
-                let jsonl = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
-                if let Ok(raw) = std::fs::read_to_string(&jsonl) {
-                    if let Some(turn) = otto_orchestrator::claude_pty::completed_turn_text(&raw) {
-                        if extract_json_block(&turn).is_some() {
-                            return LensRunResult {
-                                raw: Some(turn),
-                                session_id: Some(sid),
-                                errored: false,
-                            };
-                        }
-                    }
-                }
+    // Watch for the result via the shared runner (out-file / claude transcript;
+    // exit / stuck / timeout). Persist the waiting↔running transition on the agent
+    // row (when there is one) so the UI shows it, like a review agent does.
+    watch_for_result(
+        &ctx.manager,
+        &sid,
+        provider,
+        session.provider_session_id.as_deref(),
+        cwd,
+        out_path,
+        timeout,
+        WAITING_IDLE,
+        STUCK_IDLE,
+        |t| extract_json_block(t).is_some(),
+        |st| async move {
+            if let Some(aid) = agent_id {
+                let status = match st {
+                    WatchStatus::Waiting => "waiting",
+                    WatchStatus::Resumed => "running",
+                };
+                let _ = ctx
+                    .product_repo
+                    .set_agent_status(aid, status, None, None, false)
+                    .await;
             }
-        }
-
-        match ctx.manager.live_handle(&sid) {
-            Some(handle) => {
-                if handle.on_exit().borrow().is_some() {
-                    warn!("product_run: session ({provider}) exited before writing JSON");
-                    return LensRunResult { raw: None, session_id: Some(sid), errored: true };
-                }
-                // Idle-with-no-output → likely blocked on input; keep waiting
-                // (the PO can Open it) until the overall timeout.
-                let _idle = handle.last_output_at().elapsed() >= WAITING_IDLE;
-            }
-            None => {
-                warn!("product_run: session ({provider}) is no longer live");
-                return LensRunResult { raw: None, session_id: Some(sid), errored: true };
-            }
-        }
-
-        if Instant::now() >= deadline {
-            warn!("product_run: session ({provider}) timed out");
-            return LensRunResult { raw: None, session_id: Some(sid), errored: true };
-        }
-        tokio::time::sleep(FINDINGS_POLL).await;
-    }
+        },
+    )
+    .await
 }
 
 /// Append the "write your JSON to this file" instruction to a built prompt.
@@ -522,6 +534,95 @@ pub fn build_summarizer_prompt(
 const LENS_TIMEOUT: Duration = Duration::from_secs(600);
 const SUMMARIZER_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Quiet for this long with no result ⇒ flag the agent "waiting" (may be blocked
+/// on input); < STUCK_IDLE so there's a window before auto-retry.
+const WAITING_IDLE: Duration = Duration::from_secs(45);
+/// No PTY output AND no result file for this long ⇒ the agent is stuck; fail fast
+/// so the recovery wrapper can kill + retry instead of waiting out the timeout.
+const STUCK_IDLE: Duration = Duration::from_secs(180);
+/// Total attempts for an agent (initial + retries) before it's marked errored.
+const MAX_AGENT_ATTEMPTS: u32 = 3;
+/// How many times an orphaned agent may be auto-resumed across daemon restarts
+/// before the reaper gives up and marks it errored.
+const MAX_RESUME_ATTEMPTS: i64 = 2;
+/// Backoff before each retry attempt (index = retry number - 1). Clamped to the
+/// last entry beyond its length.
+const RETRY_BACKOFF: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(4)];
+
+// ---------------------------------------------------------------------------
+// Per-agent cancellation registry (mirrors skill_eval::CancelRegistry)
+// ---------------------------------------------------------------------------
+
+/// Maps analysis-agent id → a cancel flag, so a manual Stop (or shutdown) can
+/// signal an in-flight `run_agent_with_recovery` to abort without it being
+/// mistaken for a failure (which would auto-retry).
+pub type CancelRegistry = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
+/// Create the shared registry (called once at boot, stored in `ServerCtx`).
+pub fn new_cancel_registry() -> CancelRegistry {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn register_cancel(reg: &CancelRegistry, agent_id: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    reg.lock().unwrap().insert(agent_id.to_string(), Arc::clone(&flag));
+    flag
+}
+
+/// Trip the cancel flag for `agent_id` if it is registered (in-flight).
+pub fn signal_cancel(reg: &CancelRegistry, agent_id: &str) {
+    if let Some(flag) = reg.lock().unwrap().get(agent_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
+fn unregister_cancel(reg: &CancelRegistry, agent_id: &str) {
+    reg.lock().unwrap().remove(agent_id);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded auto-retry wrapper (delegates to the shared agent_run primitive)
+// ---------------------------------------------------------------------------
+
+/// Run an analysis agent as a real session with automatic recovery, on top of the
+/// shared [`crate::agent_run::run_with_recovery`]. Each attempt is a fresh
+/// `run_lens_session` (session id persisted early so Open shows the current
+/// attempt). When `agent_id` is `Some`, a cancel flag is registered keyed by it so
+/// a manual Stop trips it and the loop returns `stopped` WITHOUT another retry.
+/// Callers with no agent row (rewrite / generate-tests / generate-plan) pass
+/// `None` — they still get retry + stuck-recovery, just no Stop/Open wiring.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_agent_with_recovery(
+    ctx: &ServerCtx,
+    ws: &otto_core::domain::Workspace,
+    user_id: &Id,
+    provider: &str,
+    cwd: &str,
+    prompt: &str,
+    out_path: &Path,
+    timeout: Duration,
+    agent_id: Option<&Id>,
+) -> LensRunResult {
+    let cancel_key = agent_id.map(|a| a.to_string());
+    let cancel = cancel_key
+        .as_deref()
+        .map(|key| register_cancel(&ctx.product_agent_cancels, key));
+
+    let outcome = run_with_recovery(
+        &ctx.manager,
+        MAX_AGENT_ATTEMPTS,
+        &RETRY_BACKOFF,
+        cancel.as_ref(),
+        |_attempt| run_lens_session(ctx, ws, user_id, provider, cwd, prompt, out_path, timeout, agent_id),
+    )
+    .await;
+
+    if let Some(key) = cancel_key.as_deref() {
+        unregister_cancel(&ctx.product_agent_cancels, key);
+    }
+    outcome.into()
+}
+
 /// One lens agent's outcome after running as a real session.
 struct LensOutcome {
     name: String,
@@ -664,7 +765,7 @@ pub async fn run_analysis(
             let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
             // Run as a real, openable session honoring this spec's provider.
-            let result = run_lens_session(
+            let result = run_agent_with_recovery(
                 &ctx,
                 &ws,
                 &user_id,
@@ -673,6 +774,7 @@ pub async fn run_analysis(
                 &prompt,
                 &out_path,
                 LENS_TIMEOUT,
+                Some(&agent_id),
             )
             .await;
 
@@ -718,8 +820,13 @@ pub async fn run_analysis(
                     }
                 }
                 _ => {
+                    let stopped = result.reason == Some("stopped");
                     let err = if result.errored {
-                        "session produced no output (timeout/exit/start failure)".to_string()
+                        match result.reason {
+                            Some("stopped") => "stopped by user".to_string(),
+                            Some(r) => format!("agent failed after {MAX_AGENT_ATTEMPTS} attempts ({r})"),
+                            None => "session produced no output (timeout/exit/start failure)".to_string(),
+                        }
                     } else {
                         format!(
                             "could not parse Findings JSON from agent output (len={})",
@@ -731,6 +838,15 @@ pub async fn run_analysis(
                         .product_repo
                         .set_agent_status(&agent_id, "error", None, Some(&err), true)
                         .await;
+                    // Surface genuine failures (not user-initiated stops) so an
+                    // unattended pipeline notices instead of silently degrading.
+                    if !stopped {
+                        let _ = ctx.events.send(otto_core::event::Event::Notice {
+                            level: "warn".into(),
+                            title: format!("Analysis agent failed: {} · {}", spec.name, spec.provider),
+                            body: err.clone(),
+                        });
+                    }
                     LensOutcome {
                         name: spec.name.clone(),
                         provider: spec.provider.clone(),
@@ -808,7 +924,7 @@ pub async fn run_analysis(
         let base = build_summarizer_prompt(&summarizer_skill_body, &story_title, &successful);
         let prompt = augment_with_out_path(&base, &out_path.to_string_lossy());
 
-        let result = run_lens_session(
+        let result = run_agent_with_recovery(
             &ctx,
             &ws,
             &user_id,
@@ -817,6 +933,7 @@ pub async fn run_analysis(
             &prompt,
             &out_path,
             SUMMARIZER_TIMEOUT,
+            summarizer_agent.as_ref().map(|a| &a.id),
         )
         .await;
 
@@ -1160,7 +1277,7 @@ pub async fn retry_analysis_agent(
     let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
     // 9. Run the session.
-    let result = run_lens_session(
+    let result = run_agent_with_recovery(
         &ctx,
         &ws,
         &user_id,
@@ -1169,6 +1286,7 @@ pub async fn retry_analysis_agent(
         &prompt,
         &out_path,
         LENS_TIMEOUT,
+        Some(&agent_id),
     )
     .await;
 
@@ -1220,7 +1338,105 @@ pub async fn retry_analysis_agent(
                 .product_repo
                 .set_agent_status(&agent_id, "error", None, Some(&err), true)
                 .await;
+            if result.reason != Some("stopped") {
+                let _ = ctx.events.send(otto_core::event::Event::Notice {
+                    level: "warn".into(),
+                    title: format!("Analysis agent failed: {}", agent.name),
+                    body: err.clone(),
+                });
+            }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orphan reaper — auto-resume analysis agents stranded by a daemon restart
+// ---------------------------------------------------------------------------
+
+/// Run ONCE at daemon startup. After a restart, any analysis agent still in
+/// `running`/`waiting` has no surviving task driving it, so it is orphaned.
+/// For each: if it hasn't exhausted its resume budget, re-run it via
+/// [`retry_analysis_agent`] (which rebuilds context + prompt from the DB and runs
+/// with full recovery); otherwise mark it errored and notify. Running this only at
+/// startup avoids racing legitimately-in-flight agents (there are none yet).
+pub async fn reap_orphaned_agents_on_startup(ctx: ServerCtx) {
+    let agents = match ctx.product_repo.list_unfinished_agents().await {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("orphan reaper: list_unfinished_agents failed: {e}");
+            return;
+        }
+    };
+    if agents.is_empty() {
+        return;
+    }
+    warn!(
+        "orphan reaper: {} unfinished analysis agent(s) after restart",
+        agents.len()
+    );
+
+    for agent in agents {
+        let analysis = match ctx.product_repo.get_analysis(&agent.analysis_id).await {
+            Ok(a) => a,
+            Err(_) => {
+                let _ = ctx
+                    .product_repo
+                    .set_agent_status(&agent.id, "error", None, Some("interrupted (restart); analysis gone"), true)
+                    .await;
+                continue;
+            }
+        };
+        let story = match ctx.product_repo.get_story(&analysis.story_id).await {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = ctx
+                    .product_repo
+                    .set_agent_status(&agent.id, "error", None, Some("interrupted (restart); story gone"), true)
+                    .await;
+                continue;
+            }
+        };
+
+        if agent.resume_count >= MAX_RESUME_ATTEMPTS {
+            let _ = ctx
+                .product_repo
+                .set_agent_status(
+                    &agent.id,
+                    "error",
+                    None,
+                    Some("interrupted by daemon restart — gave up after auto-resumes"),
+                    true,
+                )
+                .await;
+            let _ = ctx.events.send(otto_core::event::Event::Notice {
+                level: "warn".into(),
+                title: format!("Analysis agent abandoned: {}", agent.name),
+                body: "Restarted too many times to auto-resume.".into(),
+            });
+            continue;
+        }
+
+        let ws = match ctx.workspaces.get(&story.workspace_id).await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!("orphan reaper: workspace {} load failed: {e}", story.workspace_id);
+                continue;
+            }
+        };
+
+        let _ = ctx.product_repo.bump_resume_count(&agent.id).await;
+        let _ = ctx.events.send(otto_core::event::Event::Notice {
+            level: "info".into(),
+            title: format!("Resuming analysis agent: {}", agent.name),
+            body: "Re-running after a daemon restart.".into(),
+        });
+        tokio::spawn(retry_analysis_agent(
+            ctx.clone(),
+            ws,
+            story.created_by.clone(),
+            analysis.id.clone(),
+            agent.id.clone(),
+        ));
     }
 }
 
@@ -1399,7 +1615,7 @@ pub async fn run_rewrite(
     otto_sessions::trust::ensure_trusted(&provider, &cwd);
 
     // 6. Run as a provider-honoring session.
-    let result = run_lens_session(
+    let result = run_agent_with_recovery(
         &ctx,
         &ws,
         &user_id,
@@ -1408,6 +1624,7 @@ pub async fn run_rewrite(
         &prompt,
         &out_path,
         Duration::from_secs(300),
+        None,
     )
     .await;
 
@@ -1678,7 +1895,7 @@ pub async fn run_generate_tests(
     otto_sessions::trust::ensure_trusted(&provider, &cwd);
 
     // 6. Run as a provider-honoring session.
-    let result = run_lens_session(
+    let result = run_agent_with_recovery(
         &ctx,
         &ws,
         &user_id,
@@ -1687,6 +1904,7 @@ pub async fn run_generate_tests(
         &prompt,
         &out_path,
         Duration::from_secs(300),
+        None,
     )
     .await;
 
@@ -2025,7 +2243,7 @@ pub async fn run_generate_plan(
     otto_sessions::trust::ensure_trusted(&provider, &cwd);
 
     // 6. Run as a provider-honoring session.
-    let result = run_lens_session(
+    let result = run_agent_with_recovery(
         &ctx,
         &ws,
         &user_id,
@@ -2034,6 +2252,7 @@ pub async fn run_generate_plan(
         &prompt,
         &out_path,
         Duration::from_secs(300),
+        None,
     )
     .await;
 

@@ -77,6 +77,9 @@ pub struct ProductAnalysisAgent {
     pub session_id: Option<Id>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// How many times this agent has been auto-resumed after a daemon restart.
+    /// Capped by the orphan reaper to avoid infinite resume loops.
+    pub resume_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,6 +393,7 @@ fn row_to_agent(r: &sqlx::sqlite::SqliteRow) -> Result<ProductAnalysisAgent> {
         session_id: r.get("session_id"),
         started_at: started_at.as_deref().map(ts).transpose()?,
         finished_at: finished_at.as_deref().map(ts).transpose()?,
+        resume_count: r.get("resume_count"),
     })
 }
 
@@ -961,6 +965,31 @@ impl ProductRepo {
         .await
         .map_err(dberr("list analysis agents"))?;
         rows.iter().map(row_to_agent).collect()
+    }
+
+    /// All agents still in a non-terminal state (`running`/`waiting`). Used by the
+    /// startup orphan reaper — after a restart these have no surviving task.
+    pub async fn list_unfinished_agents(&self) -> Result<Vec<ProductAnalysisAgent>> {
+        let rows = sqlx::query(
+            "SELECT * FROM product_analysis_agents \
+             WHERE status IN ('running', 'waiting') ORDER BY rowid",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list unfinished agents"))?;
+        rows.iter().map(row_to_agent).collect()
+    }
+
+    /// Increment an agent's auto-resume counter (orphan reaper loop guard).
+    pub async fn bump_resume_count(&self, id: &Id) -> Result<()> {
+        sqlx::query(
+            "UPDATE product_analysis_agents SET resume_count = resume_count + 1 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("bump resume count"))?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------

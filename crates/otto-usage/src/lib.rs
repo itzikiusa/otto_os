@@ -27,6 +27,12 @@ mod schema;
 pub mod tailer;
 mod types;
 
+/// `workspace_id` assigned to usage recorded from transcripts that don't map to
+/// any Otto session (the user's own Claude/codex runs). Recorded for a complete
+/// machine-wide picture, but excludable from the dashboard via the "Otto only"
+/// view filter (see `UsageEngine::summary(_, otto_only)`).
+pub const EXTERNAL_WORKSPACE: &str = "external";
+
 pub use clickhouse::ClickHouse;
 pub use engine::UsageEngine;
 pub use metrics::{Metric, MetricsSampler};

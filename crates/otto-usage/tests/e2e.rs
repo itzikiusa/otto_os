@@ -68,7 +68,7 @@ async fn usage_engine_end_to_end() {
     tokio::time::sleep(Duration::from_millis(2500)).await;
 
     // ── Provider rollup ─────────────────────────────────────────────────────
-    let providers = engine.provider_usage(30).await.expect("provider usage");
+    let providers = engine.provider_usage(30, false).await.expect("provider usage");
     assert_eq!(providers.len(), 2, "two providers recorded");
     let claude = providers.iter().find(|p| p.provider == "claude").expect("claude row");
     // 3 claude events: (1000+500) + (800) + (400+200) + buffered (300) = 4 events total now.
@@ -83,19 +83,19 @@ async fn usage_engine_end_to_end() {
     assert_eq!(codex.total_tokens, 2100);
 
     // ── Summary totals ────────────────────────────────────────────────────────
-    let summary = engine.summary(30).await.expect("summary");
+    let summary = engine.summary(30, false).await.expect("summary");
     assert_eq!(summary.total_events, 6);
     assert_eq!(summary.total_tokens, 5300);
     assert!((summary.total_cost_usd - 0.09).abs() < 1e-9);
     assert_eq!(summary.providers.len(), 2);
 
     // ── Daily rollup (everything lands on today) ──────────────────────────────
-    let daily = engine.daily_usage(30).await.expect("daily");
+    let daily = engine.daily_usage(30, false).await.expect("daily");
     assert_eq!(daily.len(), 1, "all events are from today");
     assert_eq!(daily[0].total_tokens, 5300);
 
     // ── Session leaderboard ───────────────────────────────────────────────────
-    let sessions = engine.session_usage(30, 50).await.expect("sessions");
+    let sessions = engine.session_usage(30, 50, false).await.expect("sessions");
     assert_eq!(sessions.len(), 3, "three distinct sessions");
     let top = &sessions[0];
     assert_eq!(top.session_id, "s1", "s1 has the most tokens (2300)");
@@ -140,7 +140,7 @@ async fn usage_engine_end_to_end() {
     )
     .await;
     assert!(engine2.available());
-    let reopened = engine2.summary(30).await.expect("summary after reopen");
+    let reopened = engine2.summary(30, false).await.expect("summary after reopen");
     assert_eq!(reopened.total_events, 6, "data persisted across restart");
     assert_eq!(reopened.total_tokens, 5300);
 }
@@ -160,6 +160,6 @@ async fn disabled_engine_is_a_noop() {
     // Recording / querying a disabled engine must not error.
     engine.record(event("claude", "s1", "m", "prompt", 1, 1, 0.0));
     engine.insert_events(&[event("claude", "s1", "m", "prompt", 1, 1, 0.0)]).await.unwrap();
-    assert_eq!(engine.summary(7).await.unwrap().total_events, 0);
+    assert_eq!(engine.summary(7, false).await.unwrap().total_events, 0);
     assert!(!engine.status().await.available);
 }

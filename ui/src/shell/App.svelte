@@ -27,6 +27,7 @@
   import Settings from '../modules/settings/Settings.svelte';
   import Walkthroughs from '../modules/help/Walkthroughs.svelte';
   import ProductPage from '../modules/product/ProductPage.svelte';
+  import InsightsPage from '../modules/insights/InsightsPage.svelte';
   import { router } from '../lib/router.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -222,6 +223,7 @@
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
       { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
       { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
+      { id: 'core.go-insights', title: 'Go to Insights', group: 'Navigate', keywords: 'insights reports daily weekly monthly summary analytics activity', run: () => router.go('insights') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle Right Panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
@@ -358,6 +360,8 @@
           <Walkthroughs />
         {:else if moduleName === 'product'}
           <ProductPage />
+        {:else if moduleName === 'insights'}
+          <InsightsPage />
         {:else}
           <AgentsPage />
         {/if}

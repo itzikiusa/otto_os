@@ -238,6 +238,28 @@
     }
   }
 
+  // ── Per-agent stop (manual override for a running/waiting agent) ────────────
+  let stoppingAgents = $state<Set<string>>(new Set());
+
+  async function stopAgent(analysisId: string, agentId: string, agentName: string): Promise<void> {
+    if (stoppingAgents.has(agentId)) return;
+    const next = new Set(stoppingAgents);
+    next.add(agentId);
+    stoppingAgents = next;
+    try {
+      await product.stopAgent(analysisId, agentId);
+      toasts.info(`Stopped ${agentName}`);
+      // Refresh so the stopped (errored) state shows immediately.
+      void pollOnce();
+    } catch (e) {
+      toasts.error('Stop failed', product.errMsg(e));
+    } finally {
+      const done = new Set(stoppingAgents);
+      done.delete(agentId);
+      stoppingAgents = done;
+    }
+  }
+
   // ── Findings parsing ──────────────────────────────────────────────────────────
 
   interface OpenQuestion { text: string; rationale: string; category: string; }
@@ -257,17 +279,6 @@
     try { return JSON.parse(json) as Findings; } catch { return null; }
   }
 
-  function statusClass(status: string): string {
-    switch (status) {
-      case 'done':    return 'pill-done';
-      case 'error':   return 'pill-error';
-      case 'running': return 'pill-running';
-      case 'partial': return 'pill-partial';
-      case 'waiting': return 'pill-waiting';
-      default:        return 'pill-pending';
-    }
-  }
-
   function toggleCollapse(key: string): void {
     collapsed = { ...collapsed, [key]: !collapsed[key] };
   }
@@ -275,10 +286,6 @@
   function fmtDate(s: string | null): string {
     if (!s) return '';
     try { return new Date(s).toLocaleString(); } catch { return s; }
-  }
-
-  function shortId(id: string): string {
-    return id.slice(0, 8);
   }
 
   // Separate summarizer agent from regular lens agents
@@ -410,20 +417,20 @@
           <div class="section-head">Synthesized Summary</div>
           {#if summarizerAgent}
             <div class="summarizer-badge">
-              <span class="pill {statusClass(summarizerAgent.status)}">{summarizerAgent.status}</span>
+              <span class="rp-status-pill rp-status-{summarizerAgent.status}">{summarizerAgent.status}</span>
               {#if summarizerAgent.session_id}
                 <button
-                  class="open-link"
+                  class="btn small ghost"
                   onclick={() => toggleTerminal(summarizerAgent!.session_id!)}
                   title="Open summarizer session"
                 >
-                  {openTerminals.has(summarizerAgent.session_id) ? 'Hide' : 'Open'} session: {shortId(summarizerAgent.session_id)}
+                  {openTerminals.has(summarizerAgent.session_id) ? 'Hide' : 'Open'} session
                 </button>
               {/if}
             </div>
           {/if}
           {#if summarizerAgent?.session_id && openTerminals.has(summarizerAgent.session_id)}
-            <div class="inline-term">
+            <div class="rp-term">
               {#key summarizerAgent.session_id}
                 <Terminal sessionId={summarizerAgent.session_id} forceDark />
               {/key}
@@ -433,69 +440,77 @@
         </section>
       {/if}
 
-      <!-- Agent progress rows -->
-      <section class="agents-section card">
+      <!-- Agent progress rows — mirrors the PR review ReviewAgents card layout. -->
+      <section class="agents-section">
         <div class="agents-header">
           <span class="section-head">Agents</span>
-          <span class="pill {statusClass(analysisStatus)}">
+          <span class="rp-status-pill rp-status-{analysisStatus}">
             {#if analysisStatus === 'running' || analysisStatus === 'waiting'}
               <span class="spinner-xs"></span>
             {/if}
             {analysisStatus}
           </span>
         </div>
-        {#each currentAgents as agent (agent.id)}
-          {@const isLens = agent !== summarizerAgent}
-          {@const isRetrying = retryingAgents.has(agent.id)}
-          <div class="agent-row">
-            <div class="agent-info">
-              <span class="agent-name">{agent.name || agent.skill}</span>
-              <span class="agent-meta">{agent.provider}{agent.model ? ` / ${agent.model}` : ''}</span>
-            </div>
-            <div class="agent-right">
-              {#if agent.session_id}
-                <button
-                  class="open-link"
-                  onclick={() => toggleTerminal(agent.session_id!)}
-                  title="Open agent session"
-                >
-                  {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'} {shortId(agent.session_id)}
-                </button>
-              {/if}
-              {#if isLens && (agent.status === 'error' || agent.status === 'done')}
-                <button
-                  class="btn-retry"
-                  disabled={isRetrying}
-                  onclick={() => retryAgent(currentAnalysis!.id, agent.id, agent.name || agent.skill)}
-                  title="Re-run this agent"
-                >
-                  {isRetrying ? 'Retrying…' : 'Retry'}
-                </button>
-              {/if}
-              <span class="pill {statusClass(agent.status)}">
-                {#if agent.status === 'running' || agent.status === 'waiting'}
-                  <span class="spinner-xs"></span>
+        <div class="rp-agents">
+          {#each currentAgents as agent (agent.id)}
+            {@const isLens = agent !== summarizerAgent}
+            {@const isRetrying = retryingAgents.has(agent.id)}
+            <div class="rp-agent card">
+              <div class="rp-agent-top">
+                <span class="rp-agent-name">{agent.name || agent.skill}</span>
+                <span class="rp-agent-chip">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</span>
+                <span class="grow"></span>
+                {#if agent.session_id}
+                  <button class="btn small ghost" onclick={() => toggleTerminal(agent.session_id!)}>
+                    {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
+                  </button>
                 {/if}
-                {agent.status}
-              </span>
+                {#if isLens && (agent.status === 'error' || agent.status === 'done')}
+                  <button
+                    class="btn small ghost"
+                    disabled={isRetrying}
+                    onclick={() => retryAgent(currentAnalysis!.id, agent.id, agent.name || agent.skill)}
+                    title="Re-run this agent"
+                  >
+                    {isRetrying ? 'Retrying…' : 'Retry'}
+                  </button>
+                {/if}
+                {#if agent.status === 'running' || agent.status === 'waiting'}
+                  <button
+                    class="btn small ghost"
+                    disabled={stoppingAgents.has(agent.id)}
+                    onclick={() => stopAgent(currentAnalysis!.id, agent.id, agent.name || agent.skill)}
+                    title="Stop this agent"
+                  >
+                    {stoppingAgents.has(agent.id) ? 'Stopping…' : 'Stop'}
+                  </button>
+                {/if}
+                <span class="rp-status-pill rp-status-{agent.status}">
+                  {#if agent.status === 'running' || agent.status === 'waiting'}
+                    <span class="spinner-xs"></span>
+                  {/if}
+                  {agent.status}
+                </span>
+              </div>
+              {#if agent.error && agent.status === 'error' && !isLens}
+                <p class="rp-agent-note error-note">{agent.error}</p>
+              {/if}
+              {#if agent.status === 'waiting'}
+                <p class="rp-agent-waiting">
+                  ⚠ This agent looks blocked on input. Click <strong>Open</strong> to view its
+                  session and respond (e.g. approve folder access).
+                </p>
+              {/if}
+              {#if agent.session_id && openTerminals.has(agent.session_id)}
+                <div class="rp-term">
+                  {#key agent.session_id}
+                    <Terminal sessionId={agent.session_id} forceDark />
+                  {/key}
+                </div>
+              {/if}
             </div>
-          </div>
-          {#if agent.error && agent.status === 'error' && !isLens}
-            <p class="agent-note error-note">{agent.error}</p>
-          {/if}
-          {#if agent.status === 'waiting'}
-            <p class="agent-waiting">
-              This agent looks blocked on input. Click <strong>Open</strong> to view its session and respond.
-            </p>
-          {/if}
-          {#if agent.session_id && openTerminals.has(agent.session_id)}
-            <div class="inline-term">
-              {#key agent.session_id}
-                <Terminal sessionId={agent.session_id} forceDark />
-              {/key}
-            </div>
-          {/if}
-        {/each}
+          {/each}
+        </div>
       </section>
 
       <!-- Per-lens findings -->
@@ -509,16 +524,16 @@
                 <div class="findings-right">
                   {#if agent.session_id}
                     <button
-                      class="open-link"
+                      class="btn small ghost"
                       onclick={() => toggleTerminal(agent.session_id!)}
                       title="Open session"
                     >
-                      {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'} {shortId(agent.session_id)}
+                      {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
                     </button>
                   {/if}
                   {#if currentAnalysis}
                     <button
-                      class="btn-retry"
+                      class="btn small ghost"
                       disabled={retryingAgents.has(agent.id)}
                       onclick={() => retryAgent(currentAnalysis!.id, agent.id, agent.name || agent.skill)}
                       title="Re-run this agent"
@@ -526,12 +541,12 @@
                       {retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}
                     </button>
                   {/if}
-                  <span class="pill pill-done">done</span>
+                  <span class="rp-status-pill rp-status-done">done</span>
                 </div>
               </div>
 
               {#if agent.session_id && openTerminals.has(agent.session_id)}
-                <div class="inline-term">
+                <div class="rp-term">
                   {#key agent.session_id}
                     <Terminal sessionId={agent.session_id} forceDark />
                   {/key}
@@ -683,16 +698,16 @@
               <div class="findings-right">
                 {#if agent.session_id}
                   <button
-                    class="open-link"
+                    class="btn small ghost"
                     onclick={() => toggleTerminal(agent.session_id!)}
                     title="Open session"
                   >
-                    {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'} {shortId(agent.session_id)}
+                    {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
                   </button>
                 {/if}
                 {#if currentAnalysis}
                   <button
-                    class="btn-retry"
+                    class="btn small ghost"
                     disabled={retryingAgents.has(agent.id)}
                     onclick={() => retryAgent(currentAnalysis!.id, agent.id, agent.name || agent.skill)}
                     title="Re-run this agent"
@@ -700,11 +715,11 @@
                     {retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}
                   </button>
                 {/if}
-                <span class="pill pill-error">error</span>
+                <span class="rp-status-pill rp-status-error">error</span>
               </div>
             </div>
             {#if agent.session_id && openTerminals.has(agent.session_id)}
-              <div class="inline-term">
+              <div class="rp-term">
                 {#key agent.session_id}
                   <Terminal sessionId={agent.session_id} forceDark />
                 {/key}
@@ -979,60 +994,101 @@
     letter-spacing: 0.06em;
     color: var(--text-dim);
   }
-  .agent-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 7px 0;
-    border-top: 1px solid var(--border);
-    gap: 12px;
-  }
-  .agent-info {
+  /* ── Agent cards — mirror PR review's ReviewAgents ────────────── */
+  .rp-agents {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    min-width: 0;
+    gap: 6px;
+    margin-top: 4px;
   }
-  .agent-name {
-    font-size: 13px;
-    font-weight: 500;
+  .rp-agent {
+    padding: 8px 12px;
+  }
+  .rp-agent-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .rp-agent-name {
+    font-size: 12.5px;
+    font-weight: 600;
     color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .agent-meta {
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-  .agent-right {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  /* Agent-card provider chip. NOTE: deliberately NOT named `.chip` — that class
+   * is the provider-selection chip in the Configure panel, and a second `.chip`
+   * rule here would override its `.chip-on` selected state (equal specificity,
+   * later in source order). */
+  .rp-agent-chip {
     flex-shrink: 0;
-  }
-
-  /* ── Open-session link ────────────────────────────────────────── */
-  .open-link {
-    background: none;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 9px;
+    border-radius: 999px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s);
+    background: transparent;
     color: var(--text-dim);
     font-size: 10.5px;
-    font-family: var(--font-mono, monospace);
-    padding: 1px 6px;
-    cursor: pointer;
-    transition: color 100ms, border-color 100ms;
+    font-weight: 500;
     white-space: nowrap;
   }
-  .open-link:hover {
+  .grow {
+    flex: 1;
+  }
+  .rp-agent-note {
+    margin: 4px 0 0;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    line-height: 1.4;
+  }
+  .rp-agent-note.error-note {
+    color: #b91c1c;
+    font-family: var(--font-mono, monospace);
+  }
+  .rp-agent-waiting {
+    margin: 6px 0 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: #b07d00;
+  }
+
+  /* ── Shared small button — mirror PR review's .btn.small.ghost ── */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: var(--radius-s);
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    transition: color 100ms, border-color 100ms, background 100ms;
+    white-space: nowrap;
+  }
+  .btn.small {
+    height: 22px;
+    padding: 0 9px;
+    font-size: 11px;
+  }
+  .btn.ghost {
+    color: var(--text-dim);
+  }
+  .btn.ghost:hover:not(:disabled) {
     color: var(--accent);
     border-color: var(--accent);
   }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 
-  /* ── Inline terminal ──────────────────────────────────────────── */
-  .inline-term {
-    height: 320px;
+  /* ── Inline terminal — mirror PR review's .rp-term ────────────── */
+  .rp-term {
+    height: 360px;
     margin: 8px 0 2px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m, 6px);
@@ -1040,39 +1096,42 @@
     background: #1b1b1b;
   }
 
-  /* ── Status pills ─────────────────────────────────────────────── */
-  .pill {
+  /* ── Status pills — mirror PR review's .rp-status-* ───────────── */
+  .rp-status-pill {
     flex-shrink: 0;
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 700;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 2px 8px;
-    border-radius: 999px;
+    padding: 2px 6px;
+    border-radius: var(--radius-s, 4px);
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
   }
-  .pill-done {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-  }
-  .pill-running {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .pill-error {
-    background: color-mix(in srgb, #ef4444 18%, transparent);
-    color: #b91c1c;
-  }
-  .pill-partial {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
-  }
-  .pill-pending {
-    background: color-mix(in srgb, var(--text-dim) 15%, transparent);
+  .rp-status-pending {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);
   }
-  .pill-waiting {
+  .rp-status-running {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+  }
+  .rp-status-waiting {
     background: color-mix(in srgb, #e0a000 20%, transparent);
     color: #b07d00;
+  }
+  .rp-status-done {
+    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 15%, transparent);
+    color: var(--status-idle, #3a8c3a);
+  }
+  .rp-status-error {
+    background: color-mix(in srgb, var(--status-exited, #ef4444) 15%, transparent);
+    color: var(--status-exited, #b91c1c);
+  }
+  .rp-status-partial {
+    background: color-mix(in srgb, #f59e0b 18%, transparent);
+    color: #b45309;
   }
 
   /* ── Findings card ────────────────────────────────────────────── */
@@ -1231,30 +1290,6 @@
     font-family: var(--font-mono, monospace);
   }
 
-  /* ── Retry button (mirrors ReviewAgents' btn small ghost) ─────── */
-  .btn-retry {
-    height: 22px;
-    padding: 0 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: color 100ms, border-color 100ms;
-    flex-shrink: 0;
-  }
-  .btn-retry:hover:not(:disabled) {
-    color: var(--accent);
-    border-color: var(--accent);
-  }
-  .btn-retry:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   /* ── Spinner (mirrors ReviewAgents) ───────────────────────────── */
   .spinner-xs {
     display: inline-block;
@@ -1271,25 +1306,6 @@
     to { transform: rotate(360deg); }
   }
 
-  /* ── Agent note / waiting ─────────────────────────────────────── */
-  .agent-note {
-    margin: 2px 0 4px;
-    font-size: 11.5px;
-    color: var(--text-dim);
-    line-height: 1.4;
-    padding-left: 2px;
-  }
-  .agent-note.error-note {
-    color: #b91c1c;
-    font-family: var(--font-mono, monospace);
-  }
-  .agent-waiting {
-    margin: 4px 0 4px;
-    font-size: 11.5px;
-    line-height: 1.45;
-    color: #b07d00;
-    padding-left: 2px;
-  }
 
   /* ── Suggested learnings discoverability hint ────────────────── */
   .sl-hint {

@@ -268,9 +268,29 @@ async fn poll_story(
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
 
-    let reconcile_result = orchestrator
-        .run_agent(&prompt, &cwd, None, RECONCILE_TIMEOUT)
-        .await;
+    // Retry the one-shot reconcile up to 3 attempts on error (transient provider
+    // / tool failures shouldn't lose a watch cycle), with linear backoff.
+    let reconcile_result = {
+        let mut attempt: u32 = 0;
+        loop {
+            match orchestrator
+                .run_agent(&prompt, &cwd, None, RECONCILE_TIMEOUT)
+                .await
+            {
+                Ok(out) => break Ok(out),
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= 3 {
+                        break Err(e);
+                    }
+                    warn!(
+                        "story watcher: reconcile attempt {attempt} failed for {story_id}: {e}; retrying"
+                    );
+                    tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
+                }
+            }
+        }
+    };
 
     let recommended_next_step = match reconcile_result {
         Err(e) => {

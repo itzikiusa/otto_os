@@ -39,8 +39,11 @@
   // Tag filter state
   let activeTagFilter = $state<string | null>(null);
 
-  /** Parse csv tags → deduplicated, trimmed, non-empty array. */
-  function parseTags(csv: string): string[] {
+  /** Parse csv tags → deduplicated, trimmed, non-empty array.
+   *  Null-safe: a missing/garbage `tags` value must never throw, or it would
+   *  break the `allTags`/`filteredStories` deriveds and freeze the whole page. */
+  function parseTags(csv: string | null | undefined): string[] {
+    if (!csv) return [];
     return [...new Set(csv.split(',').map((t) => t.trim()).filter(Boolean))];
   }
 

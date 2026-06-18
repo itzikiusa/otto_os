@@ -215,6 +215,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         usage: Arc::clone(&usage),
         product,
         product_repo,
+        product_agent_cancels: otto_server::product_run::new_cancel_registry(),
     };
 
     // Restore sessions from the previous daemon run: resumable agent
@@ -424,6 +425,22 @@ async fn run(cfg: Config) -> Result<(), String> {
     CredentialMonitor::new(ctx.clone()).spawn();
     spawn_session_event_listener(ctx.clone());
     tracing::info!("credential monitor + session-event notices started");
+
+    // --- Orphan reaper: auto-resume analysis agents stranded by a restart ---
+    // Runs once at startup; any analysis agent still 'running'/'waiting' has no
+    // surviving task, so it is re-run (capped) or marked errored + notified.
+    tokio::spawn(otto_server::product_run::reap_orphaned_agents_on_startup(
+        ctx.clone(),
+    ));
+
+    // --- Insights scheduler: opt-in, catch-up usage reports ---
+    // Background supervisor that ticks ~hourly and, for each ENABLED cadence
+    // (daily/weekly/monthly — all default OFF), runs the `insights` skill for the
+    // most-recent missed period iff it has no report yet. Runs the due-check on
+    // startup (catch-up after the app was closed), then hourly.
+    let _insights_scheduler_handle =
+        otto_server::insights::InsightsScheduler::new(ctx.clone()).start();
+    tracing::info!("insights scheduler started");
 
     // --- Usage tracking + system metrics (embedded ClickHouse) ---
     // The recorder mines usage from the activity-trail event stream; the sampler

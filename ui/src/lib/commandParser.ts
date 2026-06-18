@@ -141,3 +141,63 @@ export function parseCommand(input: string): ActionPlan | null {
 
   return null;
 }
+
+// ── Close sessions by on-screen position ─────────────────────────────────────
+
+const CLOSE_VERBS = /\b(close|kill|end|stop|terminate|quit|remove|exit|shut)\b/;
+const SESSION_NOUN =
+  /\b(session|sessions|pane|panes|tab|tabs|terminal|terminals|window|windows|agent|agents)\b/;
+const PERMANENT_VERBS = /\b(kill|delete|destroy)\b/;
+const PLACE_WORDS = /\b(place|places|position|positions|slot|slots|number|no)\b/;
+
+export interface CloseRequest {
+  /** 1-based positions in the current layout (empty when `all`). */
+  positions: number[];
+  /** Close every visible session. */
+  all: boolean;
+  /** Permanently delete (kill) instead of archive (recoverable). */
+  permanent: boolean;
+}
+
+/** Collect 1-based positions from text: standalone numbers + ranges ("1-3"). */
+function extractPositions(text: string): number[] {
+  const out = new Set<number>();
+  const rangeRe = /(\d+)\s*(?:-|–|—|to|through|thru)\s*(\d+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = rangeRe.exec(text)) !== null) {
+    const a = parseInt(m[1], 10);
+    const b = parseInt(m[2], 10);
+    if (a >= 1 && b >= a && b - a < 64) for (let i = a; i <= b; i++) out.add(i);
+  }
+  for (const tok of text.match(/\d+/g) ?? []) {
+    const n = parseInt(tok, 10);
+    if (n >= 1 && n <= 64) out.add(n);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/**
+ * Parse a "close sessions by position" request — e.g. "close sessions 1,2",
+ * "kill pane 3", "close sessions 1-3", "close all sessions". Positions are the
+ * sessions' on-screen places (place 1, place 2, …), resolved by the caller against
+ * the current layout. Returns null when it isn't clearly a close request, so the
+ * caller falls through to spawn/broadcast/AI.
+ */
+export function parseClose(input: string): CloseRequest | null {
+  const text = normalize(input);
+  if (!CLOSE_VERBS.test(text)) return null;
+  const hasNoun = SESSION_NOUN.test(text);
+  const permanent = PERMANENT_VERBS.test(text);
+
+  if (/\b(all|every|everything|everyone)\b/.test(text) && hasNoun) {
+    return { positions: [], all: true, permanent };
+  }
+
+  const positions = extractPositions(text);
+  // Require a session noun (so "close the modal"/"stop the build" don't match)
+  // or an explicit place/position keyword.
+  if (positions.length > 0 && (hasNoun || PLACE_WORDS.test(text))) {
+    return { positions, all: false, permanent };
+  }
+  return null;
+}

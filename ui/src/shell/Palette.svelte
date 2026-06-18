@@ -9,7 +9,7 @@
     OrchestrateResp,
   } from '../lib/api/types';
   import { registry, type Command } from '../lib/commands.svelte';
-  import { parseCommand } from '../lib/commandParser';
+  import { parseCommand, parseClose, type CloseRequest } from '../lib/commandParser';
   import { fuzzyMatch } from '../lib/fuzzy';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -153,6 +153,15 @@
       return;
     }
 
+    // Close-by-position is purely client-side (it needs the on-screen layout),
+    // so handle it before anything else: "close sessions 1,2" → close the panes
+    // in place 1 and place 2.
+    const closeReq = parseClose(englishText);
+    if (closeReq) {
+      await closeByPosition(closeReq);
+      return;
+    }
+
     // Deterministic first: common intents ("open 2 claude sessions",
     // "broadcast run the tests") execute instantly with no LLM and no
     // confirmation step. Only fall through to the AI planner when this
@@ -185,6 +194,45 @@
       optimizedText = resp.optimized_text;
     } catch (e) {
       toasts.error('Orchestrate failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Close sessions by their on-screen position (place 1, 2, …). The visible
+   *  layout order is how the user counts: the tiled grid when tiled, else the
+   *  side-by-side panes. "close" archives (recoverable); "kill/delete" removes. */
+  async function closeByPosition(req: CloseRequest): Promise<void> {
+    const order: string[] =
+      ws.viewMode === 'tiled' && !ws.maximizedId
+        ? ws.mainSessions.map((s) => s.id)
+        : ws.panes.filter((id) => ws.sessions.some((s) => s.id === id));
+
+    const ids = req.all
+      ? order.slice()
+      : req.positions.map((p) => order[p - 1]).filter((id): id is string => !!id);
+
+    if (ids.length === 0) {
+      toasts.warn(
+        'Nothing to close',
+        req.all ? 'No open sessions.' : `No session at position ${req.positions.join(', ')}.`,
+      );
+      return;
+    }
+
+    busy = true;
+    try {
+      for (const id of ids) {
+        if (req.permanent) await ws.killSession(id);
+        else await ws.archiveSession(id);
+      }
+      if (req.permanent) {
+        toasts.success('Sessions killed', `${ids.length} session${ids.length === 1 ? '' : 's'} removed`);
+      }
+      close();
+      englishText = '';
+    } catch (e) {
+      toasts.error('Close failed', e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
     }

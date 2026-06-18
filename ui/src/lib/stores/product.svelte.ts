@@ -108,9 +108,13 @@ class ProductStore {
 
   async importStory(req: ImportStoryReq): Promise<ProductStory> {
     const wsId = this.wsId();
-    const story = await api.post<ProductStory>(`/workspaces/${wsId}/product/stories`, req);
-    this.stories = [story, ...this.stories];
-    return story;
+    // The endpoint returns a ProductStoryDetail wrapper ({ story, source, counts }),
+    // not a bare ProductStory — same shape as the drafts endpoint. Unwrap `.story`
+    // so callers get a real id (reading `.id` off the wrapper yields undefined,
+    // which made the import dialog throw "No story selected" after a successful import).
+    const detail = await api.post<ProductStoryDetail>(`/workspaces/${wsId}/product/stories`, req);
+    this.stories = [detail.story, ...this.stories];
+    return detail.story;
   }
 
   async select(id: string): Promise<void> {
@@ -279,6 +283,10 @@ class ProductStore {
 
   async retryAgent(analysisId: string, agentId: string): Promise<void> {
     await api.post(`/product/analyses/${analysisId}/agents/${agentId}/retry`);
+  }
+
+  async stopAgent(analysisId: string, agentId: string): Promise<void> {
+    await api.post(`/product/analyses/${analysisId}/agents/${agentId}/stop`);
   }
 
   // ── Questions ──────────────────────────────────────────────────────────────

@@ -242,6 +242,11 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             "/product/analyses/{aid}/agents/{agent_id}/retry",
             post(retry_analysis_agent),
         )
+        // Per-agent stop: kill a running/waiting analysis agent on demand.
+        .route(
+            "/product/analyses/{aid}/agents/{agent_id}/stop",
+            post(stop_analysis_agent),
+        )
 }
 
 async fn orchestrate(
@@ -733,6 +738,43 @@ async fn retry_analysis_agent(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// `POST /product/analyses/{aid}/agents/{agent_id}/stop` — stop a running/waiting
+/// analysis agent on demand. Trips its cancel flag (so the recovery loop does NOT
+/// treat the kill as a failure and retry), kills the live session, and marks the
+/// agent errored ("stopped by user"). Idempotent.
+async fn stop_analysis_agent(
+    Path((aid, agent_id)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<StatusCode> {
+    let analysis = ctx.product_repo.get_analysis(&aid).await.map_err(ApiError)?;
+    let story = ctx
+        .product_repo
+        .get_story(&analysis.story_id)
+        .await
+        .map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
+
+    // Signal the in-flight recovery loop FIRST so the kill below is seen as
+    // intentional (no auto-retry).
+    crate::product_run::signal_cancel(&ctx.product_agent_cancels, &agent_id);
+
+    // Kill the current live session, if any.
+    if let Ok(agent) = ctx.product_repo.get_analysis_agent(&agent_id).await {
+        if let Some(sid) = agent.session_id.as_ref() {
+            let _ = ctx.manager.kill_session(sid).await;
+        }
+    }
+
+    // Mark terminal so the UI reflects it immediately.
+    let _ = ctx
+        .product_repo
+        .set_agent_status(&agent_id, "error", None, Some("stopped by user"), true)
+        .await;
+
+    Ok(StatusCode::ACCEPTED)
+}
+
 /// Per-request plan executor scoped to one workspace and acting user.
 struct ExecHelper {
     ctx: ServerCtx,
@@ -1180,7 +1222,7 @@ async fn run_review_core(
             &prompt,
         );
         set.spawn(async move {
-            let res = crate::review_session::run_agent_session(
+            let res = crate::review_session::run_agent_session_with_recovery(
                 &manager,
                 &reviews,
                 &states,
@@ -1563,7 +1605,7 @@ async fn retry_review_agent(
     let reviews = ctx.reviews_store.clone();
     let review_id_bg = review_id.clone();
     tokio::spawn(async move {
-        crate::review_session::run_agent_session(
+        crate::review_session::run_agent_session_with_recovery(
             &manager, &reviews, &states, &workspace, &review_user, &provider, &cwd, &review_id_bg,
             index, &prompt, timeout,
         )
@@ -2664,6 +2706,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_improve::router::<ServerCtx>(),
         otto_context::router::<ServerCtx>(),
         otto_skills::http::router::<ServerCtx>(),
+        crate::insights::routes(),
         orchestrator_routes(),
         db_explorer_routes(),
         pr_review_routes(),

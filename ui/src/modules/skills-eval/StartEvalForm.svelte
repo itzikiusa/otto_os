@@ -294,6 +294,12 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+    /* The parent `.se-main` is overflow:hidden (other views self-scroll), so the
+       form must self-scroll too — otherwise the lower validations + the Run
+       button are clipped and unreachable. Mirrors RunDetail/CompareView roots. */
+    height: 100%;
+    overflow-y: auto;
+    box-sizing: border-box;
   }
   h2 {
     margin: 0;
@@ -315,6 +321,15 @@
     display: grid;
     grid-template-columns: 1fr 110px 110px 1fr;
     gap: 12px;
+    /* Bottom-align so the inputs line up even when a label wraps to two lines
+       (e.g. "Validation passes"). */
+    align-items: end;
+  }
+  .grid4 > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
   }
   .cost {
     font-size: 11.5px;

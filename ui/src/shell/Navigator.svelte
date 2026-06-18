@@ -318,6 +318,15 @@
         <span class="grow">Skills Evaluator</span>
       </button>
 
+      <button
+        class="nav-item"
+        class:active={router.module === 'insights'}
+        onclick={() => router.go('insights')}
+      >
+        <Icon name="gauge" size={14} />
+        <span class="grow">Insights</span>
+      </button>
+
       {#if auth.isRoot}
         <button
           class="nav-item"

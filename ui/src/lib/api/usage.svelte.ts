@@ -31,6 +31,12 @@ export interface SessionUsage {
   total_tokens: number;
   cost_usd: number;
   last_active: string;
+  /** Otto session title (pane name) — null for external sessions. */
+  title: string | null;
+  /** "review" | "product" | "channel" | "agent" | … — null for external. */
+  kind: string | null;
+  /** Human-readable workspace name — null for external. */
+  workspace_name: string | null;
 }
 
 export interface MetricPoint {
@@ -87,9 +93,17 @@ class UsageStore {
   metrics: MetricPoint[] = $state([]);
   /** Selected look-back window for usage rollups, in days. */
   days = $state(30);
+  /** When true, show only sessions that ran inside Otto (exclude the user's own
+   *  Claude/codex runs, recorded as "external"). */
+  ottoOnly = $state(true);
   loading = $state(false);
   installing = $state(false);
   saving = $state(false);
+
+  /** Query string shared by every summary fetch (window + scope). */
+  private summaryQuery(): string {
+    return `days=${this.days}&otto_only=${this.ottoOnly}`;
+  }
 
   async loadStatus(): Promise<void> {
     try {
@@ -106,7 +120,7 @@ class UsageStore {
       await this.loadStatus();
       if (this.status?.available) {
         const [summary, metrics] = await Promise.all([
-          api.get<UsageSummary>(`/usage/summary?days=${this.days}`),
+          api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`),
           api.get<MetricPoint[]>('/usage/metrics?minutes=180'),
         ]);
         this.summary = summary;
@@ -124,12 +138,21 @@ class UsageStore {
 
   async setDays(days: number): Promise<void> {
     this.days = days;
-    if (this.status?.available) {
-      try {
-        this.summary = await api.get<UsageSummary>(`/usage/summary?days=${days}`);
-      } catch (e) {
-        toasts.error('Could not load usage', errMsg(e));
-      }
+    await this.refreshSummary();
+  }
+
+  /** Toggle the Otto-only vs all-sessions view and reload. */
+  async setOttoOnly(ottoOnly: boolean): Promise<void> {
+    this.ottoOnly = ottoOnly;
+    await this.refreshSummary();
+  }
+
+  private async refreshSummary(): Promise<void> {
+    if (!this.status?.available) return;
+    try {
+      this.summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
+    } catch (e) {
+      toasts.error('Could not load usage', errMsg(e));
     }
   }
 

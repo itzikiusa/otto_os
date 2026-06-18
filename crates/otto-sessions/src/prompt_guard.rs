@@ -39,30 +39,53 @@ const SELECT_YES: &[u8] = b"1\r";
 /// tests in `otto-server/tests`; update here if a CLI changes its wording.
 fn approvals_for(provider: &str) -> &'static [Approval] {
     match provider {
-        "claude" => &[Approval {
-            needles: &["do you trust the files in this folder"],
-            keys: SELECT_YES,
-        }],
-        "codex" => &[Approval {
-            needles: &[
-                "do you trust the files in this folder",
-                "allow codex to work in this folder",
-                "trust this directory",
-            ],
-            keys: ENTER,
-        }],
-        "agy" => &[Approval {
-            needles: &[
-                "do you trust the files in this folder",
-                "trust this folder",
-                "allow access to this folder",
-                "grant access to this directory",
-            ],
-            keys: ENTER,
-        }],
+        "claude" => &[
+            Approval {
+                needles: &["do you trust the files in this folder"],
+                keys: SELECT_YES,
+            },
+            CONTINUE,
+        ],
+        "codex" => &[
+            Approval {
+                needles: &[
+                    "do you trust the files in this folder",
+                    "allow codex to work in this folder",
+                    "trust this directory",
+                ],
+                keys: ENTER,
+            },
+            CONTINUE,
+        ],
+        "agy" => &[
+            Approval {
+                needles: &[
+                    "do you trust the files in this folder",
+                    "trust this folder",
+                    "allow access to this folder",
+                    "grant access to this directory",
+                ],
+                keys: ENTER,
+            },
+            CONTINUE,
+        ],
         _ => &[],
     }
 }
+
+/// Shared "blocked, waiting for a keystroke" prompts that can stall an unattended
+/// session regardless of provider. Kept deliberately narrow — these exact phrases
+/// almost never appear in an agent's real streamed output, so accepting them with
+/// Enter is safe. Anything NOT matched here is caught by the analysis
+/// stuck-detector (idle → retry → notify), so no prompt hangs forever.
+const CONTINUE: Approval = Approval {
+    needles: &[
+        "press enter to continue",
+        "press any key to continue",
+        "press enter to retry",
+    ],
+    keys: ENTER,
+};
 
 /// Pure: does `screen` (the recent PTY output, already lowercased) contain a
 /// known approval prompt for `provider`? Returns the bytes that accept it.
@@ -235,6 +258,27 @@ mod tests {
         assert_eq!(detect_approval("claude", "the folder structure looks fine"), None);
         // A provider with no approval table never matches.
         assert_eq!(detect_approval("shell", "do you trust the files in this folder"), None);
+    }
+
+    #[test]
+    fn detects_shared_continue_prompts_per_provider() {
+        for p in ["claude", "codex", "agy"] {
+            assert_eq!(
+                detect_approval(p, "press enter to continue"),
+                Some(ENTER),
+                "provider {p} should accept a 'press enter to continue' prompt"
+            );
+            assert_eq!(
+                detect_approval(p, "  press any key to continue  "),
+                Some(ENTER),
+                "provider {p} should accept a 'press any key to continue' prompt"
+            );
+        }
+        // Conservative: ordinary prose mentioning 'continue' must NOT match.
+        assert_eq!(
+            detect_approval("claude", "i will continue analyzing the codebase"),
+            None
+        );
     }
 
     #[test]

@@ -233,7 +233,7 @@ impl UsageEngine {
     // ── Queries ──────────────────────────────────────────────────────────────
 
     /// Per-provider rollup over the last `days` (inclusive of today).
-    pub async fn provider_usage(&self, days: u32) -> Result<Vec<ProviderUsage>> {
+    pub async fn provider_usage(&self, days: u32, otto_only: bool) -> Result<Vec<ProviderUsage>> {
         self.rows(&format!(
             "SELECT provider,
                     count() AS events,
@@ -242,16 +242,17 @@ impl UsageEngine {
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd
              FROM usage_events
-             WHERE event_date >= today() - {since}
+             WHERE event_date >= today() - {since} {ws}
              GROUP BY provider
              ORDER BY total_tokens DESC, events DESC",
-            since = since(days)
+            since = since(days),
+            ws = ws_filter(otto_only)
         ))
         .await
     }
 
     /// Per-day rollup over the last `days`.
-    pub async fn daily_usage(&self, days: u32) -> Result<Vec<DailyUsage>> {
+    pub async fn daily_usage(&self, days: u32, otto_only: bool) -> Result<Vec<DailyUsage>> {
         self.rows(&format!(
             "SELECT toString(event_date) AS day,
                     count() AS events,
@@ -260,16 +261,17 @@ impl UsageEngine {
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd
              FROM usage_events
-             WHERE event_date >= today() - {since}
+             WHERE event_date >= today() - {since} {ws}
              GROUP BY event_date
              ORDER BY event_date",
-            since = since(days)
+            since = since(days),
+            ws = ws_filter(otto_only)
         ))
         .await
     }
 
     /// Top sessions by token volume over the last `days`.
-    pub async fn session_usage(&self, days: u32, limit: u32) -> Result<Vec<SessionUsage>> {
+    pub async fn session_usage(&self, days: u32, limit: u32, otto_only: bool) -> Result<Vec<SessionUsage>> {
         self.rows(&format!(
             "SELECT session_id,
                     any(workspace_id) AS workspace_id,
@@ -279,21 +281,26 @@ impl UsageEngine {
                     round(sum(cost_usd), 6) AS cost_usd,
                     toString(max(ts)) AS last_active
              FROM usage_events
-             WHERE event_date >= today() - {since}
+             WHERE event_date >= today() - {since} {ws}
              GROUP BY session_id
              ORDER BY total_tokens DESC, events DESC
              LIMIT {limit}",
             since = since(days),
+            ws = ws_filter(otto_only),
             limit = limit.max(1)
         ))
         .await
     }
 
-    /// Full dashboard payload for the window.
-    pub async fn summary(&self, days: u32) -> Result<UsageSummary> {
-        let providers = self.provider_usage(days).await.unwrap_or_default();
-        let daily = self.daily_usage(days).await.unwrap_or_default();
-        let sessions = self.session_usage(days, SESSION_LIMIT).await.unwrap_or_default();
+    /// Full dashboard payload for the window. `otto_only` excludes externally
+    /// recorded (non-Otto) sessions.
+    pub async fn summary(&self, days: u32, otto_only: bool) -> Result<UsageSummary> {
+        let providers = self.provider_usage(days, otto_only).await.unwrap_or_default();
+        let daily = self.daily_usage(days, otto_only).await.unwrap_or_default();
+        let sessions = self
+            .session_usage(days, SESSION_LIMIT, otto_only)
+            .await
+            .unwrap_or_default();
 
         let total_events = providers.iter().map(|p| p.events).sum();
         let total_input_tokens = providers.iter().map(|p| p.input_tokens).sum();
@@ -453,6 +460,16 @@ fn ndjson(events: &[UsageEvent]) -> String {
 /// today): N days → offset N-1.
 fn since(days: u32) -> u32 {
     days.max(1) - 1
+}
+
+/// SQL fragment that, when `otto_only`, excludes externally-recorded (non-Otto)
+/// sessions from a usage aggregation. Empty otherwise (count everything).
+fn ws_filter(otto_only: bool) -> String {
+    if otto_only {
+        format!("AND workspace_id != '{}'", crate::EXTERNAL_WORKSPACE)
+    } else {
+        String::new()
+    }
 }
 
 /// Recursive on-disk size of `dir` in bytes (best-effort).

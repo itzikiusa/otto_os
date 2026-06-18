@@ -1752,3 +1752,47 @@ export interface WorkflowTemplate {
   icon: string;
   graph: WorkflowGraph;
 }
+
+// ---------------------------------------------------------------------------
+// Insights — scheduled (opt-in, catch-up) HTML reports.
+// ---------------------------------------------------------------------------
+
+/** Which scheduled insight reports are turned on. All default to false (opt-in). */
+export interface InsightsConfig {
+  /** Previous day, generated the next morning the app is open. */
+  daily: boolean;
+  /** Previous week (Sunday), catch-up if the app was closed. */
+  weekly: boolean;
+  /** Previous month (1st), catch-up if the app was closed. */
+  monthly: boolean;
+}
+
+export type InsightKind = 'daily' | 'weekly' | 'monthly' | 'adhoc';
+
+/** One generated insight report. `html_path` points at the rendered HTML. */
+export interface InsightReport {
+  kind: InsightKind;
+  /** ISO start of the period the report covers. */
+  period_start: string;
+  /** ISO end of the period the report covers. */
+  period_end: string;
+  /** On-disk path to the rendered HTML report. */
+  html_path: string;
+  /** A ≤10-sentence plain-text summary of the report. */
+  summary: string;
+  /** ISO timestamp the report was created. */
+  created_at: string;
+}
+
+/** The period to run an ad-hoc insights report for. */
+export type InsightRunPeriod = 'day' | 'week' | 'month';
+
+export interface RunInsightsReq {
+  period: InsightRunPeriod;
+  /** How many periods back (0 = the most recent complete period). */
+  offset?: number;
+}
+
+export interface RunInsightsResp {
+  started: boolean;
+}

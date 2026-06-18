@@ -48,6 +48,8 @@ async fn save_config(ctx: &ServerCtx, cfg: &UsageConfig) -> Result<(), ApiError>
 pub struct WindowDays {
     /// Days of history to roll up (default 30).
     pub days: Option<u32>,
+    /// When true (default), exclude externally-recorded (non-Otto) sessions.
+    pub otto_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,7 +75,48 @@ pub async fn summary(
 ) -> ApiResult<Json<UsageSummary>> {
     require_root(&user)?;
     let days = q.days.unwrap_or(30).clamp(1, 3650);
-    Ok(Json(ctx.usage.summary(days).await.map_err(ApiError)?))
+    let otto_only = q.otto_only.unwrap_or(true);
+    let mut summary = ctx.usage.summary(days, otto_only).await.map_err(ApiError)?;
+    enrich_sessions(&ctx, &mut summary.sessions).await;
+    Ok(Json(summary))
+}
+
+/// Enrich top-session rows with the Otto session title (pane name), kind
+/// (review / product / channel / agent…), and workspace name — looked up from
+/// SQLite. External (non-Otto) sessions have no matching row and are left as-is.
+async fn enrich_sessions(ctx: &ServerCtx, sessions: &mut [otto_usage::SessionUsage]) {
+    let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
+    let mut ws_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for s in sessions.iter_mut() {
+        let Ok(sess) = repo.get(&s.session_id).await else {
+            continue; // external / unknown session
+        };
+        let title = sess.title.trim();
+        if !title.is_empty() {
+            s.title = Some(title.to_string());
+        }
+        s.kind = Some(session_kind_label(&sess));
+        let wsid = sess.workspace_id.clone();
+        if let Some(name) = ws_names.get(&wsid) {
+            s.workspace_name = Some(name.clone());
+        } else if let Ok(w) = ctx.workspaces.get(&wsid).await {
+            ws_names.insert(wsid, w.name.clone());
+            s.workspace_name = Some(w.name);
+        }
+    }
+}
+
+/// Derive a short usage-kind label for an Otto session: prefer the meta `source`
+/// tag set by the review/product/channel runners, else fall back to the session
+/// kind.
+fn session_kind_label(s: &otto_core::domain::Session) -> String {
+    if let Some(src) = s.meta.get("source").and_then(Value::as_str) {
+        return match src {
+            "product-analysis" => "product".to_string(),
+            other => other.to_string(), // "review", "channel"
+        };
+    }
+    format!("{:?}", s.kind).to_lowercase()
 }
 
 /// `GET /usage/metrics?minutes=N` — system metrics time-series (root).

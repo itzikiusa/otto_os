@@ -90,6 +90,11 @@ pub struct DailyUsage {
 }
 
 /// Per-session rollup over the window (top N by tokens).
+///
+/// The first fields come straight from ClickHouse. `title`/`kind`/`workspace_name`
+/// are enriched server-side from the SQLite `sessions`/`workspaces` tables for
+/// Otto-owned sessions (and stay `None` for external ones), so they are
+/// `#[serde(default)]` — ClickHouse never supplies them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionUsage {
     pub session_id: String,
@@ -99,6 +104,16 @@ pub struct SessionUsage {
     pub total_tokens: u64,
     pub cost_usd: f64,
     pub last_active: String,
+    /// Otto session title (pane name).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// What kind of Otto work this was: "review", "product", "channel", or the
+    /// session kind ("agent", "shell", …).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Human-readable workspace name (not the id).
+    #[serde(default)]
+    pub workspace_name: Option<String>,
 }
 
 /// One system-metrics sample, as returned to the dashboard time-series.

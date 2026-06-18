@@ -38,7 +38,7 @@ use std::time::Duration;
 use otto_state::{SessionsRepo, SqlitePool};
 use otto_usage::{
     estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta, CursorStore,
-    UsageEngine, UsageEvent,
+    UsageEngine, UsageEvent, EXTERNAL_WORKSPACE,
 };
 use tokio::task::JoinHandle;
 
@@ -48,9 +48,6 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(20);
 /// Default model label for Codex turns when the rollout file carries no model.
 /// `estimate_cost` prices this at the gpt tier (substring match on "codex").
 const CODEX_FALLBACK_MODEL: &str = "codex";
-
-/// Workspace id used when a transcript can't be attributed to an Otto session.
-const EXTERNAL_WORKSPACE: &str = "external";
 
 // ---------------------------------------------------------------------------
 // Public handle

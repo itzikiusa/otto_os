@@ -22,6 +22,8 @@ use otto_sessions::SessionManager;
 use otto_state::ReviewsRepo;
 use tokio::sync::Mutex;
 
+use crate::agent_run::{run_with_recovery, watch_for_result, FailReason, RunOutcome, WatchStatus};
+
 // Generous: several CLIs cold-start concurrently for one review, so claude can
 // take >30s to draw its TUI; injecting before it's ready loses the prompt.
 const TUI_STARTUP_WAIT: Duration = Duration::from_secs(40);
@@ -36,6 +38,15 @@ pub const FINDINGS_POLL: Duration = Duration::from_millis(1000);
 /// After this much silence with no findings yet, assume the agent may be
 /// blocked on a prompt the guard couldn't auto-accept and flag it "waiting".
 pub const WAITING_IDLE: Duration = Duration::from_secs(45);
+/// After this much TOTAL silence with no findings, treat the agent as stuck and
+/// fail fast so the recovery wrapper can kill + retry it — instead of waiting out
+/// the full grace `timeout`. Well past `WAITING_IDLE`, so a watching human still
+/// has a window to Open + respond before auto-retry kicks in.
+const STUCK_IDLE: Duration = Duration::from_secs(180);
+/// Total attempts (initial + retries) for a review agent before giving up.
+const MAX_REVIEW_ATTEMPTS: u32 = 3;
+/// Backoff before each review-agent retry.
+const REVIEW_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 
 /// Absolute temp path an agent writes its findings JSON to (unique per run).
 pub fn findings_path(review_id: &str, agent_index: usize) -> PathBuf {
@@ -131,37 +142,10 @@ pub async fn run_agent_session(
     agent_index: usize,
     base_prompt: &str,
     timeout: Duration,
-) -> AgentRunResult {
+) -> RunOutcome {
     let path = findings_path(review_id, agent_index);
     let _ = std::fs::remove_file(&path); // clear any stale file
     let prompt = augment_prompt(base_prompt, &path.to_string_lossy());
-
-    // Helper to mutate this agent's state then persist. `$f` is a closure
-    // `|s: &mut ReviewAgentState| { ... }` applied to the live row.
-    //
-    // Persistence writes ONLY this agent's own array element (via
-    // `set_agent_at`), never the whole array. Review agents run concurrently and
-    // each persists its own state; rewriting the full array would let a stale
-    // snapshot (taken before this agent flipped to "running") commit after a
-    // fresher one and revert other rows to "pending" with no session_id —
-    // making live agents show as PENDING and look as though the run is
-    // capped/stuck at a couple of agents.
-    macro_rules! update {
-        ($f:expr) => {{
-            let row = {
-                let mut g = states.lock().await;
-                g.get_mut(agent_index).map(|s| {
-                    ($f)(s);
-                    s.clone()
-                })
-            };
-            if let Some(row) = row {
-                let _ = reviews
-                    .set_agent_at(&review_id.to_string(), agent_index, &row)
-                    .await;
-            }
-        }};
-    }
 
     let meta = serde_json::json!({
         "source": "review",
@@ -179,18 +163,23 @@ pub async fn run_agent_session(
     let session = match manager.create(ws, &user.id, req, None).await {
         Ok(s) => s,
         Err(e) => {
-            update!(|s: &mut ReviewAgentState| {
-                s.status = "error".into();
-                s.note = format!("could not start: {e}").chars().take(120).collect();
-            });
-            return AgentRunResult { findings: Vec::new(), errored: true };
+            tracing::warn!("review_session: create session ({provider}): {e}");
+            return RunOutcome::failed(None, FailReason::CreateFailed);
         }
     };
     let sid = session.id.clone();
-    update!(|s: &mut ReviewAgentState| {
-        s.status = "running".into();
-        s.session_id = Some(sid.clone());
-    });
+    // Persist running + session_id immediately so the UI shows it live + Open
+    // works. Terminal (done/error) + findings persistence happens in the recovery
+    // wrapper, so intermediate failed attempts aren't recorded as terminal.
+    persist_agent(states, reviews, review_id, agent_index, {
+        let sid = sid.clone();
+        move |s: &mut ReviewAgentState| {
+            s.status = "running".into();
+            s.session_id = Some(sid);
+            s.note = String::new();
+        }
+    })
+    .await;
 
     // Inject the prompt once the TUI has drawn + settled, then confirm it
     // dispatched (re-sending Enter once if the first submit was dropped).
@@ -204,88 +193,132 @@ pub async fn run_agent_session(
         }
     }
 
-    // Watch for the findings file (or claude transcript), flagging "waiting"
-    // when it goes quiet without producing anything.
-    let deadline = Instant::now() + timeout;
-    let mut flagged_waiting = false;
-    let result = loop {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let findings = parse_findings(&text);
-            let _ = std::fs::remove_file(&path);
-            break AgentRunResult { findings, errored: false };
-        }
-        if provider == "claude" {
-            if let Some(psid) = session.provider_session_id.as_deref() {
-                let jsonl = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
-                if let Ok(raw) = std::fs::read_to_string(&jsonl) {
-                    if let Some(turn) = otto_orchestrator::claude_pty::completed_turn_text(&raw) {
-                        let findings = parse_findings(&turn);
-                        if !findings.is_empty() {
-                            break AgentRunResult { findings, errored: false };
-                        }
-                    }
+    // Watch via the shared runner (out-file / claude transcript; exit / stuck /
+    // timeout). It persists the waiting↔running transition; we never kill the
+    // session here so it stays openable.
+    watch_for_result(
+        manager,
+        &sid,
+        provider,
+        session.provider_session_id.as_deref(),
+        cwd,
+        &path,
+        timeout,
+        WAITING_IDLE,
+        STUCK_IDLE,
+        |t| !parse_findings(t).is_empty(),
+        |st| async move {
+            let (status, note) = match st {
+                WatchStatus::Waiting => {
+                    ("waiting", "looks blocked on input — Open it to respond".to_string())
                 }
-            }
-        }
+                WatchStatus::Resumed => ("running", String::new()),
+            };
+            persist_agent(states, reviews, review_id, agent_index, move |s: &mut ReviewAgentState| {
+                s.status = status.into();
+                s.note = note;
+            })
+            .await;
+        },
+    )
+    .await
+}
 
-        match manager.live_handle(&sid) {
-            Some(handle) => {
-                if handle.on_exit().borrow().is_some() {
-                    update!(|s: &mut ReviewAgentState| {
-                        s.status = "error".into();
-                        s.note = "session exited before writing findings".into();
-                    });
-                    break AgentRunResult { findings: Vec::new(), errored: true };
-                }
-                // Idle-with-no-findings → likely waiting for input.
-                let idle = handle.last_output_at().elapsed();
-                if idle >= WAITING_IDLE && !flagged_waiting {
-                    flagged_waiting = true;
-                    update!(|s: &mut ReviewAgentState| {
-                        s.status = "waiting".into();
-                        s.note = "looks blocked on input — Open it to respond".into();
-                    });
-                } else if idle < WAITING_IDLE && flagged_waiting {
-                    flagged_waiting = false;
-                    update!(|s: &mut ReviewAgentState| {
-                        s.status = "running".into();
-                        s.note = String::new();
-                    });
-                }
-            }
-            None => {
-                update!(|s: &mut ReviewAgentState| {
-                    s.status = "error".into();
-                    s.note = "session is no longer live".into();
-                });
-                break AgentRunResult { findings: Vec::new(), errored: true };
-            }
-        }
-
-        if Instant::now() >= deadline {
-            update!(|s: &mut ReviewAgentState| {
-                s.status = "error".into();
-                s.note = "timed out (grace period elapsed)".into();
-            });
-            break AgentRunResult { findings: Vec::new(), errored: true };
-        }
-        tokio::time::sleep(FINDINGS_POLL).await;
+/// Mutate this agent's state element then persist ONLY that element (never the
+/// whole array — concurrent agents each persist their own, and rewriting the full
+/// array would let a stale snapshot revert other rows to "pending").
+async fn persist_agent<F: FnOnce(&mut ReviewAgentState)>(
+    states: &SharedStates,
+    reviews: &ReviewsRepo,
+    review_id: &str,
+    agent_index: usize,
+    f: F,
+) {
+    let row = {
+        let mut g = states.lock().await;
+        g.get_mut(agent_index).map(|s| {
+            f(s);
+            s.clone()
+        })
     };
+    if let Some(row) = row {
+        let _ = reviews
+            .set_agent_at(&review_id.to_string(), agent_index, &row)
+            .await;
+    }
+}
 
-    // Record findings. We intentionally do NOT archive/kill the session: it
-    // stays live (hidden from the main grid via meta.source="review") so the
-    // user can still open + inspect its terminal after it finishes.
-    if !result.errored {
-        let findings = result.findings.clone();
+/// Map a run failure reason to the human note shown on the review agent row.
+fn review_error_note(reason: Option<FailReason>) -> String {
+    match reason {
+        Some(FailReason::Stuck) => "stuck — no output for ~3m",
+        Some(FailReason::Timeout) => "timed out (grace period elapsed)",
+        Some(FailReason::Exited) => "session exited before writing findings",
+        Some(FailReason::SessionGone) => "session is no longer live",
+        Some(FailReason::CreateFailed) => "could not start",
+        Some(FailReason::Stopped) => "stopped",
+        None => "unknown error",
+    }
+    .to_string()
+}
+
+/// Run a review agent with bounded auto-recovery: up to `MAX_REVIEW_ATTEMPTS`
+/// attempts, killing the prior stuck/failed session and backing off between
+/// tries. Mirrors the product analysis recovery wrapper. Returns the first
+/// successful result, or the last failure. (PR review agents are autonomous like
+/// analysis agents — unlike interactive chat sessions, which must NOT be
+/// auto-retried.)
+#[allow(clippy::too_many_arguments)]
+pub async fn run_agent_session_with_recovery(
+    manager: &Arc<SessionManager>,
+    reviews: &ReviewsRepo,
+    states: &SharedStates,
+    ws: &Workspace,
+    user: &User,
+    provider: &str,
+    cwd: &str,
+    review_id: &str,
+    agent_index: usize,
+    base_prompt: &str,
+    timeout: Duration,
+) -> AgentRunResult {
+    // Shared retry loop (kills the prior session + backs off between attempts).
+    let outcome = run_with_recovery(
+        manager,
+        MAX_REVIEW_ATTEMPTS,
+        &[REVIEW_RETRY_BACKOFF],
+        None, // PR review has no manual-Stop cancel flag
+        |_attempt| {
+            run_agent_session(
+                manager, reviews, states, ws, user, provider, cwd, review_id, agent_index,
+                base_prompt, timeout,
+            )
+        },
+    )
+    .await;
+
+    // Persist terminal state ONCE (parse findings from the final raw result).
+    if let Some(raw) = outcome.raw.as_deref() {
+        let findings = parse_findings(raw);
         let count = findings.len();
-        update!(|s: &mut ReviewAgentState| {
+        let persisted = findings.clone();
+        persist_agent(states, reviews, review_id, agent_index, move |s| {
             s.status = "done".into();
             s.note = format!("{count} finding{}", if count == 1 { "" } else { "s" });
             s.comment_count = count as u32;
-            s.findings = findings.clone();
-        });
+            s.findings = persisted;
+        })
+        .await;
+        AgentRunResult { findings, errored: false }
+    } else {
+        let note = review_error_note(outcome.reason);
+        persist_agent(states, reviews, review_id, agent_index, move |s| {
+            s.status = "error".into();
+            s.note = note;
+        })
+        .await;
+        AgentRunResult { findings: Vec::new(), errored: true }
     }
-    result
 }
 
 pub fn bracketed_paste(text: &str) -> Vec<u8> {

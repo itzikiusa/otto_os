@@ -50,6 +50,9 @@ pub struct ServerCtx {
     pub usage: Arc<otto_usage::UsageEngine>,
     pub product: std::sync::Arc<otto_product::ProductService>,
     pub product_repo: otto_state::ProductRepo,
+    /// Per-run cancellation flags for in-flight product analysis agents (manual
+    /// Stop). Mirrors `skill_eval_cancels`.
+    pub product_agent_cancels: crate::product_run::CancelRegistry,
 }
 
 impl ServerCtx {

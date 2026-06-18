@@ -54,10 +54,15 @@
     // "2026-06-16" → "06-16"
     return iso.length >= 10 ? iso.slice(5) : iso;
   }
-  function shortTime(iso: string): string {
-    // "2026-06-16 14:32:05.123" → "14:32"
-    const m = iso.match(/(\d{2}:\d{2})/);
-    return m ? m[1] : iso;
+  function fmtLastActive(iso: string): string {
+    // "2026-06-16 14:32:05.123" → "Jun 16, 14:32" (date matters: window is up to
+    // 180d, so time-only is ambiguous). Format the stored value directly to avoid
+    // a timezone shift.
+    const m = iso.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/);
+    if (!m) return iso;
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const mon = months[parseInt(m[2], 10) - 1] ?? m[2];
+    return `${mon} ${parseInt(m[3], 10)}, ${m[4]}`;
   }
 
   // ── Daily bar chart geometry ──────────────────────────────────────────────
@@ -93,6 +98,14 @@
     </div>
     <div class="grow"></div>
     {#if usage.status?.available}
+      <div class="seg" title="Scope: only sessions run inside Otto, or all Claude/codex usage on this machine">
+        <button class="seg-btn" class:active={usage.ottoOnly} onclick={() => usage.setOttoOnly(true)}>
+          Otto
+        </button>
+        <button class="seg-btn" class:active={!usage.ottoOnly} onclick={() => usage.setOttoOnly(false)}>
+          All
+        </button>
+      </div>
       <div class="seg">
         {#each WINDOWS as w (w.days)}
           <button class="seg-btn" class:active={usage.days === w.days} onclick={() => usage.setDays(w.days)}>
@@ -272,6 +285,7 @@
             <thead>
               <tr>
                 <th>Session</th>
+                <th>Workspace</th>
                 <th>Provider</th>
                 <th class="num">Events</th>
                 <th class="num">Tokens</th>
@@ -282,12 +296,19 @@
             <tbody>
               {#each usage.summary.sessions as s (s.session_id)}
                 <tr>
-                  <td class="mono ellip" title={s.session_id}>{s.session_id.slice(0, 12)}</td>
+                  <td title={s.session_id}>
+                    <div class="sess-top">
+                      <span class="mono">{s.session_id.slice(0, 12)}</span>
+                      {#if s.kind}<span class="kind-badge kind-{s.kind}">{s.kind}</span>{/if}
+                    </div>
+                    {#if s.title}<div class="sess-title ellip" title={s.title}>{s.title}</div>{/if}
+                  </td>
+                  <td class="dim ellip">{s.workspace_name ?? '—'}</td>
                   <td>{s.provider}</td>
                   <td class="num">{fmtNum(s.events)}</td>
                   <td class="num">{fmtNum(s.total_tokens)}</td>
                   <td class="num">{fmtCost(s.cost_usd)}</td>
-                  <td class="dim">{shortTime(s.last_active)}</td>
+                  <td class="dim">{fmtLastActive(s.last_active)}</td>
                 </tr>
               {/each}
             </tbody>
@@ -626,6 +647,44 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* Session cell: id + kind badge on top, title (pane name) below */
+  .sess-top {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .sess-title {
+    margin-top: 2px;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .kind-badge {
+    flex-shrink: 0;
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    color: var(--text-dim);
+  }
+  .kind-review {
+    background: color-mix(in srgb, #f59e0b 20%, transparent);
+    color: #b45309;
+  }
+  .kind-product {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    color: var(--accent);
+  }
+  .kind-channel {
+    background: color-mix(in srgb, var(--status-working, #4a9eff) 20%, transparent);
+    color: var(--status-working, #4a9eff);
   }
 
   .cfg-grid {
