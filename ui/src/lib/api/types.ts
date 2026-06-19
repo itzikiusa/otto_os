@@ -2196,3 +2196,19 @@ export interface MemoryGraphData {
   nodes: MemoryGraphNode[];
   edges: MemoryLink[];
 }
+
+export interface MemoryImportStats {
+  nodes: number;
+  edges: number;
+}
+
+export interface MemoryEntityGraph {
+  links: MemoryLink[];
+  neighbors: Memory[];
+}
+
+export interface IngestTextReq {
+  collection?: string;
+  path: string;
+  content: string;
+}
