@@ -1335,9 +1335,16 @@ export interface ContextPreviewResp {
 export interface ContextPreviewReq {
   /** Provider to preview; omit for both `claude` and `codex`. */
   provider?: string;
-  /** Override the active skill allow-list (omit ⇒ use stored config). */
+  /**
+   * Override the active skill allow-list. Omit the key to inherit the stored
+   * config; send explicit `null` to override to *all* library skills; send a
+   * list to use exactly those.
+   */
   skills?: string[] | null;
-  /** Override the active soul (omit ⇒ use stored config). */
+  /**
+   * Override the active soul. Omit the key to inherit the stored config; send
+   * explicit `null` to override to the global default; send a name to use it.
+   */
   soul?: string | null;
   /** Override the extra-context markdown (omit ⇒ use stored config). */
   extra_context_md?: string;

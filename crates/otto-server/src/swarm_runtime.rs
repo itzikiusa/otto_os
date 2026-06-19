@@ -135,9 +135,28 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         return Ok(());
     }
 
+    // Project the run-count budget across this tick. `budget_exceeded` above
+    // only checks the budget once, so without this a single tick could enqueue
+    // up to `cap` runs and overshoot `max_total_runs` by nearly the concurrency
+    // cap. Track the projected total as we schedule and stop when the next run
+    // would reach the ceiling. (Cost can't be projected — per-run cost isn't
+    // known until the turn completes — so the cost ceiling stays a tick-top gate.)
+    let mut projected_total_runs: Option<i64> = if swarm.max_total_runs.is_some() {
+        Some(repo.swarm_spend(swarm_id).await?.total_runs)
+    } else {
+        None
+    };
+
     for task in repo.ready_tasks(swarm_id).await? {
         if budget <= 0 {
             break;
+        }
+        // Stop scheduling once the projected run count would hit the budget, so
+        // a single tick can't overshoot `max_total_runs`.
+        if let (Some(max_runs), Some(projected)) = (swarm.max_total_runs, projected_total_runs) {
+            if projected >= max_runs {
+                break;
+            }
         }
         let Some(agent) = pick_agent(ctx, &swarm, &task).await else {
             continue;
@@ -157,7 +176,7 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
 
         let is_leader = has_reports(ctx, &swarm.id, &agent.id).await;
         let kind = if is_leader && !task.delegated { "planning" } else { "task" };
-        let run = repo
+        let run = match repo
             .create_run(NewRun {
                 swarm_id: swarm.id.clone(),
                 workspace_id: swarm.workspace_id.clone(),
@@ -167,8 +186,25 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
                 kind: kind.to_string(),
                 trigger: "coordinator".to_string(),
             })
-            .await?;
+            .await
+        {
+            Ok(run) => run,
+            Err(e) => {
+                // Don't abort the whole tick over one failed enqueue: roll the
+                // task back to `todo` (we just claimed it) so it isn't stranded
+                // in_progress, and let the rest of the batch proceed.
+                tracing::warn!(task = %task.id, error = %e, "swarm: create_run failed; reverting task to todo");
+                let _ = repo
+                    .update_task(&task.id, TaskPatch { status: Some("todo".into()), ..Default::default() })
+                    .await;
+                emit_task(ctx, &task.id).await;
+                continue;
+            }
+        };
         budget -= 1;
+        if let Some(projected) = projected_total_runs.as_mut() {
+            *projected += 1;
+        }
         swarm_run::emit_run(ctx, &run.id).await;
 
         let ctx2 = ctx.clone();

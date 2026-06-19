@@ -233,9 +233,11 @@ async fn seed_tasks(
         .repo_path
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    // Planning is structured-extraction work — run it on the fast/cheap model
+    // rather than the default, matching the other planner/recruiter paths.
     let reply = match ctx
         .orchestrator
-        .run_agent(&prompt, &cwd, None, Duration::from_secs(150))
+        .run_agent(&prompt, &cwd, Some("haiku"), Duration::from_secs(150))
         .await
     {
         Ok(r) => r,
@@ -365,7 +367,7 @@ pub async fn story_to_swarm(
         .await
         .map(|p| p.len() as i64)
         .unwrap_or(0);
-    let project = ctx
+    let project = match ctx
         .swarm_repo
         .create_project(NewProject {
             swarm_id: swarm.id.clone(),
@@ -379,7 +381,35 @@ pub async fn story_to_swarm(
             created_by: user.id.clone(),
         })
         .await
-        .map_err(ApiError)?;
+    {
+        Ok(project) => project,
+        // A concurrent hand-off won the race (unique `story_id`, migration 0037):
+        // stay idempotent by returning that already-linked project as-is.
+        Err(Error::Conflict(_)) => {
+            if let Ok(Some(existing)) = ctx.swarm_repo.project_for_story(&story.id).await {
+                let swarm = ctx
+                    .swarm_repo
+                    .get_swarm(&existing.swarm_id)
+                    .await
+                    .map_err(ApiError)?;
+                let tasks = ctx
+                    .swarm_repo
+                    .list_tasks(&existing.id)
+                    .await
+                    .map_err(ApiError)?;
+                return Ok(Json(ToSwarmResp {
+                    swarm,
+                    project: existing,
+                    tasks,
+                    created: false,
+                }));
+            }
+            return Err(ApiError(Error::Conflict(
+                "a swarm project is already linked to this story".into(),
+            )));
+        }
+        Err(e) => return Err(ApiError(e)),
+    };
 
     // 6. Seed tasks (reuse plan, else generate via planner).
     let tasks = seed_tasks(&ctx, &project, &user.id, &goal_md).await;

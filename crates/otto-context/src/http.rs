@@ -37,6 +37,7 @@ pub trait ContextCtx: Clone + Send + Sync + 'static {
 // Error → response
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 struct ApiErr(Error);
 
 impl From<Error> for ApiErr {
@@ -376,11 +377,13 @@ async fn preview_ws<C: ContextCtx>(
     let ws = s.workspaces().get(&ws_id).await?;
 
     // Start from the stored selection, then apply any per-field overrides from
-    // the request so an unsaved choice can be previewed.
+    // the request so an unsaved choice can be previewed. `skills`/`soul` are
+    // double-Option: an absent key inherits the stored value, while an explicit
+    // `null` overrides to None-in-cfg (= all skills / global default).
     let stored = config::from_settings(&ws.settings);
     let cfg = WorkspaceContextConfig {
-        skills: req.skills.or(stored.skills),
-        soul: req.soul.or(stored.soul),
+        skills: req.skills.unwrap_or(stored.skills),
+        soul: req.soul.unwrap_or(stored.soul),
         extra_context_md: req.extra_context_md.unwrap_or(stored.extra_context_md),
         include_memory: req.include_memory.unwrap_or(stored.include_memory),
     };
@@ -392,13 +395,94 @@ async fn preview_ws<C: ContextCtx>(
 
     // The spawn provisions into the session's cwd, which defaults to — but may
     // differ from — the workspace root. Honor the override so the preview lands
-    // its planned paths where the real spawn would.
-    let cwd = req.cwd.as_deref().unwrap_or(&ws.root_path);
+    // its planned paths where the real spawn would. But a preview reads
+    // `<cwd>/CLAUDE.md`, `/AGENTS.md`, `/.claude/settings.local.json` and returns
+    // their contents, so an arbitrary `cwd` would be an arbitrary host-file read
+    // for a Viewer. Confine the override to the workspace root.
+    let cwd = resolve_preview_cwd(&ws.root_path, req.cwd.as_deref())?;
 
     let providers: Vec<ContextPreviewProvider> = providers
         .iter()
-        .map(|p| materialize::preview(s.library(), &cfg, cwd, p))
+        .map(|p| materialize::preview(s.library(), &cfg, &cwd, p))
         .collect();
 
     Ok(Json(ContextPreviewResp { providers }))
+}
+
+/// Resolve the preview cwd, confining any override to the workspace root.
+///
+/// `None` ⇒ the workspace root as-is. A `Some(cwd)` override is canonicalized
+/// (resolving symlinks and `..`) together with the root, then required to be
+/// *inside* the canonical root — a Viewer must not be able to steer the preview
+/// at an arbitrary path and read its `CLAUDE.md`/`AGENTS.md`/settings back out.
+fn resolve_preview_cwd(root_path: &str, req_cwd: Option<&str>) -> Result<String, ApiErr> {
+    let Some(req_cwd) = req_cwd else {
+        return Ok(root_path.to_string());
+    };
+    let canon_root = std::fs::canonicalize(root_path)
+        .map_err(|e| Error::Invalid(format!("workspace root does not resolve: {e}")))?;
+    let canon_cwd = std::fs::canonicalize(req_cwd)
+        .map_err(|e| Error::Invalid(format!("cwd does not resolve: {e}")))?;
+    if !canon_cwd.starts_with(&canon_root) {
+        return Err(Error::Forbidden("cwd must be inside the workspace root".into()).into());
+    }
+    Ok(canon_cwd.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ApiErr` is not `Debug`, so unwrap the inner `Error` by hand rather than
+    /// via `expect_err`.
+    fn err_of(r: Result<String, ApiErr>) -> Error {
+        match r {
+            Ok(p) => panic!("expected an error, got Ok({p})"),
+            Err(e) => e.0,
+        }
+    }
+
+    #[test]
+    fn preview_cwd_defaults_to_root_when_absent() {
+        let dir = std::env::temp_dir();
+        let root = dir.to_string_lossy().into_owned();
+        let resolved = resolve_preview_cwd(&root, None).expect("no override resolves");
+        assert_eq!(resolved, root);
+    }
+
+    #[test]
+    fn preview_cwd_allows_subdir_of_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sub = root.path().join("nested");
+        std::fs::create_dir(&sub).expect("create subdir");
+        let resolved =
+            resolve_preview_cwd(&root.path().to_string_lossy(), Some(&sub.to_string_lossy()))
+                .expect("subdir is allowed");
+        // Compare canonicalized forms (temp dirs are often symlinked on macOS).
+        let canon_sub = std::fs::canonicalize(&sub).unwrap();
+        assert_eq!(resolved, canon_sub.to_string_lossy());
+    }
+
+    #[test]
+    fn preview_cwd_rejects_path_outside_root() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let other = tempfile::tempdir().expect("other tempdir");
+        let err = err_of(resolve_preview_cwd(
+            &root.path().to_string_lossy(),
+            Some(&other.path().to_string_lossy()),
+        ));
+        assert!(matches!(err, Error::Forbidden(_)));
+    }
+
+    #[test]
+    fn preview_cwd_rejects_parent_traversal() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        // `<root>/..` canonicalizes to the parent, which is outside the root.
+        let traversal = root.path().join("..");
+        let err = err_of(resolve_preview_cwd(
+            &root.path().to_string_lossy(),
+            Some(&traversal.to_string_lossy()),
+        ));
+        assert!(matches!(err, Error::Forbidden(_)));
+    }
 }

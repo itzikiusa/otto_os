@@ -13,6 +13,18 @@ use crate::domain::{
 };
 use crate::Id;
 
+/// Deserialize a present-or-absent nullable field into a double-`Option`.
+/// `Some(Some(v))` ⇒ an explicit value; `Some(None)` ⇒ an explicit JSON `null`;
+/// `None` ⇒ the key was absent. Pair with `#[serde(default)]` so an absent key
+/// stays `None` while a present `null` becomes `Some(None)`.
+fn de_double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(de)?))
+}
+
 // ---------------------------------------------------------------------------
 // Meta / onboarding / auth
 // ---------------------------------------------------------------------------
@@ -1392,12 +1404,16 @@ pub struct ContextPreviewReq {
     /// Provider(s) to preview; `None` ⇒ both `claude` and `codex`.
     #[serde(default)]
     pub provider: Option<String>,
-    /// Override the active skill allow-list (`None` ⇒ use stored config).
-    #[serde(default)]
-    pub skills: Option<Vec<String>>,
-    /// Override the active soul (`None` ⇒ use stored config).
-    #[serde(default)]
-    pub soul: Option<String>,
+    /// Override the active skill allow-list. Double-`Option` so an absent key
+    /// (`None`) inherits the stored config, while an explicit `null`
+    /// (`Some(None)`) clears the allow-list to mean *all* library skills.
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub skills: Option<Option<Vec<String>>>,
+    /// Override the active soul. Double-`Option` so an absent key (`None`)
+    /// inherits the stored config, while an explicit `null` (`Some(None)`)
+    /// clears the soul to mean the global default.
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub soul: Option<Option<String>>,
     /// Override the extra-context markdown (`None` ⇒ use stored config).
     #[serde(default)]
     pub extra_context_md: Option<String>,

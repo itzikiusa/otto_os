@@ -11,7 +11,7 @@ use otto_core::domain::McpServer;
 use otto_core::{new_id, Id, Result};
 use sqlx::{Row, SqlitePool};
 
-use crate::convert::{dberr, fmt, json, ts};
+use crate::convert::{dberr, dberr_unique, fmt, json, ts};
 
 /// Fields for creating a server. `enabled` is the caller's choice (default off
 /// at the route layer); the repo never forces it on.
@@ -76,7 +76,12 @@ impl McpServersRepo {
         .bind(&now)
         .execute(&self.pool)
         .await
-        .map_err(dberr("create mcp server"))?;
+        // `UNIQUE(workspace_id, name)`: a duplicate name in the same workspace is
+        // a caller-facing condition (409), not an internal error (500).
+        .map_err(dberr_unique(
+            "create mcp server",
+            "an MCP server with this name already exists in the workspace",
+        ))?;
         self.get(&id).await
     }
 
@@ -127,7 +132,11 @@ impl McpServersRepo {
                 .bind(id)
                 .execute(&self.pool)
                 .await
-                .map_err(dberr("update mcp server"))?;
+                // A rename can collide with `UNIQUE(workspace_id, name)` → 409.
+                .map_err(dberr_unique(
+                    "update mcp server",
+                    "an MCP server with this name already exists in the workspace",
+                ))?;
         }
         if let Some(v) = command {
             sqlx::query("UPDATE mcp_servers SET command = ? WHERE id = ?")

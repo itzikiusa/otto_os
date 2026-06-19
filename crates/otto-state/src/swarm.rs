@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 
-use crate::convert::{dberr, fmt, json, ts};
+use crate::convert::{dberr, dberr_unique, fmt, json, ts};
 
 // --- Domain ----------------------------------------------------------------
 
@@ -843,7 +843,14 @@ impl SwarmRepo {
         .bind(&now)
         .execute(&self.pool)
         .await
-        .map_err(dberr("create project"))?;
+        // A project may carry a `story_id`, which is unique among non-NULL rows
+        // (migration 0037): two concurrent Plan→Swarm hand-offs racing past the
+        // pre-check both insert here, and the loser must see a Conflict (not a
+        // generic 500) so it can fall back to the existing linked project.
+        .map_err(dberr_unique(
+            "create project",
+            "a swarm project is already linked to this story",
+        ))?;
         self.get_project(&id).await
     }
 

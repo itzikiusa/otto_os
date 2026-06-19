@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::service::DbViewerService;
-use crate::types::{CompletionContext, QueryRequest};
+use crate::types::{statement_is_write, CompletionContext, Engine, QueryRequest};
 
 /// Server-side context required by the DB Explorer routes.
 pub trait DbViewerCtx: Clone + Send + Sync + 'static {
@@ -291,8 +291,15 @@ async fn run_query<S: DbViewerCtx>(
     // A confirmed write on a guarded (production / read-only) connection is a
     // security-relevant override worth auditing. Fire only after a successful
     // run so we don't log writes the engine rejected. `confirm_write` is a no-op
-    // on an unguarded connection, so gate on `is_write_guarded()` to avoid noise.
-    if req.confirm_write && conn.is_write_guarded() {
+    // on an unguarded connection, so gate on `is_write_guarded()` to avoid noise
+    // — and on the statement actually being a write (the same classifier
+    // `guard_write` uses), so a guarded SELECT sent with `confirm_write:true`
+    // isn't over-logged. Conservatively treat an unmappable engine as a write.
+    let is_write = match Engine::from_kind(conn.kind) {
+        Some(engine) => statement_is_write(engine, &req.statement),
+        None => true,
+    };
+    if req.confirm_write && conn.is_write_guarded() && is_write {
         ctx.on_confirmed_write(&user, &conn, &req.statement);
     }
     Ok(Json(result).into_response())

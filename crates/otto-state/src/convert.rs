@@ -27,3 +27,22 @@ pub fn dberr(context: &str) -> impl Fn(sqlx::Error) -> Error + '_ {
         other => Error::Internal(format!("{context}: {other}")),
     }
 }
+
+/// Like [`dberr`], but maps a UNIQUE-constraint violation to a `Conflict` (409)
+/// with `conflict_msg`, rather than burying it as an `Internal` (500). Use this
+/// on inserts/renames where a duplicate key is a caller-facing condition (e.g.
+/// `UNIQUE(workspace_id, name)`). Detection is specific to the sqlx
+/// unique-violation code, so other database errors still surface as `Internal`.
+pub fn dberr_unique<'a>(
+    context: &'a str,
+    conflict_msg: &'a str,
+) -> impl Fn(sqlx::Error) -> Error + 'a {
+    move |e| {
+        if let sqlx::Error::Database(db) = &e {
+            if db.is_unique_violation() {
+                return Error::Conflict(conflict_msg.to_string());
+            }
+        }
+        dberr(context)(e)
+    }
+}

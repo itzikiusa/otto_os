@@ -7,7 +7,6 @@
   // seeded with a friendly starter prompt. Every step reuses an existing API —
   // no new backend is invented here. Dismissable; the dismissal is remembered
   // per-machine so it doesn't nag after the user has found their footing.
-  import { api } from '../../lib/api/client';
   import { contextApi } from '../../lib/api/context';
   import type { BundledSkill } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -24,16 +23,20 @@
   let { ondismiss }: Props = $props();
 
   // --- Step 1: agent CLIs ----------------------------------------------------
-  // Providers come from /meta (detected agent CLIs); 'shell' is always present
-  // but isn't an "agent", so a real coding agent means claude or codex.
+  // `providers` is the STATIC provider registry — it always lists claude/codex/agy
+  // regardless of what's installed, so it can't gate the launch. Real detection
+  // lives in /meta.tools: a coding agent is usable only when its tool is `found`.
   const agentProviders = $derived(
     (auth.meta?.providers ?? []).filter((p) => p !== 'shell'),
   );
-  const hasAgentCli = $derived(agentProviders.length > 0);
   // Tool rows for claude/codex from /meta.tools (shows version when found).
   const agentTools = $derived(
     (auth.meta?.tools ?? []).filter((t) => t.name === 'claude' || t.name === 'codex'),
   );
+  // The gate: at least one agent CLI is actually installed on PATH.
+  const hasAgentCli = $derived(agentTools.some((t) => t.found));
+  // The provider names whose CLI is actually present.
+  const foundProviders = $derived(agentTools.filter((t) => t.found).map((t) => t.name));
 
   // --- Step 2: workspace -----------------------------------------------------
   const hasWorkspace = $derived(ws.workspaces.length > 0 && ws.current !== null);
@@ -123,13 +126,15 @@
 
   let launchBusy = $state(false);
 
-  // First useful provider: the workspace/global default if it's a real agent,
-  // else claude, else the first detected agent CLI.
+  // First useful provider: prefer one whose CLI is actually installed — the
+  // global default if it's installed, else claude, else the first found agent.
+  // Falls back to the registry only if detection is somehow empty.
   const launchProvider = $derived.by(() => {
     const def = auth.meta?.default_provider;
-    if (def && agentProviders.includes(def)) return def;
-    if (agentProviders.includes('claude')) return 'claude';
-    return agentProviders[0] ?? '';
+    if (def && foundProviders.includes(def)) return def;
+    if (foundProviders.includes('claude')) return 'claude';
+    if (foundProviders.length > 0) return foundProviders[0];
+    return agentProviders.includes('claude') ? 'claude' : (agentProviders[0] ?? '');
   });
 
   async function launchFirstSession(): Promise<void> {
