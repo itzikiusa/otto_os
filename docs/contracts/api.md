@@ -699,6 +699,27 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 
 Scoping: a notice is either **global/system** (`user_id = null`, e.g. credential/session/skill-eval producers) or **owned by one user**. Non-root members see global + their own and may mutate only their own; the unread badge counts a member's own unread only (global notices show in the list but aren't counted, since a member can't mark them read). Root sees and mutates everything.
 
+## User Feature Grants (RBAC Task 2.1)
+
+Per-user, per-feature capability grants. Any route under `/users/` requires `Users:Admin`
+(feature guard) or root. `/auth/capabilities` is self-scoped and exempt — any authenticated
+user may call it.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /users/{id}/grants | Users:Admin or root | — | `UserGrantsResp {grants: GrantEntry[]}` |
+| PUT /users/{id}/grants | Users:Admin or root | `UserGrantsReq {grants: GrantEntry[]}` | `UserGrantsResp` (atomically replaces all grants; audited) |
+| GET /auth/capabilities | member (any authed user) | — | `CapabilitiesResp {capabilities: {feature: capability}}` |
+
+- `GrantEntry` = `{feature: string, capability: string}` using snake_case strings
+  (e.g. `{feature:"database", capability:"view"}`).
+- `Capability` ladder: `none` < `view` < `edit` < `admin`.  `Capability::None` is the
+  absence of a grant row — never stored; the read returns `"none"` for ungrated features.
+- Root ⇒ `capabilities` returns `admin` for all 18 features regardless of stored rows.
+- PUT writes a `"grant.changed"` audit entry: `{user_id: actor, target: target_user_id,
+  detail: {old: GrantEntry[], new: GrantEntry[]}}`.
+- 404 if target user `{id}` does not exist.
+
 ## Trust & Safety (security audit log + posture)
 
 | Method & path | Auth | Request | Response |

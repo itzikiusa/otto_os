@@ -89,7 +89,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     // Auth / personal-access-token self-management + identity. Any authed user
     // manages their own session and tokens; never feature-gated.
-    if matches!(p, "/auth/me" | "/auth/logout" | "/auth/tokens") || p.starts_with("/auth/tokens/") {
+    // `/auth/capabilities` is self-scoped (returns the caller's own grants) —
+    // any authenticated user may call it; no feature gate needed.
+    if matches!(p, "/auth/me" | "/auth/logout" | "/auth/tokens" | "/auth/capabilities")
+        || p.starts_with("/auth/tokens/")
+    {
         return Exempt;
     }
     // Per-user notifications (self-owned).
@@ -475,6 +479,15 @@ mod tests {
             pol(Method::PATCH, "/api/v1/users/{id}"),
             Require(Users, Admin)
         );
+        // Task 2.1: grants endpoints fall under the /users/ prefix rule.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/users/{id}/grants"),
+            Require(Users, Admin)
+        );
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/users/{id}/grants"),
+            Require(Users, Admin)
+        );
         assert_eq!(
             pol(Method::PUT, "/api/v1/settings"),
             Require(Settings, Admin)
@@ -511,6 +524,8 @@ mod tests {
         assert_eq!(pol(Method::GET, "/api/v1/auth/tokens"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/auth/tokens"), Exempt);
         assert_eq!(pol(Method::DELETE, "/api/v1/auth/tokens/{id}"), Exempt);
+        // Effective-capabilities map: self-scoped, any authed user.
+        assert_eq!(pol(Method::GET, "/api/v1/auth/capabilities"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/notifications"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/notifications/{id}/read"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Exempt);

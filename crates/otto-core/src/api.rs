@@ -102,6 +102,38 @@ pub struct CreateApiTokenResp {
 }
 
 // ---------------------------------------------------------------------------
+// Grants / capabilities (RBAC Task 2.1)
+// ---------------------------------------------------------------------------
+
+/// One `(feature, capability)` grant entry, serialised as snake_case strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantEntry {
+    pub feature: String,
+    pub capability: String,
+}
+
+/// `GET /api/v1/users/{id}/grants` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserGrantsResp {
+    pub grants: Vec<GrantEntry>,
+}
+
+/// `PUT /api/v1/users/{id}/grants` request body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserGrantsReq {
+    pub grants: Vec<GrantEntry>,
+}
+
+/// `GET /api/v1/auth/capabilities` response — the caller's effective
+/// `{feature: capability}` map.  Root users receive `admin` for every feature.
+/// Any authenticated user may call this endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilitiesResp {
+    /// snake_case feature name → snake_case capability string.
+    pub capabilities: std::collections::HashMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
 // Users / workspaces
 // ---------------------------------------------------------------------------
 

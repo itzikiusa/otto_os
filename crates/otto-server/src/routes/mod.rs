@@ -5,6 +5,7 @@ pub mod api_client;
 pub mod api_stream;
 pub mod audit;
 pub mod auth_routes;
+pub mod grants;
 pub mod grpc;
 pub mod fs;
 pub mod handover;
@@ -70,6 +71,13 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/users", get(users::list).post(users::create))
         .route("/users/{id}", patch(users::update).delete(users::remove))
+        // --- Grants (per-user feature grants, RBAC Task 2.1) -------------
+        .route(
+            "/users/{id}/grants",
+            get(grants::get_grants::<ServerCtx>).put(grants::put_grants::<ServerCtx>),
+        )
+        // Caller's effective capability map (any authed user; Exempt in policy).
+        .route("/auth/capabilities", get(grants::capabilities::<ServerCtx>))
         .route(
             "/workspaces",
             get(workspaces::list).post(workspaces::create),
