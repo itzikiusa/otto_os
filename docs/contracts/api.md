@@ -229,6 +229,31 @@ Notes:
 - `DELETE` only revokes the caller's own API tokens (scoped by `user_id` + `kind='api'`).
 - `last_seen_at` is updated on use, throttled to at most once per hour.
 
+## Share-link tokens (mobile remote-access, Task 1.9)
+
+Scoped, expiring, revocable capability tokens bound to **one session** — the guest-access
+primitive for the mobile remote-access feature. The owner mints a share; the raw token is
+shown exactly once (only its SHA-256 hash is stored). The `url` field is the ready-to-share
+fragment URL (`<origin>/#/s/<session_id>/<token>`).
+
+**Guards (mint + list):** the caller must own the session or be a workspace Admin, must NOT
+be impersonated (`real_user != effective_user`), and must NOT hold a scoped share token
+(a guest cannot mint sub-shares). Role `"admin"` is rejected; TTL is clamped to `[60, 86400]`.
+
+**Revocation evicts:** after revoking a share, `SessionManager::evict` is called so any
+still-attached viewer receives `{"type":"terminated"}` and the WS closes immediately.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?}` | `CreateShareResp {token, url, info: ShareInfo}` (token shown once) |
+| GET /api/v1/sessions/{id}/shares | session owner / ws admin | — | `ListSharesResp {shares: ShareInfo[]}` (live, non-revoked) |
+| DELETE /api/v1/auth/shares/{share_id} | member (self-owned) | — | 204 (revokes + evicts; idempotent) |
+| POST /api/v1/auth/shares/revoke-all | member (self-owned) | — | 204 (revokes all caller's shares + evicts) |
+
+`ShareInfo` = `{id, session_id, role, token_prefix, label?, created_at, expires_at}`.
+`role` is `"viewer"` (read-only) or `"editor"` (read + input); never `"admin"`.
+TTL is FIXED (never slid); `expires_at = created_at + ttl_secs`.
+
 ---
 
 # Otto API Contract — extended surface (v1, mounted)

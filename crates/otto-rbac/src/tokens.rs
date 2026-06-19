@@ -532,6 +532,61 @@ impl AuthRepo {
         .map_err(|e| Error::Internal(format!("revoke share: {e}")))?;
         Ok(())
     }
+
+    /// Revoke **all** of `owner_user_id`'s live share tokens (flip `revoked=1`).
+    /// Returns the distinct `session_scope` ids whose share rows were revoked, so
+    /// the caller can evict any still-attached viewers for those sessions.
+    /// Owner-scoped: never touches another user's tokens.
+    pub async fn revoke_all_shares_for_user(&self, owner_user_id: &Id) -> Result<Vec<Id>> {
+        // Collect the session ids we are about to revoke BEFORE the update, so
+        // the caller can evict attached viewers for those sessions.
+        let rows = sqlx::query(
+            "SELECT DISTINCT session_scope FROM auth_sessions
+             WHERE user_id = ? AND kind = 'share' AND revoked = 0",
+        )
+        .bind(owner_user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("list user shares: {e}")))?;
+
+        let session_ids: Vec<Id> = rows
+            .iter()
+            .filter_map(|r| r.get::<Option<String>, _>("session_scope"))
+            .collect();
+
+        sqlx::query(
+            "UPDATE auth_sessions SET revoked = 1
+             WHERE user_id = ? AND kind = 'share' AND revoked = 0",
+        )
+        .bind(owner_user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("revoke all shares: {e}")))?;
+
+        Ok(session_ids)
+    }
+
+    /// Look up the `session_scope` (session id) for a single share row by its
+    /// `share_id` and `owner_user_id`. Returns `None` when the share doesn't
+    /// exist or isn't owned by this user. Used by the revoke-one handler to
+    /// locate which session to evict.
+    pub async fn share_session_id(
+        &self,
+        owner_user_id: &Id,
+        share_id: &str,
+    ) -> Result<Option<Id>> {
+        let row = sqlx::query(
+            "SELECT session_scope FROM auth_sessions
+             WHERE id = ? AND user_id = ? AND kind = 'share'",
+        )
+        .bind(share_id)
+        .bind(owner_user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("share_session_id: {e}")))?;
+
+        Ok(row.and_then(|r| r.get::<Option<String>, _>("session_scope")))
+    }
 }
 
 #[cfg(test)]

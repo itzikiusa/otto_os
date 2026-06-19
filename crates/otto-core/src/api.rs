@@ -140,6 +140,41 @@ pub struct ShareInfo {
     pub expires_at: DateTime<Utc>,
 }
 
+/// `POST /api/v1/sessions/{id}/share` — mint a scoped share-link token.
+///
+/// `role` must be `"viewer"` or `"editor"` (never `"admin"`). `ttl_secs`
+/// defaults to 3600 and is clamped server-side to `[60, 86400]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateShareReq {
+    /// `"viewer"` (read-only) or `"editor"` (read + input). Never `"admin"`.
+    pub role: String,
+    /// Fixed TTL in seconds. Absent → 3600. Clamped to `[60, 86400]`.
+    #[serde(default)]
+    pub ttl_secs: Option<i64>,
+    /// Human-friendly label (e.g. "for Alice"). Optional.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Response for `POST /api/v1/sessions/{id}/share`. The raw token is returned
+/// exactly once (only its SHA-256 hash is stored). `url` is the ready-to-share
+/// fragment URL (`<origin>/#/s/<session_id>/<token>`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateShareResp {
+    /// The raw share token (shown exactly once — store it safely).
+    pub token: String,
+    /// Ready-to-use share URL (`<origin>/#/s/<session_id>/<token>`).
+    pub url: String,
+    /// Metadata for the newly-minted share.
+    pub info: ShareInfo,
+}
+
+/// `GET /api/v1/sessions/{id}/shares` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListSharesResp {
+    pub shares: Vec<ShareInfo>,
+}
+
 // ---------------------------------------------------------------------------
 // Grants / capabilities (RBAC Task 2.1)
 // ---------------------------------------------------------------------------

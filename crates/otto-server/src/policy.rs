@@ -91,8 +91,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // manages their own session and tokens; never feature-gated.
     // `/auth/capabilities` is self-scoped (returns the caller's own grants) —
     // any authenticated user may call it; no feature gate needed.
+    // Share revocation (`/auth/shares/*`) is self-owned, like `/auth/tokens/*`:
+    // a user revokes their own shares; no feature grant needed.
     if matches!(p, "/auth/me" | "/auth/logout" | "/auth/tokens" | "/auth/capabilities")
         || p.starts_with("/auth/tokens/")
+        || p.starts_with("/auth/shares")
     {
         return Exempt;
     }
@@ -255,6 +258,17 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/sessions/{id}" {
         // GET inspect = View; PATCH/DELETE = Edit.
         return Require(Agents, if get { View } else { Edit });
+    }
+    // Share-link management (mobile plan Task 1.9): mint = Edit (owner/editor
+    // action); list = View. Both require the caller to own/admin the session
+    // (enforced in the handler by `require_session_owner_or_admin`). These
+    // specific patterns are tested BEFORE the generic `/sessions/` prefix below.
+    if p == "/sessions/{id}/shares" {
+        return Require(Agents, if get { View } else { Edit });
+    }
+    if p == "/sessions/{id}/share" {
+        // POST only (mint). A GET on this path would be a typo; map it Edit too.
+        return Require(Agents, Edit);
     }
     if p.starts_with("/sessions/") {
         // restart / archive / unarchive / input / handover / handover-brief /

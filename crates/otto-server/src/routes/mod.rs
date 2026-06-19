@@ -17,6 +17,7 @@ pub mod meta;
 pub mod notifications;
 pub mod onboarding;
 pub mod settings;
+pub mod share;
 pub mod swarm_ingest;
 pub mod usage;
 pub mod users;
@@ -58,6 +59,12 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(auth_routes::list_tokens).post(auth_routes::create_token),
         )
         .route("/auth/tokens/{id}", delete(auth_routes::revoke_token))
+        // --- Share-link management (mobile plan Task 1.9) ----------------
+        .route(
+            "/auth/shares/{share_id}",
+            delete(share::revoke_share),
+        )
+        .route("/auth/shares/revoke-all", post(share::revoke_all_shares))
         // --- Agent activity (live trail + task tracker) ------------------
         .route(
             "/workspaces/{wid}/sessions/{sid}/trail",
@@ -234,6 +241,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
             post(api_client::run_automation),
         )
         .route("/api-client/import-curl", post(api_client::import_curl))
+        // --- Share-link: session-level mint + list (mobile plan Task 1.9) --
+        .route("/sessions/{id}/share", post(share::mint_share))
+        .route("/sessions/{id}/shares", get(share::list_shares))
         .route(
             "/sessions/{id}/handover",
             post(handover::handover_session),
