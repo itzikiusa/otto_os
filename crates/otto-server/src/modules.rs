@@ -97,6 +97,15 @@ impl otto_dbviewer::DbViewerCtx for ServerCtx {
     }
 }
 
+impl otto_brokers::BrokersCtx for ServerCtx {
+    fn brokers(&self) -> &Arc<otto_brokers::BrokersService> {
+        &self.brokers
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+}
+
 impl otto_git::GitCtx for ServerCtx {
     fn store(&self) -> &GitStore {
         &self.git_store
@@ -3013,6 +3022,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_sessions::api_router::<ServerCtx>(),
         otto_connections::api_router::<ServerCtx>(),
         otto_dbviewer::api_router::<ServerCtx>(),
+        otto_brokers::api_router::<ServerCtx>(),
         otto_product::router::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
         otto_git::router::<ServerCtx>(),

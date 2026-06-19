@@ -22,6 +22,7 @@ members = [
     "crates/otto-skills",
     "crates/otto-swarm",
     "crates/otto-memory",
+    "crates/otto-brokers",
 ]
 
 [workspace.package]
@@ -50,6 +51,7 @@ otto-server = { path = "crates/otto-server" }
 otto-product = { path = "crates/otto-product" }
 otto-swarm = { path = "crates/otto-swarm" }
 otto-memory = { path = "crates/otto-memory" }
+otto-brokers = { path = "crates/otto-brokers" }
 
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
@@ -90,6 +92,10 @@ prost-reflect = { version = "0.14", features = ["serde"] }
 prost-types = "0.13"
 tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"] }
 reqwest_cookie_store = "0.8"
+# Message Brokers (Kafka) — librdkafka statically built (cmake) with vendored
+# OpenSSL so SASL_SSL works on machines without a system librdkafka/OpenSSL.
+rdkafka = { version = "0.39", default-features = false, features = ["cmake-build", "ssl-vendored", "libz", "zstd", "tokio"] }
+apache-avro = "0.21"
 
 [profile.release]
 lto = "thin"

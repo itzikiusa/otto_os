@@ -5,6 +5,7 @@
 pub mod activity;
 pub mod api_client;
 pub mod audit;
+pub mod broker_clusters;
 pub mod connection_sections;
 pub mod connections;
 pub mod convert;
@@ -32,6 +33,9 @@ pub use audit::{AuditRepo, NewAuditEntry};
 pub use api_client::{
     ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,
     NewApiRequest,
+};
+pub use broker_clusters::{
+    BrokerClusterRow, BrokerClustersRepo, NewBrokerCluster, UpdateBrokerCluster,
 };
 pub use connection_sections::ConnectionSectionsRepo;
 pub use connections::{ConnectionsRepo, NewConnection};

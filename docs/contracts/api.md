@@ -836,3 +836,46 @@ Notes:
   folder (git) and re-index. A shared SQLite *file* over a network is unsupported.
 - Vectors are embedded on write; the default embedder is a deterministic local stub
   (real local/remote embedders swap in behind the `Embedder` trait, feature-gated).
+
+## Message Brokers (Kafka viewer)
+
+A Conduktor/Confluent-class Kafka viewer: cluster connection profiles, cluster
+overview, topics (browse / peek / produce / configs), consumer groups + lag, broker
+CPU/RAM + throughput metrics, and a Schema Registry browser. DTOs live in
+`crates/otto-brokers/src/types.rs`, mirrored in `ui/src/lib/api/types.ts`. Reads
+require `ws viewer`; cluster management + mutations require `ws editor` (global
+clusters: root). Mutations on a guarded cluster (`environment=prod` or `read_only`)
+require `confirm=true` (403 otherwise). Cluster secrets (SASL / schema-registry
+passwords) are stored in the Keychain — only `has_*_password` flags are ever
+returned. `BrokerCluster.workspace_id=null` = global profile.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{wid}/brokers/clusters | ws viewer | — | `BrokerCluster[]` (workspace + global) |
+| POST /workspaces/{wid}/brokers/clusters | ws editor | `UpsertClusterReq` | `BrokerCluster` (201) |
+| GET /brokers/clusters/{id} | ws viewer | — | `BrokerCluster` |
+| PATCH /brokers/clusters/{id} | ws editor | `UpsertClusterReq` (absent `*_password`=keep, ``=clear; absent `environment`/`read_only` preserve the guard) | `BrokerCluster` |
+| DELETE /brokers/clusters/{id} | ws editor | — | 204 (deletes Keychain secrets too) |
+| POST /brokers/clusters/{id}/test | ws editor | — | `TestClusterResp` (never 5xx — `ok:false` carries the error) |
+| GET /brokers/clusters/{id}/overview | ws viewer | — | `ClusterOverview` |
+| GET /brokers/clusters/{id}/metrics | ws viewer | — | `ClusterMetrics` (throughput sampled per call; broker CPU/RAM when `metrics_url` set) |
+| GET /brokers/clusters/{id}/topics | ws viewer | — | `TopicSummary[]` |
+| POST /brokers/clusters/{id}/topics | ws editor | `CreateTopicReq` | `TopicSummary` (201; 409 if exists) |
+| GET /brokers/clusters/{id}/topics/{topic} | ws viewer | — | `TopicDetail` |
+| DELETE /brokers/clusters/{id}/topics/{topic}?confirm=B | ws editor | — | 204 |
+| GET /brokers/clusters/{id}/topics/{topic}/configs | ws viewer | — | `TopicConfigEntry[]` |
+| PUT /brokers/clusters/{id}/topics/{topic}/configs | ws editor | `AlterConfigsReq` | `TopicConfigEntry[]` (merges over existing dynamic overrides) |
+| POST /brokers/clusters/{id}/topics/{topic}/consume | ws viewer | `ConsumeReq` | `ConsumeResp` (peek; key/value decoded per `decode`) |
+| POST /brokers/clusters/{id}/topics/{topic}/produce | ws editor | `ProduceReq` | `ProduceResp` |
+| GET /brokers/clusters/{id}/groups | ws viewer | — | `GroupSummary[]` |
+| GET /brokers/clusters/{id}/groups/{group} | ws viewer | — | `GroupDetail` (members + per-partition lag) |
+| GET /brokers/clusters/{id}/schema-registry/subjects | ws viewer | — | `SchemaSubject[]` (400 if no registry configured) |
+
+Notes:
+- `ConsumeReq.start` is a tagged union: `{type:beginning}`, `{type:latest}` (last
+  `limit`), `{type:offset,offset}`, `{type:timestamp,timestamp_ms}`. `decode` ∈
+  `{auto,json,utf8,hex,base64,protobuf,avro}`; `auto` tries JSON → UTF-8 → schemaless
+  Protobuf wire-decode → hex, and decodes Confluent-framed Avro via the registry.
+- `ClusterMetrics.brokers` is populated from the optional Prometheus `metrics_url`
+  (Redpanda `:9644/public_metrics`, or a Kafka JMX exporter); `prometheus_available`
+  is false otherwise. Throughput is derived from watermark deltas between calls.

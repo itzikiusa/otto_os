@@ -326,6 +326,11 @@
         <span class="grow">Database</span>
       </button>
 
+      <button class="nav-item" class:active={router.module === 'brokers'} onclick={() => router.go('brokers')}>
+        <Icon name="box" size={14} />
+        <span class="grow">Message Brokers</span>
+      </button>
+
       <button
         class="nav-item"
         class:active={router.module === 'workflows'}

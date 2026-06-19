@@ -15,6 +15,7 @@
     { id: 'vault', icon: 'note', label: 'Vault' },
     { id: 'api', icon: 'send', label: 'API' },
     { id: 'database', icon: 'db', label: 'Database' },
+    { id: 'brokers', icon: 'box', label: 'Message Brokers' },
     { id: 'workflows', icon: 'split', label: 'Workflows' },
     { id: 'skills-eval', icon: 'zap', label: 'Skills Evaluator' },
     { id: 'insights', icon: 'gauge', label: 'Insights' },
