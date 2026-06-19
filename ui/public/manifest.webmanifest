@@ -1,0 +1,32 @@
+{
+  "name": "Otto",
+  "short_name": "Otto",
+  "description": "Otto — coding-agent sessions, git, DB, and more, from any device",
+  "start_url": "./",
+  "display": "standalone",
+  "theme_color": "#111111",
+  "background_color": "#111111",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/apple-touch-icon-180.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ]
+}

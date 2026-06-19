@@ -21,4 +21,11 @@ const app = mount(App, {
   target: document.getElementById('app')!,
 });
 
+// Register the PWA service worker (no-op in dev if sw.js isn't served).
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
 export default app;
