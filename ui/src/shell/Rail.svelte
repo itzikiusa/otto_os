@@ -12,6 +12,7 @@
     { id: 'connections', icon: 'plug', label: 'Connections' },
     { id: 'git', icon: 'branch', label: 'Git' },
     { id: 'product', icon: 'note', label: 'Product' },
+    { id: 'vault', icon: 'note', label: 'Vault' },
     { id: 'api', icon: 'send', label: 'API' },
     { id: 'database', icon: 'db', label: 'Database' },
     { id: 'workflows', icon: 'split', label: 'Workflows' },
