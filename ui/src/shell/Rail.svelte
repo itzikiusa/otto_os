@@ -6,20 +6,23 @@
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
 
-  const modules = $derived([
-    { id: 'agents', icon: 'terminal', label: 'Agents' },
-    { id: 'swarm', icon: 'grid', label: 'Swarm' },
-    { id: 'connections', icon: 'plug', label: 'Connections' },
-    { id: 'git', icon: 'branch', label: 'Git' },
-    { id: 'product', icon: 'note', label: 'Product' },
-    { id: 'api', icon: 'send', label: 'API' },
-    { id: 'database', icon: 'db', label: 'Database' },
-    { id: 'workflows', icon: 'split', label: 'Workflows' },
-    { id: 'skills-eval', icon: 'zap', label: 'Skills Evaluator' },
-    { id: 'insights', icon: 'gauge', label: 'Insights' },
-    // Usage analytics — requires usage:view (root always qualifies).
-    ...(auth.can('usage', 'view') ? [{ id: 'usage', icon: 'chart', label: 'Usage' }] : []),
-  ]);
+  // Each entry carries the feature name used by auth.can(); all are gated at
+  // 'view'. Root always passes (can() returns true for root).
+  const ALL_MODULES = [
+    { id: 'agents',     icon: 'terminal', label: 'Agents',           feature: 'agents'      as const },
+    { id: 'swarm',      icon: 'grid',     label: 'Swarm',            feature: 'swarm'       as const },
+    { id: 'connections',icon: 'plug',     label: 'Connections',      feature: 'connections' as const },
+    { id: 'git',        icon: 'branch',   label: 'Git',              feature: 'git'         as const },
+    { id: 'product',    icon: 'note',     label: 'Product',          feature: 'product'     as const },
+    { id: 'api',        icon: 'send',     label: 'API',              feature: 'api_client'  as const },
+    { id: 'database',   icon: 'db',       label: 'Database',         feature: 'database'    as const },
+    { id: 'workflows',  icon: 'split',    label: 'Workflows',        feature: 'workflows'   as const },
+    { id: 'skills-eval',icon: 'zap',      label: 'Skills Evaluator', feature: 'skill_eval'  as const },
+    { id: 'insights',   icon: 'gauge',    label: 'Insights',         feature: 'insights'    as const },
+    { id: 'usage',      icon: 'chart',    label: 'Usage',            feature: 'usage'       as const },
+  ];
+  // Filter to only the modules the current user has at least view on.
+  const modules = $derived(ALL_MODULES.filter(m => auth.can(m.feature, 'view')));
 </script>
 
 <nav class="rail sidebar-material" aria-label="Modules">

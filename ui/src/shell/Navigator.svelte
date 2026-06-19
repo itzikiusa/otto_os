@@ -173,185 +173,205 @@
     {/if}
 
     <div class="nav-section">
-      <div class="nav-item-row">
-        <button
-          class="nav-item"
-          class:active={router.module === 'agents' || router.module === ''}
-          onclick={() => router.go('agents')}
-          oncontextmenu={(e) => ctxMenu.show(e, [
-            { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
-            { label: 'Add workspace…', icon: 'folder', action: () => (ui.newWorkspaceOpen = true) },
-          ])}
-        >
-          <Icon name="terminal" size={14} />
-          <span class="grow">Agents</span>
-          {#if ws.workingCount > 0}
-            <span class="count-chip working">{ws.workingCount}</span>
-          {/if}
-        </button>
-        <button
-          class="icon-btn twisty"
-          onclick={() => (agentsOpen = !agentsOpen)}
-          aria-label="Toggle session list"
-        >
-          <Icon name={agentsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-        </button>
-      </div>
-
-      {#if q ? fAgents.length > 0 : agentsOpen}
-        <div class="nested">
-          {#each fAgents as s (s.id)}
-            {@render sessionRow(s)}
-          {:else}
-            <div class="nested-empty">No sessions — ⌘T to start one</div>
-          {/each}
-        </div>
-      {/if}
-
-      {#if q ? fTelegram.length > 0 : ws.telegramSessions.length > 0}
+      {#if auth.can('agents', 'view')}
         <div class="nav-item-row">
-          <button class="nav-item" onclick={() => (telegramOpen = !telegramOpen)}>
-            <Icon name="send" size={14} />
-            <span class="grow">Telegram</span>
-            <span class="count-chip">{ws.telegramSessions.length}</span>
+          <button
+            class="nav-item"
+            class:active={router.module === 'agents' || router.module === ''}
+            onclick={() => router.go('agents')}
+            oncontextmenu={(e) => ctxMenu.show(e, [
+              { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+              { label: 'Add workspace…', icon: 'folder', action: () => (ui.newWorkspaceOpen = true) },
+            ])}
+          >
+            <Icon name="terminal" size={14} />
+            <span class="grow">Agents</span>
+            {#if ws.workingCount > 0}
+              <span class="count-chip working">{ws.workingCount}</span>
+            {/if}
           </button>
           <button
             class="icon-btn twisty"
-            onclick={() => (telegramOpen = !telegramOpen)}
-            aria-label="Toggle Telegram list"
+            onclick={() => (agentsOpen = !agentsOpen)}
+            aria-label="Toggle session list"
           >
-            <Icon name={telegramOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+            <Icon name={agentsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           </button>
         </div>
-        {#if telegramOpen || q}
+
+        {#if q ? fAgents.length > 0 : agentsOpen}
           <div class="nested">
-            {#each visTelegram as s (s.id)}
+            {#each fAgents as s (s.id)}
               {@render sessionRow(s)}
             {:else}
-              <div class="nested-empty">No matching</div>
+              <div class="nested-empty">No sessions — ⌘T to start one</div>
             {/each}
-            {#if !q && fTelegram.length > CHANNEL_CAP}
-              <button class="show-more" onclick={() => (telegramShowAll = !telegramShowAll)}>
-                {telegramShowAll ? 'Show less' : `Show ${fTelegram.length - CHANNEL_CAP} more`}
-              </button>
+          </div>
+        {/if}
+
+        {#if q ? fTelegram.length > 0 : ws.telegramSessions.length > 0}
+          <div class="nav-item-row">
+            <button class="nav-item" onclick={() => (telegramOpen = !telegramOpen)}>
+              <Icon name="send" size={14} />
+              <span class="grow">Telegram</span>
+              <span class="count-chip">{ws.telegramSessions.length}</span>
+            </button>
+            <button
+              class="icon-btn twisty"
+              onclick={() => (telegramOpen = !telegramOpen)}
+              aria-label="Toggle Telegram list"
+            >
+              <Icon name={telegramOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+            </button>
+          </div>
+          {#if telegramOpen || q}
+            <div class="nested">
+              {#each visTelegram as s (s.id)}
+                {@render sessionRow(s)}
+              {:else}
+                <div class="nested-empty">No matching</div>
+              {/each}
+              {#if !q && fTelegram.length > CHANNEL_CAP}
+                <button class="show-more" onclick={() => (telegramShowAll = !telegramShowAll)}>
+                  {telegramShowAll ? 'Show less' : `Show ${fTelegram.length - CHANNEL_CAP} more`}
+                </button>
+              {/if}
+            </div>
+          {/if}
+        {/if}
+
+        {#if q ? fSlack.length > 0 : ws.slackSessions.length > 0}
+          <div class="nav-item-row">
+            <button class="nav-item" onclick={() => (slackOpen = !slackOpen)}>
+              <Icon name="slack" size={14} />
+              <span class="grow">Slack</span>
+              <span class="count-chip">{ws.slackSessions.length}</span>
+            </button>
+            <button
+              class="icon-btn twisty"
+              onclick={() => (slackOpen = !slackOpen)}
+              aria-label="Toggle Slack list"
+            >
+              <Icon name={slackOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+            </button>
+          </div>
+          {#if slackOpen || q}
+            <div class="nested">
+              {#each visSlack as s (s.id)}
+                {@render sessionRow(s)}
+              {:else}
+                <div class="nested-empty">No matching</div>
+              {/each}
+              {#if !q && fSlack.length > CHANNEL_CAP}
+                <button class="show-more" onclick={() => (slackShowAll = !slackShowAll)}>
+                  {slackShowAll ? 'Show less' : `Show ${fSlack.length - CHANNEL_CAP} more`}
+                </button>
+              {/if}
+            </div>
+          {/if}
+        {/if}
+      {/if}
+
+      {#if auth.can('connections', 'view')}
+        <div class="nav-item-row">
+          <button
+            class="nav-item"
+            class:active={router.module === 'connections'}
+            onclick={() => router.go('connections')}
+          >
+            <Icon name="plug" size={14} />
+            <span class="grow">Connections</span>
+            {#if ws.connectionSessions.length > 0}
+              <span class="count-chip">{ws.connectionSessions.length}</span>
             {/if}
+          </button>
+          <button
+            class="icon-btn twisty"
+            onclick={() => (connectionsOpen = !connectionsOpen)}
+            aria-label="Toggle connection list"
+          >
+            <Icon name={connectionsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+          </button>
+        </div>
+
+        {#if connectionsOpen}
+          <div class="nested">
+            {#each ws.connectionSessions as s (s.id)}
+              {@render sessionRow(s)}
+            {:else}
+              <div class="nested-empty">No open connections — open one from the page</div>
+            {/each}
           </div>
         {/if}
       {/if}
 
-      {#if q ? fSlack.length > 0 : ws.slackSessions.length > 0}
-        <div class="nav-item-row">
-          <button class="nav-item" onclick={() => (slackOpen = !slackOpen)}>
-            <Icon name="slack" size={14} />
-            <span class="grow">Slack</span>
-            <span class="count-chip">{ws.slackSessions.length}</span>
-          </button>
-          <button
-            class="icon-btn twisty"
-            onclick={() => (slackOpen = !slackOpen)}
-            aria-label="Toggle Slack list"
-          >
-            <Icon name={slackOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          </button>
-        </div>
-        {#if slackOpen || q}
-          <div class="nested">
-            {#each visSlack as s (s.id)}
-              {@render sessionRow(s)}
-            {:else}
-              <div class="nested-empty">No matching</div>
-            {/each}
-            {#if !q && fSlack.length > CHANNEL_CAP}
-              <button class="show-more" onclick={() => (slackShowAll = !slackShowAll)}>
-                {slackShowAll ? 'Show less' : `Show ${fSlack.length - CHANNEL_CAP} more`}
-              </button>
-            {/if}
-          </div>
-        {/if}
+      {#if auth.can('swarm', 'view')}
+        <button class="nav-item" class:active={router.module === 'swarm'} onclick={() => router.go('swarm')}>
+          <Icon name="grid" size={14} />
+          <span class="grow">Swarm</span>
+        </button>
       {/if}
 
-      <div class="nav-item-row">
+      {#if auth.can('git', 'view')}
+        <button class="nav-item" class:active={router.module === 'git'} onclick={() => router.go('git')}>
+          <Icon name="branch" size={14} />
+          <span class="grow">Git</span>
+        </button>
+      {/if}
+
+      {#if auth.can('product', 'view')}
+        <button class="nav-item" class:active={router.module === 'product'} onclick={() => router.go('product')}>
+          <Icon name="note" size={14} />
+          <span class="grow">Product</span>
+        </button>
+      {/if}
+
+      {#if auth.can('api_client', 'view')}
+        <button class="nav-item" class:active={router.module === 'api'} onclick={() => router.go('api')}>
+          <Icon name="send" size={14} />
+          <span class="grow">API</span>
+        </button>
+      {/if}
+
+      {#if auth.can('database', 'view')}
+        <button class="nav-item" class:active={router.module === 'database'} onclick={() => router.go('database')}>
+          <Icon name="db" size={14} />
+          <span class="grow">Database</span>
+        </button>
+      {/if}
+
+      {#if auth.can('workflows', 'view')}
         <button
           class="nav-item"
-          class:active={router.module === 'connections'}
-          onclick={() => router.go('connections')}
+          class:active={router.module === 'workflows'}
+          onclick={() => router.go('workflows')}
         >
-          <Icon name="plug" size={14} />
-          <span class="grow">Connections</span>
-          {#if ws.connectionSessions.length > 0}
-            <span class="count-chip">{ws.connectionSessions.length}</span>
-          {/if}
+          <Icon name="split" size={14} />
+          <span class="grow">Workflows</span>
         </button>
-        <button
-          class="icon-btn twisty"
-          onclick={() => (connectionsOpen = !connectionsOpen)}
-          aria-label="Toggle connection list"
-        >
-          <Icon name={connectionsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-        </button>
-      </div>
-
-      {#if connectionsOpen}
-        <div class="nested">
-          {#each ws.connectionSessions as s (s.id)}
-            {@render sessionRow(s)}
-          {:else}
-            <div class="nested-empty">No open connections — open one from the page</div>
-          {/each}
-        </div>
       {/if}
 
-      <button class="nav-item" class:active={router.module === 'swarm'} onclick={() => router.go('swarm')}>
-        <Icon name="grid" size={14} />
-        <span class="grow">Swarm</span>
-      </button>
+      {#if auth.can('skill_eval', 'view')}
+        <button
+          class="nav-item"
+          class:active={router.module === 'skills-eval'}
+          onclick={() => router.go('skills-eval')}
+        >
+          <Icon name="zap" size={14} />
+          <span class="grow">Skills Evaluator</span>
+        </button>
+      {/if}
 
-      <button class="nav-item" class:active={router.module === 'git'} onclick={() => router.go('git')}>
-        <Icon name="branch" size={14} />
-        <span class="grow">Git</span>
-      </button>
-
-      <button class="nav-item" class:active={router.module === 'product'} onclick={() => router.go('product')}>
-        <Icon name="note" size={14} />
-        <span class="grow">Product</span>
-      </button>
-
-      <button class="nav-item" class:active={router.module === 'api'} onclick={() => router.go('api')}>
-        <Icon name="send" size={14} />
-        <span class="grow">API</span>
-      </button>
-
-      <button class="nav-item" class:active={router.module === 'database'} onclick={() => router.go('database')}>
-        <Icon name="db" size={14} />
-        <span class="grow">Database</span>
-      </button>
-
-      <button
-        class="nav-item"
-        class:active={router.module === 'workflows'}
-        onclick={() => router.go('workflows')}
-      >
-        <Icon name="split" size={14} />
-        <span class="grow">Workflows</span>
-      </button>
-
-      <button
-        class="nav-item"
-        class:active={router.module === 'skills-eval'}
-        onclick={() => router.go('skills-eval')}
-      >
-        <Icon name="zap" size={14} />
-        <span class="grow">Skills Evaluator</span>
-      </button>
-
-      <button
-        class="nav-item"
-        class:active={router.module === 'insights'}
-        onclick={() => router.go('insights')}
-      >
-        <Icon name="gauge" size={14} />
-        <span class="grow">Insights</span>
-      </button>
+      {#if auth.can('insights', 'view')}
+        <button
+          class="nav-item"
+          class:active={router.module === 'insights'}
+          onclick={() => router.go('insights')}
+        >
+          <Icon name="gauge" size={14} />
+          <span class="grow">Insights</span>
+        </button>
+      {/if}
 
       {#if auth.can('usage', 'view')}
         <button
