@@ -12,6 +12,7 @@ pub mod login_throttle;
 pub mod lsp;
 pub mod modules;
 pub mod monitor;
+pub mod policy;
 pub mod product_run;
 pub mod product_swarm;
 pub mod product_watcher;
