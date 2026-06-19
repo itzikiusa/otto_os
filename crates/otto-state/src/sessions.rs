@@ -129,6 +129,22 @@ impl SessionsRepo {
         rows.iter().map(row_to_session).collect()
     }
 
+    /// **Every** session across **all** workspaces, newest first.
+    ///
+    /// The sanctioned cross-user, cross-workspace read backing the admin
+    /// active-sessions overview (`GET /api/v1/admin/sessions`, Task 4.2). It is
+    /// deliberately unfiltered by owner, workspace, status or `archived` — the
+    /// admin overview wants the whole picture and enriches each row with live
+    /// state from the `SessionManager`. Gated by `Users:Admin`/root at the route,
+    /// not here.
+    pub async fn list_all(&self) -> Result<Vec<Session>> {
+        let rows = sqlx::query("SELECT * FROM sessions ORDER BY created_at DESC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("all sessions"))?;
+        rows.iter().map(row_to_session).collect()
+    }
+
     /// Sessions that should be revived or marked reconnectable on daemon boot.
     ///
     /// Includes exited agent sessions that have a `provider_session_id` — those
@@ -522,6 +538,38 @@ mod tests {
         // The unscoped list still returns all three (admin/root path).
         let all = repo.list_by_workspace(&ws).await.unwrap();
         assert_eq!(all.len(), 3, "unscoped list returns every session");
+    }
+
+    #[tokio::test]
+    async fn list_all_returns_every_session_across_owners_and_workspaces() {
+        let pool = mem_pool().await;
+        let (alice, ws1) = seed_user_ws(&pool).await;
+        let bob = seed_extra_user(&pool, "bob").await;
+        // A second workspace so we prove the listing crosses workspaces too.
+        let ws2 = new_id();
+        let now = fmt(Utc::now());
+        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
+            .bind(&ws2).bind("w2").bind("/tmp2").bind(&now)
+            .execute(&pool).await.unwrap();
+        let repo = SessionsRepo::new(pool.clone());
+
+        let a1 = insert_session_full(&pool, &ws1, &alice, "claude", "running", None, 0).await;
+        let b1 = insert_session_full(&pool, &ws1, &bob, "shell", "exited", None, 0).await;
+        // bob in a different workspace, archived — still part of "all".
+        let b2 = insert_session_full(&pool, &ws2, &bob, "codex", "exited", None, 1).await;
+
+        let all: std::collections::HashSet<String> = repo
+            .list_all()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            all,
+            [a1, b1, b2].into_iter().collect(),
+            "list_all must return every session regardless of owner/workspace/status/archived"
+        );
     }
 
     #[tokio::test]

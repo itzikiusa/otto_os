@@ -1,6 +1,7 @@
 //! Core REST routes (contract endpoints #1-16, #57-58).
 
 pub mod activity;
+pub mod admin_sessions;
 pub mod api_client;
 pub mod api_stream;
 pub mod audit;
@@ -78,6 +79,16 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         // Caller's effective capability map (any authed user; Exempt in policy).
         .route("/auth/capabilities", get(grants::capabilities::<ServerCtx>))
+        // --- Admin active-sessions overview + terminate (RBAC Task 4.2) ---
+        // The sanctioned cross-user view; gated Users:Admin/root via policy.rs.
+        .route(
+            "/admin/sessions",
+            get(admin_sessions::list_sessions::<ServerCtx>),
+        )
+        .route(
+            "/admin/sessions/{id}/terminate",
+            post(admin_sessions::terminate::<ServerCtx>),
+        )
         .route(
             "/workspaces",
             get(workspaces::list).post(workspaces::create),

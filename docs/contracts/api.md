@@ -720,6 +720,35 @@ user may call it.
   detail: {old: GrantEntry[], new: GrantEntry[]}}`.
 - 404 if target user `{id}` does not exist.
 
+## Admin active-sessions overview + terminate (RBAC Task 4.2)
+
+The **sanctioned cross-user view**: a daemon-wide list of every session across
+all workspaces and users, plus forced termination. Gated by `Users:Admin`
+(feature guard) **or** root — so a non-root user granted `Users:Admin` can use it
+too. This intentionally bypasses the per-session owner gate (which everywhere
+else confines a user to their own sessions); the handlers add no extra root
+check. Both routes are mapped to `Require(Users, Admin)` in the policy table.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /admin/sessions | Users:Admin or root | — | `AdminSessionsResp {sessions: AdminSessionRow[]}` |
+| POST /admin/sessions/{id}/terminate | Users:Admin or root | — | `204 No Content` (kills the PTY → `exited`, forcibly evicts attached `/ws/term` viewers; audited) |
+
+- `AdminSessionRow` = `{id, owner_id, owner_username, workspace_id, kind, provider, title, status, live: bool, viewers: number}`.
+- Each row is a persisted session enriched with live state from the in-memory
+  `SessionManager`: `live` = `is_live(id)`, `viewers` = `attached_count(id)`.
+  `owner_username` resolves `created_by` via a single batched user load (falling
+  back to the owner id if the user row is gone).
+- `terminate` calls `SessionManager::kill_session` (kills the PTY, marks the
+  session `exited`, keeps the row + history — non-destructive) then
+  `SessionManager::evict`, which fires the per-session disconnect signal so every
+  attached `/ws/term` viewer receives a `{"type":"terminated"}` frame and the
+  socket closes (see `ws.md`). The session owner can still self-terminate their
+  own session via the owner-gated `DELETE /sessions/{id}`.
+- Writes a `"session.terminated"` audit entry: `{user_id: actor, target: session_id,
+  detail: {owner_id, workspace_id}}`.
+- 404 if the session `{id}` does not exist.
+
 ## Trust & Safety (security audit log + posture)
 
 | Method & path | Auth | Request | Response |
@@ -727,7 +756,7 @@ user may call it.
 | GET /audit-log | root | query: `from?` `to?` (RFC3339, inclusive `ts` bounds) · `action?` · `user_id?` · `limit?` (≤500, default 100) · `offset?` | AuditLogResp `{entries: AuditEntry[], total}` (newest first; `total` ignores paging) |
 | GET /security-posture | root | — | SecurityPostureResp `{network_listener, network_listener_port?, loopback_only, active_api_tokens}` |
 
-The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), and `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`). The posture summary derives entirely from existing settings + the auth store (no new state): the network listener key drives `network_listener` / `network_listener_port` / `loopback_only`, and `active_api_tokens` counts unexpired API tokens instance-wide.
+The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`), `grant.changed` (`target` = the user whose grants changed; `detail.old`/`detail.new` grant lists), and `session.terminated` (an admin force-terminated a session via `POST /admin/sessions/{id}/terminate`; `target` = session id; `detail.owner_id` + `detail.workspace_id`). The posture summary derives entirely from existing settings + the auth store (no new state): the network listener key drives `network_listener` / `network_listener_port` / `loopback_only`, and `active_api_tokens` counts unexpired API tokens instance-wide.
 
 ## Usage tracking & system metrics (embedded ClickHouse)
 

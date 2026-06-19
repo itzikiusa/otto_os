@@ -397,6 +397,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/users" || p.starts_with("/users/") {
         return Require(Users, Admin);
     }
+    // Admin active-sessions overview + terminate (Task 4.2) — the sanctioned
+    // cross-user view. `Users:Admin` (or root) governs it, so a non-root admin
+    // can also use it; the handlers deliberately do NOT add a root check.
+    if p == "/admin/sessions" || p.starts_with("/admin/sessions/") {
+        return Require(Users, Admin);
+    }
     // Activity trail / tasks / summary are Agents reads/writes (per-session data),
     // owner-scoped in Phase 3. trail/tasks GET=View, append/put=Edit; summary=View.
     if p == "/workspaces/{wid}/sessions/{sid}/trail"
@@ -495,6 +501,20 @@ mod tests {
         assert_eq!(
             pol(Method::GET, "/api/v1/settings"),
             Require(Settings, Admin)
+        );
+    }
+
+    #[test]
+    fn admin_sessions_overview_is_users_admin() {
+        // Task 4.2: the cross-user overview + terminate are gated by Users:Admin
+        // (root passes via the guard), NOT a separate root-only path.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/admin/sessions"),
+            Require(Users, Admin)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/admin/sessions/{id}/terminate"),
+            Require(Users, Admin)
         );
     }
 

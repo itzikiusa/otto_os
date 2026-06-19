@@ -134,6 +134,47 @@ pub struct CapabilitiesResp {
 }
 
 // ---------------------------------------------------------------------------
+// Admin active-sessions overview (RBAC Task 4.2)
+// ---------------------------------------------------------------------------
+
+/// One row of the daemon-wide admin active-sessions overview
+/// (`GET /api/v1/admin/sessions`). Each entry is a persisted session enriched
+/// with its owner's username and the in-memory live state from the
+/// `SessionManager` (`live`, `viewers`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminSessionRow {
+    /// Session id.
+    pub id: String,
+    /// `created_by` — the owning user's id.
+    pub owner_id: String,
+    /// The owning user's username (resolved via a batch user load); falls back
+    /// to the owner id when the user row no longer exists.
+    pub owner_username: String,
+    /// Workspace the session belongs to.
+    pub workspace_id: String,
+    /// `agent` | `connection`.
+    pub kind: String,
+    /// CLI provider / connection driver (`claude`, `codex`, `shell`, `mysql`, …).
+    pub provider: String,
+    /// Display title.
+    pub title: String,
+    /// Persisted status (`running`/`working`/`idle`/`reconnectable`/`exited`).
+    pub status: String,
+    /// True when the session has a live PTY in this daemon process
+    /// (`SessionManager::is_live`).
+    pub live: bool,
+    /// Number of WS terminal viewers currently attached
+    /// (`SessionManager::attached_count`).
+    pub viewers: u32,
+}
+
+/// `GET /api/v1/admin/sessions` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminSessionsResp {
+    pub sessions: Vec<AdminSessionRow>,
+}
+
+// ---------------------------------------------------------------------------
 // Users / workspaces
 // ---------------------------------------------------------------------------
 
