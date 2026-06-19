@@ -459,12 +459,15 @@ impl DbViewerService {
 
     /// Run a query/command and record it in history (best-effort).
     ///
+    /// `user_id` identifies the caller and is written into `db_query_history.user_id`
+    /// (since migration 0039) so history can later be filtered per-user.
+    ///
     /// When `req.query_id` is set, the query is registered in the in-flight map
     /// for its duration (via [`InFlightGuard`], which removes it on drop even if
     /// the driver errors or the future is cancelled), so a concurrent
     /// [`Self::cancel`] can issue engine-native cancellation against it. The
     /// driver fills the [`CancelToken`] with its native handle as it starts.
-    pub async fn run(&self, conn_id: &Id, req: &QueryRequest) -> Result<QueryResult> {
+    pub async fn run(&self, conn_id: &Id, user_id: &Id, req: &QueryRequest) -> Result<QueryResult> {
         self.guard_write(conn_id, req).await?;
         let r = self.resolve(conn_id).await?;
         let token = CancelToken::new();
@@ -496,6 +499,7 @@ impl DbViewerService {
                     .repo
                     .add_history(
                         conn_id,
+                        user_id,
                         &req.statement,
                         true,
                         elapsed,
@@ -507,7 +511,7 @@ impl DbViewerService {
             Err(e) => {
                 let _ = self
                     .repo
-                    .add_history(conn_id, &req.statement, false, elapsed, 0, Some(&e.to_string()))
+                    .add_history(conn_id, user_id, &req.statement, false, elapsed, 0, Some(&e.to_string()))
                     .await;
             }
         }
@@ -557,8 +561,13 @@ impl DbViewerService {
 
     // -- Persistence pass-throughs (saved queries / history / dashboards) ----
 
+    /// All saved queries for a workspace — root / ws-Admin view.
     pub async fn list_saved(&self, ws: &Id) -> Result<Vec<SavedQuery>> {
         self.repo.list_saved(ws).await
+    }
+    /// Saved queries for a workspace scoped to a single user — non-admin view.
+    pub async fn list_saved_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<SavedQuery>> {
+        self.repo.list_saved_for_user(ws, user_id).await
     }
     pub async fn create_saved(&self, q: NewSavedQuery) -> Result<SavedQuery> {
         self.repo.create_saved(q).await
@@ -569,12 +578,27 @@ impl DbViewerService {
     pub async fn delete_saved(&self, id: &Id) -> Result<()> {
         self.repo.delete_saved(id).await
     }
+    /// All history for a connection — root / ws-Admin view.
     pub async fn list_history(&self, conn_id: &Id, limit: i64) -> Result<Vec<HistoryEntry>> {
         self.repo.list_history(conn_id, limit).await
     }
+    /// History for a connection scoped to a single user — non-admin view.
+    pub async fn list_history_for_user(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        limit: i64,
+    ) -> Result<Vec<HistoryEntry>> {
+        self.repo.list_history_for_user(conn_id, user_id, limit).await
+    }
 
+    /// All dashboards for a workspace — root / ws-Admin view.
     pub async fn list_dashboards(&self, ws: &Id) -> Result<Vec<Dashboard>> {
         self.repo.list_dashboards(ws).await
+    }
+    /// Dashboards for a workspace scoped to a single user — non-admin view (#L13).
+    pub async fn list_dashboards_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Dashboard>> {
+        self.repo.list_dashboards_for_user(ws, user_id).await
     }
     pub async fn get_dashboard(&self, id: &Id) -> Result<Dashboard> {
         self.repo.get_dashboard(id).await
@@ -595,8 +619,13 @@ impl DbViewerService {
         self.repo.delete_dashboard(id).await
     }
 
+    /// All widgets for a workspace — root / ws-Admin view.
     pub async fn list_widgets(&self, ws: &Id) -> Result<Vec<Widget>> {
         self.repo.list_widgets(ws).await
+    }
+    /// Widgets for a workspace scoped to a single user — non-admin view (#L13).
+    pub async fn list_widgets_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Widget>> {
+        self.repo.list_widgets_for_user(ws, user_id).await
     }
     pub async fn get_widget(&self, id: &Id) -> Result<Widget> {
         self.repo.get_widget(id).await
@@ -624,14 +653,16 @@ impl DbViewerService {
     }
 
     /// Run a widget's query for rendering.
-    pub async fn run_widget(&self, id: &Id) -> Result<QueryResult> {
+    ///
+    /// `user_id` is threaded through to history recording (since migration 0039).
+    pub async fn run_widget(&self, id: &Id, user_id: &Id) -> Result<QueryResult> {
         let widget = self.repo.get_widget(id).await?;
         let req = QueryRequest {
             statement: widget.statement,
             max_rows: Some(5000),
             ..Default::default()
         };
-        self.run(&widget.connection_id, &req).await
+        self.run(&widget.connection_id, user_id, &req).await
     }
 }
 

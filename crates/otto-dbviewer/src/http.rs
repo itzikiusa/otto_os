@@ -294,7 +294,7 @@ async fn run_query<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    let result = ctx.db().run(&id, &req).await?;
+    let result = ctx.db().run(&id, &user.id, &req).await?;
     // A confirmed write on a guarded (production / read-only) connection is a
     // security-relevant override worth auditing. Fire only after a successful
     // run so we don't log writes the engine rejected. `confirm_write` is a no-op
@@ -350,7 +350,15 @@ async fn history<S: DbViewerCtx>(
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
-    Ok(Json(ctx.db().list_history(&id, limit).await?).into_response())
+    // Root sees all history on the connection; non-root callers see only
+    // their own rows (#L11). Legacy rows (user_id = NULL, pre-0039) are
+    // invisible to non-root callers — acceptable, as they predate multi-user.
+    let entries = if user.is_root {
+        ctx.db().list_history(&id, limit).await?
+    } else {
+        ctx.db().list_history_for_user(&id, &user.id, limit).await?
+    };
+    Ok(Json(entries).into_response())
 }
 
 // --- Saved queries ----------------------------------------------------------
@@ -361,7 +369,15 @@ async fn list_saved<S: DbViewerCtx>(
     Path(wid): Path<Id>,
 ) -> ApiResult<Response> {
     ctx.roles().check(&user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().list_saved(&wid).await?).into_response())
+    // Root sees all saved queries in the workspace; non-root callers see only
+    // their own (#L12). The `created_by` column has been present since 0021, so
+    // no legacy-null concern here.
+    let queries = if user.is_root {
+        ctx.db().list_saved(&wid).await?
+    } else {
+        ctx.db().list_saved_for_user(&wid, &user.id).await?
+    };
+    Ok(Json(queries).into_response())
 }
 
 async fn create_saved<S: DbViewerCtx>(
@@ -406,7 +422,13 @@ async fn list_dashboards<S: DbViewerCtx>(
     Path(wid): Path<Id>,
 ) -> ApiResult<Response> {
     ctx.roles().check(&user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().list_dashboards(&wid).await?).into_response())
+    // Root sees all dashboards; non-root sees only their own (#L13).
+    let dashboards = if user.is_root {
+        ctx.db().list_dashboards(&wid).await?
+    } else {
+        ctx.db().list_dashboards_for_user(&wid, &user.id).await?
+    };
+    Ok(Json(dashboards).into_response())
 }
 
 async fn create_dashboard<S: DbViewerCtx>(
@@ -474,7 +496,13 @@ async fn list_widgets<S: DbViewerCtx>(
     Path(wid): Path<Id>,
 ) -> ApiResult<Response> {
     ctx.roles().check(&user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().list_widgets(&wid).await?).into_response())
+    // Root sees all widgets; non-root sees only their own (#L13).
+    let widgets = if user.is_root {
+        ctx.db().list_widgets(&wid).await?
+    } else {
+        ctx.db().list_widgets_for_user(&wid, &user.id).await?
+    };
+    Ok(Json(widgets).into_response())
 }
 
 async fn create_widget<S: DbViewerCtx>(
@@ -560,7 +588,7 @@ async fn run_widget<S: DbViewerCtx>(
     // global connections.
     let conn = ctx.db().get_connection(&widget.connection_id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    Ok(Json(ctx.db().run_widget(&id).await?).into_response())
+    Ok(Json(ctx.db().run_widget(&id, &user.id).await?).into_response())
 }
 
 #[cfg(test)]

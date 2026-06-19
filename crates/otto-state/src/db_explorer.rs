@@ -30,6 +30,10 @@ pub struct HistoryEntry {
     pub duration_ms: i64,
     pub row_count: i64,
     pub error: Option<String>,
+    /// Who ran this query. `None` for rows recorded before migration 0039
+    /// (legacy single-user data). Non-admin filtered views only show rows
+    /// where `user_id` matches the caller; legacy rows are invisible to them.
+    pub user_id: Option<Id>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -114,6 +118,7 @@ fn row_to_history(r: &sqlx::sqlite::SqliteRow) -> Result<HistoryEntry> {
         duration_ms: r.get("duration_ms"),
         row_count: r.get("row_count"),
         error: r.get("error"),
+        user_id: r.get("user_id"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
     })
 }
@@ -154,17 +159,6 @@ impl DbExplorerRepo {
     }
 
     // -- Saved queries ------------------------------------------------------
-
-    pub async fn list_saved(&self, ws: &Id) -> Result<Vec<SavedQuery>> {
-        let rows = sqlx::query(
-            "SELECT * FROM db_saved_queries WHERE workspace_id = ? ORDER BY created_at DESC",
-        )
-        .bind(ws)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list saved queries"))?;
-        rows.iter().map(row_to_saved).collect()
-    }
 
     pub async fn create_saved(&self, q: NewSavedQuery) -> Result<SavedQuery> {
         let id = new_id();
@@ -207,9 +201,13 @@ impl DbExplorerRepo {
 
     // -- History ------------------------------------------------------------
 
+    /// Insert a history row. `user_id` is the caller who executed the statement;
+    /// it is recorded since migration 0039 and used to scope per-user history views.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_history(
         &self,
         connection_id: &Id,
+        user_id: &Id,
         statement: &str,
         ok: bool,
         duration_ms: i64,
@@ -219,12 +217,13 @@ impl DbExplorerRepo {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
-            "INSERT INTO db_query_history (id, connection_id, statement, ok, duration_ms,
+            "INSERT INTO db_query_history (id, connection_id, user_id, statement, ok, duration_ms,
                                            row_count, error, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(connection_id)
+        .bind(user_id)
         .bind(statement)
         .bind(i64::from(ok))
         .bind(duration_ms)
@@ -237,6 +236,7 @@ impl DbExplorerRepo {
         Ok(())
     }
 
+    /// Return all history for a connection, unfiltered. For root / workspace-Admin use.
     pub async fn list_history(&self, connection_id: &Id, limit: i64) -> Result<Vec<HistoryEntry>> {
         let rows = sqlx::query(
             "SELECT * FROM db_query_history WHERE connection_id = ?
@@ -250,14 +250,79 @@ impl DbExplorerRepo {
         rows.iter().map(row_to_history).collect()
     }
 
+    /// Return history for a connection scoped to a single user. Used for
+    /// non-root callers: only shows rows where `user_id = caller_id`.
+    ///
+    /// Legacy rows with `user_id = NULL` (pre-0039) are excluded — they predate
+    /// multi-user and cannot be attributed to any specific user.
+    pub async fn list_history_for_user(
+        &self,
+        connection_id: &Id,
+        user_id: &Id,
+        limit: i64,
+    ) -> Result<Vec<HistoryEntry>> {
+        let rows = sqlx::query(
+            "SELECT * FROM db_query_history WHERE connection_id = ? AND user_id = ?
+             ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(connection_id)
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list history for user"))?;
+        rows.iter().map(row_to_history).collect()
+    }
+
+    /// Return all saved queries for a workspace, unfiltered. For root / workspace-Admin use.
+    pub async fn list_saved(&self, ws: &Id) -> Result<Vec<SavedQuery>> {
+        let rows = sqlx::query(
+            "SELECT * FROM db_saved_queries WHERE workspace_id = ? ORDER BY created_at DESC",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list saved queries"))?;
+        rows.iter().map(row_to_saved).collect()
+    }
+
+    /// Return saved queries for a workspace scoped to a single user. Used for
+    /// non-root callers: only shows rows where `created_by = caller_id`.
+    pub async fn list_saved_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<SavedQuery>> {
+        let rows = sqlx::query(
+            "SELECT * FROM db_saved_queries WHERE workspace_id = ? AND created_by = ?
+             ORDER BY created_at DESC",
+        )
+        .bind(ws)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list saved queries for user"))?;
+        rows.iter().map(row_to_saved).collect()
+    }
+
     // -- Dashboards ---------------------------------------------------------
 
+    /// All dashboards for a workspace — root / ws-Admin view.
     pub async fn list_dashboards(&self, ws: &Id) -> Result<Vec<Dashboard>> {
         let rows = sqlx::query("SELECT * FROM db_dashboards WHERE workspace_id = ? ORDER BY name")
             .bind(ws)
             .fetch_all(&self.pool)
             .await
             .map_err(dberr("list dashboards"))?;
+        rows.iter().map(row_to_dashboard).collect()
+    }
+
+    /// Dashboards for a workspace scoped to a single user — non-admin view (#L13).
+    pub async fn list_dashboards_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Dashboard>> {
+        let rows = sqlx::query(
+            "SELECT * FROM db_dashboards WHERE workspace_id = ? AND created_by = ? ORDER BY name",
+        )
+        .bind(ws)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list dashboards for user"))?;
         rows.iter().map(row_to_dashboard).collect()
     }
 
@@ -334,12 +399,26 @@ impl DbExplorerRepo {
 
     // -- Widgets ------------------------------------------------------------
 
+    /// All widgets for a workspace — root / ws-Admin view.
     pub async fn list_widgets(&self, ws: &Id) -> Result<Vec<Widget>> {
         let rows = sqlx::query("SELECT * FROM db_widgets WHERE workspace_id = ? ORDER BY created_at")
             .bind(ws)
             .fetch_all(&self.pool)
             .await
             .map_err(dberr("list widgets"))?;
+        rows.iter().map(row_to_widget).collect()
+    }
+
+    /// Widgets for a workspace scoped to a single user — non-admin view (#L13).
+    pub async fn list_widgets_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Widget>> {
+        let rows = sqlx::query(
+            "SELECT * FROM db_widgets WHERE workspace_id = ? AND created_by = ? ORDER BY created_at",
+        )
+        .bind(ws)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list widgets for user"))?;
         rows.iter().map(row_to_widget).collect()
     }
 
@@ -427,5 +506,278 @@ impl DbExplorerRepo {
             .await
             .map_err(dberr("delete widget"))?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Task 3.6: owner-scope DB history + saved queries (#L11–#L13)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    /// Spin up an in-memory SQLite pool with all migrations applied.
+    async fn mem_pool() -> SqlitePool {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        pool
+    }
+
+    /// Seed a user row and return their id.
+    async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> Id {
+        let id = otto_core::new_id();
+        let now = crate::convert::fmt(Utc::now());
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, disabled, created_at)
+             VALUES (?, ?, ?, ?, ?, 0, ?)",
+        )
+        .bind(&id)
+        .bind(username)
+        .bind("hash")
+        .bind(username)
+        .bind(is_root as i64)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Seed a workspace and return its id.
+    async fn seed_workspace(pool: &SqlitePool) -> Id {
+        let ws_id = otto_core::new_id();
+        let now = crate::convert::fmt(Utc::now());
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&ws_id)
+        .bind("test-ws")
+        .bind("/tmp/test-ws")
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        ws_id
+    }
+
+    /// Seed a connection and return its id. Needed so add_history can reference it.
+    async fn seed_connection(pool: &SqlitePool, ws_id: &Id, created_by: &Id) -> Id {
+        let conn_id = otto_core::new_id();
+        let now = crate::convert::fmt(Utc::now());
+        sqlx::query(
+            "INSERT INTO connections (id, workspace_id, name, kind, params_json, created_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&conn_id)
+        .bind(ws_id)
+        .bind("test-conn")
+        .bind("mysql")
+        .bind("{}")
+        .bind(created_by)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        conn_id
+    }
+
+    // ── History isolation (#L11) ─────────────────────────────────────────────
+
+    /// User A runs a query → user B's per-user history list does NOT include it.
+    #[tokio::test]
+    async fn history_user_a_invisible_to_user_b() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+
+        let user_a = seed_user(&pool, "alice", false).await;
+        let user_b = seed_user(&pool, "bob", false).await;
+        let ws_id = seed_workspace(&pool).await;
+        let conn_id = seed_connection(&pool, &ws_id, &user_a).await;
+
+        // A records a query.
+        repo.add_history(&conn_id, &user_a, "SELECT 1", true, 10, 1, None)
+            .await
+            .unwrap();
+
+        // B's per-user list is empty.
+        let b_history = repo
+            .list_history_for_user(&conn_id, &user_b, 100)
+            .await
+            .unwrap();
+        assert!(
+            b_history.is_empty(),
+            "user B must not see user A's history; got {:?}",
+            b_history.iter().map(|h| &h.statement).collect::<Vec<_>>()
+        );
+    }
+
+    /// User B's own query appears in B's per-user history.
+    #[tokio::test]
+    async fn history_user_b_sees_own_rows() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+
+        let user_a = seed_user(&pool, "alice", false).await;
+        let user_b = seed_user(&pool, "bob", false).await;
+        let ws_id = seed_workspace(&pool).await;
+        let conn_id = seed_connection(&pool, &ws_id, &user_a).await;
+
+        repo.add_history(&conn_id, &user_a, "SELECT 1", true, 5, 1, None)
+            .await
+            .unwrap();
+        repo.add_history(&conn_id, &user_b, "SELECT 2", true, 5, 1, None)
+            .await
+            .unwrap();
+
+        let b_history = repo
+            .list_history_for_user(&conn_id, &user_b, 100)
+            .await
+            .unwrap();
+        assert_eq!(b_history.len(), 1, "B sees exactly their own entry");
+        assert_eq!(b_history[0].statement, "SELECT 2");
+    }
+
+    /// The unfiltered `list_history` (root/admin view) sees all rows.
+    #[tokio::test]
+    async fn history_unfiltered_sees_all() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+
+        let user_a = seed_user(&pool, "alice", false).await;
+        let user_b = seed_user(&pool, "bob", false).await;
+        let ws_id = seed_workspace(&pool).await;
+        let conn_id = seed_connection(&pool, &ws_id, &user_a).await;
+
+        repo.add_history(&conn_id, &user_a, "SELECT 1", true, 5, 1, None)
+            .await
+            .unwrap();
+        repo.add_history(&conn_id, &user_b, "SELECT 2", true, 5, 1, None)
+            .await
+            .unwrap();
+
+        let all = repo.list_history(&conn_id, 100).await.unwrap();
+        assert_eq!(all.len(), 2, "unfiltered view must return both entries");
+    }
+
+    /// `user_id` is stored in the row and visible via `list_history`.
+    #[tokio::test]
+    async fn history_user_id_is_recorded() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+
+        let user_a = seed_user(&pool, "alice", false).await;
+        let ws_id = seed_workspace(&pool).await;
+        let conn_id = seed_connection(&pool, &ws_id, &user_a).await;
+
+        repo.add_history(&conn_id, &user_a, "SELECT 42", true, 7, 1, None)
+            .await
+            .unwrap();
+
+        let all = repo.list_history(&conn_id, 100).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            all[0].user_id.as_deref(),
+            Some(user_a.as_str()),
+            "user_id must be stored in the history row"
+        );
+    }
+
+    // ── Saved-query isolation (#L12) ─────────────────────────────────────────
+
+    /// A's saved query is invisible to B's per-user list.
+    #[tokio::test]
+    async fn saved_queries_user_a_invisible_to_user_b() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+
+        let user_a = seed_user(&pool, "alice", false).await;
+        let user_b = seed_user(&pool, "bob", false).await;
+        let ws_id = seed_workspace(&pool).await;
+
+        // A creates a saved query.
+        repo.create_saved(NewSavedQuery {
+            workspace_id: ws_id.clone(),
+            connection_id: None,
+            name: "A query".into(),
+            statement: "SELECT * FROM a".into(),
+            created_by: user_a.clone(),
+        })
+        .await
+        .unwrap();
+
+        let b_saved = repo.list_saved_for_user(&ws_id, &user_b).await.unwrap();
+        assert!(
+            b_saved.is_empty(),
+            "user B must not see user A's saved queries"
+        );
+    }
+
+    /// B's saved query appears in B's per-user list.
+    #[tokio::test]
+    async fn saved_queries_user_b_sees_own() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+
+        let user_a = seed_user(&pool, "alice", false).await;
+        let user_b = seed_user(&pool, "bob", false).await;
+        let ws_id = seed_workspace(&pool).await;
+
+        repo.create_saved(NewSavedQuery {
+            workspace_id: ws_id.clone(),
+            connection_id: None,
+            name: "A query".into(),
+            statement: "SELECT * FROM a".into(),
+            created_by: user_a.clone(),
+        })
+        .await
+        .unwrap();
+        repo.create_saved(NewSavedQuery {
+            workspace_id: ws_id.clone(),
+            connection_id: None,
+            name: "B query".into(),
+            statement: "SELECT * FROM b".into(),
+            created_by: user_b.clone(),
+        })
+        .await
+        .unwrap();
+
+        let b_saved = repo.list_saved_for_user(&ws_id, &user_b).await.unwrap();
+        assert_eq!(b_saved.len(), 1);
+        assert_eq!(b_saved[0].name, "B query");
+    }
+
+    /// Unfiltered `list_saved` (root/admin view) sees all rows.
+    #[tokio::test]
+    async fn saved_queries_unfiltered_sees_all() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+
+        let user_a = seed_user(&pool, "alice", false).await;
+        let user_b = seed_user(&pool, "bob", false).await;
+        let ws_id = seed_workspace(&pool).await;
+
+        for (name, by) in [("A query", &user_a), ("B query", &user_b)] {
+            repo.create_saved(NewSavedQuery {
+                workspace_id: ws_id.clone(),
+                connection_id: None,
+                name: name.into(),
+                statement: "SELECT 1".into(),
+                created_by: by.clone(),
+            })
+            .await
+            .unwrap();
+        }
+
+        let all = repo.list_saved(&ws_id).await.unwrap();
+        assert_eq!(all.len(), 2, "unfiltered list must return both entries");
     }
 }
