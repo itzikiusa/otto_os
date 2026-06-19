@@ -1408,3 +1408,129 @@ pub struct ApiAutomation {
     pub steps: Value,
     pub created_at: DateTime<Utc>,
 }
+
+// ---------------------------------------------------------------------------
+// RBAC: per-user, per-feature access ladder
+// ---------------------------------------------------------------------------
+
+/// The level of access a user holds for a given feature.
+/// Variant order is significant: `None < View < Edit < Admin` (derived `Ord`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    None,
+    View,
+    Edit,
+    Admin,
+}
+
+impl Capability {
+    /// Parse from the lowercase string stored in SQLite / JSON.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(Self::None),
+            "view" => Some(Self::View),
+            "edit" => Some(Self::Edit),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+
+    /// Lowercase string form stored in SQLite / JSON.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::View => "view",
+            Self::Edit => "edit",
+            Self::Admin => "admin",
+        }
+    }
+}
+
+/// The 18 independently-gatable product features.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Feature {
+    Agents,
+    Connections,
+    Database,
+    Git,
+    Issues,
+    Product,
+    Swarm,
+    ApiClient,
+    Workflows,
+    Channels,
+    SkillEval,
+    Skills,
+    Insights,
+    Usage,
+    SelfImprovement,
+    Context,
+    Settings,
+    Users,
+}
+
+impl Feature {
+    /// Parse from the snake_case string stored in SQLite / JSON.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "agents" => Some(Self::Agents),
+            "connections" => Some(Self::Connections),
+            "database" => Some(Self::Database),
+            "git" => Some(Self::Git),
+            "issues" => Some(Self::Issues),
+            "product" => Some(Self::Product),
+            "swarm" => Some(Self::Swarm),
+            "api_client" => Some(Self::ApiClient),
+            "workflows" => Some(Self::Workflows),
+            "channels" => Some(Self::Channels),
+            "skill_eval" => Some(Self::SkillEval),
+            "skills" => Some(Self::Skills),
+            "insights" => Some(Self::Insights),
+            "usage" => Some(Self::Usage),
+            "self_improvement" => Some(Self::SelfImprovement),
+            "context" => Some(Self::Context),
+            "settings" => Some(Self::Settings),
+            "users" => Some(Self::Users),
+            _ => None,
+        }
+    }
+
+    /// Snake_case string form stored in SQLite / JSON.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Agents => "agents",
+            Self::Connections => "connections",
+            Self::Database => "database",
+            Self::Git => "git",
+            Self::Issues => "issues",
+            Self::Product => "product",
+            Self::Swarm => "swarm",
+            Self::ApiClient => "api_client",
+            Self::Workflows => "workflows",
+            Self::Channels => "channels",
+            Self::SkillEval => "skill_eval",
+            Self::Skills => "skills",
+            Self::Insights => "insights",
+            Self::Usage => "usage",
+            Self::SelfImprovement => "self_improvement",
+            Self::Context => "context",
+            Self::Settings => "settings",
+            Self::Users => "users",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Capability, Feature};
+
+    #[test]
+    fn capability_orders_and_roundtrips() {
+        assert!(Capability::View < Capability::Edit && Capability::Edit < Capability::Admin);
+        assert_eq!(Capability::parse("edit"), Some(Capability::Edit));
+        assert_eq!(Feature::parse("database"), Some(Feature::Database));
+        assert_eq!(Feature::Database.as_str(), "database");
+    }
+}
