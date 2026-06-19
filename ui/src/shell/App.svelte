@@ -450,7 +450,11 @@
       </div>
     </div>
 
-    {#if moduleName === 'agents' && ws.singleSessionView && ws.activeSession !== null}
+    <!-- Right panel (Activity/Git/Files/…) for the focused session. Shown in
+         every Agents layout — tabbed, split, AND tiled — so per-session activity
+         stays visible in multi-session views (it tracks `ws.activeSession`, the
+         focused pane/tile), not just when a single session is on screen. -->
+    {#if moduleName === 'agents' && ws.activeSession !== null}
       <RightPanel />
     {/if}
   </div>

@@ -24,7 +24,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use otto_core::domain::{
     GitAccount, GitProviderKind, IssueAccount, NoticeAction, NoticeKind, NoticeSeverity,
-    SessionStatus,
+    SessionStatus, TaskStatus,
 };
 use otto_core::event::Event;
 use otto_core::Id;
@@ -524,32 +524,55 @@ async fn handle_session_transition(
         Some(SessionStatus::Working) | Some(SessionStatus::Running)
     );
 
-    let notice = match status {
-        SessionStatus::Idle if was_active => Some((
-            NoticeSeverity::Info,
-            "Session awaiting input".to_string(),
-            "An agent session is idle and may be waiting for your input.".to_string(),
-            "idle",
-        )),
-        SessionStatus::Exited => Some((
-            NoticeSeverity::Info,
-            "Session ended".to_string(),
-            "An agent session has ended.".to_string(),
-            "exited",
-        )),
+    let kind = match status {
+        SessionStatus::Idle if was_active => {
+            Some((NoticeSeverity::Info, "Session awaiting input", "idle"))
+        }
+        SessionStatus::Exited => Some((NoticeSeverity::Info, "Session ended", "exited")),
         _ => None,
     };
-    let Some((severity, title, body, suffix)) = notice else {
+    let Some((severity, title, suffix)) = kind else {
+        return;
+    };
+
+    // Load the session so the notice can name it (title + provider + what it was
+    // doing) instead of a bare "an agent session". Bail if it's gone.
+    let Ok(s) = ctx.manager.get(session_id).await else {
         return;
     };
 
     // Background channel (Slack/Telegram) sessions end after every reply — they
     // would flood the notification center, so never notify for them.
-    if let Ok(s) = ctx.manager.get(session_id).await {
-        if s.meta.get("source").and_then(|v| v.as_str()) == Some("channel") {
-            return;
-        }
+    if s.meta.get("source").and_then(|v| v.as_str()) == Some("channel") {
+        return;
     }
+
+    // Build an informative body: "«title» (provider)" + the current task, if any.
+    // For idle, the in-progress task is the most useful "what it was on" hint.
+    let label = format!("{} ({})", s.title, s.provider);
+    let current_task = ctx
+        .activity()
+        .repo()
+        .list_tasks(session_id)
+        .await
+        .ok()
+        .and_then(|tasks| {
+            tasks
+                .into_iter()
+                .find(|t| t.status == TaskStatus::InProgress)
+                .map(|t| t.title)
+        });
+    let body = match status {
+        SessionStatus::Idle => match &current_task {
+            Some(task) => format!("{label} is idle and may be waiting for your input · was on: {task}"),
+            None => format!("{label} is idle and may be waiting for your input."),
+        },
+        _ => match &current_task {
+            Some(task) => format!("{label} has ended · last task: {task}"),
+            None => format!("{label} has ended."),
+        },
+    };
+    let title = title.to_string();
 
     // Re-read the gate per event so toggling the setting takes effect live.
     match ctx.notifications().repo().get_settings().await {

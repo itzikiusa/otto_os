@@ -46,10 +46,14 @@
   let telegramShowAll = $state(false);
   let slackShowAll = $state(false);
 
-  // Session search: filters every group by title (case-insensitive).
+  // Session search: filters every group by title (case-insensitive), plus an
+  // optional "Needs you" filter that narrows to sessions blocked on the operator.
   let sessionQuery = $state('');
   const q = $derived(sessionQuery.trim().toLowerCase());
-  const matches = (s: Session): boolean => q === '' || s.title.toLowerCase().includes(q);
+  const matches = (s: Session): boolean => {
+    if (ws.needsYouFilter && ws.needsYou[s.id] !== true) return false;
+    return q === '' || s.title.toLowerCase().includes(q);
+  };
   const fAgents = $derived(ws.plainAgentSessions.filter(matches));
   const fTelegram = $derived(ws.telegramSessions.filter(matches));
   const fSlack = $derived(ws.slackSessions.filter(matches));
@@ -150,6 +154,23 @@
         <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search">×</button>
       {/if}
     </div>
+
+    <!-- "Needs you" filter: narrows every group to sessions blocked on input.
+         Only shown once at least one session is flagged (or while already on). -->
+    {#if ws.needsYouCount > 0 || ws.needsYouFilter}
+      <button
+        class="needs-you-filter"
+        class:active={ws.needsYouFilter}
+        onclick={() => (ws.needsYouFilter = !ws.needsYouFilter)}
+        title="Show only sessions waiting on you"
+      >
+        <Icon name="bell" size={11} />
+        <span class="grow">Needs you</span>
+        {#if ws.needsYouCount > 0}
+          <span class="needs-you-count">{ws.needsYouCount}</span>
+        {/if}
+      </button>
+    {/if}
 
     <div class="nav-section">
       <div class="nav-item-row">
@@ -451,7 +472,8 @@
   {@const status = ws.statusMap[s.id] ?? s.status}
   {@const resumable = isResumable(s, status)}
   {@const sum = activity.summary(s.id)}
-  <div class="nested-row">
+  {@const needsYou = ws.needsYou[s.id] === true}
+  <div class="nested-row" class:needs-you={needsYou}>
     {#if renamingId === s.id}
       <!-- svelte-ignore a11y_autofocus -->
       <input
@@ -491,6 +513,11 @@
           <StatusDot {status} />
         {/if}
         <span class="grow ellipsis">{s.title}</span>
+        {#if needsYou}
+          <span class="needs-you-dot" title="Waiting on you" aria-label="Needs you">
+            <Icon name="bell" size={9} />
+          </span>
+        {/if}
         {#if sum && sum.total > 0}
           <span
             class="task-chip"
@@ -810,6 +837,56 @@
   .task-chip.done {
     color: var(--status-working, #3fb950);
     background: color-mix(in srgb, var(--status-working, #3fb950) 16%, transparent);
+  }
+  /* "Needs you" — sticky flag for a session blocked on operator input. Amber to
+     stand out from the calmer status colors, without shouting. */
+  .needs-you-dot {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    border-radius: 99px;
+    color: #febc2e;
+    background: color-mix(in srgb, #febc2e 18%, transparent);
+  }
+  .nested-row.needs-you .nested-item:not(.active) {
+    box-shadow: inset 2px 0 0 #febc2e;
+  }
+  .needs-you-filter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: calc(100% - 8px);
+    margin: 0 4px 6px;
+    height: 26px;
+    padding: 0 8px;
+    border: 1px solid color-mix(in srgb, #febc2e 40%, transparent);
+    background: color-mix(in srgb, #febc2e 8%, transparent);
+    border-radius: var(--radius-s);
+    color: #febc2e;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 120ms ease-out;
+  }
+  .needs-you-filter:hover {
+    background: color-mix(in srgb, #febc2e 14%, transparent);
+  }
+  .needs-you-filter.active {
+    background: color-mix(in srgb, #febc2e 22%, transparent);
+  }
+  .needs-you-count {
+    min-width: 16px;
+    height: 15px;
+    padding: 0 4px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    display: grid;
+    place-items: center;
+    color: #1a1407;
+    background: #febc2e;
   }
   .ellipsis {
     overflow: hidden;

@@ -8,6 +8,7 @@
   import AttachProductStory from './AttachProductStory.svelte';
   import Handover from './Handover.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
@@ -28,6 +29,13 @@
   const session = $derived(ws.sessions.find((s) => s.id === sessionId) ?? null);
   const status = $derived(ws.statusMap[sessionId] ?? session?.status ?? 'idle');
   const readOnly = $derived(ws.myRole === 'viewer');
+
+  // Live per-session activity roll-up (current in-progress task + done/total),
+  // surfaced in the pane header so tiled/split panes show what each agent is on.
+  const summary = $derived(activity.summary(sessionId));
+  // Sticky "needs you" flag — the session is blocked on operator input. Distinct
+  // from plain idle; cleared by the store when the user opens/inputs.
+  const needsYou = $derived(ws.needsYou[sessionId] === true);
   /** True when this agent session can be resumed after exiting. */
   const resumable = $derived(
     session?.kind === 'agent' && session?.provider_session_id != null,
@@ -196,7 +204,15 @@
 <svelte:window onclick={() => (menuOpen = false)} />
 
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-<section class="pane" class:focused onmousedown={onfocus}>
+<section
+  class="pane"
+  class:focused
+  onmousedown={() => {
+    // Interacting with the pane attends to it — drop the "needs you" flag.
+    ws.clearNeedsYou(sessionId);
+    onfocus();
+  }}
+>
   <header class="pane-head">
     <StatusDot {status} />
     {#if renaming}
@@ -234,6 +250,24 @@
       >{session?.title ?? sessionId}</span>
     {/if}
     <span class="chip provider-chip">{session?.provider ?? '?'}</span>
+    {#if needsYou}
+      <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
+        <Icon name="bell" size={10} /> Needs you
+      </span>
+    {/if}
+    {#if summary && summary.total > 0}
+      <span
+        class="task-chip"
+        class:done={summary.done === summary.total}
+        class:active={summary.in_progress != null}
+        title={summary.in_progress ? `Now: ${summary.in_progress}` : `${summary.done}/${summary.total} tasks done`}
+      >{summary.done}/{summary.total}</span>
+    {/if}
+    {#if summary?.in_progress}
+      <span class="now-task" title="Current task: {summary.in_progress}">
+        now: {summary.in_progress}
+      </span>
+    {/if}
     {#if handoverFromId}
       <button
         class="handover-crumb"
@@ -392,6 +426,56 @@
     font-size: 9.5px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  /* "Needs you" — session blocked on operator input. Amber, attention-grabbing
+     but tasteful; distinct from the (calmer) status dot for idle/working. */
+  .needs-you-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+    height: 16px;
+    padding: 0 6px;
+    border-radius: 99px;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: #febc2e;
+    background: color-mix(in srgb, #febc2e 16%, transparent);
+    white-space: nowrap;
+  }
+  /* Per-session task roll-up "done/total" — matches the sidebar chip. */
+  .task-chip {
+    flex-shrink: 0;
+    padding: 0 5px;
+    height: 15px;
+    line-height: 15px;
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+  }
+  .task-chip.active {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .task-chip.done {
+    color: var(--status-working, #3fb950);
+    background: color-mix(in srgb, var(--status-working, #3fb950) 16%, transparent);
+  }
+  /* "now: «task»" — what the agent is doing this moment. Truncates so it never
+     pushes the header controls off-screen in a narrow tile. */
+  .now-task {
+    min-width: 0;
+    flex: 0 1 auto;
+    font-size: 10.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .handover-crumb {
     flex-shrink: 0;

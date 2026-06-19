@@ -51,6 +51,16 @@ class WorkspaceStore {
   /** global session-status map (fed by loads + events WS) */
   statusMap: Record<Id, SessionStatus> = $state({});
 
+  /** Sticky "needs you" flags: a session raised a Notification/blocked hook and
+   *  is waiting on the operator (a permission or input it couldn't auto-accept).
+   *  Distinct from plain `idle` (which conflates "thinking" and "blocked").
+   *  Set when the `:waiting` notice arrives (see {@link markNeedsYou}); cleared
+   *  when the user attends — opens the session or sends it input. */
+  needsYou: Record<Id, boolean> = $state({});
+
+  /** Sidebar filter toggle: show only sessions that need attention. */
+  needsYouFilter = $state(false);
+
   current: WorkspaceWithRole | null = $derived(
     this.workspaces.find((w) => w.id === this.currentId) ?? null,
   );
@@ -138,6 +148,34 @@ class WorkspaceStore {
     ).length,
   );
 
+  /** Foreground agent sessions currently flagged "needs you" — the sidebar
+   *  "Needs you" badge/count (mirrors {@link workingCount}'s scoping). */
+  needsYouCount: number = $derived(
+    this.sessions.filter(
+      (s) =>
+        !s.archived &&
+        this.needsYou[s.id] === true &&
+        s.meta.source !== 'review' &&
+        s.meta.source !== 'channel' &&
+        s.meta.source !== 'skilleval' &&
+        s.meta.source !== 'product-analysis',
+    ).length,
+  );
+
+  /** Flag a session as needing the operator's attention (blocked on input). */
+  markNeedsYou(id: Id): void {
+    if (this.needsYou[id]) return;
+    this.needsYou = { ...this.needsYou, [id]: true };
+  }
+
+  /** Clear a session's "needs you" flag — the user has attended to it. */
+  clearNeedsYou(id: Id): void {
+    if (!this.needsYou[id]) return;
+    const next = { ...this.needsYou };
+    delete next[id];
+    this.needsYou = next;
+  }
+
   async load(): Promise<void> {
     this.workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
     const saved = localStorage.getItem(LS_CURRENT);
@@ -180,6 +218,8 @@ class WorkspaceStore {
 
   /** Open (or focus) a session tab. */
   openSession(id: Id): void {
+    // Opening a session counts as attending to it — drop any "needs you" flag.
+    this.clearNeedsYou(id);
     if (!this.openTabs.includes(id)) {
       this.openTabs = [...this.openTabs, id];
       this.persistTabs();
@@ -195,6 +235,8 @@ class WorkspaceStore {
 
   /** Inject text into a session's PTY (the Terminal for `sessionId` applies it). */
   injectInput(sessionId: Id, text: string): void {
+    // Sending input is attending to it — drop any "needs you" flag.
+    this.clearNeedsYou(sessionId);
     const prev = this.injections[sessionId]?.n ?? 0;
     this.injections = { ...this.injections, [sessionId]: { text, n: prev + 1 } };
   }
@@ -371,6 +413,7 @@ class WorkspaceStore {
     this.closeTab(id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     delete this.statusMap[id];
+    this.clearNeedsYou(id);
   }
 
   /** Archive: kill the PTY but keep the row + history in the Archived section. */
@@ -408,6 +451,11 @@ class WorkspaceStore {
         this.sessions = this.sessions.map((s) =>
           s.id === ev.session_id ? { ...s, status: ev.status } : s,
         );
+        // The agent resuming work means the operator already responded to
+        // whatever it was blocked on — clear the sticky "needs you" flag.
+        if (ev.status === 'working' || ev.status === 'running') {
+          this.clearNeedsYou(ev.session_id);
+        }
         break;
       }
       case 'session_created': {
@@ -427,6 +475,7 @@ class WorkspaceStore {
       }
       case 'session_removed': {
         delete this.statusMap[ev.session_id];
+        this.clearNeedsYou(ev.session_id);
         if (ev.workspace_id === this.currentId) {
           this.sessions = this.sessions.filter((s) => s.id !== ev.session_id);
           if (this.openTabs.includes(ev.session_id)) this.closeTab(ev.session_id);

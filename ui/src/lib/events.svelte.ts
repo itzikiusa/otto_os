@@ -51,6 +51,16 @@ class EventsClient {
         const parsed = JSON.parse(ev.data) as OttoEvent;
         if (parsed.type === 'notification') {
           notifications.ingest(parsed.notice);
+          // A "waiting"/blocked notice (Claude's Notification hook) means a
+          // session is blocked on the operator — raise the sticky "needs you"
+          // flag, distinct from plain idle. Keyed off the stable source_key.
+          const n = parsed.notice;
+          if (
+            n.source_key?.endsWith(':waiting') &&
+            n.action?.type === 'open_session'
+          ) {
+            ws.markNeedsYou(n.action.session_id);
+          }
         } else if (parsed.type === 'trail_appended' || parsed.type === 'tasks_updated') {
           activity.applyEvent(parsed);
         } else if (

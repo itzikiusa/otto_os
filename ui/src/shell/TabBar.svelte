@@ -37,6 +37,12 @@
   }
   const SUSPENDED_TIP = 'Suspended to save memory — opens instantly';
 
+  // A tab "needs you" when its session is blocked on operator input — distinct
+  // from idle. Cleared by the store when the session is opened / fed input.
+  function needsYou(id: string): boolean {
+    return id !== DB_PANE_ID && ws.needsYou[id] === true;
+  }
+
   function startRename(id: string): void {
     if (ws.myRole === 'viewer' || id === DB_PANE_ID) return;
     renamingId = id;
@@ -64,6 +70,7 @@
         class="tab"
         class:active={ws.activeSessionId === id}
         class:resumable={isResumable(id)}
+        class:needs-you={needsYou(id)}
         role="tab"
         tabindex="0"
         aria-selected={ws.activeSessionId === id}
@@ -116,6 +123,11 @@
             class="tab-title"
             title={isResumable(id) ? SUSPENDED_TIP : 'Double-click to rename'}
           >{title(id)}</span>
+          {#if needsYou(id)}
+            <span class="tab-needs-you" title="Waiting on you" aria-label="Needs you">
+              <Icon name="bell" size={9} />
+            </span>
+          {/if}
         {/if}
         <button
           class="tab-close"
@@ -220,6 +232,22 @@
   }
   .tab.resumable:not(.active):hover {
     opacity: 1;
+  }
+  /* "Needs you" — blocked on operator input. Amber accents stand out from the
+     calmer active/idle styling without being alarming. */
+  .tab.needs-you:not(.active) {
+    border-color: color-mix(in srgb, #febc2e 45%, transparent);
+    color: var(--text);
+  }
+  .tab-needs-you {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    border-radius: 99px;
+    color: #febc2e;
+    background: color-mix(in srgb, #febc2e 18%, transparent);
   }
   .susp-dot {
     display: grid;
