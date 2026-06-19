@@ -74,6 +74,23 @@ pub struct LoginResp {
     pub user: User,
 }
 
+/// `GET /api/v1/auth/me` — returns both the effective and real identities so
+/// the UI can render the impersonation banner and recover after a page reload.
+///
+/// `user` is the **effective** user (the identity authorisation runs as), kept
+/// at the `user` key so callers that only need the effective user remain
+/// compatible. `real_user` is the token's actual owner (the admin when
+/// impersonating). `impersonating` is `true` iff `real_user.id != user.id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeResp {
+    /// Effective user — the identity the session currently acts as.
+    pub user: User,
+    /// Real token owner — equals `user` for a normal session.
+    pub real_user: User,
+    /// `true` when the caller holds an impersonation token.
+    pub impersonating: bool,
+}
+
 /// `POST /api/v1/auth/tokens` — mint a long-lived API (personal access) token.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateApiTokenReq {

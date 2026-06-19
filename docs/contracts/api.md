@@ -16,7 +16,7 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 3 | POST /api/v1/onboarding/root | public, only while 0 users exist (else 409) | OnboardRootReq | LoginResp |
 | 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
-| 6 | GET /api/v1/auth/me | member | — | User |
+| 6 | GET /api/v1/auth/me | member | — | `MeResp {user, real_user, impersonating}` — `user` = effective (auth target); `real_user` = token owner (= `user` for normal sessions); `impersonating: bool` |
 | 7 | GET /api/v1/users | root | — | `User[]` |
 | 8 | POST /api/v1/users | root | CreateUserReq | User (409 dup username) |
 | 9 | PATCH /api/v1/users/{id} | root | UpdateUserReq | User |

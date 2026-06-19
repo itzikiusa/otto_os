@@ -4,6 +4,7 @@
   import type { GrantEntry, MemberEntry, User, UserGrantsResp, WorkspaceRole } from '../../lib/api/types';
   import type { Capability, Feature } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -131,6 +132,20 @@
     }
   }
 
+  let impersonatingId: string | null = $state(null);
+
+  async function doImpersonate(u: User): Promise<void> {
+    impersonatingId = u.id;
+    try {
+      await auth.impersonate(u.id);
+      toasts.success('Now acting as', u.username);
+    } catch (e) {
+      toasts.error('Impersonate failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      impersonatingId = null;
+    }
+  }
+
   function roleOf(userId: string): WorkspaceRole | 'none' {
     return members.find((m) => m.user_id === userId)?.role ?? 'none';
   }
@@ -209,6 +224,15 @@
             <button class="btn small {u.disabled ? '' : 'danger'}" onclick={() => toggleDisabled(u)}>
               {u.disabled ? 'Enable' : 'Disable'}
             </button>
+            {#if !u.is_root && u.id !== auth.realUser?.id}
+              <button
+                class="btn small"
+                disabled={!!impersonatingId || u.disabled}
+                onclick={() => doImpersonate(u)}
+              >
+                {impersonatingId === u.id ? 'Acting as…' : 'Impersonate'}
+              </button>
+            {/if}
           {/if}
         </div>
       {/each}

@@ -425,6 +425,21 @@ export interface LoginResp {
   user: User;
 }
 
+/**
+ * GET /api/v1/auth/me — mirrors `MeResp` in api.rs.
+ * `user` is the effective identity (what authorisation runs against).
+ * `real_user` is the token owner (== `user` for normal sessions).
+ * `impersonating` is true when the caller holds an impersonation token.
+ */
+export interface MeResp {
+  /** Effective user — the identity the session currently acts as. */
+  user: User;
+  /** Real token owner — equals `user` for a normal (non-impersonation) session. */
+  real_user: User;
+  /** true when real_user.id !== user.id (i.e. an impersonation token is active). */
+  impersonating: boolean;
+}
+
 /** POST /api/v1/auth/tokens — mint a long-lived API (personal access) token. */
 export interface CreateApiTokenReq {
   label?: string | null;

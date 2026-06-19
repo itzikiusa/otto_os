@@ -401,6 +401,22 @@
     </div>
 
     <div class="center">
+      {#if auth.isImpersonating}
+        <div class="provider-banner impersonation-banner" role="alert">
+          <span>
+            Viewing as <strong>{auth.me?.username ?? '…'}</strong>
+          </span>
+          <span class="grow"></span>
+          <button
+            class="pb-dismiss"
+            onclick={() => {
+              void auth.stopImpersonating().catch((e: unknown) => {
+                toasts.error('Could not exit impersonation', e instanceof Error ? e.message : String(e));
+              });
+            }}
+          >Exit</button>
+        </div>
+      {/if}
       {#if serviceHealth.visible}
         <div class="provider-banner" role="alert">
           <span>
@@ -549,6 +565,12 @@
   .pb-dismiss:hover {
     color: var(--text);
     background: color-mix(in srgb, var(--text) 10%, transparent);
+  }
+  /* Impersonation banner — blue tint to visually differentiate from the
+     amber provider-health banner; Exit button is non-destructive styling. */
+  .impersonation-banner {
+    background: color-mix(in srgb, #3b82f6 18%, var(--surface));
+    border-bottom-color: color-mix(in srgb, #3b82f6 45%, transparent);
   }
   /* Always-visible notification bell, anchored to the top-right of the main
      column so it's reachable from every module (the tab bar only renders on

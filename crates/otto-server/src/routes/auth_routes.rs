@@ -12,9 +12,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use otto_core::api::{
-    ApiTokenInfo, CreateApiTokenReq, CreateApiTokenResp, LoginReq, LoginResp, Problem,
+    ApiTokenInfo, CreateApiTokenReq, CreateApiTokenResp, LoginReq, LoginResp, MeResp, Problem,
 };
-use otto_core::domain::User;
 use otto_core::{Error, Id};
 use otto_rbac::AuthRepo;
 use otto_state::{NewAuditEntry, UsersRepo};
@@ -154,8 +153,20 @@ pub async fn logout(
 }
 
 /// `GET /api/v1/auth/me`
-pub async fn me(CurrentUser(user): CurrentUser) -> Json<User> {
-    Json(user)
+///
+/// Returns both the effective and real identities so the UI can render the
+/// impersonation banner correctly after a page reload. The `user` field is the
+/// *effective* user (the identity authorisation runs against), preserving
+/// backward compatibility for any caller that only reads `user`.
+pub async fn me(auth: CurrentAuthContext) -> Json<MeResp> {
+    let effective = auth.effective_user().clone();
+    let real = auth.real_user().clone();
+    let impersonating = real.id != effective.id;
+    Json(MeResp {
+        user: effective,
+        real_user: real,
+        impersonating,
+    })
 }
 
 /// `POST /api/v1/auth/tokens` — mint a long-lived API token for the caller.
