@@ -15,3 +15,8 @@ serde_json = { workspace = true }
 shell-words = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+sqlx = { workspace = true }

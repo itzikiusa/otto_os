@@ -143,6 +143,12 @@ impl ConnectionsService {
         self.repo.list_visible(ws).await
     }
 
+    /// Like `list` but filtered to connections created by `user_id`.
+    /// Used when `connections.owner_private = true`.
+    pub async fn list_for(&self, ws: &Id, user_id: &Id) -> Result<Vec<Connection>> {
+        self.repo.list_visible_for(ws, user_id).await
+    }
+
     /// Create a profile; `workspace_id = None` makes it global (root-managed).
     pub async fn create(
         &self,

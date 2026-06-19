@@ -14,6 +14,7 @@ use otto_core::api::{
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{Connection, ConnectionSection, Session, User, WorkspaceRole};
 use otto_core::{Error, Id};
+use otto_state::SqlitePool;
 use serde::Deserialize;
 
 use crate::service::{ConnectionsService, Spawner};
@@ -23,6 +24,32 @@ pub trait ConnectionsCtx: Clone + Send + Sync + 'static {
     fn connections(&self) -> &Arc<ConnectionsService>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
     fn spawner(&self) -> &Arc<dyn Spawner>;
+    /// SQLite pool used to read daemon settings (e.g. `connections.owner_private`).
+    fn pool(&self) -> SqlitePool;
+}
+
+/// Returns `true` when the `connections.owner_private` setting is explicitly
+/// set to `true`. Absent or non-boolean ⇒ `false` (default-off).
+pub async fn owner_private_enabled<S: ConnectionsCtx>(ctx: &S) -> bool {
+    otto_state::SettingsRepo::new(ctx.pool())
+        .get("connections.owner_private")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// When `connections.owner_private` is ON, require the caller to be root or
+/// the connection's creator, else 403.
+pub fn require_conn_owner_or_root(user: &User, conn: &Connection) -> Result<(), Error> {
+    if user.is_root || conn.created_by == user.id {
+        Ok(())
+    } else {
+        Err(Error::Forbidden(
+            "connection belongs to another user".into(),
+        ))
+    }
 }
 
 /// Local problem-details mapper (orphan rule: cannot impl IntoResponse for
@@ -122,7 +149,12 @@ async fn list_connections<S: ConnectionsCtx>(
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Viewer)
         .await?;
-    Ok(Json(ctx.connections().list(&ws_id).await?))
+    // When owner-private is ON, non-root users see only their own connections.
+    if owner_private_enabled(&ctx).await && !user.is_root {
+        Ok(Json(ctx.connections().list_for(&ws_id, &user.id).await?))
+    } else {
+        Ok(Json(ctx.connections().list(&ws_id).await?))
+    }
 }
 
 /// #26 POST /workspaces/{id}/connections — editor
@@ -150,6 +182,9 @@ async fn update_connection<S: ConnectionsCtx>(
 ) -> ApiResult<Json<Connection>> {
     let conn = ctx.connections().get(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    if owner_private_enabled(&ctx).await {
+        require_conn_owner_or_root(&user, &conn)?;
+    }
     Ok(Json(ctx.connections().update(&id, req).await?))
 }
 
@@ -161,6 +196,9 @@ async fn delete_connection<S: ConnectionsCtx>(
 ) -> ApiResult<StatusCode> {
     let conn = ctx.connections().get(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    if owner_private_enabled(&ctx).await {
+        require_conn_owner_or_root(&user, &conn)?;
+    }
     ctx.connections().delete(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -174,6 +212,9 @@ async fn open_connection<S: ConnectionsCtx>(
 ) -> ApiResult<Json<Session>> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let conn = ctx.connections().get(&id).await?;
+    if owner_private_enabled(&ctx).await {
+        require_conn_owner_or_root(&user, &conn)?;
+    }
     let ws_id = conn
         .workspace_id
         .clone()
@@ -199,6 +240,9 @@ async fn test_connection<S: ConnectionsCtx>(
 ) -> ApiResult<Json<TestConnectionResp>> {
     let conn = ctx.connections().get(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    if owner_private_enabled(&ctx).await {
+        require_conn_owner_or_root(&user, &conn)?;
+    }
     Ok(Json(ctx.connections().test(&conn).await?))
 }
 

@@ -58,6 +58,9 @@ impl otto_connections::ConnectionsCtx for ServerCtx {
     fn spawner(&self) -> &Arc<dyn Spawner> {
         &self.spawner
     }
+    fn pool(&self) -> otto_state::SqlitePool {
+        self.pool.clone()
+    }
 }
 
 impl otto_dbviewer::DbViewerCtx for ServerCtx {

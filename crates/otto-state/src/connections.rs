@@ -178,6 +178,21 @@ impl ConnectionsRepo {
             .map_err(dberr("delete connection"))?;
         Ok(())
     }
+
+    /// Like `list_visible` but filtered to connections owned by `caller_id`.
+    /// Used when `connections.owner_private = true` for non-root users.
+    pub async fn list_visible_for(&self, ws: &Id, caller_id: &Id) -> Result<Vec<Connection>> {
+        let rows = sqlx::query(
+            "SELECT * FROM connections \
+             WHERE (workspace_id = ? OR workspace_id IS NULL) AND created_by = ? ORDER BY name",
+        )
+        .bind(ws)
+        .bind(caller_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("connections for user"))?;
+        rows.iter().map(row_to_connection).collect()
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +213,10 @@ mod tests {
     }
 
     async fn seed_user(pool: &SqlitePool) -> Id {
+        seed_named_user(pool, "u").await
+    }
+
+    async fn seed_named_user(pool: &SqlitePool, name: &str) -> Id {
         let user = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
@@ -205,9 +224,9 @@ mod tests {
              VALUES (?, ?, ?, ?, 0, ?)",
         )
         .bind(&user)
-        .bind("u")
+        .bind(name)
         .bind("x")
-        .bind("U")
+        .bind(name)
         .bind(&now)
         .execute(pool)
         .await
@@ -215,9 +234,34 @@ mod tests {
         user
     }
 
+    async fn seed_ws(pool: &SqlitePool) -> Id {
+        let ws = new_id();
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&ws)
+        .bind("ws")
+        .bind("/tmp")
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        ws
+    }
+
     fn new_conn(user: &Id, environment: Environment, read_only: bool) -> NewConnection {
+        new_conn_ws(user, None, environment, read_only)
+    }
+
+    fn new_conn_ws(
+        user: &Id,
+        ws: Option<Id>,
+        environment: Environment,
+        read_only: bool,
+    ) -> NewConnection {
         NewConnection {
-            workspace_id: None,
+            workspace_id: ws,
             name: "c".into(),
             kind: ConnectionKind::Mysql,
             params: serde_json::json!({"host": "h"}),
@@ -276,5 +320,74 @@ mod tests {
         assert_eq!(updated.environment, Environment::Staging);
         assert!(updated.read_only);
         assert!(updated.is_write_guarded()); // read-only alone guards it
+    }
+
+    // --- list_visible_for (owner-private predicate) --------------------------
+
+    #[tokio::test]
+    async fn list_visible_for_excludes_others_connections() {
+        let pool = mem_pool().await;
+        let user_a = seed_named_user(&pool, "alice").await;
+        let user_b = seed_named_user(&pool, "bob").await;
+        let ws = seed_ws(&pool).await;
+        let repo = ConnectionsRepo::new(pool.clone());
+
+        // A creates a workspace-scoped connection.
+        repo.create(new_conn_ws(&user_a, Some(ws.clone()), Environment::Dev, false))
+            .await
+            .unwrap();
+
+        // B should see no connections when filtered to their own.
+        let visible = repo.list_visible_for(&ws, &user_b).await.unwrap();
+        assert!(
+            visible.is_empty(),
+            "user B should not see user A's connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_visible_for_shows_own_connections() {
+        let pool = mem_pool().await;
+        let user_a = seed_named_user(&pool, "alice2").await;
+        let user_b = seed_named_user(&pool, "bob2").await;
+        let ws = seed_ws(&pool).await;
+        let repo = ConnectionsRepo::new(pool.clone());
+
+        repo.create(new_conn_ws(&user_a, Some(ws.clone()), Environment::Dev, false))
+            .await
+            .unwrap();
+        repo.create(new_conn_ws(&user_b, Some(ws.clone()), Environment::Dev, false))
+            .await
+            .unwrap();
+
+        // A only sees their own.
+        let a_visible = repo.list_visible_for(&ws, &user_a).await.unwrap();
+        assert_eq!(a_visible.len(), 1);
+        assert_eq!(a_visible[0].created_by, user_a);
+
+        // B only sees their own.
+        let b_visible = repo.list_visible_for(&ws, &user_b).await.unwrap();
+        assert_eq!(b_visible.len(), 1);
+        assert_eq!(b_visible[0].created_by, user_b);
+    }
+
+    #[tokio::test]
+    async fn list_visible_shows_all_setting_off() {
+        // list_visible (unfiltered) still returns everything — default-off regression guard.
+        let pool = mem_pool().await;
+        let user_a = seed_named_user(&pool, "alice3").await;
+        let user_b = seed_named_user(&pool, "bob3").await;
+        let ws = seed_ws(&pool).await;
+        let repo = ConnectionsRepo::new(pool.clone());
+
+        repo.create(new_conn_ws(&user_a, Some(ws.clone()), Environment::Dev, false))
+            .await
+            .unwrap();
+        repo.create(new_conn_ws(&user_b, Some(ws.clone()), Environment::Dev, false))
+            .await
+            .unwrap();
+
+        let all = repo.list_visible(&ws).await.unwrap();
+        assert_eq!(all.len(), 2, "list_visible (default path) must return all connections");
     }
 }
