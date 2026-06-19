@@ -118,6 +118,28 @@ pub struct CreateApiTokenResp {
     pub info: ApiTokenInfo,
 }
 
+/// Metadata for one scoped **share-link** token (mobile remote-access).
+///
+/// A share token is a capability bound to ONE session, default read-only, with a
+/// short FIXED TTL and an explicit kill switch. Like [`ApiTokenInfo`] this NEVER
+/// carries the secret (only its prefix); the raw token is returned exactly once
+/// at mint time. `role` is the capped ceiling the share grants on the session —
+/// `Viewer` (read-only) or `Editor` (read + input); never `Admin`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareInfo {
+    pub id: Id,
+    /// The single session this token may reach.
+    pub session_id: Id,
+    /// Capped role on that session: `Viewer` or `Editor` (never `Admin`).
+    pub role: WorkspaceRole,
+    /// First 12 chars of the raw token, for identification in a list.
+    pub token_prefix: String,
+    pub label: Option<String>,
+    pub created_at: DateTime<Utc>,
+    /// FIXED expiry (`created_at + ttl`); never slid for share tokens.
+    pub expires_at: DateTime<Utc>,
+}
+
 // ---------------------------------------------------------------------------
 // Grants / capabilities (RBAC Task 2.1)
 // ---------------------------------------------------------------------------

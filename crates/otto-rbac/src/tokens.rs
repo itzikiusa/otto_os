@@ -5,9 +5,9 @@
 //! at most once per hour to throttle writes.
 
 use chrono::{DateTime, Duration, Utc};
-use otto_core::api::ApiTokenInfo;
-use otto_core::auth::AuthContext;
-use otto_core::domain::User;
+use otto_core::api::{ApiTokenInfo, ShareInfo};
+use otto_core::auth::{AuthContext, SessionScope};
+use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{new_id, Error, Id, Result};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -22,6 +22,13 @@ const API_TOKEN_TTL_DAYS: i64 = 3650;
 /// and **never slid** — an admin acting-as a user gets a tight window, after
 /// which the overlay simply expires (the admin's own token is unaffected).
 pub const IMPERSONATION_TOKEN_TTL_MINS: i64 = 30;
+/// Hard ceiling on a `kind='share'` token's lifetime (24h). A share is a public
+/// capability URL that can leak, so its TTL is **short and FIXED** (never slid).
+/// Requests above this are clamped down.
+pub const SHARE_TOKEN_TTL_MAX_SECS: i64 = 24 * 60 * 60;
+/// Floor on a share token's lifetime (60s). A request below this is clamped up
+/// so a share is always usable for at least a moment after minting.
+pub const SHARE_TOKEN_TTL_MIN_SECS: i64 = 60;
 /// Minimum age of `last_seen_at` before we touch the row again (throttles
 /// writes; for session tokens this also slides the expiry).
 const TOUCH_THROTTLE_SECS: i64 = 3600;
@@ -89,6 +96,7 @@ impl AuthRepo {
         // loaded separately below to keep the common path a single join.
         let row = sqlx::query(
             "SELECT a.token_hash, a.expires_at, a.last_seen_at, a.kind, a.acting_as_user_id,
+                    a.session_scope, a.scope_role, a.revoked,
                     u.id, u.username, u.display_name, u.is_root, u.disabled, u.created_at
              FROM auth_sessions a JOIN users u ON u.id = a.user_id
              WHERE a.token_hash = ?",
@@ -108,12 +116,21 @@ impl AuthRepo {
         if row.get::<i64, _>("disabled") != 0 {
             return Err(Error::Unauthorized);
         }
+        // A share token's explicit kill switch: `revoked=1` is a hard reject,
+        // checked before any upgrade so a revoked link can never open a socket.
+        if row.get::<i64, _>("revoked") != 0 {
+            return Err(Error::Unauthorized);
+        }
 
         let kind: String = row.get("kind");
         let is_impersonation = kind == "impersonation";
+        let is_share = kind == "share";
 
         let last_seen = parse_ts(&row.get::<String, _>("last_seen_at"))?;
-        if now - last_seen > Duration::seconds(TOUCH_THROTTLE_SECS) {
+        // Share tokens have a SHORT, FIXED TTL: never touch/slide them. Skipping
+        // the touch entirely (not just the slide) keeps their expiry verifiably
+        // immutable — `authenticate` is a pure read for kind='share'.
+        if !is_share && now - last_seen > Duration::seconds(TOUCH_THROTTLE_SECS) {
             // Always record "last used"; only SLIDE the expiry for interactive
             // session tokens. API tokens keep their long fixed lifetime and
             // impersonation tokens have a SHORT FIXED TTL — neither is ever slid
@@ -184,6 +201,30 @@ impl AuthRepo {
             });
         }
 
+        if is_share {
+            // A share token is the OWNER's own scoped capability — NOT
+            // impersonation. `real_user == effective_user == owner`; containment
+            // to the single session comes entirely from the `scope` (enforced by
+            // the deny-by-default scope guard in a later task). The capped role
+            // is read from `scope_role` ('viewer'|'editor'); an unparsable or
+            // missing scope is a hard reject (a share must always be bounded).
+            let session_scope: Option<String> = row.get("session_scope");
+            let session_id = session_scope.ok_or(Error::Unauthorized)?;
+            let scope_role: Option<String> = row.get("scope_role");
+            let role = scope_role
+                .as_deref()
+                .and_then(WorkspaceRole::parse)
+                .ok_or(Error::Unauthorized)?;
+            return Ok(AuthContext {
+                real_user: real_user.clone(),
+                effective_user: real_user,
+                scope: Some(SessionScope {
+                    session_id: Id::from(session_id),
+                    role,
+                }),
+            });
+        }
+
         // Normal token: the real (token owner) and effective (acted-as) user are
         // the same, and it reaches the whole authorized surface (no scope).
         Ok(AuthContext {
@@ -203,10 +244,13 @@ impl AuthRepo {
         Ok(())
     }
 
-    /// Revoke ALL of `user_id`'s sessions — both interactive login tokens and
-    /// long-lived API tokens. Used when a credential changes (password reset) or
-    /// the account is disabled, so every previously-issued token is invalidated.
-    /// Returns the number of sessions deleted.
+    /// Revoke ALL of `user_id`'s sessions — interactive login tokens, long-lived
+    /// API tokens, AND scoped share-link tokens the user minted. Used when a
+    /// credential changes (password reset), the account is disabled, or the
+    /// owner hits "revoke all" after losing a device, so every previously-issued
+    /// token (every `kind`) is invalidated in one shot. The blanket `DELETE`
+    /// removes share rows too, which is strictly stronger than flipping their
+    /// `revoked` flag. Returns the number of sessions deleted.
     pub async fn revoke_all_for_user(&self, user_id: &Id) -> Result<u64> {
         let res = sqlx::query("DELETE FROM auth_sessions WHERE user_id = ?")
             .bind(user_id)
@@ -353,6 +397,130 @@ impl AuthRepo {
         .await
         .map_err(|e| Error::Internal(format!("revoke api token: {e}")))?;
         Ok(res.rows_affected() > 0)
+    }
+
+    /// Mint a scoped **share-link** token: a capability bound to ONE session,
+    /// owned by `owner_user_id`, capped at `role` (`Viewer` or `Editor` only).
+    /// Returns the RAW token (shown to the caller exactly once) plus its metadata.
+    ///
+    /// Security shape (mobile plan Task 1.3, design §4.1/§4.4):
+    /// - **Never `Admin`** — an `Admin` role is rejected with `Forbidden`; a
+    ///   share can never escalate.
+    /// - **Short FIXED TTL** — `ttl_secs` is clamped to
+    ///   `[SHARE_TOKEN_TTL_MIN_SECS, SHARE_TOKEN_TTL_MAX_SECS]` and `expires_at`
+    ///   is `now + ttl`; [`authenticate`] never slides it.
+    /// - Stored hashed exactly like a PAT (`kind='share'`, `session_scope`,
+    ///   `scope_role`, `revoked=0`); the raw 64-hex token never persists.
+    ///
+    /// The share's effective identity is the **owner who minted it** (the
+    /// `user_id`) — this is *not* impersonation; containment to the one session
+    /// is provided entirely by the scope the [`authenticate`] path attaches.
+    pub async fn issue_share_token(
+        &self,
+        owner_user_id: &Id,
+        session_id: &Id,
+        role: WorkspaceRole,
+        ttl_secs: i64,
+        label: Option<String>,
+    ) -> Result<(String, ShareInfo)> {
+        // A share is Viewer or Editor only — never Admin (no escalation).
+        if role == WorkspaceRole::Admin {
+            return Err(Error::Forbidden(
+                "a share link cannot grant Admin role".into(),
+            ));
+        }
+        // Clamp the TTL to a sane fixed window: never longer than the 24h ceiling
+        // (a public capability URL), never shorter than the floor.
+        let ttl_secs = ttl_secs.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_TOKEN_TTL_MAX_SECS);
+
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let token = hex::encode(buf);
+        let prefix: String = token.chars().take(12).collect();
+        let id = new_id();
+        let now = Utc::now();
+        let expires_at = now + Duration::seconds(ttl_secs);
+        sqlx::query(
+            "INSERT INTO auth_sessions
+               (id, user_id, token_hash, created_at, expires_at, last_seen_at,
+                kind, label, token_prefix, session_scope, scope_role, revoked)
+             VALUES (?, ?, ?, ?, ?, ?, 'share', ?, ?, ?, ?, 0)",
+        )
+        .bind(&id)
+        .bind(owner_user_id)
+        .bind(token_hash(&token))
+        .bind(now.to_rfc3339())
+        .bind(expires_at.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(&label)
+        .bind(&prefix)
+        .bind(session_id)
+        .bind(role.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("issue share token: {e}")))?;
+        Ok((
+            token,
+            ShareInfo {
+                id,
+                session_id: session_id.clone(),
+                role,
+                token_prefix: prefix,
+                label,
+                created_at: now,
+                expires_at,
+            },
+        ))
+    }
+
+    /// List the **live** (non-revoked, non-expired) share tokens for one session,
+    /// newest first. Metadata only — never the secret.
+    pub async fn list_shares_for_session(&self, session_id: &Id) -> Result<Vec<ShareInfo>> {
+        let now = Utc::now().to_rfc3339();
+        let rows = sqlx::query(
+            "SELECT id, session_scope, scope_role, token_prefix, label, created_at, expires_at
+             FROM auth_sessions
+             WHERE kind = 'share' AND revoked = 0 AND session_scope = ? AND expires_at > ?
+             ORDER BY created_at DESC",
+        )
+        .bind(session_id)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("list shares for session: {e}")))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let scope_role: String = row.get("scope_role");
+                let role = WorkspaceRole::parse(&scope_role)
+                    .ok_or_else(|| Error::Internal(format!("bad scope_role '{scope_role}'")))?;
+                Ok(ShareInfo {
+                    id: row.get("id"),
+                    session_id: Id::from(row.get::<String, _>("session_scope")),
+                    role,
+                    token_prefix: row.get("token_prefix"),
+                    label: row.get("label"),
+                    created_at: parse_ts(&row.get::<String, _>("created_at"))?,
+                    expires_at: parse_ts(&row.get::<String, _>("expires_at"))?,
+                })
+            })
+            .collect()
+    }
+
+    /// Revoke one of `owner_user_id`'s share tokens by id (flips `revoked=1`).
+    /// Owner-scoped and kind-scoped: it never touches another user's row or a
+    /// non-share token. Idempotent (a second revoke is a no-op).
+    pub async fn revoke_share(&self, owner_user_id: &Id, share_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE auth_sessions SET revoked = 1
+             WHERE id = ? AND user_id = ? AND kind = 'share'",
+        )
+        .bind(share_id)
+        .bind(owner_user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("revoke share: {e}")))?;
+        Ok(())
     }
 }
 
@@ -595,5 +763,260 @@ mod tests {
         // The bystander's token is unaffected.
         assert!(repo.authenticate(&bystander_token).await.is_ok());
         assert!(repo.list_api_tokens(&victim).await.unwrap().is_empty());
+    }
+
+    // ---- share-link (scoped) tokens (mobile plan Task 1.3) ----------------
+
+    use otto_core::domain::WorkspaceRole;
+
+    /// Read the raw stored `expires_at` for the row matching `token`, so tests
+    /// can prove the value is (or is not) advanced by `authenticate`.
+    async fn stored_expires_at(pool: &SqlitePool, token: &str) -> String {
+        let row = sqlx::query("SELECT expires_at FROM auth_sessions WHERE token_hash = ?")
+            .bind(token_hash(token))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        row.get::<String, _>("expires_at")
+    }
+
+    /// A viewer share authenticates into a SCOPED context: real == effective ==
+    /// the minting owner (NOT impersonation), and `scope` carries the one
+    /// session id + the capped Viewer role. The 12-char prefix is preserved.
+    #[tokio::test]
+    async fn share_token_authenticates_with_viewer_scope() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, info) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+
+        // Metadata mirrors the row; the prefix is exactly the first 12 chars.
+        assert_eq!(info.session_id, Id::from("S1"));
+        assert_eq!(info.role, WorkspaceRole::Viewer);
+        assert_eq!(info.token_prefix.len(), 12);
+        assert_eq!(info.token_prefix, raw.chars().take(12).collect::<String>());
+
+        let ctx = repo.authenticate(&raw).await.unwrap();
+        // A share is the OWNER's own capability, not impersonation.
+        assert_eq!(ctx.real_user.id, owner);
+        assert_eq!(ctx.effective_user.id, owner);
+        let scope = ctx.scope.expect("share token must carry a scope");
+        assert_eq!(scope.session_id, Id::from("S1"));
+        assert_eq!(scope.role, WorkspaceRole::Viewer);
+    }
+
+    /// An editor share carries the Editor role in its scope (input allowed).
+    #[tokio::test]
+    async fn share_token_carries_editor_scope() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, _info) = repo
+            .issue_share_token(&owner, &Id::from("S7"), WorkspaceRole::Editor, 3600, None)
+            .await
+            .unwrap();
+        let scope = repo.authenticate(&raw).await.unwrap().scope.unwrap();
+        assert_eq!(scope.session_id, Id::from("S7"));
+        assert_eq!(scope.role, WorkspaceRole::Editor);
+    }
+
+    /// A share can only be Viewer or Editor — minting an Admin share is rejected
+    /// (a share must never escalate).
+    #[tokio::test]
+    async fn share_token_rejects_admin_role() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        assert!(
+            repo.issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Admin, 3600, None)
+                .await
+                .is_err(),
+            "an Admin-role share must be rejected"
+        );
+    }
+
+    /// A share TTL is FIXED, never slid: authenticating does not advance the
+    /// stored `expires_at` (the sliding/touch path is skipped for kind='share').
+    #[tokio::test]
+    async fn share_token_ttl_is_fixed_not_sliding() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, info) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+        let before = stored_expires_at(&pool, &raw).await;
+        // The touch is throttled to once/hour, but for a share the row must NOT
+        // be slid even after the throttle window — assert the value is stable
+        // across an authenticate and that it equals the minted expiry.
+        let ctx = repo.authenticate(&raw).await.unwrap();
+        assert!(ctx.scope.is_some());
+        let after = stored_expires_at(&pool, &raw).await;
+        assert_eq!(before, after, "share expiry must never be slid");
+        assert_eq!(
+            after,
+            info.expires_at.to_rfc3339(),
+            "stored expiry must equal the fixed minted expiry"
+        );
+    }
+
+    /// The clamp pins ttl to a sane ceiling: a request well above the max is
+    /// capped (expiry is `created_at + MAX`, not the requested value).
+    #[tokio::test]
+    async fn share_token_ttl_is_clamped() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        // Ask for ~10 days; expect the 24h ceiling.
+        let (_raw, info) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 864_000, None)
+            .await
+            .unwrap();
+        let ttl = (info.expires_at - info.created_at).num_seconds();
+        assert_eq!(ttl, SHARE_TOKEN_TTL_MAX_SECS, "ttl must clamp to the max");
+    }
+
+    /// A revoked share no longer authenticates (`revoked=1` is a hard reject).
+    #[tokio::test]
+    async fn revoked_share_token_fails_auth() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, info) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+        assert!(repo.authenticate(&raw).await.is_ok());
+
+        repo.revoke_share(&owner, &info.id).await.unwrap();
+        assert!(
+            matches!(repo.authenticate(&raw).await, Err(Error::Unauthorized)),
+            "a revoked share must not authenticate"
+        );
+        // And it drops out of the session's live share listing.
+        assert!(repo
+            .list_shares_for_session(&Id::from("S1"))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// `revoke_share` is owner-scoped: another user cannot revoke it.
+    #[tokio::test]
+    async fn revoke_share_is_owner_scoped() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+        let other = seed_user(&pool, "other").await;
+
+        let (raw, info) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+        // `other` cannot revoke `owner`'s share.
+        repo.revoke_share(&other, &info.id).await.unwrap();
+        assert!(repo.authenticate(&raw).await.is_ok(), "still valid");
+    }
+
+    /// An expired share is rejected. (The mint clamps ttl up to a 60s floor, so
+    /// expiry is forced by backdating the row's `expires_at` into the past — the
+    /// same `expires_at <= now` check that gates every token kind.)
+    #[tokio::test]
+    async fn expired_share_token_fails_auth() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, _info) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+        // Force expiry: set the stored expiry one hour into the past.
+        let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        sqlx::query("UPDATE auth_sessions SET expires_at = ? WHERE token_hash = ?")
+            .bind(&past)
+            .bind(token_hash(&raw))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(repo.authenticate(&raw).await, Err(Error::Unauthorized)),
+            "an expired share must not authenticate"
+        );
+        // Expired shares are excluded from the session listing.
+        assert!(repo
+            .list_shares_for_session(&Id::from("S1"))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// `list_shares_for_session` returns only live (non-revoked, non-expired)
+    /// shares for the given session, newest first, with no secret.
+    #[tokio::test]
+    async fn list_shares_for_session_lists_live_only() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (_r1, live) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, Some("a".into()))
+            .await
+            .unwrap();
+        let (_r2, revoked) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Editor, 3600, None)
+            .await
+            .unwrap();
+        // A share for a DIFFERENT session must not appear.
+        let (_r3, _other) = repo
+            .issue_share_token(&owner, &Id::from("S2"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+        repo.revoke_share(&owner, &revoked.id).await.unwrap();
+
+        let listed = repo.list_shares_for_session(&Id::from("S1")).await.unwrap();
+        assert_eq!(listed.len(), 1, "only the live S1 share is listed");
+        assert_eq!(listed[0].id, live.id);
+        assert_eq!(listed[0].session_id, Id::from("S1"));
+        assert_eq!(listed[0].label.as_deref(), Some("a"));
+    }
+
+    /// `revoke_all_for_user` also clears the user's shares (lost-device kill
+    /// switch): every kind — session, API, AND share — stops authenticating.
+    #[tokio::test]
+    async fn revoke_all_for_user_clears_shares_too() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let session = repo.issue(&owner).await.unwrap();
+        let (api, _) = repo.issue_api_token(&owner, None).await.unwrap();
+        let (share, _) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+        for t in [&session, &api, &share] {
+            assert!(repo.authenticate(t).await.is_ok());
+        }
+
+        repo.revoke_all_for_user(&owner).await.unwrap();
+
+        for t in [&session, &api, &share] {
+            assert!(
+                matches!(repo.authenticate(t).await, Err(Error::Unauthorized)),
+                "revoke_all_for_user must invalidate the share too"
+            );
+        }
     }
 }
