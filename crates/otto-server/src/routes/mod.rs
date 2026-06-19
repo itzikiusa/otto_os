@@ -13,6 +13,7 @@ pub mod mcp_servers;
 pub mod meta;
 pub mod notifications;
 pub mod onboarding;
+pub mod product_memory;
 pub mod settings;
 pub mod swarm_ingest;
 pub mod usage;
@@ -124,6 +125,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             post(notifications::mark_read),
         )
         .route("/notifications/{id}", delete(notifications::dismiss))
+        .route(
+            "/workspaces/{ws}/product/stories/{sid}/memory/ingest",
+            post(product_memory::ingest),
+        )
         .route("/fs/browse", get(fs::browse))
         .route("/fs/read", get(fs::read_file))
         .route("/logs/daemon", get(logs::daemon_logs))

@@ -2747,6 +2747,7 @@ dependencies = [
  "otto-context",
  "otto-core",
  "otto-issues",
+ "otto-memory",
  "otto-state",
  "serde",
  "serde_json",
