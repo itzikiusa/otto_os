@@ -13,6 +13,7 @@ pub mod lsp;
 pub mod modules;
 pub mod monitor;
 pub mod product_run;
+pub mod product_swarm;
 pub mod product_watcher;
 pub mod review_session;
 pub mod routes;

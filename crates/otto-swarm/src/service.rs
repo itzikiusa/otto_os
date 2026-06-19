@@ -201,6 +201,7 @@ impl SwarmService {
                 description: req.description.unwrap_or_default(),
                 repo_path: req.repo_path,
                 goal_md: req.goal_md,
+                story_id: None,
                 order_idx: 0,
                 created_by: user.clone(),
             })
@@ -216,6 +217,9 @@ impl SwarmService {
                     description: req.description,
                     repo_path: req.repo_path.map(Some),
                     goal_md: req.goal_md.map(Some),
+                    // story_id is an internal Plan → Swarm back-link, not editable
+                    // via the project PATCH endpoint — leave it unchanged.
+                    story_id: None,
                     status: req.status,
                     order_idx: req.order_idx,
                 },

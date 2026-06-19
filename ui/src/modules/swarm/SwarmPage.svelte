@@ -37,6 +37,15 @@
     if (id) swarm.loadSwarms(id);
   });
 
+  // A deep-link (e.g. Product → Swarm) opened a project and asked for the
+  // Kanban board — honor it once, then clear the flag.
+  $effect(() => {
+    if (swarm.pendingKanban) {
+      view = 'kanban';
+      swarm.pendingKanban = false;
+    }
+  });
+
   const detail = $derived(swarm.detail);
   const queued = $derived(swarm.runs.filter((r) => r.status === 'queued').length);
   const running = $derived(swarm.runs.filter((r) => r.status === 'running' || r.status === 'waiting').length);

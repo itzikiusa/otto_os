@@ -40,6 +40,8 @@ import type {
   NewTranscriptReq,
   PublishAsRfcReq,
   PublishAsStoryReq,
+  ToSwarmReq,
+  ToSwarmResp,
 } from '../../modules/product/types';
 
 function errMsg(e: unknown): string {
@@ -395,6 +397,18 @@ class ProductStore {
     const wsId = this.wsId();
     const id = this.storyId();
     await api.post(`/workspaces/${wsId}/product/stories/${id}/plan`, { body_md });
+  }
+
+  /**
+   * Plan → Swarm: create a swarm project from this story (seeding tasks from its
+   * plan) and return the created swarm/project so the caller can navigate to the
+   * Kanban board. Refreshes the detail so the linked-project badge appears.
+   */
+  async sendToSwarm(req: ToSwarmReq = {}): Promise<ToSwarmResp> {
+    const id = this.storyId();
+    const resp = await api.post<ToSwarmResp>(`/product/stories/${id}/to-swarm`, req);
+    await this.loadDetail();
+    return resp;
   }
 
   // ── Test cases ─────────────────────────────────────────────────────────────

@@ -49,6 +49,16 @@ pub struct ProductStoryVersion {
     pub created_at: DateTime<Utc>,
 }
 
+/// Lightweight back-link from a story to the swarm project created from it
+/// (Plan → Swarm). Surfaced on `ProductStoryDetail` so the story view can show
+/// a "linked swarm project" badge + deep link to the Kanban board.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmStoryLink {
+    pub project_id: Id,
+    pub swarm_id: Id,
+    pub project_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductAnalysis {
     pub id: Id,
@@ -800,6 +810,47 @@ impl ProductRepo {
         .await
         .map_err(dberr("latest plan version"))?;
         row.as_ref().map(row_to_version).transpose()
+    }
+
+    /// Newest version of a given `kind` for a story (full row, incl. `body_md`),
+    /// or `None`. Used to pull the refined ("suggested") body for the Plan →
+    /// Swarm goal without hard-coding each kind into its own query.
+    pub async fn latest_version_of_kind(
+        &self,
+        story: &Id,
+        kind: &str,
+    ) -> Result<Option<ProductStoryVersion>> {
+        let row = sqlx::query(
+            "SELECT * FROM product_story_versions
+             WHERE story_id = ? AND kind = ?
+             ORDER BY version_no DESC LIMIT 1",
+        )
+        .bind(story)
+        .bind(kind)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("latest version of kind"))?;
+        row.as_ref().map(row_to_version).transpose()
+    }
+
+    /// The swarm project (if any) created from this story — the Plan → Swarm
+    /// back-link. Reads the `swarm_projects` table directly (shared pool) so the
+    /// story detail can carry the link without otto-product depending on the
+    /// swarm repo. Most-recently-created wins if sent more than once.
+    pub async fn swarm_link_for_story(&self, story: &Id) -> Result<Option<SwarmStoryLink>> {
+        let row = sqlx::query(
+            "SELECT id, swarm_id, name FROM swarm_projects
+             WHERE story_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(story)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("swarm link for story"))?;
+        Ok(row.map(|r| SwarmStoryLink {
+            project_id: r.get("id"),
+            swarm_id: r.get("swarm_id"),
+            project_name: r.get("name"),
+        }))
     }
 
     // -----------------------------------------------------------------------

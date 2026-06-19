@@ -3,6 +3,9 @@
   // story, render it as a task tree with 3-state checkboxes the PO can toggle,
   // and persist toggles in place. Modeled on RewriteTab's load/poll pattern.
   import { product } from '../../lib/stores/product.svelte';
+  import { swarm } from '../../lib/stores/swarm.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -205,6 +208,50 @@
     const done = t.items.filter((i) => i.status === 'done').length;
     return `${done}/${t.items.length}`;
   }
+
+  // ── Send to Swarm ─────────────────────────────────────────────────────────
+  // The flagship Product → Swarm hand-off: turn the story (+ its plan) into a
+  // runnable swarm project and jump to the project's Kanban board.
+  let sendingToSwarm = $state(false);
+
+  // Existing linked swarm project, if this story was already sent (drives the
+  // badge + flips the action to "Open in Swarm").
+  const swarmLink = $derived(product.detail?.swarm_link ?? null);
+
+  async function openLinkedSwarm(): Promise<void> {
+    const link = swarmLink;
+    const wsId = ws.currentId;
+    if (!link || !wsId) return;
+    await swarm.openProject(wsId, link.swarm_id, link.project_id);
+    router.go('swarm');
+  }
+
+  async function sendToSwarm(): Promise<void> {
+    if (sendingToSwarm || !ws.currentId) return;
+    if (swarmLink) {
+      await openLinkedSwarm();
+      return;
+    }
+    const ok = await confirmer.ask(
+      'Create a swarm project from this story and seed it with the plan tasks? You can then run the swarm to implement it.',
+      { title: 'Send to Swarm', confirmLabel: 'Send to Swarm', danger: false },
+    );
+    if (!ok) return;
+    sendingToSwarm = true;
+    try {
+      const resp = await product.sendToSwarm();
+      toasts.success(
+        'Sent to Swarm',
+        `Project “${resp.project.name}” created with ${resp.tasks.length} task(s).`,
+      );
+      await swarm.openProject(ws.currentId, resp.swarm.id, resp.project.id);
+      router.go('swarm');
+    } catch (e) {
+      toasts.error('Send to Swarm failed', product.errMsg(e));
+    } finally {
+      sendingToSwarm = false;
+    }
+  }
 </script>
 
 {#if !story}
@@ -246,10 +293,23 @@
           {#if pollTimer !== null}
             <span class="polling-indicator">checking every 3s…</span>
           {/if}
+          <button
+            class="action-btn swarm"
+            onclick={sendToSwarm}
+            disabled={sendingToSwarm}
+            title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story (the swarm planner generates tasks)'}
+          >
+            {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}⚡ Send to Swarm{/if}
+          </button>
         </div>
       </section>
-      {#if pollTimer === null}
-        <div class="muted">No implementation plan yet. Generate one to break the story into trackable tasks.</div>
+      {#if swarmLink}
+        <div class="muted">
+          Linked to swarm project <strong>{swarmLink.project_name}</strong>.
+        </div>
+      {/if}
+      {#if pollTimer === null && !swarmLink}
+        <div class="muted">No implementation plan yet. Generate one to break the story into trackable tasks, or send straight to a swarm.</div>
       {/if}
     {:else}
       <!-- ── Plan exists: header + task tree ─────────────────────────────────── -->
@@ -272,9 +332,22 @@
           </div>
           <div class="ph-actions">
             {#if saving}<span class="saving">saving…</span>{/if}
+            {#if swarmLink}
+              <span class="swarm-badge" title="This story is linked to a swarm project">
+                ⚡ {swarmLink.project_name}
+              </span>
+            {/if}
             <button class="action-btn" onclick={refresh} disabled={generating}>Refresh</button>
             <button class="action-btn" onclick={() => (showRaw = !showRaw)}>
               {showRaw ? 'Hide raw' : 'Raw'}
+            </button>
+            <button
+              class="action-btn swarm"
+              onclick={sendToSwarm}
+              disabled={sendingToSwarm}
+              title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story'}
+            >
+              {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}⚡ Send to Swarm{/if}
             </button>
             <button class="action-btn primary" onclick={regenerate} disabled={generating || pollTimer !== null}>
               {pollTimer !== null ? 'Generating…' : 'Regenerate'}
@@ -423,6 +496,28 @@
   }
   .action-btn.primary:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  /* Send to Swarm — a distinct accent so the cross-feature hand-off stands out. */
+  .action-btn.swarm {
+    border-color: #8b5cf6;
+    color: #8b5cf6;
+    background: color-mix(in srgb, #8b5cf6 10%, transparent);
+    font-weight: 600;
+  }
+  .action-btn.swarm:hover:not(:disabled) {
+    background: color-mix(in srgb, #8b5cf6 20%, transparent);
+  }
+  .swarm-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: #8b5cf6;
+    background: color-mix(in srgb, #8b5cf6 14%, transparent);
+    padding: 3px 9px;
+    border-radius: 999px;
+    white-space: nowrap;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* Tasks */

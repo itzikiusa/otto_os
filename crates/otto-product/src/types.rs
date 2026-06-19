@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use otto_state::{
     ProductAnalysis, ProductAnalysisAgent, ProductStory, ProductStoryVersion, ProductTestcase,
-    ProductTestcaseRun,
+    ProductTestcaseRun, SwarmStoryLink,
 };
 
 // ---------------------------------------------------------------------------
@@ -261,6 +261,9 @@ pub struct ProductStoryDetail {
     pub story: ProductStory,
     pub source: Option<ProductStoryVersion>,
     pub counts: StoryCounts,
+    /// The swarm project created from this story (Plan → Swarm), if any. Drives
+    /// the "linked swarm project" badge in the story view.
+    pub swarm_link: Option<SwarmStoryLink>,
 }
 
 /// Aggregate counts for a story's child collections.

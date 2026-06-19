@@ -33,6 +33,9 @@ class SwarmStore {
   selectedProjectId: string | null = $state(null);
   selectedSessionId: string | null = $state(null);
   loading = $state(false);
+  /** Set when a deep-link (e.g. Product → Swarm) wants the Kanban view shown
+   *  for the just-opened project. SwarmPage reads + clears this on mount. */
+  pendingKanban = $state(false);
 
   private wsId: string | null = null;
 
@@ -71,6 +74,23 @@ class SwarmStore {
     } finally {
       this.loading = false;
     }
+  }
+
+  /**
+   * Deep-link helper: ensure swarms are loaded for `workspaceId`, open `sid`,
+   * select project `pid`, and flag the Kanban view. Used by the Product → Swarm
+   * hand-off so the user lands directly on the new project's board.
+   */
+  async openProject(workspaceId: string, sid: string, pid: string): Promise<void> {
+    if (this.wsId !== workspaceId || this.swarms.length === 0) {
+      await this.loadSwarms(workspaceId);
+    }
+    if (this.detail?.id !== sid) {
+      await this.openSwarm(sid);
+    }
+    this.selectedProjectId = pid;
+    if (!this.tasksByProject[pid]) await this.loadTasks(pid);
+    this.pendingKanban = true;
   }
 
   closeSwarm(): void {

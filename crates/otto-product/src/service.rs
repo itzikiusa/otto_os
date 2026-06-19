@@ -163,6 +163,7 @@ impl ProductService {
             let tcs = self.repo.list_testcases(&run.id).await?;
             testcase_count += tcs.len() as i64;
         }
+        let swarm_link = self.repo.swarm_link_for_story(story_id).await?;
         Ok(ProductStoryDetail {
             story,
             source,
@@ -173,6 +174,7 @@ impl ProductService {
                 notes: notes.len() as i64,
                 testcases: testcase_count,
             },
+            swarm_link,
         })
     }
 

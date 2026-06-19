@@ -318,6 +318,7 @@ async fn get_story<S: ProductCtx>(
         }
         tc_count
     };
+    let swarm_link = ctx.product_repo().swarm_link_for_story(&sid).await?;
     let detail = crate::types::ProductStoryDetail {
         story,
         source,
@@ -328,6 +329,7 @@ async fn get_story<S: ProductCtx>(
             notes: notes.len() as i64,
             testcases,
         },
+        swarm_link,
     };
     Ok(Json(detail).into_response())
 }

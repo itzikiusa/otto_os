@@ -107,6 +107,8 @@ export interface SwarmProject {
   description: string;
   repo_path?: string | null;
   goal_md?: string | null;
+  /** Source Product story this project was created from (Plan → Swarm), or null. */
+  story_id?: Id | null;
   status: 'active' | 'archived';
   order_idx: number;
   created_by: Id;

@@ -153,6 +153,7 @@ pub async fn instantiate(
                 description: p.description.clone(),
                 repo_path: None,
                 goal_md: p.goal.clone(),
+                story_id: None,
                 order_idx: i as i64,
                 created_by: user.clone(),
             })

@@ -284,6 +284,12 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             "/workspaces/{id}/product/stories/{sid}/plan",
             post(save_plan),
         )
+        // Product → Swarm: turn a refined story into a runnable swarm project.
+        // Flat item route (resolves the workspace from the owning story).
+        .route(
+            "/product/stories/{sid}/to-swarm",
+            post(crate::product_swarm::story_to_swarm),
+        )
         // Approve lives here (not in otto-product) so it can trigger self-improvement.
         .route(
             "/product/testcase-runs/{rid}/approve",

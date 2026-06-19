@@ -71,6 +71,8 @@ pub struct SwarmProject {
     pub description: String,
     pub repo_path: Option<String>,
     pub goal_md: Option<String>,
+    /// Source Product story this project was created from (Plan → Swarm), if any.
+    pub story_id: Option<Id>,
     pub status: String,
     pub order_idx: i64,
     pub created_by: Id,
@@ -226,6 +228,7 @@ pub struct NewProject {
     pub description: String,
     pub repo_path: Option<String>,
     pub goal_md: Option<String>,
+    pub story_id: Option<Id>,
     pub order_idx: i64,
     pub created_by: Id,
 }
@@ -236,6 +239,7 @@ pub struct ProjectPatch {
     pub description: Option<String>,
     pub repo_path: Option<Option<String>>,
     pub goal_md: Option<Option<String>>,
+    pub story_id: Option<Option<Id>>,
     pub status: Option<String>,
     pub order_idx: Option<i64>,
 }
@@ -390,6 +394,7 @@ fn row_to_project(r: &sqlx::sqlite::SqliteRow) -> Result<SwarmProject> {
         description: r.get("description"),
         repo_path: r.get("repo_path"),
         goal_md: r.get("goal_md"),
+        story_id: r.get("story_id"),
         status: r.get("status"),
         order_idx: r.get("order_idx"),
         created_by: r.get("created_by"),
@@ -802,13 +807,27 @@ impl SwarmRepo {
         row_to_project(&row)
     }
 
+    /// The swarm project created from a given Product story (Plan → Swarm
+    /// back-link), if any. Most-recently-created wins if the story was sent more
+    /// than once. Used by the story view's "linked swarm project" badge.
+    pub async fn project_for_story(&self, story_id: &Id) -> Result<Option<SwarmProject>> {
+        let row = sqlx::query(
+            "SELECT * FROM swarm_projects WHERE story_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(story_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("project for story"))?;
+        row.as_ref().map(row_to_project).transpose()
+    }
+
     pub async fn create_project(&self, p: NewProject) -> Result<SwarmProject> {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO swarm_projects (id, swarm_id, workspace_id, name, description, repo_path,
-                goal_md, status, order_idx, created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
+                goal_md, story_id, status, order_idx, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&p.swarm_id)
@@ -817,6 +836,7 @@ impl SwarmRepo {
         .bind(&p.description)
         .bind(&p.repo_path)
         .bind(&p.goal_md)
+        .bind(&p.story_id)
         .bind(p.order_idx)
         .bind(&p.created_by)
         .bind(&now)
@@ -833,17 +853,19 @@ impl SwarmRepo {
         let description = p.description.unwrap_or(cur.description);
         let repo_path = p.repo_path.unwrap_or(cur.repo_path);
         let goal_md = p.goal_md.unwrap_or(cur.goal_md);
+        let story_id = p.story_id.unwrap_or(cur.story_id);
         let status = p.status.unwrap_or(cur.status);
         let order_idx = p.order_idx.unwrap_or(cur.order_idx);
         let now = fmt(Utc::now());
         sqlx::query(
             "UPDATE swarm_projects SET name = ?, description = ?, repo_path = ?, goal_md = ?,
-                status = ?, order_idx = ?, updated_at = ? WHERE id = ?",
+                story_id = ?, status = ?, order_idx = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&name)
         .bind(&description)
         .bind(&repo_path)
         .bind(&goal_md)
+        .bind(&story_id)
         .bind(&status)
         .bind(order_idx)
         .bind(&now)

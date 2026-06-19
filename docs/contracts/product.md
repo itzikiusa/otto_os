@@ -59,6 +59,7 @@ all other routes are served by the `otto-product` crate router.
 | P33 | PATCH /api/v1/product/learnings/{lid} | ws editor | UpdateLearningReq | ProductLearning |
 | P34 | DELETE /api/v1/product/learnings/{lid} | ws editor | — | 204 |
 | P35 | POST /api/v1/product/learnings/{lid}/accept | ws editor | — | ProductLearning (adopt an agent-suggested learning: active=true) |
+| P36 | POST /api/v1/product/stories/{sid}/to-swarm | ws editor | ToSwarmReq | ToSwarmResp (Plan → Swarm: create a swarm project from the story + seed tasks) |
 
 Notes:
 - **Agents are claude-backed (v1).** Analysis/rewrite/test/reconcile agents run as
@@ -81,3 +82,17 @@ Notes:
 - JSON-as-TEXT columns on the wire: `findings_json`, `steps_json`
   (`{preconditions[],steps[],expected}`), `refs_json`
   (`[{type:'jira'|'confluence'|'memory'|'url',ref,label}]`), `meta_json`.
+- **Plan → Swarm bridge (P36).** `to-swarm` turns a refined story into a runnable
+  Agent-Swarm project — the cross-feature path Product alone can't run. `ToSwarmReq
+  {swarm_id?, name?}`: an explicit `swarm_id` (verified same-workspace), else the
+  workspace's first swarm, else an auto-created paused **Default Swarm**. The project's
+  `goal_md` is the story's most-refined body (latest `suggested` version → `source` →
+  title). Tasks are seeded by reusing the story's `kind="plan"` version (parsing its
+  `### Task N:` headings into Kanban cards); if there is no plan, the swarm planner is
+  run over the goal to generate one. The endpoint is idempotent — re-sending a story
+  returns the existing linked project (`created:false`). Back-link: migration 0035 adds
+  a nullable, indexed `story_id` to `swarm_projects`; `SwarmProject.story_id` is the
+  source story, and `ProductStoryDetail.swarm_link` (`{project_id, swarm_id,
+  project_name}` or null) is the reverse view that drives the story's "linked swarm
+  project" badge. `ToSwarmResp {swarm, project, tasks[], created}`. Seeded tasks carry a
+  `product` label and emit `swarm_task_updated` WS events.
