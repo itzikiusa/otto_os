@@ -23,7 +23,7 @@ use otto_core::Id;
 use otto_state::{NewNotice, NewTask, NewTrail};
 use serde_json::Value;
 
-use crate::auth::{require_ws_role, CurrentUser};
+use crate::auth::{require_session_owner_or_admin, require_ws_role, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
@@ -41,14 +41,19 @@ async fn session_in_ws(ctx: &ServerCtx, wid: &Id, sid: &Id) -> Result<Session, A
     Ok(session)
 }
 
-/// `GET /workspaces/{wid}/sessions/{sid}/trail` — viewer.
+/// `GET /workspaces/{wid}/sessions/{sid}/trail` — session owner or ws-admin.
+///
+/// A workspace Viewer/Editor who is **not** the session owner receives 403.
+/// The owner, a workspace Admin, and root all have access (same gate as every
+/// other per-session endpoint: `require_session_owner_or_admin`).
 pub async fn list_trail(
     Path((wid, sid)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<TrailEvent>>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    session_in_ws(&ctx, &wid, &sid).await?;
+    let session = session_in_ws(&ctx, &wid, &sid).await?;
+    require_session_owner_or_admin(&ctx, &user, &session).await?;
     let trail = ctx
         .activity()
         .repo()
@@ -99,14 +104,18 @@ pub async fn append_trail(
     Ok(Json(event))
 }
 
-/// `GET /workspaces/{wid}/sessions/{sid}/tasks` — viewer.
+/// `GET /workspaces/{wid}/sessions/{sid}/tasks` — session owner or ws-admin.
+///
+/// A workspace Viewer/Editor who is **not** the session owner receives 403.
+/// The owner, a workspace Admin, and root all have access.
 pub async fn list_tasks(
     Path((wid, sid)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<AgentTask>>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    session_in_ws(&ctx, &wid, &sid).await?;
+    let session = session_in_ws(&ctx, &wid, &sid).await?;
+    require_session_owner_or_admin(&ctx, &user, &session).await?;
     let tasks = ctx
         .activity()
         .repo()
@@ -145,18 +154,37 @@ pub async fn put_tasks(
 
 /// `GET /workspaces/{wid}/activity/summary` — viewer. Per-session task roll-up
 /// for the multi-agent overview (sidebar chips).
+///
+/// **Admin / root:** full workspace aggregate (all users' sessions).
+/// **Non-admin (editor/viewer/owner):** restricted to the caller's own sessions
+/// (`created_by = caller`), preventing cross-user data leakage (#L18).
 pub async fn workspace_summary(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<SessionActivitySummary>>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let summary = ctx
-        .activity()
-        .repo()
-        .workspace_summary(&wid)
-        .await
-        .map_err(ApiError)?;
+    // Root and workspace-Admins see the full cross-user roll-up; everyone else
+    // sees only their own sessions' activity to prevent data leakage (#L18).
+    let is_admin = user.is_root
+        || ctx
+            .roles
+            .check(&user, &wid, WorkspaceRole::Admin)
+            .await
+            .is_ok();
+    let summary = if is_admin {
+        ctx.activity()
+            .repo()
+            .workspace_summary(&wid)
+            .await
+            .map_err(ApiError)?
+    } else {
+        ctx.activity()
+            .repo()
+            .workspace_summary_for_user(&wid, &user.id)
+            .await
+            .map_err(ApiError)?
+    };
     Ok(Json(summary))
 }
 
