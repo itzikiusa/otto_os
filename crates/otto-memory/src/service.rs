@@ -11,6 +11,7 @@ use sqlx::SqlitePool;
 
 use crate::embed::{Embedder, StubEmbedder};
 use crate::index::{BruteForceIndex, VectorIndex};
+use crate::remote::RemoteClient;
 use crate::retrieve::{rerank_score, rrf_fuse, RerankSignals};
 use crate::types::*;
 
@@ -20,6 +21,9 @@ pub struct MemoryService {
     repo: MemoriesRepo,
     embedder: Option<Arc<dyn Embedder>>,
     index: Option<Arc<dyn VectorIndex>>,
+    /// When set, every operation forwards to a shared host Otto instead of the
+    /// local SQLite — this is how a team shares one memory across machines.
+    remote: Option<RemoteClient>,
 }
 
 impl MemoryService {
@@ -32,6 +36,7 @@ impl MemoryService {
             repo: MemoriesRepo::new(pool),
             embedder: Some(embedder),
             index: Some(index),
+            remote: None,
         }
     }
 
@@ -49,6 +54,7 @@ impl MemoryService {
             repo: MemoriesRepo::new(pool),
             embedder: None,
             index: None,
+            remote: None,
         }
     }
 
@@ -59,6 +65,18 @@ impl MemoryService {
         let index: Arc<dyn VectorIndex> =
             Arc::new(BruteForceIndex::new(pool.clone(), "stub-v1".into()));
         Self::new(pool, embedder, index)
+    }
+
+    /// Shared-backend service: forward all operations to a host Otto's memory API
+    /// (one shared memory for the whole team). `pool` is kept only to satisfy the
+    /// local repo handle (used by the graph endpoint); reads/writes go remote.
+    pub fn remote(pool: SqlitePool, base_url: String, token: String) -> Self {
+        Self {
+            repo: MemoriesRepo::new(pool),
+            embedder: None,
+            index: None,
+            remote: Some(RemoteClient::new(base_url, token)),
+        }
     }
 
     pub fn repo(&self) -> &MemoriesRepo {
@@ -79,6 +97,9 @@ impl MemoryService {
     /// Persist memories, skipping exact duplicates (NOOP returns the existing row),
     /// and embedding each new row on write.
     pub async fn save(&self, ws: &str, by: &str, items: Vec<NewMemory>) -> Result<Vec<Memory>> {
+        if let Some(r) = &self.remote {
+            return r.save(ws, items).await;
+        }
         let mut out = Vec::with_capacity(items.len());
         for nm in items {
             let hash = MemoriesRepo::content_hash(&nm.body);
@@ -98,29 +119,47 @@ impl MemoryService {
     }
 
     pub async fn get(&self, ws: &str, id: &str) -> Result<Memory> {
+        if let Some(r) = &self.remote {
+            return r.get(ws, id).await;
+        }
         self.repo.get(ws, id).await
     }
 
     pub async fn list(&self, ws: &str, f: ListFilter) -> Result<Vec<Memory>> {
+        if let Some(r) = &self.remote {
+            return r.list(ws, &f).await;
+        }
         self.repo.list(ws, &f).await
     }
 
     pub async fn update(&self, ws: &str, id: &str, p: MemoryPatch) -> Result<Memory> {
+        if let Some(r) = &self.remote {
+            return r.update(ws, id, &p).await;
+        }
         let m = self.repo.update(ws, id, p).await?;
         self.embed_one(&m).await;
         Ok(m)
     }
 
     pub async fn forget(&self, ws: &str, id: &str) -> Result<()> {
+        if let Some(r) = &self.remote {
+            return r.forget(ws, id).await;
+        }
         self.repo.forget(ws, id).await
     }
 
     pub async fn links(&self, ws: &str, id: &str) -> Result<Vec<MemoryLink>> {
+        if let Some(r) = &self.remote {
+            return r.links(ws, id).await;
+        }
         self.repo.links_of(ws, id).await
     }
 
     /// Hybrid search: keyword (LIKE) ⊕ vector KNN, fused by RRF, then re-ranked.
     pub async fn search(&self, ws: &str, q: MemoryQuery) -> Result<Vec<MemoryHit>> {
+        if let Some(r) = &self.remote {
+            return r.search(ws, &q).await;
+        }
         let limit = if q.k == 0 { 20 } else { q.k };
         let text = q.text.clone().unwrap_or_default();
 
@@ -217,6 +256,9 @@ impl MemoryService {
 
     /// Assemble a compact, token-budgeted background brief for a story.
     pub async fn recall_brief(&self, ws: &str, story: &str, opts: RecallOpts) -> Result<RecallBrief> {
+        if let Some(r) = &self.remote {
+            return r.recall_brief(ws, story, &opts).await;
+        }
         let groups: &[(&str, &[&str])] = &[
             ("Constraints & Requirements", &[kind::CONSTRAINT, kind::REQUIREMENT]),
             ("Decisions", &[kind::DECISION]),

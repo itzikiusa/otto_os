@@ -202,6 +202,17 @@ async fn run(cfg: Config) -> Result<(), String> {
     // Seed swarm role skills + preset souls into the library (only if absent).
     otto_swarm::presets::seed(&context_library);
 
+    // Memory backend: local SQLite by default, or a shared host Otto when
+    // OTTO_MEMORY_REMOTE_URL is set (so a team shares one memory across machines).
+    let memory = match std::env::var("OTTO_MEMORY_REMOTE_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            let token = std::env::var("OTTO_MEMORY_REMOTE_TOKEN").unwrap_or_default();
+            tracing::info!("memory: shared remote backend at {url}");
+            Arc::new(otto_memory::MemoryService::remote(pool.clone(), url, token))
+        }
+        _ => Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
+    };
+
     let ctx = ServerCtx {
         pool: pool.clone(),
         secrets: secrets.clone(),
@@ -228,7 +239,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         product,
         product_repo,
         product_agent_cancels: otto_server::product_run::new_cancel_registry(),
-        memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
+        memory,
         swarm,
         swarm_repo,
         swarm_coords: otto_server::swarm_runtime::new_registry(),
