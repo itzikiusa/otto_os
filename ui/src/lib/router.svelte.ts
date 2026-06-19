@@ -4,6 +4,23 @@
 // Keeps a browser-style navigation stack so back/forward (buttons + ⌘⇧←/→)
 // can return to previously-viewed pages.
 
+// ---------------------------------------------------------------------------
+// Share-token in-memory store (Task 3.1)
+// ---------------------------------------------------------------------------
+// When a visitor arrives at `#/s/<sessionId>/<token>` the raw token is
+// captured here (keyed by sessionId), then IMMEDIATELY stripped from the
+// visible URL + history via `history.replaceState`. This ensures the token
+// never persists in browser history, logs, or the address bar.
+// The token is intentionally NOT stored in localStorage (would clobber a real
+// owner login under the 'otto_token' key and survive the session).
+const _shareTokens: Map<string, string> = new Map();
+
+/** Retrieve the in-memory share token captured for a given session.
+ *  Returns null if the URL didn't carry one or the token has been consumed. */
+export function getShareToken(sessionId: string): string | null {
+  return _shareTokens.get(sessionId) ?? null;
+}
+
 class Router {
   /** path segments after '#/', e.g. ['git', '01H...', 'pr', '7'] */
   parts: string[] = $state([]);
@@ -29,6 +46,24 @@ class Router {
   private parse(): void {
     const raw = window.location.hash.replace(/^#\/?/, '');
     this.parts = raw === '' ? [] : raw.split('/').map(decodeURIComponent);
+
+    // Task 3.1: share route `#/s/<sessionId>/<token>` — capture the token
+    // into _shareTokens then strip it from the visible URL + history so it
+    // never lingers in the address bar, referrer headers, or browser history.
+    if (this.parts[0] === 's' && this.parts.length >= 3) {
+      const sessionId = this.parts[1];
+      const token = this.parts[2];
+      if (sessionId && token) {
+        _shareTokens.set(sessionId, token);
+        // Remove the token segment from the URL immediately (replaceState so
+        // it doesn't create a new history entry — the token is one-time-view).
+        const cleanHash = `#/s/${encodeURIComponent(sessionId)}`;
+        history.replaceState(null, '', cleanHash);
+        // Re-parse the now-clean URL so this.parts reflects the stripped form.
+        const cleanRaw = cleanHash.replace(/^#\/?/, '');
+        this.parts = cleanRaw.split('/').map(decodeURIComponent);
+      }
+    }
   }
 
   private currentHash(): string {

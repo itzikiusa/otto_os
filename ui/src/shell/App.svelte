@@ -1,6 +1,10 @@
 <script lang="ts">
   // Main shell (post-auth): rail/navigator + tab bar + module router +
   // right panel + status bar + palette + global keys.
+  //
+  // Special case: `router.module === 's'` is the guest share view — it renders
+  // SharePage full-screen and skips all the usual shell chrome entirely.
+  import SharePage from '../modules/share/SharePage.svelte';
   import Rail from './Rail.svelte';
   import Navigator from './Navigator.svelte';
   import TabBar from './TabBar.svelte';
@@ -390,6 +394,10 @@
   });
 </script>
 
+{#if router.module === 's'}
+  <!-- Guest share view: full-screen terminal, no shell chrome. -->
+  <SharePage sessionId={router.parts[1] ?? ''} />
+{:else}
 <div class="shell" style={isTauri ? undefined : `zoom:${ui.zoom}`}>
   <div class="shell-main">
     <div class="sidebar" class:tauri-top={isTauri}>
@@ -506,6 +514,7 @@
 <ConfirmDialog />
 <ContextMenu />
 <FindInPage />
+{/if}
 
 <style>
   .shell {

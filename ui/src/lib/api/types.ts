@@ -2177,3 +2177,45 @@ export interface RunInsightsReq {
 export interface RunInsightsResp {
   started: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Share-link tokens (Phase 3 — remote/mobile access)
+// Mirrors crates/otto-core/src/api.rs ShareInfo / CreateShareReq / CreateShareResp.
+// ---------------------------------------------------------------------------
+
+/** Metadata for one scoped share-link token. The raw token is never present
+ *  after the initial mint response (only the first 12 chars are stored). */
+export interface ShareInfo {
+  id: Id;
+  /** The single session this token may reach. */
+  session_id: Id;
+  /** Capped role on that session: 'viewer' (read-only) or 'editor' (read + input). */
+  role: WorkspaceRole;
+  /** First 12 chars of the raw token, for display/identification. */
+  token_prefix: string;
+  label: string | null;
+  created_at: string;
+  /** FIXED expiry (created_at + ttl); never slid for share tokens. */
+  expires_at: string;
+}
+
+/** `POST /api/v1/sessions/{id}/share` request body. */
+export interface CreateShareReq {
+  /** 'viewer' (read-only) or 'editor' (read + input). Never 'admin'. */
+  role: string;
+  /** Fixed TTL in seconds. Absent → 3600. Server clamps to [60, 86400]. */
+  ttl_secs?: number;
+  /** Human-friendly label (e.g. "for Alice"). Optional. */
+  label?: string;
+}
+
+/** Response for `POST /api/v1/sessions/{id}/share`. The raw token is returned
+ *  exactly once — store or copy it immediately. */
+export interface CreateShareResp {
+  /** The raw share token (shown exactly once). */
+  token: string;
+  /** Ready-to-use share URL (`<origin>/#/s/<session_id>/<token>`). */
+  url: string;
+  /** Metadata for the newly-minted share. */
+  info: ShareInfo;
+}

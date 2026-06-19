@@ -10,7 +10,7 @@
   import { SearchAddon } from '@xterm/addon-search';
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
-  import { wsUrl } from '../api/client';
+  import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
   import type { SessionStatus } from '../api/types';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
@@ -30,9 +30,15 @@
      *  of the app's current light/dark scheme. Use for embedded agent CLIs
      *  (claude, codex) that render their own dark TUI canvas. */
     forceDark?: boolean;
+    /** When provided, the WS is opened with `Authorization` via the
+     *  `otto-bearer` Sec-WebSocket-Protocol subprotocol carrying this token
+     *  instead of the stored owner login token. Used by the guest share view
+     *  (SharePage) so the scoped share token never touches localStorage.
+     *  Default = undefined → falls back to today's wsUrl() behaviour. */
+    shareToken?: string;
     onstatus?: (status: SessionStatus) => void;
   }
-  let { sessionId, readOnly = false, resumable = false, forceDark = false, onstatus }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, forceDark = false, shareToken, onstatus }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -81,7 +87,16 @@
     }
     closedByUs = false;
     disconnected = false;
-    sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`));
+    // When a shareToken is supplied (guest share view) use the otto-bearer
+    // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
+    // the URL query string (keeps it out of access logs). The stored owner
+    // login token path (wsUrl) is unchanged for all normal sessions.
+    if (shareToken) {
+      const wsBase = wsUrl(`/ws/term/${sessionId}`).replace(/\?token=.*$/, '');
+      sock = new WebSocket(wsBase, [WS_BEARER_SUBPROTOCOL, shareToken]);
+    } else {
+      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`));
+    }
     sock.binaryType = 'arraybuffer';
 
     sock.onopen = () => {
