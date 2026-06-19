@@ -50,6 +50,9 @@ export interface Session {
 
 export type ConnectionKind = 'ssh' | 'mysql' | 'redis' | 'mongodb' | 'clickhouse' | 'custom';
 
+/** Deployment environment. `prod` is write-guarded in the DB Explorer. */
+export type Environment = 'dev' | 'staging' | 'prod';
+
 export interface Connection {
   id: Id;
   workspace_id: Id | null;
@@ -59,6 +62,10 @@ export interface Connection {
   secret_ref: string | null;
   first_command: string | null;
   section_id: Id | null;
+  /** Deployment environment (defaults to 'dev'). */
+  environment: Environment;
+  /** When true, writes/DDL are refused without an explicit confirmation. */
+  read_only: boolean;
   created_by: Id;
   created_at: string;
 }
@@ -430,6 +437,10 @@ export interface UpsertConnectionReq {
   secret?: string | null;
   first_command?: string | null;
   section_id?: Id | null;
+  /** Deployment environment; omit for 'dev'. */
+  environment?: Environment;
+  /** Lock the profile against writes/DDL. */
+  read_only?: boolean;
 }
 
 export interface TestConnectionResp {

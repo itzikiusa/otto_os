@@ -9,6 +9,7 @@
     Connection,
     ConnectionKind,
     ConnectionSection,
+    Environment,
     UpsertConnectionReq,
   } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -64,6 +65,14 @@
   // svelte-ignore state_referenced_locally
   let firstCommand = $state(existing?.first_command ?? '');
   let busy         = $state(false);
+
+  // ── Environment + write guardrail ──────────────────────────────────────────
+  // `prod` connections (and any read-only profile) refuse writes/DDL in the DB
+  // Explorer unless the user types a confirmation — see the database module.
+  // svelte-ignore state_referenced_locally
+  let environment = $state<Environment>(existing?.environment ?? 'dev');
+  // svelte-ignore state_referenced_locally
+  let readOnly = $state(existing?.read_only ?? false);
 
   // ── TLS + SSH-tunnel (DB engines) ──────────────────────────────────────────
   // These write structured objects into params.tls / params.ssh for the four DB
@@ -229,6 +238,8 @@
       params: buildParams(),
       first_command: firstCommand.trim() === '' ? null : firstCommand.trim(),
       section_id: sectionId === '' ? null : sectionId,
+      environment,
+      read_only: readOnly,
     };
     if (secret !== '') body.secret = secret;
     try {
@@ -303,6 +314,33 @@
         <button class="kind-chip" class:selected={kind === k} onclick={() => setKind(k)}>{k}</button>
       {/each}
     </div>
+  </div>
+
+  <!-- Environment + write guardrail -->
+  <div class="field">
+    <label for="cf-env">Environment</label>
+    <div class="env-row" id="cf-env">
+      {#each (['dev', 'staging', 'prod'] as Environment[]) as e (e)}
+        <button
+          class="env-chip"
+          class:selected={environment === e}
+          class:prod={e === 'prod'}
+          onclick={() => (environment = e)}
+        >{e}</button>
+      {/each}
+    </div>
+    {#if environment === 'prod'}
+      <span class="hint danger">
+        Production — writes &amp; schema changes are blocked until you type a confirmation.
+      </span>
+    {/if}
+  </div>
+
+  <div class="field ssh-toggle-row">
+    <label class="toggle-label">
+      <input type="checkbox" bind:checked={readOnly} />
+      Read-only <span class="dim">(refuse all writes / DDL, even outside prod)</span>
+    </label>
   </div>
 
   {#if kind === 'clickhouse'}
@@ -623,6 +661,37 @@
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     color: var(--accent);
     font-weight: 500;
+  }
+  .env-row {
+    display: flex;
+    gap: 6px;
+  }
+  .env-chip {
+    height: 24px;
+    padding: 0 13px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+    text-transform: capitalize;
+    transition: all 130ms ease-out;
+  }
+  .env-chip.selected {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent);
+    font-weight: 500;
+  }
+  /* Production selected → red danger styling. */
+  .env-chip.prod.selected {
+    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
+    border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
+    color: var(--status-exited);
+  }
+  .hint.danger {
+    color: var(--status-exited);
   }
   .warn-banner {
     font-size: 11.5px;

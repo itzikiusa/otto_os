@@ -161,6 +161,8 @@ impl ConnectionsService {
                 secret_ref: None,
                 first_command: req.first_command,
                 section_id: req.section_id.clone(),
+                environment: req.environment,
+                read_only: req.read_only,
                 created_by: user_id.clone(),
             })
             .await?;
@@ -169,7 +171,16 @@ impl ConnectionsService {
             self.secrets.put(&secret_ref, &secret)?;
             return self
                 .repo
-                .update(&conn.id, None, None, Some(Some(&secret_ref)), None, None)
+                .update(
+                    &conn.id,
+                    None,
+                    None,
+                    Some(Some(&secret_ref)),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await;
         }
         Ok(conn)
@@ -205,6 +216,8 @@ impl ConnectionsService {
                 new_secret_ref.as_ref().map(|opt| opt.as_deref()),
                 Some(req.first_command.as_deref()),
                 Some(req.section_id.as_deref()),
+                Some(req.environment),
+                Some(req.read_only),
             )
             .await
     }

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use otto_core::domain::Connection;
 use otto_core::secrets::SecretStore;
-use otto_core::{Id, Result};
+use otto_core::{Error, Id, Result};
 use otto_state::{
     Dashboard, ConnectionsRepo, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery,
     Widget,
@@ -31,9 +31,14 @@ use crate::driver::Driver;
 use crate::registry::Registry;
 use crate::tunnel::SshTunnel;
 use crate::types::{
-    Capabilities, CompletionContext, CompletionResponse, Engine, NodePath, ObjectDetail,
-    QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
+    statement_is_write, Capabilities, CompletionContext, CompletionResponse, Engine, NodePath,
+    ObjectDetail, QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
 };
+
+/// Stable marker prefixed to the write-gate rejection message so the UI can
+/// recognise it (and prompt for a typed confirmation) without string-matching
+/// prose. The text after it stays human-readable.
+pub const WRITE_BLOCKED_PREFIX: &str = "write_blocked: ";
 
 /// Evict cached SSH tunnels that haven't been used for longer than this on the
 /// next `resolve` — dropping them kills the `ssh` child via `SshTunnel::Drop`.
@@ -231,8 +236,42 @@ impl DbViewerService {
         r.driver.object_detail(&r.config, &node).await
     }
 
+    /// Production / read-only guardrail. When a connection is `Prod` or
+    /// `read_only`, a statement classified as a write/DDL is refused unless the
+    /// request carries `confirm_write`. Classification is conservative (unknown
+    /// counts as a write), and `explain` requests never write, so they pass.
+    /// The error is a 409 with a [`WRITE_BLOCKED_PREFIX`]-tagged message so the
+    /// UI can detect it and ask for a typed confirmation.
+    async fn guard_write(&self, conn_id: &Id, req: &QueryRequest) -> Result<()> {
+        if req.confirm_write || req.explain {
+            return Ok(());
+        }
+        let conn = self.connections.get(conn_id).await?;
+        if !conn.is_write_guarded() {
+            return Ok(());
+        }
+        // Non-browsable kinds never reach `run`, but guard defensively: if we
+        // can't map to an engine we can't classify, so treat it as a write.
+        let is_write = match Engine::from_kind(conn.kind) {
+            Some(engine) => statement_is_write(engine, &req.statement),
+            None => true,
+        };
+        if !is_write {
+            return Ok(());
+        }
+        let reason = if conn.environment.is_production() {
+            format!("production connection '{}'", conn.name)
+        } else {
+            format!("read-only connection '{}'", conn.name)
+        };
+        Err(Error::Conflict(format!(
+            "{WRITE_BLOCKED_PREFIX}this is a {reason}; confirm the write to run it"
+        )))
+    }
+
     /// Run a query/command and record it in history (best-effort).
     pub async fn run(&self, conn_id: &Id, req: &QueryRequest) -> Result<QueryResult> {
+        self.guard_write(conn_id, req).await?;
         let r = self.resolve(conn_id).await?;
         let started = Instant::now();
         let result = r.driver.run(&r.config, req).await;

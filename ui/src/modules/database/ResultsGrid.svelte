@@ -9,7 +9,6 @@
   import { tick } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { api } from '../../lib/api/client';
   import { database } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -747,10 +746,14 @@
     runningReview = true;
     try {
       // Scope to the active database (Mongo needs it to resolve `db.coll.…`).
-      await api.post(`/connections/${connectionId}/db/query`, {
-        statement: sql,
-        node: database.activeDb || null,
-      });
+      // Routed through the store so the production / read-only write-gate applies
+      // — a guarded connection prompts for a typed confirmation first.
+      const res = await database.runManagedStatement(sql, database.activeDb || null);
+      if (res === null) {
+        // Write was cancelled at the confirmation prompt — keep the modal open.
+        toasts.info('Write cancelled');
+        return;
+      }
       toasts.success('Applied', 'Statement ran successfully');
       reviewSql = null;
       // Refresh from the DB by re-running the active tab's query.

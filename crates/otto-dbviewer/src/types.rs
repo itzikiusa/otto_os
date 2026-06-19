@@ -388,6 +388,11 @@ pub struct QueryRequest {
     /// Return the query plan instead of running (Mongo: server `explain`).
     #[serde(default)]
     pub explain: bool,
+    /// Explicit acknowledgement that the caller intends to run a write/DDL on a
+    /// guarded (production / read-only) connection. The UI sets this only after
+    /// a typed confirmation. Without it, the write-gate rejects the statement.
+    #[serde(default)]
+    pub confirm_write: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -660,6 +665,147 @@ fn has_word_then_digit(haystack: &str, word: &str) -> bool {
     false
 }
 
+// --- Write-gate classification ----------------------------------------------
+
+/// Conservatively classify whether `statement` performs a write / DDL on the
+/// given `engine`. Used by the production / read-only guardrail: a guarded
+/// connection rejects anything classified as a write unless the request carries
+/// an explicit confirm flag.
+///
+/// The rule is deliberately **conservative — unknown is treated as a write** —
+/// so a novel or unparseable statement errs on the side of refusing rather than
+/// silently mutating a production database. Only statements we can positively
+/// recognise as pure reads are allowed through unconfirmed. Multi-statement
+/// input is a write if *any* part is a write (or unrecognised).
+pub fn statement_is_write(engine: Engine, statement: &str) -> bool {
+    match engine {
+        Engine::Mysql | Engine::Clickhouse => sql_is_write(statement),
+        Engine::Redis => redis_is_write(statement),
+        // Mongo's `run` accepts JSON commands / `db.coll.op(...)` shorthand whose
+        // surface is large and easy to mis-parse; treat everything except a
+        // clearly read-only op as a write.
+        Engine::Mongodb => mongo_is_write(statement),
+    }
+}
+
+/// SQL: a write unless every (non-empty) statement starts with a read keyword.
+/// An empty / comment-only statement isn't a write.
+fn sql_is_write(statement: &str) -> bool {
+    // Split on `;` so a batch like `SELECT 1; DROP TABLE t` is correctly a write.
+    for part in statement.split(';') {
+        if part.trim().is_empty() {
+            continue;
+        }
+        if !sql_first_keyword_is_read(part) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when a single SQL statement's first keyword is a known row-returning
+/// read (mirrors the per-driver `is_read_statement`, kept conservative).
+fn sql_first_keyword_is_read(statement: &str) -> bool {
+    let kw = sql_first_keyword(statement);
+    matches!(
+        kw.as_str(),
+        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN" | "WITH" | "USE" | "SET"
+    )
+}
+
+/// First SQL keyword (uppercased), skipping whitespace and `--` / `/* */`
+/// comments. (Local copy of the driver helper to keep the gate engine-agnostic.)
+fn sql_first_keyword(statement: &str) -> String {
+    let mut s = statement.trim_start();
+    loop {
+        if let Some(rest) = s.strip_prefix("--") {
+            s = rest
+                .split_once('\n')
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            s = rest
+                .split_once("*/")
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
+        } else {
+            break;
+        }
+    }
+    s.chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// Redis: a write unless every command on its own line is a known read-only
+/// command. The console runs one command per line (`#` comments ignored).
+fn redis_is_write(statement: &str) -> bool {
+    for line in statement.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let cmd = line
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        if !REDIS_READ_COMMANDS.contains(&cmd.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Read-only Redis commands (conservative subset — anything not listed counts
+/// as a write, including admin/scripting commands like EVAL we can't vet).
+#[rustfmt::skip]
+const REDIS_READ_COMMANDS: &[&str] = &[
+    "GET", "MGET", "STRLEN", "GETRANGE", "EXISTS", "TYPE", "TTL", "PTTL", "KEYS", "SCAN",
+    "HGET", "HMGET", "HGETALL", "HKEYS", "HVALS", "HLEN", "HEXISTS", "HSCAN", "HSTRLEN",
+    "LRANGE", "LINDEX", "LLEN", "SMEMBERS", "SISMEMBER", "SMISMEMBER", "SCARD", "SSCAN",
+    "SRANDMEMBER", "SINTER", "SUNION", "SDIFF", "ZRANGE", "ZREVRANGE", "ZRANGEBYSCORE",
+    "ZREVRANGEBYSCORE", "ZRANGEBYLEX", "ZSCORE", "ZMSCORE", "ZRANK", "ZREVRANK", "ZCARD",
+    "ZCOUNT", "ZSCAN", "OBJECT", "DBSIZE", "RANDOMKEY", "DUMP", "MEMORY", "PING", "ECHO",
+    "INFO", "TIME", "COMMAND", "CONFIG", "CLIENT", "GETBIT", "BITCOUNT", "BITPOS",
+    "PFCOUNT", "GEOPOS", "GEODIST", "GEOSEARCH", "GEOHASH", "XLEN", "XRANGE", "XREVRANGE",
+    "XINFO", "LPOS",
+];
+
+/// Mongo: read-only only for a small set of recognisable query shapes; anything
+/// else (including raw command JSON we can't safely vet) is treated as a write.
+fn mongo_is_write(statement: &str) -> bool {
+    let s = statement.trim();
+    let lower = s.to_ascii_lowercase();
+    // `db.coll.find(...)`, `.findOne(...)`, `.aggregate(...)` (read pipelines may
+    // contain `$merge`/`$out`, but those are uncommon in the explorer console —
+    // we still treat them as writes below), `.countDocuments()`, `.distinct()`.
+    let read_methods = [
+        ".find(",
+        ".findone(",
+        ".count(",
+        ".countdocuments(",
+        ".estimateddocumentcount(",
+        ".distinct(",
+        ".aggregate(",
+    ];
+    let looks_like_read_method =
+        lower.starts_with("db.") && read_methods.iter().any(|m| lower.contains(m));
+    // Aggregation stages that write must never be allowed through.
+    let has_write_stage = lower.contains("$merge") || lower.contains("$out");
+    // A raw `{ "find": ... }` / `{ "aggregate": ... }` command document.
+    let looks_like_read_command = s.starts_with('{')
+        && (lower.contains("\"find\"")
+            || lower.contains("\"aggregate\"")
+            || lower.contains("\"count\"")
+            || lower.contains("\"distinct\""));
+    let is_read = (looks_like_read_method || looks_like_read_command) && !has_write_stage;
+    !is_read
+}
+
 /// Re-export for drivers.
 pub type DbResult<T> = Result<T>;
 
@@ -748,5 +894,77 @@ mod tests {
         assert!(inject_row_limit("-- pick\nSELECT * FROM t", 10).ends_with(" LIMIT 10"));
         assert!(inject_row_limit("WITH c AS (SELECT 1) SELECT * FROM c", 10).ends_with(" LIMIT 10"));
         assert!(inject_row_limit("(SELECT * FROM t)", 10).ends_with(" LIMIT 10"));
+    }
+
+    // --- Write-gate classification --------------------------------------------
+
+    #[test]
+    fn sql_reads_are_not_writes() {
+        for sql in [
+            "SELECT * FROM t",
+            "  select 1",
+            "WITH c AS (SELECT 1) SELECT * FROM c",
+            "SHOW TABLES",
+            "DESCRIBE t",
+            "EXPLAIN SELECT 1",
+            "-- comment\nSELECT 1",
+            "SELECT 1; SELECT 2;",
+        ] {
+            assert!(
+                !statement_is_write(Engine::Mysql, sql),
+                "read misread as write: {sql}"
+            );
+            assert!(
+                !statement_is_write(Engine::Clickhouse, sql),
+                "read misread as write: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_writes_and_ddl_are_writes() {
+        for sql in [
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a = 1",
+            "DELETE FROM t",
+            "DROP TABLE t",
+            "TRUNCATE t",
+            "CREATE TABLE t (id INT)",
+            "ALTER TABLE t ADD COLUMN c INT",
+            "GRANT ALL ON db.* TO u",
+            "SELECT 1; DROP TABLE t",
+            "totally unknown statement",
+        ] {
+            assert!(
+                statement_is_write(Engine::Mysql, sql),
+                "write missed: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn redis_reads_vs_writes() {
+        let is_write = |s: &str| statement_is_write(Engine::Redis, s);
+        assert!(!is_write("GET k"));
+        assert!(!is_write("HGETALL h\n# note\nLRANGE l 0 -1"));
+        assert!(is_write("SET k v"));
+        assert!(is_write("GET k\nDEL k"));
+        assert!(is_write("FLUSHALL"));
+        // EVAL can write — must be conservatively a write.
+        assert!(is_write("EVAL \"return 1\" 0"));
+    }
+
+    #[test]
+    fn mongo_reads_vs_writes() {
+        let is_write = |s: &str| statement_is_write(Engine::Mongodb, s);
+        assert!(!is_write("db.users.find({})"));
+        assert!(!is_write("db.users.aggregate([{$match:{a:1}}])"));
+        assert!(!is_write("{ \"find\": \"users\" }"));
+        assert!(is_write("db.users.insertOne({a:1})"));
+        assert!(is_write("db.users.deleteMany({})"));
+        assert!(is_write("db.users.drop()"));
+        // Aggregation that writes via $out / $merge is a write.
+        assert!(is_write("db.users.aggregate([{$out:\"copy\"}])"));
+        assert!(is_write("anything unrecognised"));
     }
 }

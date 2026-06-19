@@ -108,7 +108,7 @@ pub fn parse(conn: &Connection, secret: Option<String>) -> Result<ParsedProfile>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use otto_core::domain::ConnectionKind;
+    use otto_core::domain::{ConnectionKind, Environment};
     use serde_json::json;
 
     fn conn(kind: ConnectionKind, params: Value) -> Connection {
@@ -121,6 +121,8 @@ mod tests {
             secret_ref: None,
             first_command: None,
             section_id: None,
+            environment: Environment::Dev,
+            read_only: false,
             created_by: "u1".into(),
             created_at: chrono::Utc::now(),
         }

@@ -3,7 +3,7 @@
 //! Secrets are injected via env vars or placeholder substitution — never in
 //! argv except `clickhouse-client`, which is flagged with `warn_argv=true`.
 
-use otto_core::domain::{Connection, ConnectionKind};
+use otto_core::domain::{Connection, ConnectionKind, Environment};
 use otto_core::{Error, Result};
 use otto_pty::CommandSpec;
 use serde_json::Value;
@@ -306,6 +306,8 @@ pub fn validate_params(kind: ConnectionKind, params: &Value, has_secret: bool) -
         secret_ref: None,
         first_command: None,
         section_id: None,
+        environment: Environment::Dev,
+        read_only: false,
         created_by: String::new(),
         created_at: chrono::Utc::now(),
     };
@@ -328,6 +330,8 @@ mod tests {
             secret_ref: None,
             first_command: None,
             section_id: None,
+            environment: Environment::Dev,
+            read_only: false,
             created_by: "u1".into(),
             created_at: chrono::Utc::now(),
         }

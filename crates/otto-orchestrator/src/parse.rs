@@ -124,7 +124,9 @@ pub fn validate_plan(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use otto_core::domain::{Connection, ConnectionKind, Session, SessionKind, SessionStatus};
+    use otto_core::domain::{
+        Connection, ConnectionKind, Environment, Session, SessionKind, SessionStatus,
+    };
 
     fn ctx() -> OrchestratorContext {
         OrchestratorContext {
@@ -153,6 +155,8 @@ mod tests {
                 secret_ref: None,
                 first_command: None,
                 section_id: None,
+                environment: Environment::Dev,
+                read_only: false,
                 created_by: "U1".into(),
                 created_at: Utc::now(),
             }],

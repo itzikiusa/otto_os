@@ -167,6 +167,9 @@
         params: c.params,
         first_command: c.first_command,
         section_id: sectionId,
+        // Preserve the guardrail flags — omitting them would reset to dev/false.
+        environment: c.environment,
+        read_only: c.read_only,
       });
       conns = conns.map((x) => (x.id === c.id ? saved : x));
     } catch (e) {

@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::{
-    Connection, ConnectionKind, GitProviderKind, IssueProviderKind, ReviewAgentCfg, Session,
-    SessionKind, User, Workspace, WorkspaceRole,
+    Connection, ConnectionKind, Environment, GitProviderKind, IssueProviderKind, ReviewAgentCfg,
+    Session, SessionKind, User, Workspace, WorkspaceRole,
 };
 use crate::Id;
 
@@ -267,6 +267,13 @@ pub struct UpsertConnectionReq {
     /// Section to place this profile in; None/absent = ungrouped.
     #[serde(default)]
     pub section_id: Option<Id>,
+    /// Deployment environment (dev/staging/prod). Absent = `Dev`. `Prod`
+    /// connections are write-guarded in the DB Explorer.
+    #[serde(default)]
+    pub environment: Environment,
+    /// Lock the profile against writes/DDL regardless of environment.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// `POST /api/v1/workspaces/{id}/connection-sections` and `PATCH /connection-sections/{id}`.

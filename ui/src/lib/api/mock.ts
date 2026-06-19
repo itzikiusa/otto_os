@@ -188,6 +188,8 @@ const connections: Connection[] = [
     secret_ref: null,
     first_command: null,
     section_id: null,
+    environment: 'dev',
+    read_only: false,
     created_by: 'usr_root',
     created_at: ago(60 * 24 * 4),
   },
@@ -200,6 +202,8 @@ const connections: Connection[] = [
     secret_ref: 'conn-con_mysql',
     first_command: 'SHOW TABLES;',
     section_id: null,
+    environment: 'staging',
+    read_only: false,
     created_by: 'usr_root',
     created_at: ago(60 * 24 * 3),
   },
@@ -212,6 +216,8 @@ const connections: Connection[] = [
     secret_ref: 'conn-con_redis',
     first_command: 'PING',
     section_id: null,
+    environment: 'staging',
+    read_only: false,
     created_by: 'usr_root',
     created_at: ago(60 * 24 * 3),
   },
@@ -224,6 +230,8 @@ const connections: Connection[] = [
     secret_ref: 'conn-con_click',
     first_command: null,
     section_id: null,
+    environment: 'prod',
+    read_only: false,
     created_by: 'usr_root',
     created_at: ago(60 * 24 * 9),
   },
@@ -236,6 +244,8 @@ const connections: Connection[] = [
     secret_ref: 'conn-con_mongo',
     first_command: null,
     section_id: null,
+    environment: 'dev',
+    read_only: true,
     created_by: 'usr_dana',
     created_at: ago(60 * 24 * 2),
   },
@@ -1015,6 +1025,8 @@ const routes: Route[] = [
         secret_ref: body.secret ? `conn-${nid('x')}` : null,
         first_command: body.first_command ?? null,
         section_id: body.section_id ?? null,
+        environment: body.environment ?? 'dev',
+        read_only: body.read_only ?? false,
         created_by: 'usr_root',
         created_at: new Date().toISOString(),
       };
@@ -1032,6 +1044,9 @@ const routes: Route[] = [
       if (body.kind != null) c.kind = body.kind;
       if (body.params != null) c.params = body.params;
       if (body.first_command !== undefined) c.first_command = body.first_command;
+      if (body.section_id !== undefined) c.section_id = body.section_id;
+      if (body.environment != null) c.environment = body.environment;
+      if (body.read_only != null) c.read_only = body.read_only;
       if (body.secret) c.secret_ref = c.secret_ref ?? `conn-${c.id}`;
       return { json: c };
     },

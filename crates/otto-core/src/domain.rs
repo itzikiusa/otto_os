@@ -193,6 +193,45 @@ impl ConnectionKind {
     }
 }
 
+/// Deployment environment a connection points at. Drives the write-gate and the
+/// UI danger styling: `Prod` connections refuse writes/DDL without an explicit
+/// confirm flag, exactly like a `read_only` connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Environment {
+    /// Local / development (default; no guardrail).
+    #[default]
+    Dev,
+    /// Pre-production / staging (no guardrail by default).
+    Staging,
+    /// Production — writes are gated behind an explicit confirmation.
+    Prod,
+}
+
+impl Environment {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "dev" => Some(Self::Dev),
+            "staging" => Some(Self::Staging),
+            "prod" => Some(Self::Prod),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Staging => "staging",
+            Self::Prod => "prod",
+        }
+    }
+
+    /// True when this environment is treated as dangerous (production).
+    pub fn is_production(&self) -> bool {
+        matches!(self, Self::Prod)
+    }
+}
+
 /// A saved connection profile. Secrets are NEVER stored here — only a
 /// Keychain reference in `secret_ref`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,8 +250,25 @@ pub struct Connection {
     pub first_command: Option<String>,
     /// Section this profile belongs to (workspace-scoped); None = ungrouped.
     pub section_id: Option<Id>,
+    /// Deployment environment (defaults to `Dev`). `Prod` is treated as
+    /// dangerous: writes/DDL require explicit confirmation.
+    #[serde(default)]
+    pub environment: Environment,
+    /// When true, the connection refuses writes/DDL without confirmation —
+    /// independent of `environment` (so a non-prod profile can still be locked).
+    #[serde(default)]
+    pub read_only: bool,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
+}
+
+impl Connection {
+    /// True when this profile is guarded: production OR explicitly read-only.
+    /// Guarded connections reject write/DDL statements unless the caller passes
+    /// an explicit confirm flag.
+    pub fn is_write_guarded(&self) -> bool {
+        self.read_only || self.environment.is_production()
+    }
 }
 
 /// A user-defined grouping of connection profiles within a workspace.

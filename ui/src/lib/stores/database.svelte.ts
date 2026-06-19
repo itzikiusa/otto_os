@@ -2,7 +2,8 @@
 // query tabs, saved queries, history, and Superset-style dashboards/widgets.
 // Reads `ws.currentId` only (never mutates it), mirroring apiClient.svelte.ts.
 
-import { api, isAbortError } from '../api/client';
+import { api, ApiError, isAbortError } from '../api/client';
+import { confirmer } from '../confirm.svelte';
 import type {
   Connection,
   DbCapabilities,
@@ -33,6 +34,15 @@ function isDbKind(k: string): k is DbKind {
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * The production / read-only write-gate rejection. The server tags the message
+ * with `write_blocked: ` (a stable marker, see otto-dbviewer) so the UI can
+ * recognise it and offer a typed confirmation rather than string-matching prose.
+ */
+function isWriteBlocked(e: unknown): boolean {
+  return e instanceof ApiError && e.message.startsWith('write_blocked:');
 }
 
 /** Persisted default row cap applied when a statement has no explicit LIMIT. */
@@ -327,6 +337,17 @@ class DatabaseStore {
 
   selectedConn: Connection | null = $derived(
     this.connections.find((c) => c.id === this.selectedConnId) ?? null,
+  );
+
+  /** Selected connection points at production. Drives the red danger rail. */
+  isProd: boolean = $derived(this.selectedConn?.environment === 'prod');
+  /**
+   * Selected connection is write-guarded: production OR explicitly read-only.
+   * Writes/DDL require a typed confirmation before they run.
+   */
+  isGuarded: boolean = $derived(
+    this.selectedConn != null &&
+      (this.selectedConn.environment === 'prod' || this.selectedConn.read_only === true),
   );
 
   // ── Schema tree ──────────────────────────────────────────────────────────
@@ -955,17 +976,39 @@ class DatabaseStore {
       // default row cap. The server also injects this LIMIT into the SQL so a
       // huge table isn't fully scanned — this value just sizes that cap.
       const explicit = parseExplicitLimit(sql);
-      const result = await api.post<QueryResult>(
-        `${this.connBase(id)}/query`,
-        {
-          statement: sql,
-          max_rows: explicit ?? this.rowLimit,
-          // Scope to the active database (so unqualified tables resolve) unless
-          // an explicit node was passed.
-          node: node ?? (this.activeDb || null),
-        },
-        controller.signal,
-      );
+      // Scope to the active database (so unqualified tables resolve) unless an
+      // explicit node was passed.
+      const scopeNode = node ?? (this.activeDb || null);
+      const post = (confirmWrite: boolean): Promise<QueryResult> =>
+        api.post<QueryResult>(
+          `${this.connBase(id)}/query`,
+          {
+            statement: sql,
+            max_rows: explicit ?? this.rowLimit,
+            node: scopeNode,
+            confirm_write: confirmWrite,
+          },
+          controller.signal,
+        );
+
+      let result: QueryResult;
+      try {
+        result = await post(false);
+      } catch (e) {
+        // Production / read-only guardrail: the server refused a write/DDL on a
+        // guarded connection. Ask for a typed confirmation and, if granted,
+        // retry with the explicit confirm flag.
+        if (isWriteBlocked(e)) {
+          const ok = await this.confirmGuardedWrite();
+          if (!ok) {
+            toasts.info('Write cancelled');
+            return null;
+          }
+          result = await post(true);
+        } else {
+          throw e;
+        }
+      }
       t.result = result;
       void this.loadHistory(id);
       return result;
@@ -985,6 +1028,59 @@ class DatabaseStore {
         this.runControllers.delete(t.id);
         t.running = false;
       }
+    }
+  }
+
+  /**
+   * Typed confirmation gate for a write on a guarded (prod / read-only)
+   * connection. The user must type the connection name verbatim, so a write to
+   * production is a deliberate, explicit act. Returns true only on an exact,
+   * case-insensitive match.
+   */
+  private async confirmGuardedWrite(): Promise<boolean> {
+    const conn = this.selectedConn;
+    if (!conn) return false;
+    const label = conn.environment === 'prod' ? 'PRODUCTION' : 'read-only';
+    const typed = await confirmer.promptText(
+      `You are about to run a WRITE / schema change on the ${label} connection ` +
+        `"${conn.name}". This can modify or destroy data. Type the connection ` +
+        `name to confirm.`,
+      {
+        title: '⚠ Confirm production write',
+        confirmLabel: 'Run write',
+        placeholder: conn.name,
+      },
+    );
+    return typed != null && typed.trim().toLowerCase() === conn.name.trim().toLowerCase();
+  }
+
+  /**
+   * Run an arbitrary statement against the selected connection (used by inline
+   * cell edits / row deletes), applying the production / read-only write-gate:
+   * if the server blocks the write, ask for a typed confirmation and retry with
+   * the confirm flag. Returns the result, or null if cancelled.
+   *
+   * Throws on any non-guardrail failure so the caller keeps its own error UX.
+   */
+  async runManagedStatement(sql: string, node?: string | null): Promise<QueryResult | null> {
+    const id = this.selectedConnId;
+    if (!id) throw new Error('No connection selected');
+    const scopeNode = node ?? (this.activeDb || null);
+    const post = (confirmWrite: boolean): Promise<QueryResult> =>
+      api.post<QueryResult>(`${this.connBase(id)}/query`, {
+        statement: sql,
+        node: scopeNode,
+        confirm_write: confirmWrite,
+      });
+    try {
+      return await post(false);
+    } catch (e) {
+      if (isWriteBlocked(e)) {
+        const ok = await this.confirmGuardedWrite();
+        if (!ok) return null;
+        return await post(true);
+      }
+      throw e;
     }
   }
 

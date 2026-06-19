@@ -179,6 +179,9 @@
         params: c.params,
         first_command: c.first_command,
         section_id: sectionId,
+        // Preserve the guardrail flags — omitting them would reset to dev/false.
+        environment: c.environment,
+        read_only: c.read_only,
       });
       database.connections = database.connections.map((x) => (x.id === c.id ? saved : x));
     } catch (e) {
@@ -300,6 +303,19 @@
     if (s < 86400) return `${Math.floor(s / 3600)}h`;
     return `${Math.floor(s / 86400)}d`;
   }
+
+  // ── Environment guardrail (danger styling) ─────────────────────────────────
+  // Prod connections are dangerous; read-only are locked. Both get a badge, and
+  // the selected one draws a red rail down the main area as a constant reminder.
+  const isProdConn = (c: Connection): boolean => c.environment === 'prod';
+  const isGuardedConn = (c: Connection): boolean => c.environment === 'prod' || c.read_only;
+  // Short badge label, or '' when neither (dev/staging, not read-only).
+  function envBadge(c: Connection): string {
+    if (c.environment === 'prod') return 'PROD';
+    if (c.read_only) return 'RO';
+    if (c.environment === 'staging') return 'STG';
+    return '';
+  }
 </script>
 
 <div class="db-page">
@@ -403,7 +419,7 @@
     {/if}
   </aside>
 
-  <div class="db-main">
+  <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
     {#if !database.selectedConnId}
       <EmptyState
         icon="db"
@@ -418,11 +434,12 @@
       <!-- Top-level connection tabs (one per open connection) -->
       <div class="conn-tabs" role="tablist" aria-label="Open connections">
         {#each openConns as c (c.id)}
-          <div class="conn-tab" class:active={database.selectedConnId === c.id} role="tab" tabindex="-1" aria-selected={database.selectedConnId === c.id} oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
+          <div class="conn-tab" class:active={database.selectedConnId === c.id} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="tab" tabindex="-1" aria-selected={database.selectedConnId === c.id} oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
             <button class="conn-tab-main" onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
               {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
               <span class="conn-tab-name ellipsis">{c.name}</span>
+              {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
             </button>
             <button
               class="conn-tab-close"
@@ -438,6 +455,19 @@
           </div>
         {/each}
       </div>
+
+      {#if database.isGuarded}
+        <div class="guard-banner" class:prod={database.isProd}>
+          <Icon name={database.isProd ? 'zap' : 'key'} size={13} />
+          <span>
+            {#if database.isProd}
+              Production connection — writes &amp; schema changes require a typed confirmation.
+            {:else}
+              Read-only connection — writes &amp; schema changes require a typed confirmation.
+            {/if}
+          </span>
+        </div>
+      {/if}
 
       <div class="main-tabs">
         {#each visibleTabs as t (t.id)}
@@ -540,9 +570,10 @@
     ondragend={() => (draggedConnId = null)}
     oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}
   >
-    <button class="conn-item" onclick={() => database.openConnection(c.id)} title="{c.name} · {c.kind} — right-click to open beside agents">
+    <button class="conn-item" onclick={() => database.openConnection(c.id)} title="{c.name} · {c.kind}{isProdConn(c) ? ' · PRODUCTION' : c.read_only ? ' · read-only' : ''} — right-click to open beside agents">
       <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={13} /></span>
       <span class="conn-name ellipsis">{c.name}</span>
+      {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
     </button>
     <div class="conn-actions">
       <button class="icon-btn" aria-label="Edit connection" title="Edit" onclick={() => editConnection(c)}>
@@ -859,6 +890,57 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+  /* Production connection → a persistent red rail down the main area. */
+  .db-main.danger-rail {
+    border-left: 3px solid var(--status-exited);
+  }
+  /* Read-only (non-prod) connection → a softer amber rail. */
+  .db-main.guard-rail {
+    border-left: 3px solid var(--status-working);
+  }
+  /* Guardrail banner above the main tabs. */
+  .guard-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--status-working);
+    background: color-mix(in srgb, var(--status-working) 12%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--status-working) 35%, transparent);
+  }
+  .guard-banner.prod {
+    color: var(--status-exited);
+    background: color-mix(in srgb, var(--status-exited) 13%, transparent);
+    border-bottom-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
+    font-weight: 600;
+  }
+  /* Environment badge on connection tabs / rows. */
+  .env-badge {
+    flex-shrink: 0;
+    font-size: 8.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 1px 5px;
+    border-radius: 999px;
+    color: var(--status-working);
+    background: color-mix(in srgb, var(--status-working) 16%, transparent);
+  }
+  .env-badge.prod {
+    color: var(--status-exited);
+    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
+  }
+  /* Prod / guarded connection tabs get a tinted edge. */
+  .conn-tab.prod {
+    border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
+  }
+  .conn-tab.prod.active {
+    border-color: color-mix(in srgb, var(--status-exited) 65%, transparent);
+  }
+  .conn-tab.guarded {
+    border-color: color-mix(in srgb, var(--status-working) 40%, transparent);
   }
   /* Top-level connection tabs (Workbench-style), above the main tab row. */
   .conn-tabs {
