@@ -11,6 +11,7 @@ pub mod convert;
 pub mod db;
 pub mod db_explorer;
 pub mod git;
+pub mod grants;
 pub mod product;
 pub mod improvements;
 pub mod integrations;
@@ -42,6 +43,7 @@ pub use db_explorer::{
     Dashboard, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery, Widget,
 };
 pub use git::{GitStore, NewGitAccount, NewRepo};
+pub use grants::GrantsRepo;
 pub use product::*;
 pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
