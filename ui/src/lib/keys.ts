@@ -168,3 +168,67 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
   window.addEventListener('keydown', handler, { capture: true });
   return () => window.removeEventListener('keydown', handler, { capture: true });
 }
+
+// ---------------------------------------------------------------------------
+// Cheat-sheet data — the single source of truth for the `?` overlay
+// (ShortcutsOverlay.svelte). Keep these rows in sync with the chords handled
+// above so the overlay stays accurate; the overlay derives entirely from this.
+// ---------------------------------------------------------------------------
+
+export interface ShortcutBinding {
+  /** display chord, e.g. "⌘K" or "⌃1…⌃9" */
+  keys: string;
+  /** what it does */
+  label: string;
+}
+
+export interface ShortcutGroup {
+  category: string;
+  bindings: ShortcutBinding[];
+}
+
+export const KEYMAP: ShortcutGroup[] = [
+  {
+    category: 'General',
+    bindings: [
+      { keys: '⌘K', label: 'Command palette' },
+      { keys: '⌘I', label: 'Ask Otto (plain English)' },
+      { keys: '⌘⇧B', label: 'Broadcast to sessions' },
+      { keys: '⌘U', label: 'Update all agent CLIs' },
+      { keys: '⌘,', label: 'Settings' },
+      { keys: '?', label: 'Keyboard shortcuts (this sheet)' },
+    ],
+  },
+  {
+    category: 'Sessions',
+    bindings: [
+      { keys: '⌘T', label: 'New session' },
+      { keys: '⌘W', label: 'Close tab' },
+      { keys: '⌃Tab', label: 'Next tab' },
+      { keys: '⌃⇧Tab', label: 'Previous tab' },
+      { keys: '⌘]', label: 'Next session' },
+      { keys: '⌘[', label: 'Previous session' },
+      { keys: '⌃1…⌃9', label: 'Jump to session N' },
+      { keys: '⌘D', label: 'Split vertically' },
+      { keys: '⌘⇧D', label: 'Split horizontally' },
+      { keys: '⌘F', label: 'Find (terminal / page)' },
+    ],
+  },
+  {
+    category: 'View',
+    bindings: [
+      { keys: '⌘1', label: 'Toggle sidebar' },
+      { keys: '⌘J', label: 'Toggle right panel' },
+      { keys: '⌘⇧←', label: 'Navigate back' },
+      { keys: '⌘⇧→', label: 'Navigate forward' },
+    ],
+  },
+  {
+    category: 'Zoom',
+    bindings: [
+      { keys: '⌘+', label: 'Zoom in (app / terminal font)' },
+      { keys: '⌘-', label: 'Zoom out (app / terminal font)' },
+      { keys: '⌘0', label: 'Reset zoom' },
+    ],
+  },
+];

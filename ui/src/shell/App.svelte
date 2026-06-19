@@ -7,6 +7,11 @@
   import RightPanel from './RightPanel.svelte';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
+  import ShortcutsOverlay from './ShortcutsOverlay.svelte';
+  import Handover from '../modules/agents/Handover.svelte';
+  import AttachIssue from '../modules/agents/AttachIssue.svelte';
+  import AttachProductStory from '../modules/agents/AttachProductStory.svelte';
+  import { confirmer } from '../lib/confirm.svelte';
   import BroadcastModal from '../lib/components/BroadcastModal.svelte';
   import NotificationBell from './NotificationBell.svelte';
   import { serviceHealth } from '../lib/stores/serviceHealth.svelte';
@@ -44,6 +49,56 @@
   import { toasts } from '../lib/toast.svelte';
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
+
+  // ---- `?` shortcuts cheat-sheet + focused-session action modals ----
+  let shortcutsOpen = $state(false);
+  // Session-scoped modals the palette opens against the active session. They
+  // mirror the per-pane ⋯ menu but target ws.activeSession globally.
+  let sessionAction: { kind: 'handover' | 'attach-issue' | 'attach-product'; sessionId: string } | null =
+    $state(null);
+
+  function openSessionAction(kind: 'handover' | 'attach-issue' | 'attach-product'): void {
+    const s = ws.activeSession;
+    if (!s) return;
+    sessionAction = { kind, sessionId: s.id };
+  }
+
+  async function renameActiveSession(): Promise<void> {
+    const s = ws.activeSession;
+    if (!s) return;
+    const next = await confirmer.promptText('Rename session', {
+      title: 'Rename session',
+      confirmLabel: 'Rename',
+      initial: s.title,
+      placeholder: 'Session name',
+    });
+    if (!next || next === s.title) return;
+    try {
+      await ws.renameSession(s.id, next);
+    } catch (e) {
+      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // `?` (no modifier, not while typing) opens the shortcuts cheat-sheet. The
+  // global keymap in lib/keys.ts only handles modifier chords, so `?` lives here.
+  $effect(() => {
+    function onHelpKey(e: KeyboardEvent): void {
+      if (e.key !== '?' || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      const typing =
+        !!el &&
+        (el.tagName === 'INPUT' ||
+          el.tagName === 'TEXTAREA' ||
+          el.isContentEditable ||
+          !!el.closest('.cm-editor'));
+      if (typing || ui.overlayOpen) return;
+      e.preventDefault();
+      shortcutsOpen = true;
+    }
+    window.addEventListener('keydown', onHelpKey);
+    return () => window.removeEventListener('keydown', onHelpKey);
+  });
 
   // ---- boot ----
   $effect(() => {
@@ -233,9 +288,32 @@
       { id: 'core.theme-warm', title: 'Theme: Warm', group: 'Appearance', run: () => ui.setTheme('warm') },
       { id: 'core.notes', title: 'Open Notes Panel', group: 'View', run: () => ui.openRight('notes') },
       { id: 'core.git-panel', title: 'Open Git Panel', group: 'View', run: () => ui.openRight('git') },
+      { id: 'core.shortcuts', title: 'Keyboard Shortcuts', group: 'Help', shortcut: '?', keywords: 'keys cheat sheet bindings hotkeys', run: () => (shortcutsOpen = true) },
       { id: 'core.logout', title: 'Sign Out', group: 'Account', run: () => auth.logout() },
     ]);
     return unreg;
+  });
+
+  // ---- palette commands: focused session ----
+  // Lifecycle verbs for the currently-active session (mirrors the per-pane ⋯
+  // menu, which is otherwise undiscoverable). Registered only when a session is
+  // focused; the closures act on ws.activeSession at run time. Hand over is
+  // agent-only, matching the ⋯ menu.
+  $effect(() => {
+    const active = ws.activeSession;
+    if (!active) return registry.register('focused-session', []);
+    const isAgent = active.kind === 'agent';
+    const cmds = [
+      { id: 'focus.restart', title: 'Restart Focused Session', group: 'Session', keywords: 'reload reboot relaunch active current', run: () => void ws.restartSession(active.id) },
+      { id: 'focus.archive', title: 'Archive Focused Session', group: 'Session', keywords: 'close hide stash active current', run: () => void ws.archiveSession(active.id) },
+      { id: 'focus.rename', title: 'Rename Focused Session', group: 'Session', keywords: 'title name active current', run: () => void renameActiveSession() },
+      ...(isAgent
+        ? [{ id: 'focus.handover', title: 'Hand Over Focused Session…', group: 'Session', keywords: 'handoff transfer pass context active current', run: () => openSessionAction('handover') }]
+        : []),
+      { id: 'focus.attach-issue', title: 'Attach Jira Issue to Focused Session…', group: 'Session', keywords: 'jira ticket link story active current', run: () => openSessionAction('attach-issue') },
+      { id: 'focus.attach-product', title: 'Attach Product Story to Focused Session…', group: 'Session', keywords: 'product story link context active current', run: () => openSessionAction('attach-product') },
+    ];
+    return registry.register('focused-session', cmds);
   });
 
   // ---- palette commands: workspaces ----
@@ -381,6 +459,17 @@
 </div>
 
 <Palette />
+
+<ShortcutsOverlay open={shortcutsOpen} onclose={() => (shortcutsOpen = false)} />
+
+<!-- Focused-session action modals opened from the palette (mirror SessionView). -->
+{#if sessionAction?.kind === 'handover'}
+  <Handover sessionId={sessionAction.sessionId} onclose={() => (sessionAction = null)} />
+{:else if sessionAction?.kind === 'attach-issue'}
+  <AttachIssue sessionId={sessionAction.sessionId} onclose={() => (sessionAction = null)} />
+{:else if sessionAction?.kind === 'attach-product'}
+  <AttachProductStory sessionId={sessionAction.sessionId} onclose={() => (sessionAction = null)} />
+{/if}
 
 {#if ui.broadcastOpen}
   <BroadcastModal />
