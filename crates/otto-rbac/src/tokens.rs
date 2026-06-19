@@ -177,14 +177,19 @@ impl AuthRepo {
             return Ok(AuthContext {
                 real_user,
                 effective_user,
+                // Impersonation tokens are never scoped (mutually exclusive with
+                // a share-link scope; the share-token path will populate `scope`
+                // in mobile plan Task 1.3).
+                scope: None,
             });
         }
 
         // Normal token: the real (token owner) and effective (acted-as) user are
-        // the same.
+        // the same, and it reaches the whole authorized surface (no scope).
         Ok(AuthContext {
             real_user: real_user.clone(),
             effective_user: real_user,
+            scope: None,
         })
     }
 

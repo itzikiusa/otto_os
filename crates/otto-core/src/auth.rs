@@ -24,6 +24,23 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[derive(Debug, Clone)]
 pub struct AuthUser(pub User);
 
+/// The capability a scoped (guest / share-link) token is pinned to: exactly one
+/// session, accessible at a capped [`WorkspaceRole`] (`Viewer` = read-only,
+/// `Editor` = may also send input). A scoped token can touch *only* this one
+/// session; the server's scope guard rejects everything else (deny-by-default).
+///
+/// This is intentionally distinct from a workspace membership: the `role` here
+/// is the *ceiling* the share grants, independent of any role the synthetic
+/// guest user holds (it holds none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionScope {
+    /// The single session id this token may reach.
+    pub session_id: Id,
+    /// The capped role on that session: `Viewer` (read-only) or `Editor`
+    /// (read + input). Never `Admin` — shares can never escalate.
+    pub role: WorkspaceRole,
+}
+
 /// The resolved identity of an authenticated request: the **real** token owner
 /// (used for audit) and the **effective** user (used for every authorization
 /// decision). For a normal token these are the same user; they diverge only
@@ -33,10 +50,12 @@ pub struct AuthUser(pub User);
 /// Invariant (today): `real_user == effective_user` for every token. Task 5.2
 /// is the only place that may make them differ.
 ///
-/// NOTE (mobile spec): a `scope: Option<SessionScope>` field will be added here
-/// later for guest/share-link tokens (mutually exclusive with impersonation).
-/// It is intentionally **not** added yet — adding it now would pull in unused
-/// types. The struct is shaped so that field can land without churning callers.
+/// `scope` is `None` for every normal/api/impersonation token (the whole
+/// authorized surface is reachable). It is `Some` only for a guest/share-link
+/// (`kind='share'`) token, which is then pinned to a single session — the scope
+/// guard (mobile plan Task 1.5) enforces that pin. Share-token population of
+/// this field lands in mobile plan Task 1.3; until then nothing sets `Some`, so
+/// behavior is unchanged. Scope and impersonation are mutually exclusive.
 #[derive(Debug, Clone)]
 pub struct AuthContext {
     /// The token owner — the identity audit always records.
@@ -44,6 +63,17 @@ pub struct AuthContext {
     /// The identity every authorization check runs against (== `real_user`
     /// unless impersonating).
     pub effective_user: User,
+    /// The single-session capability a share-link token is pinned to; `None`
+    /// for every unscoped (normal/api/impersonation) token.
+    pub scope: Option<SessionScope>,
+}
+
+impl AuthContext {
+    /// True iff this is a scoped (guest / share-link) token — i.e. it carries a
+    /// [`SessionScope`] and must be confined to that one session.
+    pub fn is_scoped(&self) -> bool {
+        self.scope.is_some()
+    }
 }
 
 /// Validates a bearer token (HTTP header or WS `?token=`) into an [`AuthContext`].
@@ -289,10 +319,34 @@ mod tests {
         let ctx = AuthContext {
             real_user: u.clone(),
             effective_user: u,
+            scope: None,
         };
         assert_eq!(ctx.real_user.id, ctx.effective_user.id);
         assert_eq!(ctx.real_user.username, ctx.effective_user.username);
         assert_eq!(ctx.real_user.is_root, ctx.effective_user.is_root);
+        // A normal token is unscoped: it can reach the whole authorized surface.
+        assert!(ctx.scope.is_none());
+        assert!(!ctx.is_scoped());
+    }
+
+    /// A share-link [`AuthContext`] carries an optional [`SessionScope`] that pins
+    /// it to exactly one session with a capped role. (Nothing mints `Some` yet —
+    /// that lands in plan Task 1.3 — but the shape must exist for it to.)
+    #[test]
+    fn auth_context_carries_optional_session_scope() {
+        let u = user("guest", false);
+        let ctx = AuthContext {
+            real_user: u.clone(),
+            effective_user: u,
+            scope: Some(SessionScope {
+                session_id: Id::from("S1"),
+                role: WorkspaceRole::Viewer,
+            }),
+        };
+        assert!(ctx.is_scoped());
+        let scope = ctx.scope.expect("scoped token must carry a SessionScope");
+        assert_eq!(scope.session_id, Id::from("S1"));
+        assert_eq!(scope.role, WorkspaceRole::Viewer);
     }
 
     #[test]
