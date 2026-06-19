@@ -9,6 +9,9 @@
   import Navigator from './Navigator.svelte';
   import TabBar from './TabBar.svelte';
   import RightPanel from './RightPanel.svelte';
+  import BottomNav from './BottomNav.svelte';
+  import Drawer from './Drawer.svelte';
+  import Icon from '../lib/components/Icon.svelte';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
   import ShortcutsOverlay from './ShortcutsOverlay.svelte';
@@ -40,6 +43,7 @@
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
   import { router } from '../lib/router.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
+  import { viewport } from '../lib/stores/viewport.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { git } from '../lib/stores/git.svelte';
   import { auth } from '../lib/stores/auth.svelte';
@@ -398,6 +402,78 @@
   <!-- Guest share view: full-screen terminal, no shell chrome. -->
   <SharePage sessionId={router.parts[1] ?? ''} />
 {:else}
+<!-- Center column: banners + notification bell + (agents) TabBar + the module
+     router. Extracted to a snippet so the desktop 3-pane and the mobile
+     single-pane shells render byte-for-byte identical content — only the
+     surrounding chrome differs by viewport. -->
+{#snippet centerContent()}
+  {#if auth.isImpersonating}
+    <div class="provider-banner impersonation-banner" role="alert">
+      <span>
+        Viewing as <strong>{auth.me?.username ?? '…'}</strong>
+      </span>
+      <span class="grow"></span>
+      <button
+        class="pb-dismiss"
+        onclick={() => {
+          void auth.stopImpersonating().catch((e: unknown) => {
+            toasts.error('Could not exit impersonation', e instanceof Error ? e.message : String(e));
+          });
+        }}
+      >Exit</button>
+    </div>
+  {/if}
+  {#if serviceHealth.visible}
+    <div class="provider-banner" role="alert">
+      <span>
+        ⚠ A remote git provider returned <strong>502 Bad Gateway</strong> — it may be down or
+        under maintenance. Your local work is unaffected; retries will resume automatically.
+      </span>
+      <span class="grow"></span>
+      <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice">✕</button>
+    </div>
+  {/if}
+  <div class="bell-anchor" class:tauri-top={isTauri}>
+    <NotificationBell />
+  </div>
+  {#if moduleName === 'agents'}
+    <TabBar bellGutter />
+  {/if}
+  <div class="content" class:bell-gutter={moduleName !== 'agents'}>
+    {#if moduleName === 'agents'}
+      <AgentsPage />
+    {:else if moduleName === 'connections'}
+      <ConnectionsPage />
+    {:else if moduleName === 'git'}
+      <GitPage />
+    {:else if moduleName === 'api'}
+      <ApiPage />
+    {:else if moduleName === 'database'}
+      <DatabasePage />
+    {:else if moduleName === 'workflows'}
+      <WorkflowsPage />
+    {:else if moduleName === 'skills-eval'}
+      <SkillsEvalPage />
+    {:else if moduleName === 'usage'}
+      <UsagePage />
+    {:else if moduleName === 'settings'}
+      <Settings />
+    {:else if moduleName === 'walkthroughs'}
+      <Walkthroughs />
+    {:else if moduleName === 'product'}
+      <ProductPage />
+    {:else if moduleName === 'insights'}
+      <InsightsPage />
+    {:else if moduleName === 'swarm'}
+      <SwarmPage />
+    {:else}
+      <AgentsPage />
+    {/if}
+  </div>
+{/snippet}
+
+{#if viewport.isDesktop}
+<!-- DESKTOP (≥1025px): the original, unchanged 3-pane shell. -->
 <div class="shell" style={isTauri ? undefined : `zoom:${ui.zoom}`}>
   <div class="shell-main">
     <div class="sidebar" class:tauri-top={isTauri}>
@@ -409,69 +485,7 @@
     </div>
 
     <div class="center">
-      {#if auth.isImpersonating}
-        <div class="provider-banner impersonation-banner" role="alert">
-          <span>
-            Viewing as <strong>{auth.me?.username ?? '…'}</strong>
-          </span>
-          <span class="grow"></span>
-          <button
-            class="pb-dismiss"
-            onclick={() => {
-              void auth.stopImpersonating().catch((e: unknown) => {
-                toasts.error('Could not exit impersonation', e instanceof Error ? e.message : String(e));
-              });
-            }}
-          >Exit</button>
-        </div>
-      {/if}
-      {#if serviceHealth.visible}
-        <div class="provider-banner" role="alert">
-          <span>
-            ⚠ A remote git provider returned <strong>502 Bad Gateway</strong> — it may be down or
-            under maintenance. Your local work is unaffected; retries will resume automatically.
-          </span>
-          <span class="grow"></span>
-          <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice">✕</button>
-        </div>
-      {/if}
-      <div class="bell-anchor" class:tauri-top={isTauri}>
-        <NotificationBell />
-      </div>
-      {#if moduleName === 'agents'}
-        <TabBar bellGutter />
-      {/if}
-      <div class="content" class:bell-gutter={moduleName !== 'agents'}>
-        {#if moduleName === 'agents'}
-          <AgentsPage />
-        {:else if moduleName === 'connections'}
-          <ConnectionsPage />
-        {:else if moduleName === 'git'}
-          <GitPage />
-        {:else if moduleName === 'api'}
-          <ApiPage />
-        {:else if moduleName === 'database'}
-          <DatabasePage />
-        {:else if moduleName === 'workflows'}
-          <WorkflowsPage />
-        {:else if moduleName === 'skills-eval'}
-          <SkillsEvalPage />
-        {:else if moduleName === 'usage'}
-          <UsagePage />
-        {:else if moduleName === 'settings'}
-          <Settings />
-        {:else if moduleName === 'walkthroughs'}
-          <Walkthroughs />
-        {:else if moduleName === 'product'}
-          <ProductPage />
-        {:else if moduleName === 'insights'}
-          <InsightsPage />
-        {:else if moduleName === 'swarm'}
-          <SwarmPage />
-        {:else}
-          <AgentsPage />
-        {/if}
-      </div>
+      {@render centerContent()}
     </div>
 
     <!-- Right panel (Activity/Git/Files/…) for the focused session. Shown in
@@ -485,6 +499,73 @@
 
   <StatusBar />
 </div>
+{:else}
+<!-- MOBILE (phone ≤640px / tablet 641–1024px): single-pane content with the
+     Navigator and RightPanel moved off-canvas into drawers, a compact top bar,
+     and (phone only) a bottom nav. Tablet keeps a persistent narrow Navigator
+     column instead of the left drawer. -->
+<div class="shell mobile" class:tablet={viewport.isTablet}>
+  <header class="mtopbar" class:tauri-top={isTauri}>
+    {#if viewport.isPhone}
+      <button
+        class="mtop-btn"
+        onclick={() => ui.toggleRail()}
+        title="Menu"
+        aria-label="Open navigator"
+      >
+        <Icon name="sidebar" size={18} />
+      </button>
+    {/if}
+    <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleName}</span>
+    <span class="grow"></span>
+    {#if moduleName === 'agents' && ws.activeSession !== null}
+      <button
+        class="mtop-btn"
+        class:active={ui.rightOpen}
+        onclick={() => ui.toggleRight()}
+        title="Activity panel"
+        aria-label="Toggle right panel"
+      >
+        <Icon name="panel" size={18} />
+      </button>
+    {/if}
+  </header>
+
+  <div class="mbody">
+    {#if viewport.isTablet}
+      <!-- Persistent narrow Navigator on tablet. -->
+      <div class="msidebar" class:tauri-top={isTauri}>
+        <Navigator />
+      </div>
+    {/if}
+    <div class="center mcenter">
+      {@render centerContent()}
+    </div>
+  </div>
+
+  {#if viewport.isPhone}
+    <BottomNav />
+  {/if}
+
+  <StatusBar />
+</div>
+
+<!-- Phone: Navigator lives in a LEFT drawer (reuses ui.railExpanded as its
+     open-state). On tablet the Navigator is persistent, so no left drawer. -->
+{#if viewport.isPhone}
+  <Drawer bind:open={ui.railExpanded} side="left" label="Navigator" width="min(86vw, 280px)">
+    <Navigator />
+  </Drawer>
+{/if}
+
+<!-- RightPanel as a RIGHT drawer on phone + tablet (ui.rightOpen). Only
+     meaningful in the Agents layout with a focused session. -->
+{#if moduleName === 'agents' && ws.activeSession !== null}
+  <Drawer bind:open={ui.rightOpen} side="right" label="Activity" width="min(92vw, 360px)">
+    <RightPanel forceOpen />
+  </Drawer>
+{/if}
+{/if}
 
 <Palette />
 
@@ -548,6 +629,71 @@
     flex-direction: column;
     position: relative;
   }
+
+  /* ---------- mobile shell (phone ≤640 / tablet 641–1024) ---------- */
+  /* Only mounted when viewport.isDesktop is false, so none of this affects the
+     ≥1025px desktop layout above. */
+  .mtopbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: var(--mobile-topbar-h);
+    flex-shrink: 0;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-sidebar);
+  }
+  .mtopbar.tauri-top {
+    height: calc(var(--mobile-topbar-h) + 22px);
+    padding-top: 22px;
+  }
+  .mtop-btn {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .mtop-btn:hover {
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    color: var(--text);
+  }
+  .mtop-btn.active {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .mtop-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-transform: capitalize;
+  }
+  .mbody {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+  .msidebar {
+    height: 100%;
+    width: 220px;
+    flex-shrink: 0;
+    display: flex;
+    border-right: 1px solid var(--border);
+  }
+  .mcenter {
+    /* the single content pane fills the remaining width */
+    flex: 1;
+    min-width: 0;
+  }
+
   /* Upstream/provider outage strip (e.g. Bitbucket 502 / maintenance). */
   .provider-banner {
     display: flex;

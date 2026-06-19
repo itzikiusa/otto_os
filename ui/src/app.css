@@ -1,5 +1,19 @@
 /* Otto global styles — tokens come from lib/tokens.css (imported first in main.ts). */
 
+/* Responsive breakpoints (mirrored in lib/stores/viewport.svelte.ts). These are
+   documentation/reference values for @media authors — CSS can't interpolate a
+   custom prop into a media query, so the literal px values are repeated in
+   `@media (max-width: …)` rules, but keeping them named here is the single
+   source of truth. phone ≤640 · tablet 641–1024 · desktop ≥1025. */
+:root {
+  --bp-phone-max: 640px;
+  --bp-tablet-max: 1024px;
+  /* Mobile chrome sizing tokens, reused by BottomNav / Drawer / the mobile top
+     bar so heights stay consistent across the touch shell. */
+  --mobile-topbar-h: 44px;
+  --mobile-bottomnav-h: 56px;
+}
+
 * {
   box-sizing: border-box;
 }

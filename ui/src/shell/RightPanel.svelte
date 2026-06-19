@@ -11,6 +11,14 @@
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
 
+  // `forceOpen` is set when the panel is hosted inside the mobile right drawer:
+  // it then always renders the panel body, fills the drawer width (no fixed
+  // 300px), and drops the desktop drag-resize handle + collapse-to-strip path.
+  interface Props {
+    forceOpen?: boolean;
+  }
+  let { forceOpen = false }: Props = $props();
+
   // Drag-to-resize: the panel is anchored right, so dragging the left edge
   // leftwards (smaller clientX) widens it.
   let resizing = $state(false);
@@ -73,15 +81,22 @@
   }
 </script>
 
-{#if ui.rightOpen}
-  <aside class="rpanel" class:resizing style="width:{ui.rightWidth}px">
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="resize-handle"
-      onmousedown={startResize}
-      ondblclick={() => ui.setRightWidth(300)}
-      title="Drag to resize · double-click to reset"
-    ></div>
+{#if ui.rightOpen || forceOpen}
+  <aside
+    class="rpanel"
+    class:resizing
+    class:embedded={forceOpen}
+    style={forceOpen ? undefined : `width:${ui.rightWidth}px`}
+  >
+    {#if !forceOpen}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="resize-handle"
+        onmousedown={startResize}
+        ondblclick={() => ui.setRightWidth(300)}
+        title="Drag to resize · double-click to reset"
+      ></div>
+    {/if}
     <header class="rpanel-head">
       <div class="rpanel-tabs" role="tablist">
         {#each tabs as t (t.id)}
@@ -166,6 +181,12 @@
   .rpanel.resizing {
     /* no transition while dragging for 1:1 tracking */
     user-select: none;
+  }
+  /* Hosted inside the mobile right drawer: fill the drawer, no left border
+     (the drawer supplies it), no fixed width. */
+  .rpanel.embedded {
+    width: 100%;
+    border-left: none;
   }
   .resize-handle {
     position: absolute;
