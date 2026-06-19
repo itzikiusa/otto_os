@@ -34,6 +34,7 @@ pub fn from_answered_question(story_id: &str, q: &ProductQuestion) -> Option<New
     Some(NewMemory {
         collection: "product".into(),
         record_type: "item".into(),
+        visibility: "shared".into(),
         scope: Scope::Story,
         story_id: Some(story_id.into()),
         kind: "qa".into(),
@@ -54,6 +55,7 @@ pub fn from_learning(l: &ProductLearning) -> NewMemory {
     NewMemory {
         collection: "product".into(),
         record_type: "item".into(),
+        visibility: "shared".into(),
         scope: Scope::Workspace,
         story_id: l.source_story_id.clone(),
         kind: "learning".into(),
@@ -103,6 +105,7 @@ pub fn from_analysis_summary(story_id: &str, a: &ProductAnalysis) -> Vec<NewMemo
             Some(NewMemory {
                 collection: "product".into(),
                 record_type: "item".into(),
+        visibility: "shared".into(),
                 scope: Scope::Story,
                 story_id: Some(story_id.into()),
                 kind: kind.into(),
@@ -129,6 +132,7 @@ pub fn from_version(story_id: &str, v: &ProductStoryVersion) -> Option<NewMemory
     Some(NewMemory {
         collection: "product".into(),
         record_type: "item".into(),
+        visibility: "shared".into(),
         scope: Scope::Story,
         story_id: Some(story_id.into()),
         kind: "summary".into(),

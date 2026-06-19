@@ -18,6 +18,7 @@ fn nm(kind: &str, title: &str, body: &str) -> NewMemory {
     NewMemory {
         collection: "product".into(),
         record_type: "item".into(),
+        visibility: "shared".into(),
         scope: Scope::Workspace,
         story_id: None,
         kind: kind.into(),

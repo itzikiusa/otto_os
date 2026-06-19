@@ -171,6 +171,12 @@ impl MemoryService {
             if !q.include_inactive && !m.active {
                 continue;
             }
+            // Sharing: hide other users' private memories.
+            if let Some(viewer) = &q.viewer {
+                if m.visibility == "private" && &m.created_by != viewer {
+                    continue;
+                }
+            }
             if let Some(sid) = &q.story_id {
                 if m.story_id.as_deref() != Some(sid.as_str()) {
                     continue;
@@ -230,6 +236,7 @@ impl MemoryService {
                 kinds: kinds.iter().map(|s| s.to_string()).collect(),
                 k: 8,
                 mode: SearchMode::Hybrid,
+                viewer: opts.viewer.clone(),
                 ..Default::default()
             };
             let hits = self.search(ws, q).await?;

@@ -79,6 +79,7 @@ impl ProductMemory {
                     focus: focus.map(|s| s.to_string()),
                     token_budget: 4000,
                     kinds: vec![],
+                    viewer: None,
                 },
             )
             .await

@@ -110,6 +110,7 @@ async fn recall_brief_groups_story_memories() {
                 focus: None,
                 token_budget: 1000,
                 kinds: vec![],
+                viewer: None,
             },
         )
         .await

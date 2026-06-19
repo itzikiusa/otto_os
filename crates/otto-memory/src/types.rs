@@ -59,6 +59,10 @@ pub struct MemoryQuery {
     pub mode: SearchMode,
     pub include_inactive: bool,
     pub recency_half_life_days: Option<f32>,
+    /// Set server-side from the authenticated user (never from the client). When
+    /// present, results exclude other users' `private` memories.
+    #[serde(skip)]
+    pub viewer: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -75,6 +79,9 @@ pub struct RecallOpts {
     pub focus: Option<String>,
     pub token_budget: usize,
     pub kinds: Vec<String>,
+    /// Server-set viewer id (see `MemoryQuery::viewer`).
+    #[serde(skip)]
+    pub viewer: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -82,6 +82,8 @@ pub struct Memory {
     pub last_accessed_at: Option<String>,
     pub access_count: i64,
     pub expires_at: Option<String>,
+    /// `shared` (all workspace members) or `private` (creator-only).
+    pub visibility: String,
 }
 
 fn default_collection() -> String {
@@ -89,6 +91,9 @@ fn default_collection() -> String {
 }
 fn default_record_type() -> String {
     "item".into()
+}
+fn default_visibility() -> String {
+    "shared".into()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,6 +121,9 @@ pub struct NewMemory {
     pub confidence: Option<f32>,
     #[serde(default)]
     pub salience: Option<f32>,
+    /// `shared` (default — all workspace members) or `private` (creator-only).
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -154,6 +162,9 @@ pub struct ListFilter {
     pub tag: Option<String>,
     pub include_inactive: bool,
     pub limit: i64,
+    /// When set, restrict to memories visible to this user id (shared, or their
+    /// own private). `None` sees everything (internal/system callers).
+    pub viewer: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -206,6 +217,7 @@ fn row_to_memory(r: &sqlx::sqlite::SqliteRow) -> Result<Memory> {
         last_accessed_at: r.get("last_accessed_at"),
         access_count: r.get("access_count"),
         expires_at: r.get("expires_at"),
+        visibility: r.get("visibility"),
     })
 }
 
@@ -241,9 +253,9 @@ impl MemoriesRepo {
         let hash = Self::content_hash(&nm.body);
         sqlx::query(
             "INSERT INTO memories (id,workspace_id,collection,record_type,scope,story_id,kind,title,body,\
-             entities_json,tags_json,source_kind,source_ref,refs_json,confidence,salience,content_hash,\
+             entities_json,tags_json,source_kind,source_ref,refs_json,confidence,salience,visibility,content_hash,\
              active,version,created_by,created_at,updated_at,access_count) \
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,?,?,?,0)",
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,?,?,?,0)",
         )
         .bind(&id)
         .bind(ws)
@@ -261,6 +273,7 @@ impl MemoriesRepo {
         .bind(jstr(&nm.refs))
         .bind(nm.confidence.unwrap_or(0.7) as f64)
         .bind(nm.salience.unwrap_or(0.5) as f64)
+        .bind(if nm.visibility.is_empty() { "shared" } else { &nm.visibility })
         .bind(&hash)
         .bind(by)
         .bind(&now)
@@ -298,6 +311,9 @@ impl MemoriesRepo {
         if f.tag.is_some() {
             sql.push_str(" AND tags_json LIKE ?");
         }
+        if f.viewer.is_some() {
+            sql.push_str(" AND (visibility = 'shared' OR created_by = ?)");
+        }
         sql.push_str(" ORDER BY updated_at DESC LIMIT ?");
         let mut q = sqlx::query(&sql).bind(ws);
         if let Some(c) = &f.collection {
@@ -311,6 +327,9 @@ impl MemoriesRepo {
         }
         if let Some(t) = &f.tag {
             q = q.bind(format!("%\"{t}\"%"));
+        }
+        if let Some(v) = &f.viewer {
+            q = q.bind(v);
         }
         q = q.bind(if f.limit > 0 { f.limit } else { 100 });
         let rows = q.fetch_all(&self.pool).await.map_err(dberr("memory.list"))?;
@@ -600,6 +619,31 @@ impl MemoriesRepo {
                     r.get::<String, _>("kind"),
                     r.get::<String, _>("collection"),
                 )
+            })
+            .collect())
+    }
+
+    /// Map `source_ref → memory id` for a given `source_kind` (used to resolve
+    /// imported graph edges to the memory rows their nodes became).
+    pub async fn ids_by_source_ref(
+        &self,
+        ws: &str,
+        source_kind: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let rows = sqlx::query(
+            "SELECT id, source_ref FROM memories WHERE workspace_id = ? AND source_kind = ? \
+             AND source_ref IS NOT NULL AND active = 1",
+        )
+        .bind(ws)
+        .bind(source_kind)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("memory.ids_by_source_ref"))?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let sr: Option<String> = r.get("source_ref");
+                sr.map(|s| (s, r.get::<String, _>("id")))
             })
             .collect())
     }

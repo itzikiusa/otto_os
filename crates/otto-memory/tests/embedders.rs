@@ -74,6 +74,7 @@ async fn service_with_remote_embedder_indexes_and_recalls() {
         vec![NewMemory {
             collection: "product".into(),
             record_type: "item".into(),
+            visibility: "shared".into(),
             scope: Scope::Workspace,
             story_id: None,
             kind: "fact".into(),

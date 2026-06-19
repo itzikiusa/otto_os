@@ -148,6 +148,7 @@ async fn list<C: MemoryCtx>(
         tag: q.tag,
         include_inactive: q.include_inactive,
         limit: q.limit,
+        viewer: if user.is_root { None } else { Some(user.id.clone()) },
     };
     Ok(Json(c.memory().list(&ws, f).await?))
 }
@@ -169,7 +170,13 @@ async fn get_one<C: MemoryCtx>(
     Path(WsIdPath { ws, id }): Path<WsIdPath>,
 ) -> ApiResult<Json<Memory>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    Ok(Json(c.memory().get(&ws, &id).await?))
+    let m = c.memory().get(&ws, &id).await?;
+    // Another user's private memory is invisible (404, not 403, to avoid leaking
+    // its existence).
+    if m.visibility == "private" && m.created_by != user.id && !user.is_root {
+        return Err(ApiErr(Error::NotFound("memory".into())));
+    }
+    Ok(Json(m))
 }
 
 async fn patch_one<C: MemoryCtx>(
@@ -196,9 +203,10 @@ async fn search<C: MemoryCtx>(
     State(c): State<C>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(WsPath { ws }): Path<WsPath>,
-    Json(q): Json<MemoryQuery>,
+    Json(mut q): Json<MemoryQuery>,
 ) -> ApiResult<Json<Vec<MemoryHit>>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    q.viewer = if user.is_root { None } else { Some(user.id.clone()) };
     Ok(Json(c.memory().search(&ws, q).await?))
 }
 
@@ -213,6 +221,7 @@ async fn recall<C: MemoryCtx>(
         focus: r.focus,
         token_budget: r.token_budget,
         kinds: vec![],
+        viewer: if user.is_root { None } else { Some(user.id.clone()) },
     };
     Ok(Json(c.memory().recall_brief(&ws, &r.story_id, opts).await?))
 }

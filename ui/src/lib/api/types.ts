@@ -2111,6 +2111,8 @@ export interface Memory {
   last_accessed_at: string | null;
   access_count: number;
   expires_at: string | null;
+  /** 'shared' (all workspace members) or 'private' (creator-only). */
+  visibility: string;
 }
 
 export interface NewMemory {
@@ -2128,6 +2130,8 @@ export interface NewMemory {
   refs?: MemoryRef[];
   confidence?: number | null;
   salience?: number | null;
+  /** 'shared' (default) or 'private'. */
+  visibility?: string;
 }
 
 export interface MemoryPatch {
