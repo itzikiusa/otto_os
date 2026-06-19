@@ -228,6 +228,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         product,
         product_repo,
         product_agent_cancels: otto_server::product_run::new_cancel_registry(),
+        memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
         swarm,
         swarm_repo,
         swarm_coords: otto_server::swarm_runtime::new_registry(),

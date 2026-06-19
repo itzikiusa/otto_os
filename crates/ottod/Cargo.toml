@@ -32,6 +32,7 @@ otto-skills.workspace = true
 otto-usage.workspace = true
 otto-product.workspace = true
 otto-swarm.workspace = true
+otto-memory.workspace = true
 
 # TLS for the optional 0.0.0.0 network listener (S3). rustls-only to match the
 # rest of the tree (reqwest uses rustls). `tls-rustls-no-provider` so we install
