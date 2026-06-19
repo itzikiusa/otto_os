@@ -99,10 +99,19 @@ pub fn api_router<S: SessionsCtx>() -> Router<S> {
 
 /// POST /app/kill-sessions — terminate every live PTY. Called by the desktop
 /// app on quit so no agent processes are left running.
+///
+/// Root-only (#L8): any authenticated non-root caller receives 403. The
+/// endpoint is still "Exempt" in the policy table (no workspace context) but
+/// the handler enforces the root requirement directly.
 async fn kill_all_sessions<S: SessionsCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    if !user.is_root {
+        return Err(ApiErr(Error::Forbidden(
+            "only root may kill all sessions".into(),
+        )));
+    }
     let n = ctx.manager().shutdown_all().await;
     Ok(Json(serde_json::json!({ "killed": n })))
 }

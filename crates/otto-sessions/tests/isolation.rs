@@ -1,15 +1,23 @@
-//! Per-session ownership isolation tests (Task 3.2, leaks #L1–#L7).
+//! Per-session ownership isolation tests (Task 3.2, leaks #L1–#L7; Task 3.3,
+//! leaks #L8–#L9).
 //!
-//! These drive the **real** sessions REST router (`api_router`) end-to-end via
-//! tower's `oneshot`, with the `AuthUser` extension injected exactly as the
-//! production `auth_middleware` does. No PTYs are spawned: sessions are inserted
-//! straight into the migrated SQLite store (the manager's `get`/`list*` read
-//! from that store), so the test exercises only the authorization path.
+//! These drive the **real** sessions REST router (`api_router`) and the
+//! terminal WebSocket router (`ws_router`) end-to-end via tower's `oneshot`,
+//! with the `AuthUser` extension injected exactly as the production
+//! `auth_middleware` does. No PTYs are spawned: sessions are inserted straight
+//! into the migrated SQLite store (the manager's `get`/`list*` read from that
+//! store), so the test exercises only the authorization path.
 //!
-//! The security property under test: a workspace **editor** who is *not* the
-//! session owner must get **403** on get/patch/delete/restart/archive/unarchive
-//! of another user's session, and must not see that session in the list — while
-//! the owner, a workspace **admin**, and **root** retain full access.
+//! The security property under test (Task 3.2): a workspace **editor** who is
+//! *not* the session owner must get **403** on get/patch/delete/restart/
+//! archive/unarchive of another user's session, and must not see that session
+//! in the list — while the owner, a workspace **admin**, and **root** retain
+//! full access.
+//!
+//! Task 3.3 additions:
+//! - #L9: terminal attach (`GET /ws/term/{id}?token=`) is now owner-only; a
+//!   workspace editor who is not the owner gets 403 before the WS upgrade.
+//! - #L8: `POST /app/kill-sessions` requires root; non-root gets 403.
 
 use std::sync::Arc;
 
@@ -21,8 +29,8 @@ use chrono::Utc;
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{Session, SessionKind, User};
 use otto_core::Id;
-use otto_rbac::RbacRoleChecker;
-use otto_sessions::{api_router, ProviderRegistry, SessionManager, SessionsCtx};
+use otto_rbac::{tokens::AuthRepo, RbacAuthenticator, RbacRoleChecker};
+use otto_sessions::{api_router, ws_router, ProviderRegistry, SessionManager, SessionsCtx};
 use otto_state::{SessionsRepo, SqlitePool, WorkspacesRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;
@@ -333,4 +341,140 @@ async fn list_sessions(app: &Router, caller: &User, ws: &str) -> Vec<Session> {
         .unwrap()
         .to_bytes();
     serde_json::from_slice(&body).expect("decode session list")
+}
+
+// ---------------------------------------------------------------------------
+// Task 3.3 helpers
+// ---------------------------------------------------------------------------
+
+/// Build the WS router (carries its own token authenticator) over the same
+/// pool, sharing the manager+roles+workspaces with the HTTP app.
+async fn ws_app(pool: &SqlitePool) -> Router {
+    let repo = SessionsRepo::new(pool.clone());
+    let (events, _rx) = broadcast::channel(64);
+    let providers = ProviderRegistry::new(None);
+    let manager = Arc::new(SessionManager::new(repo, events, providers));
+    let ctx = Ctx {
+        manager,
+        roles: Arc::new(RbacRoleChecker::new(pool.clone())),
+        workspaces: WorkspacesRepo::new(pool.clone()),
+    };
+    let auth = Arc::new(RbacAuthenticator::new(pool.clone()));
+    ws_router(auth, ctx)
+}
+
+/// Issue a real bearer token for `user_id` via `AuthRepo` so the WS handler
+/// can validate it via `RbacAuthenticator::authenticate`.
+async fn mint_token(pool: &SqlitePool, user_id: &str) -> String {
+    let repo = AuthRepo::new(pool.clone());
+    repo.issue(&user_id.into()).await.expect("issue token")
+}
+
+/// Send a bare GET (no WS upgrade headers) to the terminal endpoint with the
+/// given raw token in the query string and return the status code. When the
+/// auth/owner gate fires the handler returns 403 *before* the upgrade, so this
+/// lets us distinguish "forbidden" from "auth passed, upgrade rejected".
+async fn term_ws_status(app: &Router, session_id: &Id, token: &str) -> StatusCode {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/ws/term/{session_id}?token={token}"))
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+// ---------------------------------------------------------------------------
+// Task 3.3 tests — #L9 terminal attach
+// ---------------------------------------------------------------------------
+
+/// #L9: a workspace **editor** who is NOT the session owner must get 403 on
+/// `GET /ws/term/{id}` before the WebSocket upgrade.
+#[tokio::test]
+async fn non_owner_editor_cannot_attach_terminal() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_user(&pool, "bob", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+    set_member(&pool, "ws1", "bob", "editor").await;
+
+    let repo = SessionsRepo::new(pool.clone());
+    let sid = insert_session(&repo, "ws1", "alice").await; // alice owns it
+    let app = ws_app(&pool).await;
+
+    // Bob (editor, non-owner) must be rejected before the WS upgrade.
+    let bob_token = mint_token(&pool, "bob").await;
+    let status = term_ws_status(&app, &sid, &bob_token).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "bob (editor, non-owner) must get 403 on terminal attach, got {status}"
+    );
+}
+
+/// #L9 complement: the **owner** and a workspace **admin** must pass the
+/// attach gate (not get 403); root too. The request will fail the WS upgrade
+/// (no Upgrade header) but that's 426 / 400, not 403.
+#[tokio::test]
+async fn owner_and_admin_can_attach_terminal() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_user(&pool, "carol", false).await;
+    // "root_usr" is seeded as root (is_root = true)
+    seed_user(&pool, "root_usr", true).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+    set_member(&pool, "ws1", "carol", "admin").await;
+
+    let repo = SessionsRepo::new(pool.clone());
+    let sid = insert_session(&repo, "ws1", "alice").await; // alice owns it
+    let app = ws_app(&pool).await;
+
+    for (label, uid) in [("owner alice", "alice"), ("ws-admin carol", "carol"), ("root", "root_usr")] {
+        let token = mint_token(&pool, uid).await;
+        let status = term_ws_status(&app, &sid, &token).await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{label} must not be forbidden on terminal attach, got {status}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 3.3 tests — #L8 kill-all root gate
+// ---------------------------------------------------------------------------
+
+/// #L8: a non-root authenticated user must get 403 on `POST /app/kill-sessions`.
+#[tokio::test]
+async fn non_root_cannot_kill_all_sessions() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "admin").await; // give her the highest non-root role
+
+    let app = app(&pool).await;
+    let alice = user("alice", false);
+    let status = status_as(&app, &alice, Method::POST, "/app/kill-sessions").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "non-root must get 403 on kill-all, got {status}"
+    );
+}
+
+/// #L8 complement: root must be able to call `POST /app/kill-sessions` (not 403).
+#[tokio::test]
+async fn root_can_kill_all_sessions() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "root_usr", true).await;
+
+    let app = app(&pool).await;
+    let root = user("root_usr", true);
+    let status = status_as(&app, &root, Method::POST, "/app/kill-sessions").await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "root must not be forbidden on kill-all, got {status}"
+    );
 }

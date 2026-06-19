@@ -1,15 +1,19 @@
 //! Terminal WebSocket — `GET /ws/term/{session_id}` per docs/contracts/ws.md.
 //!
-//! Auth: `?token=` validated BEFORE the upgrade. Viewers attach read-only
-//! (input frames dropped; a single `{"type":"error","code":"forbidden"}` is
-//! sent on the first attempt); editors may send input/resize.
+//! Auth: `?token=` validated BEFORE the upgrade via a `route_layer` middleware,
+//! so the 403 path is exercisable in tests even without a real WS connection.
+//! Owners (session creator), workspace Admins, and root may attach. Editors and
+//! Viewers who are not the owner are rejected (#L9).  Input/resize capability
+//! is determined post-auth by whether the caller holds at least Editor role in
+//! the session's workspace.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -17,7 +21,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use bytes::Bytes;
 use otto_core::api::Problem;
-use otto_core::auth::TokenAuthenticator;
+use otto_core::auth::{session_owner_or_admin, AuthUser, TokenAuthenticator};
 use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
 use otto_pty::PtyHandle;
@@ -65,13 +69,23 @@ enum ClientFrame {
 const DEFAULT_ATTACH_HISTORY_LINES: usize = 1000;
 
 /// Build the standalone terminal-WS router (carries its own state).
+///
+/// The route is layered with [`ws_auth_gate`]: token validation, session
+/// lookup, and owner-or-admin check all run BEFORE axum attempts the WS
+/// upgrade, so a forbidden caller receives a plain 403 JSON response without
+/// the connection ever being promoted to WebSocket.
 pub fn ws_router<S: SessionsCtx>(authenticator: Arc<dyn TokenAuthenticator>, ctx: S) -> Router {
+    let state = WsState {
+        auth: authenticator,
+        ctx,
+    };
     Router::new()
         .route("/ws/term/{session_id}", get(term_ws::<S>))
-        .with_state(WsState {
-            auth: authenticator,
-            ctx,
-        })
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ws_auth_gate::<S>,
+        ))
+        .with_state(state)
 }
 
 fn problem(status: StatusCode, e: &Error) -> Response {
@@ -82,13 +96,21 @@ fn problem(status: StatusCode, e: &Error) -> Response {
     (status, Json(body)).into_response()
 }
 
-async fn term_ws<S: SessionsCtx>(
-    ws: WebSocketUpgrade,
+/// Route-layer middleware: authenticate the `?token=` query param, look up the
+/// session, and enforce the owner-or-admin gate (#L9).
+///
+/// On success, inserts [`AuthUser`] and [`CanInput`] extensions so `term_ws`
+/// can read them without repeating the DB round-trips. On failure, returns a
+/// 401/403/404 JSON problem BEFORE the WebSocket upgrade extractor runs — this
+/// is the property the isolation tests rely on.
+async fn ws_auth_gate<S: SessionsCtx>(
+    State(st): State<WsState<S>>,
     Path(session_id): Path<Id>,
     Query(q): Query<TokenQuery>,
-    State(st): State<WsState<S>>,
+    mut req: Request,
+    next: Next,
 ) -> Response {
-    // 1. Token auth before upgrade.
+    // 1. Token auth.
     let token = match q.token {
         Some(t) => t,
         None => return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized),
@@ -98,19 +120,24 @@ async fn term_ws<S: SessionsCtx>(
         Err(_) => return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized),
     };
 
-    // 2. Session lookup + viewer check before upgrade.
+    // 2. Session lookup.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
         Err(e) => return problem(StatusCode::NOT_FOUND, &e),
     };
-    if let Err(e) = st
-        .ctx
-        .roles()
-        .check(&user, &session.workspace_id, WorkspaceRole::Viewer)
-        .await
-    {
-        return problem(StatusCode::FORBIDDEN, &e);
+
+    // 3. Owner-or-admin gate (#L9): only the creator, a workspace Admin, or
+    //    root may attach. Workspace Viewers/Editors who are not the owner are
+    //    refused here, before the WS upgrade.
+    if !session_owner_or_admin(st.ctx.roles().as_ref(), &user, &session).await {
+        return problem(
+            StatusCode::FORBIDDEN,
+            &Error::Forbidden("not the session owner or a workspace admin".into()),
+        );
     }
+
+    // 4. Determine write capability (owner/ws-admin/root all pass Editor check;
+    //    a viewer-owner would fail it and stay read-only — unchanged behaviour).
     let can_input = st
         .ctx
         .roles()
@@ -118,6 +145,29 @@ async fn term_ws<S: SessionsCtx>(
         .await
         .is_ok();
 
+    // Propagate auth results to the handler via extensions.
+    req.extensions_mut().insert(AuthUser(user));
+    req.extensions_mut().insert(CanInput(can_input));
+
+    next.run(req).await
+}
+
+/// Newtype extension carrying the write-capability flag set by [`ws_auth_gate`].
+#[derive(Clone, Copy)]
+struct CanInput(bool);
+
+async fn term_ws<S: SessionsCtx>(
+    ws: WebSocketUpgrade,
+    Path(session_id): Path<Id>,
+    State(st): State<WsState<S>>,
+    axum::Extension(AuthUser(_user)): axum::Extension<AuthUser>,
+    axum::Extension(CanInput(can_input)): axum::Extension<CanInput>,
+) -> Response {
+    // Auth and owner-gate already enforced by ws_auth_gate middleware.
+    let session = match st.ctx.manager().get(&session_id).await {
+        Ok(s) => s,
+        Err(e) => return problem(StatusCode::NOT_FOUND, &e),
+    };
     let initial_status = session.status;
     ws.on_upgrade(move |socket| async move {
         serve_terminal(socket, st.ctx, session_id, initial_status, can_input).await;
