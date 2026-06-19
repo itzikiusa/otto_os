@@ -41,8 +41,12 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // Skip build artifacts.
-            if path.file_name().map(|n| n == "target").unwrap_or(false) {
+            // Skip build artifacts and integration-test trees. Test files may
+            // register throwaway stub routes (e.g. the RBAC guard matrix mounts
+            // a minimal router at the real templates) that are NOT daemon routes
+            // and must not be held to the api.md contract.
+            let name = path.file_name();
+            if name.map(|n| n == "target" || n == "tests").unwrap_or(false) {
                 continue;
             }
             rust_files(&path, out);

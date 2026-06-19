@@ -7,6 +7,7 @@ pub mod agent_run;
 pub mod api_helpers;
 pub mod auth;
 pub mod error;
+pub mod feature_guard;
 pub mod insights;
 pub mod login_throttle;
 pub mod lsp;
@@ -62,10 +63,21 @@ pub fn build_router(
     for extra in api_extras {
         protected = protected.merge(extra);
     }
-    let protected = protected.route_layer(axum::middleware::from_fn_with_state(
-        ctx.clone(),
-        auth::auth_middleware,
-    ));
+    // Two route_layers, applied bottom-up so the auth chokepoint runs FIRST and
+    // the feature guard runs immediately after it: `route_layer` calls wrap
+    // outermost-last, so the guard (added first → inner) sees the `AuthUser`
+    // extension the auth middleware (added second → outer) inserts, and the
+    // `MatchedPath` axum sets on the matched route. The guard adds the per-user
+    // feature axis on top of the unchanged workspace-role gates in the handlers.
+    let protected = protected
+        .route_layer(axum::middleware::from_fn_with_state(
+            ctx.clone(),
+            feature_guard::feature_guard::<ServerCtx>,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            ctx.clone(),
+            auth::auth_middleware,
+        ));
 
     let api = routes::public_routes().merge(protected);
 
