@@ -116,7 +116,9 @@ async fn ws_auth_gate<S: SessionsCtx>(
         None => return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized),
     };
     let user = match st.auth.authenticate(&token).await {
-        Ok(u) => u,
+        // Authorize attach against the effective user (== real for a normal
+        // token); the owner-or-admin gate below runs on the effective identity.
+        Ok(auth) => auth.effective_user,
         Err(_) => return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized),
     };
 

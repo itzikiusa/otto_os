@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use otto_core::api::ApiTokenInfo;
+use otto_core::auth::AuthContext;
 use otto_core::domain::User;
 use otto_core::{new_id, Error, Id, Result};
 use rand::RngCore;
@@ -68,7 +69,11 @@ impl AuthRepo {
 
     /// Validate a raw token: lookup by hash, check expiry and that the user
     /// is not disabled, then slide expiry (throttled to once per hour).
-    pub async fn authenticate(&self, token: &str) -> Result<User> {
+    ///
+    /// Returns an [`AuthContext`]. For a normal token (every token today) the
+    /// context's `real_user` and `effective_user` are the *same* looked-up user
+    /// — impersonation (Task 5.2) is the only thing that will diverge them.
+    pub async fn authenticate(&self, token: &str) -> Result<AuthContext> {
         let hash = token_hash(token);
         let row = sqlx::query(
             "SELECT a.token_hash, a.expires_at, a.last_seen_at, a.kind,
@@ -117,13 +122,19 @@ impl AuthRepo {
             }
         }
 
-        Ok(User {
+        let user = User {
             id: row.get("id"),
             username: row.get("username"),
             display_name: row.get("display_name"),
             is_root: row.get::<i64, _>("is_root") != 0,
             disabled: false,
             created_at: parse_ts(&row.get::<String, _>("created_at"))?,
+        };
+        // Normal token: the real (token owner) and effective (acted-as) user are
+        // the same. Task 5.2 introduces the only path where these differ.
+        Ok(AuthContext {
+            real_user: user.clone(),
+            effective_user: user,
         })
     }
 
@@ -303,8 +314,10 @@ mod tests {
         let uid = seed_user(&pool, "alice").await;
 
         let token = repo.issue(&uid).await.unwrap();
-        let user = repo.authenticate(&token).await.unwrap();
-        assert_eq!(user.id, uid);
+        let ctx = repo.authenticate(&token).await.unwrap();
+        assert_eq!(ctx.effective_user.id, uid);
+        // Normal token: real == effective (the plumbing is a no-op today).
+        assert_eq!(ctx.real_user.id, ctx.effective_user.id);
 
         repo.revoke(&token).await.unwrap();
         assert!(
@@ -333,8 +346,9 @@ mod tests {
         assert_eq!(listed[0].token_prefix, info.token_prefix);
 
         // It authenticates like any bearer token.
-        let user = repo.authenticate(&token).await.unwrap();
-        assert_eq!(user.id, uid);
+        let ctx = repo.authenticate(&token).await.unwrap();
+        assert_eq!(ctx.effective_user.id, uid);
+        assert_eq!(ctx.real_user.id, ctx.effective_user.id);
 
         // Revoking by id invalidates it; the list goes empty.
         assert!(repo.revoke_api_token(&uid, &info.id).await.unwrap());
@@ -360,7 +374,10 @@ mod tests {
         // `other` cannot revoke `owner`'s token.
         assert!(!repo.revoke_api_token(&other, &info.id).await.unwrap());
         // And it still works.
-        assert_eq!(repo.authenticate(&token).await.unwrap().id, owner);
+        assert_eq!(
+            repo.authenticate(&token).await.unwrap().effective_user.id,
+            owner
+        );
     }
 
     /// Revocation on credential change: `revoke_all_for_user` invalidates EVERY

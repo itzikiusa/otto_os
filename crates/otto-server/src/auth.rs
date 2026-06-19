@@ -5,7 +5,7 @@ use axum::http::header;
 use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use otto_core::auth::{session_owner_or_admin, AuthUser, RoleChecker};
+use otto_core::auth::{session_owner_or_admin, AuthContext, AuthUser, RoleChecker};
 use otto_core::domain::{Session, User, WorkspaceRole};
 use otto_core::{Error, Id};
 
@@ -41,9 +41,17 @@ pub async fn auth_middleware(
     };
 
     match ctx.authenticator.authenticate(&token).await {
-        Ok(user) => {
+        Ok(auth) => {
             req.extensions_mut().insert(BearerToken(token));
-            req.extensions_mut().insert(AuthUser(user));
+            // Insert the full context (carries real + effective; audit reads the
+            // real owner via `CurrentAuthContext`), AND keep `AuthUser` =
+            // *effective* user for back-compat so the feature guard,
+            // `require_session_owner_or_admin`, and `CurrentUser` all authorize
+            // against the effective identity with no signature change. For a
+            // normal token effective == real, so behavior is unchanged.
+            req.extensions_mut()
+                .insert(AuthUser(auth.effective_user.clone()));
+            req.extensions_mut().insert(auth);
             next.run(req).await
         }
         Err(e) => ApiError(e).into_response(),
@@ -66,6 +74,44 @@ where
             .extensions
             .get::<AuthUser>()
             .map(|a| CurrentUser(a.0.clone()))
+            .ok_or(ApiError(Error::Unauthorized))
+    }
+}
+
+/// Extractor for the full [`AuthContext`] (real + effective user) of the
+/// current request, read from the extension inserted by [`auth_middleware`];
+/// rejects with 401 when absent.
+///
+/// Handlers that authorize keep using [`CurrentUser`] (the effective user).
+/// This extractor exists for **audit**: it exposes the real token owner via
+/// [`CurrentAuthContext::real_user`], which the audit-logging path (Task 5.2)
+/// records. For a normal token `real_user == effective_user`.
+#[derive(Debug, Clone)]
+pub struct CurrentAuthContext(pub AuthContext);
+
+impl CurrentAuthContext {
+    /// The real token owner — the identity to record in audit.
+    pub fn real_user(&self) -> &User {
+        &self.0.real_user
+    }
+
+    /// The effective (acted-as) user — the identity authorization runs against.
+    pub fn effective_user(&self) -> &User {
+        &self.0.effective_user
+    }
+}
+
+impl<S> FromRequestParts<S> for CurrentAuthContext
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthContext>()
+            .map(|a| CurrentAuthContext(a.clone()))
             .ok_or(ApiError(Error::Unauthorized))
     }
 }

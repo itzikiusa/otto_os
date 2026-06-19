@@ -6,7 +6,7 @@
 pub mod passwords;
 pub mod tokens;
 
-use otto_core::auth::{BoxFuture, RoleChecker, TokenAuthenticator};
+use otto_core::auth::{AuthContext, BoxFuture, RoleChecker, TokenAuthenticator};
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{Error, Id, Result};
 use otto_state::WorkspacesRepo;
@@ -30,7 +30,7 @@ impl RbacAuthenticator {
 }
 
 impl TokenAuthenticator for RbacAuthenticator {
-    fn authenticate<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<User>> {
+    fn authenticate<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<AuthContext>> {
         Box::pin(self.repo.authenticate(token))
     }
 }

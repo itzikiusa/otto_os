@@ -80,7 +80,10 @@ async fn token_mint_authenticate_revoke_cycle() {
     let listed = repo.list_api_tokens(&uid).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, info.id);
-    assert_eq!(repo.authenticate(&token).await.unwrap().id, uid);
+    assert_eq!(
+        repo.authenticate(&token).await.unwrap().effective_user.id,
+        uid
+    );
 
     // Revoke it; authentication now fails and the list is empty.
     assert!(repo.revoke_api_token(&uid, &info.id).await.unwrap());

@@ -15,12 +15,42 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// The authenticated user, inserted into request extensions by the server's
 /// auth middleware and read by downstream handlers.
+///
+/// This always carries the **effective** user (== the real token owner for a
+/// normal token; the impersonation *target* once Part D lands). Keeping it as
+/// the effective user means every existing consumer — the feature guard,
+/// `require_session_owner_or_admin`, `CurrentUser` — transparently authorizes
+/// against the effective identity without any signature change.
 #[derive(Debug, Clone)]
 pub struct AuthUser(pub User);
 
-/// Validates a bearer token (HTTP header or WS `?token=`) into a user.
+/// The resolved identity of an authenticated request: the **real** token owner
+/// (used for audit) and the **effective** user (used for every authorization
+/// decision). For a normal token these are the same user; they diverge only
+/// when an admin is impersonating another user (Part D, Task 5.2), where
+/// `real_user` is the admin and `effective_user` is the impersonation target.
+///
+/// Invariant (today): `real_user == effective_user` for every token. Task 5.2
+/// is the only place that may make them differ.
+///
+/// NOTE (mobile spec): a `scope: Option<SessionScope>` field will be added here
+/// later for guest/share-link tokens (mutually exclusive with impersonation).
+/// It is intentionally **not** added yet — adding it now would pull in unused
+/// types. The struct is shaped so that field can land without churning callers.
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    /// The token owner — the identity audit always records.
+    pub real_user: User,
+    /// The identity every authorization check runs against (== `real_user`
+    /// unless impersonating).
+    pub effective_user: User,
+}
+
+/// Validates a bearer token (HTTP header or WS `?token=`) into an [`AuthContext`].
+///
+/// For a normal token the returned context has `real_user == effective_user`.
 pub trait TokenAuthenticator: Send + Sync {
-    fn authenticate<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<User>>;
+    fn authenticate<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<AuthContext>>;
 }
 
 /// Checks that a user holds at least `min` role in a workspace (root passes).
@@ -248,6 +278,21 @@ mod tests {
             token_expires_at: None,
             created_at: Utc::now(),
         }
+    }
+
+    /// A normal-token [`AuthContext`] resolves `real_user == effective_user`:
+    /// the plumbing introduced for impersonation must be a no-op until Task 5.2
+    /// actually diverges the two identities.
+    #[test]
+    fn auth_context_normal_token_real_equals_effective() {
+        let u = user("alice", false);
+        let ctx = AuthContext {
+            real_user: u.clone(),
+            effective_user: u,
+        };
+        assert_eq!(ctx.real_user.id, ctx.effective_user.id);
+        assert_eq!(ctx.real_user.username, ctx.effective_user.username);
+        assert_eq!(ctx.real_user.is_root, ctx.effective_user.is_root);
     }
 
     #[test]

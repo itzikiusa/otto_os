@@ -53,7 +53,9 @@ pub async fn events_ws(
         return ApiError(Error::Unauthorized).into_response();
     };
     match ctx.authenticator.authenticate(&token).await {
-        Ok(user) => {
+        Ok(auth) => {
+            // Authorize against the effective user (== real for a normal token).
+            let user = auth.effective_user;
             // Echo `otto-bearer` only when the client used the subprotocol path,
             // otherwise the browser would reject an unsolicited subprotocol.
             if used_subprotocol {
