@@ -348,6 +348,39 @@ export interface CapabilitiesResp {
 }
 
 // ---------------------------------------------------------------------------
+// Admin active-sessions overview (RBAC Task 4.2/4.3)
+// ---------------------------------------------------------------------------
+
+/** One row of `GET /api/v1/admin/sessions` — mirrors `AdminSessionRow` in api.rs. */
+export interface AdminSessionRow {
+  /** Session id. */
+  id: string;
+  /** `created_by` — owning user's id. */
+  owner_id: string;
+  /** Owning user's username (falls back to owner_id when user no longer exists). */
+  owner_username: string;
+  /** Workspace the session belongs to. */
+  workspace_id: string;
+  /** `'agent'` | `'connection'`. */
+  kind: string;
+  /** CLI provider / connection driver (`'claude'`, `'codex'`, `'shell'`, `'mysql'`, …). */
+  provider: string;
+  /** Display title. */
+  title: string;
+  /** Persisted status (`'running'` | `'working'` | `'idle'` | `'reconnectable'` | `'exited'`). */
+  status: string;
+  /** True when the session has a live PTY in the daemon process. */
+  live: boolean;
+  /** Number of WS terminal viewers currently attached. */
+  viewers: number;
+}
+
+/** `GET /api/v1/admin/sessions` response — mirrors `AdminSessionsResp` in api.rs. */
+export interface AdminSessionsResp {
+  sessions: AdminSessionRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Meta / auth
 // ---------------------------------------------------------------------------
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   // Settings layout: subnav + routed page (#/settings/<page>).
   import Appearance from './Appearance.svelte';
+  import AdminSessions from './AdminSessions.svelte';
   import Daemon from './Daemon.svelte';
   import Providers from './Providers.svelte';
   import Users from './Users.svelte';
@@ -49,6 +50,8 @@
       : []),
     // users management: users:admin gate.
     ...(auth.can('users', 'admin') ? [{ id: 'users', label: 'Users' }] : []),
+    // admin session overview: users:admin gate.
+    ...(auth.can('users', 'admin') ? [{ id: 'sessions', label: 'Sessions' }] : []),
   ]);
 </script>
 
@@ -100,6 +103,8 @@
       <Providers />
     {:else if page === 'users' && auth.can('users', 'admin')}
       <Users />
+    {:else if page === 'sessions' && auth.can('users', 'admin')}
+      <AdminSessions />
     {:else if page === 'daemon' && auth.can('settings', 'admin')}
       <Daemon />
     {:else if page === 'trust-safety' && auth.can('settings', 'admin')}
