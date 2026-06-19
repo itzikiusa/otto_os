@@ -10,7 +10,7 @@ use otto_core::domain::{
     Session, SessionKind, SessionStatus, TrailKind, TrailLevel, TrailSource, Workspace,
 };
 use otto_core::event::Event;
-use otto_core::hooks::PreSpawnHook;
+use otto_core::hooks::{McpServerProvider, PreSpawnHook};
 use otto_core::{new_id, Error, Id, Result};
 use otto_pty::{CommandSpec, PtyHandle};
 use otto_state::{ActivityRepo, NewSession, NewTrail, SessionsRepo};
@@ -125,6 +125,9 @@ pub struct SessionManager {
     providers: ProviderRegistry,
     /// Optional context-provisioning hook, invoked before an agent spawn.
     pre_spawn_hook: Option<Arc<dyn PreSpawnHook>>,
+    /// Optional resolver for the workspace's enabled user-configured MCP servers,
+    /// merged into `.mcp.json` on agent spawn (alongside Otto's browser entry).
+    mcp_servers: Option<Arc<dyn McpServerProvider>>,
     /// Optional live-output scanner (credential monitor's mid-session auth
     /// detection). When set, each session's status task subscribes to its PTY
     /// output and forwards chunks here.
@@ -155,6 +158,7 @@ impl SessionManager {
             events,
             providers,
             pre_spawn_hook: None,
+            mcp_servers: None,
             output_scanner: None,
             ingest_base: std::env::var("OTTO_INGEST_BASE")
                 .ok()
@@ -339,6 +343,13 @@ impl SessionManager {
         self
     }
 
+    /// Attach the user-configured MCP-server resolver, merged into `.mcp.json`
+    /// on agent spawn. Builder-style; without it no user servers are written.
+    pub fn with_mcp_servers(mut self, provider: Arc<dyn McpServerProvider>) -> Self {
+        self.mcp_servers = Some(provider);
+        self
+    }
+
     /// Attach a live-output scanner (mid-session re-auth detection). Builder-
     /// style so existing `new()` callers stay unchanged.
     pub fn with_output_scanner(mut self, scanner: Arc<dyn OutputScanner>) -> Self {
@@ -474,6 +485,26 @@ impl SessionManager {
             {
                 if let Err(e) = crate::mcp::enable_browser(&session.cwd) {
                     tracing::warn!("enable browser MCP: {e}");
+                }
+            }
+            // User-configured MCP servers: merge the workspace's *enabled* ones
+            // into `.mcp.json` alongside any managed entries. Opt-in by the user
+            // (each server is enabled explicitly); best-effort — never blocks spawn.
+            if let Some(provider) = &self.mcp_servers {
+                let specs = provider.enabled_servers(&session.workspace_id);
+                if !specs.is_empty() {
+                    let servers: Vec<crate::mcp::UserMcpServer> = specs
+                        .into_iter()
+                        .map(|s| crate::mcp::UserMcpServer {
+                            name: s.name,
+                            command: s.command,
+                            args: s.args,
+                            env: s.env,
+                        })
+                        .collect();
+                    if let Err(e) = crate::mcp::merge_user_servers(&session.cwd, &servers) {
+                        tracing::warn!("merge user MCP servers: {e}");
+                    }
                 }
             }
             // Otto context provisioning: materialize the workspace's active

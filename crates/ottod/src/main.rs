@@ -137,6 +137,10 @@ async fn run(cfg: Config) -> Result<(), String> {
                 context_library.clone(),
             )))
             .with_output_scanner(scanner)
+            // User-configured MCP servers merged into `.mcp.json` on agent spawn.
+            .with_mcp_servers(Arc::new(
+                otto_server::routes::mcp_servers::DbMcpServerProvider::new(pool.clone()),
+            ))
             // Agent activity hooks post back to this loopback daemon.
             .with_ingest_base(format!("http://127.0.0.1:{}", cfg.port))
             // Record Otto-side lifecycle + user actions to the activity trail.

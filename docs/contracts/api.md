@@ -85,6 +85,18 @@ Usage & metrics (embedded ClickHouse, all root-only; types in `crates/otto-usage
 - GET /usage/metrics?minutes=N → `MetricPoint[]` (system CPU/RAM/load time-series).
 - PUT /usage/config → UsageStatus (update + persist engine config).
 - POST /usage/install → UsageStatus (install/update ClickHouse via the official installer).
+- GET /usage/budgets → UsageBudgetStatus — the persisted budget config plus live status rows
+  (spend vs cap) over the window. Status is computed even when enforcement is off, so the UI can
+  preview caps before turning them on.
+- PUT /usage/budgets → UsageBudgetStatus — replace + persist the budget config (returns refreshed
+  status). Body is `UsageBudgetConfig{enforce, block_on_exceed, window_days, workspaces[], providers[]}`.
+  **Enforcement is opt-in:** `enforce` defaults `false`, so budgets are purely informational
+  (warnings only) until a root user turns it on; `block_on_exceed` (default `false`) further gates
+  whether an exceeded cap is a hard block or warn-only. `WorkspaceBudget{workspace_id, monthly_usd}`
+  and `ProviderBudget{provider, monthly_usd}` cap USD spend over `window_days` (default 30,
+  clamped 1..3650); a `0` cap = no cap. `BudgetStatusRow{scope, key, label?, limit_usd, spent_usd,
+  used_fraction, warning(≥80%), exceeded(≥100%)}`. The daemon exposes a consultable
+  `routes::usage::check_budget(ctx, workspace_id, provider)` that is a no-op while `enforce` is off.
 - POST /ingest/usage → 204 — per-session token-usage ingest, gated by the per-session
   ingest token (`X-Otto-Session` + `X-Otto-Token`), not a bearer token.
 
@@ -271,6 +283,32 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 | PATCH /connection-sections/{id} | ws editor | RenameSectionReq | ConnectionSection |
 | DELETE /connection-sections/{id} | ws editor | — | 204 |
 | POST /connection-sections/{id}/move | ws editor | MoveSectionReq | 204 |
+
+## Workspace MCP servers (user-managed `.mcp.json` entries)
+
+User-configured MCP (Model Context Protocol) servers, per workspace. *Enabled* servers are
+merged into the workspace's `.mcp.json` — alongside Otto's own managed entries (e.g. the
+browser server) — when an agent session spawns there (see `otto-sessions::mcp`). Nothing is
+auto-enabled: `enabled` defaults `false` on create, and a server is only written to
+`.mcp.json` once the user flips it on and a session then spawns in the workspace. Reads =
+`ws viewer`, mutations = `ws editor`. Item routes resolve the workspace from the row.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{id}/mcp-servers | ws viewer | — | `McpServer[]` |
+| POST /workspaces/{id}/mcp-servers | ws editor | CreateMcpServerReq | McpServer |
+| PATCH /mcp-servers/{id} | ws editor | UpdateMcpServerReq (partial; absent fields kept) | McpServer |
+| DELETE /mcp-servers/{id} | ws editor | — | 204 |
+
+Notes:
+- `McpServer` = `{id, workspace_id, name, command, args:[string], env:{string:string}, enabled,
+  created_by, created_at, updated_at}`. `name` is the key under `.mcp.json`'s `mcpServers` map
+  and is unique within the workspace.
+- `CreateMcpServerReq{name, command, args?, env?, enabled?}` — `enabled` defaults `false`
+  (never auto-enabled). Empty `name`/`command` → 400 `invalid`.
+- `env` is stored in plaintext for now (like `.mcp.json` itself, which lives in the workspace);
+  long-lived secrets belong in the user's own MCP config until Keychain secret-refs land. The
+  merge preserves all other `.mcp.json` keys and never overwrites Otto's `otto-browser` entry.
 
 ## DB Explorer — engine access (`/connections/{id}/db/*`)
 
@@ -664,6 +702,8 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
 | PUT /usage/config | root | UsageConfig | config |
 | POST /usage/install | root | — | install the embedded ClickHouse binary |
+| GET /usage/budgets | root | — | UsageBudgetStatus (caps + live spend; enforcement opt-in, default off) |
+| PUT /usage/budgets | root | UsageBudgetConfig | UsageBudgetStatus (replace + persist budget config) |
 
 ## Insights (scheduled usage reports)
 

@@ -288,6 +288,29 @@ pub struct ConnectionSection {
     pub created_at: DateTime<Utc>,
 }
 
+/// A user-configured MCP (Model Context Protocol) server for a workspace.
+/// Enabled servers are merged into the workspace's `.mcp.json` (alongside Otto's
+/// own managed entries) when an agent session spawns there. Never auto-enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServer {
+    pub id: Id,
+    pub workspace_id: Id,
+    /// Key under `.mcp.json`'s `mcpServers` map; unique within the workspace.
+    pub name: String,
+    pub command: String,
+    /// Command arguments, in order.
+    pub args: Vec<String>,
+    /// Extra environment passed to the server process. Stored in plaintext for
+    /// now (like `.mcp.json` on disk) — sensitive values belong in the user's
+    /// own MCP config until Keychain secret-refs land.
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Off by default: a server is only written to `.mcp.json` once enabled.
+    pub enabled: bool,
+    pub created_by: Id,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Git hosting providers supported for PR workflows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

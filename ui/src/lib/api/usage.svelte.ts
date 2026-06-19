@@ -4,6 +4,7 @@
 
 import { api } from './client';
 import { toasts } from '../toast.svelte';
+import type { Id } from './types';
 
 export interface ProviderUsage {
   provider: string;
@@ -112,6 +113,53 @@ export interface UsageConfigReq {
   clickhouse_path?: string;
 }
 
+// --- Usage budgets (opt-in spend caps) ------------------------------------
+
+export interface WorkspaceBudget {
+  workspace_id: Id;
+  /** USD cap over the window; 0 = no cap. */
+  monthly_usd: number;
+}
+
+export interface ProviderBudget {
+  provider: string;
+  monthly_usd: number;
+}
+
+export interface UsageBudgetConfig {
+  /** Master opt-in; false = budgets are informational only (default). */
+  enforce: boolean;
+  /** When enforcing, true = hard block on exceed; false = warn only (default). */
+  block_on_exceed: boolean;
+  /** Window the caps apply to, in days (default 30). */
+  window_days: number;
+  workspaces: WorkspaceBudget[];
+  providers: ProviderBudget[];
+}
+
+export interface BudgetStatusRow {
+  /** "workspace" | "provider". */
+  scope: string;
+  /** Workspace id or provider name. */
+  key: string;
+  /** Workspace name / provider name when resolvable. */
+  label: string | null;
+  limit_usd: number;
+  spent_usd: number;
+  /** spent / limit (0 when no limit). */
+  used_fraction: number;
+  /** Spend crossed the 80% warn line. */
+  warning: boolean;
+  /** Spend met/exceeded the cap. */
+  exceeded: boolean;
+}
+
+export interface UsageBudgetStatus {
+  config: UsageBudgetConfig;
+  window_days: number;
+  rows: BudgetStatusRow[];
+}
+
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -128,6 +176,9 @@ class UsageStore {
   loading = $state(false);
   installing = $state(false);
   saving = $state(false);
+  /** Usage budgets (caps + live spend status). Null until loaded. */
+  budgets: UsageBudgetStatus | null = $state(null);
+  savingBudgets = $state(false);
 
   /** Query string shared by every summary fetch (window + scope). */
   private summaryQuery(): string {
@@ -158,10 +209,36 @@ class UsageStore {
         this.summary = null;
         this.metrics = [];
       }
+      // Budgets are config (not engine) data — load them whether or not the
+      // engine is available so the caps are still editable.
+      await this.loadBudgets();
     } catch (e) {
       toasts.error('Could not load usage', errMsg(e));
     } finally {
       this.loading = false;
+    }
+  }
+
+  /** Load the budget config + live spend status (root-only). */
+  async loadBudgets(): Promise<void> {
+    try {
+      this.budgets = await api.get<UsageBudgetStatus>('/usage/budgets');
+    } catch (e) {
+      // Non-fatal: the dashboard still renders without budgets.
+      toasts.error('Could not load usage budgets', errMsg(e));
+    }
+  }
+
+  /** Persist the budget config and refresh the status. */
+  async saveBudgets(cfg: UsageBudgetConfig): Promise<void> {
+    this.savingBudgets = true;
+    try {
+      this.budgets = await api.put<UsageBudgetStatus>('/usage/budgets', cfg);
+      toasts.success('Budgets saved');
+    } catch (e) {
+      toasts.error('Could not save budgets', errMsg(e));
+    } finally {
+      this.savingBudgets = false;
     }
   }
 

@@ -6,6 +6,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { usage } from '../../lib/api/usage.svelte';
+  import type { UsageBudgetConfig } from '../../lib/api/usage.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
 
   const WINDOWS = [
     { days: 7, label: '7d' },
@@ -20,6 +22,18 @@
   let chPath = $state('');
   let configOpen = $state(false);
 
+  // Editable budget config — a local copy of usage.budgets.config, seeded when
+  // budgets load and saved back on demand. Enforcement is opt-in (default off).
+  let budgetCfg: UsageBudgetConfig = $state({
+    enforce: false,
+    block_on_exceed: false,
+    window_days: 30,
+    workspaces: [],
+    providers: [],
+  });
+  let budgetsOpen = $state(false);
+  let budgetsDirty = $state(false);
+
   onMount(() => {
     if (auth.isRoot) void usage.loadAll();
   });
@@ -32,6 +46,54 @@
       interval = s.metrics_interval_secs;
       chPath = s.binary ?? '';
     }
+  });
+
+  // Seed the editable budget config from the server, unless the user has made
+  // local edits (don't clobber in-flight changes on a background refresh).
+  $effect(() => {
+    const b = usage.budgets;
+    if (b && !budgetsDirty) {
+      budgetCfg = structuredClone($state.snapshot(b.config));
+    }
+  });
+
+  function addWsBudget(): void {
+    budgetsDirty = true;
+    budgetCfg.workspaces = [...budgetCfg.workspaces, { workspace_id: '', monthly_usd: 0 }];
+  }
+  function addProviderBudget(): void {
+    budgetsDirty = true;
+    budgetCfg.providers = [...budgetCfg.providers, { provider: '', monthly_usd: 0 }];
+  }
+  function removeWsBudget(i: number): void {
+    budgetsDirty = true;
+    budgetCfg.workspaces = budgetCfg.workspaces.filter((_, j) => j !== i);
+  }
+  function removeProviderBudget(i: number): void {
+    budgetsDirty = true;
+    budgetCfg.providers = budgetCfg.providers.filter((_, j) => j !== i);
+  }
+  async function saveBudgets(): Promise<void> {
+    // Drop blank rows before saving (no key or no cap = nothing to enforce).
+    const cfg: UsageBudgetConfig = {
+      ...budgetCfg,
+      window_days: budgetCfg.window_days || 30,
+      workspaces: budgetCfg.workspaces.filter((b) => b.workspace_id && b.monthly_usd > 0),
+      providers: budgetCfg.providers.filter((b) => b.provider && b.monthly_usd > 0),
+    };
+    await usage.saveBudgets(cfg);
+    budgetsDirty = false;
+  }
+
+  // Workspace name for a budget row's id (falls back to the id).
+  function wsName(id: string): string {
+    return ws.workspaces.find((w) => w.id === id)?.name ?? id;
+  }
+  // Provider choices for the budget editor (installed CLIs + any already used).
+  const providerChoices = $derived.by(() => {
+    const set = new Set<string>((usage.summary?.providers ?? []).map((p) => p.provider));
+    for (const t of auth.meta?.providers ?? []) set.add(t);
+    return [...set].filter(Boolean);
   });
 
   function fmtNum(n: number): string {
@@ -368,6 +430,144 @@
           </div>
         {:else}
           <p class="dim small">No usage recorded yet. Cost splits by feature (review, product, channels, agents…) appear here as work runs.</p>
+        {/if}
+      </div>
+
+      <!-- Budgets (opt-in spend caps) -->
+      <div class="panel card">
+        <div class="panel-head">
+          <h3>Budgets</h3>
+          <button class="link-btn" onclick={() => (budgetsOpen = !budgetsOpen)}>
+            {budgetsOpen ? 'Hide' : 'Configure'}
+          </button>
+        </div>
+        <span class="dim small">
+          Per-workspace / per-provider spend caps. Enforcement is opt-in — caps stay informational
+          (warnings only) until you turn enforcement on.
+        </span>
+
+        <!-- Status: budget vs spend -->
+        {#if usage.budgets && usage.budgets.rows.length > 0}
+          <div class="budget-rows">
+            {#each usage.budgets.rows as r (r.scope + ':' + r.key)}
+              <div class="budget-row" class:warn={r.warning && !r.exceeded} class:over={r.exceeded}>
+                <span class="budget-name" title={r.key}>
+                  <span class="kind-badge">{r.scope}</span>
+                  {r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
+                </span>
+                <div class="bar-track">
+                  <div
+                    class="bar-fill"
+                    style="width: {Math.min(100, r.used_fraction * 100)}%"
+                    title="{fmtCost(r.spent_usd)} of {fmtCost(r.limit_usd)}"
+                  ></div>
+                </div>
+                <span class="budget-val">
+                  {fmtCost(r.spent_usd)} / {fmtCost(r.limit_usd)}
+                  {#if r.exceeded}<span class="over-tag">over</span>
+                  {:else if r.warning}<span class="warn-tag">{(r.used_fraction * 100).toFixed(0)}%</span>{/if}
+                </span>
+              </div>
+            {/each}
+          </div>
+          {#if usage.budgets.config.enforce && usage.budgets.rows.some((r) => r.exceeded)}
+            <div class="budget-alert">
+              {usage.budgets.config.block_on_exceed
+                ? 'Enforcement is ON (blocking). Work in an over-budget scope can be blocked by the daemon.'
+                : 'Enforcement is ON (warn-only). Over-budget scopes are flagged but not blocked.'}
+            </div>
+          {/if}
+        {:else}
+          <p class="dim small">No budgets set. Configure caps to track spend against a target.</p>
+        {/if}
+
+        <!-- Editor -->
+        {#if budgetsOpen}
+          <div class="budget-editor">
+            <label class="cfg-row">
+              <input type="checkbox" bind:checked={budgetCfg.enforce} onchange={() => (budgetsDirty = true)} />
+              <span>Enforce budgets (opt-in) — warn prominently when a cap is exceeded</span>
+            </label>
+            <label class="cfg-row" class:disabled={!budgetCfg.enforce}>
+              <input
+                type="checkbox"
+                bind:checked={budgetCfg.block_on_exceed}
+                disabled={!budgetCfg.enforce}
+                onchange={() => (budgetsDirty = true)}
+              />
+              <span>Block work when a cap is exceeded (otherwise warn only)</span>
+            </label>
+            <label class="cfg-row">
+              <span>Window (days)</span>
+              <input
+                class="num"
+                type="number"
+                min="1"
+                bind:value={budgetCfg.window_days}
+                onchange={() => (budgetsDirty = true)}
+              />
+            </label>
+
+            <div class="editor-section">
+              <div class="editor-head">
+                <span>Per workspace</span>
+                <button class="link-btn" onclick={addWsBudget}>+ Add</button>
+              </div>
+              {#each budgetCfg.workspaces as b, i (i)}
+                <div class="editor-line">
+                  <select bind:value={b.workspace_id} onchange={() => (budgetsDirty = true)}>
+                    <option value="">Select workspace…</option>
+                    {#each ws.workspaces as w (w.id)}
+                      <option value={w.id}>{w.name}</option>
+                    {/each}
+                  </select>
+                  <input
+                    class="num"
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder="USD"
+                    bind:value={b.monthly_usd}
+                    onchange={() => (budgetsDirty = true)}
+                  />
+                  <button class="link-btn danger" onclick={() => removeWsBudget(i)}>Remove</button>
+                </div>
+              {/each}
+            </div>
+
+            <div class="editor-section">
+              <div class="editor-head">
+                <span>Per provider</span>
+                <button class="link-btn" onclick={addProviderBudget}>+ Add</button>
+              </div>
+              {#each budgetCfg.providers as b, i (i)}
+                <div class="editor-line">
+                  <select bind:value={b.provider} onchange={() => (budgetsDirty = true)}>
+                    <option value="">Select provider…</option>
+                    {#each providerChoices as p (p)}
+                      <option value={p}>{p}</option>
+                    {/each}
+                  </select>
+                  <input
+                    class="num"
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder="USD"
+                    bind:value={b.monthly_usd}
+                    onchange={() => (budgetsDirty = true)}
+                  />
+                  <button class="link-btn danger" onclick={() => removeProviderBudget(i)}>Remove</button>
+                </div>
+              {/each}
+            </div>
+
+            <div class="editor-actions">
+              <button class="btn primary" disabled={usage.savingBudgets} onclick={saveBudgets}>
+                {usage.savingBudgets ? 'Saving…' : 'Save budgets'}
+              </button>
+            </div>
+          </div>
         {/if}
       </div>
 
@@ -1059,5 +1259,132 @@
   }
   code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* --- Budgets --------------------------------------------------------- */
+  .link-btn {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0;
+  }
+  .link-btn:hover {
+    text-decoration: underline;
+  }
+  .link-btn.danger {
+    color: var(--danger, #c0392b);
+  }
+  .budget-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .budget-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 1.4fr) 2fr minmax(120px, auto);
+    align-items: center;
+    gap: 10px;
+  }
+  .budget-name {
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .budget-val {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    text-align: right;
+    white-space: nowrap;
+  }
+  .budget-row.warn .bar-fill {
+    background: var(--warn, #d08a18);
+  }
+  .budget-row.over .bar-fill {
+    background: var(--danger, #c0392b);
+  }
+  .warn-tag {
+    color: var(--warn, #d08a18);
+    font-weight: 600;
+    margin-left: 4px;
+  }
+  .over-tag {
+    color: var(--danger, #c0392b);
+    font-weight: 600;
+    margin-left: 4px;
+    text-transform: uppercase;
+  }
+  .budget-alert {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: var(--radius-s, 6px);
+    background: color-mix(in srgb, var(--danger, #c0392b) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger, #c0392b) 40%, transparent);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .budget-editor {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .cfg-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+  }
+  .cfg-row.disabled {
+    opacity: 0.55;
+  }
+  .editor-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .editor-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .editor-line {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .editor-line select {
+    flex: 1;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 6px);
+    color: var(--text);
+    font-size: 12px;
+    padding: 4px 6px;
+  }
+  input.num {
+    width: 90px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 6px);
+    color: var(--text);
+    font-size: 12px;
+    padding: 4px 6px;
+    text-align: right;
+  }
+  .editor-actions {
+    display: flex;
+    justify-content: flex-end;
   }
 </style>

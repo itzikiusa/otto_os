@@ -9,6 +9,7 @@ pub mod grpc;
 pub mod fs;
 pub mod handover;
 pub mod logs;
+pub mod mcp_servers;
 pub mod meta;
 pub mod notifications;
 pub mod onboarding;
@@ -85,6 +86,15 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // --- Trust & Safety Center (root only) ---------------------------
         .route("/audit-log", get(audit::list))
         .route("/security-posture", get(audit::posture))
+        // --- Workspace MCP servers (user-managed `.mcp.json` entries) -----
+        .route(
+            "/workspaces/{id}/mcp-servers",
+            get(mcp_servers::list).post(mcp_servers::create),
+        )
+        .route(
+            "/mcp-servers/{id}",
+            patch(mcp_servers::update).delete(mcp_servers::delete),
+        )
         // --- Usage tracking & system metrics (embedded ClickHouse) -------
         .route("/usage/status", get(usage::status))
         .route("/usage/summary", get(usage::summary))
@@ -92,6 +102,11 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/usage/metrics", get(usage::metrics))
         .route("/usage/config", put(usage::put_config))
         .route("/usage/install", post(usage::install))
+        // Usage budgets (opt-in spend caps; enforcement default off).
+        .route(
+            "/usage/budgets",
+            get(usage::budgets).put(usage::put_budgets),
+        )
         .route(
             "/notifications",
             get(notifications::list).delete(notifications::clear),

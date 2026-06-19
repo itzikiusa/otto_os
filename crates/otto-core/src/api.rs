@@ -314,6 +314,106 @@ pub struct MoveSectionReq {
     pub parent_id: Option<Id>,
 }
 
+/// `POST /api/v1/workspaces/{id}/mcp-servers` — create a workspace MCP server.
+/// `enabled` defaults to `false` (servers are never auto-enabled).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateMcpServerReq {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Usage budgets (spend caps, opt-in enforcement)
+// ---------------------------------------------------------------------------
+
+/// Per-workspace spend cap (USD over the budget window).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkspaceBudget {
+    pub workspace_id: Id,
+    /// Cap in USD for the window. `0` (or absent) = no cap for this workspace.
+    pub monthly_usd: f64,
+}
+
+/// Per-provider spend cap (USD over the budget window).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderBudget {
+    pub provider: String,
+    pub monthly_usd: f64,
+}
+
+/// The full usage-budget configuration, persisted under the `usage_budgets`
+/// settings key. Enforcement is **opt-in**: `enforce` defaults to `false`, so a
+/// budget never blocks or even warns until a root user turns it on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageBudgetConfig {
+    /// Master opt-in flag. When `false`, budgets are purely informational and
+    /// the daemon's budget check is a no-op.
+    #[serde(default)]
+    pub enforce: bool,
+    /// When `true` (and `enforce` is on) an exceeded budget is a hard block;
+    /// when `false` it only warns prominently. Default `false` (warn-only).
+    #[serde(default)]
+    pub block_on_exceed: bool,
+    /// Window the caps apply to, in days (approximates a calendar month).
+    /// Default 30, clamped 1..=3650 at the route.
+    #[serde(default)]
+    pub window_days: u32,
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceBudget>,
+    #[serde(default)]
+    pub providers: Vec<ProviderBudget>,
+}
+
+/// One budget vs. its current spend, as surfaced in the Usage UI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BudgetStatusRow {
+    /// "workspace" or "provider".
+    pub scope: String,
+    /// The workspace id or provider name.
+    pub key: String,
+    /// Human label (workspace name, or the provider name) when resolvable.
+    #[serde(default)]
+    pub label: Option<String>,
+    pub limit_usd: f64,
+    pub spent_usd: f64,
+    /// `spent / limit` (0 when no limit).
+    pub used_fraction: f64,
+    /// True once spend crosses the warn threshold (80% of the cap).
+    pub warning: bool,
+    /// True once spend meets/exceeds the cap.
+    pub exceeded: bool,
+}
+
+/// `GET /api/v1/usage/budgets` response: the config plus its live status rows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageBudgetStatus {
+    pub config: UsageBudgetConfig,
+    /// Window actually used to compute spend (after clamping/defaults).
+    pub window_days: u32,
+    pub rows: Vec<BudgetStatusRow>,
+}
+
+/// `PATCH /api/v1/mcp-servers/{id}` — partial update; absent fields are kept.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateMcpServerReq {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 /// `POST /api/v1/connections/{id}/test`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestConnectionResp {

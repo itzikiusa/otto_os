@@ -75,6 +75,62 @@ pub fn enable_browser(workspace_root: &str) -> Result<(), String> {
     write_doc(&path, &doc)
 }
 
+/// A user-configured MCP server to merge into the workspace `.mcp.json`. Mirrors
+/// the persisted `otto_core::domain::McpServer` (name/command/args/env), kept as
+/// a plain struct so `otto-sessions` needn't depend on `otto-state`.
+#[derive(Debug, Clone)]
+pub struct UserMcpServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Merge the user's enabled MCP servers into the workspace `.mcp.json`,
+/// preserving every other key — including Otto's own `otto-browser` entry. Each
+/// server is written under its `name`; an `env` map is only emitted when
+/// non-empty. Best-effort: errors are returned for logging.
+///
+/// This does NOT remove servers the user has since disabled/deleted: a stale
+/// entry written on a prior spawn is the user's `.mcp.json` to manage, and we
+/// avoid silently dropping a key they may have hand-edited. We never auto-enable
+/// — callers pass only the rows the user flipped on.
+pub fn merge_user_servers(workspace_root: &str, servers: &[UserMcpServer]) -> Result<(), String> {
+    if servers.is_empty() {
+        return Ok(());
+    }
+    let path = mcp_path(workspace_root);
+    let mut doc = read_doc(&path)?;
+    let map = doc
+        .entry("mcpServers")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or("mcpServers is not an object")?;
+    for s in servers {
+        // Reserved for Otto's managed browser server — don't let a user entry
+        // named "otto-browser" clobber it via this merge path.
+        if s.name == SERVER_KEY {
+            continue;
+        }
+        let mut entry = Map::new();
+        entry.insert("command".into(), Value::String(s.command.clone()));
+        entry.insert(
+            "args".into(),
+            Value::Array(s.args.iter().cloned().map(Value::String).collect()),
+        );
+        if !s.env.is_empty() {
+            let env: Map<String, Value> = s
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            entry.insert("env".into(), Value::Object(env));
+        }
+        map.insert(s.name.clone(), Value::Object(entry));
+    }
+    write_doc(&path, &doc)
+}
+
 /// Remove the browser MCP entry, preserving everything else. No-op if absent.
 pub fn disable_browser(workspace_root: &str) -> Result<(), String> {
     let path = mcp_path(workspace_root);

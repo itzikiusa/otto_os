@@ -9,6 +9,7 @@
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
+use otto_core::api::{BudgetStatusRow, UsageBudgetConfig, UsageBudgetStatus};
 use otto_core::Id;
 use otto_state::SettingsRepo;
 use otto_usage::{
@@ -23,6 +24,8 @@ use crate::state::ServerCtx;
 
 /// `settings` key the usage config is persisted under.
 const SETTINGS_KEY: &str = "usage";
+/// `settings` key the usage-budget config is persisted under.
+const BUDGETS_KEY: &str = "usage_budgets";
 
 async fn load_config(ctx: &ServerCtx) -> UsageConfig {
     SettingsRepo::new(ctx.pool.clone())
@@ -236,6 +239,167 @@ pub async fn install(
     save_config(&ctx, &cfg).await?;
     let _ = ctx.usage.set_retention(cfg.retention_days).await;
     Ok(Json(ctx.usage.status().await))
+}
+
+// ---------------------------------------------------------------------------
+// Usage budgets (opt-in spend caps; secondary to MCP host config)
+// ---------------------------------------------------------------------------
+
+/// Load the persisted budget config (defaults: enforcement off).
+async fn load_budgets(ctx: &ServerCtx) -> UsageBudgetConfig {
+    SettingsRepo::new(ctx.pool.clone())
+        .get(BUDGETS_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// `GET /usage/budgets` — the budget config plus live status rows (spend vs cap)
+/// over the configured window (root). Status is computed even when enforcement is
+/// off, so the UI can preview caps before turning them on.
+pub async fn budgets(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<UsageBudgetStatus>> {
+    require_root(&user)?;
+    let cfg = load_budgets(&ctx).await;
+    Ok(Json(budget_status(&ctx, cfg).await))
+}
+
+/// `PUT /usage/budgets` — replace + persist the budget config (root). Returns the
+/// new config with refreshed status. Enforcement is whatever the body sets;
+/// nothing is turned on implicitly.
+pub async fn put_budgets(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(mut cfg): Json<UsageBudgetConfig>,
+) -> ApiResult<Json<UsageBudgetStatus>> {
+    require_root(&user)?;
+    cfg.window_days = if cfg.window_days == 0 {
+        30
+    } else {
+        cfg.window_days.clamp(1, 3650)
+    };
+    let value = serde_json::to_value(&cfg)
+        .map_err(|e| ApiError(otto_core::Error::Internal(format!("serialize budgets: {e}"))))?;
+    SettingsRepo::new(ctx.pool.clone())
+        .put(BUDGETS_KEY, &value)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(budget_status(&ctx, cfg).await))
+}
+
+/// 80% of a cap is the "warning" line.
+const BUDGET_WARN_FRACTION: f64 = 0.8;
+
+/// Compute spend vs. cap for every configured budget over the window. Best-effort
+/// — on any engine error spend reads as `0` (so the UI still renders the caps).
+async fn budget_status(ctx: &ServerCtx, mut cfg: UsageBudgetConfig) -> UsageBudgetStatus {
+    let window_days = if cfg.window_days == 0 {
+        30
+    } else {
+        cfg.window_days.clamp(1, 3650)
+    };
+    cfg.window_days = window_days;
+
+    // One pass over per-session totals folds spend into both buckets.
+    let totals = ctx
+        .usage
+        .session_totals(window_days, true)
+        .await
+        .unwrap_or_default();
+    let mut by_ws: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut by_provider: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for t in &totals {
+        *by_ws.entry(t.workspace_id.clone()).or_default() += t.cost_usd;
+        *by_provider.entry(t.provider.clone()).or_default() += t.cost_usd;
+    }
+
+    let mut rows = Vec::new();
+    for b in &cfg.workspaces {
+        if b.monthly_usd <= 0.0 {
+            continue;
+        }
+        let spent = by_ws.get(&b.workspace_id).copied().unwrap_or(0.0);
+        let label = ctx.workspaces.get(&b.workspace_id).await.ok().map(|w| w.name);
+        rows.push(make_row("workspace", &b.workspace_id, label, b.monthly_usd, spent));
+    }
+    for b in &cfg.providers {
+        if b.monthly_usd <= 0.0 {
+            continue;
+        }
+        let spent = by_provider.get(&b.provider).copied().unwrap_or(0.0);
+        rows.push(make_row(
+            "provider",
+            &b.provider,
+            Some(b.provider.clone()),
+            b.monthly_usd,
+            spent,
+        ));
+    }
+
+    UsageBudgetStatus {
+        config: cfg,
+        window_days,
+        rows,
+    }
+}
+
+fn make_row(scope: &str, key: &str, label: Option<String>, limit: f64, spent: f64) -> BudgetStatusRow {
+    let used = if limit > 0.0 { spent / limit } else { 0.0 };
+    BudgetStatusRow {
+        scope: scope.to_string(),
+        key: key.to_string(),
+        label,
+        limit_usd: limit,
+        spent_usd: spent,
+        used_fraction: used,
+        warning: used >= BUDGET_WARN_FRACTION,
+        exceeded: used >= 1.0,
+    }
+}
+
+/// Outcome of a daemon-side budget consultation for a workspace + provider.
+#[derive(Debug, Clone, Default)]
+pub struct BudgetVerdict {
+    /// True when enforcement is on AND `block_on_exceed` AND a relevant cap is
+    /// exceeded. Callers that want to gate work check this.
+    pub blocked: bool,
+    /// True when enforcement is on and a relevant cap is exceeded (whether or not
+    /// blocking is enabled). Callers can use this to warn prominently.
+    pub exceeded: bool,
+    /// Human-readable reason when exceeded/blocked (which cap, spend vs limit).
+    pub reason: Option<String>,
+}
+
+/// Daemon-consultable budget check for a `(workspace, provider)`. Returns a
+/// no-op verdict when enforcement is off (the default), so callers can wire this
+/// in safely without changing behaviour until a root user opts in. Best-effort:
+/// any engine error reads as "not exceeded".
+pub async fn check_budget(ctx: &ServerCtx, workspace_id: &str, provider: &str) -> BudgetVerdict {
+    let cfg = load_budgets(ctx).await;
+    if !cfg.enforce {
+        return BudgetVerdict::default();
+    }
+    let status = budget_status(ctx, cfg.clone()).await;
+    for row in &status.rows {
+        let relevant = (row.scope == "workspace" && row.key == workspace_id)
+            || (row.scope == "provider" && row.key == provider);
+        if relevant && row.exceeded {
+            let reason = format!(
+                "{} budget exceeded: ${:.2} spent of ${:.2} cap over {}d",
+                row.scope, row.spent_usd, row.limit_usd, status.window_days
+            );
+            return BudgetVerdict {
+                blocked: cfg.block_on_exceed,
+                exceeded: true,
+                reason: Some(reason),
+            };
+        }
+    }
+    BudgetVerdict::default()
 }
 
 #[derive(Debug, Default, Deserialize)]

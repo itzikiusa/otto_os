@@ -82,6 +82,41 @@ export interface ConnectionSection {
   created_at: string;
 }
 
+/** A user-configured MCP server for a workspace. Enabled servers are merged into
+ *  the workspace's `.mcp.json` (alongside Otto's managed entries) on agent spawn.
+ *  Never auto-enabled. */
+export interface McpServer {
+  id: Id;
+  workspace_id: Id;
+  /** Key under `.mcp.json`'s mcpServers map; unique within the workspace. */
+  name: string;
+  command: string;
+  args: string[];
+  /** Extra env passed to the server. Stored in plaintext for now (like `.mcp.json`). */
+  env: Record<string, string>;
+  /** Off by default — only written to `.mcp.json` once enabled. */
+  enabled: boolean;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateMcpServerReq {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  enabled?: boolean;
+}
+
+export interface UpdateMcpServerReq {
+  name?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  enabled?: boolean;
+}
+
 export type GitProviderKind = 'github' | 'bitbucket' | 'gitlab';
 
 export interface GitAccount {

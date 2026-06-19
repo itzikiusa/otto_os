@@ -9,6 +9,7 @@
   import Channels from './Channels.svelte';
   import Notifications from './Notifications.svelte';
   import SelfImprovement from './SelfImprovement.svelte';
+  import McpServers from './McpServers.svelte';
   import InsightsSettings from './InsightsSettings.svelte';
   import SkillEvalSettings from './SkillEvalSettings.svelte';
   import ContextSoul from './ContextSoul.svelte';
@@ -30,6 +31,7 @@
     { id: 'channels', label: 'Channels' },
     { id: 'notifications', label: 'Notifications' },
     { id: 'self-improvement', label: 'Self-Improvement' },
+    { id: 'mcp-servers', label: 'MCP Servers' },
     { id: 'insights', label: 'Insights' },
     { id: 'context-soul', label: 'Context & Soul' },
     { id: 'language-servers', label: 'Language Servers' },
@@ -78,6 +80,8 @@
       <Notifications />
     {:else if page === 'self-improvement'}
       <SelfImprovement />
+    {:else if page === 'mcp-servers'}
+      <McpServers />
     {:else if page === 'insights'}
       <InsightsSettings />
     {:else if page === 'skills' && auth.isRoot}
