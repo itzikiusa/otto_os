@@ -7,10 +7,14 @@
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { router } from '../lib/router.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import ShareModal from '../modules/agents/ShareModal.svelte';
 
   // `bellGutter` reserves space on the right so the shell's floating
   // notification bell never overlaps the tab-bar controls.
   let { bellGutter = false }: { bellGutter?: boolean } = $props();
+
+  // Share modal: tracks the session id we're sharing; null = closed.
+  let shareSessionId = $state<string | null>(null);
 
   let renamingId: string | null = $state(null);
   let draft = $state('');
@@ -88,6 +92,9 @@
           { label: 'Close tab', icon: 'x', action: () => ws.closeTab(id) },
           { separator: true },
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+          ...(id !== DB_PANE_ID
+            ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) }]
+            : []),
           { separator: true },
           {
             label: ws.viewMode === 'tabs' ? 'Switch to tiled view' : 'Switch to tabbed view',
@@ -317,3 +324,7 @@
     color: var(--accent);
   }
 </style>
+
+{#if shareSessionId}
+  <ShareModal sessionId={shareSessionId} onclose={() => (shareSessionId = null)} />
+{/if}
