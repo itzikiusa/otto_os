@@ -44,6 +44,13 @@ cd ui && npm run build && cd ..
 
 # 2. Daemon (release)
 cargo build --release -p ottod
+#   For REMOTE / phone access (serve the SPA from the daemon over HTTP/Cloudflare
+#   Tunnel), build with the `embed-ui` feature INSTEAD — it bakes ui/dist into the
+#   binary so https://<host>/ returns the app same-origin (hash-router deep links /
+#   refresh / back all resolve correctly). Build order matters: step 1 (npm run
+#   build → ui/dist) MUST run first, because rust-embed reads ui/dist at compile time.
+#       cargo build --release -p ottod --features embed-ui
+#   See docs/remote-access-runbook.md for exposure (Cloudflare Tunnel) + PWA install.
 
 # 3. Bundle the daemon as the app's sidecar (Tauri externalBin).
 #    The filename MUST carry the host target triple.
