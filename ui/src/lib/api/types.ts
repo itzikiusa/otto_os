@@ -380,6 +380,15 @@ export interface AdminSessionsResp {
   sessions: AdminSessionRow[];
 }
 
+/**
+ * `POST /api/v1/admin/impersonate/{user_id}` response — mirrors `ImpersonateResp`
+ * in api.rs. The short-lived impersonation bearer token (returned once); the UI
+ * swaps to it to act-as the target user and calls `/admin/impersonate/stop` to end.
+ */
+export interface ImpersonateResp {
+  token: string;
+}
+
 // ---------------------------------------------------------------------------
 // Meta / auth
 // ---------------------------------------------------------------------------

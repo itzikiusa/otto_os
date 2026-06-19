@@ -1,0 +1,16 @@
+-- Audited admin impersonation (RBAC Task 5.2).
+--
+-- An impersonation token is a short-lived `auth_sessions` row of a new
+-- `kind = 'impersonation'`:
+--   user_id           = the REAL token owner (the admin doing the impersonating)
+--   acting_as_user_id = the EFFECTIVE / target user being acted-as
+--
+-- `authenticate()` resolves such a row into an AuthContext where
+-- `real_user`  = the admin (user_id) and
+-- `effective_user` = the target (acting_as_user_id). Every authorization decision
+-- runs against the effective user; every audit entry records the real user.
+--
+-- The `kind` column (added in 0030 with `DEFAULT 'session'` and NO CHECK
+-- constraint) freely accepts the new 'impersonation' value — no constraint to
+-- widen. acting_as_user_id is NULL for every existing/normal/api token.
+ALTER TABLE auth_sessions ADD COLUMN acting_as_user_id TEXT;

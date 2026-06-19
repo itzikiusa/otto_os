@@ -175,6 +175,20 @@ pub struct AdminSessionsResp {
 }
 
 // ---------------------------------------------------------------------------
+// Impersonation (RBAC Task 5.2)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/admin/impersonate/{user_id}` response — the short-lived
+/// impersonation bearer token the admin swaps to in order to act as the target
+/// user. The raw secret is returned exactly once (only its hash is stored).
+/// Every authorization decision then runs against the *target* (effective)
+/// user; every audit entry records the *admin* (real) user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImpersonateResp {
+    pub token: String,
+}
+
+// ---------------------------------------------------------------------------
 // Users / workspaces
 // ---------------------------------------------------------------------------
 

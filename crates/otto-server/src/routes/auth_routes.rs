@@ -19,7 +19,7 @@ use otto_core::{Error, Id};
 use otto_rbac::AuthRepo;
 use otto_state::{NewAuditEntry, UsersRepo};
 
-use crate::auth::{BearerToken, CurrentUser};
+use crate::auth::{BearerToken, CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::login_throttle::{self, AttemptStore};
 use crate::state::ServerCtx;
@@ -162,11 +162,23 @@ pub async fn me(CurrentUser(user): CurrentUser) -> Json<User> {
 /// The raw secret is returned exactly once (only its hash is stored). Use it as
 /// `Authorization: Bearer <token>` on every route, or as `?token=<token>` on
 /// the WebSocket endpoints.
+///
+/// **Impersonation guardrail (Task 5.2):** an impersonated request (one whose
+/// bearer is an impersonation token — `real_user != effective_user`) may NOT
+/// mint a PAT. Otherwise an admin acting-as a user could forge a long-lived
+/// credential *as that user*, escaping the short-TTL, fully-audited overlay.
+/// → 403. (The same guard will later cover share-link minting.)
 pub async fn create_token(
     State(ctx): State<ServerCtx>,
+    auth: CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<CreateApiTokenReq>,
 ) -> ApiResult<Json<CreateApiTokenResp>> {
+    if auth.real_user().id != auth.effective_user().id {
+        return Err(ApiError(Error::Forbidden(
+            "an impersonated session cannot mint API tokens".into(),
+        )));
+    }
     let label = req
         .label
         .as_deref()

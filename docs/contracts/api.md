@@ -749,6 +749,46 @@ check. Both routes are mapped to `Require(Users, Admin)` in the policy table.
   detail: {owner_id, workspace_id}}`.
 - 404 if the session `{id}` does not exist.
 
+## Admin impersonation (act-as, audited; RBAC Task 5.2)
+
+An admin can "act as" another user to see exactly what they see — an
+**effective-user overlay**, not a re-login. `start` mints a short-lived
+impersonation token whose owner is the admin (the **real** user) and whose
+`acting_as_user_id` is the target (the **effective** user). `authenticate`
+resolves it to `AuthContext{real_user: admin, effective_user: target}`, so **every
+authorization decision runs against the target** while **every audit entry records
+the admin**. The UI swaps its bearer to the returned token; `stop` revokes it and
+the UI restores the admin's own token.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /admin/impersonate/{user_id} | Users:Admin or root | — | `ImpersonateResp {token}` (audited `impersonate.start`) |
+| POST /admin/impersonate/stop | the impersonating session (self-scoped) | — | `204 No Content` (revokes the presented token; audited `impersonate.stop`) |
+
+- `ImpersonateResp` = `{token}` — the raw impersonation token, returned **exactly
+  once** (only its hash is stored). Short fixed TTL (30 min); the expiry is never
+  slid, so the overlay always times out predictably.
+- `start` is gated `Users:Admin`/root by the policy table. The handler then
+  enforces the **anti-escalation guardrails** (403 on violation):
+  1. **No up/sideways:** the target may not be root, nor hold `Users:Admin`
+     (can't impersonate root or a fellow Users-admin).
+  2. **No nesting:** an impersonation token (real ≠ effective) may not start
+     another impersonation.
+  3. **No self:** the target may not be the caller (404 if the target is absent;
+     403 if disabled).
+  4. **Impersonation cannot mint PATs:** `POST /auth/tokens` is rejected (403)
+     when the request is impersonated (real ≠ effective) — an admin acting-as a
+     user can't forge a long-lived credential as that user. (The same guard will
+     later cover share-link minting.)
+- `stop` is **self-scoped** (`Exempt` in the policy table, like `/auth/logout`) —
+  the effective user mid-impersonation is a plain user, so it cannot be
+  `Users:Admin`-gated or "Exit" would be impossible. It revokes the *presented*
+  token. After `stop`, that token returns `401`.
+- Audit: `impersonate.start` = `{user_id: admin (real), target: target_id
+  (effective), detail: {real_user_id, effective_user_id, effective_username}}`;
+  `impersonate.stop` = `{user_id: real, target: effective, detail: {real_user_id,
+  effective_user_id}}`.
+
 ## Trust & Safety (security audit log + posture)
 
 | Method & path | Auth | Request | Response |
@@ -756,7 +796,7 @@ check. Both routes are mapped to `Require(Users, Admin)` in the policy table.
 | GET /audit-log | root | query: `from?` `to?` (RFC3339, inclusive `ts` bounds) · `action?` · `user_id?` · `limit?` (≤500, default 100) · `offset?` | AuditLogResp `{entries: AuditEntry[], total}` (newest first; `total` ignores paging) |
 | GET /security-posture | root | — | SecurityPostureResp `{network_listener, network_listener_port?, loopback_only, active_api_tokens}` |
 
-The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`), `grant.changed` (`target` = the user whose grants changed; `detail.old`/`detail.new` grant lists), and `session.terminated` (an admin force-terminated a session via `POST /admin/sessions/{id}/terminate`; `target` = session id; `detail.owner_id` + `detail.workspace_id`). The posture summary derives entirely from existing settings + the auth store (no new state): the network listener key drives `network_listener` / `network_listener_port` / `loopback_only`, and `active_api_tokens` counts unexpired API tokens instance-wide.
+The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`), `grant.changed` (`target` = the user whose grants changed; `detail.old`/`detail.new` grant lists), `session.terminated` (an admin force-terminated a session via `POST /admin/sessions/{id}/terminate`; `target` = session id; `detail.owner_id` + `detail.workspace_id`), and `impersonate.start` / `impersonate.stop` (an admin began / ended acting-as another user; `user_id` = the real admin, `target` = the effective/impersonated user, `detail.real_user_id` + `detail.effective_user_id`). The posture summary derives entirely from existing settings + the auth store (no new state): the network listener key drives `network_listener` / `network_listener_port` / `loopback_only`, and `active_api_tokens` counts unexpired API tokens instance-wide.
 
 ## Usage tracking & system metrics (embedded ClickHouse)
 

@@ -18,6 +18,10 @@ const TOKEN_TTL_DAYS: i64 = 30;
 /// Fixed lifetime for `kind='api'` personal access tokens (~10 years). Long
 /// enough to behave as "create once"; the expiry is never slid for these.
 const API_TOKEN_TTL_DAYS: i64 = 3650;
+/// Default fixed lifetime for `kind='impersonation'` tokens (30 minutes). Short
+/// and **never slid** — an admin acting-as a user gets a tight window, after
+/// which the overlay simply expires (the admin's own token is unaffected).
+pub const IMPERSONATION_TOKEN_TTL_MINS: i64 = 30;
 /// Minimum age of `last_seen_at` before we touch the row again (throttles
 /// writes; for session tokens this also slides the expiry).
 const TOUCH_THROTTLE_SECS: i64 = 3600;
@@ -70,13 +74,21 @@ impl AuthRepo {
     /// Validate a raw token: lookup by hash, check expiry and that the user
     /// is not disabled, then slide expiry (throttled to once per hour).
     ///
-    /// Returns an [`AuthContext`]. For a normal token (every token today) the
-    /// context's `real_user` and `effective_user` are the *same* looked-up user
-    /// — impersonation (Task 5.2) is the only thing that will diverge them.
+    /// Returns an [`AuthContext`]:
+    /// - For a **normal** token (`kind` `'session'`/`'api'`) the context's
+    ///   `real_user` and `effective_user` are the same looked-up user.
+    /// - For an **impersonation** token (`kind='impersonation'`, Task 5.2) the
+    ///   `real_user` is the admin that owns the row (`user_id`) and the
+    ///   `effective_user` is the impersonation target (`acting_as_user_id`).
+    ///   The row is rejected (Unauthorized) if it has expired or if **either**
+    ///   the admin or the target user is disabled (the target must exist).
     pub async fn authenticate(&self, token: &str) -> Result<AuthContext> {
         let hash = token_hash(token);
+        // Resolve the row's own fields (kind/expiry/target) plus the REAL user
+        // (the token owner) in one shot. The target user (impersonation only) is
+        // loaded separately below to keep the common path a single join.
         let row = sqlx::query(
-            "SELECT a.token_hash, a.expires_at, a.last_seen_at, a.kind,
+            "SELECT a.token_hash, a.expires_at, a.last_seen_at, a.kind, a.acting_as_user_id,
                     u.id, u.username, u.display_name, u.is_root, u.disabled, u.created_at
              FROM auth_sessions a JOIN users u ON u.id = a.user_id
              WHERE a.token_hash = ?",
@@ -92,24 +104,22 @@ impl AuthRepo {
         if expires_at <= now {
             return Err(Error::Unauthorized);
         }
+        // The REAL user (token owner) must not be disabled.
         if row.get::<i64, _>("disabled") != 0 {
             return Err(Error::Unauthorized);
         }
 
+        let kind: String = row.get("kind");
+        let is_impersonation = kind == "impersonation";
+
         let last_seen = parse_ts(&row.get::<String, _>("last_seen_at"))?;
         if now - last_seen > Duration::seconds(TOUCH_THROTTLE_SECS) {
             // Always record "last used"; only SLIDE the expiry for interactive
-            // session tokens. API tokens keep their long fixed lifetime so they
-            // never silently expire from regular use.
-            let is_api = row.get::<String, _>("kind") == "api";
-            if is_api {
-                sqlx::query("UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?")
-                    .bind(now.to_rfc3339())
-                    .bind(&hash)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|e| Error::Internal(format!("touch token: {e}")))?;
-            } else {
+            // session tokens. API tokens keep their long fixed lifetime and
+            // impersonation tokens have a SHORT FIXED TTL — neither is ever slid
+            // (impersonation must time out predictably).
+            let slide = !is_impersonation && kind != "api";
+            if slide {
                 sqlx::query(
                     "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
                 )
@@ -119,10 +129,17 @@ impl AuthRepo {
                 .execute(&self.pool)
                 .await
                 .map_err(|e| Error::Internal(format!("touch token: {e}")))?;
+            } else {
+                sqlx::query("UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?")
+                    .bind(now.to_rfc3339())
+                    .bind(&hash)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| Error::Internal(format!("touch token: {e}")))?;
             }
         }
 
-        let user = User {
+        let real_user = User {
             id: row.get("id"),
             username: row.get("username"),
             display_name: row.get("display_name"),
@@ -130,11 +147,44 @@ impl AuthRepo {
             disabled: false,
             created_at: parse_ts(&row.get::<String, _>("created_at"))?,
         };
+
+        if is_impersonation {
+            // Impersonation overlay: load the target (effective) user and reject
+            // if it is missing or disabled. Authorization runs against the
+            // target; audit records the admin (real_user).
+            let target_id: Option<String> = row.get("acting_as_user_id");
+            let target_id = target_id.ok_or(Error::Unauthorized)?;
+            let target = sqlx::query(
+                "SELECT id, username, display_name, is_root, disabled, created_at
+                 FROM users WHERE id = ?",
+            )
+            .bind(&target_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("authenticate target: {e}")))?
+            .ok_or(Error::Unauthorized)?;
+            if target.get::<i64, _>("disabled") != 0 {
+                return Err(Error::Unauthorized);
+            }
+            let effective_user = User {
+                id: target.get("id"),
+                username: target.get("username"),
+                display_name: target.get("display_name"),
+                is_root: target.get::<i64, _>("is_root") != 0,
+                disabled: false,
+                created_at: parse_ts(&target.get::<String, _>("created_at"))?,
+            };
+            return Ok(AuthContext {
+                real_user,
+                effective_user,
+            });
+        }
+
         // Normal token: the real (token owner) and effective (acted-as) user are
-        // the same. Task 5.2 introduces the only path where these differ.
+        // the same.
         Ok(AuthContext {
-            real_user: user.clone(),
-            effective_user: user,
+            real_user: real_user.clone(),
+            effective_user: real_user,
         })
     }
 
@@ -202,6 +252,45 @@ impl AuthRepo {
                 expires_at,
             },
         ))
+    }
+
+    /// Mint a short-lived **impersonation** token: the REAL owner is `real_user_id`
+    /// (the admin) and the EFFECTIVE / acted-as user is `target_user_id`. Returns
+    /// the RAW token (shown to the caller exactly once).
+    ///
+    /// The token's TTL is a SHORT fixed window (`ttl`, e.g. 30 min); it is never
+    /// slid in [`authenticate`], so the overlay always times out predictably.
+    /// All guardrails (caller authority, no impersonating up/sideways, no nesting,
+    /// disabled/absent/self target) are enforced by the *route* before this is
+    /// called — this method only persists the row.
+    pub async fn issue_impersonation_token(
+        &self,
+        real_user_id: &Id,
+        target_user_id: &Id,
+        ttl: Duration,
+    ) -> Result<String> {
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let token = hex::encode(buf);
+        let prefix: String = token.chars().take(12).collect();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO auth_sessions
+               (id, user_id, token_hash, created_at, expires_at, last_seen_at, kind, token_prefix, acting_as_user_id)
+             VALUES (?, ?, ?, ?, ?, ?, 'impersonation', ?, ?)",
+        )
+        .bind(new_id())
+        .bind(real_user_id)
+        .bind(token_hash(&token))
+        .bind(now.to_rfc3339())
+        .bind((now + ttl).to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(&prefix)
+        .bind(target_user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("issue impersonation token: {e}")))?;
+        Ok(token)
     }
 
     /// List a user's API tokens (newest first). Never includes the secret.
@@ -377,6 +466,95 @@ mod tests {
         assert_eq!(
             repo.authenticate(&token).await.unwrap().effective_user.id,
             owner
+        );
+    }
+
+    /// Seed a user with an explicit `disabled` flag; returns its id.
+    async fn seed_user_disabled(pool: &SqlitePool, username: &str, disabled: bool) -> Id {
+        let id = new_id();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, disabled, created_at)
+             VALUES (?, ?, ?, ?, 0, ?, ?)",
+        )
+        .bind(&id)
+        .bind(username)
+        .bind("hash")
+        .bind("Test User")
+        .bind(disabled as i64)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Impersonation token: mint → authenticate resolves real=admin /
+    /// effective=target → revoke (stop) → auth fails.
+    #[tokio::test]
+    async fn impersonation_token_resolves_real_and_effective() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let admin = seed_user(&pool, "admin").await;
+        let target = seed_user(&pool, "target").await;
+
+        let token = repo
+            .issue_impersonation_token(&admin, &target, Duration::minutes(30))
+            .await
+            .unwrap();
+
+        let ctx = repo.authenticate(&token).await.unwrap();
+        // Authorization runs against the target; audit records the admin.
+        assert_eq!(ctx.real_user.id, admin, "real_user is the admin (audit)");
+        assert_eq!(
+            ctx.effective_user.id, target,
+            "effective_user is the target (authz)"
+        );
+
+        // `stop` revokes the presented impersonation token.
+        repo.revoke(&token).await.unwrap();
+        assert!(
+            matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
+            "revoked impersonation token must no longer authenticate"
+        );
+    }
+
+    /// An impersonation token whose TTL has elapsed is rejected (it is a SHORT
+    /// fixed window and is never slid).
+    #[tokio::test]
+    async fn impersonation_token_expires() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let admin = seed_user(&pool, "admin").await;
+        let target = seed_user(&pool, "target").await;
+
+        // Negative TTL ⇒ already expired at mint time.
+        let token = repo
+            .issue_impersonation_token(&admin, &target, Duration::minutes(-1))
+            .await
+            .unwrap();
+        assert!(
+            matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
+            "an expired impersonation token must not authenticate"
+        );
+    }
+
+    /// A disabled target user invalidates an otherwise-valid impersonation token
+    /// (the effective identity must be a live account).
+    #[tokio::test]
+    async fn impersonation_rejects_disabled_target() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let admin = seed_user(&pool, "admin").await;
+        let target = seed_user_disabled(&pool, "target", true).await;
+
+        let token = repo
+            .issue_impersonation_token(&admin, &target, Duration::minutes(30))
+            .await
+            .unwrap();
+        assert!(
+            matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
+            "impersonating a disabled target must be rejected"
         );
     }
 

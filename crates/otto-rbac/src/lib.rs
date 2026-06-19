@@ -13,7 +13,7 @@ use otto_state::WorkspacesRepo;
 use sqlx::SqlitePool;
 
 pub use passwords::{hash_password, validate_password, verify_password, MIN_PASSWORD_LEN};
-pub use tokens::AuthRepo;
+pub use tokens::{AuthRepo, IMPERSONATION_TOKEN_TTL_MINS};
 
 /// `TokenAuthenticator` backed by [`AuthRepo`].
 #[derive(Clone)]

@@ -403,6 +403,23 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/admin/sessions" || p.starts_with("/admin/sessions/") {
         return Require(Users, Admin);
     }
+    // Admin impersonation (Task 5.2). START (`/admin/impersonate/{user_id}`) is
+    // gated `Users:Admin` (or root) so a granted admin — not only root — can
+    // begin acting-as another user; the handler then enforces the anti-escalation
+    // guardrails (never impersonate root or a fellow Users-admin, no nesting, no
+    // self, …) on top of this feature gate.
+    //
+    // STOP (`/admin/impersonate/stop`) is **self-scoped** — it revokes the
+    // *presented* token to end the overlay. Authorization here runs against the
+    // EFFECTIVE user (the impersonation target, typically a plain non-admin), so
+    // it cannot be `Users:Admin`-gated or "Exit" would be impossible. Treat it
+    // like `/auth/logout`: Exempt (any authed session may end its own overlay).
+    if p == "/admin/impersonate/stop" {
+        return Exempt;
+    }
+    if p.starts_with("/admin/impersonate") {
+        return Require(Users, Admin);
+    }
     // Activity trail / tasks / summary are Agents reads/writes (per-session data),
     // owner-scoped in Phase 3. trail/tasks GET=View, append/put=Edit; summary=View.
     if p == "/workspaces/{wid}/sessions/{sid}/trail"
@@ -515,6 +532,23 @@ mod tests {
         assert_eq!(
             pol(Method::POST, "/api/v1/admin/sessions/{id}/terminate"),
             Require(Users, Admin)
+        );
+    }
+
+    #[test]
+    fn admin_impersonate_start_is_users_admin_stop_is_exempt() {
+        // Task 5.2: START is gated by Users:Admin (root passes via the guard);
+        // the handler enforces the anti-escalation guardrails on top.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/admin/impersonate/{user_id}"),
+            Require(Users, Admin)
+        );
+        // STOP is self-scoped (revokes the presented token) and must NOT require
+        // Users:Admin — the effective user mid-impersonation is a plain user, so
+        // an Admin gate would make "Exit" impossible.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/admin/impersonate/stop"),
+            Exempt
         );
     }
 

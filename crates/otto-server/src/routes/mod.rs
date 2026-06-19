@@ -10,6 +10,7 @@ pub mod grants;
 pub mod grpc;
 pub mod fs;
 pub mod handover;
+pub mod impersonate;
 pub mod logs;
 pub mod mcp_servers;
 pub mod meta;
@@ -88,6 +89,17 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/admin/sessions/{id}/terminate",
             post(admin_sessions::terminate::<ServerCtx>),
+        )
+        // --- Admin impersonation (act-as, audited; RBAC Task 5.2) ---------
+        // Gated Users:Admin/root via policy.rs; the handlers enforce the
+        // anti-escalation guardrails (never up/sideways, no nesting, no self).
+        .route(
+            "/admin/impersonate/{user_id}",
+            post(impersonate::start::<ServerCtx>),
+        )
+        .route(
+            "/admin/impersonate/stop",
+            post(impersonate::stop::<ServerCtx>),
         )
         .route(
             "/workspaces",
