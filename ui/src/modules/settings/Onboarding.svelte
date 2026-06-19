@@ -33,6 +33,14 @@
   // after setup, since it needs an authenticated session).
   const clickhouse = $derived(auth.meta?.tools?.find((t) => t.name === 'clickhouse'));
 
+  // Detected agent CLIs (claude / codex). Otto can't run an agent session
+  // without one, so the tool-check step calls this out specifically — the
+  // first-run coach on the Agents page then walks the user to a launched agent.
+  const agentTools = $derived(
+    (auth.meta?.tools ?? []).filter((t) => t.name === 'claude' || t.name === 'codex'),
+  );
+  const hasAgentCli = $derived(agentTools.some((t) => t.found));
+
   async function finish(): Promise<void> {
     if (busy) return;
     busy = true;
@@ -191,6 +199,17 @@
             <div class="dim">Tool detection unavailable.</div>
           {/each}
         </div>
+
+        <p class="hint-line">
+          {#if hasAgentCli}
+            An agent CLI is ready. After setup, the Agents page will walk you through
+            launching your first session.
+          {:else}
+            No coding-agent CLI yet. Install one
+            (<span class="mono">npm i -g @anthropic-ai/claude-code</span>) — Otto will guide the
+            rest from the Agents page.
+          {/if}
+        </p>
 
         {#if error}<div class="hint err">{error}</div>{/if}
 

@@ -233,6 +233,17 @@ class WorkspaceStore {
     }
   }
 
+  /**
+   * Write text into a session's PTY **server-side** (`POST /sessions/{id}/input`),
+   * which works even when no Terminal is mounted for the session yet — unlike
+   * {@link injectInput}, which relies on an open Terminal applying the store
+   * update. `submit` appends a newline so the agent runs it immediately (default).
+   * Used by the first-run coach to seed a freshly launched session with a prompt.
+   */
+  async sendInput(sessionId: Id, text: string, submit = true): Promise<void> {
+    await api.post(`/sessions/${sessionId}/input`, { text, submit });
+  }
+
   /** Inject text into a session's PTY (the Terminal for `sessionId` applies it). */
   injectInput(sessionId: Id, text: string): void {
     // Sending input is attending to it — drop any "needs you" flag.

@@ -235,7 +235,7 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 |---|---|---|---|
 | POST /sessions/{id}/archive | ws editor | — | 204 (archive a channel/agent session) |
 | POST /sessions/{id}/unarchive | ws editor | — | 204 (restore an archived session) |
-| POST /sessions/{id}/input | ws editor | `{text}` (submits a keystroke/paste) | 204 |
+| POST /sessions/{id}/input | ws editor | `SendInputReq{text, submit?}` — writes a keystroke/paste into the PTY (`submit` omitted/true appends a newline) | 204 |
 | POST /sessions/{id}/handover | ws editor | — | starts a handover; progress via `SessionMetaUpdated` |
 | POST /sessions/{id}/handover/brief | ws editor | — | generates a handover brief for the session |
 | POST /sessions/{session_id}/attach-product | ws editor | `{story_id}` | attaches a product story to the session |

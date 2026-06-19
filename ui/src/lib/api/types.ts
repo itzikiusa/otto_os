@@ -379,6 +379,15 @@ export interface UpdateSessionReq {
   meta?: Record<string, unknown> | null;
 }
 
+/** POST /sessions/{id}/input — write text into a session's PTY server-side. */
+export interface SendInputReq {
+  /** Text to write into the PTY. */
+  text: string;
+  /** Append a newline so the agent runs it immediately. `null`/`true` submits;
+   *  `false` sends verbatim so the user can inspect/edit before pressing Enter. */
+  submit?: boolean | null;
+}
+
 // ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------

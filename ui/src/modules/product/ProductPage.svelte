@@ -286,11 +286,20 @@
       {:else if !product.selectedId}
         <div class="empty-state">
           <Icon name="file" size={28} />
-          <p>Select a story from the sidebar, or import one to get started.</p>
-          <button class="btn ghost" onclick={() => (importOpen = true)}>
-            <Icon name="plus" size={13} />
-            Import story
-          </button>
+          <p>
+            Analyse a Jira/Confluence story — ask questions, draft a plan and test cases, then
+            publish back. Import an existing issue or start a blank draft.
+          </p>
+          <div class="empty-actions">
+            <button class="btn primary" onclick={createDraft} disabled={draftCreating}>
+              <Icon name="plus" size={13} />
+              {draftCreating ? 'Creating…' : 'Start a draft'}
+            </button>
+            <button class="btn ghost" onclick={() => (importOpen = true)}>
+              <Icon name="plus" size={13} />
+              Import story
+            </button>
+          </div>
         </div>
       {:else if product.tab === 'overview'}
         <OverviewTab />
@@ -709,8 +718,12 @@
   .empty-state p {
     margin: 0;
     font-size: 13px;
-    max-width: 320px;
+    max-width: 380px;
     line-height: 1.5;
+  }
+  .empty-actions {
+    display: flex;
+    gap: 8px;
   }
   .muted {
     padding: 32px 16px;
