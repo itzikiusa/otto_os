@@ -6,6 +6,7 @@
   // workspace's native CLI files on demand.
   import { contextApi } from '../../lib/api/context';
   import type {
+    ContextPreviewReq,
     LibrarySkill,
     LibrarySoul,
     UpdateWorkspaceContextReq,
@@ -16,6 +17,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import ContextPreview from '../agents/ContextPreview.svelte';
 
   // ---------------------------------------------------------------------------
   // State
@@ -35,6 +37,19 @@
   let selectedSkills: Set<string> = $state(new Set());
 
   const wsId = $derived(ws.currentId);
+
+  // Which provider the dry-run preview targets.
+  let previewProvider = $state('claude');
+  // The not-yet-saved selection, fed to the preview so it reflects in-flight
+  // edits (skills/soul/extra/memory) rather than only what's persisted.
+  function buildPreviewOverrides(c: WorkspaceContextConfig): ContextPreviewReq {
+    return {
+      skills: allSkills ? null : [...selectedSkills],
+      soul: c.soul,
+      extra_context_md: c.extra_context_md,
+      include_memory: c.include_memory,
+    };
+  }
 
   // Agent CLIs offered for materialization (from /meta), restricted to the two
   // providers this feature supports.
@@ -267,6 +282,35 @@
         <span class="dim">No supported providers available.</span>
       {/if}
     </div>
+
+    <!-- Preview (dry-run) -->
+    {#if providers.length > 0 && wsId}
+      <h2 class="section-title">Preview</h2>
+      <div class="card-info dim">
+        See exactly what a spawn would write — the skill files, soul, generated
+        instruction file and runtime hooks — for the current selection above,
+        before saving or materializing.
+      </div>
+      <div class="actions materialize-actions">
+        <label class="preview-prov">
+          <span class="hint">Provider</span>
+          <select class="input" bind:value={previewProvider}>
+            {#each providers as p (p)}
+              <option value={p}>{p}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+      <div class="preview-box">
+        {#if cfg}
+          <ContextPreview
+            {wsId}
+            provider={previewProvider}
+            overrides={buildPreviewOverrides(cfg)}
+          />
+        {/if}
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -369,5 +413,22 @@
   .card-info {
     font-size: 12px;
     max-width: 640px;
+  }
+
+  .preview-prov {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .preview-prov .input {
+    width: auto;
+  }
+  .preview-box {
+    margin-top: 10px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
+    max-width: 720px;
   }
 </style>

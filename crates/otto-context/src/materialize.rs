@@ -1,18 +1,75 @@
 //! Per-provider materialization: resolve the active skills/soul/context for a
 //! workspace and write them into the CLI's native on-disk form.
 //!
-//! All filesystem operations are best-effort: a failure is logged via
-//! `tracing::warn!` and materialization continues. This function never panics —
-//! it is reachable from the spawn path, where degraded context beats no session.
+//! The flow is split into a pure-ish **plan** and an effectful **provision**:
+//! [`plan`] resolves the active library entries and computes every artifact a
+//! spawn would produce — the instruction file (`CLAUDE.md`/`AGENTS.md`), the
+//! skill files, the activity-hook settings — without touching disk. [`provision`]
+//! executes that plan, and the dry-run preview ([`preview`]) describes it. Both
+//! the real spawn path and the preview endpoint share `plan`, so what you see in
+//! the preview is exactly what a session would get.
+//!
+//! All filesystem operations in `provision` are best-effort: a failure is logged
+//! via `tracing::warn!` and materialization continues. The spawn path never
+//! panics — degraded context beats no session.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use otto_core::api::{LibrarySkill, MaterializeProviderResult, WorkspaceContextConfig};
+use otto_core::api::{
+    ContextEnforcement, ContextPlanFile, ContextPlanSkill, ContextPreviewProvider, LibrarySkill,
+    MaterializeProviderResult, WorkspaceContextConfig,
+};
 use serde_json::{json, Value};
 
 use crate::library::Library;
 use crate::merge;
+
+/// How many leading lines of an artifact's content the preview carries.
+const PREVIEW_LINES: usize = 12;
+
+/// One skill artifact the plan wants on disk. Either a recursive copy of the
+/// library skill dir (multi-file skills with references/assets/scripts) or a
+/// single `SKILL.md` written from the in-memory body (legacy/in-memory skills).
+enum SkillArtifact {
+    /// Copy every file under `lib_dir` into `dest_dir`.
+    CopyDir { lib_dir: PathBuf, dest_dir: PathBuf },
+    /// Write `body` to a single `SKILL.md` under `dest_dir`.
+    Body { dest_dir: PathBuf, body: String },
+}
+
+/// The full set of artifacts a spawn would materialize for one provider,
+/// computed without writing anything. Shared by [`provision`] and [`preview`].
+struct ProviderPlan {
+    provider: String,
+    skipped: bool,
+    /// The resolved active skills (in library order).
+    skills: Vec<LibrarySkill>,
+    /// The active soul name, if any.
+    soul_name: Option<String>,
+    /// Skill artifacts to materialize (claude only; empty for codex).
+    skill_artifacts: Vec<SkillArtifact>,
+    /// Managed-skill manifest names + the skills dir it lives under (claude only).
+    skills_dir: Option<PathBuf>,
+    /// The instruction file (CLAUDE.md/AGENTS.md) path and the fully-merged
+    /// content that would be written into it.
+    instruction: Option<InstructionPlan>,
+    /// The activity-hooks settings file (claude only): path + merged JSON.
+    hooks: Option<HooksPlan>,
+}
+
+/// The instruction file a provider writes: its path, the Otto region block, and
+/// the merged file content (region merged into whatever exists on disk now).
+struct InstructionPlan {
+    path: PathBuf,
+    merged: String,
+}
+
+/// The activity-hooks settings file: its path and the merged JSON content.
+struct HooksPlan {
+    path: PathBuf,
+    merged: String,
+}
 
 /// Materialize the active context for `provider` into `cwd`.
 ///
@@ -24,13 +81,42 @@ pub fn provision(
     cwd: &str,
     provider: &str,
 ) -> MaterializeProviderResult {
+    let plan = plan(library, cfg, cwd, provider);
+    execute(plan)
+}
+
+/// Dry-run: describe exactly what [`provision`] would write for `provider`,
+/// without spawning a session or touching disk.
+pub fn preview(
+    library: &Library,
+    cfg: &WorkspaceContextConfig,
+    cwd: &str,
+    provider: &str,
+) -> ContextPreviewProvider {
+    describe(plan(library, cfg, cwd, provider))
+}
+
+/// Resolve every artifact `provider` would materialize for `cfg` into `cwd`,
+/// without writing anything. The single source of truth shared by `provision`
+/// and `preview`.
+fn plan(
+    library: &Library,
+    cfg: &WorkspaceContextConfig,
+    cwd: &str,
+    provider: &str,
+) -> ProviderPlan {
     match provider {
-        "claude" => provision_claude(library, cfg, cwd),
-        "codex" => provision_codex(library, cfg, cwd),
-        other => MaterializeProviderResult {
+        "claude" => plan_claude(library, cfg, cwd),
+        "codex" => plan_codex(library, cfg, cwd),
+        other => ProviderPlan {
             provider: other.to_string(),
-            files_written: Vec::new(),
             skipped: true,
+            skills: Vec::new(),
+            soul_name: None,
+            skill_artifacts: Vec::new(),
+            skills_dir: None,
+            instruction: None,
+            hooks: None,
         },
     }
 }
@@ -45,14 +131,20 @@ fn active_skills(library: &Library, cfg: &WorkspaceContextConfig) -> Vec<Library
     }
 }
 
-/// Resolve the active soul body: the workspace soul if set and present, else
-/// the global default soul, else none.
-fn active_soul_body(library: &Library, cfg: &WorkspaceContextConfig) -> Option<String> {
-    let name = match &cfg.soul {
+/// Resolve the active soul name: the workspace soul if set, else the global
+/// default soul, else none. (Resolved to a name; the body is fetched separately.)
+fn active_soul_name(library: &Library, cfg: &WorkspaceContextConfig) -> Option<String> {
+    match &cfg.soul {
         Some(n) => Some(n.clone()),
         None => library.default_soul(),
-    }?;
-    library.get_soul(&name).map(|s| s.body)
+    }
+}
+
+/// Resolve the active soul body, given the resolved name. `None` when the soul
+/// is unset or doesn't exist in the library.
+fn active_soul_body(library: &Library, name: &Option<String>) -> Option<String> {
+    let name = name.as_ref()?;
+    library.get_soul(name).map(|s| s.body)
 }
 
 /// Encode a cwd into claude's per-project directory name: every non-alphanumeric
@@ -83,12 +175,13 @@ fn build_block(
     library: &Library,
     cfg: &WorkspaceContextConfig,
     cwd: &str,
+    soul_name: &Option<String>,
     skills: &[LibrarySkill],
     include_skill_bodies: bool,
 ) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    if let Some(soul) = active_soul_body(library, cfg) {
+    if let Some(soul) = active_soul_body(library, soul_name) {
         sections.push(format!("## Soul\n\n{}", soul.trim_end()));
     }
 
@@ -146,87 +239,308 @@ fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<Vec<String>> {
     Ok(written)
 }
 
-fn provision_claude(
-    library: &Library,
-    cfg: &WorkspaceContextConfig,
-    cwd: &str,
-) -> MaterializeProviderResult {
-    let mut files_written: Vec<String> = Vec::new();
+/// Plan the claude materialization for `cfg` into `cwd` (no writes).
+fn plan_claude(library: &Library, cfg: &WorkspaceContextConfig, cwd: &str) -> ProviderPlan {
     let skills = active_skills(library, cfg);
+    let soul_name = active_soul_name(library, cfg);
     let skills_dir = Path::new(cwd).join(".claude").join("skills");
 
-    // Write each active skill: prefer a full recursive dir copy from the library
-    // when the library skill dir exists (multi-file skills with references/
-    // assets/ scripts/). Fall back to writing skill.body as SKILL.md alone for
-    // legacy skills that have only a SKILL.md in the library (or were created via
-    // put_skill) — backward-compatible.
-    let active_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+    // For each active skill, prefer copying the full library dir when present
+    // (multi-file skills), else write skill.body as a single SKILL.md.
+    let mut skill_artifacts = Vec::new();
     for skill in &skills {
         let dest_dir = skills_dir.join(&skill.name);
         let lib_skill_dir = library.root.join("skills").join(&skill.name);
-
         if lib_skill_dir.is_dir() {
-            // Multi-file skill: remove the old managed copy and re-copy the whole
-            // library dir so references/ assets/ scripts/ stay in sync.
-            if dest_dir.exists() {
-                if let Err(e) = fs::remove_dir_all(&dest_dir) {
-                    tracing::warn!(skill = %skill.name, error = %e, "remove existing skill dir failed");
-                    continue;
+            skill_artifacts.push(SkillArtifact::CopyDir { lib_dir: lib_skill_dir, dest_dir });
+        } else {
+            skill_artifacts
+                .push(SkillArtifact::Body { dest_dir, body: skill.body.clone() });
+        }
+    }
+
+    // The instruction file (CLAUDE.md): merge the context block (no skill bodies
+    // for claude — they live as files) into the existing file's Otto region.
+    let block = build_block(library, cfg, cwd, &soul_name, &skills, false);
+    let claude_md = Path::new(cwd).join("CLAUDE.md");
+    let existing = fs::read_to_string(&claude_md).unwrap_or_default();
+    let merged = merge::merge_otto_region(&existing, &block);
+
+    // The activity-hooks settings file (enforced by the runtime).
+    let hooks = plan_claude_hooks(cwd);
+
+    ProviderPlan {
+        provider: "claude".to_string(),
+        skipped: false,
+        skills,
+        soul_name,
+        skill_artifacts,
+        skills_dir: Some(skills_dir),
+        instruction: Some(InstructionPlan { path: claude_md, merged }),
+        hooks,
+    }
+}
+
+/// Plan the codex materialization for `cfg` into `cwd` (no writes).
+fn plan_codex(library: &Library, cfg: &WorkspaceContextConfig, cwd: &str) -> ProviderPlan {
+    let skills = active_skills(library, cfg);
+    let soul_name = active_soul_name(library, cfg);
+
+    // Codex has no skills dir: inline skill bodies into the block.
+    let block = build_block(library, cfg, cwd, &soul_name, &skills, true);
+    let agents_md = Path::new(cwd).join("AGENTS.md");
+    let existing = fs::read_to_string(&agents_md).unwrap_or_default();
+    let merged = merge::merge_otto_region(&existing, &block);
+
+    ProviderPlan {
+        provider: "codex".to_string(),
+        skipped: false,
+        skills,
+        soul_name,
+        skill_artifacts: Vec::new(),
+        skills_dir: None,
+        instruction: Some(InstructionPlan { path: agents_md, merged }),
+        hooks: None,
+    }
+}
+
+/// Execute a plan: write every artifact best-effort and report what landed.
+fn execute(plan: ProviderPlan) -> MaterializeProviderResult {
+    if plan.skipped {
+        return MaterializeProviderResult {
+            provider: plan.provider,
+            files_written: Vec::new(),
+            skipped: true,
+        };
+    }
+
+    let mut files_written: Vec<String> = Vec::new();
+
+    // Skills + manifest reconciliation (claude).
+    if let Some(skills_dir) = &plan.skills_dir {
+        let active_names: Vec<String> = plan.skills.iter().map(|s| s.name.clone()).collect();
+        for (artifact, skill) in plan.skill_artifacts.iter().zip(plan.skills.iter()) {
+            match artifact {
+                SkillArtifact::CopyDir { lib_dir, dest_dir } => {
+                    // Remove the old managed copy and re-copy the whole library
+                    // dir so references/assets/scripts stay in sync.
+                    if dest_dir.exists() {
+                        if let Err(e) = fs::remove_dir_all(dest_dir) {
+                            tracing::warn!(skill = %skill.name, error = %e, "remove existing skill dir failed");
+                            continue;
+                        }
+                    }
+                    match copy_dir_all(lib_dir, dest_dir) {
+                        Ok(copied) => files_written.extend(copied),
+                        Err(e) => {
+                            tracing::warn!(skill = %skill.name, error = %e, "copy skill dir failed")
+                        }
+                    }
+                }
+                SkillArtifact::Body { dest_dir, body } => {
+                    if let Err(e) = fs::create_dir_all(dest_dir) {
+                        tracing::warn!(skill = %skill.name, error = %e, "create skill dir failed");
+                        continue;
+                    }
+                    let path = dest_dir.join("SKILL.md");
+                    match fs::write(&path, body) {
+                        Ok(()) => files_written.push(path.to_string_lossy().into_owned()),
+                        Err(e) => {
+                            tracing::warn!(path = %path.display(), error = %e, "write skill failed")
+                        }
+                    }
                 }
             }
-            match copy_dir_all(&lib_skill_dir, &dest_dir) {
-                Ok(copied) => files_written.extend(copied),
-                Err(e) => tracing::warn!(skill = %skill.name, error = %e, "copy skill dir failed"),
+        }
+
+        // Reconcile the manifest: remove skill dirs we previously managed that
+        // are no longer active. Never touch a dir not in the old manifest.
+        let old = merge::read_manifest(skills_dir);
+        for stale in old.iter().filter(|n| !active_names.contains(n)) {
+            let dir = skills_dir.join(stale);
+            if let Err(e) = fs::remove_dir_all(&dir) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(skill = %stale, error = %e, "remove stale skill dir failed");
+                }
             }
+        }
+        if let Err(e) = merge::write_manifest(skills_dir, &active_names) {
+            tracing::warn!(error = %e, "write skill manifest failed");
         } else {
-            // Legacy / in-memory skill: write only SKILL.md.
-            if let Err(e) = fs::create_dir_all(&dest_dir) {
-                tracing::warn!(skill = %skill.name, error = %e, "create skill dir failed");
-                continue;
-            }
-            let path = dest_dir.join("SKILL.md");
-            match fs::write(&path, &skill.body) {
-                Ok(()) => files_written.push(path.to_string_lossy().into_owned()),
-                Err(e) => tracing::warn!(path = %path.display(), error = %e, "write skill failed"),
-            }
+            files_written
+                .push(skills_dir.join(".otto-managed.json").to_string_lossy().into_owned());
         }
     }
 
-    // Reconcile the manifest: remove skill dirs we previously managed that are
-    // no longer active. Never touch a dir not in the old manifest.
-    let old = merge::read_manifest(&skills_dir);
-    for stale in old.iter().filter(|n| !active_names.contains(n)) {
-        let dir = skills_dir.join(stale);
-        if let Err(e) = fs::remove_dir_all(&dir) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(skill = %stale, error = %e, "remove stale skill dir failed");
-            }
+    // Instruction file (CLAUDE.md / AGENTS.md).
+    if let Some(instr) = &plan.instruction {
+        if write_file(&instr.path, &instr.merged) {
+            files_written.push(instr.path.to_string_lossy().into_owned());
         }
     }
-    if let Err(e) = merge::write_manifest(&skills_dir, &active_names) {
-        tracing::warn!(error = %e, "write skill manifest failed");
-    } else {
-        files_written.push(skills_dir.join(".otto-managed.json").to_string_lossy().into_owned());
-    }
 
-    // Merge the context block (no skill bodies) into CLAUDE.md.
-    let block = build_block(library, cfg, cwd, &skills, false);
-    let claude_md = Path::new(cwd).join("CLAUDE.md");
-    if write_region(&claude_md, &block) {
-        files_written.push(claude_md.to_string_lossy().into_owned());
-    }
-
-    // Wire Otto's activity hooks into .claude/settings.local.json so the agent
-    // forwards skills/commands/tools/prompts/tasks to the per-session ingest
-    // endpoint (the "live trail" + task tracker). Best-effort.
-    if let Some(p) = write_claude_hooks(cwd) {
-        files_written.push(p);
+    // Activity hooks (enforced).
+    if let Some(hooks) = &plan.hooks {
+        if write_file(&hooks.path, &hooks.merged) {
+            files_written.push(hooks.path.to_string_lossy().into_owned());
+        }
     }
 
     MaterializeProviderResult {
-        provider: "claude".to_string(),
+        provider: plan.provider,
         files_written,
         skipped: false,
+    }
+}
+
+/// Describe a plan as the dry-run preview the API returns.
+fn describe(plan: ProviderPlan) -> ContextPreviewProvider {
+    if plan.skipped {
+        return ContextPreviewProvider {
+            provider: plan.provider,
+            skipped: true,
+            skills: Vec::new(),
+            soul: None,
+            files: Vec::new(),
+            generated_instructions: String::new(),
+            instructions_file_name: None,
+            generated_hooks: None,
+        };
+    }
+
+    let mut files: Vec<ContextPlanFile> = Vec::new();
+
+    // Skill files (advisory). For copy-dir skills, enumerate the source tree so
+    // the preview lists each file the copy would land (SKILL.md + assets); for
+    // body skills, the single SKILL.md.
+    for artifact in &plan.skill_artifacts {
+        match artifact {
+            SkillArtifact::CopyDir { lib_dir, dest_dir } => {
+                describe_copy_dir(lib_dir, lib_dir, dest_dir, &mut files);
+            }
+            SkillArtifact::Body { dest_dir, body } => {
+                files.push(plan_file(
+                    dest_dir.join("SKILL.md"),
+                    "skill",
+                    ContextEnforcement::Advisory,
+                    body,
+                ));
+            }
+        }
+    }
+
+    // Managed-skill manifest (advisory — it's Otto bookkeeping, not a runtime
+    // constraint on the agent).
+    if let Some(skills_dir) = &plan.skills_dir {
+        let names: Vec<String> = plan.skills.iter().map(|s| s.name.clone()).collect();
+        let manifest = serde_json::to_string_pretty(&json!({ "skills": names }))
+            .unwrap_or_else(|_| "{}".to_string());
+        files.push(plan_file(
+            skills_dir.join(".otto-managed.json"),
+            "manifest",
+            ContextEnforcement::Advisory,
+            &manifest,
+        ));
+    }
+
+    // Instruction file (advisory).
+    let (generated_instructions, instructions_file_name) = match &plan.instruction {
+        Some(instr) => {
+            files.push(plan_file(
+                instr.path.clone(),
+                "instructions",
+                ContextEnforcement::Advisory,
+                &instr.merged,
+            ));
+            let name = instr
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
+            (instr.merged.clone(), name)
+        }
+        None => (String::new(), None),
+    };
+
+    // Hooks / settings (enforced).
+    let generated_hooks = match &plan.hooks {
+        Some(hooks) => {
+            files.push(plan_file(
+                hooks.path.clone(),
+                "hooks",
+                ContextEnforcement::Enforced,
+                &hooks.merged,
+            ));
+            Some(hooks.merged.clone())
+        }
+        None => None,
+    };
+
+    ContextPreviewProvider {
+        provider: plan.provider,
+        skipped: false,
+        skills: plan
+            .skills
+            .iter()
+            .map(|s| ContextPlanSkill {
+                name: s.name.clone(),
+                description: s.description.clone(),
+                version: s.version,
+            })
+            .collect(),
+        soul: plan.soul_name,
+        files,
+        generated_instructions,
+        instructions_file_name,
+        generated_hooks,
+    }
+}
+
+/// Walk `src` (relative to `root`) and push a `ContextPlanFile` for every file,
+/// targeting the matching path under `dest`. Best-effort; unreadable entries are
+/// skipped. Mirrors `copy_dir_all`'s traversal so the preview matches the copy.
+fn describe_copy_dir(root: &Path, src: &Path, dest: &Path, out: &mut Vec<ContextPlanFile>) {
+    let entries = match fs::read_dir(src) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            describe_copy_dir(root, &path, dest, out);
+        } else if let Ok(rel) = path.strip_prefix(root) {
+            let dest_path = dest.join(rel);
+            let body = fs::read_to_string(&path).unwrap_or_default();
+            // A SKILL.md at the skill root is the skill itself; everything else
+            // is a supporting asset.
+            let kind = if rel.as_os_str() == "SKILL.md" { "skill" } else { "skill_asset" };
+            out.push(plan_file(dest_path, kind, ContextEnforcement::Advisory, &body));
+        }
+    }
+}
+
+/// Build a `ContextPlanFile` describing `content` at `path` without writing it.
+fn plan_file(
+    path: PathBuf,
+    kind: &str,
+    enforcement: ContextEnforcement,
+    content: &str,
+) -> ContextPlanFile {
+    let size = content.len() as u64;
+    let all: Vec<&str> = content.lines().collect();
+    let truncated = all.len() > PREVIEW_LINES;
+    let first_lines = all
+        .iter()
+        .take(PREVIEW_LINES)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    ContextPlanFile {
+        path: path.to_string_lossy().into_owned(),
+        kind: kind.to_string(),
+        enforcement,
+        size,
+        first_lines,
+        truncated,
     }
 }
 
@@ -273,10 +587,11 @@ fn otto_hook_group(with_matcher: bool) -> Value {
     }
 }
 
-/// Merge Otto's activity hooks into `<cwd>/.claude/settings.local.json`,
-/// preserving every other setting and any user-authored hooks. Idempotent:
-/// re-running replaces only Otto's groups. Returns the file path on success.
-fn write_claude_hooks(cwd: &str) -> Option<String> {
+/// Plan the merge of Otto's activity hooks into
+/// `<cwd>/.claude/settings.local.json`, preserving every other setting and any
+/// user-authored hooks. Returns the path + merged JSON, or `None` when the
+/// existing file is malformed and must not be clobbered. No writes occur here.
+fn plan_claude_hooks(cwd: &str) -> Option<HooksPlan> {
     let path = Path::new(cwd).join(".claude").join("settings.local.json");
 
     let mut doc: Value = match fs::read_to_string(&path) {
@@ -309,9 +624,7 @@ fn write_claude_hooks(cwd: &str) -> Option<String> {
         ("Notification", false),
     ];
     for (event, with_matcher) in EVENTS {
-        let arr = hooks
-            .entry(event.to_string())
-            .or_insert_with(|| json!([]));
+        let arr = hooks.entry(event.to_string()).or_insert_with(|| json!([]));
         if !arr.is_array() {
             *arr = json!([]);
         }
@@ -320,56 +633,20 @@ fn write_claude_hooks(cwd: &str) -> Option<String> {
         groups.push(otto_hook_group(*with_matcher));
     }
 
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            tracing::warn!(path = %path.display(), error = %e, "create .claude dir failed");
-            return None;
-        }
-    }
-    let body = serde_json::to_string_pretty(&doc).ok()?;
-    match fs::write(&path, body) {
-        Ok(()) => Some(path.to_string_lossy().into_owned()),
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "write settings.local.json failed");
-            None
-        }
-    }
+    let merged = serde_json::to_string_pretty(&doc).ok()?;
+    Some(HooksPlan { path, merged })
 }
 
-fn provision_codex(
-    library: &Library,
-    cfg: &WorkspaceContextConfig,
-    cwd: &str,
-) -> MaterializeProviderResult {
-    let mut files_written: Vec<String> = Vec::new();
-    let skills = active_skills(library, cfg);
-
-    // Codex has no skills dir: inline skill bodies into the block.
-    let block = build_block(library, cfg, cwd, &skills, true);
-    let agents_md = Path::new(cwd).join("AGENTS.md");
-    if write_region(&agents_md, &block) {
-        files_written.push(agents_md.to_string_lossy().into_owned());
-    }
-
-    MaterializeProviderResult {
-        provider: "codex".to_string(),
-        files_written,
-        skipped: false,
-    }
-}
-
-/// Read `path`, merge the Otto region with `block`, and write it back.
-/// Best-effort: logs and returns `false` on write failure.
-fn write_region(path: &Path, block: &str) -> bool {
-    let existing = fs::read_to_string(path).unwrap_or_default();
-    let merged = merge::merge_otto_region(&existing, block);
+/// Write `content` to `path`, creating parents as needed. Best-effort: logs and
+/// returns `false` on failure.
+fn write_file(path: &Path, content: &str) -> bool {
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             tracing::warn!(path = %path.display(), error = %e, "create parent dir failed");
             return false;
         }
     }
-    match fs::write(path, merged) {
+    match fs::write(path, content) {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "write context file failed");
@@ -571,5 +848,95 @@ mod tests {
         provision(&lib, &cfg, &cwd_path, "codex");
         let agents = fs::read_to_string(cwd.path().join("AGENTS.md")).unwrap();
         assert!(agents.contains("Default persona."));
+    }
+
+    // -- preview (dry-run) ----------------------------------------------------
+
+    #[test]
+    fn preview_writes_nothing() {
+        let (_l, cwd, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        lib.put_skill("triage", "A").unwrap();
+
+        let p = preview(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude");
+        assert!(!p.skipped);
+        // Nothing on disk.
+        assert!(!cwd.path().join("CLAUDE.md").exists());
+        assert!(!cwd.path().join(".claude").exists());
+        // But the plan is described.
+        assert!(p.files.iter().any(|f| f.kind == "skill"));
+        assert!(p.files.iter().any(|f| f.kind == "instructions"));
+        assert!(p.files.iter().any(|f| f.kind == "hooks"));
+    }
+
+    #[test]
+    fn preview_matches_what_provision_writes() {
+        let (_l, cwd, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        lib.put_soul("otto", "Persona.").unwrap();
+        lib.put_skill("triage", "BODY").unwrap();
+        let cfg = WorkspaceContextConfig { soul: Some("otto".into()), ..Default::default() };
+
+        let p = preview(&lib, &cfg, &cwd_path, "claude");
+        let res = provision(&lib, &cfg, &cwd_path, "claude");
+
+        // The preview's instruction content equals the bytes on disk.
+        let claude = fs::read_to_string(cwd.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(p.generated_instructions, claude);
+        assert_eq!(p.instructions_file_name.as_deref(), Some("CLAUDE.md"));
+
+        // Every previewed file path is among the files provision wrote.
+        for f in &p.files {
+            assert!(
+                res.files_written.contains(&f.path),
+                "previewed file {} not written by provision",
+                f.path
+            );
+        }
+        // Skill + soul surfaced.
+        assert_eq!(p.skills.len(), 1);
+        assert_eq!(p.skills[0].name, "triage");
+        assert_eq!(p.soul.as_deref(), Some("otto"));
+    }
+
+    #[test]
+    fn preview_labels_hooks_enforced_and_rest_advisory() {
+        let (_l, cwd, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        lib.put_skill("triage", "A").unwrap();
+
+        let p = preview(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude");
+        for f in &p.files {
+            match f.kind.as_str() {
+                "hooks" => assert_eq!(f.enforcement, ContextEnforcement::Enforced),
+                _ => assert_eq!(f.enforcement, ContextEnforcement::Advisory),
+            }
+        }
+        assert!(p.generated_hooks.is_some());
+    }
+
+    #[test]
+    fn preview_skips_shell() {
+        let (_l, cwd, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        let p = preview(&lib, &WorkspaceContextConfig::default(), &cwd_path, "shell");
+        assert!(p.skipped);
+        assert!(p.files.is_empty());
+    }
+
+    #[test]
+    fn preview_enumerates_multi_file_skill() {
+        let (_l, cwd, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        // A multi-file skill dir in the library (SKILL.md + a reference asset).
+        let skill_dir = lib.root.join("skills").join("multi");
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "skill md").unwrap();
+        fs::write(skill_dir.join("references").join("ref.md"), "ref body").unwrap();
+
+        let p = preview(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude");
+        let kinds: Vec<&str> = p.files.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"skill"), "SKILL.md described");
+        assert!(kinds.contains(&"skill_asset"), "asset described");
     }
 }

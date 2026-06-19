@@ -1170,6 +1170,103 @@ pub struct MaterializeResp {
     pub provider_results: Vec<MaterializeProviderResult>,
 }
 
+/// How binding a planned artifact is on the agent.
+///
+/// - `Advisory` — instruction files (`AGENTS.md`/`CLAUDE.md`) and skills:
+///   guidance the model reads and *may ignore*.
+/// - `Enforced` — hooks / runtime settings the daemon imposes regardless of
+///   what the model decides (e.g. activity-forwarding hooks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextEnforcement {
+    Advisory,
+    Enforced,
+}
+
+/// A single artifact `materialize` would write, described without writing it.
+/// Used by the dry-run context preview to show exactly what a spawn produces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPlanFile {
+    /// Absolute destination path the file would be written to.
+    pub path: String,
+    /// What this file is: `instructions` (AGENTS.md/CLAUDE.md), `skill`,
+    /// `skill_asset` (a non-SKILL.md file in a multi-file skill dir), `hooks`,
+    /// or `manifest` (Otto's managed-skill manifest).
+    pub kind: String,
+    /// Advisory (model may ignore) vs enforced (runtime imposes).
+    pub enforcement: ContextEnforcement,
+    /// Size in bytes of the content that would be written.
+    pub size: u64,
+    /// First lines of the content (a short excerpt for the preview list).
+    pub first_lines: String,
+    /// Whether the full content was elided from `first_lines` (file is larger).
+    pub truncated: bool,
+}
+
+/// A skill selected for a workspace, summarized for the preview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPlanSkill {
+    pub name: String,
+    pub description: String,
+    pub version: u32,
+}
+
+/// `POST /workspaces/{id}/context/preview` — exactly what a session spawn would
+/// materialize for one provider, computed WITHOUT spawning or writing anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPreviewProvider {
+    pub provider: String,
+    /// True for providers that materialize nothing (shell/agy/…).
+    pub skipped: bool,
+    /// The skills that would be activated, resolved from the library.
+    pub skills: Vec<ContextPlanSkill>,
+    /// The soul (persona) name that would apply, if any.
+    pub soul: Option<String>,
+    /// Every file the spawn would write (paths, sizes, excerpts, enforcement).
+    pub files: Vec<ContextPlanFile>,
+    /// The generated instruction-file content (the bytes of the Otto region as
+    /// merged into AGENTS.md/CLAUDE.md), for an exact preview of what the model
+    /// will read. Empty when the provider writes no instruction file.
+    pub generated_instructions: String,
+    /// Name of the instruction file (`CLAUDE.md` or `AGENTS.md`), if any.
+    pub instructions_file_name: Option<String>,
+    /// The hooks/settings JSON the runtime would impose (enforced), if any.
+    pub generated_hooks: Option<String>,
+}
+
+/// `POST /workspaces/{id}/context/preview`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPreviewResp {
+    pub providers: Vec<ContextPreviewProvider>,
+}
+
+/// `POST /workspaces/{id}/context/preview` body. All fields optional: when
+/// present they override the workspace's stored context selection so the UI can
+/// preview a not-yet-saved choice (the same inputs a session spawn would use).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextPreviewReq {
+    /// Provider(s) to preview; `None` ⇒ both `claude` and `codex`.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Override the active skill allow-list (`None` ⇒ use stored config).
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
+    /// Override the active soul (`None` ⇒ use stored config).
+    #[serde(default)]
+    pub soul: Option<String>,
+    /// Override the extra-context markdown (`None` ⇒ use stored config).
+    #[serde(default)]
+    pub extra_context_md: Option<String>,
+    /// Override the include-memory toggle (`None` ⇒ use stored config).
+    #[serde(default)]
+    pub include_memory: Option<bool>,
+    /// Working directory the spawn would use (`None` ⇒ the workspace root). The
+    /// New Session sheet lets the user pick a cwd other than the workspace root;
+    /// passing it here makes the preview match what that spawn would write.
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // API client ("Postman" section). Collection/request/environment routes are
 // workspace-scoped (`/workspaces/{wid}/api-client/...`), so `workspace_id`

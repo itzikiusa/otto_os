@@ -6,6 +6,8 @@
 import { api } from './client';
 import type {
   BundledSkill,
+  ContextPreviewReq,
+  ContextPreviewResp,
   GlobalSoulResp,
   InstallAllBundledResp,
   InstallBundledResp,
@@ -83,4 +85,10 @@ export const contextApi = {
         provider ? `?provider=${encodeURIComponent(provider)}` : ''
       }`,
     ),
+
+  // --- Preview (dry-run) ----------------------------------------------------
+  // Exactly what a session spawn would materialize, without spawning. Body may
+  // override the stored selection so a not-yet-saved choice can be previewed.
+  preview: (wsId: string, body: ContextPreviewReq = {}) =>
+    api.post<ContextPreviewResp>(`/workspaces/${wsId}/context/preview`, body),
 };

@@ -1185,6 +1185,82 @@ export interface MaterializeResp {
   provider_results: MaterializeProviderResult[];
 }
 
+// --- Context preview (dry-run before spawn) --------------------------------
+
+/**
+ * How binding a planned artifact is on the agent:
+ * - `advisory` — instruction files (AGENTS.md/CLAUDE.md) and skills: guidance
+ *   the model reads and *may ignore*.
+ * - `enforced` — hooks / runtime settings the daemon imposes regardless of what
+ *   the model decides (e.g. activity-forwarding hooks).
+ */
+export type ContextEnforcement = 'advisory' | 'enforced';
+
+/** A single artifact a spawn would write, described without writing it. */
+export interface ContextPlanFile {
+  /** Absolute destination path the file would be written to. */
+  path: string;
+  /** `instructions`, `skill`, `skill_asset`, `hooks`, or `manifest`. */
+  kind: string;
+  enforcement: ContextEnforcement;
+  /** Size in bytes of the content that would be written. */
+  size: number;
+  /** First lines of the content (a short excerpt for the preview list). */
+  first_lines: string;
+  /** Whether content was elided from first_lines (file is larger). */
+  truncated: boolean;
+}
+
+/** A skill that would be activated, summarized for the preview. */
+export interface ContextPlanSkill {
+  name: string;
+  description: string;
+  version: number;
+}
+
+/** What a session spawn would materialize for one provider (dry-run). */
+export interface ContextPreviewProvider {
+  provider: string;
+  /** True for providers that materialize nothing (shell/agy/…). */
+  skipped: boolean;
+  skills: ContextPlanSkill[];
+  /** The soul (persona) name that would apply, if any. */
+  soul: string | null;
+  files: ContextPlanFile[];
+  /** The exact instruction-file bytes the model will read (Otto region merged
+   * into AGENTS.md/CLAUDE.md). Empty when the provider writes no instructions. */
+  generated_instructions: string;
+  /** Name of the instruction file (`CLAUDE.md` or `AGENTS.md`), if any. */
+  instructions_file_name: string | null;
+  /** The hooks/settings JSON the runtime would impose (enforced), if any. */
+  generated_hooks: string | null;
+}
+
+/** `POST /workspaces/{id}/context/preview` */
+export interface ContextPreviewResp {
+  providers: ContextPreviewProvider[];
+}
+
+/**
+ * `POST /workspaces/{id}/context/preview` body. All fields optional: when
+ * present they override the workspace's stored context selection so the UI can
+ * preview a not-yet-saved choice (the same inputs a session spawn would use).
+ */
+export interface ContextPreviewReq {
+  /** Provider to preview; omit for both `claude` and `codex`. */
+  provider?: string;
+  /** Override the active skill allow-list (omit ⇒ use stored config). */
+  skills?: string[] | null;
+  /** Override the active soul (omit ⇒ use stored config). */
+  soul?: string | null;
+  /** Override the extra-context markdown (omit ⇒ use stored config). */
+  extra_context_md?: string;
+  /** Override the include-memory toggle (omit ⇒ use stored config). */
+  include_memory?: boolean;
+  /** Working directory the spawn would use (omit ⇒ the workspace root). */
+  cwd?: string;
+}
+
 // ---------------------------------------------------------------------------
 // API client ("Postman" section) — workspace-scoped
 // ---------------------------------------------------------------------------

@@ -13,9 +13,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
-    GlobalSoulReq, GlobalSoulResp, LibraryContext, LibrarySkill, LibrarySoul,
-    MaterializeProviderResult, MaterializeResp, Problem, UpdateWorkspaceContextReq,
-    UpsertLibraryEntryReq, WorkspaceContextConfig,
+    ContextPreviewProvider, ContextPreviewReq, ContextPreviewResp, GlobalSoulReq, GlobalSoulResp,
+    LibraryContext, LibrarySkill, LibrarySoul, MaterializeProviderResult, MaterializeResp, Problem,
+    UpdateWorkspaceContextReq, UpsertLibraryEntryReq, WorkspaceContextConfig,
 };
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::WorkspaceRole;
@@ -113,6 +113,10 @@ pub fn router<C: ContextCtx>() -> Router<C> {
         .route(
             "/workspaces/{id}/context/materialize",
             post(materialize_ws::<C>),
+        )
+        .route(
+            "/workspaces/{id}/context/preview",
+            post(preview_ws::<C>),
         )
 }
 
@@ -355,4 +359,46 @@ async fn materialize_ws<C: ContextCtx>(
         .collect();
 
     Ok(Json(MaterializeResp { provider_results }))
+}
+
+/// Dry-run: return exactly what a session spawn would materialize, without
+/// spawning or touching disk. The request body may override the stored context
+/// selection (skills/soul/extra context/memory) so the UI can preview a choice
+/// before it is saved — the same inputs the spawn path uses. Viewer-gated: a
+/// preview reads but never writes.
+async fn preview_ws<C: ContextCtx>(
+    State(s): State<C>,
+    Extension(user): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+    Json(req): Json<ContextPreviewReq>,
+) -> ApiResult<Json<ContextPreviewResp>> {
+    s.roles().check(&user.0, &ws_id, WorkspaceRole::Viewer).await?;
+    let ws = s.workspaces().get(&ws_id).await?;
+
+    // Start from the stored selection, then apply any per-field overrides from
+    // the request so an unsaved choice can be previewed.
+    let stored = config::from_settings(&ws.settings);
+    let cfg = WorkspaceContextConfig {
+        skills: req.skills.or(stored.skills),
+        soul: req.soul.or(stored.soul),
+        extra_context_md: req.extra_context_md.unwrap_or(stored.extra_context_md),
+        include_memory: req.include_memory.unwrap_or(stored.include_memory),
+    };
+
+    let providers: Vec<String> = match req.provider {
+        Some(p) => vec![p],
+        None => vec!["claude".to_string(), "codex".to_string()],
+    };
+
+    // The spawn provisions into the session's cwd, which defaults to — but may
+    // differ from — the workspace root. Honor the override so the preview lands
+    // its planned paths where the real spawn would.
+    let cwd = req.cwd.as_deref().unwrap_or(&ws.root_path);
+
+    let providers: Vec<ContextPreviewProvider> = providers
+        .iter()
+        .map(|p| materialize::preview(s.library(), &cfg, cwd, p))
+        .collect();
+
+    Ok(Json(ContextPreviewResp { providers }))
 }

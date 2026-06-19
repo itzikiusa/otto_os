@@ -488,6 +488,60 @@ are root; per-workspace context selection is workspace-scoped.
 | GET /workspaces/{id}/context | ws viewer | — | the workspace's active context selection |
 | PUT /workspaces/{id}/context | ws admin | UpdateWsContextReq | selection |
 | POST /workspaces/{id}/context/materialize | ws editor | — | materialize the active set into the CLIs |
+| POST /workspaces/{id}/context/preview | ws viewer | `ContextPreviewReq` | `ContextPreviewResp` — dry-run of what a spawn would materialize |
+
+`POST /workspaces/{id}/context/preview` is a **dry-run**: it returns exactly what
+a session spawn would materialize for one or more providers — the skill files,
+selected soul, the generated `AGENTS.md` / `CLAUDE.md` content, and the runtime
+hooks — **without spawning a session or writing any file**. It is the same
+`plan()` the real spawn path uses, so the preview matches the spawn byte-for-byte.
+
+The request body lets the UI preview a not-yet-saved selection: every field is
+optional and, when present, overrides the workspace's stored context config (the
+same inputs a spawn uses — provider, skills, soul, extra context, memory, cwd).
+`provider` omitted ⇒ preview both `claude` and `codex`; `cwd` omitted ⇒ the
+workspace root.
+
+```ts
+interface ContextPreviewReq {
+  provider?: string;            // omit ⇒ claude + codex
+  skills?: string[] | null;     // omit ⇒ stored; null ⇒ all library skills
+  soul?: string | null;         // omit ⇒ stored; null ⇒ global default
+  extra_context_md?: string;    // omit ⇒ stored
+  include_memory?: boolean;     // omit ⇒ stored
+  cwd?: string;                 // omit ⇒ workspace root
+}
+
+interface ContextPreviewResp { providers: ContextPreviewProvider[]; }
+
+interface ContextPreviewProvider {
+  provider: string;
+  skipped: boolean;             // true for shell/custom (nothing materialized)
+  skills: ContextPlanSkill[];   // resolved active skills (advisory)
+  soul: string | null;          // applied soul name (advisory)
+  files: ContextPlanFile[];     // every file the spawn would write
+  generated_instructions: string;        // exact AGENTS.md/CLAUDE.md bytes (advisory)
+  instructions_file_name: string | null; // "CLAUDE.md" | "AGENTS.md"
+  generated_hooks: string | null;        // settings.local.json JSON (enforced)
+}
+
+interface ContextPlanFile {
+  path: string;                 // absolute destination path
+  kind: string;                 // instructions | skill | skill_asset | hooks | manifest
+  enforcement: 'advisory' | 'enforced';
+  size: number;                 // bytes
+  first_lines: string;          // short excerpt
+  truncated: boolean;           // content elided from first_lines
+}
+
+interface ContextPlanSkill { name: string; description: string; version: number; }
+```
+
+**Advisory vs enforced.** Each artifact is labeled by how binding it is on the
+agent: `advisory` — instruction files (`AGENTS.md`/`CLAUDE.md`) and skills are
+guidance the model reads and *may ignore*; `enforced` — hooks / runtime settings
+(`.claude/settings.local.json`) the daemon imposes regardless of the model's
+choices. The UI surfaces this distinction in the preview.
 
 ## Bundled skills (first-party skill catalog)
 

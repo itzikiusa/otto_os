@@ -1,6 +1,7 @@
 <script lang="ts">
   // ⌘T sheet: provider (from /meta.providers), title, cwd.
   import Modal from '../../lib/components/Modal.svelte';
+  import ContextPreview from './ContextPreview.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { router } from '../../lib/router.svelte';
@@ -54,6 +55,11 @@
   // Browser tools wire an MCP server into the workspace .mcp.json; only
   // claude/codex load MCP servers, so the toggle is hidden for plain shells.
   const supportsBrowser = $derived(provider === 'claude' || provider === 'codex');
+
+  // Context preview: only claude/codex materialize an Otto context; plain shells
+  // and custom providers get nothing, so there's nothing to preview for them.
+  const supportsContext = $derived(provider === 'claude' || provider === 'codex');
+  let showPreview = $state(false);
 
   $effect(() => {
     if (provider === '' && providers.length > 0) {
@@ -164,6 +170,30 @@
         <span class="hint">Give the agent a real browser via MCP (navigate, click, read pages).</span>
       </span>
     </label>
+  {/if}
+
+  {#if supportsContext && ws.currentId}
+    <div class="field">
+      <button
+        type="button"
+        class="preview-toggle"
+        onclick={() => (showPreview = !showPreview)}
+        aria-expanded={showPreview}
+      >
+        <span class="chevron" class:open={showPreview}>▸</span>
+        Preview context
+        <span class="hint">— exactly what Otto would inject before spawning</span>
+      </button>
+      {#if showPreview}
+        <div class="preview-box">
+          <ContextPreview
+            wsId={ws.currentId}
+            {provider}
+            overrides={{ cwd: cwd.trim() === '' ? undefined : cwd.trim() }}
+          />
+        </div>
+      {/if}
+    </div>
   {/if}
 
   {#snippet footer()}
@@ -289,5 +319,40 @@
   .dir-add .input {
     flex: 1;
     min-width: 0;
+  }
+
+  .preview-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    padding: 2px 0;
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    text-align: left;
+  }
+  .preview-toggle .hint {
+    font-weight: 400;
+  }
+  .preview-toggle .chevron {
+    font-size: 9px;
+    color: var(--text-dim);
+    transition: transform 120ms ease-out;
+  }
+  .preview-toggle .chevron.open {
+    transform: rotate(90deg);
+  }
+  .preview-box {
+    margin-top: 8px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
+    max-height: 360px;
+    overflow: auto;
   }
 </style>
