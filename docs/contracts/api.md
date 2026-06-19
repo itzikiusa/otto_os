@@ -152,6 +152,13 @@ Notes:
   `swarm_id`/`agent_id`.
 - Assigning a task to a *leader* (an agent with reports) triggers a delegation turn
   that decomposes it into subtasks for the reports.
+- `SwarmRun.tokens_input` / `tokens_output` / `cost_usd` are backfilled on the run's
+  terminal patch (done/error/stopped) from the embedded usage store (otto-usage),
+  keyed on the run's `session_id`. They stay `null` when usage tracking is disabled or
+  no usage was recorded for the session yet (e.g. transcript not yet flushed) — never a
+  misleading `0`. The Run Inspector surfaces the parsed `result` (summary, `artifacts[]`),
+  the run's `cwd`, the board posts tagged with this `run_id`, tokens/cost, and the raw
+  result JSON; it is a pure client view (no new endpoint).
 
 ## API Tokens (#87–#89)
 

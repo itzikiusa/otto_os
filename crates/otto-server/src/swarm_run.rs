@@ -356,11 +356,20 @@ async fn run_turn_inner(
     )
     .await;
 
+    // Best-effort token/cost backfill for this turn, keyed on the run's session.
+    // otto-usage records per-session; the run is tagged with `session_id`/`run_id`
+    // (swarm_meta above), so the session totals are the turn's usage. Stays null
+    // when usage tracking is off or the latest events haven't been flushed yet.
+    let (toks_in, toks_out, cost) = session_usage(ctx, outcome.session_id.as_deref()).await;
+
     // Persist terminal state.
     if let Some(raw) = outcome.raw.as_deref() {
         let parsed = parse_turn_result(raw);
         let status = parsed.as_ref().map(|r| r.status.clone()).unwrap_or_else(|| "done".into());
         let summary = parsed.as_ref().map(|r| r.summary.clone()).unwrap_or_default();
+        // Persist the parsed result plus the turn's `cwd`/`brief` so the Run
+        // Inspector can show what was sent and where it ran without a new route.
+        let result = enrich_result(parsed.as_ref().map(|r| serde_json::to_value(r).unwrap_or_default()), &cwd, &prompt);
         let _ = repo
             .update_run(
                 &run.id,
@@ -368,7 +377,10 @@ async fn run_turn_inner(
                     status: Some("done".into()),
                     session_id: Some(outcome.session_id.clone()),
                     summary: Some(Some(if summary.is_empty() { format!("turn {status}") } else { summary })),
-                    result: Some(parsed.as_ref().map(|r| serde_json::to_value(r).unwrap_or_default())),
+                    result: Some(Some(result)),
+                    tokens_input: Some(toks_in),
+                    tokens_output: Some(toks_out),
+                    cost_usd: Some(cost),
                     finished_at: Some(Some(Utc::now())),
                     ..Default::default()
                 },
@@ -379,6 +391,8 @@ async fn run_turn_inner(
     } else {
         let reason = outcome.reason.map(|r| r.as_str()).unwrap_or("error");
         let stopped = matches!(outcome.reason, Some(FailReason::Stopped));
+        // Even on failure, keep the brief/cwd for inspection.
+        let result = enrich_result(None, &cwd, &prompt);
         let _ = repo
             .update_run(
                 &run.id,
@@ -386,6 +400,11 @@ async fn run_turn_inner(
                     status: Some(if stopped { "stopped".into() } else { "error".into() }),
                     session_id: Some(outcome.session_id.clone()),
                     error: Some(Some(reason.to_string())),
+                    result: Some(Some(result)),
+                    // The agent may have spent tokens before failing/stopping.
+                    tokens_input: Some(toks_in),
+                    tokens_output: Some(toks_out),
+                    cost_usd: Some(cost),
                     finished_at: Some(Some(Utc::now())),
                     ..Default::default()
                 },
@@ -393,6 +412,38 @@ async fn run_turn_inner(
             .await;
         emit_run(ctx, &run.id).await;
         None
+    }
+}
+
+/// Fold the turn's `cwd` + `brief` into the stored run `result` object so the
+/// Run Inspector can surface them. The parsed turn JSON (if any) keeps its own
+/// keys; `cwd`/`brief` are added only when not already present.
+fn enrich_result(parsed: Option<serde_json::Value>, cwd: &str, brief: &str) -> serde_json::Value {
+    let mut obj = match parsed {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    obj.entry("cwd").or_insert_with(|| json!(cwd));
+    obj.entry("brief").or_insert_with(|| json!(brief));
+    serde_json::Value::Object(obj)
+}
+
+/// Pull this turn's token/cost totals from otto-usage for `session_id`.
+/// Returns `(input, output, cost_usd)`, each `None` when usage tracking is
+/// unavailable, no session was created, or no events were recorded yet — the
+/// `RunPatch` then writes nulls rather than misleading zeros.
+async fn session_usage(
+    ctx: &ServerCtx,
+    session_id: Option<&str>,
+) -> (Option<i64>, Option<i64>, Option<f64>) {
+    let Some(sid) = session_id else { return (None, None, None) };
+    match ctx.usage.session_totals_for(sid).await {
+        Some(t) => (
+            Some(t.input_tokens as i64),
+            Some(t.output_tokens as i64),
+            Some(t.cost_usd),
+        ),
+        None => (None, None, None),
     }
 }
 

@@ -368,6 +368,36 @@ impl UsageEngine {
         Ok(out)
     }
 
+    /// Lifetime token/cost totals for a single `session_id` (no date window —
+    /// the per-session link is exact). Returns `None` when usage tracking is
+    /// off or the session has no recorded events yet, so callers can leave the
+    /// fields null without crashing. Used to backfill per-run token columns
+    /// once an agent turn finishes (see swarm runs).
+    pub async fn session_totals_for(&self, session_id: &str) -> Option<SessionTotals> {
+        // session ids are ULIDs, but escape defensively for the embedded query.
+        let sid = session_id.replace('\'', "''");
+        let rows: Vec<SessionTotals> = self
+            .rows(&format!(
+                "SELECT '{sid}' AS session_id,
+                        any(workspace_id) AS workspace_id,
+                        any(provider) AS provider,
+                        count() AS events,
+                        sum(input_tokens) AS input_tokens,
+                        sum(output_tokens) AS output_tokens,
+                        sum(cache_read_tokens) AS cache_read_tokens,
+                        sum(cache_write_tokens) AS cache_write_tokens,
+                        sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                        round(sum(cost_usd), 6) AS cost_usd
+                 FROM usage_events
+                 WHERE session_id = '{sid}'"
+            ))
+            .await
+            .ok()?;
+        // The aggregate always yields exactly one row; treat zero events as
+        // "no usage yet" so the caller writes null rather than a misleading 0.
+        rows.into_iter().find(|t| t.events > 0)
+    }
+
     /// Full dashboard payload for the window. `otto_only` excludes externally
     /// recorded (non-Otto) sessions.
     pub async fn summary(&self, days: u32, otto_only: bool) -> Result<UsageSummary> {

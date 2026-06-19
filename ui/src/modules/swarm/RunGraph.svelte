@@ -4,8 +4,23 @@
   // zoom (wheel), click a node with a session → open it. Live via events.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import RunInspector from './RunInspector.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
-  import type { GraphNode } from './types';
+  import type { GraphNode, SwarmRun } from './types';
+
+  let inspecting = $state<SwarmRun | null>(null);
+  const live = $derived(inspecting ? (swarm.runs.find((r) => r.id === inspecting!.id) ?? inspecting) : null);
+
+  // Latest run for a task node (graph nodes are tasks; ids are `task:<id>`).
+  function latestRun(nodeId: string): SwarmRun | null {
+    const tid = nodeId.startsWith('task:') ? nodeId.slice(5) : null;
+    if (!tid) return null;
+    const runs = swarm.runs.filter((r) => r.task_id === tid);
+    if (runs.length === 0) return null;
+    return [...runs].sort(
+      (a, b) => new Date(b.enqueued_at).getTime() - new Date(a.enqueued_at).getTime(),
+    )[0];
+  }
 
   const COL_W = 210;
   const ROW_H = 86;
@@ -102,7 +117,10 @@
   }
 
   function click(n: Placed) {
-    if (n.session_id) swarm.selectedSessionId = n.session_id;
+    // Prefer the run inspector (richer); fall back to opening the live session.
+    const run = latestRun(n.id);
+    if (run) inspecting = run;
+    else if (n.session_id) swarm.selectedSessionId = n.session_id;
   }
 </script>
 
@@ -137,16 +155,17 @@
         {#each placed as n (n.id)}
           {@const si = statusIcon(n.status)}
           {@const agent = swarm.agentById(n.agent_id)}
+          {@const run = latestRun(n.id)}
           <button
             class="node {si.cls}"
-            class:clickable={!!n.session_id}
+            class:clickable={!!n.session_id || !!run}
             style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{NODE_H}px"
             onclick={() => click(n)}
           >
             <span class="node-badge {si.cls}"><Icon name={si.icon} size={12} /></span>
             <span class="node-main">
               <span class="node-label">{n.label}</span>
-              <span class="node-sub dim">{agent ? agent.name : n.status}{n.session_id ? ' · open' : ''}</span>
+              <span class="node-sub dim">{agent ? agent.name : n.status}{run ? ' · inspect' : n.session_id ? ' · open' : ''}</span>
             </span>
           </button>
         {/each}
@@ -154,6 +173,10 @@
     </div>
   {/if}
 </div>
+
+{#if live}
+  <RunInspector run={live} onclose={() => (inspecting = null)} />
+{/if}
 
 <style>
   .graph-wrap {

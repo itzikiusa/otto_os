@@ -148,6 +148,46 @@ export interface SwarmRun {
   finished_at?: string | null;
 }
 
+/** One artifact a turn produced — a file, PR, doc, or arbitrary URL. */
+export interface TurnArtifact {
+  type: string; // 'file' | 'pr' | 'doc' | 'url'
+  path?: string | null;
+  url?: string | null;
+  label: string;
+}
+
+export interface TurnHandoff {
+  to_role: string;
+  brief: string;
+}
+
+export interface TurnConcern {
+  severity: string;
+  text: string;
+}
+
+/**
+ * The parsed structured result an agent turn writes (`SwarmRun.result`),
+ * mirrored from Rust `SwarmTurnResult`. The daemon also folds in `cwd` + the
+ * `brief` it sent (see swarm_run::enrich_result) so the Run Inspector can show
+ * them without a dedicated endpoint. All fields optional — older runs and
+ * failed turns carry partial objects.
+ */
+export interface TurnResult {
+  status?: string;
+  summary?: string;
+  artifacts?: TurnArtifact[];
+  handoffs?: TurnHandoff[];
+  reviews?: unknown[];
+  subtasks?: unknown[];
+  concerns?: TurnConcern[];
+  /** Absolute cwd / worktree path the turn ran in (added server-side). */
+  cwd?: string;
+  /** The brief/prompt that was sent to the agent (added server-side). */
+  brief?: string;
+  [k: string]: unknown;
+}
+
 export interface SwarmMessage {
   id: Id;
   swarm_id: Id;

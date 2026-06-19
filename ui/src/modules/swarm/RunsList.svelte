@@ -2,12 +2,18 @@
   // All runs/iterations as a filterable list (per assignee / project / status).
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import RunInspector from './RunInspector.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import type { RunStatus, SwarmRun } from './types';
 
   let agentFilter = $state<string>('');
   let projectFilter = $state<string>('');
   let statusFilter = $state<string>('');
+  let inspecting = $state<SwarmRun | null>(null);
+
+  // Keep the open inspector in sync with live WS run updates (tokens land on the
+  // terminal patch, after the inspector may already be open).
+  const live = $derived(inspecting ? (swarm.runs.find((r) => r.id === inspecting!.id) ?? inspecting) : null);
 
   const STATUSES: RunStatus[] = ['queued', 'running', 'waiting', 'done', 'error', 'stopped'];
 
@@ -75,7 +81,7 @@
       </div>
       {#each filtered as r (r.id)}
         {@const agent = swarm.agentById(r.agent_id)}
-        <div class="trow">
+        <div class="trow" role="button" tabindex="0" onclick={() => (inspecting = r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (inspecting = r)}>
           <span class="c-agent">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
           <span class="c-kind dim">{r.kind}{r.summary ? ` · ${r.summary}` : ''}</span>
           <span class="c-status"><span class="badge {r.status}">{r.status}</span></span>
@@ -86,11 +92,14 @@
               : '—'}
           </span>
           <span class="c-act">
+            <button class="icon-btn" title="Inspect run" aria-label="inspect run" onclick={(e) => { e.stopPropagation(); inspecting = r; }}>
+              <Icon name="eye" size={14} />
+            </button>
             {#if r.session_id}
-              <button class="btn small ghost" onclick={() => (swarm.selectedSessionId = r.session_id!)}>Open</button>
+              <button class="btn small ghost" onclick={(e) => { e.stopPropagation(); swarm.selectedSessionId = r.session_id!; }}>Open</button>
             {/if}
             {#if active(r)}
-              <button class="btn small danger" onclick={() => swarm.stopRun(r.id)}>Stop</button>
+              <button class="btn small danger" onclick={(e) => { e.stopPropagation(); swarm.stopRun(r.id); }}>Stop</button>
             {/if}
           </span>
         </div>
@@ -98,6 +107,10 @@
     </div>
   {/if}
 </div>
+
+{#if live}
+  <RunInspector run={live} onclose={() => (inspecting = null)} />
+{/if}
 
 <style>
   .runs {
@@ -148,6 +161,7 @@
   }
   .trow {
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    cursor: pointer;
   }
   .trow:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
