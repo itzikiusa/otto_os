@@ -24,6 +24,9 @@ pub struct MemoryService {
     /// When set, every operation forwards to a shared host Otto instead of the
     /// local SQLite — this is how a team shares one memory across machines.
     remote: Option<RemoteClient>,
+    /// When set, saved memories are also written through to an Obsidian-compatible
+    /// markdown vault (git-shareable; the file-based path to a shared vault).
+    vault: Option<crate::vault::VaultWriter>,
 }
 
 impl MemoryService {
@@ -37,6 +40,7 @@ impl MemoryService {
             embedder: Some(embedder),
             index: Some(index),
             remote: None,
+            vault: None,
         }
     }
 
@@ -55,6 +59,7 @@ impl MemoryService {
             embedder: None,
             index: None,
             remote: None,
+            vault: None,
         }
     }
 
@@ -76,7 +81,29 @@ impl MemoryService {
             embedder: None,
             index: None,
             remote: Some(RemoteClient::new(base_url, token)),
+            vault: None,
         }
+    }
+
+    /// Enable Obsidian-vault write-through: saved memories are also written as
+    /// markdown notes under `root/<workspace>/`.
+    pub fn with_vault(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.vault = Some(crate::vault::VaultWriter::new(root));
+        self
+    }
+
+    /// Re-index a (possibly externally edited / git-synced) vault directory into
+    /// the store. Returns the number of notes ingested.
+    pub async fn reindex_vault(
+        &self,
+        ws: &str,
+        by: &str,
+        dir: &std::path::Path,
+    ) -> Result<usize> {
+        let notes = crate::vault::read_dir_notes(dir)?;
+        let n = notes.len();
+        self.save(ws, by, notes).await?;
+        Ok(n)
     }
 
     pub fn repo(&self) -> &MemoriesRepo {
@@ -113,6 +140,9 @@ impl MemoryService {
             }
             let m = self.repo.create(ws, by, nm).await?;
             self.embed_one(&m).await;
+            if let Some(v) = &self.vault {
+                let _ = v.write(ws, &m, &[]);
+            }
             out.push(m);
         }
         Ok(out)

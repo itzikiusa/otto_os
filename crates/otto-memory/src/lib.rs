@@ -11,6 +11,7 @@ pub mod retrieve;
 pub mod service;
 pub mod test_support;
 pub mod types;
+pub mod vault;
 
 pub use http::{router, GraphData, GraphNode, MemoryCtx};
 pub use service::MemoryService;

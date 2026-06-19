@@ -212,6 +212,17 @@ async fn run(cfg: Config) -> Result<(), String> {
         }
         _ => Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
     };
+    // Optional Obsidian-vault write-through (git-shareable notes). Wrap only the
+    // local service; a remote-backed one writes notes on the host instead.
+    let memory = match std::env::var("OTTO_MEMORY_VAULT_DIR") {
+        Ok(dir) if !dir.trim().is_empty() && std::env::var("OTTO_MEMORY_REMOTE_URL").is_err() => {
+            tracing::info!("memory: vault write-through at {dir}");
+            Arc::new(
+                otto_memory::MemoryService::with_defaults(pool.clone()).with_vault(dir),
+            )
+        }
+        _ => memory,
+    };
 
     let ctx = ServerCtx {
         pool: pool.clone(),
