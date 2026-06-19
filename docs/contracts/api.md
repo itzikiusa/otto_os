@@ -273,6 +273,7 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | POST /repos/{id}/api-collections/pull | ws editor | — | pull API-client collections committed in the repo |
 | POST /repos/{id}/api-collections/push | ws editor | — | commit API-client collections into the repo |
 | POST /repos/{id}/pr/draft | ws editor | DraftPrReq | DraftPrResp (AI-drafted title+body) |
+| POST /repos/{id}/draft-commit-message | ws editor | DraftCommitMessageReq (empty `{}`) | DraftCommitMessageResp (AI-drafted Conventional-Commits message from the STAGED diff; falls back to the working diff when nothing is staged) |
 
 ## PR review agents (multi-agent code review)
 

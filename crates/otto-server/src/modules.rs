@@ -1492,6 +1492,10 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
             post(retry_review_agent),
         )
         .route("/repos/{id}/pr/draft", post(draft_pr))
+        .route(
+            "/repos/{id}/draft-commit-message",
+            post(draft_commit_message),
+        )
 }
 
 /// Tolerantly pull `{title, description}` out of an agent reply (which may wrap
@@ -1600,6 +1604,117 @@ async fn draft_pr(
         description,
         source_branch: source,
         target_branch: body.base,
+    }))
+}
+
+/// Tolerantly extract a commit message from an agent reply. The agent is asked
+/// to reply with ONLY the message, but it may still wrap it in a markdown fence
+/// or add a stray preamble — strip a leading/trailing ``` fence and trim.
+fn parse_commit_draft(text: &str) -> String {
+    let trimmed = text.trim();
+    // Strip a surrounding ```…``` fence if present (with or without a language
+    // tag on the opening line).
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        if let Some(end) = rest.rfind("```") {
+            let inner = &rest[..end];
+            // Drop the (possibly empty) language tag on the first line.
+            let body = inner.split_once('\n').map(|(_, b)| b).unwrap_or(inner);
+            return body.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// `POST /repos/{id}/draft-commit-message` — draft a Conventional Commits–style
+/// commit message from the STAGED diff (falls back to the full working diff when
+/// nothing is staged), using the configured default agent CLI. Symmetric with
+/// `draft_pr`, but scoped to what's about to be committed.
+async fn draft_commit_message(
+    Path(repo_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> crate::error::ApiResult<Json<otto_core::api::DraftCommitMessageResp>> {
+    let repo = ctx
+        .git_store
+        .get_repo(&repo_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+
+    let git = otto_git::LocalGit::new(&repo.path);
+    // Prefer the staged diff (what's actually about to be committed). When the
+    // index is empty, fall back to the full working diff so the button is still
+    // useful before staging.
+    let staged = git.staged_diff_text().await.map_err(crate::error::ApiError)?;
+    let (diff, from_staged) = if staged.trim().is_empty() {
+        let working = git
+            .working_diff_text()
+            .await
+            .map_err(crate::error::ApiError)?;
+        (working, false)
+    } else {
+        (staged, true)
+    };
+    if diff.trim().is_empty() {
+        return Err(crate::error::ApiError(Error::Invalid(
+            "nothing to commit — no staged or unstaged changes".into(),
+        )));
+    }
+
+    // Cap the diff fed to the drafting agent — a commit message doesn't need
+    // every line, and a huge prompt is slow + can exceed input limits.
+    const MAX_DIFF: usize = 40_000;
+    let truncated = diff.len() > MAX_DIFF;
+    let diff_slice = if truncated {
+        let mut end = MAX_DIFF;
+        while end > 0 && !diff.is_char_boundary(end) {
+            end -= 1;
+        }
+        &diff[..end]
+    } else {
+        diff.as_str()
+    };
+
+    let scope = if from_staged {
+        "the STAGED changes (what is about to be committed)"
+    } else {
+        "the working-tree changes (nothing is staged yet)"
+    };
+    let prompt = format!(
+        "You are writing a git commit message for {scope}. Based ONLY on the diff below, write:\n\
+         - a Conventional Commits subject line: `type(scope): summary` (type ∈ feat, fix, docs, \
+         style, refactor, perf, test, build, ci, chore; scope optional; imperative mood; \
+         ≤72 chars; no trailing period)\n\
+         - an optional body (blank line, then a short bullet list of WHAT changed and WHY) when \
+         the change is non-trivial; omit the body for tiny changes.\n\
+         Infer and honor any repo convention you can see in the diff (e.g. an emoji prefix or a \
+         scope naming style). Reply with ONLY the raw commit message text — no prose, no \
+         explanation, and no markdown code fence.\n\n\
+         {trunc}DIFF:\n{diff}",
+        scope = scope,
+        trunc = if truncated {
+            "(diff truncated for brevity)\n\n"
+        } else {
+            ""
+        },
+        diff = diff_slice,
+    );
+
+    let reply = ctx
+        .orchestrator
+        .run_agent(
+            &prompt,
+            &repo.path,
+            None,
+            std::time::Duration::from_secs(150),
+        )
+        .await
+        .map_err(crate::error::ApiError)?;
+    let message = parse_commit_draft(&reply);
+
+    Ok(Json(otto_core::api::DraftCommitMessageResp {
+        message,
+        from_staged,
     }))
 }
 

@@ -394,6 +394,18 @@ impl LocalGit {
         self.run(&["diff", base]).await
     }
 
+    /// Raw unified diff of the staged changes (`git diff --cached`). Empty when
+    /// nothing is staged.
+    pub async fn staged_diff_text(&self) -> Result<String> {
+        self.run(&["diff", "--no-color", "-M", "--cached"]).await
+    }
+
+    /// Raw unified diff of all unstaged tracked changes (`git diff`). Used as a
+    /// fallback when nothing is staged.
+    pub async fn working_diff_text(&self) -> Result<String> {
+        self.run(&["diff", "--no-color", "-M"]).await
+    }
+
     /// `git remote get-url origin`, best-effort.
     pub async fn remote_url(&self) -> Option<String> {
         self.run(&["remote", "get-url", "origin"])

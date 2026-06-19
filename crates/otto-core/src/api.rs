@@ -744,6 +744,20 @@ pub struct DraftPrResp {
     pub target_branch: String,
 }
 
+/// `POST /repos/{id}/draft-commit-message` — ask an agent to draft a commit
+/// message from the staged diff (falls back to the full working diff when
+/// nothing is staged). No request body is required.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DraftCommitMessageReq {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DraftCommitMessageResp {
+    pub message: String,
+    /// Whether the message was drafted from the staged diff (`true`) or fell
+    /// back to the full working diff because nothing was staged (`false`).
+    pub from_staged: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePrReq {
     pub title: Option<String>,

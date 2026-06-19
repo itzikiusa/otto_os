@@ -1,7 +1,12 @@
 <script lang="ts">
   // Working-tree changes: stage checkboxes, per-file diff, commit composer.
   import { api } from '../../lib/api/client';
-  import type { DiffResp, FileChange, RepoStatusResp } from '../../lib/api/types';
+  import type {
+    DiffResp,
+    DraftCommitMessageResp,
+    FileChange,
+    RepoStatusResp,
+  } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import DiffViewer from './DiffViewer.svelte';
@@ -23,6 +28,7 @@
   let message = $state('');
   let amend = $state(false);
   let committing = $state(false);
+  let drafting = $state(false);
 
   // Mouse multi-select for batch actions. Plain click selects one (and shows
   // its diff); ⌘/Ctrl-click toggles; Shift-click selects a range. The selection
@@ -180,6 +186,29 @@
     );
   }
 
+  // Ask an agent to draft a Conventional Commits message from the staged diff
+  // (falls back to the working diff when nothing is staged). Fills the box; the
+  // user reviews/edits before committing.
+  async function draftMessage(): Promise<void> {
+    if (drafting || committing) return;
+    drafting = true;
+    try {
+      const d = await api.post<DraftCommitMessageResp>(
+        `/repos/${repoId}/draft-commit-message`,
+        {},
+      );
+      message = d.message;
+      toasts.info(
+        'Draft ready',
+        d.from_staged ? 'From staged changes — review and edit.' : 'From working changes (nothing staged) — review and edit.',
+      );
+    } catch (e) {
+      toasts.error('Draft failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      drafting = false;
+    }
+  }
+
   async function commit(): Promise<void> {
     if (committing) return;
     committing = true;
@@ -266,13 +295,27 @@
     </div>
 
     <div class="composer">
-      <textarea
-        class="input"
-        rows="3"
-        bind:value={message}
-        placeholder="Commit message"
-        spellcheck="false"
-      ></textarea>
+      <div class="msg-box">
+        <textarea
+          class="input"
+          rows="3"
+          bind:value={message}
+          placeholder="Commit message"
+          spellcheck="false"
+        ></textarea>
+        <button
+          class="btn small ghost draft-btn"
+          disabled={drafting || committing || status.changes.length === 0}
+          onclick={draftMessage}
+          title="Draft a commit message from your staged changes"
+        >
+          {#if drafting}
+            <span class="spinner-xs"></span>Drafting…
+          {:else}
+            <Icon name="zap" size={11} /> Draft
+          {/if}
+        </button>
+      </div>
       <div class="row">
         <label class="checkbox-row">
           <input type="checkbox" bind:checked={amend} />
@@ -281,7 +324,7 @@
         <span class="grow"></span>
         <button
           class="btn primary"
-          disabled={committing || (message.trim() === '' && !amend) || (stagedCount === 0 && !amend)}
+          disabled={committing || drafting || (message.trim() === '' && !amend) || (stagedCount === 0 && !amend)}
           onclick={commit}
         >
           {committing ? 'Committing…' : `Commit${stagedCount > 0 ? ` (${stagedCount})` : ''}`}
@@ -432,6 +475,34 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  .msg-box {
+    position: relative;
+  }
+  .msg-box textarea {
+    width: 100%;
+    padding-right: 78px;
+  }
+  .draft-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+  }
+  .spinner-xs {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border: 1.5px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 4px;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .changes-diff {
     flex: 1;

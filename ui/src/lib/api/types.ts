@@ -712,6 +712,12 @@ export interface DraftPrResp {
   target_branch: string;
 }
 
+export interface DraftCommitMessageResp {
+  message: string;
+  /** True when drafted from the staged diff; false when it fell back to the working diff. */
+  from_staged: boolean;
+}
+
 export interface UpdatePrReq {
   title?: string | null;
   description?: string | null;
