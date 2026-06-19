@@ -130,6 +130,36 @@ pub struct GraphData {
     pub edges: Vec<MemoryLink>,
 }
 
+fn default_code_collection() -> String {
+    "code".into()
+}
+
+#[derive(Deserialize)]
+struct IngestTextReq {
+    #[serde(default = "default_code_collection")]
+    collection: String,
+    path: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct IngestTextResp {
+    chunks: usize,
+}
+
+#[derive(Deserialize)]
+struct ImportGraphReq {
+    #[serde(default = "default_code_collection")]
+    collection: String,
+    graph: crate::ingest::GraphifyGraph,
+}
+
+#[derive(Serialize)]
+struct EntityGraphResp {
+    links: Vec<MemoryLink>,
+    neighbors: Vec<Memory>,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -258,6 +288,44 @@ async fn graph<C: MemoryCtx>(
     Ok(Json(GraphData { nodes, edges }))
 }
 
+async fn ingest_text<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsPath { ws }): Path<WsPath>,
+    Json(req): Json<IngestTextReq>,
+) -> ApiResult<Json<IngestTextResp>> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    let chunks = c
+        .memory()
+        .ingest_text(&ws, &user.id, &req.collection, &req.path, &req.content)
+        .await?;
+    Ok(Json(IngestTextResp { chunks }))
+}
+
+async fn import_graph<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsPath { ws }): Path<WsPath>,
+    Json(req): Json<ImportGraphReq>,
+) -> ApiResult<Json<crate::ingest::ImportStats>> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    Ok(Json(
+        c.memory()
+            .import_graph(&ws, &user.id, &req.collection, req.graph)
+            .await?,
+    ))
+}
+
+async fn entity_graph<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsIdPath { ws, id }): Path<WsIdPath>,
+) -> ApiResult<Json<EntityGraphResp>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    let (links, neighbors) = c.memory().entity_graph(&ws, &id).await?;
+    Ok(Json(EntityGraphResp { links, neighbors }))
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -277,4 +345,10 @@ pub fn router<C: MemoryCtx>() -> Router<C> {
         .route("/workspaces/{ws}/memory/search", post(search::<C>))
         .route("/workspaces/{ws}/memory/recall", post(recall::<C>))
         .route("/workspaces/{ws}/memory/graph", get(graph::<C>))
+        .route("/workspaces/{ws}/memory/ingest-text", post(ingest_text::<C>))
+        .route("/workspaces/{ws}/memory/import-graph", post(import_graph::<C>))
+        .route(
+            "/workspaces/{ws}/memory/entities/{id}/graph",
+            get(entity_graph::<C>),
+        )
 }

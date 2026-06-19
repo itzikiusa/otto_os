@@ -155,6 +155,73 @@ impl MemoryService {
         self.repo.links_of(ws, id).await
     }
 
+    // -- collections: code/docs ingestion + graph import/traversal --
+
+    /// Chunk text into a collection (e.g. `code`/`docs`) and store as `chunk`
+    /// records. Returns the number of chunks created.
+    pub async fn ingest_text(
+        &self,
+        ws: &str,
+        by: &str,
+        collection: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<usize> {
+        let chunks = crate::ingest::chunk_text(collection, path, content, 40, 8);
+        let n = chunks.len();
+        self.save(ws, by, chunks).await?;
+        Ok(n)
+    }
+
+    /// Import a graphify `graph.json`: nodes → `entity` memories, edges → links
+    /// (with graphify's certainty tag). Runs on the store-owning instance.
+    pub async fn import_graph(
+        &self,
+        ws: &str,
+        by: &str,
+        collection: &str,
+        g: crate::ingest::GraphifyGraph,
+    ) -> Result<crate::ingest::ImportStats> {
+        if self.remote.is_some() {
+            return Err(otto_core::Error::Invalid(
+                "graph import must run on the memory host".into(),
+            ));
+        }
+        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for n in &g.nodes {
+            let created = self.save(ws, by, vec![crate::ingest::node_to_memory(collection, n)]).await?;
+            if let Some(m) = created.into_iter().next() {
+                map.insert(n.id.clone(), m.id);
+            }
+        }
+        let mut edges = 0;
+        for e in &g.edges {
+            if let (Some(s), Some(t)) = (map.get(&e.source), map.get(&e.target)) {
+                self.repo
+                    .link(s, t, e.rel.as_deref().unwrap_or("relates_to"), 1.0, e.certainty.as_deref())
+                    .await?;
+                edges += 1;
+            }
+        }
+        Ok(crate::ingest::ImportStats {
+            nodes: map.len(),
+            edges,
+        })
+    }
+
+    /// An entity's immediate neighborhood: its links + the memories they connect.
+    pub async fn entity_graph(&self, ws: &str, id: &str) -> Result<(Vec<MemoryLink>, Vec<Memory>)> {
+        let links = self.repo.links_of(ws, id).await?;
+        let mut neighbors = Vec::new();
+        for l in &links {
+            let other = if l.src_id == id { &l.dst_id } else { &l.src_id };
+            if let Ok(m) = self.repo.get(ws, other).await {
+                neighbors.push(m);
+            }
+        }
+        Ok((links, neighbors))
+    }
+
     /// Hybrid search: keyword (LIKE) ⊕ vector KNN, fused by RRF, then re-ranked.
     pub async fn search(&self, ws: &str, q: MemoryQuery) -> Result<Vec<MemoryHit>> {
         if let Some(r) = &self.remote {

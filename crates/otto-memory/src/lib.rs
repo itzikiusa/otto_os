@@ -5,6 +5,7 @@
 pub mod embed;
 pub mod http;
 pub mod index;
+pub mod ingest;
 pub mod remote;
 pub mod retrieve;
 pub mod service;
