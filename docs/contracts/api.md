@@ -625,6 +625,15 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 
 Scoping: a notice is either **global/system** (`user_id = null`, e.g. credential/session/skill-eval producers) or **owned by one user**. Non-root members see global + their own and may mutate only their own; the unread badge counts a member's own unread only (global notices show in the list but aren't counted, since a member can't mark them read). Root sees and mutates everything.
 
+## Trust & Safety (security audit log + posture)
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /audit-log | root | query: `from?` `to?` (RFC3339, inclusive `ts` bounds) · `action?` · `user_id?` · `limit?` (≤500, default 100) · `offset?` | AuditLogResp `{entries: AuditEntry[], total}` (newest first; `total` ignores paging) |
+| GET /security-posture | root | — | SecurityPostureResp `{network_listener, network_listener_port?, loopback_only, active_api_tokens}` |
+
+The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), and `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`). The posture summary derives entirely from existing settings + the auth store (no new state): the network listener key drives `network_listener` / `network_listener_port` / `loopback_only`, and `active_api_tokens` counts unexpired API tokens instance-wide.
+
 ## Usage tracking & system metrics (embedded ClickHouse)
 
 | Method & path | Auth | Request | Response |

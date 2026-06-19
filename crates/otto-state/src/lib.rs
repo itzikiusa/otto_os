@@ -4,6 +4,7 @@
 
 pub mod activity;
 pub mod api_client;
+pub mod audit;
 pub mod connection_sections;
 pub mod connections;
 pub mod convert;
@@ -25,6 +26,7 @@ pub mod workflows;
 pub mod workspaces;
 
 pub use activity::{ActivityRepo, NewTask, NewTrail};
+pub use audit::{AuditRepo, NewAuditEntry};
 pub use api_client::{
     ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,
     NewApiRequest,

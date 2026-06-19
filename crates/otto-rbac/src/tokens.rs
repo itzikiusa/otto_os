@@ -220,6 +220,22 @@ impl AuthRepo {
             .collect()
     }
 
+    /// Count active (unexpired) API tokens across ALL users. Instance-wide, for
+    /// the root-only security-posture summary. `expires_at` is stored RFC3339,
+    /// which sorts lexicographically with `now`, so a TEXT comparison is exact.
+    pub async fn count_active_api_tokens(&self) -> Result<i64> {
+        let now = Utc::now().to_rfc3339();
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n FROM auth_sessions
+             WHERE kind = 'api' AND expires_at > ?",
+        )
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("count active api tokens: {e}")))?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
     /// Revoke one of `user_id`'s API tokens by id. Returns whether a row was
     /// deleted (false = not found / not owned / not an API token).
     pub async fn revoke_api_token(&self, user_id: &Id, id: &Id) -> Result<bool> {

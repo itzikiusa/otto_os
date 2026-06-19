@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod api_client;
 pub mod api_stream;
+pub mod audit;
 pub mod auth_routes;
 pub mod grpc;
 pub mod fs;
@@ -81,6 +82,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(workspaces::members).put(workspaces::set_members),
         )
         .route("/settings", get(settings::get_all).put(settings::put_all))
+        // --- Trust & Safety Center (root only) ---------------------------
+        .route("/audit-log", get(audit::list))
+        .route("/security-posture", get(audit::posture))
         // --- Usage tracking & system metrics (embedded ClickHouse) -------
         .route("/usage/status", get(usage::status))
         .route("/usage/summary", get(usage::summary))

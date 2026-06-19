@@ -25,6 +25,13 @@ use crate::types::{CompletionContext, QueryRequest};
 pub trait DbViewerCtx: Clone + Send + Sync + 'static {
     fn db(&self) -> &Arc<DbViewerService>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
+
+    /// Audit hook fired when a guarded (production / read-only) connection runs
+    /// a write the caller explicitly confirmed (`confirm_write`). Default no-op
+    /// so this crate stays decoupled from the server's audit log; `ServerCtx`
+    /// overrides it to append a `db.write_confirmed` entry. Best-effort — it
+    /// must not block or fail the query.
+    fn on_confirmed_write(&self, _user: &User, _conn: &Connection, _statement: &str) {}
 }
 
 /// Local problem-details mapper (orphan rule: can't impl IntoResponse for
@@ -280,7 +287,15 @@ async fn run_query<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    Ok(Json(ctx.db().run(&id, &req).await?).into_response())
+    let result = ctx.db().run(&id, &req).await?;
+    // A confirmed write on a guarded (production / read-only) connection is a
+    // security-relevant override worth auditing. Fire only after a successful
+    // run so we don't log writes the engine rejected. `confirm_write` is a no-op
+    // on an unguarded connection, so gate on `is_write_guarded()` to avoid noise.
+    if req.confirm_write && conn.is_write_guarded() {
+        ctx.on_confirmed_write(&user, &conn, &req.statement);
+    }
+    Ok(Json(result).into_response())
 }
 
 async fn completion<S: DbViewerCtx>(

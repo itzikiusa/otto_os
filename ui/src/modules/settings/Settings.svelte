@@ -16,6 +16,7 @@
   import SkillsLibrary from './SkillsLibrary.svelte';
   import Logs from './Logs.svelte';
   import LanguageServers from './LanguageServers.svelte';
+  import TrustSafety from './TrustSafety.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -40,6 +41,7 @@
           { id: 'providers', label: 'Providers' },
           { id: 'users', label: 'Users' },
           { id: 'daemon', label: 'Daemon' },
+          { id: 'trust-safety', label: 'Trust & Safety' },
           { id: 'logs', label: 'Logs' },
         ]
       : []),
@@ -94,6 +96,8 @@
       <Users />
     {:else if page === 'daemon' && auth.isRoot}
       <Daemon />
+    {:else if page === 'trust-safety' && auth.isRoot}
+      <TrustSafety />
     {:else if page === 'logs' && auth.isRoot}
       <Logs />
     {:else}

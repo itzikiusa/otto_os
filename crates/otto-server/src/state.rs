@@ -12,8 +12,8 @@ use otto_orchestrator::Orchestrator;
 use otto_sessions::SessionManager;
 use otto_core::domain::{AgentTask, Notice, TrailEvent};
 use otto_state::{
-    ActivityRepo, GitStore, IntegrationsRepo, IssuesRepo, NewNotice, NewTask, NewTrail,
-    NotificationsRepo, ReviewsRepo, SkillEvalsRepo, WorkspacesRepo,
+    ActivityRepo, AuditRepo, GitStore, IntegrationsRepo, IssuesRepo, NewAuditEntry, NewNotice,
+    NewTask, NewTrail, NotificationsRepo, ReviewsRepo, SkillEvalsRepo, WorkspacesRepo,
 };
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
@@ -84,6 +84,19 @@ impl ServerCtx {
         ActivityService {
             repo: ActivityRepo::new(self.pool.clone()),
             events: self.events.clone(),
+        }
+    }
+
+    /// Append a security-audit entry, BEST-EFFORT: a failure is logged and
+    /// swallowed so it can never fail the request being audited. Call it at
+    /// sensitive sites (login, token mint/revoke, settings & network-listener
+    /// changes, confirmed DB writes); the Trust & Safety Center reads the
+    /// resulting ledger via `GET /audit-log`. The audit table is append-only —
+    /// [`AuditRepo`] exposes no update/delete.
+    pub async fn audit(&self, entry: NewAuditEntry) {
+        let action = entry.action.clone();
+        if let Err(e) = AuditRepo::new(self.pool.clone()).insert(entry).await {
+            tracing::warn!(%action, "audit insert failed (best-effort): {e}");
         }
     }
 }

@@ -3,7 +3,7 @@
 
 use axum::extract::State;
 use axum::Json;
-use otto_state::SettingsRepo;
+use otto_state::{NewAuditEntry, SettingsRepo};
 use serde_json::{Map, Value};
 
 use crate::auth::{require_root, CurrentUser};
@@ -35,5 +35,35 @@ pub async fn put_all(
     if let Some(value) = body.get("providers") {
         ctx.manager.providers().reload(Some(value));
     }
+
+    // Audit the change. The list of changed keys is the durable record; secret
+    // values are deliberately NOT captured. The network listener is a setting,
+    // so its toggle flows through here — give it a dedicated, easily-filtered
+    // entry (with the new enabled/port) on top of the generic settings change.
+    if let Some(listener) = body.get("network_listener") {
+        let enabled = listener
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        ctx.audit(NewAuditEntry {
+            user_id: Some(user.id.clone()),
+            action: "network_listener.toggle".into(),
+            target: Some(if enabled { "on" } else { "off" }.into()),
+            detail: Some(listener.clone()),
+            ip: None,
+        })
+        .await;
+    }
+    let mut keys: Vec<&String> = body.keys().collect();
+    keys.sort();
+    ctx.audit(NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: "settings.change".into(),
+        target: Some(keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(",")),
+        detail: Some(serde_json::json!({ "keys": keys })),
+        ip: None,
+    })
+    .await;
+
     Ok(Json(repo.all().await?))
 }

@@ -429,6 +429,28 @@ pub enum NoticeAction {
     Reauth { target: String },
 }
 
+/// One append-only entry in the security audit log, listed (root only) at
+/// `GET /api/v1/audit-log` and surfaced in the Trust & Safety Center. Written
+/// best-effort by `ServerCtx::audit` at sensitive sites (login, token
+/// mint/revoke, settings/network-listener changes, confirmed DB writes). Never
+/// updated or deleted — treat the stream as forward-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: Id,
+    pub ts: DateTime<Utc>,
+    /// Acting user; None for an unauthenticated actor (e.g. a failed login for
+    /// an unknown username) or a daemon-internal caller.
+    pub user_id: Option<Id>,
+    /// Stable snake_case verb, e.g. `"login.success"`, `"token.mint"`.
+    pub action: String,
+    /// Optional subject of the action (a username, token id, connection name…).
+    pub target: Option<String>,
+    /// Optional action-specific context.
+    pub detail: Option<Value>,
+    /// Optional client IP (the real socket peer; forwarding headers untrusted).
+    pub ip: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Agent activity: per-session live trail + normalized task tracker
 // ---------------------------------------------------------------------------

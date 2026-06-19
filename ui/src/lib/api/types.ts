@@ -320,6 +320,57 @@ export interface CreateApiTokenResp {
 }
 
 // ---------------------------------------------------------------------------
+// Trust & Safety: audit log + security posture (root only)
+// ---------------------------------------------------------------------------
+
+/**
+ * One append-only entry in the security audit log. Written best-effort by the
+ * daemon at sensitive sites; never updated or deleted.
+ * `action` is a stable snake_case verb, e.g. 'login.success', 'token.mint',
+ * 'token.revoke', 'settings.change', 'network_listener.toggle',
+ * 'login.failure', 'login.lockout', 'db.write_confirmed'.
+ */
+export interface AuditEntry {
+  id: Id;
+  ts: string;
+  /** Acting user; null for an unauthenticated actor (e.g. a failed login). */
+  user_id: Id | null;
+  action: string;
+  target: string | null;
+  detail: unknown | null;
+  ip: string | null;
+}
+
+/** Query for GET /api/v1/audit-log (root only). All filters optional. */
+export interface AuditLogQuery {
+  /** Lower bound on `ts` (RFC3339), inclusive. */
+  from?: string;
+  /** Upper bound on `ts` (RFC3339), inclusive. */
+  to?: string;
+  /** Exact `action` match. */
+  action?: string;
+  /** Exact acting-user match. */
+  user_id?: Id;
+  limit?: number;
+  offset?: number;
+}
+
+/** Response for GET /api/v1/audit-log: a page plus the filtered total. */
+export interface AuditLogResp {
+  entries: AuditEntry[];
+  /** Total rows matching the filters (ignores limit/offset). */
+  total: number;
+}
+
+/** GET /api/v1/security-posture (root only) — a derived security snapshot. */
+export interface SecurityPostureResp {
+  network_listener: boolean;
+  network_listener_port: number | null;
+  loopback_only: boolean;
+  active_api_tokens: number;
+}
+
+// ---------------------------------------------------------------------------
 // Users / workspaces
 // ---------------------------------------------------------------------------
 

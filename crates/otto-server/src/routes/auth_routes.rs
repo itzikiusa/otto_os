@@ -17,7 +17,7 @@ use otto_core::api::{
 use otto_core::domain::User;
 use otto_core::{Error, Id};
 use otto_rbac::AuthRepo;
-use otto_state::UsersRepo;
+use otto_state::{NewAuditEntry, UsersRepo};
 
 use crate::auth::{BearerToken, CurrentUser};
 use crate::error::{ApiError, ApiResult};
@@ -74,10 +74,20 @@ async fn handle_login(
         return too_many_requests(retry_after);
     }
 
+    let ip = peer.map(|p| p.to_string());
     match try_login(ctx, &req).await {
         Ok(resp) => {
             attempts.clear(&ip_key);
             attempts.clear(&user_key);
+            // Audit the successful authentication (the acting user is now known).
+            ctx.audit(NewAuditEntry {
+                user_id: Some(resp.user.id.clone()),
+                action: "login.success".into(),
+                target: Some(req.username.clone()),
+                detail: None,
+                ip,
+            })
+            .await;
             Json(resp).into_response()
         }
         Err(ApiError(Error::Unauthorized)) => {
@@ -85,7 +95,22 @@ async fn handle_login(
             attempts.record_failure(&user_key);
             // Re-check so the attempt that *crosses* either threshold is itself
             // answered with the lockout, not a bare 401.
-            if let Some(retry_after) = attempts.max_locked(&[&ip_key, &user_key]) {
+            let locked = attempts.max_locked(&[&ip_key, &user_key]);
+            // No acting user on a failed login (the username may not even exist),
+            // so user_id is None; the attempted username is the target.
+            ctx.audit(NewAuditEntry {
+                user_id: None,
+                action: if locked.is_some() {
+                    "login.lockout".into()
+                } else {
+                    "login.failure".into()
+                },
+                target: Some(req.username.clone()),
+                detail: None,
+                ip,
+            })
+            .await;
+            if let Some(retry_after) = locked {
                 too_many_requests(retry_after)
             } else {
                 ApiError(Error::Unauthorized).into_response()
@@ -150,6 +175,17 @@ pub async fn create_token(
     let (token, info) = AuthRepo::new(ctx.pool.clone())
         .issue_api_token(&user.id, label)
         .await?;
+    ctx.audit(NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: "token.mint".into(),
+        target: Some(info.id.clone()),
+        detail: info
+            .label
+            .clone()
+            .map(|l| serde_json::json!({ "label": l })),
+        ip: None,
+    })
+    .await;
     Ok(Json(CreateApiTokenResp { token, info }))
 }
 
@@ -174,6 +210,14 @@ pub async fn revoke_token(
         .revoke_api_token(&user.id, &id)
         .await?;
     if deleted {
+        ctx.audit(NewAuditEntry {
+            user_id: Some(user.id.clone()),
+            action: "token.revoke".into(),
+            target: Some(id.clone()),
+            detail: None,
+            ip: None,
+        })
+        .await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(Error::NotFound("api token".into()).into())

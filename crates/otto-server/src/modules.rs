@@ -67,6 +67,34 @@ impl otto_dbviewer::DbViewerCtx for ServerCtx {
     fn roles(&self) -> &Arc<dyn RoleChecker> {
         &self.roles
     }
+    fn on_confirmed_write(
+        &self,
+        user: &otto_core::domain::User,
+        conn: &otto_core::domain::Connection,
+        statement: &str,
+    ) {
+        // The audit write is async + best-effort; the route must not block on
+        // it, so spawn a detached task off a cheap ctx clone.
+        let ctx = self.clone();
+        let user_id = user.id.clone();
+        let conn_name = conn.name.clone();
+        let environment = conn.environment.as_str().to_string();
+        // Keep a bounded statement preview (audit detail, not a query log).
+        let preview: String = statement.chars().take(512).collect();
+        tokio::spawn(async move {
+            ctx.audit(otto_state::NewAuditEntry {
+                user_id: Some(user_id),
+                action: "db.write_confirmed".into(),
+                target: Some(conn_name),
+                detail: Some(serde_json::json!({
+                    "environment": environment,
+                    "statement": preview,
+                })),
+                ip: None,
+            })
+            .await;
+        });
+    }
 }
 
 impl otto_git::GitCtx for ServerCtx {
