@@ -142,6 +142,13 @@ pub struct SessionManager {
     /// the session trail (so the trail is populated for every provider, not just
     /// ones with native hooks).
     activity: Option<ActivityRepo>,
+    /// Per-session forced-disconnect signal. Attached `/ws/term` viewers
+    /// subscribe via [`Self::evict_signal`]; [`Self::evict`] fires a unit to all
+    /// of them so they immediately send `{"type":"terminated"}` and close.
+    /// Created lazily (a session only gets a sender once someone subscribes or
+    /// evicts it). A `broadcast` channel is used so every attached viewer is
+    /// dropped, not just one — mirrors how `live`/`attached` are keyed by id.
+    evict: Arc<DashMap<Id, broadcast::Sender<()>>>,
 }
 
 impl SessionManager {
@@ -166,6 +173,7 @@ impl SessionManager {
                 .unwrap_or_else(|| DEFAULT_INGEST_BASE.to_string()),
             ingest_tokens: Arc::new(DashMap::new()),
             activity: None,
+            evict: Arc::new(DashMap::new()),
         }
     }
 
@@ -604,6 +612,31 @@ impl SessionManager {
         self.attached_count(id) > 0
     }
 
+    /// Subscribe to the per-session forced-disconnect signal, lazily creating
+    /// the broadcast sender for `id` if it doesn't exist yet (mirrors how the
+    /// `attached` map's entry is created on demand). The attached `/ws/term`
+    /// loop selects on the returned receiver; on [`Self::evict`] it sends a
+    /// `{"type":"terminated"}` frame and closes the socket. Capacity is tiny —
+    /// the channel only ever carries unit signals.
+    pub fn evict_signal(&self, id: &Id) -> broadcast::Receiver<()> {
+        self.evict
+            .entry(id.clone())
+            .or_insert_with(|| broadcast::channel(8).0)
+            .subscribe()
+    }
+
+    /// Fire the forced-disconnect signal for `id`: every attached viewer that
+    /// subscribed via [`Self::evict_signal`] is dropped. A no-op when no sender
+    /// exists (no one ever subscribed); the "no receivers" send error is ignored
+    /// (all viewers already detached). Used by admin terminate (Task 4.2) and
+    /// mobile share-link revoke to kick live `/ws/term` viewers immediately.
+    pub fn evict(&self, id: &Id) {
+        if let Some(tx) = self.evict.get(id) {
+            // Err means no live receivers — harmless, nothing to evict.
+            let _ = tx.send(());
+        }
+    }
+
     /// Ensure the session is live, resuming it if it is an exited-but-resumable
     /// agent session. A no-op when the session is already live or cannot be
     /// resumed. Errors are logged and suppressed so callers (WS attach) can
@@ -974,6 +1007,9 @@ impl SessionManager {
         }
         self.repo.delete(id).await?;
         self.ingest_tokens.remove(id);
+        // Drop the per-session disconnect sender; any attached viewers were
+        // already evicted by the terminate path before removal.
+        self.evict.remove(id);
         let _ = self.events.send(Event::SessionRemoved {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
@@ -1246,6 +1282,36 @@ mod tests {
         // The sweep over live sessions is a no-op (no live PTYs), and the
         // attachment registry it consults is correct.
         assert_eq!(mgr.suspend_idle_unattached().await, 0);
+    }
+
+    #[tokio::test]
+    async fn evict_signal_fires_to_subscribers() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("sid")).await;
+
+        // Two attached viewers each subscribe to the per-session disconnect
+        // signal (broadcast so every viewer is dropped, not just one).
+        let mut rx1 = mgr.evict_signal(&id);
+        let mut rx2 = mgr.evict_signal(&id);
+
+        // Nothing fired yet.
+        assert!(rx1.try_recv().is_err());
+
+        // Firing the signal yields a unit to every subscriber.
+        mgr.evict(&id);
+        assert!(rx1.recv().await.is_ok(), "subscriber 1 must receive evict");
+        assert!(rx2.recv().await.is_ok(), "subscriber 2 must receive evict");
+    }
+
+    #[tokio::test]
+    async fn evict_without_subscribers_is_noop() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, None).await;
+        // No receivers exist; evict must not panic or error (no-op).
+        mgr.evict(&id);
+        // A subscriber created afterwards does not see the earlier (lost) send.
+        let mut rx = mgr.evict_signal(&id);
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

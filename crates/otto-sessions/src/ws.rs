@@ -195,6 +195,23 @@ async fn next_exit(rx: &mut Option<watch::Receiver<Option<i32>>>) -> i32 {
     }
 }
 
+/// Wait for the per-session forced-disconnect signal. `Ok` (fired) and `Lagged`
+/// both mean "evict"; `Closed` (the sender was dropped without ever firing,
+/// e.g. the session row was removed) clears the receiver and pends forever so
+/// this branch stops competing in the `select!` without busy-looping.
+async fn next_evict(rx: &mut Option<broadcast::Receiver<()>>) {
+    match rx {
+        Some(r) => match r.recv().await {
+            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => {
+                *rx = None;
+                std::future::pending().await
+            }
+        },
+        None => std::future::pending().await,
+    }
+}
+
 async fn serve_terminal<S: SessionsCtx>(
     mut socket: WebSocket,
     ctx: S,
@@ -240,6 +257,10 @@ async fn serve_terminal<S: SessionsCtx>(
     let handle: Option<Arc<PtyHandle>> = ctx.manager().live_handle(&session_id);
     let mut out_rx = handle.as_ref().map(|h| h.subscribe());
     let mut exit_rx = handle.as_ref().map(|h| h.on_exit());
+    // Forced-disconnect signal: admin terminate / share-link revoke fire this
+    // (via SessionManager::evict) to immediately kick attached viewers, even
+    // before the PTY broadcast closes.
+    let mut evict_rx = Some(ctx.manager().evict_signal(&session_id));
     let mut warned_forbidden = false;
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -275,6 +296,15 @@ async fn serve_terminal<S: SessionsCtx>(
                 if socket.send(Message::Ping(Bytes::new())).await.is_err() {
                     return;
                 }
+            }
+            // Forced disconnect: the session was terminated (admin terminate or
+            // share-link revoke). Tell the client and close cleanly. `Lagged`
+            // also resolves here (signal was sent) → evict; only `Closed`
+            // (handled in next_evict) is a non-event that stops this branch.
+            _ = next_evict(&mut evict_rx) => {
+                let frame = r#"{"type":"terminated"}"#;
+                let _ = socket.send(Message::Text(frame.into())).await;
+                return;
             }
             // Client control frames.
             msg = socket.recv() => {

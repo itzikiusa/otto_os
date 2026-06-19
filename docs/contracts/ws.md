@@ -35,8 +35,14 @@ Input frames from viewers are silently dropped server-side (and a single JSON
 {"type":"scrollback","data":"<base64 bytes>"}      // response to scrollback request; send BEFORE live bytes resume
 {"type":"status","status":"working"}                // running|working|idle|exited|reconnectable
 {"type":"exit","code":0}                            // child exited; socket stays open
+{"type":"terminated"}                               // session force-terminated (admin terminate / share-link revoke); socket closes immediately after
 {"type":"error","code":"forbidden","message":"..."}
 ```
+
+Unlike `exit` (the child process ended but the socket stays open so the user can
+read the final output), `terminated` is the server forcibly dropping this viewer:
+it is sent once and the socket is closed right after. Clients should treat it as
+"this session is gone" (admin terminated it, or a mobile share-link was revoked).
 
 Multiple clients may attach to one session simultaneously; all receive the same
 output broadcast. Input is interleaved in arrival order. On attach the server
