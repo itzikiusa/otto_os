@@ -11,7 +11,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use otto_core::Id;
 use otto_state::SettingsRepo;
-use otto_usage::{MetricPoint, UsageConfig, UsageEvent, UsageStatus, UsageSummary};
+use otto_usage::{
+    FeatureUsage, MetricPoint, SessionTotals, UsageConfig, UsageEvent, UsageStatus, UsageSummary,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -65,7 +67,7 @@ pub async fn status(
     Ok(Json(ctx.usage.status().await))
 }
 
-/// `GET /usage/summary?days=N` — provider/day/session rollups (root).
+/// `GET /usage/summary?days=N` — provider/day/session/feature rollups (root).
 pub async fn summary(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
@@ -76,7 +78,57 @@ pub async fn summary(
     let otto_only = q.otto_only.unwrap_or(true);
     let mut summary = ctx.usage.summary(days, otto_only).await.map_err(ApiError)?;
     enrich_sessions(&ctx, &mut summary.sessions).await;
+    summary.by_kind = by_kind_rollup(&ctx, days, otto_only).await;
     Ok(Json(summary))
+}
+
+/// `GET /usage/by-kind?days=N` — per-feature (review / product / channel /
+/// agent / …) token + cost rollup over the window (root). Same classification
+/// as the top-session `kind` badge; pricing is reused untouched.
+pub async fn by_kind(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<WindowDays>,
+) -> ApiResult<Json<Vec<FeatureUsage>>> {
+    require_root(&user)?;
+    let days = q.days.unwrap_or(30).clamp(1, 3650);
+    let otto_only = q.otto_only.unwrap_or(true);
+    Ok(Json(by_kind_rollup(&ctx, days, otto_only).await))
+}
+
+/// Build the per-feature rollup: pull every session's raw token/cost sums from
+/// ClickHouse, classify each session via its SQLite metadata (the same label as
+/// the session-row `kind` badge), and fold into feature buckets. Best-effort —
+/// returns empty on any engine error so the summary still renders.
+async fn by_kind_rollup(ctx: &ServerCtx, days: u32, otto_only: bool) -> Vec<FeatureUsage> {
+    // Resolve each session's feature label up front (async SQLite lookups), then
+    // hand the engine a pure closure to fold the sums. Sessions absent from the
+    // map fall back to "external".
+    let totals = match ctx.usage.session_totals(days, otto_only).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("usage: session totals for by-kind failed: {e}");
+            return Vec::new();
+        }
+    };
+    let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
+    let mut labels: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for t in &totals {
+        let label = match repo.get(&t.session_id).await {
+            Ok(sess) => session_kind_label(&sess),
+            Err(_) => "external".to_string(), // not an Otto session
+        };
+        labels.insert(t.session_id.clone(), label);
+    }
+    ctx.usage
+        .feature_usage(days, otto_only, |t: &SessionTotals| {
+            labels
+                .get(&t.session_id)
+                .cloned()
+                .unwrap_or_else(|| "external".to_string())
+        })
+        .await
+        .unwrap_or_default()
 }
 
 /// Enrich top-session rows with the Otto session title (pane name), kind

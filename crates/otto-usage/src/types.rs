@@ -134,6 +134,51 @@ pub struct SessionUsage {
     pub workspace_name: Option<String>,
 }
 
+/// Per-feature rollup over the window — usage grouped by the kind of Otto work
+/// (review / product / channel / agent / shell / connection / external …)
+/// rather than by provider. The `feature` label is derived server-side from each
+/// session's SQLite metadata (see `routes::usage`), so the engine never produces
+/// these directly; it only supplies the per-session sums the server folds in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeatureUsage {
+    /// Short feature label: "review" | "product" | "channel" | "agent" |
+    /// "connection" | "external" | … (matches the session-row `kind`).
+    pub feature: String,
+    pub events: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+    /// Distinct sessions that contributed to this feature bucket.
+    #[serde(default)]
+    pub sessions: u64,
+}
+
+/// Per-session raw sums over the window — the unenriched, unlimited rollup the
+/// server uses to build the per-feature breakdown. Same numbers as
+/// [`SessionUsage`] but without the SQLite enrichment or top-N cap.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionTotals {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub provider: String,
+    pub events: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
 /// One system-metrics sample, as returned to the dashboard time-series.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetricPoint {
@@ -164,6 +209,11 @@ pub struct UsageSummary {
     pub providers: Vec<ProviderUsage>,
     pub daily: Vec<DailyUsage>,
     pub sessions: Vec<SessionUsage>,
+    /// Per-feature (by-kind) rollup — review / product / channel / agent / …
+    /// Built server-side by classifying sessions, so it's `#[serde(default)]`
+    /// (the engine itself returns it empty until the server fills it in).
+    #[serde(default)]
+    pub by_kind: Vec<FeatureUsage>,
 }
 
 /// Engine + ClickHouse health/status, for the settings panel and the wizard.

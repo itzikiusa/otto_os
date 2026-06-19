@@ -17,8 +17,8 @@ use crate::clickhouse::ClickHouse;
 use crate::metrics::{Metric, MetricsSampler};
 use crate::schema;
 use crate::types::{
-    DailyUsage, MetricPoint, ProviderUsage, SessionUsage, UsageConfig, UsageEvent, UsageStatus,
-    UsageSummary,
+    DailyUsage, FeatureUsage, MetricPoint, ProviderUsage, SessionTotals, SessionUsage, UsageConfig,
+    UsageEvent, UsageStatus, UsageSummary,
 };
 
 /// Flush the usage buffer at least this often.
@@ -300,6 +300,74 @@ impl UsageEngine {
         .await
     }
 
+    /// Per-session raw sums over the last `days` — every session (no top-N cap),
+    /// unenriched. The server classifies these into per-feature buckets for the
+    /// by-kind rollup (see [`Self::feature_usage`]).
+    pub async fn session_totals(&self, days: u32, otto_only: bool) -> Result<Vec<SessionTotals>> {
+        self.rows(&format!(
+            "SELECT session_id,
+                    any(workspace_id) AS workspace_id,
+                    any(provider) AS provider,
+                    count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                    round(sum(cost_usd), 6) AS cost_usd
+             FROM usage_events
+             WHERE event_date >= today() - {since} {ws}
+             GROUP BY session_id",
+            since = since(days),
+            ws = ws_filter(otto_only)
+        ))
+        .await
+    }
+
+    /// Fold per-session sums into per-feature buckets using a caller-supplied
+    /// `session_id → feature label` classifier. The engine has no view of the
+    /// SQLite session metadata that defines a "feature", so the server passes a
+    /// closure (mirroring its session-row enrichment). Buckets are returned
+    /// sorted by total tokens, then cost. Pricing is untouched — each session's
+    /// `cost_usd` is already the per-row sum.
+    pub async fn feature_usage(
+        &self,
+        days: u32,
+        otto_only: bool,
+        classify: impl Fn(&SessionTotals) -> String,
+    ) -> Result<Vec<FeatureUsage>> {
+        let totals = self.session_totals(days, otto_only).await?;
+        let mut buckets: std::collections::HashMap<String, FeatureUsage> =
+            std::collections::HashMap::new();
+        for t in &totals {
+            let feature = classify(t);
+            let b = buckets.entry(feature.clone()).or_insert_with(|| FeatureUsage {
+                feature,
+                ..Default::default()
+            });
+            b.events += t.events;
+            b.input_tokens += t.input_tokens;
+            b.output_tokens += t.output_tokens;
+            b.cache_read_tokens += t.cache_read_tokens;
+            b.cache_write_tokens += t.cache_write_tokens;
+            b.total_tokens += t.total_tokens;
+            b.cost_usd += t.cost_usd;
+            b.sessions += 1;
+        }
+        let mut out: Vec<FeatureUsage> = buckets.into_values().collect();
+        // Round cost to the same 6 dp the SQL rollups use (sums of rounded
+        // per-session values can drift a few ulps).
+        for b in &mut out {
+            b.cost_usd = (b.cost_usd * 1_000_000.0).round() / 1_000_000.0;
+        }
+        out.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then(b.cost_usd.total_cmp(&a.cost_usd))
+        });
+        Ok(out)
+    }
+
     /// Full dashboard payload for the window. `otto_only` excludes externally
     /// recorded (non-Otto) sessions.
     pub async fn summary(&self, days: u32, otto_only: bool) -> Result<UsageSummary> {
@@ -330,6 +398,9 @@ impl UsageEngine {
             providers,
             daily,
             sessions,
+            // Per-feature rollup needs SQLite session metadata to classify, so
+            // the server fills this in (via `feature_usage`) after `summary`.
+            by_kind: Vec::new(),
         })
     }
 

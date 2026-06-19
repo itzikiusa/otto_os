@@ -112,6 +112,22 @@
       .map((s) => `${s.label} ${s.v.toLocaleString()}`)
       .join(' · ');
   }
+  // ── Per-feature (by-kind) labels ──────────────────────────────────────────
+  // Friendly display names for the feature buckets the server emits. Unknown
+  // values pass through capitalized.
+  const FEATURE_LABELS: Record<string, string> = {
+    review: 'Code review',
+    product: 'Product AI',
+    channel: 'Channels',
+    agent: 'Ad-hoc agents',
+    connection: 'Connections',
+    external: 'External',
+    swarm: 'Swarm',
+  };
+  function featureLabel(k: string): string {
+    return FEATURE_LABELS[k] ?? (k ? k[0].toUpperCase() + k.slice(1) : 'Other');
+  }
+
   // The summary carries the same four numbers under total_* names.
   function summaryParts(s: {
     total_input_tokens: number;
@@ -320,6 +336,39 @@
             <p class="dim small">No daily data in this window.</p>
           {/if}
         </div>
+      </div>
+
+      <!-- By feature (by-kind): review / product / channel / agent / … -->
+      <div class="panel card">
+        <div class="panel-head">
+          <h3>By feature</h3>
+          {#if usage.summary && usage.summary.by_kind.length > 0}
+            <span class="dim small">cost + tokens by kind of work</span>
+          {/if}
+        </div>
+        {#if usage.summary && usage.summary.by_kind.length > 0}
+          {@const fmax = Math.max(1, ...usage.summary.by_kind.map((f) => f.total_tokens))}
+          <div class="bars">
+            {#each usage.summary.by_kind as f (f.feature)}
+              <div class="bar-row feat-row">
+                <span class="bar-name" title={f.feature}>
+                  <span class="kind-badge kind-{f.feature}">{featureLabel(f.feature)}</span>
+                </span>
+                <div class="bar-track">
+                  <div class="bar-fill stacked" style="width: {(f.total_tokens / fmax) * 100}%" title={breakdownTitle(f)}>
+                    {#each tokenSegs(f) as s (s.label)}
+                      {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
+                    {/each}
+                  </div>
+                </div>
+                <span class="bar-val">{fmtNum(f.total_tokens)}</span>
+                <span class="bar-cost dim">{fmtCost(f.cost_usd)}</span>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="dim small">No usage recorded yet. Cost splits by feature (review, product, channels, agents…) appear here as work runs.</p>
+        {/if}
       </div>
 
       <!-- System metrics -->
@@ -874,6 +923,26 @@
   .kind-channel {
     background: color-mix(in srgb, var(--status-working, #4a9eff) 20%, transparent);
     color: var(--status-working, #4a9eff);
+  }
+  .kind-agent {
+    background: color-mix(in srgb, #8b5cf6 20%, transparent);
+    color: #8b5cf6;
+  }
+  .kind-swarm {
+    background: color-mix(in srgb, #10b981 22%, transparent);
+    color: #0f9d6e;
+  }
+  .kind-connection {
+    background: color-mix(in srgb, #64748b 22%, transparent);
+    color: #64748b;
+  }
+
+  /* By-feature rows: widen the label column so the feature badge fits. */
+  .feat-row {
+    grid-template-columns: 120px 1fr 56px 50px;
+  }
+  .feat-row .bar-name {
+    overflow: visible;
   }
 
   .cfg-grid {

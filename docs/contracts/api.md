@@ -70,6 +70,24 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 57 | GET /api/v1/settings | root | — | `{ "<key>": <value_json>, ... }` |
 | 58 | PUT /api/v1/settings | root | same shape | same shape |
 
+Usage & metrics (embedded ClickHouse, all root-only; types in `crates/otto-usage`):
+- GET /usage/status → UsageStatus (engine + ClickHouse health).
+- GET /usage/summary?days=N&otto_only=B → UsageSummary. `days` 1–3650 (default 30),
+  `otto_only` (default true) excludes externally-recorded sessions. Carries provider,
+  daily, session, and **`by_kind`** (per-feature) rollups.
+- GET /usage/by-kind?days=N&otto_only=B → `FeatureUsage[]` — the same per-feature rollup
+  on its own. `FeatureUsage{feature, events, input_tokens, output_tokens,
+  cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, sessions}`. `feature` is
+  the kind of Otto work — `review`|`product`|`channel`|`agent`|`connection`|`external`|…
+  — derived server-side from each session's metadata (same label as a session row's
+  `kind`). Visibility only; no budgets/enforcement. Pricing is unchanged (per-row
+  `cost_usd` summed).
+- GET /usage/metrics?minutes=N → `MetricPoint[]` (system CPU/RAM/load time-series).
+- PUT /usage/config → UsageStatus (update + persist engine config).
+- POST /usage/install → UsageStatus (install/update ClickHouse via the official installer).
+- POST /ingest/usage → 204 — per-session token-usage ingest, gated by the per-session
+  ingest token (`X-Otto-Session` + `X-Otto-Token`), not a bearer token.
+
 Notes:
 - Session create with kind=connection requires `connection_id`; provider is set server-side
   to the connection kind. Title defaults: agent → "<provider> #N", connection → conn name.

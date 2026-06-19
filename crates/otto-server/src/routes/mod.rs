@@ -84,6 +84,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // --- Usage tracking & system metrics (embedded ClickHouse) -------
         .route("/usage/status", get(usage::status))
         .route("/usage/summary", get(usage::summary))
+        .route("/usage/by-kind", get(usage::by_kind))
         .route("/usage/metrics", get(usage::metrics))
         .route("/usage/config", put(usage::put_config))
         .route("/usage/install", post(usage::install))

@@ -47,6 +47,23 @@ export interface SessionUsage {
   workspace_name: string | null;
 }
 
+/** Per-feature (by-kind) rollup: usage grouped by the kind of Otto work
+ *  (review / product / channel / agent / connection / external …) rather than by
+ *  provider. Built server-side by classifying each session. */
+export interface FeatureUsage {
+  /** "review" | "product" | "channel" | "agent" | "connection" | "external" | … */
+  feature: string;
+  events: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+  /** Distinct sessions that contributed to this bucket. */
+  sessions: number;
+}
+
 export interface MetricPoint {
   ts: string;
   cpu_pct: number;
@@ -71,6 +88,8 @@ export interface UsageSummary {
   providers: ProviderUsage[];
   daily: DailyUsage[];
   sessions: SessionUsage[];
+  /** Per-feature (by-kind) rollup — review / product / channel / agent / … */
+  by_kind: FeatureUsage[];
 }
 
 export interface UsageStatus {
