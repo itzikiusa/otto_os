@@ -215,9 +215,19 @@ impl AuthRepo {
                 .as_deref()
                 .and_then(WorkspaceRole::parse)
                 .ok_or(Error::Unauthorized)?;
+            // SECURITY: a share principal is **never root** (mobile plan Task 1.4).
+            // The primary account is often root, and a share is a public capability
+            // URL that can leak — so even though the share carries the *owner's*
+            // identity (its `id` is preserved, keeping the scoped session's
+            // `created_by == id` ownership check working), the root flag is DROPPED.
+            // This way a leaked share link can never carry root's blanket bypass:
+            // it is confined to its one session by the scope guard with no root
+            // escape hatch behind it. Clone the owner and force `is_root=false`.
+            let mut share_user = real_user;
+            share_user.is_root = false;
             return Ok(AuthContext {
-                real_user: real_user.clone(),
-                effective_user: real_user,
+                real_user: share_user.clone(),
+                effective_user: share_user,
                 scope: Some(SessionScope {
                     session_id: Id::from(session_id),
                     role,
@@ -804,6 +814,60 @@ mod tests {
         // A share is the OWNER's own capability, not impersonation.
         assert_eq!(ctx.real_user.id, owner);
         assert_eq!(ctx.effective_user.id, owner);
+        let scope = ctx.scope.expect("share token must carry a scope");
+        assert_eq!(scope.session_id, Id::from("S1"));
+        assert_eq!(scope.role, WorkspaceRole::Viewer);
+    }
+
+    /// Seed a ROOT user (the common primary-account shape) and return its id.
+    async fn seed_root_user(pool: &SqlitePool, username: &str) -> Id {
+        let id = new_id();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
+             VALUES (?, ?, ?, ?, 1, ?)",
+        )
+        .bind(&id)
+        .bind(username)
+        .bind("hash")
+        .bind("Root User")
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// SECURITY: a share minted by a **root** owner must NOT carry root. The
+    /// principal's `id` is preserved (so the scoped session's `created_by == id`
+    /// ownership check still passes) but `is_root` is forced to `false` on BOTH
+    /// the real and effective user — a leaked share link can never carry root's
+    /// blanket bypass. It still authenticates and still carries a `scope`.
+    #[tokio::test]
+    async fn root_owned_share_does_not_grant_root() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let root_owner = seed_root_user(&pool, "root").await;
+
+        let (raw, _info) = repo
+            .issue_share_token(&root_owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+
+        let ctx = repo.authenticate(&raw).await.unwrap();
+        // The owner's id is preserved (ownership checks still pass) …
+        assert_eq!(ctx.real_user.id, root_owner);
+        assert_eq!(ctx.effective_user.id, root_owner);
+        // … but the root flag is dropped on BOTH identities.
+        assert!(
+            !ctx.real_user.is_root,
+            "a share principal must never be root (real_user)"
+        );
+        assert!(
+            !ctx.effective_user.is_root,
+            "a share principal must never be root (effective_user)"
+        );
+        // And it remains a scoped capability pinned to its one session.
         let scope = ctx.scope.expect("share token must carry a scope");
         assert_eq!(scope.session_id, Id::from("S1"));
         assert_eq!(scope.role, WorkspaceRole::Viewer);
