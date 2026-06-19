@@ -219,6 +219,62 @@ impl PtyHandle {
         out
     }
 
+    /// A snapshot that prepends up to `lines` rows of scrollback *history*
+    /// (the rows that have scrolled off above the visible screen) before the
+    /// coherent current-screen frame, so reconnecting doesn't lose history.
+    ///
+    /// The history rows are emitted as plain text (one `\r\n`-terminated line
+    /// each); writing them scrolls them up into the client xterm's own
+    /// scrollback. The current screen is then drawn by [`screen_snapshot`],
+    /// whose leading `\x1b[2J\x1b[H` clears the grid (NOT the client's
+    /// scrollback) and redraws the live viewport with full formatting. The
+    /// visible rows are therefore rendered exactly once — history holds only
+    /// rows that scrolled off above the live screen, never the visible ones.
+    ///
+    /// `lines` is the cap on how many history rows to include (in addition to
+    /// the current screen); it is further clamped to the emulator's retained
+    /// history. `lines == 0` is equivalent to [`screen_snapshot`].
+    ///
+    /// [`screen_snapshot`]: Self::screen_snapshot
+    pub fn snapshot_with_history(&self, lines: usize) -> Vec<u8> {
+        let mut parser = lock_unpoisoned(&self.parser);
+        if lines == 0 {
+            let screen = parser.screen();
+            let mut out = b"\x1b[2J\x1b[H".to_vec();
+            out.extend_from_slice(&screen.state_formatted());
+            return out;
+        }
+
+        let (_, cols) = parser.screen().size();
+        let screen = parser.screen_mut();
+        let saved_offset = screen.scrollback();
+
+        // Probe the retained history depth: set_scrollback clamps to the
+        // actual number of rows that have scrolled off, so reading it back
+        // tells us how far up we can go.
+        screen.set_scrollback(usize::MAX);
+        let total_history = screen.scrollback();
+        let take = lines.min(total_history);
+
+        // Read history rows from oldest to newest. At scrollback offset `d`
+        // the first visible row is exactly the row `d` positions above the
+        // live screen's top, so iterating d = take..=1 yields the most recent
+        // `take` history rows in display order.
+        let mut out = Vec::new();
+        for d in (1..=take).rev() {
+            screen.set_scrollback(d);
+            let line = screen.rows(0, cols).next().unwrap_or_default();
+            out.extend_from_slice(line.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+
+        // Restore the viewport, then append the coherent current-screen frame.
+        screen.set_scrollback(saved_offset);
+        out.extend_from_slice(b"\x1b[2J\x1b[H");
+        out.extend_from_slice(&screen.state_formatted());
+        out
+    }
+
     /// Current emulator size (rows, cols) — clients sync their xterm to this.
     pub fn screen_size(&self) -> (u16, u16) {
         lock_unpoisoned(&self.parser).screen().size()
@@ -301,5 +357,73 @@ mod tests {
         .expect("output in time");
         assert!(found, "did not receive 'hello' via subscribe");
         assert!(handle.last_output_at() > handle.epoch);
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_history_keeps_offscreen_lines_without_duplicating_visible() {
+        // Print far more than one 24-row screen so early lines scroll off into
+        // the emulator's history. Each line is unique (LINE_0001..LINE_0080).
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "i=1; while [ $i -le 80 ]; do printf 'LINE_%04d\\n' $i; i=$((i+1)); done".into(),
+            ],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn(&spec).expect("spawn sh");
+
+        // Wait for the child to finish emitting all lines.
+        let mut exit = handle.on_exit();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            exit.wait_for(|v| v.is_some()).await.expect("exit watch");
+        })
+        .await
+        .expect("child exited in time");
+
+        // Let the reader thread drain the last buffered output into the parser.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snap = String::from_utf8_lossy(&handle.snapshot_with_history(1000)).into_owned();
+            if snap.contains("LINE_0080") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "LINE_0080 never appeared");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let snap = String::from_utf8_lossy(&handle.snapshot_with_history(1000)).into_owned();
+
+        // A line that scrolled off the top of a 24-row screen must survive in
+        // the history-inclusive snapshot.
+        assert!(
+            snap.contains("LINE_0001"),
+            "early off-screen line lost from history snapshot"
+        );
+
+        // The last line is in the visible viewport. It must appear exactly once
+        // — the visible screen is rendered by the current-screen frame and must
+        // NOT also be emitted as history (no double-render).
+        let visible_count = snap.matches("LINE_0080").count();
+        assert_eq!(
+            visible_count, 1,
+            "visible line was duplicated between history and the live screen"
+        );
+
+        // The bare current-screen snapshot must NOT contain the off-screen line:
+        // confirms LINE_0001 is genuinely history, not part of the live screen.
+        let screen_only = String::from_utf8_lossy(&handle.screen_snapshot()).into_owned();
+        assert!(
+            !screen_only.contains("LINE_0001"),
+            "off-screen line unexpectedly present in the bare current screen"
+        );
+
+        // `lines == 0` is equivalent to the bare current-screen snapshot.
+        assert_eq!(
+            handle.snapshot_with_history(0),
+            handle.screen_snapshot(),
+            "lines == 0 must equal the bare screen snapshot"
+        );
     }
 }

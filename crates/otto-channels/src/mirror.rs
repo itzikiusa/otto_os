@@ -468,12 +468,13 @@ async fn upload_file_path(
 ) {
     match tokio::fs::read(path).await {
         Ok(bytes) => {
-            let content = String::from_utf8_lossy(&bytes);
             let filename = std::path::Path::new(path)
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("attachment");
-            match adapter.upload(chat, thread, filename, &content).await {
+            // Upload the raw bytes verbatim — a UTF-8 round-trip would corrupt
+            // binary attachments (images, PDFs, …).
+            match adapter.upload(chat, thread, filename, &bytes).await {
                 Ok(()) => info!(file = filename, "mirror: uploaded agent file attachment"),
                 Err(e) => warn!("mirror: file upload {path}: {e}"),
             }
@@ -491,7 +492,10 @@ async fn post_reply(adapter: &Arc<dyn Adapter>, chat: &str, thread: Option<&str>
         if let Err(e) = adapter.send(chat, thread, &head_msg).await {
             warn!("mirror final-head-send: {e}");
         }
-        if let Err(e) = adapter.upload(chat, thread, "investigation.md", text).await {
+        if let Err(e) = adapter
+            .upload(chat, thread, "investigation.md", text.as_bytes())
+            .await
+        {
             warn!("mirror upload: {e}");
         }
     } else if let Err(e) = adapter.send(chat, thread, text).await {

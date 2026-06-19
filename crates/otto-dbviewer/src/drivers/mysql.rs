@@ -23,9 +23,10 @@ use tokio::sync::Mutex;
 use crate::driver::Driver;
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, Column, ColumnDef, CompletionContext, CompletionItem, CompletionKind,
-    CompletionResponse, Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail,
-    QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode, TestResult,
+    self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionItem,
+    CompletionKind, CompletionResponse, Engine, ForeignKey, IndexDef, NodeKind, NodePath,
+    ObjectDetail, QueryHandle, QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode,
+    TestResult,
 };
 
 const DEFAULT_MAX_ROWS: usize = 1000;
@@ -246,6 +247,16 @@ impl Driver for MysqlDriver {
     }
 
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
+        // Run with a throwaway token (no cancel tracking for the bare `run`).
+        self.run_tracked(cfg, req, &CancelToken::new()).await
+    }
+
+    async fn run_tracked(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &QueryRequest,
+        token: &CancelToken,
+    ) -> Result<QueryResult> {
         let statement = req.statement.trim();
         if statement.is_empty() {
             return Err(types::invalid("empty statement"));
@@ -260,9 +271,9 @@ impl Driver for MysqlDriver {
 
         let result = if is_read_statement(statement) {
             let limited = types::inject_row_limit(statement, max_rows.saturating_add(1));
-            run_read(&pool, &limited, max_rows, active_db).await
+            run_read(&pool, &limited, max_rows, active_db, token).await
         } else {
-            run_write(&pool, statement, active_db).await
+            run_write(&pool, statement, active_db, token).await
         };
         let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -270,6 +281,26 @@ impl Driver for MysqlDriver {
         result.stats.duration_ms = duration_ms;
         result.stats.row_count = result.rows.len();
         Ok(result)
+    }
+
+    /// Kill the running query on its backend connection: `KILL QUERY <connid>`.
+    /// Runs on a separate pooled connection (you can't issue it on the blocked
+    /// one). `KILL QUERY` cancels only the *current statement* on that connection,
+    /// not the connection itself — the pooled session survives and is reused. A
+    /// stale/finished connection id makes MySQL return an "Unknown thread id"
+    /// error, which we swallow (the query is already gone — cancel succeeded).
+    async fn cancel(&self, cfg: &ResolvedConfig, handle: &QueryHandle) -> Result<()> {
+        let QueryHandle::MysqlConnId(conn_id) = handle else {
+            return Ok(());
+        };
+        let pool = self.pool(cfg).await?;
+        // `KILL QUERY <id>` takes a bare integer; the id came from CONNECTION_ID()
+        // (a u64), so there's nothing to escape.
+        let sql = format!("KILL QUERY {conn_id}");
+        // Best-effort: an already-finished query yields "Unknown thread id 1234"
+        // — that's a successful no-op cancel, not a failure to report.
+        let _ = sqlx::query(&sql).execute(&pool).await;
+        Ok(())
     }
 
     async fn completion(
@@ -660,15 +691,33 @@ fn first_keyword(statement: &str) -> String {
         .to_ascii_uppercase()
 }
 
+/// Read the backend connection id (`CONNECTION_ID()`) for the acquired session
+/// and record it in `token`, so a concurrent cancel can `KILL QUERY <id>` this
+/// exact connection. Best-effort: a failure leaves the token empty (the query
+/// just can't be server-cancelled), never an error to the caller.
+async fn capture_conn_id(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>, token: &CancelToken) {
+    if let Ok(id) = sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
+        .fetch_one(&mut **conn)
+        .await
+    {
+        token.set(QueryHandle::MysqlConnId(id));
+    }
+}
+
 async fn run_read(
     pool: &sqlx::MySqlPool,
     statement: &str,
     max_rows: usize,
     active_db: Option<&str>,
+    token: &CancelToken,
 ) -> Result<QueryResult> {
     // Acquire a single connection so the optional `USE <db>` and the statement
     // share the same session — the default schema must apply to the query.
     let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    // Capture this connection's backend id so a concurrent cancel can
+    // `KILL QUERY <id>` it. Best-effort — a query with no captured id simply
+    // can't be server-cancelled.
+    capture_conn_id(&mut conn, token).await;
     if let Some(db) = active_db {
         sqlx::query(&format!("USE `{}`", esc_ident(db)))
             .execute(&mut *conn)
@@ -712,9 +761,11 @@ async fn run_write(
     pool: &sqlx::MySqlPool,
     statement: &str,
     active_db: Option<&str>,
+    token: &CancelToken,
 ) -> Result<QueryResult> {
     // Same as run_read: `USE <db>` and the statement must share one session.
     let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    capture_conn_id(&mut conn, token).await;
     if let Some(db) = active_db {
         sqlx::query(&format!("USE `{}`", esc_ident(db)))
             .execute(&mut *conn)

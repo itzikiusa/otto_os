@@ -285,6 +285,10 @@ async fn import_story<S: ProductCtx>(
     Json(req): Json<crate::types::ImportStoryReq>,
 ) -> ApiResult<Response> {
     ctx.roles().check(&user, &ws, WorkspaceRole::Editor).await?;
+    // S4: the caller may only bind a story to an issue account they own (or root).
+    ctx.product()
+        .authorize_account_id(&req.account_id, &user)
+        .await?;
     let detail = ctx.product().import_story(&ws, &req, &user.id).await?;
     Ok(Json(detail).into_response())
 }
@@ -388,6 +392,8 @@ async fn refresh_story<S: ProductCtx>(
     Path(StoryId { sid }): Path<StoryId>,
 ) -> ApiResult<Response> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    // S4: refreshing re-fetches via the story's bound credential — owner/root only.
+    ctx.product().authorize_story_account(&sid, &user).await?;
     let detail = ctx.product().refresh_story(&sid, &user.id).await?;
     Ok(Json(detail).into_response())
 }
@@ -430,6 +436,10 @@ async fn publish_version<S: ProductCtx>(
     let story = ctx.product_repo().get_story(&version.story_id).await?;
     ctx.roles()
         .check(&user, &story.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    // S4: publishing pushes through the story's bound credential — owner/root only.
+    ctx.product()
+        .authorize_story_account(&version.story_id, &user)
         .await?;
     // Delegate to service: push to issue tracker + record publish event.
     let (url, source_ref) = ctx.product().publish_version(&vid, &user.id).await?;
@@ -562,6 +572,8 @@ async fn post_questions<S: ProductCtx>(
     Json(req): Json<PostQuestionsReq>,
 ) -> ApiResult<Response> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    // S4: posting comments uses the story's bound credential — owner/root only.
+    ctx.product().authorize_story_account(&sid, &user).await?;
     let results = ctx
         .product()
         .post_questions(&sid, &req.ids, req.format.as_deref(), &user.id)
@@ -848,6 +860,10 @@ async fn publish_tests<S: ProductCtx>(
     ctx.roles()
         .check(&user, &story.workspace_id, WorkspaceRole::Editor)
         .await?;
+    // S4: publishing tests writes through the story's bound credential — owner/root only.
+    ctx.product()
+        .authorize_story_account(&run.story_id, &user)
+        .await?;
     let url = ctx
         .product()
         .publish_testcases(
@@ -964,6 +980,10 @@ async fn publish_as_rfc<S: ProductCtx>(
     Json(req): Json<PublishAsRfcReq>,
 ) -> ApiResult<Response> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    // S4: publish through a user-supplied account — owner/root only.
+    ctx.product()
+        .authorize_account_id(&req.account_id, &user)
+        .await?;
     let detail = ctx
         .product()
         .publish_as_rfc(
@@ -985,6 +1005,10 @@ async fn publish_as_story<S: ProductCtx>(
     Json(req): Json<PublishAsStoryReq>,
 ) -> ApiResult<Response> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    // S4: publish through a user-supplied account — owner/root only.
+    ctx.product()
+        .authorize_account_id(&req.account_id, &user)
+        .await?;
     let detail = ctx
         .product()
         .publish_as_story(&sid, &req.account_id, &req.project_key, &req.issue_type, &user.id)
@@ -1173,6 +1197,62 @@ mod tests {
             .layer(Extension(AuthUser(user)))
     }
 
+    /// Build the app with an explicit (possibly non-root) user, so S4 credential
+    /// ownership can be exercised at the HTTP boundary.
+    fn app_as(ctx: TestCtx, user_id: &Id, is_root: bool) -> Router {
+        use chrono::Utc;
+        let user = User {
+            id: user_id.clone(),
+            username: "tester".into(),
+            display_name: "Tester".into(),
+            is_root,
+            disabled: false,
+            created_at: Utc::now(),
+        };
+        router::<TestCtx>()
+            .with_state(ctx)
+            .layer(Extension(AuthUser(user)))
+    }
+
+    /// Seed a user row with a specific id + username (distinct usernames avoid the
+    /// UNIQUE collision `seed_user` hits when called twice).
+    async fn seed_named_user(pool: &SqlitePool, username: &str) -> Id {
+        use chrono::Utc;
+        let uid = otto_core::new_id();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
+             VALUES (?, ?, ?, ?, 0, ?)",
+        )
+        .bind(&uid)
+        .bind(username)
+        .bind("hash")
+        .bind(username)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        uid
+    }
+
+    /// Seed an issue account owned by `user_id`.
+    async fn seed_issue_account(pool: &SqlitePool, user_id: &Id) -> Id {
+        use otto_core::domain::IssueProviderKind;
+        let repo = IssuesRepo::new(pool.clone());
+        repo.create_account(otto_state::NewIssueAccount {
+            user_id: user_id.clone(),
+            provider: IssueProviderKind::Jira,
+            label: "work".into(),
+            email: "owner@example.com".into(),
+            token_ref: "issueacct-1".into(),
+            base_url: "https://example.atlassian.net".into(),
+            token_expires_at: None,
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
@@ -1334,5 +1414,79 @@ mod tests {
         assert!(body["counts"]["open_questions"].is_number());
         assert!(body["counts"]["notes"].is_number());
         assert!(body["counts"]["testcases"].is_number());
+    }
+
+    // -----------------------------------------------------------------------
+    // S4: credential ownership at the HTTP boundary
+    // -----------------------------------------------------------------------
+
+    /// `POST /product/stories/{sid}/publish-as-story` with an `account_id` the
+    /// caller does not own must be rejected with 403 *before* any network call —
+    /// even though the workspace RoleChecker (AllowAll) would let them through.
+    #[tokio::test]
+    async fn publish_as_story_rejects_non_owner_account() {
+        let pool = mem_pool().await;
+        let owner = seed_named_user(&pool, "owner").await;
+        let attacker = seed_named_user(&pool, "attacker").await;
+        let ws = seed_workspace(&pool).await;
+        // Account belongs to `owner`.
+        let account_id = seed_issue_account(&pool, &owner).await;
+
+        let ctx = TestCtx::new(pool);
+        // A draft story to publish.
+        let draft = ctx
+            .repo
+            .create_story(NewStory {
+                workspace_id: ws.clone(),
+                source_kind: "draft".into(),
+                account_id: String::new(),
+                source_key: String::new(),
+                title: "Draft".into(),
+                url: String::new(),
+                issue_type: None,
+                stage: "draft".into(),
+                cwd: None,
+                created_by: attacker.clone(),
+            })
+            .await
+            .unwrap();
+        let sid = draft.id.clone();
+
+        let body = serde_json::json!({
+            "account_id": account_id,
+            "project_key": "NEW",
+            "issue_type": "Story",
+        });
+
+        // Attacker (non-root, not the account owner) → 403 Forbidden.
+        let attacker_app = app_as(ctx.clone(), &attacker, false);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/product/stories/{sid}/publish-as-story"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = attacker_app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-owner must be forbidden before using the credential"
+        );
+
+        // Owner passes the ownership guard (then fails later at the network step,
+        // which is NOT a 403) — proving the guard does not block the legit owner.
+        let owner_app = app_as(ctx, &owner, false);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/product/stories/{sid}/publish-as-story"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = owner_app.oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "owner must clear the ownership guard"
+        );
     }
 }

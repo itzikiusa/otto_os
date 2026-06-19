@@ -17,7 +17,7 @@ use otto_core::api::{
     RefsResp, RepoStatusResp, RequestChangesReq, ResolveConflictReq, StagePathsReq,
     UpdateGitAccountReq, UpdatePrReq,
 };
-use otto_core::auth::{AuthUser, RoleChecker};
+use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
 use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
@@ -163,22 +163,51 @@ fn account_token<S: GitCtx>(s: &S, account: &GitAccount) -> Result<String> {
         .ok_or_else(|| Error::Invalid(format!("token missing for git account {}", account.id)))
 }
 
-async fn optional_token<S: GitCtx>(s: &S, repo: &Repo) -> Option<String> {
-    let account_id = repo.git_account_id.as_ref()?;
-    let account = s.store().get_account(account_id).await.ok()?;
-    s.secrets().get(&account.token_ref).ok().flatten()
+/// S4 guard: a repo's bound git credential may be *used* only by its owner (or
+/// root). A workspace can have many members and a repo binds exactly one account,
+/// so the workspace role-check alone does not stop user B from pushing / opening
+/// PRs through user A's hosting token. Returns the bound account when the caller
+/// is authorized; `None` when no account is bound (ssh-via-agent remotes); and
+/// `Forbidden` when the caller is neither the owner nor root.
+async fn authorized_repo_account<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    repo: &Repo,
+) -> Result<Option<GitAccount>> {
+    let Some(account_id) = repo.git_account_id.as_ref() else {
+        return Ok(None);
+    };
+    let account = s.store().get_account(account_id).await?;
+    authorize_owner(&account, &user.0)?;
+    Ok(Some(account))
+}
+
+/// Resolve the push/pull token for a repo's bound account, enforcing the S4
+/// ownership guard. `None` when no account is bound (ssh remotes work through the
+/// user's agent); `Forbidden` when the caller does not own the bound account.
+async fn optional_token<S: GitCtx>(s: &S, user: &AuthUser, repo: &Repo) -> Result<Option<String>> {
+    match authorized_repo_account(s, user, repo).await? {
+        Some(account) => Ok(s.secrets().get(&account.token_ref)?),
+        None => Ok(None),
+    }
 }
 
 /// Resolve provider client + remote ref for PR routes (400 when not bound).
-async fn provider_ctx<S: GitCtx>(s: &S, repo: &Repo) -> Result<(Arc<dyn GitProvider>, RemoteRef)> {
+/// Enforces the S4 ownership guard: the caller must own the repo's bound account.
+async fn provider_ctx<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    repo: &Repo,
+) -> Result<(Arc<dyn GitProvider>, RemoteRef)> {
     let kind = repo
         .provider
         .ok_or_else(|| Error::Invalid("repo has no git provider".into()))?;
-    let account_id = repo
-        .git_account_id
-        .as_ref()
+    if repo.git_account_id.is_none() {
+        return Err(Error::Invalid("repo has no git account".into()));
+    }
+    let account = authorized_repo_account(s, user, repo)
+        .await?
         .ok_or_else(|| Error::Invalid("repo has no git account".into()))?;
-    let account = s.store().get_account(account_id).await?;
     if account.provider != kind {
         return Err(Error::Invalid(
             "git account provider does not match repo provider".into(),
@@ -561,6 +590,9 @@ async fn resolve_account<S: GitCtx>(
 ) -> Result<Option<Id>> {
     if let Some(id) = explicit {
         let account = s.store().get_account(id).await?;
+        // S4: never let a caller bind a repo to a credential they don't own —
+        // otherwise any workspace member could later push through it.
+        authorize_owner(&account, &user.0)?;
         return Ok(Some(account.id));
     }
     let Some(kind) = provider else {
@@ -637,7 +669,7 @@ async fn repo_fetch<S: GitCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<RepoStatusResp>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let token = optional_token(&s, &repo).await;
+    let token = optional_token(&s, &user, &repo).await?;
     git.fetch(token).await?;
     Ok(Json(git.status().await?))
 }
@@ -732,7 +764,7 @@ async fn repo_push<S: GitCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let token = optional_token(&s, &repo).await;
+    let token = optional_token(&s, &user, &repo).await?;
     let output = git.push(token).await?;
     Ok(Json(serde_json::json!({ "output": output })))
 }
@@ -743,7 +775,7 @@ async fn repo_pull<S: GitCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let token = optional_token(&s, &repo).await;
+    let token = optional_token(&s, &user, &repo).await?;
     let output = git.pull(token).await?;
     Ok(Json(serde_json::json!({ "output": output })))
 }
@@ -757,7 +789,7 @@ async fn repo_collections_pull<S: GitCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let token = optional_token(&s, &repo).await;
+    let token = optional_token(&s, &user, &repo).await?;
     let _ = git.pull(token).await; // best-effort; report read result regardless
     let dir = std::path::Path::new(&repo.path).join("collections");
     let mut files: Vec<serde_json::Value> = Vec::new();
@@ -818,7 +850,7 @@ async fn repo_collections_push<S: GitCtx>(
     }
     git.stage(&staged).await?;
     let sha = git.commit(&req.message, false).await?;
-    let token = optional_token(&s, &repo).await;
+    let token = optional_token(&s, &user, &repo).await?;
     let push_out = git.push(token).await?;
     Ok(Json(serde_json::json!({ "commit": sha, "push": push_out, "files": staged.len() })))
 }
@@ -966,7 +998,7 @@ async fn pr_list<S: GitCtx>(
         Some("all") => PrState::All,
         Some(other) => return Err(Error::Invalid(format!("bad pr state: {other}")).into()),
     };
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     Ok(Json(provider.list_prs(&remote, state).await?))
 }
 
@@ -977,7 +1009,7 @@ async fn pr_create<S: GitCtx>(
     Json(req): Json<CreatePrReq>,
 ) -> ApiResult<Json<PrSummary>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     Ok(Json(provider.create_pr(&remote, &req).await?))
 }
 
@@ -987,7 +1019,7 @@ async fn pr_detail<S: GitCtx>(
     Path((id, number)): Path<(Id, u64)>,
 ) -> ApiResult<Json<PrDetail>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     Ok(Json(provider.get_pr(&remote, number).await?))
 }
 
@@ -998,7 +1030,7 @@ async fn pr_update<S: GitCtx>(
     Json(req): Json<UpdatePrReq>,
 ) -> ApiResult<StatusCode> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     provider.update_pr(&remote, number, &req).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1009,7 +1041,7 @@ async fn pr_diff<S: GitCtx>(
     Path((id, number)): Path<(Id, u64)>,
 ) -> ApiResult<Json<DiffResp>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     Ok(Json(provider.get_pr_diff(&remote, number).await?))
 }
 
@@ -1023,7 +1055,7 @@ async fn pr_comment<S: GitCtx>(
         return Err(Error::Invalid("comment body must not be empty".into()).into());
     }
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     Ok(Json(provider.comment(&remote, number, &req).await?))
 }
 
@@ -1033,7 +1065,7 @@ async fn pr_approve<S: GitCtx>(
     Path((id, number)): Path<(Id, u64)>,
 ) -> ApiResult<StatusCode> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     provider.approve(&remote, number).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1045,7 +1077,7 @@ async fn pr_merge<S: GitCtx>(
     Json(req): Json<MergePrReq>,
 ) -> ApiResult<StatusCode> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     provider.merge(&remote, number, req.strategy).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1056,7 +1088,7 @@ async fn pr_decline<S: GitCtx>(
     Path((id, number)): Path<(Id, u64)>,
 ) -> ApiResult<StatusCode> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     provider.decline(&remote, number).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1068,7 +1100,7 @@ async fn pr_request_changes<S: GitCtx>(
     Json(req): Json<RequestChangesReq>,
 ) -> ApiResult<StatusCode> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     provider
         .request_changes(&remote, number, req.body.as_deref())
         .await?;
@@ -1081,6 +1113,241 @@ async fn pr_commits<S: GitCtx>(
     Path((id, number)): Path<(Id, u64)>,
 ) -> ApiResult<Json<Vec<PrCommit>>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
-    let (provider, remote) = provider_ctx(&s, &repo).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     Ok(Json(provider.list_pr_commits(&remote, number).await?))
+}
+
+// ---------------------------------------------------------------------------
+// Tests — S4 credential ownership on the git use-paths
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use otto_core::auth::{BoxFuture, RoleChecker};
+    use otto_core::domain::{GitProviderKind, User};
+    use otto_core::secrets::SecretStore;
+    use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
+    use sqlx::SqlitePool;
+
+    use super::*;
+
+    /// In-memory secret store that returns a fixed token for any ref.
+    struct FixedSecret;
+    impl SecretStore for FixedSecret {
+        fn put(&self, _k: &str, _v: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get(&self, _k: &str) -> Result<Option<String>> {
+            Ok(Some("token".into()))
+        }
+        fn delete(&self, _k: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// RoleChecker that always authorizes — proves the S4 guard is what blocks a
+    /// non-owner, independent of the workspace role-check.
+    struct AllowAll;
+    impl RoleChecker for AllowAll {
+        fn check<'a>(
+            &'a self,
+            _u: &'a User,
+            _w: &'a Id,
+            _m: WorkspaceRole,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestCtx {
+        store: GitStore,
+        workspaces: WorkspacesRepo,
+        secrets: Arc<dyn SecretStore>,
+        roles: Arc<dyn RoleChecker>,
+        events: tokio::sync::broadcast::Sender<otto_core::event::Event>,
+    }
+
+    impl GitCtx for TestCtx {
+        fn store(&self) -> &GitStore {
+            &self.store
+        }
+        fn workspaces(&self) -> &WorkspacesRepo {
+            &self.workspaces
+        }
+        fn secrets(&self) -> &Arc<dyn SecretStore> {
+            &self.secrets
+        }
+        fn roles(&self) -> &Arc<dyn RoleChecker> {
+            &self.roles
+        }
+        fn events(&self) -> &tokio::sync::broadcast::Sender<otto_core::event::Event> {
+            &self.events
+        }
+    }
+
+    async fn mem_pool() -> SqlitePool {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    async fn seed_user(pool: &SqlitePool, username: &str) -> Id {
+        let uid = new_id();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
+             VALUES (?, ?, ?, ?, 0, ?)",
+        )
+        .bind(&uid)
+        .bind(username)
+        .bind("hash")
+        .bind(username)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        uid
+    }
+
+    async fn seed_workspace(pool: &SqlitePool) -> Id {
+        let wid = new_id();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&wid)
+        .bind("ws")
+        .bind("/tmp")
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        wid
+    }
+
+    fn auth(id: &Id, is_root: bool) -> AuthUser {
+        AuthUser(User {
+            id: id.clone(),
+            username: id.clone(),
+            display_name: id.clone(),
+            is_root,
+            disabled: false,
+            created_at: Utc::now(),
+        })
+    }
+
+    /// A repo bound to user A's git account may have its credential *used* only by
+    /// A or root; a different workspace member is forbidden even though AllowAll
+    /// passes the workspace role-check. An unbound repo yields `None` (no leak).
+    #[tokio::test]
+    async fn repo_credential_use_is_owner_or_root_only() {
+        let pool = mem_pool().await;
+        let owner = seed_user(&pool, "owner").await;
+        let other = seed_user(&pool, "other").await;
+        let root = seed_user(&pool, "root").await;
+        let ws = seed_workspace(&pool).await;
+
+        let store = GitStore::new(pool.clone());
+        let account = store
+            .create_account(NewGitAccount {
+                user_id: owner.clone(),
+                provider: GitProviderKind::Github,
+                label: "gh".into(),
+                username: "octocat".into(),
+                token_ref: "gitacct-1".into(),
+                api_base_url: None,
+                namespace: None,
+                token_expires_at: None,
+            })
+            .await
+            .unwrap();
+
+        let bound_repo = store
+            .create_repo(NewRepo {
+                workspace_id: ws.clone(),
+                name: "bound".into(),
+                path: "/tmp/bound".into(),
+                remote_url: Some("https://github.com/o/bound.git".into()),
+                provider: Some(GitProviderKind::Github),
+                git_account_id: Some(account.id.clone()),
+            })
+            .await
+            .unwrap();
+
+        let ctx = TestCtx {
+            store: store.clone(),
+            workspaces: WorkspacesRepo::new(pool.clone()),
+            secrets: Arc::new(FixedSecret),
+            roles: Arc::new(AllowAll),
+            events: tokio::sync::broadcast::channel(8).0,
+        };
+
+        // Owner ✅
+        assert!(
+            authorized_repo_account(&ctx, &auth(&owner, false), &bound_repo)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Root ✅
+        assert!(
+            authorized_repo_account(&ctx, &auth(&root, true), &bound_repo)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Non-owner ⛔ — Forbidden, even with AllowAll roles.
+        let err = authorized_repo_account(&ctx, &auth(&other, false), &bound_repo)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+
+        // The token resolver enforces the same: owner gets a token, other is
+        // forbidden (not silently `None`).
+        assert!(optional_token(&ctx, &auth(&owner, false), &bound_repo)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(matches!(
+            optional_token(&ctx, &auth(&other, false), &bound_repo)
+                .await
+                .unwrap_err(),
+            Error::Forbidden(_)
+        ));
+
+        // An unbound repo carries no credential → None for anyone (no leak path).
+        let unbound = store
+            .create_repo(NewRepo {
+                workspace_id: ws.clone(),
+                name: "unbound".into(),
+                path: "/tmp/unbound".into(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(authorized_repo_account(&ctx, &auth(&other, false), &unbound)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(optional_token(&ctx, &auth(&other, false), &unbound)
+            .await
+            .unwrap()
+            .is_none());
+    }
 }

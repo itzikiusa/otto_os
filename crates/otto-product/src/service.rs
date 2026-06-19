@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use otto_core::domain::IssueAccount;
+use otto_core::auth::authorize_owner;
+use otto_core::domain::{IssueAccount, User};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use otto_issues::{markdown_to_storage, storage_to_markdown, CommentRef, ConfluenceClient, JiraClient, PageComment, IssueComment};
@@ -66,6 +67,41 @@ impl ProductService {
             issues,
             secrets,
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Credential ownership guards
+    // ---------------------------------------------------------------------------
+    //
+    // Every workflow below resolves an issue account and then acts with that
+    // account's Atlassian credentials. Because a story binds *one* account id and
+    // a workspace can have many members, a workspace role-check alone does NOT
+    // stop user B from driving user A's Jira/Confluence identity. These guards
+    // enforce the canonical rule (owner-or-root) at the trust boundary; the HTTP
+    // handlers call them with the authenticated user before invoking a workflow.
+
+    /// Authorize the caller to *use* the issue account identified by `account_id`.
+    ///
+    /// Returns `Forbidden` when `user` is neither the account owner nor root.
+    /// Used by the publish/import flows that take a user-supplied `account_id`.
+    pub async fn authorize_account_id(&self, account_id: &Id, user: &User) -> Result<()> {
+        let account = self.issues.get_account(account_id).await?;
+        authorize_owner(&account, user)
+    }
+
+    /// Authorize the caller to *use* the account a story is bound to.
+    ///
+    /// Loads the story, then authorizes `user` against `story.account_id`. Stories
+    /// not bound to an issue account (e.g. drafts with an empty `account_id`) carry
+    /// no third-party credential, so there is nothing to leak and the check passes.
+    /// Used by the refresh/comment/publish flows that act on a stored story.
+    pub async fn authorize_story_account(&self, story_id: &Id, user: &User) -> Result<()> {
+        let story = self.repo.get_story(story_id).await?;
+        if story.account_id.is_empty() {
+            return Ok(());
+        }
+        let account = self.issues.get_account(&story.account_id).await?;
+        authorize_owner(&account, user)
     }
 
     // ---------------------------------------------------------------------------
@@ -2622,5 +2658,122 @@ mod tests {
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "published_story");
+    }
+
+    // -----------------------------------------------------------------------
+    // S4 credential-ownership guards
+    // -----------------------------------------------------------------------
+
+    /// Seed a second user with a distinct username (avoids the UNIQUE collision
+    /// that `seed_user` would hit when called twice).
+    async fn seed_named_user(pool: &SqlitePool, username: &str) -> Id {
+        let uid = new_id();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
+             VALUES (?, ?, ?, ?, 0, ?)",
+        )
+        .bind(&uid)
+        .bind(username)
+        .bind("hash")
+        .bind(username)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+        uid
+    }
+
+    fn as_user(id: &Id, is_root: bool) -> User {
+        User {
+            id: id.clone(),
+            username: id.clone(),
+            display_name: id.clone(),
+            is_root,
+            disabled: false,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn svc_for(pool: &SqlitePool) -> ProductService {
+        let repo = ProductRepo::new(pool.clone());
+        let issues = IssuesRepo::new(pool.clone());
+        let secrets: Arc<dyn SecretStore> = Arc::new(FixedSecret("tok".into()));
+        ProductService::new(repo, issues, secrets)
+    }
+
+    /// `authorize_account_id` (used by import/publish flows that take a
+    /// user-supplied account id) — owner ✅, root ✅, stranger ⛔.
+    #[tokio::test]
+    async fn authorize_account_id_owner_root_ok_stranger_forbidden() {
+        let pool = mem_pool().await;
+        let owner = seed_named_user(&pool, "owner").await;
+        let stranger = seed_named_user(&pool, "stranger").await;
+        let account = seed_issue_account(&pool, &owner, "https://example.atlassian.net").await;
+        let svc = svc_for(&pool);
+
+        // Owner may use their own account.
+        svc.authorize_account_id(&account.id, &as_user(&owner, false))
+            .await
+            .expect("owner authorized");
+
+        // Root may use anyone's account.
+        let root = seed_named_user(&pool, "root").await;
+        svc.authorize_account_id(&account.id, &as_user(&root, true))
+            .await
+            .expect("root authorized");
+
+        // A stranger must be forbidden.
+        let err = svc
+            .authorize_account_id(&account.id, &as_user(&stranger, false))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+    }
+
+    /// `authorize_story_account` (used by refresh/comment/publish flows that act
+    /// on a stored story) — story owner ✅, stranger ⛔, accountless story ✅.
+    #[tokio::test]
+    async fn authorize_story_account_guards_bound_credential() {
+        let pool = mem_pool().await;
+        let owner = seed_named_user(&pool, "owner").await;
+        let stranger = seed_named_user(&pool, "stranger").await;
+        let ws = seed_workspace(&pool).await;
+        let account = seed_issue_account(&pool, &owner, "https://example.atlassian.net").await;
+        let svc = svc_for(&pool);
+
+        // A story bound to the owner's account.
+        let story = svc
+            .repo
+            .create_story(NewStory {
+                workspace_id: ws.clone(),
+                source_kind: "jira".into(),
+                account_id: account.id.clone(),
+                source_key: "PROJ-1".into(),
+                title: "Bound".into(),
+                url: "https://jira/PROJ-1".into(),
+                issue_type: None,
+                stage: "imported".into(),
+                cwd: None,
+                created_by: owner.clone(),
+            })
+            .await
+            .unwrap();
+
+        // Owner ✅, stranger ⛔.
+        svc.authorize_story_account(&story.id, &as_user(&owner, false))
+            .await
+            .expect("owner authorized");
+        let err = svc
+            .authorize_story_account(&story.id, &as_user(&stranger, false))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+
+        // A draft story with no bound account carries no credential → always ok.
+        let draft = svc.create_draft(&ws, &stranger, Some("D")).await.unwrap();
+        svc.authorize_story_account(&draft.story.id, &as_user(&stranger, false))
+            .await
+            .expect("accountless story passes");
     }
 }

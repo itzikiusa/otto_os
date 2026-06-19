@@ -228,9 +228,20 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/schema/children | ws viewer | `{node}` | child schema nodes (lazy expand) |
 | POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.) |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
+| POST /connections/{id}/db/cancel | ws editor | `{query_id}` | 204 — cancel an in-flight query engine-side |
 | POST /connections/{id}/db/completion | ws viewer | `{text,cursor}` | SQL completion suggestions |
 | GET /connections/{id}/db/history | ws viewer | — | recent query history |
 | POST /connections/{id}/db/explain-with-agent | ws editor | `{sql}` | AI explanation of a query (spawns an agent) |
+
+`RunQueryReq` may include an optional client-generated `query_id` (string). When
+present, the server registers the in-flight query under it; `POST …/db/cancel`
+with the same `query_id` then issues **engine-native** cancellation on a
+*separate* connection — MySQL `KILL QUERY <connid>`, ClickHouse `KILL QUERY WHERE
+query_id = '<id>'` — so the database stops the heavy query and frees the cached
+connection, not just the client's HTTP wait. Cancel is gated at the same role as
+`query` (`ws editor`; global connections: root). Cancelling an unknown /
+already-finished query, a query on a different connection, or one on an engine
+without a native per-query cancel (Redis/MongoDB) is a no-op success (`204`).
 
 ## DB Explorer — saved queries, dashboards, widgets
 

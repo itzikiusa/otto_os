@@ -184,4 +184,8 @@ pub struct UsageStatus {
     pub metric_rows: u64,
     /// On-disk size of the data directory in bytes.
     pub disk_bytes: u64,
+    /// Date the cost-estimation rate table was last reconciled against published
+    /// list prices (see `pricing::PRICED_AS_OF`). Lets the UI flag estimates as
+    /// "priced as of <date>" rather than implying live pricing.
+    pub priced_as_of: String,
 }

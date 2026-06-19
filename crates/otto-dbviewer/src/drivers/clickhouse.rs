@@ -29,9 +29,9 @@ use tokio::sync::Mutex;
 use crate::driver::Driver;
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, Column, ColumnDef, CompletionContext, CompletionItem, CompletionKind,
-    CompletionResponse, Engine, NodeKind, NodePath, ObjectDetail, QueryRequest, QueryResult,
-    QueryStats, ResolvedConfig, SchemaNode, TestResult,
+    self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionItem,
+    CompletionKind, CompletionResponse, Engine, NodeKind, NodePath, ObjectDetail, QueryHandle,
+    QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode, TestResult,
 };
 
 /// ClickHouse driver. Caches one transport handle per [`ResolvedConfig::cache_key`]:
@@ -126,6 +126,10 @@ struct Conn {
     /// Active database (if the user selected one), sent as the `database`
     /// request param so unqualified table names resolve against it.
     database: Option<String>,
+    /// Server-side `query_id` to tag this request with, so a concurrent
+    /// `KILL QUERY WHERE query_id = '<id>'` can target it. `None` for
+    /// introspection/completion (no need to cancel those).
+    query_id: Option<String>,
 }
 
 /// The shape of a `FORMAT JSONCompact` reply.
@@ -181,9 +185,16 @@ impl ClickhouseDriver {
     }
 
     /// Build a [`Conn`] for one operation: the cached `reqwest::Client` plus the
-    /// base URL, auth headers, session timezone, and optional active database
-    /// (all derived cheaply from `cfg`).
-    async fn connect(&self, cfg: &ResolvedConfig, active_db: Option<&str>) -> Result<Conn> {
+    /// base URL, auth headers, session timezone, optional active database, and an
+    /// optional server-side `query_id` (set so `run` can later cancel via
+    /// `KILL QUERY WHERE query_id = '<id>'`; `None` for introspection/completion).
+    /// All derived cheaply from `cfg`.
+    async fn connect_id(
+        &self,
+        cfg: &ResolvedConfig,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+    ) -> Result<Conn> {
         let client = self.client(cfg).await?;
 
         let scheme = if cfg.tls.enabled() { "https" } else { "http" };
@@ -219,6 +230,7 @@ impl ClickhouseDriver {
             headers,
             timezone,
             database: active_db.map(str::to_string),
+            query_id,
         })
     }
 
@@ -301,24 +313,29 @@ impl ClickhouseDriver {
     /// their own table names); `run` uses [`Self::query_rows_db`] to scope to the
     /// active database.
     async fn query_rows(&self, cfg: &ResolvedConfig, sql: &str) -> Result<RawRows> {
-        self.query_rows_db(cfg, sql, None).await
+        self.query_rows_db(cfg, sql, None, None).await
     }
 
     /// Like [`Self::query_rows`] but scopes unqualified table names to
-    /// `active_db` (when `Some`). On the HTTP transport this sets the `database`
-    /// request param. NATIVE TRANSPORT TODO: the native client's default
-    /// database is fixed at connect time (cached per config), so active-db
-    /// scoping is not applied there yet — unqualified names resolve against the
-    /// profile's database. Most connections use HTTP.
+    /// `active_db` (when `Some`) and, when `query_id` is set, tags the HTTP
+    /// request so a concurrent cancel can `KILL QUERY` it. On the HTTP transport
+    /// this sets the `database` / `query_id` request params. NATIVE TRANSPORT
+    /// TODO: the native client's default database is fixed at connect time
+    /// (cached per config), so active-db scoping is not applied there yet —
+    /// unqualified names resolve against the profile's database. The native
+    /// transport also doesn't expose a per-query `query_id` here, so a native
+    /// query isn't server-cancellable (cancel becomes a no-op). Most connections
+    /// use HTTP.
     async fn query_rows_db(
         &self,
         cfg: &ResolvedConfig,
         sql: &str,
         active_db: Option<&str>,
+        query_id: Option<String>,
     ) -> Result<RawRows> {
         match transport_for(cfg) {
             Transport::Http => {
-                let conn = self.connect(cfg, active_db).await?;
+                let conn = self.connect_id(cfg, active_db, query_id).await?;
                 Ok(conn.query_json(sql).await?.into_raw())
             }
             Transport::Native => self.native_query(cfg, sql).await,
@@ -330,20 +347,22 @@ impl ClickhouseDriver {
     /// and join the single string column the server returns. No-scope wrapper;
     /// `run` uses [`Self::query_text_db`].
     async fn query_text(&self, cfg: &ResolvedConfig, sql: &str) -> Result<String> {
-        self.query_text_db(cfg, sql, None).await
+        self.query_text_db(cfg, sql, None, None).await
     }
 
-    /// Like [`Self::query_text`] but scopes to `active_db` on the HTTP transport
-    /// (see [`Self::query_rows_db`] for the native-transport TODO).
+    /// Like [`Self::query_text`] but scopes to `active_db` and tags the HTTP
+    /// request with `query_id` (see [`Self::query_rows_db`] for the
+    /// native-transport TODO).
     async fn query_text_db(
         &self,
         cfg: &ResolvedConfig,
         sql: &str,
         active_db: Option<&str>,
+        query_id: Option<String>,
     ) -> Result<String> {
         match transport_for(cfg) {
             Transport::Http => {
-                let conn = self.connect(cfg, active_db).await?;
+                let conn = self.connect_id(cfg, active_db, query_id).await?;
                 conn.query_raw(sql).await
             }
             Transport::Native => {
@@ -420,6 +439,11 @@ impl Conn {
             // The `database` request param sets the default DB for unqualified
             // table names (the HTTP analogue of `USE <db>`).
             req = req.query(&[("database", db.as_str())]);
+        }
+        if let Some(qid) = &self.query_id {
+            // Tag the server-side query so `KILL QUERY WHERE query_id = '<id>'`
+            // can target it from another connection.
+            req = req.query(&[("query_id", qid.as_str())]);
         }
         let resp = req.body(body).send().await.map_err(req_err)?;
         let status = resp.status();
@@ -765,6 +789,13 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+/// A fresh, opaque ClickHouse `query_id` for one execution. A ULID — purely
+/// `[0-9A-Z]`, so it's safe in the `query_id` request param and the
+/// `KILL QUERY WHERE query_id = '…'` literal.
+fn new_query_id() -> String {
+    format!("otto-{}", otto_core::new_id())
+}
+
 /// Escape backticks for a backtick-quoted identifier (`db`.`tbl`).
 fn esc_ident(s: &str) -> String {
     s.replace('`', "``")
@@ -1065,6 +1096,16 @@ impl Driver for ClickhouseDriver {
     }
 
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
+        // Run with a throwaway token (no cancel tracking for the bare `run`).
+        self.run_tracked(cfg, req, &CancelToken::new()).await
+    }
+
+    async fn run_tracked(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &QueryRequest,
+        token: &CancelToken,
+    ) -> Result<QueryResult> {
         let sql = req.statement.trim();
         if sql.is_empty() {
             return Err(types::invalid("clickhouse: empty statement"));
@@ -1076,9 +1117,19 @@ impl Driver for ClickhouseDriver {
         // table names — see query_rows_db for how it's applied per transport.
         let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
+        // Tag this execution with a fresh server-side query_id (HTTP transport)
+        // and record it in the token, so a concurrent cancel can KILL it. The
+        // native transport ignores it (cancel becomes a no-op there).
+        let query_id = new_query_id();
+        if transport_for(cfg) == Transport::Http {
+            token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
+        }
+
         if returns_rows(sql) {
             let limited = types::inject_row_limit(sql, max_rows.saturating_add(1));
-            let resp = self.query_rows_db(cfg, &limited, active_db).await?;
+            let resp = self
+                .query_rows_db(cfg, &limited, active_db, Some(query_id))
+                .await?;
             let duration_ms = started.elapsed().as_millis() as u64;
 
             let columns: Vec<Column> = resp
@@ -1113,7 +1164,7 @@ impl Driver for ClickhouseDriver {
             })
         } else {
             // Write / DDL statement: no rowset, just acknowledge.
-            self.query_text_db(cfg, sql, active_db).await?;
+            self.query_text_db(cfg, sql, active_db, Some(query_id)).await?;
             let duration_ms = started.elapsed().as_millis() as u64;
             let mut result = QueryResult::message("OK");
             result.rows_affected = None;
@@ -1124,6 +1175,25 @@ impl Driver for ClickhouseDriver {
             };
             Ok(result)
         }
+    }
+
+    /// Cancel the running query by its `query_id`: `KILL QUERY WHERE query_id =
+    /// '<id>'`. Issued on a separate connection (always HTTP here — the captured
+    /// handle only exists for HTTP-transport runs). `KILL QUERY ... SYNC` would
+    /// block until the query actually stops; we use the default async form so the
+    /// cancel returns promptly and ClickHouse stops the query out of band. An
+    /// already-finished query simply matches no rows — a successful no-op.
+    async fn cancel(&self, cfg: &ResolvedConfig, handle: &QueryHandle) -> Result<()> {
+        let QueryHandle::ClickhouseQueryId(qid) = handle else {
+            return Ok(());
+        };
+        // `query_id` is a server-generated UUID; still escape defensively for the
+        // string literal.
+        let sql = format!("KILL QUERY WHERE query_id = '{}'", esc(qid));
+        // Best-effort: a no-match KILL is a successful no-op; don't surface a
+        // transient error as a cancel failure.
+        let _ = self.query_text(cfg, &sql).await;
+        Ok(())
     }
 
     async fn completion(

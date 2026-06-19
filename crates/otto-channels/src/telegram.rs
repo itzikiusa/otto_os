@@ -18,6 +18,48 @@ const API_BASE: &str = "https://api.telegram.org";
 const LONG_POLL_TIMEOUT: u64 = 25;
 const RETRY_SLEEP: Duration = Duration::from_secs(3);
 
+/// How long to wait for a TCP/TLS connection to the Telegram Bot API.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Overall per-request deadline for ordinary Bot API calls (sendMessage,
+/// editMessageText, sendChatAction). A hung endpoint must not block indefinitely.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Overall deadline for `sendDocument` uploads, which can carry large files and
+/// so get a more generous budget than ordinary API calls.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// Overall deadline for the long-poll `getUpdates` request. This MUST exceed
+/// `LONG_POLL_TIMEOUT` (the server holds the connection open that long waiting
+/// for updates) plus margin, or long-polling would be cut off mid-poll.
+const LONG_POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(LONG_POLL_TIMEOUT + 15);
+
+/// Build an HTTP client for ordinary Bot API calls (connect + overall timeouts).
+/// Falls back to a default client if the builder fails.
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
+/// Build an HTTP client for the long-poll listener. Its overall timeout is sized
+/// to the long-poll interval plus margin so `getUpdates` is never cut short.
+fn build_long_poll_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(LONG_POLL_REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
+/// Build an HTTP client for `sendDocument` uploads (larger overall budget).
+fn build_upload_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(UPLOAD_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Telegram API response shapes
 // ---------------------------------------------------------------------------
@@ -61,14 +103,18 @@ struct TgUpdate {
 /// Telegram bot adapter: post, edit, upload, and type via the Bot API.
 pub struct TelegramAdapter {
     token: String,
+    /// Client for ordinary calls (sendMessage / editMessageText / sendChatAction).
     http: reqwest::Client,
+    /// Client for `sendDocument` uploads, with a more generous overall timeout.
+    http_upload: reqwest::Client,
 }
 
 impl TelegramAdapter {
     pub fn new(token: impl Into<String>) -> Self {
         Self {
             token: token.into(),
-            http: reqwest::Client::new(),
+            http: build_http_client(),
+            http_upload: build_upload_client(),
         }
     }
 
@@ -147,11 +193,14 @@ impl Adapter for TelegramAdapter {
         chat: &str,
         thread: Option<&str>,
         filename: &str,
-        content: &str,
+        content: &[u8],
     ) -> anyhow::Result<()> {
-        let file_part = reqwest::multipart::Part::bytes(content.as_bytes().to_vec())
+        // Send the raw bytes verbatim so binary files are not corrupted. A
+        // generic content type lets Telegram/clients infer the kind from the
+        // filename extension rather than mislabelling everything as markdown.
+        let file_part = reqwest::multipart::Part::bytes(content.to_vec())
             .file_name(filename.to_string())
-            .mime_str("text/markdown")?;
+            .mime_str("application/octet-stream")?;
 
         let mut form = reqwest::multipart::Form::new()
             .text("chat_id", chat.to_string())
@@ -164,7 +213,7 @@ impl Adapter for TelegramAdapter {
         }
 
         let resp = self
-            .http
+            .http_upload
             .post(self.api_url("sendDocument"))
             .multipart(form)
             .send()
@@ -214,7 +263,9 @@ impl Adapter for TelegramAdapter {
 /// to `bridge`.
 pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel: Arc<AtomicBool>) {
     let adapter = Arc::new(TelegramAdapter::new(token.clone()));
-    let http = reqwest::Client::new();
+    // Long-poll client: its overall timeout exceeds LONG_POLL_TIMEOUT so the
+    // held-open getUpdates request is not cut off mid-poll.
+    let http = build_long_poll_client();
     let mut offset: i64 = 0;
     info!(workspace = %integ.workspace_id, "telegram: listener loop started");
 
@@ -296,5 +347,28 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
         if updates.is_empty() {
             tokio::task::yield_now().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_clients_build() {
+        // Each timeout-configured builder must produce a usable client.
+        let _ = build_http_client();
+        let _ = build_long_poll_client();
+        let _ = build_upload_client();
+    }
+
+    #[test]
+    fn long_poll_request_timeout_exceeds_poll_interval() {
+        // The held-open getUpdates request must outlive the long-poll window,
+        // otherwise long-polling would be cut off mid-poll.
+        assert!(
+            LONG_POLL_REQUEST_TIMEOUT > Duration::from_secs(LONG_POLL_TIMEOUT),
+            "long-poll request timeout must exceed the long-poll interval"
+        );
     }
 }

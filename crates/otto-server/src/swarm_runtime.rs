@@ -114,6 +114,12 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
     if swarm.status != "active" {
         return Ok(());
     }
+    // Budget guardrails (D3): before scheduling any new run, stop the swarm if it
+    // has exhausted a lifetime budget (total runs / wall-clock / summed cost).
+    if let Some(reason) = budget_exceeded(ctx, &swarm).await? {
+        stop_for_budget(ctx, &swarm, &reason).await;
+        return Ok(());
+    }
     let cap = swarm
         .config
         .get("max_parallel_sessions")
@@ -166,6 +172,77 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         });
     }
     Ok(())
+}
+
+/// Check a swarm against its lifetime budgets. Returns `Some(reason)` for the
+/// first exhausted dimension (total runs / wall-clock / summed cost), else `None`.
+/// A `None` budget on any dimension means unlimited. `max_cost_usd` is a SOFT cap
+/// (cost may be 0 until usage attribution lands).
+async fn budget_exceeded(ctx: &ServerCtx, swarm: &Swarm) -> otto_core::Result<Option<String>> {
+    let repo = &ctx.swarm_repo;
+    let total = repo.total_run_count(&swarm.id).await?;
+    let elapsed = (Utc::now() - swarm.created_at).num_seconds().max(0);
+    let spent = repo.total_cost(&swarm.id).await?;
+    Ok(eval_budget(swarm, total, elapsed, spent))
+}
+
+/// Pure budget evaluation (no I/O) so it can be unit-tested directly. Returns the
+/// reason for the first exhausted dimension, in priority order: runs, runtime,
+/// cost. `None` limit = unlimited.
+fn eval_budget(swarm: &Swarm, total_runs: i64, elapsed_secs: i64, spent_usd: f64) -> Option<String> {
+    if let Some(max) = swarm.max_total_runs {
+        if total_runs >= max {
+            return Some(format!("run budget reached ({total_runs}/{max} runs)"));
+        }
+    }
+    if let Some(max) = swarm.max_runtime_secs {
+        if elapsed_secs >= max {
+            return Some(format!("runtime budget reached ({elapsed_secs}s/{max}s)"));
+        }
+    }
+    if let Some(max) = swarm.max_cost_usd {
+        if spent_usd >= max {
+            return Some(format!("cost budget reached (${spent_usd:.2}/${max:.2})"));
+        }
+    }
+    None
+}
+
+/// Stop scheduling for a swarm that exhausted a budget: pause it (so ticks no-op),
+/// flip the coordinator's paused flag, post the reason to the board, and emit the
+/// status event + a notice so the UI surfaces it (never silently stops).
+async fn stop_for_budget(ctx: &ServerCtx, swarm: &Swarm, reason: &str) {
+    if ctx.swarm_repo.set_swarm_status(&swarm.id, "paused").await.is_err() {
+        return;
+    }
+    set_paused(ctx, &swarm.id, true);
+    emit_status(ctx, &swarm.workspace_id, &swarm.id, "paused");
+    system_post(ctx, &swarm.id, None, None, "status",
+        &format!("Swarm paused — {reason}. Raise the budget or resume to continue.")).await;
+    let _ = ctx.events.send(Event::Notice {
+        level: "warn".into(),
+        title: "Swarm budget reached".into(),
+        body: format!("“{}” paused — {reason}.", swarm.name),
+    });
+    tracing::info!(swarm = %swarm.id, "swarm paused for budget: {reason}");
+}
+
+/// Has a task reached its per-task attempt ceiling? Counts the task's runs (the
+/// just-finished one is already persisted) against the swarm's `max_attempts`.
+/// `None` max_attempts = unlimited (never exhausted).
+async fn attempts_exhausted(ctx: &ServerCtx, task: &SwarmTask) -> bool {
+    let max = match ctx.swarm_repo.get_swarm(&task.swarm_id).await {
+        Ok(s) => s.max_attempts,
+        Err(_) => return false,
+    };
+    let runs = ctx.swarm_repo.task_run_count(&task.id).await.unwrap_or(0);
+    attempts_reached(max, runs)
+}
+
+/// Pure attempt-ceiling check: `runs` runs have occurred for a task; `max` is the
+/// swarm's `max_attempts`. `None` or non-positive `max` = unlimited.
+fn attempts_reached(max: Option<i64>, runs: i64) -> bool {
+    matches!(max, Some(m) if m > 0 && runs >= m)
 }
 
 /// Pick the agent to run a task: the explicit assignee, else best-fit by title/
@@ -322,8 +399,26 @@ async fn route_result(
             let _ = repo.update_task(&task.id, TaskPatch { status: Some("blocked".into()), ..Default::default() }).await;
         }
         _ => {
-            // in_progress / unknown → allow another turn next tick.
-            let _ = repo.update_task(&task.id, TaskPatch { status: Some("todo".into()), ..Default::default() }).await;
+            // in_progress / unknown → allow another turn next tick, UNLESS this
+            // task has hit its attempt ceiling (D3). Without a ceiling a leader's
+            // delegation-of-delegation or an agent that never reports `done` would
+            // re-queue forever, spending tokens with no off-switch.
+            if attempts_exhausted(ctx, task).await {
+                let _ = repo
+                    .update_task(&task.id, TaskPatch { status: Some("blocked".into()), ..Default::default() })
+                    .await;
+                system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "status",
+                    &format!("Task “{}” blocked after exhausting its attempt budget.", task.title)).await;
+                let _ = ctx.events.send(Event::Notice {
+                    level: "warn".into(),
+                    title: "Swarm task blocked".into(),
+                    body: format!("“{}” hit its attempt ceiling.", clip(&task.title, 120)),
+                });
+            } else {
+                let _ = repo
+                    .update_task(&task.id, TaskPatch { status: Some("todo".into()), ..Default::default() })
+                    .await;
+            }
         }
     }
     emit_task(ctx, &task.id).await;
@@ -736,4 +831,77 @@ async fn plan(
     }
     let result = ctx.swarm_repo.list_tasks(&pid).await.map_err(ApiError)?;
     Ok(Json(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A swarm with the given budget limits (other fields are placeholders — the
+    /// pure budget/attempt logic only reads the limit fields).
+    fn swarm_with_budget(
+        max_total_runs: Option<i64>,
+        max_runtime_secs: Option<i64>,
+        max_cost_usd: Option<f64>,
+        max_attempts: Option<i64>,
+    ) -> Swarm {
+        let now = Utc::now();
+        Swarm {
+            id: "s".into(),
+            workspace_id: "w".into(),
+            name: "test".into(),
+            description: String::new(),
+            preset_slug: None,
+            status: "active".into(),
+            config: json!({}),
+            max_total_runs,
+            max_runtime_secs,
+            max_cost_usd,
+            max_attempts,
+            created_by: "u".into(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Budget-exceeded stops scheduling: once total runs hit the cap, `eval_budget`
+    /// returns a reason (the coordinator then pauses the swarm instead of creating
+    /// more runs). Below the cap it returns None (keep scheduling).
+    #[test]
+    fn run_budget_stops_scheduling_at_cap() {
+        let s = swarm_with_budget(Some(5), None, None, None);
+        assert!(eval_budget(&s, 4, 0, 0.0).is_none(), "under cap → keep running");
+        let reason = eval_budget(&s, 5, 0, 0.0).expect("at cap → stop");
+        assert!(reason.contains("run budget"), "reason names the run budget: {reason}");
+        assert!(eval_budget(&s, 9, 0, 0.0).is_some(), "over cap → stop");
+    }
+
+    #[test]
+    fn runtime_and_cost_budgets_stop_scheduling() {
+        let s = swarm_with_budget(None, Some(3600), Some(10.0), None);
+        assert!(eval_budget(&s, 1000, 3599, 9.99).is_none(), "all under cap");
+        assert!(eval_budget(&s, 1000, 3600, 0.0).unwrap().contains("runtime"));
+        assert!(eval_budget(&s, 0, 0, 10.0).unwrap().contains("cost"));
+    }
+
+    /// Null limits = unlimited: a swarm with no budgets never stops on budget.
+    #[test]
+    fn unlimited_budget_never_stops() {
+        let s = swarm_with_budget(None, None, None, None);
+        assert!(eval_budget(&s, 1_000_000, 1_000_000, 1_000_000.0).is_none());
+    }
+
+    /// A task hitting max_attempts is treated as exhausted (the route_result `_`
+    /// arm then marks it blocked instead of re-queuing to todo forever).
+    #[test]
+    fn attempt_ceiling_blocks_after_n_runs() {
+        // max_attempts = 3: the 3rd run (runs == 3) trips the ceiling.
+        assert!(!attempts_reached(Some(3), 2), "2 runs < 3 → keep trying");
+        assert!(attempts_reached(Some(3), 3), "3rd run hits the ceiling → block");
+        assert!(attempts_reached(Some(3), 4), "beyond the ceiling → block");
+        // None / non-positive = unlimited.
+        assert!(!attempts_reached(None, 100), "no ceiling → never block");
+        assert!(!attempts_reached(Some(0), 100), "0 = unlimited → never block");
+    }
 }

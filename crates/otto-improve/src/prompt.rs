@@ -21,6 +21,7 @@ const UNTRUSTED_CLOSE: &str = "<<<END_OTTO_UNTRUSTED_CONTENT>>>";
 ///     boundaries — the surrounding template fences memory/skill files in ```,
 ///   * neutralize common chat/tool role markers an injection uses to look like
 ///     a privileged turn.
+///
 /// We replace rather than delete so evidence stays human-legible in the prompt.
 fn escape_untrusted(raw: &str) -> String {
     // Walk line-by-line so role markers anchored at line start are caught even

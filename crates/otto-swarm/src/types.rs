@@ -17,6 +17,16 @@ pub struct CreateSwarmReq {
     pub preset_slug: Option<String>,
     #[serde(default)]
     pub config: Option<Value>,
+    /// Budget guardrails (see `Swarm`). Omitted → service defaults are applied;
+    /// explicit `null` → unlimited for that dimension.
+    #[serde(default, deserialize_with = "double_option")]
+    pub max_total_runs: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub max_runtime_secs: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub max_cost_usd: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub max_attempts: Option<Option<i64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +39,25 @@ pub struct UpdateSwarmReq {
     pub status: Option<String>,
     #[serde(default)]
     pub config: Option<Value>,
+    /// Budget guardrails. Omitted → unchanged; `null` → set to unlimited.
+    #[serde(default, deserialize_with = "double_option")]
+    pub max_total_runs: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub max_runtime_secs: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub max_cost_usd: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub max_attempts: Option<Option<i64>>,
+}
+
+/// Distinguish "field absent" (`None`) from "field present and null"
+/// (`Some(None)`) so a budget can be explicitly cleared to unlimited.
+fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(de).map(Some)
 }
 
 #[derive(Debug, Serialize)]
@@ -295,5 +324,10 @@ pub struct SwarmPreset {
     pub name: String,
     pub description: String,
     pub max_parallel_sessions: i64,
+    /// Budget guardrails for swarms created from this preset (None = unlimited).
+    pub max_total_runs: Option<i64>,
+    pub max_runtime_secs: Option<i64>,
+    pub max_cost_usd: Option<f64>,
+    pub max_attempts: Option<i64>,
     pub agents: Vec<PresetAgent>,
 }

@@ -13,9 +13,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use otto_core::domain::Channel;
+use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
 use otto_sessions::SessionManager;
 use otto_state::{IntegrationsRepo, SettingsRepo, WorkspacesRepo};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -70,6 +72,9 @@ pub struct ChannelManager {
     pub settings: SettingsRepo,
     pub secrets: Arc<dyn SecretStore>,
     pub root_user_id: String,
+    /// Daemon event bus (the same one the WS subscribes to). The proactive
+    /// self-improvement notifier subscribes to this; `None` disables it.
+    pub events: Option<broadcast::Sender<Event>>,
 }
 
 impl ChannelManager {
@@ -80,6 +85,7 @@ impl ChannelManager {
         settings: SettingsRepo,
         secrets: Arc<dyn SecretStore>,
         root_user_id: String,
+        events: Option<broadcast::Sender<Event>>,
     ) -> Self {
         Self {
             manager,
@@ -88,6 +94,7 @@ impl ChannelManager {
             settings,
             secrets,
             root_user_id,
+            events,
         }
     }
 
@@ -95,6 +102,21 @@ impl ChannelManager {
     /// background and stay in sync with the config until the handle is dropped.
     pub async fn start(self) -> ChannelHandle {
         let cancel = Arc::new(AtomicBool::new(false));
+
+        // Spawn the proactive self-improvement notifier alongside the adapter
+        // supervisor (opt-in, gated inside on `channels.notify_self_improvement`).
+        // It shares the top-level cancel flag so it stops on shutdown.
+        if let Some(events) = &self.events {
+            crate::improve_notify::spawn(
+                events.subscribe(),
+                self.integrations.clone(),
+                self.settings.clone(),
+                Arc::clone(&self.secrets),
+                Arc::clone(&cancel),
+            );
+            info!("channel manager: self-improvement notifier started (opt-in)");
+        }
+
         let supervisor = tokio::spawn(self.supervise(Arc::clone(&cancel)));
         ChannelHandle {
             cancel,

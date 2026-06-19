@@ -33,14 +33,15 @@ pub trait Adapter: Send + Sync {
 
     /// Upload a file attachment to the conversation.
     ///
-    /// Default implementation is a no-op (returns `Ok(())`).  Adapters that
-    /// support file uploads override this.
+    /// `content` is the file's raw bytes — passed verbatim so binary files
+    /// (images, PDFs, …) are uploaded intact. Default implementation is a no-op
+    /// (returns `Ok(())`).  Adapters that support file uploads override this.
     async fn upload(
         &self,
         _chat: &str,
         _thread: Option<&str>,
         _filename: &str,
-        _content: &str,
+        _content: &[u8],
     ) -> anyhow::Result<()> {
         Ok(())
     }

@@ -371,6 +371,7 @@ impl UsageEngine {
                 usage_rows,
                 metric_rows,
                 disk_bytes: dir_size(ch.data_dir()),
+                priced_as_of: crate::PRICED_AS_OF.to_string(),
             }
         } else {
             UsageStatus {
@@ -384,6 +385,7 @@ impl UsageEngine {
                 usage_rows: 0,
                 metric_rows: 0,
                 disk_bytes: 0,
+                priced_as_of: crate::PRICED_AS_OF.to_string(),
             }
         }
     }

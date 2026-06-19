@@ -73,6 +73,12 @@ struct HistoryQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct CancelReq {
+    /// The `query_id` the client sent on the `db/query` request to be cancelled.
+    query_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct NewSavedQueryReq {
     #[serde(default)]
     connection_id: Option<Id>,
@@ -140,6 +146,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/schema/children", post(schema_children::<S>))
         .route("/connections/{id}/db/object", post(object_detail::<S>))
         .route("/connections/{id}/db/query", post(run_query::<S>))
+        .route("/connections/{id}/db/cancel", post(cancel_query::<S>))
         .route("/connections/{id}/db/completion", post(completion::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
         // Saved queries.
@@ -255,6 +262,24 @@ async fn run_query<S: DbViewerCtx>(
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
     Ok(Json(ctx.db().run(&id, &req).await?).into_response())
+}
+
+/// Cancel an in-flight query (server-side, engine-native). Gated at the SAME
+/// role as `run_query` (`Editor`; global connections: root only): issuing a
+/// `KILL QUERY` is a privileged operation against the live database, and only
+/// someone who could have *started* the query should be able to stop it. An
+/// unknown / already-finished `query_id` is a no-op success (204), never an
+/// error — the caller just wants the query gone.
+async fn cancel_query<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<CancelReq>,
+) -> ApiResult<StatusCode> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    ctx.db().cancel(&id, &req.query_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn completion<S: DbViewerCtx>(

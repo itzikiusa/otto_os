@@ -21,6 +21,16 @@ pub struct Swarm {
     pub preset_slug: Option<String>,
     pub status: String,
     pub config: Value,
+    /// Budget guardrails (D3). `None` on any field = unlimited for that dimension.
+    /// Lifetime run cap for the swarm (counts all `swarm_runs` rows).
+    pub max_total_runs: Option<i64>,
+    /// Wall-clock budget in seconds, measured from `created_at`.
+    pub max_runtime_secs: Option<i64>,
+    /// Summed cost cap in USD (best-effort/soft — cost may be 0 until usage
+    /// attribution lands).
+    pub max_cost_usd: Option<f64>,
+    /// Per-task attempt ceiling before a task is marked `blocked`.
+    pub max_attempts: Option<i64>,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -138,6 +148,11 @@ pub struct NewSwarm {
     pub description: String,
     pub preset_slug: Option<String>,
     pub config: Value,
+    /// Budget guardrails (None = unlimited for that dimension).
+    pub max_total_runs: Option<i64>,
+    pub max_runtime_secs: Option<i64>,
+    pub max_cost_usd: Option<f64>,
+    pub max_attempts: Option<i64>,
     pub created_by: Id,
 }
 
@@ -147,6 +162,11 @@ pub struct SwarmPatch {
     pub description: Option<String>,
     pub status: Option<String>,
     pub config: Option<Value>,
+    /// Budget guardrails. `Some(None)` clears (→ unlimited), `Some(Some(v))` sets.
+    pub max_total_runs: Option<Option<i64>>,
+    pub max_runtime_secs: Option<Option<i64>>,
+    pub max_cost_usd: Option<Option<f64>>,
+    pub max_attempts: Option<Option<i64>>,
 }
 
 pub struct NewAgent {
@@ -312,6 +332,10 @@ fn row_to_swarm(r: &sqlx::sqlite::SqliteRow) -> Result<Swarm> {
         preset_slug: r.get("preset_slug"),
         status: r.get("status"),
         config: json(&r.get::<String, _>("config_json"))?,
+        max_total_runs: r.get("max_total_runs"),
+        max_runtime_secs: r.get("max_runtime_secs"),
+        max_cost_usd: r.get("max_cost_usd"),
+        max_attempts: r.get("max_attempts"),
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
@@ -472,8 +496,9 @@ impl SwarmRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO swarms (id, workspace_id, name, description, preset_slug, status,
-                                 config_json, created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'paused', ?, ?, ?, ?)",
+                                 config_json, max_total_runs, max_runtime_secs, max_cost_usd,
+                                 max_attempts, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'paused', ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&s.workspace_id)
@@ -481,6 +506,10 @@ impl SwarmRepo {
         .bind(&s.description)
         .bind(&s.preset_slug)
         .bind(s.config.to_string())
+        .bind(s.max_total_runs)
+        .bind(s.max_runtime_secs)
+        .bind(s.max_cost_usd)
+        .bind(s.max_attempts)
         .bind(&s.created_by)
         .bind(&now)
         .bind(&now)
@@ -496,15 +525,24 @@ impl SwarmRepo {
         let description = p.description.unwrap_or(cur.description);
         let status = p.status.unwrap_or(cur.status);
         let config = p.config.unwrap_or(cur.config).to_string();
+        let max_total_runs = p.max_total_runs.unwrap_or(cur.max_total_runs);
+        let max_runtime_secs = p.max_runtime_secs.unwrap_or(cur.max_runtime_secs);
+        let max_cost_usd = p.max_cost_usd.unwrap_or(cur.max_cost_usd);
+        let max_attempts = p.max_attempts.unwrap_or(cur.max_attempts);
         let now = fmt(Utc::now());
         sqlx::query(
-            "UPDATE swarms SET name = ?, description = ?, status = ?, config_json = ?, updated_at = ?
-             WHERE id = ?",
+            "UPDATE swarms SET name = ?, description = ?, status = ?, config_json = ?,
+                max_total_runs = ?, max_runtime_secs = ?, max_cost_usd = ?, max_attempts = ?,
+                updated_at = ? WHERE id = ?",
         )
         .bind(&name)
         .bind(&description)
         .bind(&status)
         .bind(&config)
+        .bind(max_total_runs)
+        .bind(max_runtime_secs)
+        .bind(max_cost_usd)
+        .bind(max_attempts)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -929,10 +967,16 @@ impl SwarmRepo {
     pub async fn create_run(&self, r: NewRun) -> Result<SwarmRun> {
         let id = new_id();
         let now = fmt(Utc::now());
+        // 0-based attempt index for the task: number of prior runs against it. Used
+        // by the coordinator's per-task attempt ceiling (D3).
+        let attempt = match &r.task_id {
+            Some(tid) => self.task_run_count(tid).await.unwrap_or(0),
+            None => 0,
+        };
         sqlx::query(
             "INSERT INTO swarm_runs (id, swarm_id, workspace_id, project_id, task_id, agent_id,
                 kind, trigger, status, attempt, enqueued_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
         )
         .bind(&id)
         .bind(&r.swarm_id)
@@ -942,6 +986,7 @@ impl SwarmRepo {
         .bind(&r.agent_id)
         .bind(&r.kind)
         .bind(&r.trigger)
+        .bind(attempt)
         .bind(&now)
         .execute(&self.pool)
         .await
@@ -1015,6 +1060,41 @@ impl SwarmRepo {
         .fetch_one(&self.pool)
         .await
         .map_err(dberr("active run count"))?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
+    /// Lifetime run count for a swarm (all `swarm_runs` rows, any status). Drives
+    /// the `max_total_runs` budget.
+    pub async fn total_run_count(&self, swarm_id: &Id) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM swarm_runs WHERE swarm_id = ?")
+            .bind(swarm_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("total run count"))?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
+    /// Summed cost (USD) across a swarm's runs. Best-effort/soft — `cost_usd` may
+    /// be 0/NULL until usage attribution lands. Drives the `max_cost_usd` budget.
+    pub async fn total_cost(&self, swarm_id: &Id) -> Result<f64> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) AS c FROM swarm_runs WHERE swarm_id = ?",
+        )
+        .bind(swarm_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("total cost"))?;
+        Ok(row.get::<f64, _>("c"))
+    }
+
+    /// How many runs have been started for a task (its attempt count). Drives the
+    /// per-task `max_attempts` ceiling so a task isn't re-queued forever.
+    pub async fn task_run_count(&self, task_id: &Id) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM swarm_runs WHERE task_id = ?")
+            .bind(task_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("task run count"))?;
         Ok(row.get::<i64, _>("n"))
     }
 
@@ -1269,5 +1349,99 @@ mod tests {
         let ready = repo.ready_tasks(&swarm).await.unwrap();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].id, blocked.id);
+    }
+
+    fn new_swarm(budget: (Option<i64>, Option<i64>, Option<f64>, Option<i64>)) -> NewSwarm {
+        NewSwarm {
+            workspace_id: new_id(),
+            name: "budget-swarm".into(),
+            description: String::new(),
+            preset_slug: None,
+            config: json!({}),
+            max_total_runs: budget.0,
+            max_runtime_secs: budget.1,
+            max_cost_usd: budget.2,
+            max_attempts: budget.3,
+            created_by: new_id(),
+        }
+    }
+
+    /// D3: budget columns round-trip through create/get/update (migration 0032),
+    /// and `update_swarm` can clear a budget to NULL (unlimited).
+    #[tokio::test]
+    async fn swarm_budget_columns_roundtrip() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+
+        let s = repo
+            .create_swarm(new_swarm((Some(300), Some(14400), None, Some(3))))
+            .await
+            .unwrap();
+        assert_eq!(s.max_total_runs, Some(300));
+        assert_eq!(s.max_runtime_secs, Some(14400));
+        assert_eq!(s.max_cost_usd, None);
+        assert_eq!(s.max_attempts, Some(3));
+
+        // Raise one budget and clear another to unlimited.
+        let s = repo
+            .update_swarm(
+                &s.id,
+                SwarmPatch {
+                    max_total_runs: Some(Some(500)),
+                    max_attempts: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(s.max_total_runs, Some(500));
+        assert_eq!(s.max_attempts, None, "cleared → unlimited");
+        assert_eq!(s.max_runtime_secs, Some(14400), "untouched budget unchanged");
+    }
+
+    /// D3: the budget query building blocks. `total_run_count`/`total_cost` sum a
+    /// swarm's runs; `task_run_count` (and `create_run`'s `attempt`) count per task.
+    #[tokio::test]
+    async fn budget_run_queries_and_attempt_numbering() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = repo
+            .create_swarm(new_swarm((Some(10), None, Some(100.0), Some(3))))
+            .await
+            .unwrap();
+        let task = repo.create_task(new_task(&swarm.id, "todo")).await.unwrap();
+
+        assert_eq!(repo.total_run_count(&swarm.id).await.unwrap(), 0);
+        assert_eq!(repo.task_run_count(&task.id).await.unwrap(), 0);
+
+        let mk_run = || NewRun {
+            swarm_id: swarm.id.clone(),
+            workspace_id: swarm.workspace_id.clone(),
+            project_id: Some(task.project_id.clone()),
+            task_id: Some(task.id.clone()),
+            agent_id: new_id(),
+            kind: "task".into(),
+            trigger: "coordinator".into(),
+        };
+
+        // First run for the task → attempt 0.
+        let r0 = repo.create_run(mk_run()).await.unwrap();
+        assert_eq!(r0.attempt, 0, "first run is attempt 0");
+        // Second run for the same task → attempt 1 (prior run count).
+        let r1 = repo.create_run(mk_run()).await.unwrap();
+        assert_eq!(r1.attempt, 1, "attempt = prior run count");
+
+        assert_eq!(repo.total_run_count(&swarm.id).await.unwrap(), 2);
+        assert_eq!(repo.task_run_count(&task.id).await.unwrap(), 2);
+
+        // Cost sums (best-effort): set cost on the runs and confirm SUM.
+        repo.update_run(&r0.id, RunPatch { cost_usd: Some(Some(1.50)), ..Default::default() })
+            .await
+            .unwrap();
+        repo.update_run(&r1.id, RunPatch { cost_usd: Some(Some(2.25)), ..Default::default() })
+            .await
+            .unwrap();
+        let spent = repo.total_cost(&swarm.id).await.unwrap();
+        assert!((spent - 3.75).abs() < 1e-9, "summed cost = 3.75, got {spent}");
     }
 }

@@ -388,6 +388,52 @@ pub struct QueryRequest {
     /// Return the query plan instead of running (Mongo: server `explain`).
     #[serde(default)]
     pub explain: bool,
+    /// Client-supplied id for this execution. When set, the service registers the
+    /// in-flight query under this key so a later cancel request (same id) can
+    /// issue engine-native cancellation (`KILL QUERY`, etc.). Opaque to drivers.
+    #[serde(default)]
+    pub query_id: Option<String>,
+}
+
+/// An engine-native handle the driver captured for an executing query, so the
+/// service can cancel it on a *separate* connection (you can't `KILL` on the
+/// blocked one). Drivers fill this in via the [`CancelToken`] passed to
+/// [`crate::driver::Driver::run_tracked`]; [`crate::driver::Driver::cancel`]
+/// interprets it. Engines without a native cancel never set one (no-op cancel).
+#[derive(Debug, Clone)]
+pub enum QueryHandle {
+    /// MySQL backend connection id (from `CONNECTION_ID()`) → `KILL QUERY <id>`.
+    MysqlConnId(u64),
+    /// ClickHouse `query_id` set on the request → `KILL QUERY WHERE query_id=…`.
+    ClickhouseQueryId(String),
+}
+
+/// A slot a driver fills with the [`QueryHandle`] for an in-flight query as soon
+/// as it knows the engine-native identifier. Shared with the service's in-flight
+/// registry so a concurrent cancel can read the handle the moment it's set.
+/// Cheaply cloneable (`Arc`); a clone is handed to the driver, the registry
+/// keeps the other.
+#[derive(Clone, Default)]
+pub struct CancelToken {
+    inner: std::sync::Arc<std::sync::Mutex<Option<QueryHandle>>>,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the engine-native handle for this query (driver side).
+    pub fn set(&self, handle: QueryHandle) {
+        if let Ok(mut slot) = self.inner.lock() {
+            *slot = Some(handle);
+        }
+    }
+
+    /// Read the handle, if a driver has captured one (cancel side).
+    pub fn handle(&self) -> Option<QueryHandle> {
+        self.inner.lock().ok().and_then(|slot| slot.clone())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -666,6 +712,54 @@ pub type DbResult<T> = Result<T>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancel_token_round_trips_a_handle() {
+        let token = CancelToken::new();
+        // Empty before a driver captures anything.
+        assert!(token.handle().is_none());
+
+        token.set(QueryHandle::MysqlConnId(4242));
+        match token.handle() {
+            Some(QueryHandle::MysqlConnId(id)) => assert_eq!(id, 4242),
+            other => panic!("expected MysqlConnId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_token_is_shared_across_clones() {
+        // The driver gets one clone, the registry keeps the other — a set on the
+        // driver clone must be visible through the registry clone.
+        let driver_side = CancelToken::new();
+        let registry_side = driver_side.clone();
+        assert!(registry_side.handle().is_none());
+
+        driver_side.set(QueryHandle::ClickhouseQueryId("otto-XYZ".into()));
+        match registry_side.handle() {
+            Some(QueryHandle::ClickhouseQueryId(id)) => assert_eq!(id, "otto-XYZ"),
+            other => panic!("expected ClickhouseQueryId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_token_last_set_wins() {
+        let token = CancelToken::new();
+        token.set(QueryHandle::MysqlConnId(1));
+        token.set(QueryHandle::MysqlConnId(2));
+        assert!(matches!(token.handle(), Some(QueryHandle::MysqlConnId(2))));
+    }
+
+    #[test]
+    fn query_id_deserializes_default_none() {
+        // An old client that omits query_id still deserializes (no cancel
+        // tracking for that run).
+        let req: QueryRequest = serde_json::from_str(r#"{"statement":"SELECT 1"}"#).unwrap();
+        assert!(req.query_id.is_none());
+
+        let req: QueryRequest =
+            serde_json::from_str(r#"{"statement":"SELECT 1","query_id":"abc"}"#).unwrap();
+        assert_eq!(req.query_id.as_deref(), Some("abc"));
+    }
 
     #[test]
     fn injects_limit_on_plain_select() {
