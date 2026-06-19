@@ -612,6 +612,8 @@ mod tests {
             secret_ref: None,
             first_command: None,
             section_id: None,
+            environment: Default::default(),
+            read_only: false,
             created_by: new_id(),
             created_at: chrono::Utc::now(),
         }
