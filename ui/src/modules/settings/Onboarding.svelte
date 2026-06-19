@@ -50,7 +50,7 @@
         password,
         display_name: displayName.trim() === '' ? null : displayName.trim(),
       });
-      auth.acceptLogin(resp);
+      await auth.acceptLogin(resp);
       if (wsName.trim() !== '' && wsPath.trim() !== '') {
         await api.post<Workspace>('/workspaces', { name: wsName.trim(), root_path: wsPath.trim() });
       }

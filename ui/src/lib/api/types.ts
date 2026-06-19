@@ -297,6 +297,57 @@ export interface NotificationSettings {
 }
 
 // ---------------------------------------------------------------------------
+// RBAC — features + capabilities
+// ---------------------------------------------------------------------------
+
+/** The 18 protected features (snake_case, mirrors Rust Feature enum). */
+export type Feature =
+  | 'agents'
+  | 'connections'
+  | 'database'
+  | 'git'
+  | 'issues'
+  | 'product'
+  | 'swarm'
+  | 'api_client'
+  | 'workflows'
+  | 'channels'
+  | 'skill_eval'
+  | 'skills'
+  | 'insights'
+  | 'usage'
+  | 'self_improvement'
+  | 'context'
+  | 'settings'
+  | 'users';
+
+/** Capability ladder (None < View < Edit < Admin). */
+export type Capability = 'none' | 'view' | 'edit' | 'admin';
+
+/** One (feature, capability) pair — mirrors `GrantEntry` in api.rs. */
+export interface GrantEntry {
+  feature: string;
+  capability: string;
+}
+
+/** `GET /api/v1/users/{id}/grants` response. */
+export interface UserGrantsResp {
+  grants: GrantEntry[];
+}
+
+/** `PUT /api/v1/users/{id}/grants` request body. */
+export interface UserGrantsReq {
+  grants: GrantEntry[];
+}
+
+/** `GET /api/v1/auth/capabilities` response — the caller's effective map.
+ *  Root receives `admin` for every feature. */
+export interface CapabilitiesResp {
+  /** snake_case feature name → snake_case capability string. */
+  capabilities: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
 // Meta / auth
 // ---------------------------------------------------------------------------
 

@@ -353,7 +353,7 @@
         <span class="grow">Insights</span>
       </button>
 
-      {#if auth.isRoot}
+      {#if auth.can('usage', 'view')}
         <button
           class="nav-item"
           class:active={router.module === 'usage'}

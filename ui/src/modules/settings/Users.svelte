@@ -1,7 +1,8 @@
 <script lang="ts">
-  // Users admin (root): create/disable users + per-workspace role matrix.
+  // Users admin (root): create/disable users + per-workspace role matrix + feature grants.
   import { api } from '../../lib/api/client';
-  import type { MemberEntry, User, WorkspaceRole } from '../../lib/api/types';
+  import type { GrantEntry, MemberEntry, User, UserGrantsResp, WorkspaceRole } from '../../lib/api/types';
+  import type { Capability, Feature } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -22,6 +23,32 @@
   let members: MemberEntry[] = $state([]);
   let matrixLoading = $state(false);
 
+  // ---- feature grant matrix -----------------------------------------------
+  const ALL_FEATURES: Feature[] = [
+    'agents', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
+    'api_client', 'workflows', 'channels', 'skill_eval', 'skills', 'insights',
+    'usage', 'self_improvement', 'context', 'settings', 'users',
+  ];
+  const FEATURE_LABELS: Record<Feature, string> = {
+    agents: 'Agents', connections: 'Connections', database: 'Database',
+    git: 'Git', issues: 'Issues', product: 'Product', swarm: 'Swarm',
+    api_client: 'API Client', workflows: 'Workflows', channels: 'Channels',
+    skill_eval: 'Skills Evaluator', skills: 'Skills', insights: 'Insights',
+    usage: 'Usage', self_improvement: 'Self-Improvement', context: 'Context',
+    settings: 'Settings', users: 'Users',
+  };
+  const CAP_OPTIONS: Capability[] = ['none', 'view', 'edit', 'admin'];
+
+  /** Selected user for the grant matrix (non-root only). */
+  let grantUserId: string = $state('');
+  /** Working copy of grants for the selected user: feature → capability. */
+  let grantMap: Record<string, Capability> = $state({});
+  let grantLoading = $state(false);
+  let grantSaving = $state(false);
+
+  /** The non-root users available to manage grants for. */
+  const nonRootUsers = $derived(users.filter((u) => !u.is_root));
+
   $effect(() => {
     void loadUsers();
   });
@@ -39,6 +66,30 @@
       .then((m) => (members = m))
       .catch(() => (members = []))
       .finally(() => (matrixLoading = false));
+  });
+
+  // Auto-select first non-root user for the grant matrix when the list loads.
+  $effect(() => {
+    if (grantUserId === '' && nonRootUsers.length > 0) {
+      grantUserId = nonRootUsers[0].id;
+    }
+  });
+
+  // Reload the grant map whenever the selected grant user changes.
+  $effect(() => {
+    const id = grantUserId;
+    if (id === '') return;
+    grantLoading = true;
+    grantMap = {};
+    void api
+      .get<UserGrantsResp>(`/users/${id}/grants`)
+      .then((resp) => {
+        const m: Record<string, Capability> = {};
+        for (const g of resp.grants) m[g.feature] = g.capability as Capability;
+        grantMap = m;
+      })
+      .catch(() => (grantMap = {}))
+      .finally(() => (grantLoading = false));
   });
 
   async function loadUsers(): Promise<void> {
@@ -102,6 +153,30 @@
       toasts.success('Membership updated');
     } catch (e) {
       toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function grantCapOf(feature: Feature): Capability {
+    return grantMap[feature] ?? 'none';
+  }
+
+  function setGrantCap(feature: Feature, cap: Capability): void {
+    grantMap = { ...grantMap, [feature]: cap };
+  }
+
+  async function saveGrants(): Promise<void> {
+    if (!grantUserId) return;
+    grantSaving = true;
+    try {
+      const grants: GrantEntry[] = ALL_FEATURES
+        .filter((f) => grantMap[f] && grantMap[f] !== 'none')
+        .map((f) => ({ feature: f, capability: grantMap[f] }));
+      await api.put(`/users/${grantUserId}/grants`, { grants });
+      toasts.success('Feature grants saved');
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      grantSaving = false;
     }
   }
 </script>
@@ -175,6 +250,55 @@
           <div class="matrix-empty dim">No non-root users yet.</div>
         {/each}
       </div>
+    {/if}
+
+    <!-- Feature grant matrix -->
+    <div class="section-title" style="margin-top: 24px">Feature grants</div>
+    <div class="sub" style="margin-bottom: 10px">Per-feature capability for non-root users. None = no access; root always has admin everywhere.</div>
+
+    {#if nonRootUsers.length === 0}
+      <div class="dim" style="padding: 8px 0">No non-root users yet.</div>
+    {:else}
+      <div class="row" style="margin-bottom: 10px">
+        <select class="input" bind:value={grantUserId} style="max-width: 220px">
+          {#each nonRootUsers as u (u.id)}
+            <option value={u.id}>{u.display_name} (@{u.username})</option>
+          {/each}
+        </select>
+      </div>
+
+      {#if grantLoading}
+        <Skeleton rows={5} height={32} />
+      {:else}
+        <div class="card grant-matrix">
+          <div class="grant-head">
+            <span>Feature</span>
+            <div class="grant-caps-head">
+              {#each CAP_OPTIONS as c (c)}
+                <span>{c}</span>
+              {/each}
+            </div>
+          </div>
+          {#each ALL_FEATURES as feat (feat)}
+            <div class="grant-row">
+              <span class="grant-label">{FEATURE_LABELS[feat]}</span>
+              <div class="segmented">
+                {#each CAP_OPTIONS as c (c)}
+                  <button
+                    class:active={grantCapOf(feat) === c}
+                    onclick={() => setGrantCap(feat, c)}
+                  >{c}</button>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        </div>
+        <div style="margin-top: 10px">
+          <button class="btn primary" disabled={grantSaving} onclick={saveGrants}>
+            {grantSaving ? 'Saving…' : 'Save grants'}
+          </button>
+        </div>
+      {/if}
     {/if}
   {/if}
 </div>
@@ -273,5 +397,43 @@
   .matrix-empty {
     padding: 16px;
     text-align: center;
+  }
+  /* ---- feature grant matrix ---- */
+  .grant-matrix {
+    max-width: 700px;
+  }
+  .grant-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 14px;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+  }
+  .grant-caps-head {
+    display: flex;
+    gap: 2px;
+    /* align with the segmented buttons below */
+    min-width: 280px;
+    justify-content: space-between;
+    padding: 0 2px;
+  }
+  .grant-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 14px;
+    font-size: 12.5px;
+  }
+  .grant-row + .grant-row {
+    border-top: 1px solid var(--border);
+  }
+  .grant-label {
+    min-width: 130px;
   }
 </style>

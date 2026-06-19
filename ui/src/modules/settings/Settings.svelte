@@ -35,18 +35,20 @@
     { id: 'insights', label: 'Insights' },
     { id: 'context-soul', label: 'Context & Soul' },
     { id: 'language-servers', label: 'Language Servers' },
-    ...(auth.isRoot
+    // skills + skill-eval + context-library: settings:admin covers these root-managed items.
+    ...(auth.can('settings', 'admin')
       ? [
           { id: 'skills', label: 'Skills' },
           { id: 'skill-eval', label: 'Skills Evaluator' },
           { id: 'context-library', label: 'Context Library' },
           { id: 'providers', label: 'Providers' },
-          { id: 'users', label: 'Users' },
           { id: 'daemon', label: 'Daemon' },
           { id: 'trust-safety', label: 'Trust & Safety' },
           { id: 'logs', label: 'Logs' },
         ]
       : []),
+    // users management: users:admin gate.
+    ...(auth.can('users', 'admin') ? [{ id: 'users', label: 'Users' }] : []),
   ]);
 </script>
 
@@ -84,25 +86,25 @@
       <McpServers />
     {:else if page === 'insights'}
       <InsightsSettings />
-    {:else if page === 'skills' && auth.isRoot}
+    {:else if page === 'skills' && auth.can('settings', 'admin')}
       <SkillsLibrary />
-    {:else if page === 'skill-eval' && auth.isRoot}
+    {:else if page === 'skill-eval' && auth.can('settings', 'admin')}
       <SkillEvalSettings />
     {:else if page === 'context-soul'}
       <ContextSoul />
     {:else if page === 'language-servers'}
       <LanguageServers />
-    {:else if page === 'context-library' && auth.isRoot}
+    {:else if page === 'context-library' && auth.can('settings', 'admin')}
       <ContextLibrary />
-    {:else if page === 'providers' && auth.isRoot}
+    {:else if page === 'providers' && auth.can('settings', 'admin')}
       <Providers />
-    {:else if page === 'users' && auth.isRoot}
+    {:else if page === 'users' && auth.can('users', 'admin')}
       <Users />
-    {:else if page === 'daemon' && auth.isRoot}
+    {:else if page === 'daemon' && auth.can('settings', 'admin')}
       <Daemon />
-    {:else if page === 'trust-safety' && auth.isRoot}
+    {:else if page === 'trust-safety' && auth.can('settings', 'admin')}
       <TrustSafety />
-    {:else if page === 'logs' && auth.isRoot}
+    {:else if page === 'logs' && auth.can('settings', 'admin')}
       <Logs />
     {:else}
       <Appearance />

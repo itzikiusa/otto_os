@@ -17,8 +17,8 @@
     { id: 'workflows', icon: 'split', label: 'Workflows' },
     { id: 'skills-eval', icon: 'zap', label: 'Skills Evaluator' },
     { id: 'insights', icon: 'gauge', label: 'Insights' },
-    // Usage analytics aggregate across all workspaces — root only.
-    ...(auth.isRoot ? [{ id: 'usage', icon: 'chart', label: 'Usage' }] : []),
+    // Usage analytics — requires usage:view (root always qualifies).
+    ...(auth.can('usage', 'view') ? [{ id: 'usage', icon: 'chart', label: 'Usage' }] : []),
   ]);
 </script>
 
