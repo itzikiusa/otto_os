@@ -36,3 +36,21 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
 
     Ok(pool)
 }
+
+/// In-memory pool with all migrations applied — for tests only. A single
+/// connection keeps the `sqlite::memory:` schema alive for the pool's lifetime.
+pub async fn test_pool() -> SqlitePool {
+    let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+        .expect("sqlite memory options")
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .expect("open in-memory sqlite");
+    sqlx::migrate!()
+        .run(&pool)
+        .await
+        .expect("run migrations");
+    pool
+}

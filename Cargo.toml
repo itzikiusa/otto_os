@@ -21,6 +21,7 @@ members = [
     "crates/otto-product",
     "crates/otto-skills",
     "crates/otto-swarm",
+    "crates/otto-memory",
 ]
 
 [workspace.package]

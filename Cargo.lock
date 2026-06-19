@@ -2703,6 +2703,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "otto-core",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "otto-orchestrator"
 version = "0.1.0"
 dependencies = [
@@ -2858,6 +2877,7 @@ dependencies = [
  "otto-core",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tracing",
