@@ -11,6 +11,7 @@ import type {
   DbDashboard,
   DbHistoryEntry,
   DbSavedQuery,
+  DbSchemaGraph,
   DbTestResult,
   DbViz,
   DbWidget,
@@ -273,7 +274,7 @@ function blankTab(statement = ''): QueryTab {
 }
 
 /** Main-pane tabs of the DB page. */
-export type DbMainTab = 'query' | 'builder' | 'structure' | 'dashboards';
+export type DbMainTab = 'query' | 'builder' | 'structure' | 'diagram' | 'dashboards';
 /** Sidebar lower switch (below the schema tree). */
 export type DbSideTab = 'schema' | 'saved' | 'history';
 
@@ -888,6 +889,25 @@ class DatabaseStore {
       return await api.post<ObjectDetail>(`${this.connBase(id)}/object`, { path });
     } catch (e) {
       toasts.error('Could not load object', errMsg(e));
+      return null;
+    }
+  }
+
+  /**
+   * Fetch the relationship graph (ERD) for a schema/database: tables (with
+   * columns + PK/FK flags) and the FK edges between them. Read-only; backed by
+   * the same introspection the tree uses. `maxTables` caps the fan-out.
+   */
+  async fetchSchemaGraph(schema: string, maxTables = 60): Promise<DbSchemaGraph | null> {
+    const id = this.selectedConnId;
+    if (!id) return null;
+    try {
+      return await api.post<DbSchemaGraph>(`${this.connBase(id)}/schema-graph`, {
+        schema,
+        max_tables: maxTables,
+      });
+    } catch (e) {
+      toasts.error('Could not load diagram', errMsg(e));
       return null;
     }
   }

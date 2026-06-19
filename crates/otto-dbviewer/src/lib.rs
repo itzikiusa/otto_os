@@ -26,7 +26,7 @@ pub use registry::Registry;
 pub use service::DbViewerService;
 pub use types::{
     Capabilities, Column, ColumnDef, CompletionContext, CompletionItem, CompletionKind,
-    CompletionResponse, Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail,
-    QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode, SshTunnelConfig, TestResult,
-    TlsConfig, TlsMode,
+    CompletionResponse, Engine, ForeignKey, GraphColumn, GraphEdge, GraphTable, IndexDef, NodeKind,
+    NodePath, ObjectDetail, QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaGraph,
+    SchemaNode, SshTunnelConfig, TestResult, TlsConfig, TlsMode,
 };

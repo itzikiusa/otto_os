@@ -261,6 +261,7 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | GET /connections/{id}/db/schema | ws viewer | — | top-level schema tree (roots) |
 | POST /connections/{id}/db/schema/children | ws viewer | `{node}` | child schema nodes (lazy expand) |
 | POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.) |
+| POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
 | POST /connections/{id}/db/completion | ws viewer | `{text,cursor}` | SQL completion suggestions |
 | GET /connections/{id}/db/history | ws viewer | — | recent query history |

@@ -8,6 +8,7 @@
   import QueryEditor from './QueryEditor.svelte';
   import QueryBuilder from './QueryBuilder.svelte';
   import StructureView from './StructureView.svelte';
+  import DiagramView from './DiagramView.svelte';
   import Dashboards from './Dashboards.svelte';
   import ConnectionForm from '../connections/ConnectionForm.svelte';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
@@ -283,6 +284,8 @@
     { id: 'query', label: 'Query', show: () => true },
     { id: 'builder', label: 'Builder', show: () => database.supportsBuilder },
     { id: 'structure', label: 'Structure', show: () => true },
+    // ERD is table/collection-oriented; Redis (keys, no table model) is excluded.
+    { id: 'diagram', label: 'Diagram', show: () => database.capabilities?.engine !== 'redis' },
     { id: 'dashboards', label: 'Dashboards', show: () => true },
   ];
   const visibleTabs = $derived(mainTabs.filter((t) => t.show()));
@@ -496,6 +499,8 @@
           <QueryBuilder />
         {:else if database.mainTab === 'structure'}
           <StructureView />
+        {:else if database.mainTab === 'diagram'}
+          <DiagramView />
         {:else}
           <Dashboards />
         {/if}

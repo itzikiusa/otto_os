@@ -73,6 +73,15 @@ struct HistoryQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct SchemaGraphReq {
+    /// Schema/database to diagram.
+    schema: String,
+    /// Cap on tables introspected (each is one round-trip); clamped server-side.
+    #[serde(default)]
+    max_tables: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NewSavedQueryReq {
     #[serde(default)]
     connection_id: Option<Id>,
@@ -139,6 +148,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/schema", get(schema_root::<S>))
         .route("/connections/{id}/db/schema/children", post(schema_children::<S>))
         .route("/connections/{id}/db/object", post(object_detail::<S>))
+        .route("/connections/{id}/db/schema-graph", post(schema_graph::<S>))
         .route("/connections/{id}/db/query", post(run_query::<S>))
         .route("/connections/{id}/db/completion", post(completion::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
@@ -244,6 +254,22 @@ async fn object_detail<S: DbViewerCtx>(
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
     Ok(Json(ctx.db().object_detail(&id, &req.path).await?).into_response())
+}
+
+/// Read-only relationship graph (ERD) for a schema: tables + columns + FK edges.
+/// Gated at `Viewer` like the other introspection routes.
+async fn schema_graph<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<SchemaGraphReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
+    // Default to 60 tables; clamp so a request can't fan out into thousands of
+    // per-table introspection round-trips.
+    let max_tables = req.max_tables.unwrap_or(60).clamp(1, 200);
+    Ok(Json(ctx.db().schema_graph(&id, &req.schema, max_tables).await?).into_response())
 }
 
 async fn run_query<S: DbViewerCtx>(

@@ -31,8 +31,9 @@ use crate::driver::Driver;
 use crate::registry::Registry;
 use crate::tunnel::SshTunnel;
 use crate::types::{
-    statement_is_write, Capabilities, CompletionContext, CompletionResponse, Engine, NodePath,
-    ObjectDetail, QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
+    statement_is_write, Capabilities, CompletionContext, CompletionResponse, Engine, GraphColumn,
+    GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail, QueryRequest, QueryResult,
+    ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
 };
 
 /// Stable marker prefixed to the write-gate rejection message so the UI can
@@ -267,6 +268,120 @@ impl DbViewerService {
         Err(Error::Conflict(format!(
             "{WRITE_BLOCKED_PREFIX}this is a {reason}; confirm the write to run it"
         )))
+    }
+
+    /// Build the relationship graph (ERD) for one schema/database: the tables
+    /// (with columns + PK/FK flags) and the foreign-key edges between them.
+    ///
+    /// Engine-agnostic by construction — it walks the same lazy schema tree the
+    /// UI browses (`schema_children` + `object_detail`), so every driver gets it
+    /// for free and the FK data flows through the existing `ObjectDetail`
+    /// introspection (e.g. MySQL `foreign_keys_of`). Engines without FK metadata
+    /// (Redis/Mongo) yield tables with no edges and `relationships = false`.
+    ///
+    /// `max_tables` caps how many objects are introspected (a full schema can
+    /// have thousands of tables, and each is one `object_detail` round-trip);
+    /// when the cap clips the list, `truncated` is set so the UI can prompt the
+    /// user to pick a subset.
+    pub async fn schema_graph(
+        &self,
+        conn_id: &Id,
+        schema: &str,
+        max_tables: usize,
+    ) -> Result<SchemaGraph> {
+        let r = self.resolve(conn_id).await?;
+        let driver = &r.driver;
+        let cfg = &r.config;
+        let relationships = driver.capabilities().joins;
+
+        // Enumerate the table-like objects under the schema. We list the db
+        // node's children and descend one level into any "folder" grouping
+        // (MySQL exposes Tables/Views as folders); ClickHouse/Mongo list the
+        // tables/collections directly.
+        let db_path = NodePath::parse(&format!("db:{schema}"));
+        let mut object_nodes: Vec<SchemaNode> = Vec::new();
+        let mut total_seen = 0usize;
+        for node in driver.schema_children(cfg, &db_path, None).await? {
+            match node.kind {
+                NodeKind::Folder => {
+                    let child = NodePath::parse(&node.id);
+                    for inner in driver.schema_children(cfg, &child, None).await? {
+                        total_seen += 1;
+                        if object_nodes.len() < max_tables {
+                            object_nodes.push(inner);
+                        }
+                    }
+                }
+                NodeKind::Table | NodeKind::View | NodeKind::Collection => {
+                    total_seen += 1;
+                    if object_nodes.len() < max_tables {
+                        object_nodes.push(node);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let truncated = total_seen > object_nodes.len();
+
+        // Fetch each object's detail and project it onto the graph shape. A
+        // single object that fails to introspect is skipped rather than failing
+        // the whole diagram (a dropped/locked table shouldn't blank the canvas).
+        let mut tables: Vec<GraphTable> = Vec::with_capacity(object_nodes.len());
+        let mut edges: Vec<GraphEdge> = Vec::new();
+        for node in object_nodes {
+            let path = NodePath::parse(&node.id);
+            let detail = match driver.object_detail(cfg, &path).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let pk: std::collections::HashSet<&str> =
+                detail.primary_key.iter().map(String::as_str).collect();
+            let fk_cols: std::collections::HashSet<&str> = detail
+                .foreign_keys
+                .iter()
+                .flat_map(|fk| fk.columns.iter().map(String::as_str))
+                .collect();
+            let columns = detail
+                .columns
+                .iter()
+                .map(|c| GraphColumn {
+                    name: c.name.clone(),
+                    data_type: c.data_type.clone(),
+                    nullable: c.nullable,
+                    primary_key: pk.contains(c.name.as_str()),
+                    foreign_key: fk_cols.contains(c.name.as_str()),
+                })
+                .collect();
+
+            for fk in &detail.foreign_keys {
+                edges.push(GraphEdge {
+                    name: fk.name.clone(),
+                    from_table: detail.name.clone(),
+                    from_columns: fk.columns.clone(),
+                    // Default a missing ref schema to this object's schema (a
+                    // self-schema reference); the UI matches on schema.name.
+                    to_schema: fk.ref_schema.clone().unwrap_or_else(|| schema.to_string()),
+                    to_table: fk.ref_table.clone(),
+                    to_columns: fk.ref_columns.clone(),
+                });
+            }
+
+            tables.push(GraphTable {
+                id: node.id,
+                schema: schema.to_string(),
+                name: detail.name,
+                kind: detail.kind,
+                columns,
+            });
+        }
+
+        Ok(SchemaGraph {
+            schema: schema.to_string(),
+            tables,
+            edges,
+            relationships,
+            truncated,
+        })
     }
 
     /// Run a query/command and record it in history (best-effort).

@@ -369,6 +369,68 @@ impl ObjectDetail {
     }
 }
 
+// --- Schema graph (ERD / relationship diagram) ------------------------------
+
+/// One column on a diagram table card. A trimmed [`ColumnDef`] carrying just
+/// what the ERD draws: name, type, and PK/FK flags.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphColumn {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    /// Part of the table's primary key.
+    #[serde(default)]
+    pub primary_key: bool,
+    /// References another table (the source side of a foreign key).
+    #[serde(default)]
+    pub foreign_key: bool,
+}
+
+/// A table/view/collection node in the schema graph — a card on the ERD canvas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphTable {
+    /// The opaque [`NodePath`] id (e.g. `db:shop/table:orders`), so the UI can
+    /// open the same object in Structure/Query without re-deriving the path.
+    pub id: String,
+    /// Schema/database the table lives in.
+    pub schema: String,
+    /// Bare object name (the card title).
+    pub name: String,
+    pub kind: NodeKind,
+    #[serde(default)]
+    pub columns: Vec<GraphColumn>,
+}
+
+/// A foreign-key relationship between two graph tables — an ERD edge. Resolved
+/// to the referenced table's `schema.name` so the UI can match it to a card.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub name: String,
+    pub from_table: String,
+    pub from_columns: Vec<String>,
+    pub to_schema: String,
+    pub to_table: String,
+    pub to_columns: Vec<String>,
+}
+
+/// The relationship graph for a single schema/database: the tables (cards) and
+/// the FK edges between them. Engines without FK metadata (Redis/Mongo) return
+/// tables with an empty `edges` list and `relationships = false`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaGraph {
+    /// The schema/database this graph covers.
+    pub schema: String,
+    pub tables: Vec<GraphTable>,
+    pub edges: Vec<GraphEdge>,
+    /// Whether this engine exposes FK relationships at all (false for
+    /// Redis/Mongo — drives the UI's "no relationships" hint).
+    pub relationships: bool,
+    /// True when the table list was capped (the schema has more tables than the
+    /// diagram fetched — the UI surfaces this so the user can pick a subset).
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 // --- Query request / result -------------------------------------------------
 
 /// A query/command to run. SQL engines: `statement` is SQL. Redis: one command

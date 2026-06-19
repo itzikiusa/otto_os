@@ -1673,6 +1673,45 @@ export interface ObjectDetail {
   extra?: unknown;
 }
 
+/** One column on an ERD diagram card (trimmed ColumnDef + PK/FK flags). */
+export interface DbGraphColumn {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+  primary_key: boolean;
+  foreign_key: boolean;
+}
+
+/** A table/view/collection node in the schema graph (an ERD card). */
+export interface DbGraphTable {
+  /** Opaque NodePath id (e.g. `db:shop/table:orders`) for opening elsewhere. */
+  id: string;
+  schema: string;
+  name: string;
+  kind: DbNodeKind;
+  columns: DbGraphColumn[];
+}
+
+/** A foreign-key relationship between two graph tables (an ERD edge). */
+export interface DbGraphEdge {
+  name: string;
+  from_table: string;
+  from_columns: string[];
+  to_schema: string;
+  to_table: string;
+  to_columns: string[];
+}
+
+/** The relationship graph (ERD) for one schema: tables + FK edges. Engines
+ *  without FK metadata (Redis/Mongo) return `relationships: false` + no edges. */
+export interface DbSchemaGraph {
+  schema: string;
+  tables: DbGraphTable[];
+  edges: DbGraphEdge[];
+  relationships: boolean;
+  truncated: boolean;
+}
+
 /** A column in a query result set. */
 export interface DbColumn {
   name: string;
