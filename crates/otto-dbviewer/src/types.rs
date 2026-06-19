@@ -767,11 +767,15 @@ fn sql_is_write(statement: &str) -> bool {
 
 /// True when a single SQL statement's first keyword is a known row-returning
 /// read (mirrors the per-driver `is_read_statement`, kept conservative).
+///
+/// `SET` is deliberately NOT a read: `SET GLOBAL …` / `SET PASSWORD …` mutate
+/// server/session state, so they must require `confirm_write` on a guarded
+/// connection.
 fn sql_first_keyword_is_read(statement: &str) -> bool {
     let kw = sql_first_keyword(statement);
     matches!(
         kw.as_str(),
-        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN" | "WITH" | "USE" | "SET"
+        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN" | "WITH" | "USE"
     )
 }
 
@@ -824,6 +828,11 @@ fn redis_is_write(statement: &str) -> bool {
 
 /// Read-only Redis commands (conservative subset — anything not listed counts
 /// as a write, including admin/scripting commands like EVAL we can't vet).
+///
+/// `CONFIG` and `CLIENT` are intentionally absent: they have mutating subcommands
+/// (`CONFIG SET`, `CLIENT KILL`) and we don't parse the subcommand here, so the
+/// whole family classifies as a write and requires `confirm_write` on a guarded
+/// connection.
 #[rustfmt::skip]
 const REDIS_READ_COMMANDS: &[&str] = &[
     "GET", "MGET", "STRLEN", "GETRANGE", "EXISTS", "TYPE", "TTL", "PTTL", "KEYS", "SCAN",
@@ -832,7 +841,7 @@ const REDIS_READ_COMMANDS: &[&str] = &[
     "SRANDMEMBER", "SINTER", "SUNION", "SDIFF", "ZRANGE", "ZREVRANGE", "ZRANGEBYSCORE",
     "ZREVRANGEBYSCORE", "ZRANGEBYLEX", "ZSCORE", "ZMSCORE", "ZRANK", "ZREVRANK", "ZCARD",
     "ZCOUNT", "ZSCAN", "OBJECT", "DBSIZE", "RANDOMKEY", "DUMP", "MEMORY", "PING", "ECHO",
-    "INFO", "TIME", "COMMAND", "CONFIG", "CLIENT", "GETBIT", "BITCOUNT", "BITPOS",
+    "INFO", "TIME", "COMMAND", "GETBIT", "BITCOUNT", "BITPOS",
     "PFCOUNT", "GEOPOS", "GEODIST", "GEOSEARCH", "GEOHASH", "XLEN", "XRANGE", "XREVRANGE",
     "XINFO", "LPOS",
 ];
@@ -995,6 +1004,11 @@ mod tests {
             "ALTER TABLE t ADD COLUMN c INT",
             "GRANT ALL ON db.* TO u",
             "SELECT 1; DROP TABLE t",
+            // `SET` mutates server/session state (SET GLOBAL / SET PASSWORD) —
+            // it must NOT be a free read on a guarded connection.
+            "SET GLOBAL max_connections = 1000",
+            "SET PASSWORD FOR u = 'x'",
+            "set autocommit = 0",
             "totally unknown statement",
         ] {
             assert!(
@@ -1014,6 +1028,12 @@ mod tests {
         assert!(is_write("FLUSHALL"));
         // EVAL can write — must be conservatively a write.
         assert!(is_write("EVAL \"return 1\" 0"));
+        // CONFIG / CLIENT have mutating subcommands and we don't parse the
+        // subcommand — the whole family is a write.
+        assert!(is_write("CONFIG SET maxmemory 100mb"));
+        assert!(is_write("CONFIG GET maxmemory"));
+        assert!(is_write("CLIENT KILL ID 5"));
+        assert!(is_write("CLIENT LIST"));
     }
 
     #[test]

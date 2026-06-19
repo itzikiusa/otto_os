@@ -437,9 +437,11 @@ export interface UpsertConnectionReq {
   secret?: string | null;
   first_command?: string | null;
   section_id?: Id | null;
-  /** Deployment environment; omit for 'dev'. */
+  /** Deployment environment. On create, omit for 'dev'; on PATCH, omitting it
+   *  KEEPS the stored value (never silently downgrades a 'prod' connection). */
   environment?: Environment;
-  /** Lock the profile against writes/DDL. */
+  /** Lock the profile against writes/DDL. On create, omit for false; on PATCH,
+   *  omitting it KEEPS the stored value (never silently un-locks read-only). */
   read_only?: boolean;
 }
 

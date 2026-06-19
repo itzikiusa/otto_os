@@ -267,13 +267,17 @@ pub struct UpsertConnectionReq {
     /// Section to place this profile in; None/absent = ungrouped.
     #[serde(default)]
     pub section_id: Option<Id>,
-    /// Deployment environment (dev/staging/prod). Absent = `Dev`. `Prod`
-    /// connections are write-guarded in the DB Explorer.
+    /// Deployment environment (dev/staging/prod). On create, absent = `Dev`.
+    /// On PATCH, absent KEEPS the stored value (so a PATCH that omits it never
+    /// silently downgrades a `Prod` connection to `Dev` and disables the guard).
+    /// `Prod` connections are write-guarded in the DB Explorer.
     #[serde(default)]
-    pub environment: Environment,
-    /// Lock the profile against writes/DDL regardless of environment.
+    pub environment: Option<Environment>,
+    /// Lock the profile against writes/DDL regardless of environment. On create,
+    /// absent = `false`. On PATCH, absent KEEPS the stored value (so a PATCH that
+    /// omits it never silently un-locks a read-only connection).
     #[serde(default)]
-    pub read_only: bool,
+    pub read_only: Option<bool>,
 }
 
 /// `POST /api/v1/workspaces/{id}/connection-sections` and `PATCH /connection-sections/{id}`.

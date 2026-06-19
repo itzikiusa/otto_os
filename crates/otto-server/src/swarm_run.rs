@@ -311,13 +311,16 @@ async fn run_turn_inner(
         &out.to_string_lossy(),
     );
 
-    // Mark running.
+    // Mark running. Capture the turn's start time so the token/cost backfill
+    // below can bound usage to THIS turn — the agent's session is reused across
+    // turns, so an unbounded session total would accumulate run1+run2+….
+    let turn_started_at = Utc::now();
     let _ = repo
         .update_run(
             &run.id,
             RunPatch {
                 status: Some("running".into()),
-                started_at: Some(Some(Utc::now())),
+                started_at: Some(Some(turn_started_at)),
                 ..Default::default()
             },
         )
@@ -358,9 +361,11 @@ async fn run_turn_inner(
 
     // Best-effort token/cost backfill for this turn, keyed on the run's session.
     // otto-usage records per-session; the run is tagged with `session_id`/`run_id`
-    // (swarm_meta above), so the session totals are the turn's usage. Stays null
+    // (swarm_meta above). Bound to events at/after `turn_started_at` so a reused
+    // session reports only THIS turn's usage (not the lifetime sum). Stays null
     // when usage tracking is off or the latest events haven't been flushed yet.
-    let (toks_in, toks_out, cost) = session_usage(ctx, outcome.session_id.as_deref()).await;
+    let (toks_in, toks_out, cost) =
+        session_usage(ctx, outcome.session_id.as_deref(), turn_started_at).await;
 
     // Persist terminal state.
     if let Some(raw) = outcome.raw.as_deref() {
@@ -428,16 +433,19 @@ fn enrich_result(parsed: Option<serde_json::Value>, cwd: &str, brief: &str) -> s
     serde_json::Value::Object(obj)
 }
 
-/// Pull this turn's token/cost totals from otto-usage for `session_id`.
-/// Returns `(input, output, cost_usd)`, each `None` when usage tracking is
-/// unavailable, no session was created, or no events were recorded yet — the
+/// Pull this turn's token/cost totals from otto-usage for `session_id`, bounded
+/// to events at/after `since` (the turn's start) — swarm sessions are reused
+/// across turns, so an unbounded total would sum every prior run. Returns
+/// `(input, output, cost_usd)`, each `None` when usage tracking is unavailable,
+/// no session was created, or no events were recorded in the window yet — the
 /// `RunPatch` then writes nulls rather than misleading zeros.
 async fn session_usage(
     ctx: &ServerCtx,
     session_id: Option<&str>,
+    since: chrono::DateTime<Utc>,
 ) -> (Option<i64>, Option<i64>, Option<f64>) {
     let Some(sid) = session_id else { return (None, None, None) };
-    match ctx.usage.session_totals_for(sid).await {
+    match ctx.usage.session_totals_for(sid, Some(since)).await {
         Some(t) => (
             Some(t.input_tokens as i64),
             Some(t.output_tokens as i64),
@@ -465,6 +473,12 @@ async fn run_attempt(
     let sid = match find_agent_session(ctx, ws, agent_id).await {
         Some(existing) => {
             let _ = ctx.manager.ensure_live(&existing).await;
+            // Re-tag the reused session with THIS turn's run/task/project ids
+            // (they were only set at creation). Without this, board posts from
+            // later turns carry the first run's id. `update_meta` shallow-merges,
+            // so the current `meta` (source/swarm_id/agent_id + the turn's
+            // run_id/task_id/project_id) overwrites the stale ids in place.
+            let _ = ctx.manager.update_meta(&existing, meta.clone()).await;
             existing
         }
         None => {

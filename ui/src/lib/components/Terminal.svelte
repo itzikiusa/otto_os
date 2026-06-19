@@ -17,7 +17,7 @@
   import { ui } from '../stores/ui.svelte';
   import { ws } from '../stores/workspace.svelte';
   import { openFile } from '../stores/openfile.svelte';
-  import { openExternal } from '../external';
+  import { openExternal, isExternalUrl } from '../external';
   import { keyContext } from '../keys';
 
   interface Props {
@@ -217,9 +217,22 @@
   // but commonly trail one in prose. Trailing punctuation is trimmed afterwards.
   const URL_RE = /\bhttps?:\/\/[^\s<>"'`(){}\[\]]+/gi;
   // file:line(:col) — require a file extension (1–8 alnum chars) right before the
-  // `:line` so we don't match clock times (12:34) or `host:port`. The path part
-  // allows dirs, `.`, `~`, `@`, `+`, `-`, `_`.
-  const FILE_RE = /(?<![\w./@~+-])((?:[\w.@~+-]+\/)*[\w.@~+-]+\.[A-Za-z0-9]{1,8}):(\d+)(?::(\d+))?\b/g;
+  // `:line` so we don't match clock times (12:34). The path may be absolute (an
+  // optional leading `/`) or relative; it allows dirs, `.`, `~`, `@`, `+`, `-`,
+  // `_`. The negative lookbehind deliberately does NOT include `/`, so a leading
+  // `/abs/path` isn't blocked. `host:port` false positives (example.com:8080) are
+  // filtered in scanLine via SOURCE_FILE_EXTS for refs that contain no `/`.
+  const FILE_RE = /(?<![\w.@~+-])(\/?(?:[\w.@~+-]+\/)*[\w.@~+-]+\.([A-Za-z0-9]{1,8})):(\d+)(?::(\d+))?\b/g;
+
+  // Source/text file extensions we'll treat as a file link even when the ref has
+  // no `/` (so `file.go:7` links but `example.com:8080` / `redis.io:6379` don't).
+  // Refs that DO contain a `/` always link (an explicit path).
+  const SOURCE_FILE_EXTS = new Set([
+    'rs', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'go', 'py', 'rb', 'java', 'kt',
+    'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'php', 'swift', 'scala', 'sh', 'bash',
+    'zsh', 'sql', 'html', 'css', 'scss', 'svelte', 'vue', 'json', 'toml', 'yaml',
+    'yml', 'md', 'txt', 'xml', 'proto', 'lock', 'cfg', 'ini', 'env',
+  ]);
 
   /** Trim trailing punctuation that's likely sentence/markup, not part of the URL. */
   function trimUrl(raw: string): string {
@@ -242,16 +255,28 @@
       hits.push({ start: m.index, end: m.index + trimmed.length, kind: 'url', text: trimmed });
     }
 
+    // `file:line` links only make sense for agent sessions: they open paths in
+    // the local Files panel. SSH/DB connection sessions show a REMOTE filesystem
+    // the local Files panel can't resolve, so we surface URLs only there.
+    const isAgent = ws.sessions.find((s) => s.id === sessionId)?.kind === 'agent';
+    if (!isAgent) return hits;
+
     FILE_RE.lastIndex = 0;
     for (let m = FILE_RE.exec(text); m; m = FILE_RE.exec(text)) {
       const start = m.index;
       const end = m.index + m[0].length;
       // Skip file refs that sit inside a URL we already matched (e.g. a port).
       if (hits.some((h) => h.kind === 'url' && start < h.end && end > h.start)) continue;
-      const line = Number(m[2]);
-      const col = m[3] ? Number(m[3]) : undefined;
+      const path = m[1];
+      const ext = m[2].toLowerCase();
+      const line = Number(m[3]);
+      const col = m[4] ? Number(m[4]) : undefined;
       if (!Number.isFinite(line) || line < 1) continue;
-      hits.push({ start, end, kind: 'file', text: m[0], path: m[1], line, col });
+      // A ref with no `/` separator could be `host:port` (example.com:8080) — only
+      // treat it as a file link if its extension is a known source/text type. Any
+      // ref containing a `/` is an explicit path and always links.
+      if (!path.includes('/') && !SOURCE_FILE_EXTS.has(ext)) continue;
+      hits.push({ start, end, kind: 'file', text: m[0], path, line, col });
     }
     return hits;
   }
@@ -283,8 +308,11 @@
         }
         const links = hits.map((h) => {
           // xterm buffer coords are 1-based; clamp the end to the row width.
+          // IBufferRange.end.x is 1-based *inclusive* while h.end is exclusive,
+          // so the two cancel out — no `+ 1` on the end (that would over-extend
+          // the clickable range by one cell).
           const startX = h.start + 1;
-          const endX = Math.min(h.end, cols) + 1;
+          const endX = Math.min(h.end, cols);
           return {
             text: h.text,
             range: {
@@ -295,7 +323,8 @@
             activate: (event: MouseEvent) => {
               event.preventDefault();
               if (h.kind === 'url') {
-                void openExternal(h.text);
+                // Defence-in-depth: only ever hand http(s) to the OS browser.
+                if (isExternalUrl(h.text)) void openExternal(h.text);
               } else if (h.path) {
                 openFile.open(resolvePath(h.path), h.line, h.col);
               }

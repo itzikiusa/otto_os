@@ -109,6 +109,14 @@
 
   const stagedCount = $derived(status.changes.filter((c) => c.staged).length);
 
+  // The draft endpoint reads the staged diff (falling back to the full working
+  // diff) — neither includes untracked files. So a tree of only-untracked files
+  // gives the drafter nothing to work from: enable Draft only when at least one
+  // change is staged or is a tracked modification.
+  const draftable = $derived(
+    status.changes.some((c) => c.staged || c.kind !== 'untracked'),
+  );
+
   $effect(() => {
     // (re)load the diff whenever a file is selected
     const path = selectedPath;
@@ -305,9 +313,11 @@
         ></textarea>
         <button
           class="btn small ghost draft-btn"
-          disabled={drafting || committing || status.changes.length === 0}
+          disabled={drafting || committing || !draftable}
           onclick={draftMessage}
-          title="Draft a commit message from your staged changes"
+          title={draftable
+            ? 'Draft a commit message from your staged changes'
+            : 'Stage a file first — drafting can’t see untracked files'}
         >
           {#if drafting}
             <span class="spinner-xs"></span>Drafting…

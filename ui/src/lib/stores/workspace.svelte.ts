@@ -452,8 +452,15 @@ class WorkspaceStore {
           s.id === ev.session_id ? { ...s, status: ev.status } : s,
         );
         // The agent resuming work means the operator already responded to
-        // whatever it was blocked on — clear the sticky "needs you" flag.
-        if (ev.status === 'working' || ev.status === 'running') {
+        // whatever it was blocked on — clear the sticky "needs you" flag. Also
+        // clear it once the session exits or becomes reconnectable: a dead agent
+        // can't need you, so it shouldn't keep a stale badge.
+        if (
+          ev.status === 'working' ||
+          ev.status === 'running' ||
+          ev.status === 'exited' ||
+          ev.status === 'reconnectable'
+        ) {
           this.clearNeedsYou(ev.session_id);
         }
         break;

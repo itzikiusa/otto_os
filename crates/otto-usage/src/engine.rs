@@ -368,14 +368,29 @@ impl UsageEngine {
         Ok(out)
     }
 
-    /// Lifetime token/cost totals for a single `session_id` (no date window —
-    /// the per-session link is exact). Returns `None` when usage tracking is
-    /// off or the session has no recorded events yet, so callers can leave the
-    /// fields null without crashing. Used to backfill per-run token columns
-    /// once an agent turn finishes (see swarm runs).
-    pub async fn session_totals_for(&self, session_id: &str) -> Option<SessionTotals> {
+    /// Token/cost totals for a single `session_id`, optionally bounded to events
+    /// at or after `since`. Returns `None` when usage tracking is off or the
+    /// session has no recorded events in the window yet, so callers can leave the
+    /// fields null without crashing. Used to backfill per-run token columns once
+    /// an agent turn finishes (see swarm runs).
+    ///
+    /// `since` matters because swarm sessions are REUSED across turns: without a
+    /// lower bound this sums the session's LIFETIME usage, so a later run's
+    /// backfill would (wrongly) be run1+run2+…. Passing the current turn's start
+    /// bounds it to just this turn (one turn per agent at a time + sequential
+    /// reuse means `ts >= since` cleanly isolates the turn).
+    pub async fn session_totals_for(
+        &self,
+        session_id: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Option<SessionTotals> {
         // session ids are ULIDs, but escape defensively for the embedded query.
         let sid = session_id.replace('\'', "''");
+        // `ts` is a DateTime64(3); a `'YYYY-MM-DD HH:MM:SS.mmm'` literal compares
+        // correctly against it. The timestamp is our own (no escaping needed).
+        let since_clause = since
+            .map(|t| format!(" AND ts >= '{}'", t.format("%Y-%m-%d %H:%M:%S%.3f")))
+            .unwrap_or_default();
         let rows: Vec<SessionTotals> = self
             .rows(&format!(
                 "SELECT '{sid}' AS session_id,
@@ -389,7 +404,7 @@ impl UsageEngine {
                         sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                         round(sum(cost_usd), 6) AS cost_usd
                  FROM usage_events
-                 WHERE session_id = '{sid}'"
+                 WHERE session_id = '{sid}'{since_clause}"
             ))
             .await
             .ok()?;

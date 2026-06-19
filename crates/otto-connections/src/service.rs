@@ -161,8 +161,8 @@ impl ConnectionsService {
                 secret_ref: None,
                 first_command: req.first_command,
                 section_id: req.section_id.clone(),
-                environment: req.environment,
-                read_only: req.read_only,
+                environment: req.environment.unwrap_or_default(),
+                read_only: req.read_only.unwrap_or(false),
                 created_by: user_id.clone(),
             })
             .await?;
@@ -187,7 +187,10 @@ impl ConnectionsService {
     }
 
     /// Update a profile. Absent secret keeps the stored one; a provided
-    /// secret replaces it. `kind` cannot change.
+    /// secret replaces it. `kind` cannot change. `environment` / `read_only`
+    /// are true PATCH semantics: absent (None) keeps the stored value, so a
+    /// PATCH that omits them can't silently downgrade a `Prod`/read-only
+    /// connection and disable the write-guard.
     pub async fn update(&self, id: &Id, req: UpsertConnectionReq) -> Result<Connection> {
         let existing = self.repo.get(id).await?;
         if req.kind != existing.kind {
@@ -216,8 +219,8 @@ impl ConnectionsService {
                 new_secret_ref.as_ref().map(|opt| opt.as_deref()),
                 Some(req.first_command.as_deref()),
                 Some(req.section_id.as_deref()),
-                Some(req.environment),
-                Some(req.read_only),
+                req.environment,
+                req.read_only,
             )
             .await
     }

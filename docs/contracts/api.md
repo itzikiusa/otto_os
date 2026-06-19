@@ -37,7 +37,7 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 24 | POST /api/v1/workspaces/{id}/orchestrate/execute | ws editor | ExecutePlanReq | `{"results":[{"action_index":0,"ok":true,"detail":"...","session_ids":["..."]}]}` |
 | 25 | GET /api/v1/workspaces/{id}/connections | ws viewer | — | `Connection[]` (includes global ones; secret never present) |
 | 26 | POST /api/v1/workspaces/{id}/connections | ws editor | UpsertConnectionReq | Connection |
-| 27 | PATCH /api/v1/connections/{id} | ws editor (global: root) | UpsertConnectionReq (all fields optional semantics: absent secret = keep; absent `environment`/`read_only` reset to dev/false) | Connection |
+| 27 | PATCH /api/v1/connections/{id} | ws editor (global: root) | UpsertConnectionReq (PATCH semantics: absent secret = keep; absent `environment`/`read_only` = **preserve** the stored value — never reset to dev/false, so a partial PATCH can't disable the write-guard) | Connection |
 | 28 | DELETE /api/v1/connections/{id} | ws editor (global: root) | — | 204 (deletes Keychain secret too) |
 | 29 | POST /api/v1/connections/{id}/open | ws editor | `{"title":null}` optional | Session |
 | 30 | POST /api/v1/connections/{id}/test | ws editor | — | TestConnectionResp |
@@ -90,13 +90,16 @@ Usage & metrics (embedded ClickHouse, all root-only; types in `crates/otto-usage
 
 Notes:
 - `Connection` carries `environment` (`dev`|`staging`|`prod`, default `dev`) and `read_only`
-  (bool, default `false`). `UpsertConnectionReq` accepts both (absent → defaults). A connection
-  is *write-guarded* when `environment=prod` OR `read_only=true`.
+  (bool, default `false`). `UpsertConnectionReq` accepts both: on **create** absent → defaults
+  (`dev`/`false`); on **PATCH** absent → preserve the stored value. A connection is
+  *write-guarded* when `environment=prod` OR `read_only=true`.
 - DB Explorer query (`POST /api/v1/connections/{id}/db/query`, body `QueryRequest`) enforces the
   guardrail: on a write-guarded connection a statement classified as a write/DDL is rejected with
   `409 conflict` and a `Problem.message` prefixed `write_blocked: ` unless the request sets
-  `confirm_write:true`. Read-vs-write is classified conservatively per engine (unknown → write);
-  `explain` requests never write. The UI requires a typed confirmation before sending
+  `confirm_write:true`. Read-vs-write is classified conservatively per engine (unknown → write).
+  `explain:true` does NOT exempt a statement (the SQL drivers execute by statement text and ignore
+  the flag), so a genuine read still passes on its own classification while a raw write tagged
+  `explain:true` is still blocked. The UI requires a typed confirmation before sending
   `confirm_write`.
 - Session create with kind=connection requires `connection_id`; provider is set server-side
   to the connection kind. Title defaults: agent → "<provider> #N", connection → conn name.

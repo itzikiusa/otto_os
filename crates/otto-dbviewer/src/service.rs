@@ -240,11 +240,17 @@ impl DbViewerService {
     /// Production / read-only guardrail. When a connection is `Prod` or
     /// `read_only`, a statement classified as a write/DDL is refused unless the
     /// request carries `confirm_write`. Classification is conservative (unknown
-    /// counts as a write), and `explain` requests never write, so they pass.
-    /// The error is a 409 with a [`WRITE_BLOCKED_PREFIX`]-tagged message so the
-    /// UI can detect it and ask for a typed confirmation.
+    /// counts as a write). The error is a 409 with a [`WRITE_BLOCKED_PREFIX`]-tagged
+    /// message so the UI can detect it and ask for a typed confirmation.
+    ///
+    /// `req.explain` does NOT exempt a statement: the SQL drivers ignore the flag
+    /// and execute by statement text, so `{statement:"DELETE …", explain:true}`
+    /// would otherwise bypass the gate and still run the write. A genuine
+    /// `EXPLAIN`-prefixed statement classifies as a read via `statement_is_write`
+    /// and passes the `is_write` check below; only raw writes carrying
+    /// `explain:true` are blocked.
     async fn guard_write(&self, conn_id: &Id, req: &QueryRequest) -> Result<()> {
-        if req.confirm_write || req.explain {
+        if req.confirm_write {
             return Ok(());
         }
         let conn = self.connections.get(conn_id).await?;
@@ -293,6 +299,21 @@ impl DbViewerService {
         let driver = &r.driver;
         let cfg = &r.config;
         let relationships = driver.capabilities().joins;
+
+        // Redis has no `db:`-rooted tree (its root is `kdb:<n>` keyspaces), so
+        // walking it below would error ("expected a keyspace node"). It also has
+        // no relationships. Return an empty graph instead of failing the diagram.
+        // Mongo (also `relationships = false`) DOES use `db:` nodes, so it keeps
+        // walking the tree and yields collection cards with no edges.
+        if r.config.engine == Engine::Redis {
+            return Ok(SchemaGraph {
+                schema: schema.to_string(),
+                tables: Vec::new(),
+                edges: Vec::new(),
+                relationships: false,
+                truncated: false,
+            });
+        }
 
         // Enumerate the table-like objects under the schema. We list the db
         // node's children and descend one level into any "folder" grouping
