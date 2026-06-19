@@ -45,9 +45,12 @@ sends current `status` immediately.
 ## 2. Event stream — `WS /ws/events`
 
 Server → client only. Each message is one JSON-serialized `otto_core::event::Event`
-(see crate; tag field `type`, snake_case). The server filters events: a client only
-receives session events for workspaces it is a member of (root receives all).
-`Notice` events are delivered to all authenticated clients.
+(see crate; tag field `type`, snake_case). The server filters events: a client
+receives a **session-scoped** event only if it is a member (`viewer`+) of the
+event's workspace **and** is the session's owner (`created_by`), a workspace
+`admin`, or root. Other **workspace-scoped** events (improvement, swarm) reach
+every member (`viewer`+) of the workspace. Root receives all. `Notice` events
+are delivered to all authenticated clients.
 
 Client→server messages on this socket are ignored. Ping/pong handled by the
 transport layer (axum auto-responds to pings; server sends a ping every 30s).
@@ -56,11 +59,15 @@ transport layer (axum auto-responds to pings; server sends a ping every 30s).
 
 Every variant of `otto_core::event::Event` (`crates/otto-core/src/event.rs`). The tag is
 the `type` field (snake_case of the variant name); the remaining keys are the payload.
-Delivery scope: **session/workspace events** reach only members with `viewer`+ on the
-event's `workspace_id` (root receives all); **broadcast events** (`Notice`) reach every
-authenticated client. There are 16 variants.
+Delivery scope: **session-family events** (`session_status`, `session_created`,
+`session_meta_updated`, `session_removed`, `trail_appended`, `tasks_updated`)
+reach only the session's owner (`created_by`), a workspace `admin`, or root —
+and only after the `viewer`+ membership gate on the event's `workspace_id`;
+other **workspace-scoped events** (improvement, swarm) reach every member with
+`viewer`+ on the event's `workspace_id` (root receives all); **broadcast
+events** (`Notice`) reach every authenticated client. There are 16 variants.
 
-Session lifecycle:
+Session lifecycle (session-family — owner/admin/root, viewer-gated):
 
 ```json
 {"type":"session_status","session_id":"…","workspace_id":"…","status":{…SessionStatus…}}
@@ -92,7 +99,7 @@ Notices & notifications:
   present the notification targets a single user and is delivered only to that user;
   when absent it is delivered per the standard workspace/broadcast scoping.
 
-Activity trail & tasks (workspace-scoped):
+Activity trail & tasks (session-family — owner/admin/root, viewer-gated):
 
 ```json
 {"type":"trail_appended","workspace_id":"…","session_id":"…","event":{…TrailEvent…}}
