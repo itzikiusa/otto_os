@@ -31,9 +31,9 @@ use crate::driver::Driver;
 use crate::registry::Registry;
 use crate::tunnel::SshTunnel;
 use crate::types::{
-    statement_is_write, Capabilities, CompletionContext, CompletionResponse, Engine, GraphColumn,
-    GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail, QueryRequest, QueryResult,
-    ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
+    statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse, Engine,
+    GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest,
+    QueryResult, ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
 };
 
 /// Stable marker prefixed to the write-gate rejection message so the UI can
@@ -51,6 +51,16 @@ struct CachedTunnel {
     last_used: Instant,
 }
 
+/// One in-flight, cancellable query. Holds the engine-native handle slot (filled
+/// by the driver once it knows the backend connection id / `query_id`) plus the
+/// connection it ran against, so a cancel can re-resolve a *fresh* connection to
+/// that same endpoint and issue the engine-native KILL on it.
+#[derive(Clone)]
+struct InFlightQuery {
+    conn_id: Id,
+    token: CancelToken,
+}
+
 #[derive(Clone)]
 pub struct DbViewerService {
     connections: ConnectionsRepo,
@@ -59,6 +69,47 @@ pub struct DbViewerService {
     registry: Registry,
     /// Live SSH tunnels, keyed by connection id, reused across operations.
     tunnels: Arc<Mutex<HashMap<Id, CachedTunnel>>>,
+    /// In-flight cancellable queries, keyed by the client's `query_id`. Populated
+    /// for the duration of a `run` that carries a `query_id`; a `cancel` request
+    /// looks the target up here to issue engine-native cancellation. A plain
+    /// `std::sync::Mutex` (held only for the brief map insert/remove/lookup, never
+    /// across an await) — distinct from the tokio `Mutex` guarding `tunnels`.
+    in_flight: Arc<std::sync::Mutex<HashMap<String, InFlightQuery>>>,
+}
+
+/// Removes an in-flight query from the registry when a `run` ends — on success,
+/// error, or future-cancellation (the UI dropping the request). RAII so the map
+/// never leaks a stale entry that a later cancel could wrongly target.
+struct InFlightGuard {
+    map: Arc<std::sync::Mutex<HashMap<String, InFlightQuery>>>,
+    key: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.map.lock() {
+            map.remove(&self.key);
+        }
+    }
+}
+
+/// Decide what (if anything) to cancel for a `(conn_id, query_id)` pair, given a
+/// snapshot of the in-flight registry. Returns the engine-native [`QueryHandle`]
+/// to KILL, or `None` when there's nothing to do — an unknown/finished query, a
+/// query that belongs to a *different* connection (a cancel must not reach across
+/// connections), or one whose driver hasn't captured a native handle yet (engine
+/// without per-query cancel, or the query hadn't reached the capture point). Pure
+/// so the decision logic is unit-testable without live repos.
+fn cancel_handle_for(
+    map: &HashMap<String, InFlightQuery>,
+    conn_id: &Id,
+    query_id: &str,
+) -> Option<QueryHandle> {
+    let target = map.get(query_id)?;
+    if &target.conn_id != conn_id {
+        return None;
+    }
+    target.token.handle()
 }
 
 /// A driver + endpoint resolved for one operation. The `_tunnel` clone, when
@@ -83,6 +134,7 @@ impl DbViewerService {
             repo,
             registry: Registry::new(),
             tunnels: Arc::new(Mutex::new(HashMap::new())),
+            in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -406,11 +458,37 @@ impl DbViewerService {
     }
 
     /// Run a query/command and record it in history (best-effort).
+    ///
+    /// When `req.query_id` is set, the query is registered in the in-flight map
+    /// for its duration (via [`InFlightGuard`], which removes it on drop even if
+    /// the driver errors or the future is cancelled), so a concurrent
+    /// [`Self::cancel`] can issue engine-native cancellation against it. The
+    /// driver fills the [`CancelToken`] with its native handle as it starts.
     pub async fn run(&self, conn_id: &Id, req: &QueryRequest) -> Result<QueryResult> {
         self.guard_write(conn_id, req).await?;
         let r = self.resolve(conn_id).await?;
+        let token = CancelToken::new();
+
+        // Register the in-flight query so a cancel can find it. The guard removes
+        // the entry on drop regardless of how `run_tracked` returns.
+        let _guard = req.query_id.as_deref().filter(|s| !s.is_empty()).map(|qid| {
+            if let Ok(mut map) = self.in_flight.lock() {
+                map.insert(
+                    qid.to_string(),
+                    InFlightQuery {
+                        conn_id: conn_id.clone(),
+                        token: token.clone(),
+                    },
+                );
+            }
+            InFlightGuard {
+                map: Arc::clone(&self.in_flight),
+                key: qid.to_string(),
+            }
+        });
+
         let started = Instant::now();
-        let result = r.driver.run(&r.config, req).await;
+        let result = r.driver.run_tracked(&r.config, req, &token).await;
         let elapsed = started.elapsed().as_millis() as i64;
         match &result {
             Ok(res) => {
@@ -434,6 +512,38 @@ impl DbViewerService {
             }
         }
         result
+    }
+
+    /// Cancel an in-flight query (issued via [`Self::run`] with the same
+    /// `query_id`) using engine-native cancellation. The cancel runs on a FRESH
+    /// connection re-resolved to the query's endpoint — you can't `KILL` on the
+    /// blocked one. An unknown id, a query that already finished, or an engine
+    /// without a captured handle is a no-op success (never an error/panic): the
+    /// caller just wants the query gone, and a race with completion is benign.
+    ///
+    /// `conn_id` is the connection the client *thinks* the query belongs to (the
+    /// route is connection-scoped for role-gating); we additionally require the
+    /// registry entry to match it, so a cancel can't reach across connections.
+    pub async fn cancel(&self, conn_id: &Id, query_id: &str) -> Result<()> {
+        // Look up + decide (and drop the lock) before any await — the std Mutex is
+        // never held across the cancel's network round-trip.
+        let handle = {
+            let map = self
+                .in_flight
+                .lock()
+                .map_err(|_| otto_core::Error::Internal("in-flight registry poisoned".into()))?;
+            cancel_handle_for(&map, conn_id, query_id)
+        };
+        let Some(handle) = handle else {
+            // Unknown/finished query, a different connection, or no native handle
+            // captured yet — nothing to cancel (a successful no-op).
+            return Ok(());
+        };
+
+        // Re-resolve a fresh connection to the same endpoint and issue the
+        // engine-native KILL there (can't KILL on the blocked connection).
+        let r = self.resolve(conn_id).await?;
+        r.driver.cancel(&r.config, &handle).await
     }
 
     pub async fn completion(
@@ -522,5 +632,84 @@ impl DbViewerService {
             ..Default::default()
         };
         self.run(&widget.connection_id, &req).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the in-flight cancel registry — the decision logic
+    //! ([`cancel_handle_for`]) and the RAII [`InFlightGuard`] — without standing
+    //! up a full `DbViewerService` (which needs a DB pool + secret store). These
+    //! prove the security/robustness properties: a cancel only targets a matching
+    //! connection's query, only when a native handle was captured, and a finished
+    //! query leaves no stale entry a later cancel could hit.
+
+    use super::*;
+
+    fn entry(conn_id: &str, handle: Option<QueryHandle>) -> InFlightQuery {
+        let token = CancelToken::new();
+        if let Some(h) = handle {
+            token.set(h);
+        }
+        InFlightQuery {
+            conn_id: conn_id.to_string(),
+            token,
+        }
+    }
+
+    #[test]
+    fn cancel_handle_for_returns_captured_handle_on_match() {
+        let mut map = HashMap::new();
+        map.insert(
+            "q1".to_string(),
+            entry("conn-A", Some(QueryHandle::MysqlConnId(7))),
+        );
+        let h = cancel_handle_for(&map, &"conn-A".to_string(), "q1");
+        assert!(matches!(h, Some(QueryHandle::MysqlConnId(7))));
+    }
+
+    #[test]
+    fn cancel_handle_for_unknown_query_is_none() {
+        let map: HashMap<String, InFlightQuery> = HashMap::new();
+        assert!(cancel_handle_for(&map, &"conn-A".to_string(), "nope").is_none());
+    }
+
+    #[test]
+    fn cancel_handle_for_wrong_connection_is_none() {
+        // The query exists but under a different connection — a cancel must not
+        // reach across connections.
+        let mut map = HashMap::new();
+        map.insert(
+            "q1".to_string(),
+            entry("conn-A", Some(QueryHandle::MysqlConnId(7))),
+        );
+        assert!(cancel_handle_for(&map, &"conn-B".to_string(), "q1").is_none());
+    }
+
+    #[test]
+    fn cancel_handle_for_no_captured_handle_is_none() {
+        // Right connection + known id, but the driver never set a native handle
+        // (e.g. Redis/Mongo, or the query hadn't reached the capture point).
+        let mut map = HashMap::new();
+        map.insert("q1".to_string(), entry("conn-A", None));
+        assert!(cancel_handle_for(&map, &"conn-A".to_string(), "q1").is_none());
+    }
+
+    #[test]
+    fn in_flight_guard_removes_its_entry_on_drop() {
+        let map: Arc<std::sync::Mutex<HashMap<String, InFlightQuery>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        map.lock()
+            .unwrap()
+            .insert("q1".to_string(), entry("conn-A", None));
+        {
+            let _guard = InFlightGuard {
+                map: Arc::clone(&map),
+                key: "q1".to_string(),
+            };
+            assert!(map.lock().unwrap().contains_key("q1"));
+        }
+        // Guard dropped → entry gone, so a later cancel can't target it.
+        assert!(map.lock().unwrap().is_empty());
     }
 }

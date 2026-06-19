@@ -21,6 +21,16 @@ struct PresetFile {
     description: String,
     #[serde(default = "default_cap")]
     max_parallel_sessions: i64,
+    // Budget guardrails (D3). Absent → the shared defaults below (non-null so a
+    // runaway swarm self-stops); set explicitly to a YAML `null` for unlimited.
+    #[serde(default = "default_max_total_runs")]
+    max_total_runs: Option<i64>,
+    #[serde(default = "default_max_runtime_secs")]
+    max_runtime_secs: Option<i64>,
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
+    #[serde(default = "default_max_attempts")]
+    max_attempts: Option<i64>,
     #[serde(default)]
     projects: Vec<PresetProjectDef>,
     agents: Vec<PresetAgentDef>,
@@ -28,6 +38,18 @@ struct PresetFile {
 
 fn default_cap() -> i64 {
     3
+}
+
+fn default_max_total_runs() -> Option<i64> {
+    Some(crate::service::DEFAULT_MAX_TOTAL_RUNS)
+}
+
+fn default_max_runtime_secs() -> Option<i64> {
+    Some(crate::service::DEFAULT_MAX_RUNTIME_SECS)
+}
+
+fn default_max_attempts() -> Option<i64> {
+    Some(crate::service::DEFAULT_MAX_ATTEMPTS)
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +114,10 @@ pub fn list_presets() -> Vec<SwarmPreset> {
             name: p.name,
             description: p.description,
             max_parallel_sessions: p.max_parallel_sessions,
+            max_total_runs: p.max_total_runs,
+            max_runtime_secs: p.max_runtime_secs,
+            max_cost_usd: p.max_cost_usd,
+            max_attempts: p.max_attempts,
             agents: p
                 .agents
                 .into_iter()
@@ -133,14 +159,27 @@ pub async fn instantiate(
         return Ok(());
     };
 
-    // Set the swarm's parallel cap from the preset (keep other config defaults).
+    // Set the swarm's parallel cap from the preset (keep other config defaults),
+    // and apply the preset's budget guardrails to the swarm row.
     let mut config = swarm.config.clone();
     if let Some(obj) = config.as_object_mut() {
         obj.insert("max_parallel_sessions".into(), json!(preset.max_parallel_sessions));
         obj.entry("cwd_mode").or_insert(json!("scratch"));
     }
     let _ = repo
-        .update_swarm(&swarm.id, SwarmPatch { config: Some(config), ..Default::default() })
+        .update_swarm(
+            &swarm.id,
+            SwarmPatch {
+                config: Some(config),
+                max_total_runs: Some(preset.max_total_runs),
+                max_runtime_secs: Some(preset.max_runtime_secs),
+                max_cost_usd: Some(preset.max_cost_usd),
+                // SwarmPatch.max_attempts is a plain Option<i64> (Some = set);
+                // the preset's max_attempts is already Option<i64> (default 3).
+                max_attempts: preset.max_attempts,
+                ..Default::default()
+            },
+        )
         .await;
 
     // Projects.

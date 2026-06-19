@@ -11,6 +11,14 @@ use serde_json::{json, Value};
 
 use crate::types::*;
 
+/// Default budget guardrails for a new swarm when the create request omits them
+/// (D3). Non-null so a runaway swarm self-stops; callers can pass explicit `null`
+/// to opt out (unlimited). `max_cost_usd` defaults to unlimited because cost is
+/// best-effort (often 0 until usage attribution lands) — it's a soft cap when set.
+pub const DEFAULT_MAX_TOTAL_RUNS: i64 = 300;
+pub const DEFAULT_MAX_RUNTIME_SECS: i64 = 4 * 60 * 60; // 4 hours
+pub const DEFAULT_MAX_ATTEMPTS: i64 = 3;
+
 #[derive(Clone)]
 pub struct SwarmService {
     pub repo: SwarmRepo,
@@ -47,6 +55,8 @@ impl SwarmService {
         req: CreateSwarmReq,
     ) -> Result<Swarm> {
         let config = req.config.unwrap_or_else(Self::default_config);
+        // Budget defaults: an omitted field (None) takes the sensible default;
+        // an explicit `null` (Some(None)) means unlimited for that dimension.
         self.repo
             .create_swarm(NewSwarm {
                 workspace_id: ws.clone(),

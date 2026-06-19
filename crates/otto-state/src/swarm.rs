@@ -1085,10 +1085,16 @@ impl SwarmRepo {
     pub async fn create_run(&self, r: NewRun) -> Result<SwarmRun> {
         let id = new_id();
         let now = fmt(Utc::now());
+        // 0-based attempt index for the task: number of prior runs against it. Used
+        // by the coordinator's per-task attempt ceiling (D3).
+        let attempt = match &r.task_id {
+            Some(tid) => self.task_run_count(tid).await.unwrap_or(0),
+            None => 0,
+        };
         sqlx::query(
             "INSERT INTO swarm_runs (id, swarm_id, workspace_id, project_id, task_id, agent_id,
                 kind, trigger, status, attempt, enqueued_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
         )
         .bind(&id)
         .bind(&r.swarm_id)
@@ -1098,6 +1104,7 @@ impl SwarmRepo {
         .bind(&r.agent_id)
         .bind(&r.kind)
         .bind(&r.trigger)
+        .bind(attempt)
         .bind(&now)
         .execute(&self.pool)
         .await
@@ -1171,6 +1178,41 @@ impl SwarmRepo {
         .fetch_one(&self.pool)
         .await
         .map_err(dberr("active run count"))?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
+    /// Lifetime run count for a swarm (all `swarm_runs` rows, any status). Drives
+    /// the `max_total_runs` budget.
+    pub async fn total_run_count(&self, swarm_id: &Id) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM swarm_runs WHERE swarm_id = ?")
+            .bind(swarm_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("total run count"))?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
+    /// Summed cost (USD) across a swarm's runs. Best-effort/soft — `cost_usd` may
+    /// be 0/NULL until usage attribution lands. Drives the `max_cost_usd` budget.
+    pub async fn total_cost(&self, swarm_id: &Id) -> Result<f64> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) AS c FROM swarm_runs WHERE swarm_id = ?",
+        )
+        .bind(swarm_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("total cost"))?;
+        Ok(row.get::<f64, _>("c"))
+    }
+
+    /// How many runs have been started for a task (its attempt count). Drives the
+    /// per-task `max_attempts` ceiling so a task isn't re-queued forever.
+    pub async fn task_run_count(&self, task_id: &Id) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM swarm_runs WHERE task_id = ?")
+            .bind(task_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("task run count"))?;
         Ok(row.get::<i64, _>("n"))
     }
 
@@ -1600,5 +1642,49 @@ mod tests {
         let ready = repo.ready_tasks(&swarm).await.unwrap();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].id, blocked.id);
+    }
+
+    /// D3: the budget query building blocks. `total_run_count`/`total_cost` sum a
+    /// swarm's runs; `task_run_count` (and `create_run`'s `attempt`) count per task.
+    #[tokio::test]
+    async fn budget_run_queries_and_attempt_numbering() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let ws = new_id();
+        let swarm = repo.create_swarm(new_swarm(&ws)).await.unwrap();
+        let task = repo.create_task(new_task(&swarm.id, "todo")).await.unwrap();
+
+        assert_eq!(repo.total_run_count(&swarm.id).await.unwrap(), 0);
+        assert_eq!(repo.task_run_count(&task.id).await.unwrap(), 0);
+
+        let mk_run = || NewRun {
+            swarm_id: swarm.id.clone(),
+            workspace_id: swarm.workspace_id.clone(),
+            project_id: Some(task.project_id.clone()),
+            task_id: Some(task.id.clone()),
+            agent_id: new_id(),
+            kind: "task".into(),
+            trigger: "coordinator".into(),
+        };
+
+        // First run for the task → attempt 0.
+        let r0 = repo.create_run(mk_run()).await.unwrap();
+        assert_eq!(r0.attempt, 0, "first run is attempt 0");
+        // Second run for the same task → attempt 1 (prior run count).
+        let r1 = repo.create_run(mk_run()).await.unwrap();
+        assert_eq!(r1.attempt, 1, "attempt = prior run count");
+
+        assert_eq!(repo.total_run_count(&swarm.id).await.unwrap(), 2);
+        assert_eq!(repo.task_run_count(&task.id).await.unwrap(), 2);
+
+        // Cost sums (best-effort): set cost on the runs and confirm SUM.
+        repo.update_run(&r0.id, RunPatch { cost_usd: Some(Some(1.50)), ..Default::default() })
+            .await
+            .unwrap();
+        repo.update_run(&r1.id, RunPatch { cost_usd: Some(Some(2.25)), ..Default::default() })
+            .await
+            .unwrap();
+        let spent = repo.total_cost(&swarm.id).await.unwrap();
+        assert!((spent - 3.75).abs() < 1e-9, "summed cost = 3.75, got {spent}");
     }
 }

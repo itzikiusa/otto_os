@@ -389,6 +389,10 @@ async fn run(cfg: Config) -> Result<(), String> {
             SettingsRepo::new(pool.clone()),
             secrets.clone(),
             uid,
+            // Share the daemon event bus so the proactive self-improvement
+            // notifier can mirror Improvement* events to the user's channels
+            // (opt-in via the `channels.notify_self_improvement` setting).
+            Some(events.clone()),
         );
         let handle = cm.start().await;
         tracing::info!("channel manager: supervisor started (adapters track config live)");

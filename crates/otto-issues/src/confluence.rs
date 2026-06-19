@@ -1,10 +1,27 @@
 //! Confluence Cloud REST API v1 client (storage-format XHTML ↔ Markdown helpers included).
 
+use std::time::Duration;
+
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use otto_core::{Error, Result};
 
 use crate::jira::CommentRef;
+
+/// How long to wait for the TCP/TLS connection to a Confluence endpoint.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Overall per-request deadline so a hung endpoint can't block the caller.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Build the shared HTTP client with connect + overall timeouts. Falls back to a
+/// default client if the builder fails (keeps `ConfluenceClient::new` infallible).
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Domain types
@@ -77,7 +94,7 @@ impl ConfluenceClient {
         Self {
             site_base,
             auth_header,
-            http: reqwest::Client::new(),
+            http: build_http_client(),
         }
     }
 
@@ -1146,6 +1163,12 @@ fn strip_ordered_item(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_http_client_succeeds() {
+        // The timeout-configured builder must produce a usable client.
+        let _client = build_http_client();
+    }
 
     // ── storage_to_markdown ──────────────────────────────────────────────────
 

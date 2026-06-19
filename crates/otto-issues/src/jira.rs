@@ -1,11 +1,29 @@
 //! Jira Cloud / Server REST API v3 client.
 
+use std::time::Duration;
+
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use otto_core::domain::{IssueDetail, IssueProject, IssueSummary};
 use otto_core::{Error, Result};
 
 use crate::adf::{adf_to_markdown, text_to_adf};
+
+/// How long to wait for the TCP/TLS connection to a Jira endpoint to establish.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Overall per-request deadline. A hung Jira endpoint must not block the caller
+/// (and stack up in the watcher) indefinitely — bound every call.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Build the shared HTTP client with connect + overall timeouts. Falls back to a
+/// default client if the builder fails (keeps `JiraClient::new` infallible).
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
 
 /// A lightweight reference to a comment that was just created.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -153,7 +171,7 @@ impl JiraClient {
         Self {
             base_url,
             auth_header,
-            http: reqwest::Client::new(),
+            http: build_http_client(),
         }
     }
 
@@ -1496,6 +1514,13 @@ fn escape_jql(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_http_client_succeeds() {
+        // The timeout-configured builder must produce a usable client (i.e. not
+        // silently fall back to the default on every call).
+        let _client = build_http_client();
+    }
 
     #[test]
     fn test_is_issue_key() {

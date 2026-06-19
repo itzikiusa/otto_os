@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Extension, Json, Router};
 use otto_core::api::{CreateIssueAccountReq, Problem, UpdateIssueAccountReq};
-use otto_core::auth::AuthUser;
+use otto_core::auth::{authorize_owner, AuthUser};
 use otto_core::domain::{IssueAccount, IssueDetail, IssueProject, IssueSummary};
 use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Error, Id};
@@ -70,12 +70,10 @@ type ApiResult<T> = std::result::Result<T, ApiErr>;
 /// guard is the single chokepoint for every handler that resolves an
 /// `account_id` and acts with that account's Atlassian credentials — without it,
 /// any authenticated user could read or write through another user's Jira /
-/// Confluence identity.
+/// Confluence identity. Delegates to [`otto_core::auth::authorize_owner`] so the
+/// same ownership semantics are shared with the product and git use-paths.
 fn authorize_account(account: &IssueAccount, user: &AuthUser) -> Result<(), Error> {
-    if account.user_id != user.0.id && !user.0.is_root {
-        return Err(Error::Forbidden("not the account owner".into()));
-    }
-    Ok(())
+    authorize_owner(account, &user.0)
 }
 
 /// Load an issue account by id and authorize the caller in one step.

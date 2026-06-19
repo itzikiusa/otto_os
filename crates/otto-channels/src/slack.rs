@@ -24,6 +24,34 @@ const CANCEL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Cap on the dedup set size; cleared when exceeded to avoid unbounded growth.
 const DEDUP_CAP: usize = 2000;
 
+/// How long to wait for a TCP/TLS connection to Slack to establish.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Overall per-request deadline for ordinary Web API calls. A hung Slack
+/// endpoint must not block the caller (or the listener loop) indefinitely.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Overall deadline for file-download requests, which can carry large payloads
+/// and so are given a more generous budget than ordinary API calls.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Build an HTTP client for Slack Web API calls (connect + overall timeouts).
+/// Falls back to a default client if the builder fails.
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
+/// Build an HTTP client for downloading attachment files (larger overall budget).
+fn build_download_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(DOWNLOAD_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
 // Regex-free mention strip: strips leading `<@Uxxxxxxx>` (and trailing space)
 // from Slack message text when the bot is mentioned.
 fn strip_mention(text: &str) -> &str {
@@ -50,7 +78,7 @@ impl SlackAdapter {
     pub fn new(bot_token: impl Into<String>) -> Self {
         Self {
             bot_token: bot_token.into(),
-            http: reqwest::Client::new(),
+            http: build_http_client(),
         }
     }
 }
@@ -114,29 +142,47 @@ impl Adapter for SlackAdapter {
 
     /// Upload `content` as a file named `filename` to the Slack conversation.
     ///
-    /// Uses the legacy `files.upload` multipart endpoint which accepts a `content`
-    /// field directly — no external URL round-trip needed.
+    /// The legacy `files.upload` endpoint is deprecated/sunset, so this uses the
+    /// current external-upload flow:
+    ///   1. `files.getUploadURLExternal` → an upload URL + a file id
+    ///   2. POST the raw bytes to that URL
+    ///   3. `files.completeUploadExternal` → associate the file to the channel
+    ///      (and thread, if any)
+    ///
+    /// The bytes are sent verbatim (no UTF-8 round-trip), so binary files are
+    /// uploaded intact.
     async fn upload(
         &self,
         chat: &str,
         thread: Option<&str>,
         filename: &str,
-        content: &str,
+        content: &[u8],
     ) -> anyhow::Result<()> {
-        let mut form = reqwest::multipart::Form::new()
-            .text("channels", chat.to_string())
-            .text("filename", filename.to_string())
-            .text("content", content.to_string());
+        let (upload_url, file_id) = self.get_upload_url_external(filename, content.len()).await?;
+        self.put_bytes_to_upload_url(&upload_url, content).await?;
+        self.complete_upload_external(&file_id, filename, chat, thread)
+            .await
+    }
+}
 
-        if let Some(ts) = thread {
-            form = form.text("thread_ts", ts.to_string());
-        }
-
+impl SlackAdapter {
+    /// Step 1 of the external-upload flow: `files.getUploadURLExternal`.
+    ///
+    /// Returns `(upload_url, file_id)`. The call is form-encoded with the
+    /// `filename` and the byte `length` of the content.
+    async fn get_upload_url_external(
+        &self,
+        filename: &str,
+        length: usize,
+    ) -> anyhow::Result<(String, String)> {
         let resp = self
             .http
-            .post("https://slack.com/api/files.upload")
+            .post("https://slack.com/api/files.getUploadURLExternal")
             .header("Authorization", format!("Bearer {}", self.bot_token))
-            .multipart(form)
+            .form(&[
+                ("filename", filename.to_string()),
+                ("length", length.to_string()),
+            ])
             .send()
             .await?
             .error_for_status()?;
@@ -144,7 +190,67 @@ impl Adapter for SlackAdapter {
         let val: serde_json::Value = resp.json().await?;
         if !val["ok"].as_bool().unwrap_or(false) {
             let err = val["error"].as_str().unwrap_or("unknown").to_string();
-            return Err(anyhow::anyhow!("slack files.upload: {err}"));
+            return Err(anyhow::anyhow!("slack files.getUploadURLExternal: {err}"));
+        }
+
+        let upload_url = val["upload_url"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("slack getUploadURLExternal: missing upload_url"))?
+            .to_string();
+        let file_id = val["file_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("slack getUploadURLExternal: missing file_id"))?
+            .to_string();
+        Ok((upload_url, file_id))
+    }
+
+    /// Step 2 of the external-upload flow: POST the raw bytes to the upload URL.
+    ///
+    /// The bytes are sent verbatim so binary files are not corrupted.
+    async fn put_bytes_to_upload_url(&self, upload_url: &str, bytes: &[u8]) -> anyhow::Result<()> {
+        self.http
+            .post(upload_url)
+            .body(bytes.to_vec())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Step 3 of the external-upload flow: `files.completeUploadExternal`.
+    ///
+    /// Associates the uploaded file with `channel_id` (and `thread_ts`, if any).
+    async fn complete_upload_external(
+        &self,
+        file_id: &str,
+        filename: &str,
+        channel_id: &str,
+        thread: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let files_json =
+            serde_json::json!([{ "id": file_id, "title": filename }]).to_string();
+
+        let mut params = vec![
+            ("files", files_json),
+            ("channel_id", channel_id.to_string()),
+        ];
+        if let Some(ts) = thread {
+            params.push(("thread_ts", ts.to_string()));
+        }
+
+        let resp = self
+            .http
+            .post("https://slack.com/api/files.completeUploadExternal")
+            .header("Authorization", format!("Bearer {}", self.bot_token))
+            .form(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let val: serde_json::Value = resp.json().await?;
+        if !val["ok"].as_bool().unwrap_or(false) {
+            let err = val["error"].as_str().unwrap_or("unknown").to_string();
+            return Err(anyhow::anyhow!("slack files.completeUploadExternal: {err}"));
         }
         Ok(())
     }
@@ -163,7 +269,7 @@ pub async fn run(
     bridge: Arc<Bridge>,
     cancel: Arc<AtomicBool>,
 ) {
-    let http = reqwest::Client::new();
+    let http = build_http_client();
     // In-memory dedup set: keyed by "channel:ts".
     let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
@@ -458,7 +564,7 @@ async fn collect_attachments(content: &serde_json::Value, bot_token: &str) -> St
         Some(f) if !f.is_empty() => f,
         _ => return String::new(),
     };
-    let client = reqwest::Client::new();
+    let client = build_download_client();
     let mut notes = Vec::new();
     for f in files {
         let name = f["name"].as_str().unwrap_or("file");

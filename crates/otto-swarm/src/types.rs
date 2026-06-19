@@ -329,5 +329,10 @@ pub struct SwarmPreset {
     pub name: String,
     pub description: String,
     pub max_parallel_sessions: i64,
+    /// Budget guardrails for swarms created from this preset (None = unlimited).
+    pub max_total_runs: Option<i64>,
+    pub max_runtime_secs: Option<i64>,
+    pub max_cost_usd: Option<f64>,
+    pub max_attempts: Option<i64>,
     pub agents: Vec<PresetAgent>,
 }

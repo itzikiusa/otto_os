@@ -51,13 +51,18 @@ enum ClientFrame {
         cols: u16,
         rows: u16,
     },
-    // `lines` is accepted for protocol compatibility but the server now
-    // replies with a full current-screen snapshot rather than N raw lines.
+    // Request a history-inclusive snapshot: up to `lines` rows of scrollback
+    // history (rows that scrolled off above the visible screen) followed by a
+    // coherent current-screen frame. Honors the requested `lines`.
     Scrollback {
-        #[allow(dead_code)]
         lines: usize,
     },
 }
+
+/// Default scrollback depth used for the initial on-attach snapshot when the
+/// client has not yet asked for a specific amount. Capped well under the
+/// emulator's 1000-line history so reconnecting restores ample context.
+const DEFAULT_ATTACH_HISTORY_LINES: usize = 1000;
 
 /// Build the standalone terminal-WS router (carries its own state).
 pub fn ws_router<S: SessionsCtx>(authenticator: Arc<dyn TokenAuthenticator>, ctx: S) -> Router {
@@ -252,14 +257,20 @@ async fn serve_terminal<S: SessionsCtx>(
                             let _ = ctx.manager().resize(&session_id, cols, rows).await;
                         }
                     }
-                    ClientFrame::Scrollback { lines: _ } => {
-                        // Send the CURRENT screen as one coherent frame (what
-                        // tmux does on attach): reproduces the live screen —
-                        // including a TUI's input box — with no replay flicker
-                        // and no clipped bottom.
+                    ClientFrame::Scrollback { lines } => {
+                        // Reproduce the live screen as one coherent frame (what
+                        // tmux does on attach) PRECEDED by up to `lines` rows of
+                        // scrollback history, so reconnecting restores history
+                        // above the viewport instead of losing it. A `lines` of
+                        // 0 falls back to the bare current-screen snapshot.
+                        let want = if lines == 0 {
+                            DEFAULT_ATTACH_HISTORY_LINES
+                        } else {
+                            lines
+                        };
                         let data = handle
                             .as_ref()
-                            .map(|h| h.screen_snapshot())
+                            .map(|h| h.snapshot_with_history(want))
                             .unwrap_or_default();
                         let frame = format!(
                             r#"{{"type":"scrollback","data":"{}"}}"#,

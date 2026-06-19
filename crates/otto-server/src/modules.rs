@@ -957,8 +957,14 @@ impl PlanIo for ExecHelper {
 // ---------------------------------------------------------------------------
 
 /// Helper: build provider + remote ref from a repo row in ServerCtx.
+///
+/// S4: the repo's bound git credential may be *used* only by its owner (or root).
+/// A workspace can have many members but a repo binds exactly one account, so the
+/// Editor role-check on the repo is not sufficient to stop user B from opening /
+/// drafting PRs through user A's hosting token — authorize the owner here.
 async fn resolve_provider_remote(
     ctx: &ServerCtx,
+    user: &otto_core::domain::User,
     repo: &otto_core::domain::Repo,
 ) -> Result<(Arc<dyn otto_git::GitProvider>, otto_git::RemoteRef)> {
     let _kind = repo
@@ -969,6 +975,7 @@ async fn resolve_provider_remote(
         .as_ref()
         .ok_or_else(|| Error::Invalid("repo has no git account".into()))?;
     let account = ctx.git_store.get_account(account_id).await?;
+    otto_core::auth::authorize_owner(&account, user)?;
     let remote_url = repo
         .remote_url
         .as_deref()
@@ -1438,8 +1445,14 @@ async fn run_review_core(
 }
 
 /// Fetch PR diff + Jira context and delegate to `run_review_core`.
+///
+/// `user` is the caller that started the review; their ownership of the repo's
+/// bound git account (and any supplied issue account) is enforced here so the
+/// review never acts through another user's credentials (S4).
+#[allow(clippy::too_many_arguments)]
 async fn run_pr_review_inner(
     ctx: &ServerCtx,
+    user: &otto_core::domain::User,
     review_id: &Id,
     repo_id: &Id,
     pr_number: u64,
@@ -1450,7 +1463,7 @@ async fn run_pr_review_inner(
     // 1. Load repo + its workspace, and resolve provider.
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
-    let (provider, remote) = resolve_provider_remote(ctx, &repo).await?;
+    let (provider, remote) = resolve_provider_remote(ctx, user, &repo).await?;
 
     // 2. Fetch the PR diff.
     tracing::info!(review = %review_id, "fetching PR diff for PR #{pr_number}");
@@ -1466,6 +1479,8 @@ async fn run_pr_review_inner(
         (Some(account_id), Some(ref key)) => {
             let ctx_str = async {
                 let account = ctx.issues_store.get_account(&account_id).await?;
+                // S4: only the issue account's owner (or root) may use its token.
+                otto_core::auth::authorize_owner(&account, user)?;
                 let token = ctx.secrets.get(&account.token_ref)?.ok_or_else(|| {
                     otto_core::Error::Invalid(format!(
                         "token missing for issue account {}",
@@ -1901,9 +1916,14 @@ async fn start_review(
     let issue_account_id = req.issue_account_id;
     let issue_key = req.issue_key;
     let user_context = req.context;
+    // Carry the caller into the background task so credential-ownership (S4) is
+    // enforced against the user who started the review, not whoever happens to
+    // own the repo's bound accounts.
+    let review_user = user.clone();
     tokio::spawn(async move {
         let result = run_pr_review_inner(
             &ctx_bg,
+            &review_user,
             &review_id,
             &repo_id,
             number,
@@ -1986,7 +2006,7 @@ async fn approve_comment(
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
     // Post the comment to the PR provider.
-    let pr_posted = match resolve_provider_remote(&ctx, &repo).await {
+    let pr_posted = match resolve_provider_remote(&ctx, &user, &repo).await {
         Ok((provider, remote)) => {
             let req = NewPrCommentReq {
                 body: comment.body.clone(),

@@ -59,6 +59,19 @@ function loadRowLimit(): number {
 }
 
 /**
+ * A fresh per-run id sent with a query so the server can register it and a later
+ * `db/cancel` (same id) can issue engine-native cancellation. Uses
+ * `crypto.randomUUID` where available, with a non-cryptographic fallback (the id
+ * only needs to be unique among this client's in-flight queries).
+ */
+function newQueryId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
  * Extract a trailing explicit `LIMIT` from a SQL statement so we honor what the
  * user wrote instead of clipping it. Handles `LIMIT n`, `LIMIT offset, count`,
  * and `LIMIT n OFFSET m`. Returns the row count, or null when there's no
@@ -383,11 +396,17 @@ class DatabaseStore {
   }
 
   /**
-   * In-flight query AbortControllers, keyed by tab id. Non-reactive (plain Map):
-   * lets us cancel a running query (`abortQuery`) without storing a
-   * non-serializable controller inside the reactive `$state` tab objects.
+   * In-flight runs, keyed by tab id. Non-reactive (plain Map): lets us cancel a
+   * running query (`abortQuery`) without storing a non-serializable controller
+   * inside the reactive `$state` tab objects. Each entry carries the fetch
+   * `AbortController` (to drop the HTTP wait), plus the `queryId` + `connId` the
+   * run was issued with — so `abortQuery` can also tell the SERVER to cancel the
+   * query engine-side (`POST …/db/cancel`), not just abandon the response.
    */
-  private runControllers = new Map<number, AbortController>();
+  private runControllers = new Map<
+    number,
+    { controller: AbortController; queryId: string; connId: Id }
+  >();
 
   // ── UI tabs ────────────────────────────────────────────────────────────────
   mainTab: DbMainTab = $state('query');
@@ -985,10 +1004,14 @@ class DatabaseStore {
       return null;
     }
     if (statement !== undefined) t.statement = statement;
-    // Cancel any prior in-flight run for this tab before starting a new one.
-    this.runControllers.get(t.id)?.abort();
+    // Cancel any prior in-flight run for this tab before starting a new one
+    // (server-side too, so a previous heavy query stops on the DB).
+    this.abortQuery(t.id);
     const controller = new AbortController();
-    this.runControllers.set(t.id, controller);
+    // Per-run id the server registers the query under; the same id lets the
+    // cancel endpoint issue engine-native cancellation (KILL QUERY / etc.).
+    const queryId = newQueryId();
+    this.runControllers.set(t.id, { controller, queryId, connId: id });
     t.running = true;
     t.error = null;
     try {
@@ -1007,6 +1030,9 @@ class DatabaseStore {
             max_rows: explicit ?? this.rowLimit,
             node: scopeNode,
             confirm_write: confirmWrite,
+            // Per-run id so the cancel endpoint can issue engine-native
+            // cancellation (KILL QUERY / etc.) for this in-flight query.
+            query_id: queryId,
           },
           controller.signal,
         );
@@ -1044,7 +1070,7 @@ class DatabaseStore {
     } finally {
       // Only clear running/controller if this run is still the current one
       // (a newer run may have replaced it).
-      if (this.runControllers.get(t.id) === controller) {
+      if (this.runControllers.get(t.id)?.controller === controller) {
         this.runControllers.delete(t.id);
         t.running = false;
       }
@@ -1140,17 +1166,30 @@ class DatabaseStore {
     }
   }
 
-  /** Abort the in-flight query for a tab (defaults to the active tab). */
+  /**
+   * Stop the in-flight query for a tab (defaults to the active tab). Aborts the
+   * fetch (drops our HTTP wait) AND tells the server to cancel the query
+   * engine-side (`POST …/db/cancel` with the run's `query_id`) so the database
+   * stops the heavy work and frees the cached connection — not just our client.
+   * The server cancel is best-effort/fire-and-forget: an unknown/finished query
+   * is a no-op there, and a cancel failure must not block stopping the UI.
+   */
   abortQuery(tabId?: number): void {
     const id = tabId ?? this.tab?.id;
     if (id == null) return;
-    const c = this.runControllers.get(id);
-    if (c) {
-      c.abort();
-      this.runControllers.delete(id);
-      const t = this.tabs.find((x) => x.id === id);
-      if (t) t.running = false;
-    }
+    const entry = this.runControllers.get(id);
+    if (!entry) return;
+    this.runControllers.delete(id);
+    // 1) Ask the server to cancel the query engine-side (fire-and-forget).
+    void api
+      .post(`${this.connBase(entry.connId)}/cancel`, { query_id: entry.queryId })
+      .catch(() => {
+        /* best-effort: server may have already finished/evicted the query */
+      });
+    // 2) Abort our fetch and clear the tab's running state.
+    entry.controller.abort();
+    const t = this.tabs.find((x) => x.id === id);
+    if (t) t.running = false;
   }
 
   // ── Table actions (schema-tree context menu) ──────────────────────────────
