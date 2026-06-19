@@ -2608,6 +2608,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "ulid",
 ]
 
@@ -2826,8 +2827,10 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "http-body-util",
  "otto-core",
  "otto-pty",
+ "otto-rbac",
  "otto-state",
  "serde",
  "serde_json",
@@ -2835,6 +2838,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "uuid",
 ]

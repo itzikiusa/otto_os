@@ -10,3 +10,8 @@ serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 ulid.workspace = true
+
+[dev-dependencies]
+# Async test runtime for the `session_owner_or_admin` helper tests only; not a
+# production dependency of otto-core.
+tokio = { workspace = true }

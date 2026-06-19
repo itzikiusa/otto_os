@@ -561,6 +561,12 @@ impl SessionManager {
         self.repo.list_by_workspace(ws).await
     }
 
+    /// Sessions of a workspace owned by `user_id` — the owner-scoped variant
+    /// used to list only the caller's own sessions for non-admins (#L1).
+    pub async fn list_by_workspace_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Session>> {
+        self.repo.list_by_workspace_for_user(ws, user_id).await
+    }
+
     /// True when the session has a live PTY in this daemon process.
     pub fn is_live(&self, id: &Id) -> bool {
         self.live.contains_key(id)

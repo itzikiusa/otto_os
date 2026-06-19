@@ -12,12 +12,32 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{CreateSessionReq, Problem, UpdateSessionReq};
-use otto_core::auth::{AuthUser, RoleChecker};
-use otto_core::domain::{Session, WorkspaceRole};
+use otto_core::auth::{session_owner_or_admin, AuthUser, RoleChecker};
+use otto_core::domain::{Session, User, WorkspaceRole};
 use otto_core::{Error, Id};
 use otto_state::WorkspacesRepo;
 
 use crate::manager::SessionManager;
+
+/// Owner-or-admin gate for a single session: `Ok` iff the canonical
+/// [`session_owner_or_admin`] helper allows the caller (root, the session's
+/// creator, or a workspace Admin of the session's workspace). Returns a
+/// `Forbidden` [`ApiErr`] otherwise. This is the chokepoint that stops one user
+/// reading or controlling another user's session (#L1–#L7) — the single source
+/// of truth lives in `otto_core::auth`, shared with `otto-server`.
+async fn ensure_session_owner_or_admin<S: SessionsCtx>(
+    ctx: &S,
+    user: &User,
+    session: &Session,
+) -> ApiResult<()> {
+    if session_owner_or_admin(ctx.roles().as_ref(), user, session).await {
+        Ok(())
+    } else {
+        Err(ApiErr(Error::Forbidden(
+            "not the session owner or a workspace admin".into(),
+        )))
+    }
+}
 
 /// Server-side context required by the sessions routes.
 pub trait SessionsCtx: Clone + Send + Sync + 'static {
@@ -87,7 +107,11 @@ async fn kill_all_sessions<S: SessionsCtx>(
     Ok(Json(serde_json::json!({ "killed": n })))
 }
 
-/// #17 GET /workspaces/{id}/sessions — viewer
+/// #17 GET /workspaces/{id}/sessions — viewer, owner-scoped.
+///
+/// Membership (Viewer+) is still required to list a workspace at all. Within it,
+/// a non-admin caller sees only **their own** sessions (#L1); root and workspace
+/// **Admins** keep the full cross-user list (the sanctioned team/admin view).
 async fn list_sessions<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -96,7 +120,21 @@ async fn list_sessions<S: SessionsCtx>(
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Viewer)
         .await?;
-    Ok(Json(ctx.manager().list_by_workspace(&ws_id).await?))
+    // Root or workspace-Admin → full list; otherwise scope to the caller's own.
+    let admin = user.is_root
+        || ctx
+            .roles()
+            .check(&user, &ws_id, WorkspaceRole::Admin)
+            .await
+            .is_ok();
+    let sessions = if admin {
+        ctx.manager().list_by_workspace(&ws_id).await?
+    } else {
+        ctx.manager()
+            .list_by_workspace_for_user(&ws_id, &user.id)
+            .await?
+    };
+    Ok(Json(sessions))
 }
 
 /// #18 POST /workspaces/{id}/sessions — editor
@@ -114,20 +152,18 @@ async fn create_session<S: SessionsCtx>(
     Ok(Json(session))
 }
 
-/// #19 GET /sessions/{id} — viewer (of the session's workspace)
+/// #19 GET /sessions/{id} — owner-or-admin.
 async fn get_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
-    ctx.roles()
-        .check(&user, &session.workspace_id, WorkspaceRole::Viewer)
-        .await?;
+    ensure_session_owner_or_admin(&ctx, &user, &session).await?;
     Ok(Json(session))
 }
 
-/// #20 PATCH /sessions/{id} — editor
+/// #20 PATCH /sessions/{id} — owner-or-admin
 async fn patch_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -135,9 +171,7 @@ async fn patch_session<S: SessionsCtx>(
     Json(req): Json<UpdateSessionReq>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
-    ctx.roles()
-        .check(&user, &session.workspace_id, WorkspaceRole::Editor)
-        .await?;
+    ensure_session_owner_or_admin(&ctx, &user, &session).await?;
     let session = match req.title {
         Some(title) => ctx.manager().update_title(&id, &title).await?,
         None => session,
@@ -149,55 +183,47 @@ async fn patch_session<S: SessionsCtx>(
     Ok(Json(session))
 }
 
-/// #21 DELETE /sessions/{id} — editor; kills PTY + removes row
+/// #21 DELETE /sessions/{id} — owner-or-admin; kills PTY + removes row
 async fn delete_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     let session = ctx.manager().get(&id).await?;
-    ctx.roles()
-        .check(&user, &session.workspace_id, WorkspaceRole::Editor)
-        .await?;
+    ensure_session_owner_or_admin(&ctx, &user, &session).await?;
     ctx.manager().remove(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// #22 POST /sessions/{id}/restart — editor
+/// #22 POST /sessions/{id}/restart — owner-or-admin
 async fn restart_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
-    ctx.roles()
-        .check(&user, &session.workspace_id, WorkspaceRole::Editor)
-        .await?;
+    ensure_session_owner_or_admin(&ctx, &user, &session).await?;
     Ok(Json(ctx.manager().restart(&id, None).await?))
 }
 
-/// POST /sessions/{id}/archive — editor; kills PTY, keeps row + history
+/// POST /sessions/{id}/archive — owner-or-admin; kills PTY, keeps row + history
 async fn archive_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
-    ctx.roles()
-        .check(&user, &session.workspace_id, WorkspaceRole::Editor)
-        .await?;
+    ensure_session_owner_or_admin(&ctx, &user, &session).await?;
     Ok(Json(ctx.manager().archive(&id).await?))
 }
 
-/// POST /sessions/{id}/unarchive — editor
+/// POST /sessions/{id}/unarchive — owner-or-admin
 async fn unarchive_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
-    ctx.roles()
-        .check(&user, &session.workspace_id, WorkspaceRole::Editor)
-        .await?;
+    ensure_session_owner_or_admin(&ctx, &user, &session).await?;
     Ok(Json(ctx.manager().unarchive(&id).await?))
 }

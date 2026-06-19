@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::domain::{GitAccount, IssueAccount, User, WorkspaceRole};
+use crate::domain::{GitAccount, IssueAccount, Session, User, WorkspaceRole};
 use crate::{Error, Id, Result};
 
 /// Boxed future alias used by the auth traits (no external deps).
@@ -31,6 +31,28 @@ pub trait RoleChecker: Send + Sync {
         workspace_id: &'a Id,
         min: WorkspaceRole,
     ) -> BoxFuture<'a, Result<()>>;
+}
+
+/// True iff `user` may access `session`: root, the session's creator, or a
+/// workspace **Admin** of the session's workspace.
+///
+/// This is the single source of truth for per-session ownership. Both the
+/// lower `otto-sessions` HTTP handlers and the higher `otto-server`
+/// `require_session_owner_or_admin` wrapper call it, so the owner-or-admin axis
+/// is defined in exactly one place. Root and the owner are decided without a DB
+/// round-trip; the admin branch defers to the injected [`RoleChecker`] (which
+/// also short-circuits root inside `role_of`).
+pub async fn session_owner_or_admin(
+    roles: &dyn RoleChecker,
+    user: &User,
+    session: &Session,
+) -> bool {
+    user.is_root
+        || session.created_by == user.id
+        || roles
+            .check(user, &session.workspace_id, WorkspaceRole::Admin)
+            .await
+            .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +100,10 @@ pub fn authorize_owner<C: OwnedCredential>(account: &C, user: &User) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{GitAccount, GitProviderKind, IssueAccount, IssueProviderKind};
+    use crate::domain::{
+        GitAccount, GitProviderKind, IssueAccount, IssueProviderKind, Session, SessionKind,
+        SessionStatus,
+    };
     use chrono::Utc;
 
     /// A trivial credential to exercise the generic guard directly.
@@ -98,6 +123,102 @@ mod tests {
             disabled: false,
             created_at: Utc::now(),
         }
+    }
+
+    // ---- session_owner_or_admin -------------------------------------------
+
+    /// A stub [`RoleChecker`] that grants `granted_role` to exactly one
+    /// `(user_id, workspace_id)` pair and denies everyone else. Root is *not*
+    /// special-cased here so the test proves the helper's own root branch (not
+    /// the checker's) handles root.
+    struct StubRoles {
+        ok_user: &'static str,
+        ok_ws: &'static str,
+        granted: WorkspaceRole,
+    }
+
+    impl RoleChecker for StubRoles {
+        fn check<'a>(
+            &'a self,
+            user: &'a User,
+            workspace_id: &'a Id,
+            min: WorkspaceRole,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                if user.id == self.ok_user && workspace_id == self.ok_ws && self.granted >= min {
+                    Ok(())
+                } else {
+                    Err(Error::Forbidden("stub: insufficient role".into()))
+                }
+            })
+        }
+    }
+
+    fn session(id: &str, ws: &str, created_by: &str) -> Session {
+        Session {
+            id: id.into(),
+            workspace_id: ws.into(),
+            kind: SessionKind::Agent,
+            provider: "shell".into(),
+            title: "t".into(),
+            status: SessionStatus::Running,
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: created_by.into(),
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+            archived: false,
+            meta: serde_json::Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_may_access_own_session() {
+        // alice has no role at all in the workspace, yet owns the session.
+        let roles = StubRoles {
+            ok_user: "nobody",
+            ok_ws: "ws1",
+            granted: WorkspaceRole::Viewer,
+        };
+        let s = session("s1", "ws1", "alice");
+        assert!(session_owner_or_admin(&roles, &user("alice", false), &s).await);
+    }
+
+    #[tokio::test]
+    async fn non_owner_editor_is_denied() {
+        // bob is a workspace Editor but not the owner -> denied (Editor < Admin).
+        let roles = StubRoles {
+            ok_user: "bob",
+            ok_ws: "ws1",
+            granted: WorkspaceRole::Editor,
+        };
+        let s = session("s1", "ws1", "alice");
+        assert!(!session_owner_or_admin(&roles, &user("bob", false), &s).await);
+    }
+
+    #[tokio::test]
+    async fn workspace_admin_non_owner_is_allowed() {
+        // carol is a workspace Admin (but not the owner) -> allowed.
+        let roles = StubRoles {
+            ok_user: "carol",
+            ok_ws: "ws1",
+            granted: WorkspaceRole::Admin,
+        };
+        let s = session("s1", "ws1", "alice");
+        assert!(session_owner_or_admin(&roles, &user("carol", false), &s).await);
+    }
+
+    #[tokio::test]
+    async fn root_is_always_allowed_without_role_rows() {
+        // The stub grants nothing to root; the helper's own root branch wins.
+        let roles = StubRoles {
+            ok_user: "nobody",
+            ok_ws: "nowhere",
+            granted: WorkspaceRole::Viewer,
+        };
+        let s = session("s1", "ws1", "alice");
+        assert!(session_owner_or_admin(&roles, &user("root", true), &s).await);
     }
 
     fn git_account_owned_by(owner: &str) -> GitAccount {

@@ -24,3 +24,8 @@ chrono = { workspace = true }
 tempfile = { workspace = true }
 chrono = { workspace = true }
 sqlx = { workspace = true }
+# Session-isolation tests drive the real REST router via tower's oneshot, read
+# the response body, and build a `RoleChecker` from a migrated SQLite pool.
+otto-rbac = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

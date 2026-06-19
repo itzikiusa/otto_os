@@ -5,7 +5,7 @@ use axum::http::header;
 use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use otto_core::auth::AuthUser;
+use otto_core::auth::{session_owner_or_admin, AuthUser, RoleChecker};
 use otto_core::domain::{Session, User, WorkspaceRole};
 use otto_core::{Error, Id};
 
@@ -96,36 +96,32 @@ pub fn require_root(user: &User) -> Result<(), ApiError> {
 /// - `session.created_by == user.id`  (the owner)
 /// - the user holds [`WorkspaceRole::Admin`] in `session.workspace_id`
 ///
-/// Returns `Forbidden` otherwise. Root is handled without a DB round-trip;
-/// the admin check delegates to the existing `WorkspacesRepo::role_of` resolver
-/// (which also short-circuits for root), keeping the bypass logic in one place.
+/// Returns `Forbidden` otherwise. The decision itself lives in the canonical
+/// `otto_core::auth::session_owner_or_admin` helper (the single source of truth
+/// shared with the lower `otto-sessions` handlers); this wrapper only adapts
+/// its `bool` to the server's `Result<(), ApiError>` convention.
 pub async fn require_session_owner_or_admin(
     ctx: &ServerCtx,
     user: &User,
     session: &Session,
 ) -> Result<(), ApiError> {
-    check_session_owner_or_admin(&ctx.workspaces, user, session).await
+    check_session_owner_or_admin(ctx.roles.as_ref(), user, session).await
 }
 
-/// Inner implementation operating on a bare `WorkspacesRepo` so unit tests can
-/// call it without constructing a full `ServerCtx`.
+/// Inner implementation operating on a bare [`RoleChecker`] so unit tests can
+/// call it without constructing a full `ServerCtx`. Delegates the actual
+/// owner-or-admin logic to the canonical core helper.
 pub(crate) async fn check_session_owner_or_admin(
-    workspaces: &otto_state::WorkspacesRepo,
+    roles: &dyn RoleChecker,
     user: &User,
     session: &Session,
 ) -> Result<(), ApiError> {
-    if user.is_root || session.created_by == user.id {
-        return Ok(());
-    }
-    match workspaces
-        .role_of(user, &session.workspace_id)
-        .await
-        .map_err(ApiError)?
-    {
-        Some(WorkspaceRole::Admin) => Ok(()),
-        _ => Err(ApiError(Error::Forbidden(
+    if session_owner_or_admin(roles, user, session).await {
+        Ok(())
+    } else {
+        Err(ApiError(Error::Forbidden(
             "not the session owner or a workspace admin".into(),
-        ))),
+        )))
     }
 }
 
@@ -133,7 +129,7 @@ pub(crate) async fn check_session_owner_or_admin(
 mod session_owner_tests {
     use chrono::Utc;
     use otto_core::domain::{Session, SessionKind, SessionStatus, User};
-    use otto_state::WorkspacesRepo;
+    use otto_rbac::RbacRoleChecker;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use sqlx::SqlitePool;
 
@@ -238,7 +234,7 @@ mod session_owner_tests {
 
         let alice = make_user("alice", false);
         let session = make_session("s1", "ws1", "alice"); // alice owns it
-        let repo = WorkspacesRepo::new(pool.clone());
+        let repo = RbacRoleChecker::new(pool.clone());
 
         let result = super::check_session_owner_or_admin(&repo, &alice, &session).await;
         assert!(result.is_ok(), "owner must be allowed: {result:?}");
@@ -256,7 +252,7 @@ mod session_owner_tests {
 
         let alice = make_user("alice", false);
         let session = make_session("s1", "ws1", "bob"); // bob owns it
-        let repo = WorkspacesRepo::new(pool.clone());
+        let repo = RbacRoleChecker::new(pool.clone());
 
         let result = super::check_session_owner_or_admin(&repo, &alice, &session).await;
         assert!(result.is_err(), "editor non-owner must be denied");
@@ -278,7 +274,7 @@ mod session_owner_tests {
 
         let alice = make_user("alice", false);
         let session = make_session("s1", "ws1", "bob"); // bob owns it
-        let repo = WorkspacesRepo::new(pool.clone());
+        let repo = RbacRoleChecker::new(pool.clone());
 
         let result = super::check_session_owner_or_admin(&repo, &alice, &session).await;
         assert!(result.is_ok(), "workspace admin must be allowed: {result:?}");
@@ -291,7 +287,7 @@ mod session_owner_tests {
         // No rows seeded at all — root must not need them.
         let root = make_user("root", true);
         let session = make_session("s1", "ws1", "someone-else");
-        let repo = WorkspacesRepo::new(pool.clone());
+        let repo = RbacRoleChecker::new(pool.clone());
 
         let result = super::check_session_owner_or_admin(&repo, &root, &session).await;
         assert!(result.is_ok(), "root must always be allowed: {result:?}");

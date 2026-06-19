@@ -112,6 +112,23 @@ impl SessionsRepo {
         rows.iter().map(row_to_session).collect()
     }
 
+    /// Sessions of a workspace **owned by** `user_id` (the `created_by` creator).
+    ///
+    /// Used to owner-scope the session list for non-admin callers so user A's
+    /// sessions never appear in user B's list (leak #L1). Admins/root keep the
+    /// unfiltered [`list_by_workspace`].
+    pub async fn list_by_workspace_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Session>> {
+        let rows = sqlx::query(
+            "SELECT * FROM sessions WHERE workspace_id = ? AND created_by = ? ORDER BY created_at",
+        )
+        .bind(ws)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("sessions"))?;
+        rows.iter().map(row_to_session).collect()
+    }
+
     /// Sessions that should be revived or marked reconnectable on daemon boot.
     ///
     /// Includes exited agent sessions that have a `provider_session_id` — those
@@ -454,6 +471,57 @@ mod tests {
         let exited_row = got.iter().find(|r| r.id == exited).unwrap();
         assert_eq!(exited_row.provider, "codex");
         assert_eq!(exited_row.provider_session_id, None);
+    }
+
+    /// Seed an extra user into an existing pool and return its id.
+    async fn seed_extra_user(pool: &SqlitePool, username: &str) -> String {
+        let id = new_id();
+        let now = fmt(Utc::now());
+        sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, ?, ?, 0, ?)")
+            .bind(&id).bind(username).bind("x").bind(username).bind(&now)
+            .execute(pool).await.unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn list_by_workspace_for_user_filters_by_owner() {
+        let pool = mem_pool().await;
+        let (alice, ws) = seed_user_ws(&pool).await;
+        let bob = seed_extra_user(&pool, "bob").await;
+        let repo = SessionsRepo::new(pool.clone());
+
+        // Two sessions for alice, one for bob — same workspace.
+        let a1 = insert_session_full(&pool, &ws, &alice, "claude", "running", None, 0).await;
+        let a2 = insert_session_full(&pool, &ws, &alice, "shell", "running", None, 0).await;
+        let b1 = insert_session_full(&pool, &ws, &bob, "claude", "running", None, 0).await;
+
+        // alice sees only her two; bob sees only his one.
+        let alice_ids: std::collections::HashSet<String> = repo
+            .list_by_workspace_for_user(&ws, &alice)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            alice_ids,
+            [a1.clone(), a2.clone()].into_iter().collect(),
+            "alice must see only her own sessions"
+        );
+        assert!(!alice_ids.contains(&b1), "alice must not see bob's session");
+
+        let bob_ids: Vec<String> = repo
+            .list_by_workspace_for_user(&ws, &bob)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(bob_ids, vec![b1.clone()], "bob sees only his own");
+
+        // The unscoped list still returns all three (admin/root path).
+        let all = repo.list_by_workspace(&ws).await.unwrap();
+        assert_eq!(all.len(), 3, "unscoped list returns every session");
     }
 
     #[tokio::test]
