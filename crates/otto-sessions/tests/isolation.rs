@@ -29,6 +29,7 @@ use chrono::Utc;
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{Session, SessionKind, User};
 use otto_core::Id;
+use otto_core::domain::WorkspaceRole;
 use otto_rbac::{tokens::AuthRepo, RbacAuthenticator, RbacRoleChecker};
 use otto_sessions::{api_router, ws_router, ProviderRegistry, SessionManager, SessionsCtx};
 use otto_state::{SessionsRepo, SqlitePool, WorkspacesRepo};
@@ -370,6 +371,18 @@ async fn mint_token(pool: &SqlitePool, user_id: &str) -> String {
     repo.issue(&user_id.into()).await.expect("issue token")
 }
 
+/// Mint a real **share-link** (`kind='share'`) token scoped to `session_id` at
+/// `role`, owned by `owner`. `authenticate` will attach the corresponding
+/// `SessionScope`, exercising the scoped-attach branch of `ws_auth_gate`.
+async fn mint_share(pool: &SqlitePool, owner: &str, session_id: &Id, role: WorkspaceRole) -> String {
+    let repo = AuthRepo::new(pool.clone());
+    let (raw, _info) = repo
+        .issue_share_token(&owner.into(), session_id, role, 3600, None)
+        .await
+        .expect("issue share token");
+    raw
+}
+
 /// Send a bare GET (no WS upgrade headers) to the terminal endpoint with the
 /// given raw token in the query string and return the status code. When the
 /// auth/owner gate fires the handler returns 403 *before* the upgrade, so this
@@ -476,5 +489,97 @@ async fn root_can_kill_all_sessions() {
         status,
         StatusCode::FORBIDDEN,
         "root must not be forbidden on kill-all, got {status}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Mobile plan Task 1.6 — share-token scope enforcement on /ws/term
+// ---------------------------------------------------------------------------
+
+/// A **viewer share** scoped to S1 may attach to `/ws/term/S1` (passes the gate,
+/// not 403) but is REFUSED on `/ws/term/S2` with a pre-upgrade 403 — even though
+/// the same owner created S2. The scope pins the token to exactly one session.
+#[tokio::test]
+async fn viewer_share_attaches_only_to_its_session() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+
+    let repo = SessionsRepo::new(pool.clone());
+    let s1 = insert_session(&repo, "ws1", "alice").await; // alice owns both
+    let s2 = insert_session(&repo, "ws1", "alice").await;
+    let app = ws_app(&pool).await;
+
+    // viewer share for S1 → may attach to S1 (the WS upgrade then fails on the
+    // missing Upgrade header → 400/426, never 403 from the auth gate).
+    let share = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
+    let s1_status = term_ws_status(&app, &s1, &share).await;
+    assert_ne!(
+        s1_status,
+        StatusCode::FORBIDDEN,
+        "viewer share must pass the scope gate on its own session, got {s1_status}"
+    );
+
+    // same share token → REFUSED on S2 (a share for S1 must never attach to S2).
+    let s2_status = term_ws_status(&app, &s2, &share).await;
+    assert_eq!(
+        s2_status,
+        StatusCode::FORBIDDEN,
+        "a share scoped to S1 must get 403 on S2, got {s2_status}"
+    );
+}
+
+/// An **editor share** scoped to S1 likewise passes the gate on S1 and is bound
+/// to that one session (403 on S2). (The read-only vs read-write distinction —
+/// `CanInput` — is asserted directly in the in-crate unit test in `ws.rs`, where
+/// the extension set by the gate is observable without a real WS upgrade.)
+#[tokio::test]
+async fn editor_share_attaches_only_to_its_session() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+
+    let repo = SessionsRepo::new(pool.clone());
+    let s1 = insert_session(&repo, "ws1", "alice").await;
+    let s2 = insert_session(&repo, "ws1", "alice").await;
+    let app = ws_app(&pool).await;
+
+    let share = mint_share(&pool, "alice", &s1, WorkspaceRole::Editor).await;
+    assert_ne!(
+        term_ws_status(&app, &s1, &share).await,
+        StatusCode::FORBIDDEN,
+        "editor share must pass the scope gate on its own session"
+    );
+    assert_eq!(
+        term_ws_status(&app, &s2, &share).await,
+        StatusCode::FORBIDDEN,
+        "an editor share scoped to S1 must get 403 on S2"
+    );
+}
+
+/// A scoped share BYPASSES the owner-or-admin gate: it attaches to its pinned
+/// session even though the synthetic share principal holds no workspace
+/// membership and is not the session's creator. (Here the share is minted by the
+/// owner, but the gate path that authorizes the attach is the scope, not
+/// ownership — proven by S2 being denied despite the same owner.)
+#[tokio::test]
+async fn scoped_share_bypasses_owner_gate_on_its_session() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_workspace(&pool, "ws1").await;
+    // alice is only a viewer in the workspace — irrelevant to the scoped path.
+    set_member(&pool, "ws1", "alice", "viewer").await;
+
+    let repo = SessionsRepo::new(pool.clone());
+    let s1 = insert_session(&repo, "ws1", "alice").await;
+    let app = ws_app(&pool).await;
+
+    let share = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
+    assert_ne!(
+        term_ws_status(&app, &s1, &share).await,
+        StatusCode::FORBIDDEN,
+        "a scoped share must attach to its pinned session via the scope authority"
     );
 }

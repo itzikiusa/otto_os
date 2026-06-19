@@ -6,6 +6,12 @@
 //! Viewers who are not the owner are rejected (#L9).  Input/resize capability
 //! is determined post-auth by whether the caller holds at least Editor role in
 //! the session's workspace.
+//!
+//! A **scoped (share-link) token** is a separate path (mobile plan Task 1.6): it
+//! bypasses the owner-or-admin gate (the scope IS the authority) but may attach
+//! ONLY to its one pinned session — the path `session_id` must equal the scope's
+//! `session_id` (else 403, no upgrade) — and its write capability is the share's
+//! capped role (`Editor` may input/resize; a `Viewer` share is read-only).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,12 +121,13 @@ async fn ws_auth_gate<S: SessionsCtx>(
         Some(t) => t,
         None => return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized),
     };
-    let user = match st.auth.authenticate(&token).await {
-        // Authorize attach against the effective user (== real for a normal
-        // token); the owner-or-admin gate below runs on the effective identity.
-        Ok(auth) => auth.effective_user,
+    let auth = match st.auth.authenticate(&token).await {
+        Ok(auth) => auth,
         Err(_) => return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized),
     };
+    // Authorize attach against the effective user (== real for a normal token);
+    // the owner-or-admin gate below runs on the effective identity.
+    let user = auth.effective_user;
 
     // 2. Session lookup.
     let session = match st.ctx.manager().get(&session_id).await {
@@ -128,24 +135,48 @@ async fn ws_auth_gate<S: SessionsCtx>(
         Err(e) => return problem(StatusCode::NOT_FOUND, &e),
     };
 
-    // 3. Owner-or-admin gate (#L9): only the creator, a workspace Admin, or
-    //    root may attach. Workspace Viewers/Editors who are not the owner are
-    //    refused here, before the WS upgrade.
-    if !session_owner_or_admin(st.ctx.roles().as_ref(), &user, &session).await {
-        return problem(
-            StatusCode::FORBIDDEN,
-            &Error::Forbidden("not the session owner or a workspace admin".into()),
-        );
-    }
-
-    // 4. Determine write capability (owner/ws-admin/root all pass Editor check;
-    //    a viewer-owner would fail it and stay read-only — unchanged behaviour).
-    let can_input = st
-        .ctx
-        .roles()
-        .check(&user, &session.workspace_id, WorkspaceRole::Editor)
-        .await
-        .is_ok();
+    // 3. Authorize the attach + decide write capability. Two disjoint paths:
+    //
+    //  - **Scoped (share-link) token** (`scope == Some`): the scope IS the
+    //    authority, so the owner-or-admin gate is BYPASSED. The single guarantee
+    //    a share carries is its one pinned `session_id`, so the path id MUST
+    //    equal `scope.session_id` (a share for S1 must never attach to S2, even
+    //    if the same owner created S2) → otherwise 403, no upgrade. Write
+    //    capability is the share's capped role: `Editor` may type/resize, a
+    //    `Viewer` share is strictly read-only. The workspace-role probe is
+    //    ignored entirely (the synthetic share principal holds no membership).
+    //
+    //  - **Unscoped token** (`scope == None`): unchanged behaviour — the
+    //    owner-or-admin gate (#L9) plus the Editor probe for write capability.
+    let can_input = match auth.scope {
+        Some(scope) => {
+            if scope.session_id != session_id {
+                return problem(
+                    StatusCode::FORBIDDEN,
+                    &Error::Forbidden("share token is scoped to a different session".into()),
+                );
+            }
+            scope.role == WorkspaceRole::Editor
+        }
+        None => {
+            // Owner-or-admin gate (#L9): only the creator, a workspace Admin, or
+            // root may attach. Workspace Viewers/Editors who are not the owner
+            // are refused here, before the WS upgrade.
+            if !session_owner_or_admin(st.ctx.roles().as_ref(), &user, &session).await {
+                return problem(
+                    StatusCode::FORBIDDEN,
+                    &Error::Forbidden("not the session owner or a workspace admin".into()),
+                );
+            }
+            // Write capability (owner/ws-admin/root all pass the Editor check; a
+            // viewer-owner would fail it and stay read-only — unchanged).
+            st.ctx
+                .roles()
+                .check(&user, &session.workspace_id, WorkspaceRole::Editor)
+                .await
+                .is_ok()
+        }
+    };
 
     // Propagate auth results to the handler via extensions.
     req.extensions_mut().insert(AuthUser(user));
@@ -366,5 +397,252 @@ async fn serve_terminal<S: SessionsCtx>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! In-crate gate tests (mobile plan Task 1.6). These drive the private
+    //! [`ws_auth_gate`] middleware directly through a probe handler that echoes
+    //! the [`CanInput`] extension into a response header, so the read-only vs
+    //! read-write capability a scoped share confers is observable WITHOUT a real
+    //! WebSocket upgrade (which the integration harness in `tests/isolation.rs`
+    //! cannot inspect — it only sees the pre-upgrade status).
+
+    use super::*;
+    use crate::{ProviderRegistry, SessionManager};
+    use chrono::Utc;
+    use otto_core::auth::RoleChecker;
+    use otto_core::domain::{SessionKind, WorkspaceRole};
+    use otto_rbac::{tokens::AuthRepo, RbacAuthenticator, RbacRoleChecker};
+    use otto_state::{SessionsRepo, SqlitePool, WorkspacesRepo};
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt; // for `oneshot`
+
+    #[derive(Clone)]
+    struct Ctx {
+        manager: Arc<SessionManager>,
+        roles: Arc<dyn RoleChecker>,
+        workspaces: WorkspacesRepo,
+    }
+
+    impl SessionsCtx for Ctx {
+        fn manager(&self) -> &Arc<SessionManager> {
+            &self.manager
+        }
+        fn roles(&self) -> &Arc<dyn RoleChecker> {
+            &self.roles
+        }
+        fn workspaces(&self) -> &WorkspacesRepo {
+            &self.workspaces
+        }
+    }
+
+    async fn mem_pool() -> SqlitePool {
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("connect in-memory sqlite");
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    async fn seed_user(pool: &SqlitePool, id: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
+             VALUES (?, ?, 'x', ?, 0, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+    }
+
+    async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
+             VALUES (?, 'ws', '/tmp', '{}', 0, ?)",
+        )
+        .bind(ws_id)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+    }
+
+    async fn insert_session(repo: &SessionsRepo, ws: &str, created_by: &str) -> Id {
+        repo.create(otto_state::NewSession {
+            workspace_id: ws.into(),
+            kind: SessionKind::Agent,
+            provider: "shell".into(),
+            title: "t".into(),
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: created_by.into(),
+            meta: serde_json::Value::Null,
+        })
+        .await
+        .expect("insert session")
+        .id
+    }
+
+    /// Build a router that layers the REAL [`ws_auth_gate`] over a probe handler
+    /// echoing the gate-set [`CanInput`] flag into an `x-can-input` header. This
+    /// lets the test read the exact capability decision pre-upgrade.
+    fn probe_app(state: WsState<Ctx>) -> Router {
+        async fn probe(axum::Extension(CanInput(can_input)): axum::Extension<CanInput>) -> Response {
+            let mut resp = StatusCode::OK.into_response();
+            resp.headers_mut().insert(
+                "x-can-input",
+                axum::http::HeaderValue::from_static(if can_input { "1" } else { "0" }),
+            );
+            resp
+        }
+        Router::new()
+            .route("/ws/term/{session_id}", get(probe))
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                ws_auth_gate::<Ctx>,
+            ))
+            .with_state(state)
+    }
+
+    async fn build(pool: &SqlitePool) -> WsState<Ctx> {
+        let repo = SessionsRepo::new(pool.clone());
+        let (events, _rx) = broadcast::channel(64);
+        let providers = ProviderRegistry::new(None);
+        let manager = Arc::new(SessionManager::new(repo, events, providers));
+        let ctx = Ctx {
+            manager,
+            roles: Arc::new(RbacRoleChecker::new(pool.clone())),
+            workspaces: WorkspacesRepo::new(pool.clone()),
+        };
+        WsState {
+            auth: Arc::new(RbacAuthenticator::new(pool.clone())),
+            ctx,
+        }
+    }
+
+    async fn mint_share(pool: &SqlitePool, owner: &str, sid: &Id, role: WorkspaceRole) -> String {
+        AuthRepo::new(pool.clone())
+            .issue_share_token(&owner.into(), sid, role, 3600, None)
+            .await
+            .expect("issue share")
+            .0
+    }
+
+    async fn gate(app: &Router, sid: &Id, token: &str) -> Response {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/ws/term/{sid}?token={token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap()
+    }
+
+    /// A **viewer** share attaches to its session but is read-only: the gate sets
+    /// `CanInput = false`.
+    #[tokio::test]
+    async fn viewer_share_is_read_only() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let s1 = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+
+        let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
+        let resp = gate(&app, &s1, &token).await;
+        assert_eq!(resp.status(), StatusCode::OK, "viewer share must pass the gate");
+        assert_eq!(
+            resp.headers().get("x-can-input").unwrap(),
+            "0",
+            "a viewer share must be read-only (CanInput=false)"
+        );
+    }
+
+    /// An **editor** share attaches AND may type/resize: `CanInput = true`.
+    #[tokio::test]
+    async fn editor_share_can_input() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let s1 = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+
+        let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Editor).await;
+        let resp = gate(&app, &s1, &token).await;
+        assert_eq!(resp.status(), StatusCode::OK, "editor share must pass the gate");
+        assert_eq!(
+            resp.headers().get("x-can-input").unwrap(),
+            "1",
+            "an editor share may input (CanInput=true)"
+        );
+    }
+
+    /// A share scoped to S1 is REFUSED (403) on S2 — even though the same owner
+    /// created both — and never reaches the probe handler.
+    #[tokio::test]
+    async fn share_for_s1_denied_on_s2() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let repo = SessionsRepo::new(pool.clone());
+        let s1 = insert_session(&repo, "ws1", "alice").await;
+        let s2 = insert_session(&repo, "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+
+        let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
+        assert_eq!(
+            gate(&app, &s1, &token).await.status(),
+            StatusCode::OK,
+            "share must pass on its pinned session S1"
+        );
+        assert_eq!(
+            gate(&app, &s2, &token).await.status(),
+            StatusCode::FORBIDDEN,
+            "a share scoped to S1 must be 403 on S2"
+        );
+    }
+
+    /// A normal (unscoped) owner token still passes the owner gate and gets the
+    /// Editor-probe capability — unchanged behaviour for non-scoped tokens.
+    #[tokio::test]
+    async fn unscoped_owner_token_unchanged() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws1','alice','editor')")
+            .execute(&pool)
+            .await
+            .expect("set member");
+        let s1 = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+
+        let token = AuthRepo::new(pool.clone())
+            .issue(&"alice".into())
+            .await
+            .expect("issue token");
+        let resp = gate(&app, &s1, &token).await;
+        assert_eq!(resp.status(), StatusCode::OK, "owner must pass the gate");
+        assert_eq!(
+            resp.headers().get("x-can-input").unwrap(),
+            "1",
+            "owner-editor keeps input capability (unscoped path unchanged)"
+        );
     }
 }

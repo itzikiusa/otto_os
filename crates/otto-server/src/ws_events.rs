@@ -21,7 +21,7 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use otto_core::auth::RoleChecker;
+use otto_core::auth::{AuthContext, RoleChecker};
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::event::Event;
 use otto_core::{Error, Id};
@@ -54,6 +54,16 @@ pub async fn events_ws(
     };
     match ctx.authenticator.authenticate(&token).await {
         Ok(auth) => {
+            // Scoped (share-link) tokens get ZERO event-stream access: `/ws/events`
+            // is workspace-scoped and would leak every sibling session's status,
+            // trail, and tasks. A share token only ever sees its one session's live
+            // terminal via `/ws/term`. Refuse the upgrade with 403 (deny-by-default).
+            if scope_denied(&auth) {
+                return ApiError(Error::Forbidden(
+                    "share-scoped tokens cannot subscribe to the event stream".into(),
+                ))
+                .into_response();
+            }
             // Authorize against the effective user (== real for a normal token).
             let user = auth.effective_user;
             // Echo `otto-bearer` only when the client used the subprotocol path,
@@ -84,6 +94,15 @@ fn token_from_subprotocol(headers: &HeaderMap) -> Option<String> {
     }
     let token = parts.next()?;
     (!token.is_empty()).then(|| token.to_string())
+}
+
+/// True iff this authenticated context must be denied `/ws/events` outright: a
+/// scoped (`kind='share'`) token is pinned to a single session's terminal and is
+/// never allowed onto the workspace-wide event stream. Pure (no I/O) so the
+/// pre-upgrade denial is exercised directly by the unit test below — building a
+/// full `ServerCtx` to drive `events_ws` end-to-end is infeasible in tests.
+fn scope_denied(auth: &AuthContext) -> bool {
+    auth.is_scoped()
 }
 
 async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User) {
@@ -543,6 +562,43 @@ mod tests {
             Scope::Session { owner, .. } => assert_eq!(owner, Some(&"alice".to_string())),
             _ => panic!("expected Scope::Session for SessionCreated"),
         }
+    }
+
+    // ---- scope_denied: share tokens get NO event stream (Task 1.7) --------
+
+    fn ctx_with_scope(scope: Option<otto_core::auth::SessionScope>) -> AuthContext {
+        let u = user("guest", false);
+        AuthContext {
+            real_user: u.clone(),
+            effective_user: u,
+            scope,
+        }
+    }
+
+    /// A scoped (share-link) token is refused on `/ws/events` (pre-upgrade): the
+    /// stream is workspace-wide and would leak every sibling session.
+    #[test]
+    fn scoped_token_denied_on_events_stream() {
+        let denied = ctx_with_scope(Some(otto_core::auth::SessionScope {
+            session_id: "S1".into(),
+            role: WorkspaceRole::Viewer,
+        }));
+        assert!(scope_denied(&denied), "a viewer share must be denied /ws/events");
+        let denied = ctx_with_scope(Some(otto_core::auth::SessionScope {
+            session_id: "S1".into(),
+            role: WorkspaceRole::Editor,
+        }));
+        assert!(scope_denied(&denied), "an editor share must be denied /ws/events too");
+    }
+
+    /// A normal (unscoped) token is unaffected — it proceeds to the per-event
+    /// `allowed()` filter as before.
+    #[test]
+    fn unscoped_token_allowed_onto_events_stream() {
+        assert!(
+            !scope_denied(&ctx_with_scope(None)),
+            "a normal/impersonation token must NOT be denied at the scope gate"
+        );
     }
 
     /// Non-session events keep their prior scope (regression guard for the
