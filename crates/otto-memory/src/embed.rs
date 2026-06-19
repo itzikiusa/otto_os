@@ -3,13 +3,117 @@
 //! behind this trait behind cargo features.
 
 use async_trait::async_trait;
-use otto_core::Result;
+use otto_core::{Error, Result};
+use serde::{Deserialize, Serialize};
 
 #[async_trait]
 pub trait Embedder: Send + Sync {
     fn model_id(&self) -> &str;
     fn dim(&self) -> usize;
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+}
+
+// ---------------------------------------------------------------------------
+// Remote embedders (OpenAI / Voyage). The `base_url` is injectable so they can
+// be pointed at a mock server in tests. API keys come from the keychain (passed
+// in as a string ref-resolved value, never stored in the DB).
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct EmbedReq<'a> {
+    model: &'a str,
+    input: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct EmbedItem {
+    embedding: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+struct EmbedResp {
+    data: Vec<EmbedItem>,
+}
+
+/// Which remote provider to construct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteProvider {
+    Openai,
+    Voyage,
+}
+
+/// OpenAI-/Voyage-compatible embeddings client (both speak `{model,input}` →
+/// `{data:[{embedding}]}` at `<base>/embeddings`).
+pub struct RemoteEmbedder {
+    base_url: String,
+    api_key: String,
+    model: String,
+    dim: usize,
+    http: reqwest::Client,
+}
+
+impl RemoteEmbedder {
+    pub fn new(provider: RemoteProvider, api_key: String) -> Self {
+        match provider {
+            RemoteProvider::Openai => Self::with(
+                api_key,
+                "https://api.openai.com/v1".into(),
+                "text-embedding-3-small".into(),
+                1536,
+            ),
+            RemoteProvider::Voyage => Self::with(
+                api_key,
+                "https://api.voyageai.com/v1".into(),
+                "voyage-3".into(),
+                1024,
+            ),
+        }
+    }
+
+    pub fn with(api_key: String, base_url: String, model: String, dim: usize) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
+            model,
+            dim,
+            http: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl Embedder for RemoteEmbedder {
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let resp = self
+            .http
+            .post(format!("{}/embeddings", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&EmbedReq {
+                model: &self.model,
+                input: texts,
+            })
+            .send()
+            .await
+            .map_err(|e| Error::Upstream(format!("embed request: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(Error::Upstream(format!(
+                "embed provider returned {}",
+                resp.status()
+            )));
+        }
+        let body: EmbedResp = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("embed decode: {e}")))?;
+        Ok(body.data.into_iter().map(|d| d.embedding).collect())
+    }
 }
 
 /// Deterministic hashed bag-of-words embedder — unit-normalized. Shared tokens →

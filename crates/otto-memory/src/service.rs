@@ -35,6 +35,14 @@ impl MemoryService {
         }
     }
 
+    /// Build a service from any embedder, wiring a brute-force index keyed to the
+    /// embedder's model id (one-liner for real local/remote embedders).
+    pub fn with_embedder(pool: SqlitePool, embedder: Arc<dyn Embedder>) -> Self {
+        let index: Arc<dyn VectorIndex> =
+            Arc::new(BruteForceIndex::new(pool.clone(), embedder.model_id().to_string()));
+        Self::new(pool, embedder, index)
+    }
+
     /// Keyword-only service (no embeddings) — used where vectors aren't wanted.
     pub fn new_keyword_only(pool: SqlitePool) -> Self {
         Self {

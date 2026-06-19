@@ -2711,6 +2711,7 @@ dependencies = [
  "chrono",
  "otto-core",
  "otto-state",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -2719,6 +2720,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "ulid",
+ "wiremock",
 ]
 
 [[package]]
