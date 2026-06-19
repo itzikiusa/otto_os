@@ -45,6 +45,16 @@ export interface Swarm {
   preset_slug?: string | null;
   status: SwarmStatus;
   config: SwarmConfig;
+  /** Budget guardrails (all null = unlimited). Enforced by the Coordinator. */
+  max_total_runs?: number | null;
+  max_cost_usd?: number | null;
+  max_runtime_secs?: number | null;
+  /** Per-task attempt ceiling (default 3). */
+  max_attempts: number;
+  /** When the swarm last went active — anchors the runtime budget. */
+  run_started_at?: string | null;
+  /** Why the Coordinator auto-paused (budget/limit reason), else null. */
+  pause_reason?: string | null;
   created_by: Id;
   created_at: string;
   updated_at: string;
@@ -119,6 +129,8 @@ export interface SwarmTask {
   labels: string[];
   result_ref?: string | null;
   delegated: boolean;
+  /** How many turns the Coordinator has queued for this task (attempt ceiling). */
+  attempts: number;
   order_idx: number;
   created_by: Id;
   created_at: string;
@@ -209,6 +221,10 @@ export interface SwarmCounts {
   projects: number;
   tasks: number;
   running_runs: number;
+  /** Total runs ever enqueued (basis for the max_total_runs budget). */
+  total_runs: number;
+  /** Accumulated backfilled spend in USD (basis for the max_cost_usd budget). */
+  cost_usd: number;
 }
 
 export interface SwarmDetail extends Swarm {

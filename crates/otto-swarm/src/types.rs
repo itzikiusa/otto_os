@@ -8,6 +8,16 @@ use serde_json::Value;
 
 // --- Swarms ----------------------------------------------------------------
 
+/// Optional present-or-absent budget fields. `Some(None)` clears a limit
+/// (unlimited); `None` (absent) leaves it untouched. Used by `UpdateSwarmReq`.
+fn de_double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(de)?))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateSwarmReq {
     pub name: String,
@@ -17,9 +27,19 @@ pub struct CreateSwarmReq {
     pub preset_slug: Option<String>,
     #[serde(default)]
     pub config: Option<Value>,
+    /// Budget guardrails (all nullable = unlimited).
+    #[serde(default)]
+    pub max_total_runs: Option<i64>,
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub max_runtime_secs: Option<i64>,
+    /// Per-task attempt ceiling (default 3 when omitted).
+    #[serde(default)]
+    pub max_attempts: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdateSwarmReq {
     #[serde(default)]
     pub name: Option<String>,
@@ -29,6 +49,16 @@ pub struct UpdateSwarmReq {
     pub status: Option<String>,
     #[serde(default)]
     pub config: Option<Value>,
+    // Budget guardrails. `null` in the body clears the limit; an absent key
+    // leaves it untouched (double-Option).
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub max_total_runs: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub max_cost_usd: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub max_runtime_secs: Option<Option<i64>>,
+    #[serde(default)]
+    pub max_attempts: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +67,10 @@ pub struct SwarmCounts {
     pub projects: usize,
     pub tasks: usize,
     pub running_runs: i64,
+    /// Total runs ever enqueued (basis for the `max_total_runs` budget).
+    pub total_runs: i64,
+    /// Accumulated backfilled spend in USD (basis for the `max_cost_usd` budget).
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, Serialize)]

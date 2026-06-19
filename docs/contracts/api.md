@@ -155,6 +155,26 @@ Notes:
   parallel-worker limit). A blank create uses sensible defaults; create-from-preset
   (`preset_slug`) instantiates the org and maps each agent's provider to an installed
   CLI, falling back to the workspace default.
+- **Budget guardrails (D3/D8).** `Swarm` carries four top-level limit columns, all
+  nullable = unlimited: `max_total_runs`, `max_cost_usd`, `max_runtime_secs`, and the
+  per-task attempt ceiling `max_attempts` (default 3). `CreateSwarmReq`/`UpdateSwarmReq`
+  accept all four (on update, `null` clears a limit, an absent key leaves it untouched).
+  On every tick the Coordinator checks total runs so far, accumulated `cost_usd`
+  (summed from the per-run backfill below), and wall-clock since `run_started_at`; when
+  any is exceeded it **auto-pauses** the swarm (status `paused`, a human-facing
+  `pause_reason`, idle sessions suspended) instead of spawning more — raise the budget
+  and `resume` to continue. `SwarmDetail.counts` surfaces `total_runs` + `cost_usd`
+  alongside `running_runs`. `run_started_at` is the wall-clock anchor (set when the
+  swarm goes active; cleared on pause/abort, so a resume restarts the clock).
+- **Attempt ceiling.** `SwarmTask.attempts` counts the turns the Coordinator has queued
+  for a task. A task that keeps returning a non-terminal status (`in_progress`/unknown)
+  or whose turn fails is re-queued only until `attempts` reaches the swarm's
+  `max_attempts`; after that it is marked `blocked` (with an `escalation` board post +
+  notice) rather than re-run forever.
+- **Crash recovery.** On daemon start, swarm runs left `queued`/`running`/`waiting` by a
+  previous process are marked `error` (their background task died with the process)
+  before any coordinator is restored — so they don't permanently consume the parallel
+  cap or block an agent. Mirrors the review/skill-eval recovery.
 - Lifecycle: `start`/`resume` (re)start the Coordinator and set status `active`;
   `pause` stops new turns + suspends idle swarm sessions (status `paused`); `abort`
   cancels queued/running runs, kills swarm sessions (status `aborted`).

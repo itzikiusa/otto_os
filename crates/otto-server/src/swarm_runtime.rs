@@ -114,6 +114,15 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
     if swarm.status != "active" {
         return Ok(());
     }
+
+    // Budget guardrails (D3/D8): before doing anything, check whether any
+    // per-swarm budget is exhausted. If so, pause the swarm with a clear reason
+    // instead of scheduling more work — the user must raise the budget + resume.
+    if let Some(reason) = budget_exceeded(ctx, &swarm).await {
+        pause_for_budget(ctx, &swarm, &reason).await;
+        return Ok(());
+    }
+
     let cap = swarm
         .config
         .get("max_parallel_sessions")
@@ -136,6 +145,10 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         if repo.agent_has_active_run(&agent.id).await.unwrap_or(false) {
             continue; // one turn per agent at a time
         }
+        // Count this scheduled turn against the task's attempt ceiling. The
+        // ceiling itself is enforced in `route_result` once the turn returns a
+        // non-terminal status, so the work still happens this tick.
+        let _ = repo.bump_task_attempt(&task.id).await;
         // Claim: move the task to in_progress so it isn't re-selected next tick.
         let _ = repo
             .update_task(&task.id, TaskPatch { status: Some("in_progress".into()), ..Default::default() })
@@ -166,6 +179,75 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         });
     }
     Ok(())
+}
+
+/// Check the per-swarm budgets against current spend/runs/wall-clock. Returns a
+/// human-facing reason string when a budget is exhausted, else `None`. All
+/// limits are nullable = unlimited. Spend/run-count counts every run ever
+/// enqueued for the swarm; the runtime budget is measured from `run_started_at`
+/// (the last time the swarm went active).
+async fn budget_exceeded(ctx: &ServerCtx, swarm: &Swarm) -> Option<String> {
+    if let (None, None, None) = (swarm.max_total_runs, swarm.max_cost_usd, swarm.max_runtime_secs) {
+        return None;
+    }
+    let spend = ctx.swarm_repo.swarm_spend(&swarm.id).await.ok()?;
+    if let Some(max_runs) = swarm.max_total_runs {
+        if spend.total_runs >= max_runs {
+            return Some(format!(
+                "run budget reached ({}/{} runs)",
+                spend.total_runs, max_runs
+            ));
+        }
+    }
+    if let Some(max_cost) = swarm.max_cost_usd {
+        if spend.cost_usd >= max_cost {
+            return Some(format!(
+                "cost budget reached (${:.2}/${:.2})",
+                spend.cost_usd, max_cost
+            ));
+        }
+    }
+    if let Some(max_secs) = swarm.max_runtime_secs {
+        if let Some(started) = swarm.run_started_at {
+            let elapsed = (Utc::now() - started).num_seconds().max(0);
+            if elapsed >= max_secs {
+                return Some(format!(
+                    "runtime budget reached ({}s/{}s)",
+                    elapsed, max_secs
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Pause a swarm because a budget was hit: persist status+reason, flip the
+/// coordinator's paused flag (so it idles without ticking), suspend idle swarm
+/// sessions, post to the board, and notify.
+async fn pause_for_budget(ctx: &ServerCtx, swarm: &Swarm, reason: &str) {
+    let _ = ctx
+        .swarm_repo
+        .pause_swarm_with_reason(&swarm.id, reason)
+        .await;
+    set_paused(ctx, &swarm.id, true);
+    for s in swarm_session_ids(ctx, &swarm.workspace_id, &swarm.id).await {
+        let _ = ctx.manager.suspend(&s).await;
+    }
+    emit_status(ctx, &swarm.workspace_id, &swarm.id, "paused");
+    system_post(
+        ctx,
+        &swarm.id,
+        None,
+        None,
+        "system",
+        &format!("Swarm paused — {reason}. Raise the budget and resume to continue."),
+    )
+    .await;
+    let _ = ctx.events.send(Event::Notice {
+        level: "warn".into(),
+        title: "Swarm paused (budget)".into(),
+        body: format!("“{}”: {reason}", swarm.name),
+    });
 }
 
 /// Pick the agent to run a task: the explicit assignee, else best-fit by title/
@@ -225,13 +307,18 @@ async fn route_result(
 ) {
     let repo = &ctx.swarm_repo;
     let Some(res) = result else {
-        // Turn failed/stopped — block the task so it isn't retried forever.
-        let _ = repo
-            .update_task(&task.id, TaskPatch { status: Some("blocked".into()), ..Default::default() })
-            .await;
-        emit_task(ctx, &task.id).await;
-        system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "status",
-            &format!("Run for “{}” did not complete.", task.title)).await;
+        // Turn failed/stopped. Retry on the next tick up to the attempt ceiling
+        // (D8); once exhausted, block the task so it isn't retried forever.
+        if attempt_ceiling_reached(ctx, task).await {
+            block_for_attempts(ctx, task).await;
+        } else {
+            let _ = repo
+                .update_task(&task.id, TaskPatch { status: Some("todo".into()), ..Default::default() })
+                .await;
+            emit_task(ctx, &task.id).await;
+            system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "status",
+                &format!("Run for “{}” did not complete — will retry.", task.title)).await;
+        }
         return;
     };
 
@@ -322,8 +409,15 @@ async fn route_result(
             let _ = repo.update_task(&task.id, TaskPatch { status: Some("blocked".into()), ..Default::default() }).await;
         }
         _ => {
-            // in_progress / unknown → allow another turn next tick.
-            let _ = repo.update_task(&task.id, TaskPatch { status: Some("todo".into()), ..Default::default() }).await;
+            // in_progress / unknown → allow another turn next tick, UNLESS the
+            // task has hit its attempt ceiling (D8): otherwise a task that never
+            // self-reports a terminal status would re-run forever, burning the
+            // budget. Block it with a reason + notification instead.
+            if attempt_ceiling_reached(ctx, task).await {
+                block_for_attempts(ctx, task).await;
+            } else {
+                let _ = repo.update_task(&task.id, TaskPatch { status: Some("todo".into()), ..Default::default() }).await;
+            }
         }
     }
     emit_task(ctx, &task.id).await;
@@ -331,6 +425,38 @@ async fn route_result(
         system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "status",
             &format!("{} — {}", task.title, clip(&res.summary, 240))).await;
     }
+}
+
+/// Has a task exhausted its swarm's per-task attempt ceiling? Re-reads the task
+/// for the up-to-date attempt counter (the Coordinator bumps it when it queues
+/// each turn) and compares against the swarm's `max_attempts` (default 3, min 1).
+async fn attempt_ceiling_reached(ctx: &ServerCtx, task: &SwarmTask) -> bool {
+    let repo = &ctx.swarm_repo;
+    let attempts = repo.get_task(&task.id).await.map(|t| t.attempts).unwrap_or(task.attempts);
+    let ceiling = repo.get_swarm(&task.swarm_id).await.map(|s| s.max_attempts.max(1)).unwrap_or(3);
+    attempts >= ceiling
+}
+
+/// Mark a task `blocked` because it hit the attempt ceiling, post to the board,
+/// and notify. Used both for hard failures and tasks that never self-report a
+/// terminal status.
+async fn block_for_attempts(ctx: &ServerCtx, task: &SwarmTask) {
+    let repo = &ctx.swarm_repo;
+    let attempts = repo.get_task(&task.id).await.map(|t| t.attempts).unwrap_or(task.attempts);
+    let _ = repo
+        .update_task(&task.id, TaskPatch { status: Some("blocked".into()), ..Default::default() })
+        .await;
+    emit_task(ctx, &task.id).await;
+    let body = format!(
+        "Task “{}” blocked after {attempts} attempt(s) without completing — needs a human.",
+        task.title
+    );
+    system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "escalation", &body).await;
+    let _ = ctx.events.send(Event::Notice {
+        level: "warn".into(),
+        title: "Swarm task blocked (attempts)".into(),
+        body: clip(&body, 160),
+    });
 }
 
 async fn create_subtasks(ctx: &ServerCtx, parent: &SwarmTask, subs: &[swarm_run::TurnSubtask]) {

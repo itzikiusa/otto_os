@@ -463,7 +463,20 @@ async fn run(cfg: Config) -> Result<(), String> {
         otto_server::insights::InsightsScheduler::new(ctx.clone()).start();
     tracing::info!("insights scheduler started");
 
-    // --- Agent Swarm: scheduler + restore coordinators for active swarms ---
+    // --- Agent Swarm: reconcile stale runs, then scheduler + restore coords ---
+    // A swarm run's background task dies with the process. A row left
+    // queued/running/waiting would permanently consume the parallel cap and
+    // block its agent's one-turn-at-a-time gate, so fail them BEFORE restarting
+    // any coordinator (mirrors the review/skill-eval recovery above).
+    match ctx
+        .swarm_repo
+        .fail_running("Interrupted by a daemon restart — the coordinator will re-run the task.")
+        .await
+    {
+        Ok(n) if n > 0 => tracing::info!("swarm recovery: marked {n} orphaned run(s) as error"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("swarm recovery: {e}"),
+    }
     let _swarm_scheduler_handle = otto_server::swarm_scheduler::start(ctx.clone());
     match ctx.swarm_repo.list_all_active_swarms().await {
         Ok(active) => {

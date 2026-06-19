@@ -21,6 +21,17 @@ pub struct Swarm {
     pub preset_slug: Option<String>,
     pub status: String,
     pub config: Value,
+    /// Budget guardrails (D3/D8). All nullable = unlimited. The Coordinator
+    /// pauses the swarm (with `pause_reason`) when any is exceeded.
+    pub max_total_runs: Option<i64>,
+    pub max_cost_usd: Option<f64>,
+    pub max_runtime_secs: Option<i64>,
+    /// Per-task attempt ceiling (default 3).
+    pub max_attempts: i64,
+    /// When the swarm last went active — anchors the wall-clock runtime budget.
+    pub run_started_at: Option<DateTime<Utc>>,
+    /// Why the Coordinator auto-paused (budget/limit reason); else `None`.
+    pub pause_reason: Option<String>,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -83,6 +94,9 @@ pub struct SwarmTask {
     pub labels: Value,
     pub result_ref: Option<String>,
     pub delegated: bool,
+    /// How many turns the Coordinator has (re-)queued for this task. Compared
+    /// against the swarm's `max_attempts` ceiling to stop infinite re-runs.
+    pub attempts: i64,
     pub order_idx: i64,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
@@ -138,6 +152,10 @@ pub struct NewSwarm {
     pub description: String,
     pub preset_slug: Option<String>,
     pub config: Value,
+    pub max_total_runs: Option<i64>,
+    pub max_cost_usd: Option<f64>,
+    pub max_runtime_secs: Option<i64>,
+    pub max_attempts: Option<i64>,
     pub created_by: Id,
 }
 
@@ -147,6 +165,19 @@ pub struct SwarmPatch {
     pub description: Option<String>,
     pub status: Option<String>,
     pub config: Option<Value>,
+    // Budget guardrails. Outer Option = "present in patch"; inner = the value
+    // (NULL clears the limit → unlimited).
+    pub max_total_runs: Option<Option<i64>>,
+    pub max_cost_usd: Option<Option<f64>>,
+    pub max_runtime_secs: Option<Option<i64>>,
+    pub max_attempts: Option<i64>,
+}
+
+/// Accumulated spend/run-count for a swarm (for the budget check + API surface).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct SwarmSpend {
+    pub total_runs: i64,
+    pub cost_usd: f64,
 }
 
 pub struct NewAgent {
@@ -312,6 +343,12 @@ fn row_to_swarm(r: &sqlx::sqlite::SqliteRow) -> Result<Swarm> {
         preset_slug: r.get("preset_slug"),
         status: r.get("status"),
         config: json(&r.get::<String, _>("config_json"))?,
+        max_total_runs: r.get("max_total_runs"),
+        max_cost_usd: r.get("max_cost_usd"),
+        max_runtime_secs: r.get("max_runtime_secs"),
+        max_attempts: r.get("max_attempts"),
+        run_started_at: opt_ts(r.get::<Option<String>, _>("run_started_at"))?,
+        pause_reason: r.get("pause_reason"),
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
@@ -377,6 +414,7 @@ fn row_to_task(r: &sqlx::sqlite::SqliteRow) -> Result<SwarmTask> {
         labels: json(&r.get::<String, _>("labels_json"))?,
         result_ref: r.get("result_ref"),
         delegated: r.get::<i64, _>("delegated") != 0,
+        attempts: r.get("attempts"),
         order_idx: r.get("order_idx"),
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
@@ -472,8 +510,9 @@ impl SwarmRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO swarms (id, workspace_id, name, description, preset_slug, status,
-                                 config_json, created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'paused', ?, ?, ?, ?)",
+                                 config_json, max_total_runs, max_cost_usd, max_runtime_secs,
+                                 max_attempts, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'paused', ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&s.workspace_id)
@@ -481,6 +520,10 @@ impl SwarmRepo {
         .bind(&s.description)
         .bind(&s.preset_slug)
         .bind(s.config.to_string())
+        .bind(s.max_total_runs)
+        .bind(s.max_cost_usd)
+        .bind(s.max_runtime_secs)
+        .bind(s.max_attempts.unwrap_or(3))
         .bind(&s.created_by)
         .bind(&now)
         .bind(&now)
@@ -496,15 +539,24 @@ impl SwarmRepo {
         let description = p.description.unwrap_or(cur.description);
         let status = p.status.unwrap_or(cur.status);
         let config = p.config.unwrap_or(cur.config).to_string();
+        let max_total_runs = p.max_total_runs.unwrap_or(cur.max_total_runs);
+        let max_cost_usd = p.max_cost_usd.unwrap_or(cur.max_cost_usd);
+        let max_runtime_secs = p.max_runtime_secs.unwrap_or(cur.max_runtime_secs);
+        let max_attempts = p.max_attempts.unwrap_or(cur.max_attempts);
         let now = fmt(Utc::now());
         sqlx::query(
-            "UPDATE swarms SET name = ?, description = ?, status = ?, config_json = ?, updated_at = ?
-             WHERE id = ?",
+            "UPDATE swarms SET name = ?, description = ?, status = ?, config_json = ?,
+                max_total_runs = ?, max_cost_usd = ?, max_runtime_secs = ?, max_attempts = ?,
+                updated_at = ? WHERE id = ?",
         )
         .bind(&name)
         .bind(&description)
         .bind(&status)
         .bind(&config)
+        .bind(max_total_runs)
+        .bind(max_cost_usd)
+        .bind(max_runtime_secs)
+        .bind(max_attempts)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -513,16 +565,72 @@ impl SwarmRepo {
         self.get_swarm(id).await
     }
 
+    /// Set a swarm's lifecycle status. Manages the budget bookkeeping too:
+    /// going `active` anchors the wall-clock runtime budget (`run_started_at`)
+    /// if it isn't already set and clears any prior `pause_reason`; leaving
+    /// `active` (pause/abort) clears the anchor so a later resume restarts the
+    /// clock.
     pub async fn set_swarm_status(&self, id: &Id, status: &str) -> Result<()> {
         let now = fmt(Utc::now());
-        sqlx::query("UPDATE swarms SET status = ?, updated_at = ? WHERE id = ?")
+        if status == "active" {
+            sqlx::query(
+                "UPDATE swarms SET status = 'active', pause_reason = NULL,
+                    run_started_at = COALESCE(run_started_at, ?), updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set swarm status"))?;
+        } else {
+            sqlx::query(
+                "UPDATE swarms SET status = ?, run_started_at = NULL, updated_at = ? WHERE id = ?",
+            )
             .bind(status)
             .bind(&now)
             .bind(id)
             .execute(&self.pool)
             .await
             .map_err(dberr("set swarm status"))?;
+        }
         Ok(())
+    }
+
+    /// Auto-pause a swarm because a budget/limit was hit. Records a human-facing
+    /// `pause_reason` and clears the wall-clock anchor (a manual resume restarts
+    /// the clock — the user is expected to raise the budget first).
+    pub async fn pause_swarm_with_reason(&self, id: &Id, reason: &str) -> Result<()> {
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE swarms SET status = 'paused', pause_reason = ?, run_started_at = NULL,
+                updated_at = ? WHERE id = ?",
+        )
+        .bind(reason)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("pause swarm with reason"))?;
+        Ok(())
+    }
+
+    /// Accumulated spend + total run count for a swarm — the basis for the
+    /// `max_total_runs` / `max_cost_usd` budget checks and the API surface.
+    /// `cost_usd` sums the per-run backfilled cost (NULLs count as 0).
+    pub async fn swarm_spend(&self, swarm_id: &Id) -> Result<SwarmSpend> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(cost_usd), 0.0) AS spend
+             FROM swarm_runs WHERE swarm_id = ?",
+        )
+        .bind(swarm_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("swarm spend"))?;
+        Ok(SwarmSpend {
+            total_runs: row.get::<i64, _>("n"),
+            cost_usd: row.get::<f64, _>("spend"),
+        })
     }
 
     pub async fn delete_swarm(&self, id: &Id) -> Result<()> {
@@ -869,6 +977,25 @@ impl SwarmRepo {
         Ok(())
     }
 
+    /// Increment a task's attempt counter and return the new value. Called when
+    /// the Coordinator (re-)queues a turn so `route_result` can enforce the
+    /// per-task `max_attempts` ceiling.
+    pub async fn bump_task_attempt(&self, id: &Id) -> Result<i64> {
+        let now = fmt(Utc::now());
+        sqlx::query("UPDATE swarm_tasks SET attempts = attempts + 1, updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("bump task attempt"))?;
+        let row = sqlx::query("SELECT attempts FROM swarm_tasks WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("get task attempts"))?;
+        Ok(row.get::<i64, _>("attempts"))
+    }
+
     /// Tasks ready to run: status='todo' with all dependencies done.
     pub async fn ready_tasks(&self, swarm_id: &Id) -> Result<Vec<SwarmTask>> {
         let all = self.list_tasks_for_swarm(swarm_id).await?;
@@ -1073,6 +1200,25 @@ impl SwarmRepo {
         rows.iter().map(row_to_run).collect()
     }
 
+    /// Fail every swarm run left in a non-terminal state (daemon-startup
+    /// recovery): a run's background task dies with the process, so an orphaned
+    /// `queued`/`running`/`waiting` row would otherwise permanently consume the
+    /// parallel cap (and block its agent's "one turn at a time" gate). Mirrors
+    /// the review/skill-eval recovery. Returns the number of rows updated.
+    pub async fn fail_running(&self, error: &str) -> Result<u64> {
+        let now = fmt(Utc::now());
+        let res = sqlx::query(
+            "UPDATE swarm_runs SET status = 'error', error = ?, finished_at = ?
+             WHERE status IN ('queued','running','waiting')",
+        )
+        .bind(error)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("fail running swarm runs"))?;
+        Ok(res.rows_affected())
+    }
+
     /// Mark all non-terminal runs of a swarm as stopped (abort).
     pub async fn stop_active_runs(&self, swarm_id: &Id) -> Result<Vec<Id>> {
         let rows = sqlx::query(
@@ -1238,6 +1384,162 @@ mod tests {
         assert_eq!(ready.len(), 1, "only the todo task should be schedulable");
         assert_eq!(ready[0].id, todo.id);
         assert_eq!(ready[0].status, "todo");
+    }
+
+    fn new_swarm(ws: &Id) -> NewSwarm {
+        NewSwarm {
+            workspace_id: ws.clone(),
+            name: "team".into(),
+            description: String::new(),
+            preset_slug: None,
+            config: json!({}),
+            max_total_runs: None,
+            max_cost_usd: None,
+            max_runtime_secs: None,
+            max_attempts: None,
+            created_by: new_id(),
+        }
+    }
+
+    fn new_run(swarm: &Id) -> NewRun {
+        NewRun {
+            swarm_id: swarm.clone(),
+            workspace_id: new_id(),
+            project_id: None,
+            task_id: None,
+            agent_id: new_id(),
+            kind: "task".into(),
+            trigger: "coordinator".into(),
+        }
+    }
+
+    /// D3: a fresh swarm defaults to `max_attempts = 3` and unlimited budgets,
+    /// and the budget columns round-trip through create/update.
+    #[tokio::test]
+    async fn swarm_budget_columns_roundtrip() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let ws = new_id();
+
+        let s = repo.create_swarm(new_swarm(&ws)).await.unwrap();
+        assert_eq!(s.max_attempts, 3, "default attempt ceiling");
+        assert!(s.max_total_runs.is_none() && s.max_cost_usd.is_none() && s.max_runtime_secs.is_none());
+        assert!(s.run_started_at.is_none() && s.pause_reason.is_none());
+
+        // Set limits via the patch (Some(Some(..)) = set the value).
+        let s = repo
+            .update_swarm(
+                &s.id,
+                SwarmPatch {
+                    max_total_runs: Some(Some(5)),
+                    max_cost_usd: Some(Some(2.5)),
+                    max_runtime_secs: Some(Some(600)),
+                    max_attempts: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(s.max_total_runs, Some(5));
+        assert_eq!(s.max_cost_usd, Some(2.5));
+        assert_eq!(s.max_runtime_secs, Some(600));
+        assert_eq!(s.max_attempts, 2);
+
+        // Clear a limit via Some(None) = NULL = unlimited.
+        let s = repo
+            .update_swarm(
+                &s.id,
+                SwarmPatch { max_cost_usd: Some(None), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(s.max_cost_usd.is_none(), "null clears the cost budget");
+        assert_eq!(s.max_total_runs, Some(5), "other limits untouched");
+    }
+
+    /// D3: `swarm_spend` sums per-run cost (NULLs as 0) and counts every run —
+    /// the basis for the `max_total_runs` / `max_cost_usd` budget checks.
+    #[tokio::test]
+    async fn swarm_spend_sums_cost_and_counts_runs() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+
+        let spend = repo.swarm_spend(&swarm).await.unwrap();
+        assert_eq!(spend.total_runs, 0);
+        assert_eq!(spend.cost_usd, 0.0);
+
+        let r1 = repo.create_run(new_run(&swarm)).await.unwrap();
+        let r2 = repo.create_run(new_run(&swarm)).await.unwrap();
+        let _r3 = repo.create_run(new_run(&swarm)).await.unwrap(); // cost stays NULL
+        repo.update_run(&r1.id, RunPatch { cost_usd: Some(Some(1.25)), ..Default::default() }).await.unwrap();
+        repo.update_run(&r2.id, RunPatch { cost_usd: Some(Some(0.75)), ..Default::default() }).await.unwrap();
+
+        let spend = repo.swarm_spend(&swarm).await.unwrap();
+        assert_eq!(spend.total_runs, 3, "every run counts, even with null cost");
+        assert!((spend.cost_usd - 2.0).abs() < 1e-9, "1.25 + 0.75 + (null=0)");
+    }
+
+    /// D8: the per-task attempt counter starts at 0 and increments, returning the
+    /// new value (the Coordinator compares it against `max_attempts`).
+    #[tokio::test]
+    async fn bump_task_attempt_increments() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+
+        let task = repo.create_task(new_task(&swarm, "todo")).await.unwrap();
+        assert_eq!(task.attempts, 0);
+        assert_eq!(repo.bump_task_attempt(&task.id).await.unwrap(), 1);
+        assert_eq!(repo.bump_task_attempt(&task.id).await.unwrap(), 2);
+        assert_eq!(repo.get_task(&task.id).await.unwrap().attempts, 2);
+    }
+
+    /// Lifecycle bookkeeping: going active anchors `run_started_at` + clears the
+    /// pause reason; an auto-pause records the reason and drops the anchor.
+    #[tokio::test]
+    async fn status_manages_runtime_anchor_and_pause_reason() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let ws = new_id();
+        let s = repo.create_swarm(new_swarm(&ws)).await.unwrap();
+
+        repo.set_swarm_status(&s.id, "active").await.unwrap();
+        let s = repo.get_swarm(&s.id).await.unwrap();
+        assert_eq!(s.status, "active");
+        assert!(s.run_started_at.is_some(), "active anchors the wall clock");
+        assert!(s.pause_reason.is_none());
+
+        repo.pause_swarm_with_reason(&s.id, "cost budget reached").await.unwrap();
+        let s = repo.get_swarm(&s.id).await.unwrap();
+        assert_eq!(s.status, "paused");
+        assert_eq!(s.pause_reason.as_deref(), Some("cost budget reached"));
+        assert!(s.run_started_at.is_none(), "pause drops the anchor");
+
+        // Resuming clears the reason and re-anchors.
+        repo.set_swarm_status(&s.id, "active").await.unwrap();
+        let s = repo.get_swarm(&s.id).await.unwrap();
+        assert!(s.pause_reason.is_none() && s.run_started_at.is_some());
+    }
+
+    /// Crash recovery: non-terminal runs are failed; terminal ones are untouched.
+    #[tokio::test]
+    async fn fail_running_only_hits_non_terminal_runs() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+
+        let queued = repo.create_run(new_run(&swarm)).await.unwrap(); // status 'queued'
+        let running = repo.create_run(new_run(&swarm)).await.unwrap();
+        repo.update_run(&running.id, RunPatch { status: Some("running".into()), ..Default::default() }).await.unwrap();
+        let done = repo.create_run(new_run(&swarm)).await.unwrap();
+        repo.update_run(&done.id, RunPatch { status: Some("done".into()), ..Default::default() }).await.unwrap();
+
+        let n = repo.fail_running("interrupted").await.unwrap();
+        assert_eq!(n, 2, "queued + running failed; done untouched");
+        assert_eq!(repo.get_run(&queued.id).await.unwrap().status, "error");
+        assert_eq!(repo.get_run(&running.id).await.unwrap().status, "error");
+        assert_eq!(repo.get_run(&done.id).await.unwrap().status, "done");
     }
 
     /// A "todo" task whose dependency isn't done yet is NOT ready; once the

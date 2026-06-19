@@ -54,6 +54,10 @@ impl SwarmService {
                 description: req.description.unwrap_or_default(),
                 preset_slug: req.preset_slug,
                 config,
+                max_total_runs: req.max_total_runs,
+                max_cost_usd: req.max_cost_usd,
+                max_runtime_secs: req.max_runtime_secs,
+                max_attempts: req.max_attempts,
                 created_by: user.clone(),
             })
             .await
@@ -68,6 +72,10 @@ impl SwarmService {
                     description: req.description,
                     status: req.status,
                     config: req.config,
+                    max_total_runs: req.max_total_runs,
+                    max_cost_usd: req.max_cost_usd,
+                    max_runtime_secs: req.max_runtime_secs,
+                    max_attempts: req.max_attempts,
                 },
             )
             .await
@@ -83,11 +91,14 @@ impl SwarmService {
         let projects = self.repo.list_projects(id).await?;
         let tasks = self.repo.list_tasks_for_swarm(id).await?;
         let running_runs = self.repo.running_count(id).await?;
+        let spend = self.repo.swarm_spend(id).await?;
         let counts = SwarmCounts {
             agents: agents.len(),
             projects: projects.len(),
             tasks: tasks.len(),
             running_runs,
+            total_runs: spend.total_runs,
+            cost_usd: spend.cost_usd,
         };
         Ok(SwarmDetail {
             swarm,
