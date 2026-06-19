@@ -2069,3 +2069,126 @@ export interface RunInsightsReq {
 export interface RunInsightsResp {
   started: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Memory layer (TS mirror of crates/otto-memory + otto_state::memory)
+// ---------------------------------------------------------------------------
+
+export type MemoryScope = 'workspace' | 'story' | 'entity';
+export type MemorySearchMode = 'hybrid' | 'semantic' | 'keyword';
+
+export interface MemoryRef {
+  kind: string;
+  ref: string;
+  url: string | null;
+  label: string | null;
+}
+
+export interface Memory {
+  id: string;
+  workspace_id: string;
+  collection: string;
+  record_type: string;
+  scope: MemoryScope;
+  story_id: string | null;
+  kind: string;
+  title: string;
+  body: string;
+  entities: string[];
+  tags: string[];
+  source_kind: string;
+  source_ref: string | null;
+  refs: MemoryRef[];
+  confidence: number;
+  salience: number;
+  content_hash: string;
+  active: boolean;
+  superseded_by: string | null;
+  version: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  last_accessed_at: string | null;
+  access_count: number;
+  expires_at: string | null;
+}
+
+export interface NewMemory {
+  collection?: string;
+  record_type?: string;
+  scope: MemoryScope;
+  story_id?: string | null;
+  kind: string;
+  title: string;
+  body: string;
+  entities?: string[];
+  tags?: string[];
+  source_kind: string;
+  source_ref?: string | null;
+  refs?: MemoryRef[];
+  confidence?: number | null;
+  salience?: number | null;
+}
+
+export interface MemoryPatch {
+  title?: string | null;
+  body?: string | null;
+  tags?: string[] | null;
+  entities?: string[] | null;
+  confidence?: number | null;
+  salience?: number | null;
+  active?: boolean | null;
+}
+
+export interface MemoryQuery {
+  text?: string;
+  collection?: string;
+  scope?: MemoryScope;
+  story_id?: string;
+  kinds?: string[];
+  tags?: string[];
+  entities?: string[];
+  k?: number;
+  mode?: MemorySearchMode;
+  include_inactive?: boolean;
+  recency_half_life_days?: number;
+}
+
+export interface MemoryHit {
+  memory: Memory;
+  score: number;
+  why: string[];
+}
+
+export interface BriefSection {
+  heading: string;
+  body_md: string;
+  refs: MemoryRef[];
+}
+
+export interface RecallBrief {
+  story_id: string;
+  sections: BriefSection[];
+  token_estimate: number;
+  used: string[];
+}
+
+export interface MemoryLink {
+  src_id: string;
+  dst_id: string;
+  rel: string;
+  weight: number;
+  certainty: string | null;
+}
+
+export interface MemoryGraphNode {
+  id: string;
+  label: string;
+  kind: string;
+  collection: string;
+}
+
+export interface MemoryGraphData {
+  nodes: MemoryGraphNode[];
+  edges: MemoryLink[];
+}
