@@ -282,7 +282,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // remote-repos (GET) = View; account update/delete = Edit.
         return Require(Git, if get { View } else { Edit });
     }
-    if p == "/workspaces/{id}/repos" {
+    if p == "/workspaces/{id}/repos" || p == "/workspaces/{id}/repos/detect" {
+        // list workspace repos (GET=View); add/detect repo (POST=Edit).
         return Require(Git, if get { View } else { Edit });
     }
     if p.starts_with("/repos/") {
