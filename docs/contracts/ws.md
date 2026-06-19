@@ -9,10 +9,18 @@ completes; invalid token → HTTP 401, no upgrade.
   success. This keeps the token out of the URL/query string (which is logged by
   proxies and servers). A `?token=<bearer token>` query parameter is still
   accepted as a backward-compatible fallback.
-- The terminal stream (`/ws/term/{session_id}`) authenticates via the
-  `?token=<bearer token>` query parameter.
+- The terminal stream (`/ws/term/{session_id}`) accepts the token the same way:
+  prefer `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes back
+  `otto-bearer` on success, keeping the share token out of the URL). A
+  `?token=<bearer token>` query parameter is still accepted as a
+  backward-compatible fallback for existing clients.
 
 ## 1. Terminal stream — `WS /ws/term/{session_id}`
+
+Auth: prefer `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes
+`otto-bearer` subprotocol on success, keeping the bearer token out of the URL).
+`?token=<bearer token>` query parameter is accepted as a backward-compatible
+fallback. An IP that fails token validation too many times is locked out (429).
 
 Role: workspace **viewer** may attach (read-only); **editor**+ may send input/resize.
 Input frames from viewers are silently dropped server-side (and a single JSON

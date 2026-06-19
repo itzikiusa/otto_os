@@ -8,6 +8,7 @@ pub mod manager;
 pub mod mcp;
 pub mod prompt_guard;
 pub mod providers;
+pub mod share_throttle;
 pub mod trust;
 pub mod ws;
 
