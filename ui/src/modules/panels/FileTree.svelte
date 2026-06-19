@@ -2,6 +2,7 @@
   // FileTree: lazy browsable file tree + read-only syntax-highlighted viewer
   // for the right-panel Files tab.
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { openFile as openFileSignal } from '../../lib/stores/openfile.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -17,8 +18,11 @@
     root?: string;
     /** When provided, a ✕ button is shown in the header to close this section. */
     onClose?: () => void;
+    /** When true, this section responds to programmatic open-file requests
+     *  (terminal `file:line` clicks). Only one section should be primary. */
+    primary?: boolean;
   }
-  let { root = undefined, onClose = undefined }: Props = $props();
+  let { root = undefined, onClose = undefined, primary = false }: Props = $props();
 
   // ── tree state ────────────────────────────────────────────────────────────
 
@@ -49,6 +53,9 @@
   let viewerFile: FsRead | null = $state(null);
   let viewerName = $state('');
   let viewerLoading = $state(false);
+  // Line/col to reveal when the viewer opens from a terminal `file:line` click.
+  let viewerGotoLine: number | null = $state(null);
+  let viewerGotoCol: number | null = $state(null);
 
   // ── folder picker state ───────────────────────────────────────────────────
 
@@ -65,6 +72,18 @@
       viewerName = '';
       loadRoot(r);
     }
+  });
+
+  // Programmatic open: react to terminal `file:line` clicks. Only the primary
+  // section handles them so a single, predictable viewer responds. The `n`
+  // counter on the request makes each click fire exactly once.
+  let lastOpenN = 0;
+  $effect(() => {
+    if (!primary) return;
+    const req = openFileSignal.request;
+    if (!req || req.n <= lastOpenN) return;
+    lastOpenN = req.n;
+    void openPath(req.path, req.line, req.col);
   });
 
   // ── helpers ───────────────────────────────────────────────────────────────
@@ -115,6 +134,9 @@
   }
 
   async function openFile(entry: FsEntry): Promise<void> {
+    // A manual tree click clears any pending line jump.
+    viewerGotoLine = null;
+    viewerGotoCol = null;
     viewerLoading = true;
     viewerName = entry.name;
     viewerFile = null;
@@ -131,9 +153,34 @@
     }
   }
 
+  // Open a file by absolute path and reveal an optional line/col. Used by the
+  // terminal `file:line` link provider (routed through the open-file store).
+  async function openPath(path: string, line?: number, col?: number): Promise<void> {
+    viewerGotoLine = line ?? null;
+    viewerGotoCol = col ?? null;
+    viewerLoading = true;
+    viewerName = path.split('/').filter(Boolean).pop() ?? path;
+    viewerFile = null;
+    // Force the source view (not the markdown/HTML preview) so the line jump
+    // lands in the CodeEditor where it's meaningful.
+    previewMode = false;
+    try {
+      const data = await api.get<FsRead>(`/fs/read?path=${encodeURIComponent(path)}`);
+      viewerFile = data;
+    } catch (e) {
+      toasts.error('Cannot open file', e instanceof Error ? e.message : String(e));
+      viewerLoading = false;
+      return;
+    } finally {
+      viewerLoading = false;
+    }
+  }
+
   function closeViewer(): void {
     viewerFile = null;
     viewerName = '';
+    viewerGotoLine = null;
+    viewerGotoCol = null;
   }
 
   // ── Markdown / HTML preview ────────────────────────────────────────────────
@@ -304,6 +351,8 @@
                   path={viewerFile.path}
                   content={viewerFile.content}
                   root={effectiveRoot}
+                  gotoLine={viewerGotoLine}
+                  gotoCol={viewerGotoCol}
                   readOnly
                 />
               </div>

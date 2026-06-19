@@ -61,6 +61,7 @@
       <div class="fp-section">
         <FileTree
           root={section.root}
+          primary={i === 0}
           onClose={sections.length > 1 ? () => removeSection(section.id) : undefined}
         />
       </div>

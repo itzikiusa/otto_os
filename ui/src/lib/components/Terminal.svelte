@@ -3,6 +3,9 @@
   // Binary frames → term.write; JSON control frames for status/exit/scrollback.
   import { untrack } from 'svelte';
   import { Terminal } from '@xterm/xterm';
+  // ILinkProvider isn't exported from the ambient module, so derive its shape
+  // from registerLinkProvider's parameter (kept in lockstep with the version).
+  type LinkProvider = Parameters<Terminal['registerLinkProvider']>[0];
   import { FitAddon } from '@xterm/addon-fit';
   import { SearchAddon } from '@xterm/addon-search';
   import { WebglAddon } from '@xterm/addon-webgl';
@@ -13,6 +16,8 @@
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
   import { ws } from '../stores/workspace.svelte';
+  import { openFile } from '../stores/openfile.svelte';
+  import { openExternal } from '../external';
   import { keyContext } from '../keys';
 
   interface Props {
@@ -189,6 +194,119 @@
     else search.findNext(findQuery, { decorations: searchDecorations });
   }
 
+  // ── Clickable links (URLs + `file:line(:col)`) ─────────────────────────────
+  // Implemented with xterm's built-in registerLinkProvider (no web-links addon
+  // dependency). For each buffer line we scan the text and surface ranges for:
+  //   • http(s) URLs            → open in the system browser (openExternal)
+  //   • path:line(:col) refs    → open the file in the Files panel at the line
+  // Detection is conservative to avoid turning ordinary prose into dead links.
+
+  interface LinkHit {
+    /** 0-based [start, end) character offsets within the line string. */
+    start: number;
+    end: number;
+    kind: 'url' | 'file';
+    text: string;
+    /** file refs only */
+    path?: string;
+    line?: number;
+    col?: number;
+  }
+
+  // URLs: stop at whitespace and characters that are almost never *inside* a URL
+  // but commonly trail one in prose. Trailing punctuation is trimmed afterwards.
+  const URL_RE = /\bhttps?:\/\/[^\s<>"'`(){}\[\]]+/gi;
+  // file:line(:col) — require a file extension (1–8 alnum chars) right before the
+  // `:line` so we don't match clock times (12:34) or `host:port`. The path part
+  // allows dirs, `.`, `~`, `@`, `+`, `-`, `_`.
+  const FILE_RE = /(?<![\w./@~+-])((?:[\w.@~+-]+\/)*[\w.@~+-]+\.[A-Za-z0-9]{1,8}):(\d+)(?::(\d+))?\b/g;
+
+  /** Trim trailing punctuation that's likely sentence/markup, not part of the URL. */
+  function trimUrl(raw: string): string {
+    let s = raw;
+    // Drop a trailing unbalanced closing paren/bracket and common terminators.
+    while (s.length > 1 && /[.,;:!?'"]$/.test(s)) s = s.slice(0, -1);
+    if (s.endsWith(')') && !s.includes('(')) s = s.slice(0, -1);
+    if (s.endsWith(']') && !s.includes('[')) s = s.slice(0, -1);
+    return s;
+  }
+
+  /** Scan one rendered buffer-line string for URL + file:line hits. */
+  function scanLine(text: string): LinkHit[] {
+    const hits: LinkHit[] = [];
+
+    URL_RE.lastIndex = 0;
+    for (let m = URL_RE.exec(text); m; m = URL_RE.exec(text)) {
+      const trimmed = trimUrl(m[0]);
+      if (trimmed.length < 'http://a'.length) continue;
+      hits.push({ start: m.index, end: m.index + trimmed.length, kind: 'url', text: trimmed });
+    }
+
+    FILE_RE.lastIndex = 0;
+    for (let m = FILE_RE.exec(text); m; m = FILE_RE.exec(text)) {
+      const start = m.index;
+      const end = m.index + m[0].length;
+      // Skip file refs that sit inside a URL we already matched (e.g. a port).
+      if (hits.some((h) => h.kind === 'url' && start < h.end && end > h.start)) continue;
+      const line = Number(m[2]);
+      const col = m[3] ? Number(m[3]) : undefined;
+      if (!Number.isFinite(line) || line < 1) continue;
+      hits.push({ start, end, kind: 'file', text: m[0], path: m[1], line, col });
+    }
+    return hits;
+  }
+
+  /** Resolve a (possibly relative) file path against the session cwd. */
+  function resolvePath(p: string): string {
+    if (p.startsWith('/') || p.startsWith('~')) return p;
+    const cwd = ws.sessions.find((s) => s.id === sessionId)?.cwd;
+    if (!cwd) return p;
+    return `${cwd.replace(/\/$/, '')}/${p}`;
+  }
+
+  /** Build the xterm link provider that surfaces every URL + file:line hit on a line. */
+  function makeLinkProvider(): LinkProvider {
+    return {
+      provideLinks(bufferLineNumber, callback) {
+        const buf = term?.buffer.active;
+        const line = buf?.getLine(bufferLineNumber - 1);
+        if (!line) {
+          callback(undefined);
+          return;
+        }
+        const text = line.translateToString(true);
+        const cols = term?.cols ?? text.length;
+        const hits = scanLine(text);
+        if (hits.length === 0) {
+          callback(undefined);
+          return;
+        }
+        const links = hits.map((h) => {
+          // xterm buffer coords are 1-based; clamp the end to the row width.
+          const startX = h.start + 1;
+          const endX = Math.min(h.end, cols) + 1;
+          return {
+            text: h.text,
+            range: {
+              start: { x: startX, y: bufferLineNumber },
+              end: { x: endX, y: bufferLineNumber },
+            },
+            decorations: { pointerCursor: true, underline: true },
+            activate: (event: MouseEvent) => {
+              event.preventDefault();
+              if (h.kind === 'url') {
+                void openExternal(h.text);
+              } else if (h.path) {
+                openFile.open(resolvePath(h.path), h.line, h.col);
+              }
+            },
+          };
+        });
+        callback(links);
+      },
+    };
+  }
+
   $effect(() => {
     // Tracked read: toggling the experimental RTL mode re-runs this effect so the
     // terminal is rebuilt with the correct renderer (WebGL vs DOM — see below).
@@ -224,6 +342,10 @@
         // WebGL unavailable — xterm falls back to its default renderer
       }
     }
+
+    // Clickable links — works identically with WebGL on or off (the link layer
+    // is a DOM overlay above the renderer). Disposed on teardown below.
+    const linkProvider = term.registerLinkProvider(makeLinkProvider());
     // NOTE: do NOT fit() here. The container has no real size yet on first open
     // (grid/flex layout isn't resolved this tick). The ResizeObserver below
     // fires once the pane gets its real box and performs the first valid fit,
@@ -310,6 +432,7 @@
 
     return () => {
       ro.disconnect();
+      linkProvider.dispose();
       if (refitTimer) clearTimeout(refitTimer);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);

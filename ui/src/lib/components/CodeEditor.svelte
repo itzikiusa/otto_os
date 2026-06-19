@@ -79,6 +79,13 @@
     minimal?: boolean;
     /** Run handler bound to Cmd/Ctrl+Enter (e.g. execute the query). */
     onsubmit?: () => void;
+    /**
+     * Optional 1-based line to scroll to and select on mount (and whenever this
+     * value changes for the same doc) — used to jump to a `file:line` reference
+     * clicked in the terminal. `gotoCol` (1-based) refines the cursor column.
+     */
+    gotoLine?: number | null;
+    gotoCol?: number | null;
   }
 
   let {
@@ -91,6 +98,8 @@
     completionSource = null,
     minimal = false,
     onsubmit,
+    gotoLine = null,
+    gotoCol = null,
   }: Props = $props();
 
   // ── Container ─────────────────────────────────────────────────────────────
@@ -358,6 +367,36 @@
     // A caller-supplied completion source replaces LSP for this doc; only attach
     // the language server when no custom source is wired.
     if (!completionSource) void attachLsp(view, filePath, rootPath);
+
+    // Jump to the requested line on first paint (e.g. a `file:line` ref clicked
+    // in the terminal). Done after layout settles so scrollIntoView measures the
+    // real geometry.
+    if (gotoLine != null) revealLine(gotoLine, gotoCol);
+  }
+
+  /** Scroll to + select the given 1-based line (clamped to the doc), centering
+   *  it in the viewport. `col` (1-based) refines the cursor within the line. */
+  function revealLine(line: number, col?: number | null): void {
+    if (!view) return;
+    const doc = view.state.doc;
+    const lineNo = Math.max(1, Math.min(line, doc.lines));
+    const lineInfo = doc.line(lineNo);
+    const pos =
+      col != null && col > 0
+        ? Math.min(lineInfo.from + (col - 1), lineInfo.to)
+        : lineInfo.from;
+    requestAnimationFrame(() => {
+      if (!view) return;
+      try {
+        view.dispatch({
+          selection: { anchor: pos, head: pos },
+          effects: EditorView.scrollIntoView(pos, { y: 'center' }),
+        });
+        view.focus();
+      } catch {
+        /* doc replaced mid-flight — harmless */
+      }
+    });
   }
 
   // ── Reactive effects ───────────────────────────────────────────────────────
@@ -412,6 +451,20 @@
   $effect(() => {
     const scheme = ui.resolvedScheme;
     if (view) view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme)) });
+  });
+
+  // Re-reveal when the target line/col changes for an already-mounted doc (e.g.
+  // clicking a second `file:line` ref into the same open file — no rebuild). The
+  // initial reveal happens inside buildEditor on mount.
+  let prevGoto: string | null = null;
+  $effect(() => {
+    const line = gotoLine;
+    const col = gotoCol;
+    if (!view || line == null) return;
+    const key = `${line}:${col ?? ''}`;
+    if (key === prevGoto) return;
+    prevGoto = key;
+    revealLine(line, col);
   });
 
   onDestroy(() => {
