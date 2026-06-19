@@ -180,6 +180,12 @@ async fn resolve_swarm(
             description: "Auto-created for Product → Swarm".into(),
             preset_slug: None,
             config: json!({}),
+            // Budget guardrails left unset (unlimited) on an auto-created default
+            // swarm; the user can set limits before starting it.
+            max_total_runs: None,
+            max_cost_usd: None,
+            max_runtime_secs: None,
+            max_attempts: None,
             created_by: user_id.clone(),
         })
         .await
