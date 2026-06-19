@@ -1723,10 +1723,6 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent);
   }
-  .tb-note {
-    font-size: 11px;
-    color: var(--text-dim);
-  }
   .grid-scroll {
     flex: 1;
     min-height: 0;

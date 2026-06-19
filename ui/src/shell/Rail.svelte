@@ -8,6 +8,7 @@
 
   const modules = $derived([
     { id: 'agents', icon: 'terminal', label: 'Agents' },
+    { id: 'swarm', icon: 'grid', label: 'Swarm' },
     { id: 'connections', icon: 'plug', label: 'Connections' },
     { id: 'git', icon: 'branch', label: 'Git' },
     { id: 'product', icon: 'note', label: 'Product' },

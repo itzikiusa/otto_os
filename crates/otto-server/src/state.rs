@@ -29,6 +29,8 @@ pub struct ServerCtx {
     pub roles: Arc<dyn RoleChecker>,
     /// Daemon version reported by `/meta` (the ottod CARGO_PKG_VERSION).
     pub version: String,
+    /// The daemon data directory (library, swarm worktrees/scratch, …).
+    pub data_dir: std::path::PathBuf,
     // -- module handles (wired by ottod at boot) ---------------------------
     pub manager: Arc<SessionManager>,
     pub workspaces: WorkspacesRepo,
@@ -53,6 +55,13 @@ pub struct ServerCtx {
     /// Per-run cancellation flags for in-flight product analysis agents (manual
     /// Stop). Mirrors `skill_eval_cancels`.
     pub product_agent_cancels: crate::product_run::CancelRegistry,
+    // -- Agent Swarm -------------------------------------------------------
+    pub swarm: Arc<otto_swarm::SwarmService>,
+    pub swarm_repo: otto_state::SwarmRepo,
+    /// Per-swarm Coordinator runtime handles (start/pause/abort/resume).
+    pub swarm_coords: crate::swarm_runtime::CoordinatorRegistry,
+    /// Per-run cancellation flags for in-flight swarm runs (manual Stop / abort).
+    pub swarm_run_cancels: crate::swarm_run::CancelRegistry,
 }
 
 impl ServerCtx {
@@ -148,9 +157,12 @@ impl NotificationService {
     /// Returns the persisted notice. A broadcast with no live subscribers is
     /// not an error.
     pub async fn create(&self, new: NewNotice) -> otto_core::Result<Notice> {
+        // The notice owner drives per-user WS delivery (None = global notice).
+        let user_id = new.user_id.clone();
         let notice = self.repo.create(new).await?;
         let _ = self.events.send(Event::Notification {
             notice: notice.clone(),
+            user_id,
         });
         Ok(notice)
     }

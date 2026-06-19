@@ -226,7 +226,7 @@ async fn lsp_ws(
             return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "missing token");
         }
     };
-    if let Err(_) = st.auth.authenticate(&token).await {
+    if st.auth.authenticate(&token).await.is_err() {
         return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "invalid token");
     }
 

@@ -8,8 +8,14 @@
 
   let { node, depth }: { node: SchemaNode; depth: number } = $props();
 
-  let draft = $state(database.nodeFilter(node.id));
+  // Local edit buffer for the filter input. Seeded from the node's current
+  // filter and re-synced whenever the node (or its stored filter) changes, so a
+  // reused component never shows a stale prefix.
+  let draft = $state('');
   const active = $derived(database.nodeFilter(node.id));
+  $effect(() => {
+    draft = active;
+  });
 
   function apply(): void {
     void database.applyNodeFilter(node, draft);

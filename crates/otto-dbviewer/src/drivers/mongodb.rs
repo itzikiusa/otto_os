@@ -786,9 +786,9 @@ fn clean_statement(slice: &str) -> Option<String> {
     let mut s = slice.trim();
     loop {
         if let Some(rest) = s.strip_prefix("//") {
-            s = rest.splitn(2, '\n').nth(1).unwrap_or("").trim_start();
+            s = rest.split_once('\n').map(|x| x.1).unwrap_or("").trim_start();
         } else if let Some(rest) = s.strip_prefix("/*") {
-            s = rest.splitn(2, "*/").nth(1).unwrap_or("").trim_start();
+            s = rest.split_once("*/").map(|x| x.1).unwrap_or("").trim_start();
         } else {
             break;
         }
@@ -1230,7 +1230,7 @@ fn decode_date(v: &Value) -> Result<Bson> {
                 return Ok(Bson::DateTime(dt));
             }
             // Tolerate a date-only `YYYY-MM-DD` by assuming midnight UTC.
-            if let Ok(dt) = BsonDateTime::parse_rfc3339_str(&format!("{s}T00:00:00Z")) {
+            if let Ok(dt) = BsonDateTime::parse_rfc3339_str(format!("{s}T00:00:00Z")) {
                 return Ok(Bson::DateTime(dt));
             }
             Err(types::invalid(format!("invalid $date string '{s}'")))

@@ -927,6 +927,7 @@ async fn notify_complete(ctx: &ServerCtx, eval_id: &Id, skill: &str, status: Ski
             body,
             source_key: Some(format!("skilleval:{eval_id}")),
             action: None,
+            user_id: None, // global system notice
         })
         .await;
 }
@@ -1046,7 +1047,7 @@ async fn run_skill_eval_core(
         // Create an isolated worktree and install the skill copy into it.
         let dest = std::env::temp_dir()
             .join("otto-skilleval")
-            .join(eval_id.to_string())
+            .join(eval_id)
             .join(format!("iter{iter}"));
         let dest_str = dest.to_string_lossy().to_string();
         if let Err(e) = add_worktree(&repo_path, &base_ref, &dest).await {

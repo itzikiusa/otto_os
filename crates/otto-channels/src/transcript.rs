@@ -149,16 +149,13 @@ fn emoji_label(name: &str) -> (&'static str, String) {
 /// Truncate a string to at most `max_chars` Unicode scalar values, appending
 /// `…` when it is actually truncated.
 fn truncate_chars(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
     let mut out = String::new();
-    let mut count = 0;
-    while let Some(c) = chars.next() {
+    for (count, c) in s.chars().enumerate() {
         if count >= max_chars {
             out.push('…');
             return out;
         }
         out.push(c);
-        count += 1;
     }
     out
 }

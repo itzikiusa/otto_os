@@ -16,11 +16,40 @@ use otto_core::workflows::{
 use otto_core::{Id, Result};
 use otto_state::WorkflowsRepo;
 use serde_json::{json, Value};
+use sqlx::SqlitePool;
 
 use crate::state::ServerCtx;
 
 /// Per-node turn budget for agent/LLM nodes.
 const NODE_AGENT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Global wall-clock budget for a whole run. A run can't execute forever: once
+/// the cumulative time across all nodes exceeds this, the run is failed at the
+/// next node boundary (a node already executing finishes first, bounded by
+/// `NODE_AGENT_TIMEOUT`). 30 min comfortably covers a multi-agent game pipeline
+/// while still guaranteeing termination.
+const RUN_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Fail any workflow run left `pending`/`running` by a previous daemon process.
+///
+/// A run executes in a background task that dies with the process, so a row left
+/// non-terminal is orphaned and would otherwise poll forever in the UI. Called
+/// once on daemon startup (mirrors the review / skill-eval / product / swarm
+/// startup reconciliation). Writes inline SQL against `workflow_runs` so it needs
+/// no repo method. Returns the number of rows updated.
+pub async fn reap_orphaned_runs(pool: &SqlitePool) -> std::result::Result<u64, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE workflow_runs
+         SET status = 'error',
+             error = 'Interrupted by a daemon restart — re-run the workflow.',
+             finished_at = COALESCE(finished_at, ?)
+         WHERE status IN ('pending', 'running')",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
 
 /// The node-kind catalog: drives the editor palette and validates generated
 /// graphs. Keep in sync with `execute_node` below.
@@ -116,10 +145,15 @@ pub async fn run_workflow(
     let preds = predecessors(&workflow.graph);
     let mut failed: std::collections::HashSet<String> = Default::default();
     let mut canceled = false;
+    let mut timed_out = false;
 
     let _ = repo
         .update_run(&run_id, RunStatus::Running, &states, None, false)
         .await;
+
+    // Global wall clock: a run can't execute forever. Checked at each node
+    // boundary; a node already executing finishes first (bounded per-node).
+    let run_started = Instant::now();
 
     for node_id in order {
         // Honor a cancel request (the API flips the run status to Canceled).
@@ -128,6 +162,12 @@ pub async fn run_workflow(
                 canceled = true;
                 break;
             }
+        }
+
+        // Stop once the run has exceeded its global time budget.
+        if run_started.elapsed() >= RUN_WALL_CLOCK_TIMEOUT {
+            timed_out = true;
+            break;
         }
 
         let Some(node) = workflow.graph.nodes.iter().find(|n| n.id == node_id) else {
@@ -198,6 +238,23 @@ pub async fn run_workflow(
         }
         let _ = repo
             .update_run(&run_id, RunStatus::Canceled, &states, Some("canceled"), true)
+            .await;
+        return;
+    }
+
+    if timed_out {
+        // Unreached nodes never ran — mark them skipped, then fail the run.
+        for s in states.iter_mut() {
+            if matches!(s.status, NodeStatus::Pending | NodeStatus::Running) {
+                s.status = NodeStatus::Skipped;
+            }
+        }
+        let msg = format!(
+            "run exceeded the {}-minute time limit",
+            RUN_WALL_CLOCK_TIMEOUT.as_secs() / 60
+        );
+        let _ = repo
+            .update_run(&run_id, RunStatus::Error, &states, Some(&msg), true)
             .await;
         return;
     }

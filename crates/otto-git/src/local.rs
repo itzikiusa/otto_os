@@ -168,6 +168,84 @@ impl LocalGit {
         Ok(out.trim().to_string())
     }
 
+    /// Create (or reset) a linked worktree at `path` on `branch`, based on
+    /// `base` (a branch/sha/HEAD). Used by the Agent Swarm to give each code
+    /// agent an isolated, unique working directory it can edit in parallel.
+    /// `-B` resets the branch to `base`; `--force` tolerates a path git still
+    /// tracks from a stale prior run.
+    ///
+    /// DESTRUCTIVE: because `-B` resets `branch` to `base`, calling this on an
+    /// existing worktree throws away any commits the branch had accumulated.
+    /// For multi-turn swarm work use [`worktree_add_if_absent`] instead, which
+    /// only creates on first use and otherwise reuses the existing tree.
+    pub async fn worktree_add(&self, path: &str, branch: &str, base: &str) -> Result<()> {
+        self.run(&["worktree", "add", "--force", "-B", branch, path, base])
+            .await?;
+        Ok(())
+    }
+
+    /// True when `path` is already registered as a linked worktree of this repo.
+    /// Reads `git worktree list --porcelain` (each tree is a `worktree <abs>`
+    /// line) and compares canonicalized paths so symlink/`..` differences don't
+    /// cause a false negative. Returns `false` (rather than erroring) when the
+    /// listing fails or the path can't be canonicalized.
+    pub async fn worktree_exists(&self, path: &str) -> bool {
+        let (ok, stdout, _, _) = match self
+            .run_raw(&["worktree", "list", "--porcelain"], &[])
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        if !ok {
+            return false;
+        }
+        let want = std::fs::canonicalize(path).ok();
+        stdout
+            .lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .any(|registered| {
+                let registered = registered.trim();
+                if registered == path {
+                    return true;
+                }
+                match (std::fs::canonicalize(registered).ok(), want.as_ref()) {
+                    (Some(r), Some(w)) => &r == w,
+                    _ => false,
+                }
+            })
+    }
+
+    /// Non-destructive worktree provisioning for multi-turn agents.
+    ///
+    /// On FIRST use the worktree doesn't exist yet, so this creates it exactly
+    /// like [`worktree_add`] (`-B` + `--force`), branching `branch` from `base`.
+    /// On every later turn the worktree already exists with the agent's prior
+    /// commits, so this is a no-op and the agent resumes on top of its own work
+    /// — `base` is ignored and the branch is NOT reset. Returns `true` when it
+    /// created the worktree, `false` when it reused an existing one.
+    pub async fn worktree_add_if_absent(
+        &self,
+        path: &str,
+        branch: &str,
+        base: &str,
+    ) -> Result<bool> {
+        if self.worktree_exists(path).await {
+            return Ok(false);
+        }
+        self.worktree_add(path, branch, base).await?;
+        Ok(true)
+    }
+
+    /// Remove a linked worktree at `path` (force-removes dirty/locked trees).
+    /// Best-effort: a missing worktree is not an error.
+    pub async fn worktree_remove(&self, path: &str) -> Result<()> {
+        let _ = self
+            .run(&["worktree", "remove", "--force", path])
+            .await;
+        Ok(())
+    }
+
     pub async fn log(&self, limit: u32, skip: u32, all: bool) -> Result<Vec<CommitInfo>> {
         let limit_s = limit.to_string();
         let skip_s = skip.to_string();
@@ -1118,6 +1196,67 @@ mod tests {
         assert!(!lines.is_empty(), "expected progress output");
         let cloned = LocalGit::new(&dest);
         assert_eq!(cloned.log(10, 0, false).await.unwrap().len(), 2);
+    }
+
+    /// D1 regression: a worktree provisioned with `worktree_add_if_absent` must
+    /// be REUSED on the second call (not reset), so an agent's committed work
+    /// from a prior turn survives. The old unconditional `worktree_add`
+    /// (`-B`/`--force`) would discard it by resetting the branch to base.
+    #[tokio::test]
+    async fn worktree_add_if_absent_reuses_and_preserves_commits() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        let wt = dir.parent().unwrap().join("agent-wt");
+        let wt_str = wt.to_str().unwrap().to_string();
+        let branch = "swarm/s1/a1";
+
+        // First turn: created from absent → true.
+        assert!(!git.worktree_exists(&wt_str).await);
+        let created = git
+            .worktree_add_if_absent(&wt_str, branch, "HEAD")
+            .await
+            .unwrap();
+        assert!(created, "first call should create the worktree");
+        assert!(git.worktree_exists(&wt_str).await);
+
+        // Agent does work IN the worktree and commits it (multi-turn progress).
+        let wt_git = LocalGit::new(&wt);
+        write(&wt, "agent_work.txt", "turn 1 output\n");
+        wt_git.stage(&["agent_work.txt".into()]).await.unwrap();
+        let sha = wt_git.commit("agent turn 1", false).await.unwrap();
+
+        // Second turn: already exists → reuse (false), NO reset. The commit and
+        // the file must still be there.
+        let created2 = git
+            .worktree_add_if_absent(&wt_str, branch, "HEAD")
+            .await
+            .unwrap();
+        assert!(!created2, "second call should reuse, not recreate");
+        assert_eq!(
+            wt_git.current_branch().await.unwrap(),
+            branch,
+            "still on the agent's branch"
+        );
+        let head = wt_git.log(1, 0, false).await.unwrap();
+        assert_eq!(head[0].sha, sha, "prior commit preserved");
+        assert_eq!(head[0].subject, "agent turn 1");
+        assert!(wt.join("agent_work.txt").exists(), "committed file preserved");
+    }
+
+    /// `worktree_exists` is path-aware: false for an unrelated path, true once
+    /// registered (even via a non-canonical path with a trailing component).
+    #[tokio::test]
+    async fn worktree_exists_tracks_registration() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        let wt = dir.parent().unwrap().join("wt2");
+        let wt_str = wt.to_str().unwrap().to_string();
+
+        assert!(!git.worktree_exists(&wt_str).await);
+        git.worktree_add(&wt_str, "swarm/s/b", "HEAD").await.unwrap();
+        assert!(git.worktree_exists(&wt_str).await);
+        // An unrelated path is not a worktree.
+        assert!(!git.worktree_exists("/tmp/definitely-not-a-worktree-xyz").await);
     }
 
     #[test]

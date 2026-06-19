@@ -1082,6 +1082,7 @@ pub async fn run_analysis(
             }
         }
     }
+    #[allow(clippy::drop_non_drop)]
     drop(create_question);
     for nq in to_create {
         if let Err(e) = ctx.product_repo.create_question(nq).await {
@@ -2450,7 +2451,7 @@ pub fn build_improve_narrative_from_tests(
     for case in cases {
         let needs_emphasis =
             case.status == "changes_requested"
-                || case.review_note.as_ref().map_or(false, |n| !n.trim().is_empty());
+                || case.review_note.as_ref().is_some_and(|n| !n.trim().is_empty());
 
         if needs_emphasis {
             s.push_str("### [FEEDBACK] ");

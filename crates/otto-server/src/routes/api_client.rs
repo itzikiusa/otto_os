@@ -41,6 +41,167 @@ const HISTORY_DEFAULT: i64 = 100;
 /// Execution timeout for outbound requests.
 const EXECUTE_TIMEOUT: Duration = Duration::from_secs(60);
 
+// ===========================================================================
+// SSRF guard (audit S1)
+// ===========================================================================
+
+/// SSRF defense shared by every outbound user-URL fetch in the API-client /
+/// streaming / gRPC / browser-proxy paths. Resolves the target host and rejects
+/// requests that would reach loopback, private, link-local (incl. cloud
+/// metadata), CGNAT, unspecified, or multicast/broadcast addresses, and bounds +
+/// re-validates HTTP redirects so an upstream can't bounce us into the internal
+/// network. std + tokio only (URL parsing via the already-vendored `reqwest::Url`).
+pub(crate) mod net_guard {
+    use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+
+    /// Max redirect hops we follow (matches the prior `Policy::limited(10)`).
+    pub(crate) const MAX_REDIRECTS: usize = 10;
+
+    /// True when `ip` must never be reachable by a user-supplied fetch: any
+    /// loopback, private (RFC1918 / ULA fc00::/7), link-local (incl. the
+    /// 169.254.169.254 cloud-metadata address and fe80::/10), CGNAT
+    /// (100.64.0.0/10), unspecified (0.0.0.0 / ::), or multicast/broadcast
+    /// address. Also unwraps IPv4-mapped/compat IPv6 so `::ffff:127.0.0.1`
+    /// can't slip through.
+    pub(crate) fn is_blocked_ip(ip: IpAddr) -> bool {
+        let ip = match ip {
+            // Unwrap only the genuine IPv4-mapped form (`::ffff:a.b.c.d`) so the
+            // v4 rules below apply to it. We must NOT use the deprecated
+            // `to_ipv4()` here: it also maps IPv4-compatible addresses in `::/96`
+            // (e.g. `::1` → `0.0.0.1`), which would dodge every v4 block check and
+            // let IPv6 loopback slip through. `::1`/`fe80::`/`fc00::` are handled
+            // by the V6 arm below instead.
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => IpAddr::V4(v4),
+                None => IpAddr::V6(v6),
+            },
+            other => other,
+        };
+        match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.is_multicast()
+                    || v4.is_documentation()
+                    // Cloud metadata endpoint (also caught by link_local, kept explicit).
+                    || v4 == Ipv4Addr::new(169, 254, 169, 254)
+                    // CGNAT 100.64.0.0/10 (not flagged by is_private).
+                    || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 0x40)
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    // Unique-local fc00::/7.
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    // Link-local fe80::/10.
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+            }
+        }
+    }
+
+    /// Parse `url`, returning `(host, port)` for DNS resolution. Rejects URLs
+    /// without a host (e.g. `file:`, `data:`) and any non-http(s) scheme.
+    fn host_port(url: &str) -> Result<(String, u16), String> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+        match parsed.scheme() {
+            "http" | "https" | "ws" | "wss" | "grpc" | "grpcs" => {}
+            other => return Err(format!("blocked url scheme: {other}")),
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "url has no host".to_string())?
+            .to_string();
+        let port = parsed.port_or_known_default().unwrap_or(0);
+        Ok((host, port))
+    }
+
+    /// Pre-flight async check of a target URL: resolve the host and reject if
+    /// ANY resolved address is blocked. A bare IP literal is checked directly
+    /// (no DNS). Returns a human-readable reason on rejection.
+    pub(crate) async fn check_url(url: &str) -> Result<(), String> {
+        let (host, port) = host_port(url)?;
+        // IP literal → no DNS needed.
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return if is_blocked_ip(ip) {
+                Err(format!("blocked address {ip} (SSRF guard)"))
+            } else {
+                Ok(())
+            };
+        }
+        // Resolve on the blocking pool (lookup_host wants host:port).
+        let probe_port = if port == 0 { 80 } else { port };
+        let addrs = tokio::net::lookup_host((host.as_str(), probe_port))
+            .await
+            .map_err(|e| format!("dns resolution failed for {host}: {e}"))?;
+        let mut saw = false;
+        for sa in addrs {
+            saw = true;
+            if is_blocked_ip(sa.ip()) {
+                return Err(format!(
+                    "blocked address {} for host {host} (SSRF guard)",
+                    sa.ip()
+                ));
+            }
+        }
+        if !saw {
+            return Err(format!("host {host} did not resolve"));
+        }
+        Ok(())
+    }
+
+    /// Synchronous host check for use inside reqwest's redirect policy (which is
+    /// a sync callback). IP literals are checked directly; hostnames are
+    /// resolved via a bounded blocking lookup. On any resolution error we fail
+    /// closed (block), since a redirect we can't validate is not one we follow.
+    fn check_url_blocking(url: &reqwest::Url) -> bool {
+        match url.scheme() {
+            "http" | "https" | "ws" | "wss" | "grpc" | "grpcs" => {}
+            _ => return false,
+        }
+        let host = match url.host_str() {
+            Some(h) => h,
+            None => return false,
+        };
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return !is_blocked_ip(ip);
+        }
+        let port = url.port_or_known_default().unwrap_or(80);
+        match (host, port).to_socket_addrs() {
+            Ok(addrs) => {
+                let mut saw = false;
+                for sa in addrs {
+                    saw = true;
+                    if is_blocked_ip(sa.ip()) {
+                        return false;
+                    }
+                }
+                saw
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// A `reqwest` redirect policy that caps hops at [`MAX_REDIRECTS`] and
+    /// re-validates each hop's target host against the SSRF rules, so an
+    /// upstream 30x can't bounce the fetch into a private/loopback address.
+    pub(crate) fn redirect_policy() -> reqwest::redirect::Policy {
+        reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                return attempt.error("too many redirects");
+            }
+            if check_url_blocking(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        })
+    }
+}
+
 fn repo(ctx: &ServerCtx) -> ApiClientRepo {
     ApiClientRepo::new(ctx.pool.clone())
 }
@@ -64,7 +225,9 @@ fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .user_agent("Otto-ApiClient/1.0")
-            .redirect(reqwest::redirect::Policy::limited(10))
+            // SSRF guard: cap + re-validate each redirect hop's host so an
+            // upstream 30x can't bounce us into a private/loopback address.
+            .redirect(net_guard::redirect_policy())
             .cookie_provider(cookie_jar())
             .build()
             .unwrap_or_default()
@@ -73,6 +236,8 @@ fn http_client() -> &'static reqwest::Client {
 
 /// Build a one-off client when per-request settings deviate from the defaults
 /// (disable redirects, skip TLS verification). `None` → use the shared client.
+/// TLS verification is only ever skipped when the request explicitly sets
+/// `verify_ssl=false` (never the default).
 fn build_settings_client(req: &ExecuteApiReq) -> Option<reqwest::Client> {
     let no_redirect = req.follow_redirects == Some(false);
     let no_verify = req.verify_ssl == Some(false);
@@ -85,7 +250,8 @@ fn build_settings_client(req: &ExecuteApiReq) -> Option<reqwest::Client> {
     builder = if no_redirect {
         builder.redirect(reqwest::redirect::Policy::none())
     } else {
-        builder.redirect(reqwest::redirect::Policy::limited(10))
+        // Redirects still follow the SSRF-guarded policy.
+        builder.redirect(net_guard::redirect_policy())
     };
     if no_verify {
         builder = builder.danger_accept_invalid_certs(true);
@@ -413,7 +579,9 @@ pub async fn list_cookies(
 ) -> ApiResult<Json<Value>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
     let jar = cookie_jar();
-    let store = jar.lock().map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?;
+    let store = jar
+        .lock()
+        .map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?;
     let cookies: Vec<Value> = store
         .iter_any()
         .map(|c| {
@@ -484,7 +652,11 @@ pub async fn oauth2_token(
             form.push(("grant_type", "refresh_token"));
             form.push(("refresh_token", &req.refresh_token));
         }
-        other => return Err(ApiError(Error::Invalid(format!("unsupported grant: {other}")))),
+        other => {
+            return Err(ApiError(Error::Invalid(format!(
+                "unsupported grant: {other}"
+            ))))
+        }
     }
     if !req.scope.is_empty() {
         form.push(("scope", &req.scope));
@@ -495,6 +667,11 @@ pub async fn oauth2_token(
     if !req.client_secret.is_empty() {
         form.push(("client_secret", &req.client_secret));
     }
+
+    // SSRF guard: never let the token endpoint point at an internal address.
+    net_guard::check_url(&req.token_url)
+        .await
+        .map_err(|m| ApiError(Error::Invalid(m)))?;
 
     let resp = http_client()
         .post(&req.token_url)
@@ -706,6 +883,8 @@ async fn build_and_send(
 
     // --- method ---
     let url = substitute(&req.url, vars);
+    // SSRF guard: resolve + classify the target host before connecting.
+    net_guard::check_url(&url).await?;
     let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
         .map_err(|_| format!("invalid HTTP method '{}'", req.method))?;
 
@@ -813,7 +992,10 @@ async fn build_and_send(
     ];
 
     let started = Instant::now();
-    let resp = builder.send().await.map_err(|e| describe_reqwest_error(&e))?;
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| describe_reqwest_error(&e))?;
     let ttfb_ms = started.elapsed().as_millis() as i64;
     let final_url = resp.url().to_string();
     trace.push(trace_step(
@@ -823,14 +1005,16 @@ async fn build_and_send(
         "timing",
     ));
     if final_url != url {
-        trace.push(trace_step("Redirected", &format!("→ {final_url}"), None, "redirect"));
+        trace.push(trace_step(
+            "Redirected",
+            &format!("→ {final_url}"),
+            None,
+            "redirect",
+        ));
     }
     let status = resp.status();
     let status_code = status.as_u16();
-    let status_text = status
-        .canonical_reason()
-        .unwrap_or("")
-        .to_string();
+    let status_text = status.canonical_reason().unwrap_or("").to_string();
 
     // Response headers as [{key,value}].
     let resp_headers: Vec<Value> = resp
@@ -868,7 +1052,11 @@ async fn build_and_send(
         "Completed",
         &format!("{status_code} {status_text}"),
         Some(duration_ms),
-        if status.is_success() { "success" } else { "error" },
+        if status.is_success() {
+            "success"
+        } else {
+            "error"
+        },
     ));
 
     let (body, body_base64, truncated, too_large) = if bytes.len() > MAX_INLINE {
@@ -904,7 +1092,12 @@ async fn build_and_send(
     })
 }
 
-fn trace_step(label: &str, detail: &str, ms: Option<i64>, level: &str) -> otto_core::api::TraceStep {
+fn trace_step(
+    label: &str,
+    detail: &str,
+    ms: Option<i64>,
+    level: &str,
+) -> otto_core::api::TraceStep {
     otto_core::api::TraceStep {
         label: label.to_string(),
         detail: detail.to_string(),
@@ -938,7 +1131,10 @@ fn apply_auth(
     let kind = auth.get("type").and_then(Value::as_str).unwrap_or("none");
     match kind {
         "bearer" => {
-            let token = substitute(auth.get("token").and_then(Value::as_str).unwrap_or(""), vars);
+            let token = substitute(
+                auth.get("token").and_then(Value::as_str).unwrap_or(""),
+                vars,
+            );
             if !token.is_empty() {
                 let hv = HeaderValue::from_str(&format!("Bearer {token}"))
                     .map_err(|_| "invalid bearer token".to_string())?;
@@ -949,7 +1145,9 @@ fn apply_auth(
             // The token is fetched separately (POST .../oauth2/token) and stored
             // on the auth object; here we just attach it.
             let token = substitute(
-                auth.get("access_token").and_then(Value::as_str).unwrap_or(""),
+                auth.get("access_token")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
                 vars,
             );
             let ttype = auth
@@ -981,7 +1179,10 @@ fn apply_auth(
         }
         "api_key" => {
             let key = substitute(auth.get("key").and_then(Value::as_str).unwrap_or(""), vars);
-            let value = substitute(auth.get("value").and_then(Value::as_str).unwrap_or(""), vars);
+            let value = substitute(
+                auth.get("value").and_then(Value::as_str).unwrap_or(""),
+                vars,
+            );
             if key.is_empty() {
                 return Ok(());
             }
@@ -1158,12 +1359,8 @@ async fn run_step(
             let body_json = serde_json::from_str::<Value>(&resp.body).unwrap_or(Value::Null);
 
             // Evaluate assertions.
-            let (assertions_value, all_passed) = eval_step_assertions(
-                step,
-                Some(resp.status),
-                resp.duration_ms,
-                &body_json,
-            );
+            let (assertions_value, all_passed) =
+                eval_step_assertions(step, Some(resp.status), resp.duration_ms, &body_json);
 
             // Apply extractions into the chained variable map.
             apply_extractions(step, &body_json, vars);
@@ -1181,8 +1378,7 @@ async fn run_step(
         Err(err) => {
             // Request failed: still evaluate assertions (against a null body and
             // unknown status) so the report is complete, but ok is false.
-            let (assertions_value, _) =
-                eval_step_assertions(step, None, 0, &Value::Null);
+            let (assertions_value, _) = eval_step_assertions(step, None, 0, &Value::Null);
             ApiRunStepResult {
                 request_id,
                 name: request.name,
@@ -1261,11 +1457,7 @@ fn eval_step_assertions(
 /// Apply a step's `extract` list: evaluate each `path` against the JSON body and
 /// store `var -> value` into the chained variable map. Missing paths are
 /// skipped (the variable is simply not set).
-fn apply_extractions(
-    step: &Value,
-    body: &Value,
-    vars: &mut serde_json::Map<String, Value>,
-) {
+fn apply_extractions(step: &Value, body: &Value, vars: &mut serde_json::Map<String, Value>) {
     if let Some(arr) = step.get("extract").and_then(Value::as_array) {
         for entry in arr {
             let var = entry.get("var").and_then(Value::as_str).unwrap_or("");
@@ -1411,6 +1603,49 @@ mod tests {
         assert_eq!(substitute("{{missing}}/x", &vars), "{{missing}}/x");
         // no placeholders → unchanged
         assert_eq!(substitute("plain", &vars), "plain");
+    }
+
+    #[test]
+    fn net_guard_blocks_internal_addresses() {
+        use super::net_guard::is_blocked_ip;
+        use std::net::IpAddr;
+        let blocked = [
+            "127.0.0.1",
+            "::1",
+            "10.0.0.5",
+            "172.16.3.4",
+            "192.168.1.1",
+            "169.254.169.254", // cloud metadata
+            "169.254.1.1",     // link-local
+            "100.64.0.1",      // CGNAT
+            "0.0.0.0",
+            "::",
+            "::ffff:127.0.0.1", // v4-mapped loopback
+            "fd00::1",          // ULA
+            "fe80::1",          // link-local v6
+        ];
+        for s in blocked {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(is_blocked_ip(ip), "{s} should be blocked");
+        }
+        let allowed = ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:2800:220:1::1"];
+        for s in allowed {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(!is_blocked_ip(ip), "{s} should be allowed");
+        }
+    }
+
+    #[tokio::test]
+    async fn net_guard_check_url_rejects_loopback_and_schemes() {
+        use super::net_guard::check_url;
+        assert!(check_url("http://127.0.0.1/x").await.is_err());
+        assert!(check_url("http://169.254.169.254/latest/meta-data")
+            .await
+            .is_err());
+        assert!(check_url("http://[::1]:8080/").await.is_err());
+        // Non-fetchable schemes are rejected outright.
+        assert!(check_url("file:///etc/passwd").await.is_err());
+        assert!(check_url("not a url").await.is_err());
     }
 
     #[test]

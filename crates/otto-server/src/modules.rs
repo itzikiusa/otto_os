@@ -147,6 +147,30 @@ impl otto_product::ProductCtx for ServerCtx {
     }
 }
 
+impl otto_swarm::SwarmCtx for ServerCtx {
+    fn swarm(&self) -> &Arc<otto_swarm::SwarmService> {
+        &self.swarm
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+    fn workspaces(&self) -> &WorkspacesRepo {
+        &self.workspaces
+    }
+    fn events(&self) -> &tokio::sync::broadcast::Sender<Event> {
+        &self.events
+    }
+    fn available_providers(&self) -> Vec<String> {
+        // Agent-capable providers from the live registry (exclude the plain shell).
+        self.manager
+            .providers()
+            .names()
+            .into_iter()
+            .filter(|n| n != "shell")
+            .collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Connection spawner: ConnectionsService -> SessionManager bridge
 // ---------------------------------------------------------------------------
@@ -346,7 +370,9 @@ async fn analyze(
     // Load story and verify it belongs to the requested workspace.
     let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
     if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+        return Err(ApiError(Error::NotFound(
+            "story not found in workspace".into(),
+        )));
     }
 
     // Resolve default provider (workspace → global → "claude"), mirroring the
@@ -473,7 +499,9 @@ async fn rewrite(
     // Load story and verify it belongs to this workspace.
     let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
     if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+        return Err(ApiError(Error::NotFound(
+            "story not found in workspace".into(),
+        )));
     }
 
     // Resolve default provider (workspace → global → "claude"), mirroring analyze.
@@ -525,7 +553,9 @@ async fn generate_tests(
     // Load story and verify it belongs to this workspace.
     let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
     if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+        return Err(ApiError(Error::NotFound(
+            "story not found in workspace".into(),
+        )));
     }
 
     // Resolve default provider (workspace → global → "claude"), mirroring rewrite.
@@ -578,7 +608,9 @@ async fn generate_plan(
     // Load story and verify it belongs to this workspace.
     let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
     if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+        return Err(ApiError(Error::NotFound(
+            "story not found in workspace".into(),
+        )));
     }
 
     // Resolve default provider (workspace → global → "claude"), mirroring rewrite.
@@ -629,7 +661,9 @@ async fn save_plan(
     // Load story and verify it belongs to this workspace.
     let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
     if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+        return Err(ApiError(Error::NotFound(
+            "story not found in workspace".into(),
+        )));
     }
 
     // Find the latest plan version and overwrite its body in place (preserving
@@ -662,20 +696,35 @@ async fn approve_testcase_run(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<otto_state::ProductTestcaseRun>> {
     // Resolve workspace via run → story, then role-check.
-    let run = ctx.product_repo.get_testcase_run(&rid).await.map_err(ApiError)?;
-    let story = ctx.product_repo.get_story(&run.story_id).await.map_err(ApiError)?;
+    let run = ctx
+        .product_repo
+        .get_testcase_run(&rid)
+        .await
+        .map_err(ApiError)?;
+    let story = ctx
+        .product_repo
+        .get_story(&run.story_id)
+        .await
+        .map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
 
     // Flip all testcases in this run to "approved", and mark the run row approved
     // so clients can read the run's aggregate status (spec: approve "marks the run approved").
-    ctx.product_repo.approve_run_testcases(&rid).await.map_err(ApiError)?;
+    ctx.product_repo
+        .approve_run_testcases(&rid)
+        .await
+        .map_err(ApiError)?;
     ctx.product_repo
         .set_testcase_run(&rid, Some("approved"), None, None)
         .await
         .map_err(ApiError)?;
 
     // Fetch the cases (now approved) for the improvement narrative.
-    let cases = ctx.product_repo.list_testcases(&rid).await.map_err(ApiError)?;
+    let cases = ctx
+        .product_repo
+        .list_testcases(&rid)
+        .await
+        .map_err(ApiError)?;
 
     // Build the narrative describing what the PO did with the test cases.
     let narrative = crate::product_run::build_improve_narrative_from_tests(&story, &cases);
@@ -699,7 +748,11 @@ async fn approve_testcase_run(
     });
 
     // Return the (now-approved) run row.
-    let updated = ctx.product_repo.get_testcase_run(&rid).await.map_err(ApiError)?;
+    let updated = ctx
+        .product_repo
+        .get_testcase_run(&rid)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(updated))
 }
 
@@ -715,7 +768,11 @@ async fn retry_analysis_agent(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     // Resolve workspace: agent → analysis → story → workspace, then role-check.
-    let analysis = ctx.product_repo.get_analysis(&aid).await.map_err(ApiError)?;
+    let analysis = ctx
+        .product_repo
+        .get_analysis(&aid)
+        .await
+        .map_err(ApiError)?;
     let story = ctx
         .product_repo
         .get_story(&analysis.story_id)
@@ -724,7 +781,11 @@ async fn retry_analysis_agent(
     crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
 
     // Resolve workspace domain object (needed by run_lens_session → session create).
-    let ws = ctx.workspaces.get(&story.workspace_id).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&story.workspace_id)
+        .await
+        .map_err(ApiError)?;
 
     // Spawn background retry; errors are isolated inside retry_analysis_agent.
     tokio::spawn(crate::product_run::retry_analysis_agent(
@@ -747,7 +808,11 @@ async fn stop_analysis_agent(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
-    let analysis = ctx.product_repo.get_analysis(&aid).await.map_err(ApiError)?;
+    let analysis = ctx
+        .product_repo
+        .get_analysis(&aid)
+        .await
+        .map_err(ApiError)?;
     let story = ctx
         .product_repo
         .get_story(&analysis.story_id)
@@ -977,9 +1042,10 @@ fn default_review_config(default_provider: &str) -> ReviewConfig {
 async fn load_review_config(ctx: &ServerCtx) -> ReviewConfig {
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
     let global_default = repo.get("default_provider").await.ok().flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+    let default_provider =
+        otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
+            global_default.as_ref(),
+        )]);
     match repo.get("pr_review").await {
         Ok(Some(v)) => serde_json::from_value(v).unwrap_or_else(|e| {
             tracing::warn!("failed to deserialize pr_review config: {e}; using default");
@@ -1217,10 +1283,7 @@ async fn run_review_core(
             run.prompt_lens, user_ctx, jira_ctx, diff_path_str
         );
         // Persist the prompt so a per-agent Retry can re-run exactly this agent.
-        let _ = std::fs::write(
-            crate::review_session::prompt_path(review_id, i),
-            &prompt,
-        );
+        let _ = std::fs::write(crate::review_session::prompt_path(review_id, i), &prompt);
         set.spawn(async move {
             let res = crate::review_session::run_agent_session_with_recovery(
                 &manager,
@@ -1439,9 +1502,17 @@ fn parse_pr_draft(text: &str, fallback_title: &str) -> (String, String) {
         if e > s {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text[s..=e]) {
                 let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").trim();
-                let desc = v.get("description").and_then(|x| x.as_str()).unwrap_or("").trim();
+                let desc = v
+                    .get("description")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim();
                 if !title.is_empty() || !desc.is_empty() {
-                    let title = if title.is_empty() { fallback_title } else { title };
+                    let title = if title.is_empty() {
+                        fallback_title
+                    } else {
+                        title
+                    };
                     return (title.to_string(), desc.to_string());
                 }
             }
@@ -1504,13 +1575,22 @@ async fn draft_pr(
          {trunc}DIFF:\n{diff}",
         source = source,
         base = body.base,
-        trunc = if truncated { "(diff truncated for brevity)\n\n" } else { "" },
+        trunc = if truncated {
+            "(diff truncated for brevity)\n\n"
+        } else {
+            ""
+        },
         diff = diff_slice,
     );
 
     let reply = ctx
         .orchestrator
-        .run_agent(&prompt, &repo.path, None, std::time::Duration::from_secs(150))
+        .run_agent(
+            &prompt,
+            &repo.path,
+            None,
+            std::time::Duration::from_secs(150),
+        )
         .await
         .map_err(crate::error::ApiError)?;
     let (title, description) = parse_pr_draft(&reply, &source);
@@ -1591,23 +1671,36 @@ async fn retry_review_agent(
             })
         };
         if let Some(row) = row {
-            let _ = ctx.reviews_store.set_agent_at(&review_id, index, &row).await;
+            let _ = ctx
+                .reviews_store
+                .set_agent_at(&review_id, index, &row)
+                .await;
         }
     }
 
     let provider = review.agents[index].provider.clone();
     let cwd = repo.path.clone();
-    let diff_len = std::fs::metadata(std::env::temp_dir().join(format!("otto-review-{review_id}.diff")))
-        .map(|m| m.len() as usize)
-        .unwrap_or(0);
+    let diff_len =
+        std::fs::metadata(std::env::temp_dir().join(format!("otto-review-{review_id}.diff")))
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
     let timeout = review_agent_timeout(diff_len);
     let manager = Arc::clone(&ctx.manager);
     let reviews = ctx.reviews_store.clone();
     let review_id_bg = review_id.clone();
     tokio::spawn(async move {
         crate::review_session::run_agent_session_with_recovery(
-            &manager, &reviews, &states, &workspace, &review_user, &provider, &cwd, &review_id_bg,
-            index, &prompt, timeout,
+            &manager,
+            &reviews,
+            &states,
+            &workspace,
+            &review_user,
+            &provider,
+            &cwd,
+            &review_id_bg,
+            index,
+            &prompt,
+            timeout,
         )
         .await;
     });
@@ -1870,7 +1963,10 @@ async fn start_local_review(
         let ctx_bg = ctx.clone();
         let repo_path = repo.path.clone();
         tokio::spawn(async move {
-            run_review(ctx_bg, review_id, repo_path, diff_text, None, None, workspace).await;
+            run_review(
+                ctx_bg, review_id, repo_path, diff_text, None, None, workspace,
+            )
+            .await;
         });
     }
 
@@ -2261,7 +2357,9 @@ struct BrowserProxyState {
 pub fn browser_proxy_router(authenticator: Arc<dyn otto_core::auth::TokenAuthenticator>) -> Router {
     let http = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; OttoProxy/1.0)")
-        .redirect(reqwest::redirect::Policy::limited(10))
+        // SSRF guard: cap + re-validate each redirect hop's host so an upstream
+        // 30x can't bounce the proxy into a private/loopback address.
+        .redirect(crate::routes::api_client::net_guard::redirect_policy())
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .expect("failed to build reqwest client for browser proxy");
@@ -2320,6 +2418,18 @@ async fn browser_proxy(
                 .into_response();
         }
     };
+
+    // --- SSRF guard: resolve + classify before fetching ---
+    if let Err(msg) = crate::routes::api_client::net_guard::check_url(&url).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(otto_core::api::Problem {
+                code: "bad_request".into(),
+                message: msg,
+            }),
+        )
+            .into_response();
+    }
 
     // --- Fetch upstream ---
     let upstream = match st.http.get(&url).send().await {
@@ -2467,7 +2577,11 @@ async fn db_explain_with_agent(
     CurrentUser(user): CurrentUser,
     Json(body): Json<DbExplainReq>,
 ) -> ApiResult<Json<Session>> {
-    let conn = ctx.db_explorer.get_connection(&conn_id).await.map_err(ApiError)?;
+    let conn = ctx
+        .db_explorer
+        .get_connection(&conn_id)
+        .await
+        .map_err(ApiError)?;
     let ws_id = conn
         .workspace_id
         .clone()
@@ -2508,7 +2622,10 @@ async fn db_explain_with_agent(
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(default_provider),
-        title: Some(body.title.unwrap_or_else(|| format!("Explain {}", conn.name))),
+        title: Some(
+            body.title
+                .unwrap_or_else(|| format!("Explain {}", conn.name)),
+        ),
         cwd: Some(ws.root_path.clone()),
         connection_id: None,
         meta: None,
@@ -2553,7 +2670,9 @@ async fn inject_session(
     // Load story and verify it belongs to the requested workspace.
     let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
     if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+        return Err(ApiError(Error::NotFound(
+            "story not found in workspace".into(),
+        )));
     }
 
     // Resolve default provider (workspace → global → "claude"), mirroring analyze.
@@ -2576,7 +2695,11 @@ async fn inject_session(
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
 
     // Build the inject bundle.
-    let bundle = ctx.product.build_inject_bundle(&sid).await.map_err(ApiError)?;
+    let bundle = ctx
+        .product
+        .build_inject_bundle(&sid)
+        .await
+        .map_err(ApiError)?;
 
     // Spawn the agent session.
     let create_req = CreateSessionReq {
@@ -2656,13 +2779,23 @@ async fn attach_product_story(
     crate::auth::require_ws_role(&ctx, &user, &session.workspace_id, WorkspaceRole::Editor).await?;
 
     // Load story and verify it belongs to the same workspace.
-    let story = ctx.product_repo.get_story(&req.story_id).await.map_err(ApiError)?;
+    let story = ctx
+        .product_repo
+        .get_story(&req.story_id)
+        .await
+        .map_err(ApiError)?;
     if story.workspace_id != session.workspace_id {
-        return Err(ApiError(Error::NotFound("story not found in workspace".into())));
+        return Err(ApiError(Error::NotFound(
+            "story not found in workspace".into(),
+        )));
     }
 
     // Build the inject bundle.
-    let bundle = ctx.product.build_inject_bundle(&req.story_id).await.map_err(ApiError)?;
+    let bundle = ctx
+        .product
+        .build_inject_bundle(&req.story_id)
+        .await
+        .map_err(ApiError)?;
 
     // Push the bundle into the live PTY after a short settle delay.
     let manager = Arc::clone(&ctx.manager);
@@ -2690,7 +2823,10 @@ async fn attach_product_story(
 
 /// Routes for the attach-product-story endpoint.
 pub fn attach_product_routes() -> Router<ServerCtx> {
-    Router::new().route("/sessions/{session_id}/attach-product", post(attach_product_story))
+    Router::new().route(
+        "/sessions/{session_id}/attach-product",
+        post(attach_product_story),
+    )
 }
 
 /// All module routers: `(api_extras, root_extras)` for [`crate::build_router`].
@@ -2706,6 +2842,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_improve::router::<ServerCtx>(),
         otto_context::router::<ServerCtx>(),
         otto_skills::http::router::<ServerCtx>(),
+        otto_swarm::router::<ServerCtx>(),
+        crate::swarm_runtime::routes(),
         crate::insights::routes(),
         orchestrator_routes(),
         db_explorer_routes(),

@@ -133,7 +133,10 @@ fn json_skeleton(msg: &MessageDescriptor, depth: u8) -> String {
 fn skeleton_value(msg: &MessageDescriptor, depth: u8) -> Value {
     let mut map = serde_json::Map::new();
     for field in msg.fields() {
-        map.insert(field.json_name().to_string(), field_placeholder(&field, depth));
+        map.insert(
+            field.json_name().to_string(),
+            field_placeholder(&field, depth),
+        );
     }
     Value::Object(map)
 }
@@ -146,8 +149,17 @@ fn field_placeholder(field: &prost_reflect::FieldDescriptor, depth: u8) -> Value
         return Value::Object(serde_json::Map::new());
     }
     match field.kind() {
-        Kind::Double | Kind::Float | Kind::Int32 | Kind::Int64 | Kind::Uint32 | Kind::Uint64
-        | Kind::Sint32 | Kind::Sint64 | Kind::Fixed32 | Kind::Fixed64 | Kind::Sfixed32
+        Kind::Double
+        | Kind::Float
+        | Kind::Int32
+        | Kind::Int64
+        | Kind::Uint32
+        | Kind::Uint64
+        | Kind::Sint32
+        | Kind::Sint64
+        | Kind::Fixed32
+        | Kind::Fixed64
+        | Kind::Sfixed32
         | Kind::Sfixed64 => json!(0),
         Kind::Bool => json!(false),
         Kind::String | Kind::Bytes => json!(""),
@@ -212,7 +224,8 @@ impl Encoder for DynEncoder {
     type Item = DynamicMessage;
     type Error = Status;
     fn encode(&mut self, item: Self::Item, dst: &mut EncodeBuf<'_>) -> Result<(), Status> {
-        item.encode(dst).map_err(|e| Status::internal(e.to_string()))
+        item.encode(dst)
+            .map_err(|e| Status::internal(e.to_string()))
     }
 }
 
@@ -272,9 +285,17 @@ pub async fn invoke(
         .map_err(|e| invalid(format!("request JSON does not match message: {e}")))?;
 
     let started = Instant::now();
-    let mut trace = vec![
-        TraceStep { label: "Request".into(), detail: format!("gRPC {} {}", req.url, req.method), ms: None, level: "info".into() },
-    ];
+    let mut trace = vec![TraceStep {
+        label: "Request".into(),
+        detail: format!("gRPC {} {}", req.url, req.method),
+        ms: None,
+        level: "info".into(),
+    }];
+
+    // SSRF guard: resolve + classify the target host before dialing.
+    crate::routes::api_client::net_guard::check_url(&req.url)
+        .await
+        .map_err(invalid)?;
 
     // Build the channel (TLS for https/grpcs).
     let uri = axum::http::Uri::from_str(&req.url).map_err(|e| invalid(format!("bad url: {e}")))?;
@@ -292,10 +313,18 @@ pub async fn invoke(
         Ok(Err(e)) => return Err(upstream(format!("connect failed: {e}"))),
         Err(_) => return Err(upstream("connection timed out")),
     };
-    trace.push(TraceStep { label: "Connected".into(), detail: req.url.clone(), ms: Some(started.elapsed().as_millis() as i64), level: "timing".into() });
+    trace.push(TraceStep {
+        label: "Connected".into(),
+        detail: req.url.clone(),
+        ms: Some(started.elapsed().as_millis() as i64),
+        level: "timing".into(),
+    });
 
     let mut client = tonic::client::Grpc::new(channel);
-    client.ready().await.map_err(|e| upstream(format!("not ready: {e}")))?;
+    client
+        .ready()
+        .await
+        .map_err(|e| upstream(format!("not ready: {e}")))?;
 
     let path = PathAndQuery::from_str(&req.method)
         .map_err(|e| invalid(format!("bad method path: {e}")))?;
@@ -312,7 +341,9 @@ pub async fn invoke(
         }
     }
 
-    let codec = DynamicCodec { output: method.output() };
+    let codec = DynamicCodec {
+        output: method.output(),
+    };
     let call_started = Instant::now();
 
     // Unary → one message; server-streaming → a JSON array of messages.
@@ -337,7 +368,8 @@ pub async fn invoke(
                     Some(s) => Err(s),
                     None => Ok((
                         meta,
-                        serde_json::to_string_pretty(&Value::Array(msgs)).unwrap_or_else(|_| "[]".into()),
+                        serde_json::to_string_pretty(&Value::Array(msgs))
+                            .unwrap_or_else(|_| "[]".into()),
                     )),
                 }
             }
@@ -360,9 +392,23 @@ pub async fn invoke(
 
     match outcome {
         Ok((meta_headers, json_body)) => {
-            let detail = if server_streaming { "stream complete" } else { "message received" };
-            trace.push(TraceStep { label: "Response".into(), detail: detail.into(), ms: Some(call_ms), level: "timing".into() });
-            trace.push(TraceStep { label: "Completed".into(), detail: "OK (grpc-status 0)".into(), ms: Some(duration_ms), level: "success".into() });
+            let detail = if server_streaming {
+                "stream complete"
+            } else {
+                "message received"
+            };
+            trace.push(TraceStep {
+                label: "Response".into(),
+                detail: detail.into(),
+                ms: Some(call_ms),
+                level: "timing".into(),
+            });
+            trace.push(TraceStep {
+                label: "Completed".into(),
+                detail: "OK (grpc-status 0)".into(),
+                ms: Some(duration_ms),
+                level: "success".into(),
+            });
             let size = json_body.len() as i64;
             Ok(Json(ApiResponse {
                 status: 200,
@@ -380,7 +426,12 @@ pub async fn invoke(
         }
         Err(status) => {
             let code = status.code();
-            trace.push(TraceStep { label: "Completed".into(), detail: format!("grpc-status {} {:?}", code as i32, code), ms: Some(duration_ms), level: "error".into() });
+            trace.push(TraceStep {
+                label: "Completed".into(),
+                detail: format!("grpc-status {} {:?}", code as i32, code),
+                ms: Some(duration_ms),
+                level: "error".into(),
+            });
             let body = json!({
                 "grpc_status": code as i32,
                 "grpc_status_name": format!("{code:?}"),
@@ -390,7 +441,9 @@ pub async fn invoke(
             Ok(Json(ApiResponse {
                 status: 500,
                 status_text: format!("gRPC {code:?}"),
-                headers: Value::Array(vec![json!({"key":"grpc-status","value": (code as i32).to_string()})]),
+                headers: Value::Array(vec![
+                    json!({"key":"grpc-status","value": (code as i32).to_string()}),
+                ]),
                 body_base64: B64.encode(body.as_bytes()),
                 size_bytes: body.len() as i64,
                 body,
@@ -408,7 +461,11 @@ fn meta_to_json(meta: &tonic::metadata::MetadataMap) -> Vec<Value> {
     meta.clone()
         .into_headers()
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|vs| json!({ "key": k.as_str(), "value": vs })))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|vs| json!({ "key": k.as_str(), "value": vs }))
+        })
         .collect()
 }
 
@@ -450,6 +507,10 @@ message ErrorResponse { int32 error_code = 1; string error_message = 2; }
 "#;
 
 async fn connect_channel(url: &str) -> Result<Channel, ApiError> {
+    // SSRF guard: resolve + classify the reflection target before dialing.
+    crate::routes::api_client::net_guard::check_url(url)
+        .await
+        .map_err(invalid)?;
     let uri = axum::http::Uri::from_str(url).map_err(|e| invalid(format!("bad url: {e}")))?;
     let is_tls = matches!(uri.scheme_str(), Some("https") | Some("grpcs"));
     let mut endpoint = Channel::builder(uri);
@@ -495,9 +556,8 @@ async fn reflect_pool(url: &str, headers: &[KV]) -> Result<DescriptorPool, ApiEr
     let resp_desc = refl
         .get_message_by_name("grpc.reflection.v1alpha.ServerReflectionResponse")
         .ok_or_else(|| upstream("reflection response descriptor missing"))?;
-    let path = PathAndQuery::from_static(
-        "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
-    );
+    let path =
+        PathAndQuery::from_static("/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo");
 
     let channel = connect_channel(url).await?;
     let mut client = tonic::client::Grpc::new(channel);
@@ -517,17 +577,27 @@ async fn reflect_pool(url: &str, headers: &[KV]) -> Result<DescriptorPool, ApiEr
     let mut req1 = tonic::Request::new(stream::iter(vec![make_req("list_services", "*")]));
     *req1.metadata_mut() = md.clone();
     let resp1 = client
-        .streaming(req1, path.clone(), DynamicCodec { output: resp_desc.clone() })
+        .streaming(
+            req1,
+            path.clone(),
+            DynamicCodec {
+                output: resp_desc.clone(),
+            },
+        )
         .await
         .map_err(|s| upstream(format!("reflection unavailable: {}", s.message())))?;
     let mut s1 = resp1.into_inner();
     let mut services: Vec<String> = Vec::new();
     while let Ok(Some(m)) = s1.message().await {
         if let Some(lsr) = m.get_field_by_name("list_services_response") {
-            if let Some(list) = lsr.as_message().and_then(|x| x.get_field_by_name("service")) {
+            if let Some(list) = lsr
+                .as_message()
+                .and_then(|x| x.get_field_by_name("service"))
+            {
                 if let Some(arr) = list.as_list() {
                     for sv in arr {
-                        if let Some(name) = sv.as_message()
+                        if let Some(name) = sv
+                            .as_message()
                             .and_then(|x| x.get_field_by_name("name"))
                             .and_then(|v| v.as_str().map(String::from))
                         {
@@ -540,7 +610,9 @@ async fn reflect_pool(url: &str, headers: &[KV]) -> Result<DescriptorPool, ApiEr
     }
     services.retain(|s| !s.is_empty() && !s.starts_with("grpc.reflection"));
     if services.is_empty() {
-        return Err(upstream("server returned no services (reflection may be disabled)"));
+        return Err(upstream(
+            "server returned no services (reflection may be disabled)",
+        ));
     }
 
     // 2. fetch the file descriptors containing each service
@@ -559,11 +631,15 @@ async fn reflect_pool(url: &str, headers: &[KV]) -> Result<DescriptorPool, ApiEr
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     while let Ok(Some(m)) = s2.message().await {
         if let Some(fdr) = m.get_field_by_name("file_descriptor_response") {
-            if let Some(list) = fdr.as_message().and_then(|x| x.get_field_by_name("file_descriptor_proto")) {
+            if let Some(list) = fdr
+                .as_message()
+                .and_then(|x| x.get_field_by_name("file_descriptor_proto"))
+            {
                 if let Some(arr) = list.as_list() {
                     for b in arr {
                         if let Some(bytes) = b.as_bytes() {
-                            if let Ok(fdp) = prost_types::FileDescriptorProto::decode(bytes.clone()) {
+                            if let Ok(fdp) = prost_types::FileDescriptorProto::decode(bytes.clone())
+                            {
                                 let name = fdp.name.clone().unwrap_or_default();
                                 if seen.insert(name) {
                                     files.push(fdp);
@@ -582,8 +658,7 @@ async fn reflect_pool(url: &str, headers: &[KV]) -> Result<DescriptorPool, ApiEr
     let mut buf = Vec::new();
     fds.encode(&mut buf)
         .map_err(|e| upstream(format!("encode descriptors: {e}")))?;
-    DescriptorPool::decode(buf.as_slice())
-        .map_err(|e| invalid(format!("descriptor build: {e}")))
+    DescriptorPool::decode(buf.as_slice()).map_err(|e| invalid(format!("descriptor build: {e}")))
 }
 
 #[derive(Deserialize)]
@@ -603,7 +678,9 @@ pub async fn reflect(
 ) -> ApiResult<Json<GrpcDescribeResp>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let pool = reflect_pool(&req.url, &req.headers).await?;
-    Ok(Json(GrpcDescribeResp { services: services_from_pool(&pool) }))
+    Ok(Json(GrpcDescribeResp {
+        services: services_from_pool(&pool),
+    }))
 }
 
 fn dynamic_to_json(msg: &DynamicMessage) -> String {
@@ -671,7 +748,11 @@ mod tests {
         let mut buf = Vec::new();
         m.encode(&mut buf).unwrap();
         let back = DynamicMessage::decode(desc, buf.as_slice()).unwrap();
-        assert_eq!(back.get_field_by_name("list_services").and_then(|v| v.as_str().map(String::from)), Some("*".to_string()));
+        assert_eq!(
+            back.get_field_by_name("list_services")
+                .and_then(|v| v.as_str().map(String::from)),
+            Some("*".to_string())
+        );
         // The reflection service itself is filtered out of results.
         assert!(services_from_pool(&pool).is_empty());
     }

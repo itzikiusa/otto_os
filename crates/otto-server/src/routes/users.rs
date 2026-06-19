@@ -6,6 +6,7 @@ use axum::Json;
 use otto_core::api::{CreateUserReq, UpdateUserReq};
 use otto_core::domain::User;
 use otto_core::{Error, Id};
+use otto_rbac::AuthRepo;
 use otto_state::UsersRepo;
 
 use crate::auth::{require_root, CurrentUser};
@@ -31,9 +32,8 @@ pub async fn create(
     if req.username.trim().is_empty() {
         return Err(Error::Invalid("username must not be empty".into()).into());
     }
-    if req.password.is_empty() {
-        return Err(Error::Invalid("password must not be empty".into()).into());
-    }
+    // Enforce the shared minimum-password policy (same rule as onboarding).
+    otto_rbac::validate_password(&req.password)?;
     let hash = otto_rbac::hash_password(&req.password)?;
     let display_name = req.display_name.unwrap_or_else(|| req.username.clone());
     let created = UsersRepo::new(ctx.pool.clone())
@@ -56,8 +56,11 @@ pub async fn update(
         return Err(Error::Invalid("the root user cannot be disabled".into()).into());
     }
     let password_hash = match &req.password {
-        Some(p) if !p.is_empty() => Some(otto_rbac::hash_password(p)?),
-        Some(_) => return Err(Error::Invalid("password must not be empty".into()).into()),
+        // Enforce the shared minimum-password policy on any password change.
+        Some(p) => {
+            otto_rbac::validate_password(p)?;
+            Some(otto_rbac::hash_password(p)?)
+        }
         None => None,
     };
     let updated = repo
@@ -68,6 +71,16 @@ pub async fn update(
             req.disabled,
         )
         .await?;
+
+    // A changed credential or a disabled account must invalidate every
+    // outstanding token for this user (login sessions + API tokens), so a
+    // leaked/old token can't keep working after the change.
+    if password_hash.is_some() || req.disabled == Some(true) {
+        AuthRepo::new(ctx.pool.clone())
+            .revoke_all_for_user(&id)
+            .await?;
+    }
+
     Ok(Json(updated))
 }
 
@@ -84,5 +97,9 @@ pub async fn remove(
         return Err(Error::Invalid("the root user cannot be disabled".into()).into());
     }
     repo.update(&id, None, None, Some(true)).await?;
+    // Disabling the account invalidates all of its outstanding tokens.
+    AuthRepo::new(ctx.pool.clone())
+        .revoke_all_for_user(&id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }

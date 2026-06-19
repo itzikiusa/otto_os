@@ -1,11 +1,12 @@
 // Events WS client (/ws/events) with auto-reconnect + exponential backoff.
 // Feeds the workspace store (session statuses) and the toast store (notices).
 
-import { wsUrl } from './api/client';
+import { wsConnect } from './api/client';
 import type { OttoEvent } from './api/types';
 import { ws } from './stores/workspace.svelte';
 import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
+import { swarm } from './stores/swarm.svelte';
 
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
@@ -34,7 +35,8 @@ class EventsClient {
     if (this.stopped) return;
     this.state = 'connecting';
     try {
-      this.sock = new WebSocket(wsUrl('/ws/events'));
+      // Bearer token travels in Sec-WebSocket-Protocol, not the URL query.
+      this.sock = wsConnect('/ws/events');
     } catch {
       this.scheduleReconnect();
       return;
@@ -51,6 +53,13 @@ class EventsClient {
           notifications.ingest(parsed.notice);
         } else if (parsed.type === 'trail_appended' || parsed.type === 'tasks_updated') {
           activity.applyEvent(parsed);
+        } else if (
+          parsed.type === 'swarm_run_updated' ||
+          parsed.type === 'swarm_task_updated' ||
+          parsed.type === 'swarm_message_posted' ||
+          parsed.type === 'swarm_status'
+        ) {
+          swarm.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

@@ -59,11 +59,11 @@ fn row_to_integration(row: &IntegrationRow) -> Integration {
         has_bot_token: row
             .bot_token_ref
             .as_deref()
-            .map_or(false, |s| !s.is_empty()),
+            .is_some_and(|s| !s.is_empty()),
         has_app_token: row
             .app_token_ref
             .as_deref()
-            .map_or(false, |s| !s.is_empty()),
+            .is_some_and(|s| !s.is_empty()),
         updated_at: row.updated_at,
     }
 }
@@ -124,6 +124,7 @@ impl IntegrationsRepo {
     /// When `bot_token_ref` / `app_token_ref` is `None`, the existing ref is
     /// preserved (read-then-write). The caller is responsible for storing/deleting
     /// the actual secret in the keychain before calling this.
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert(
         &self,
         workspace_id: &Id,
@@ -141,7 +142,6 @@ impl IntegrationsRepo {
         let (existing_bot, existing_app) = self
             .get_refs(workspace_id, channel)
             .await?
-            .map(|(b, a)| (b, a))
             .unwrap_or((None, None));
 
         let bot_ref = bot_token_ref.or(existing_bot);

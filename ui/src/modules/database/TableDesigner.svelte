@@ -23,16 +23,28 @@
     drop: boolean;
   }
 
-  let rows = $state<Row[]>(
-    columns.map((c) => ({
+  function rowsFromColumns(cols: DbColumnDef[]): Row[] {
+    return cols.map((c) => ({
       orig: c.name,
       name: c.name,
       type: c.data_type,
       notNull: !c.nullable,
       def: c.default ?? '',
       drop: false,
-    })),
-  );
+    }));
+  }
+
+  // Editable working copy of the table's columns. Re-seeded from the incoming
+  // `columns` whenever the table being designed changes, so reopening the
+  // designer on a different table never carries over the previous edits.
+  let rows = $state<Row[]>([]);
+  let seededFor = $state<string | null>(null);
+  $effect(() => {
+    if (seededFor !== table) {
+      rows = rowsFromColumns(columns);
+      seededFor = table;
+    }
+  });
 
   function addColumn(): void {
     rows = [

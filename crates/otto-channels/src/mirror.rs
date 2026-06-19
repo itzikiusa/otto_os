@@ -131,6 +131,7 @@ impl Mirror {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_tailer(
         &self,
         session_id: Id,
@@ -387,12 +388,10 @@ fn render_feed(header: &str, lines: &[String]) -> String {
 /// Truncate `s` to at most `max_chars` Unicode scalar values.  Does NOT append
 /// `…` — the caller adds a continuation note instead.
 fn truncate_to_char_boundary(s: &str, max_chars: usize) -> &str {
-    let mut char_count = 0;
-    for (byte_idx, _) in s.char_indices() {
+    for (char_count, (byte_idx, _)) in s.char_indices().enumerate() {
         if char_count == max_chars {
             return &s[..byte_idx];
         }
-        char_count += 1;
     }
     s
 }

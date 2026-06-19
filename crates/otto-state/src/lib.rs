@@ -19,6 +19,7 @@ pub mod reviews;
 pub mod sessions;
 pub mod settings;
 pub mod skill_evals;
+pub mod swarm;
 pub mod users;
 pub mod workflows;
 pub mod workspaces;
@@ -42,11 +43,18 @@ pub use product::*;
 pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
 pub use issues::{IssuesRepo, NewIssueAccount};
-pub use notifications::{NewNotice, NotificationsRepo};
+pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
 pub use reviews::ReviewsRepo;
 pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
 pub use settings::SettingsRepo;
 pub use skill_evals::SkillEvalsRepo;
+// Note: `swarm::NewTask` collides with `activity::NewTask`; access it via the
+// module path (`otto_state::swarm::NewTask`). The rest are re-exported here.
+pub use swarm::{
+    AgentPatch, NewAgent, NewMessage, NewProject, NewRun, NewSwarm, ProjectPatch, RunFilter,
+    RunPatch, Swarm, SwarmAgent, SwarmMessage, SwarmPatch, SwarmProject, SwarmRepo, SwarmRun,
+    SwarmTask, TaskPatch,
+};
 pub use workflows::WorkflowsRepo;
 pub use users::{UserRecord, UsersRepo};
 pub use workspaces::{Member, WorkspacesRepo};

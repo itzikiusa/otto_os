@@ -31,3 +31,15 @@ otto-context.workspace = true
 otto-skills.workspace = true
 otto-usage.workspace = true
 otto-product.workspace = true
+otto-swarm.workspace = true
+
+# TLS for the optional 0.0.0.0 network listener (S3). rustls-only to match the
+# rest of the tree (reqwest uses rustls). `tls-rustls-no-provider` so we install
+# the crypto provider explicitly (both ring + aws-lc are compiled in this tree,
+# so the default is ambiguous and would panic). `rcgen` mints a persisted
+# self-signed cert on first use so the listener works out of the box.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
+sha2 = "0.10"

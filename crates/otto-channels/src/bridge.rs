@@ -201,38 +201,6 @@ pub struct Bridge {
     sessions: Mutex<HashMap<ConvKey, Id>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn agent_paste_input_uses_bracketed_paste_without_submit_key() {
-        let bytes = agent_paste_input("line one\nline two");
-
-        assert_eq!(bytes, b"\x1b[200~line one\nline two\x1b[201~".to_vec());
-        assert_eq!(AGENT_SUBMIT_KEY, b"\r");
-    }
-
-    #[test]
-    fn session_title_uses_first_line_trimmed_and_truncated() {
-        // First non-empty line becomes the title (sidebar pane name).
-        assert_eq!(
-            session_title("Investigate ticket XYZ\n\nmore details", "Telegram"),
-            "Investigate ticket XYZ"
-        );
-        // Leading blank lines / whitespace are skipped + trimmed.
-        assert_eq!(session_title("\n   \n  hello there  ", "Slack"), "hello there");
-        // Empty / whitespace-only falls back to "<Channel> chat".
-        assert_eq!(session_title("   \n  ", "Telegram"), "Telegram chat");
-        assert_eq!(session_title("", "Slack"), "Slack chat");
-        // Over 48 chars is truncated with an ellipsis.
-        let long = "a".repeat(60);
-        let title = session_title(&long, "Telegram");
-        assert_eq!(title.chars().count(), 49); // 48 chars + '…'
-        assert!(title.ends_with('…'));
-    }
-}
-
 impl Bridge {
     pub fn new(
         manager: Arc<SessionManager>,
@@ -279,14 +247,13 @@ impl Bridge {
 
         // --- 2. Quick commands (intercepted before routing) ---
         let trimmed = msg.text.trim();
-        if trimmed.starts_with('/') {
-            if self
+        if trimmed.starts_with('/')
+            && self
                 .handle_command(integ, adapter.clone(), &msg, trimmed)
                 .await
             {
                 return;
             }
-        }
 
         // --- 3. Resolve workspace ---
         let ws_id: Id = msg.workspace_id.clone();
@@ -589,5 +556,37 @@ impl Bridge {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_paste_input_uses_bracketed_paste_without_submit_key() {
+        let bytes = agent_paste_input("line one\nline two");
+
+        assert_eq!(bytes, b"\x1b[200~line one\nline two\x1b[201~".to_vec());
+        assert_eq!(AGENT_SUBMIT_KEY, b"\r");
+    }
+
+    #[test]
+    fn session_title_uses_first_line_trimmed_and_truncated() {
+        // First non-empty line becomes the title (sidebar pane name).
+        assert_eq!(
+            session_title("Investigate ticket XYZ\n\nmore details", "Telegram"),
+            "Investigate ticket XYZ"
+        );
+        // Leading blank lines / whitespace are skipped + trimmed.
+        assert_eq!(session_title("\n   \n  hello there  ", "Slack"), "hello there");
+        // Empty / whitespace-only falls back to "<Channel> chat".
+        assert_eq!(session_title("   \n  ", "Telegram"), "Telegram chat");
+        assert_eq!(session_title("", "Slack"), "Slack chat");
+        // Over 48 chars is truncated with an ellipsis.
+        let long = "a".repeat(60);
+        let title = session_title(&long, "Telegram");
+        assert_eq!(title.chars().count(), 49); // 48 chars + '…'
+        assert!(title.ends_with('…'));
     }
 }

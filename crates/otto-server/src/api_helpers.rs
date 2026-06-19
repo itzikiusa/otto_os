@@ -505,11 +505,8 @@ fn enabled_entries(v: &Value) -> Vec<(String, String)> {
 fn body_example(body_mode: &str, body: &str) -> (String, Value) {
     match body_mode {
         "json" | "graphql" => {
-            let media = if body_mode == "graphql" {
-                "application/json"
-            } else {
-                "application/json"
-            };
+            // GraphQL-over-HTTP requests are JSON-encoded, same as `json`.
+            let media = "application/json";
             let example = serde_json::from_str::<Value>(body).unwrap_or_else(|_| json!(body));
             (media.to_string(), example)
         }
@@ -687,7 +684,7 @@ pub fn eval_assertion(
 
     match kind {
         "status" => {
-            let actual = status.map(|s| Value::from(s)).unwrap_or(Value::Null);
+            let actual = status.map(Value::from).unwrap_or(Value::Null);
             let passed = compare(&actual, op, &expected);
             AssertionResult {
                 desc: format!("status {} {}", op, value_label(&expected)),

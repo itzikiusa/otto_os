@@ -84,12 +84,11 @@ pub fn digest_from_jsonl(session_id: &str, title: &str, body: &str) -> SessionDi
                         }
                     }
                 }
-                Some("tool_result") => {
+                Some("tool_result")
                     // Real claude JSONL records tool failures here.
-                    if block.get("is_error").and_then(|b| b.as_bool()) == Some(true) {
+                    if block.get("is_error").and_then(|b| b.as_bool()) == Some(true) => {
                         tool_errors += 1;
                     }
-                }
                 _ => {}
             }
         }

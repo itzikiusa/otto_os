@@ -115,3 +115,28 @@ export function wsUrl(path: string): string {
   const token = getToken() ?? '';
   return `${proto}//${base.host}${path}?token=${encodeURIComponent(token)}`;
 }
+
+/** Fixed first subprotocol paired with the bearer token on auth-by-subprotocol
+ *  WebSockets (keeps the token out of the URL/query string). The server reads
+ *  the token from `Sec-WebSocket-Protocol` and echoes this marker back. */
+export const WS_BEARER_SUBPROTOCOL = 'otto-bearer';
+
+/**
+ * Open a WebSocket whose bearer token travels in the `Sec-WebSocket-Protocol`
+ * header instead of the `?token=` query string — the URL (and the token) then
+ * never lands in access logs. The browser offers `[WS_BEARER_SUBPROTOCOL, token]`;
+ * the daemon validates the token and echoes `WS_BEARER_SUBPROTOCOL` back.
+ *
+ * Tokens are not valid `Sec-WebSocket-Protocol` values if they contain spaces or
+ * other separators; Otto tokens are URL-safe so this is fine. When no token is
+ * stored we open without a subprotocol (the server will 401).
+ */
+export function wsConnect(path: string): WebSocket {
+  const base = new URL(baseUrl());
+  const proto = base.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${base.host}${path}`;
+  const token = getToken();
+  return token
+    ? new WebSocket(url, [WS_BEARER_SUBPROTOCOL, token])
+    : new WebSocket(url);
+}

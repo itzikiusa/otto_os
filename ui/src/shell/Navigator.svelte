@@ -280,6 +280,11 @@
         </div>
       {/if}
 
+      <button class="nav-item" class:active={router.module === 'swarm'} onclick={() => router.go('swarm')}>
+        <Icon name="grid" size={14} />
+        <span class="grow">Swarm</span>
+      </button>
+
       <button class="nav-item" class:active={router.module === 'git'} onclick={() => router.go('git')}>
         <Icon name="branch" size={14} />
         <span class="grow">Git</span>

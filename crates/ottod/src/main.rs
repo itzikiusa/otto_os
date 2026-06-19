@@ -191,6 +191,13 @@ async fn run(cfg: Config) -> Result<(), String> {
         secrets.clone(),
     ));
 
+    // Agent Swarm: persistence + CRUD service. The Coordinator runtime + scheduler
+    // are started below once the full ServerCtx exists.
+    let swarm_repo = otto_state::SwarmRepo::new(pool.clone());
+    let swarm = Arc::new(otto_swarm::SwarmService::new(swarm_repo.clone()));
+    // Seed swarm role skills + preset souls into the library (only if absent).
+    otto_swarm::presets::seed(&context_library);
+
     let ctx = ServerCtx {
         pool: pool.clone(),
         secrets: secrets.clone(),
@@ -198,6 +205,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         authenticator: Arc::new(RbacAuthenticator::new(pool.clone())),
         roles: Arc::new(RbacRoleChecker::new(pool.clone())),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        data_dir: cfg.data_dir.clone(),
         manager: Arc::clone(&manager),
         workspaces: workspaces.clone(),
         connections,
@@ -216,6 +224,10 @@ async fn run(cfg: Config) -> Result<(), String> {
         product,
         product_repo,
         product_agent_cancels: otto_server::product_run::new_cancel_registry(),
+        swarm,
+        swarm_repo,
+        swarm_coords: otto_server::swarm_runtime::new_registry(),
+        swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
     };
 
     // Restore sessions from the previous daemon run: resumable agent
@@ -254,6 +266,15 @@ async fn run(cfg: Config) -> Result<(), String> {
         Ok(n) if n > 0 => tracing::info!("skill-eval recovery: marked {n} orphaned run(s) as error"),
         Ok(_) => {}
         Err(e) => tracing::warn!("skill-eval recovery: {e}"),
+    }
+
+    // Same recovery for orphaned workflow runs: a run executes in a background
+    // task that dies with the process, so any row left `pending`/`running` would
+    // otherwise poll forever in the UI. Mark them error so they're re-runnable.
+    match otto_server::workflow_engine::reap_orphaned_runs(&pool).await {
+        Ok(n) if n > 0 => tracing::info!("workflow recovery: marked {n} orphaned run(s) as error"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("workflow recovery: {e}"),
     }
 
     // Periodically auto-archive idle channel (ticket/chat) sessions so they
@@ -442,6 +463,18 @@ async fn run(cfg: Config) -> Result<(), String> {
         otto_server::insights::InsightsScheduler::new(ctx.clone()).start();
     tracing::info!("insights scheduler started");
 
+    // --- Agent Swarm: scheduler + restore coordinators for active swarms ---
+    let _swarm_scheduler_handle = otto_server::swarm_scheduler::start(ctx.clone());
+    match ctx.swarm_repo.list_all_active_swarms().await {
+        Ok(active) => {
+            for s in active {
+                otto_server::swarm_runtime::start_coordinator(ctx.clone(), s.id.clone());
+            }
+            tracing::info!("swarm scheduler started; coordinators restored");
+        }
+        Err(e) => tracing::warn!("swarm restore: {e}"),
+    }
+
     // --- Usage tracking + system metrics (embedded ClickHouse) ---
     // The recorder mines usage from the activity-trail event stream; the sampler
     // periodically writes CPU/RAM. Both are cheap no-ops until ClickHouse is
@@ -487,7 +520,10 @@ async fn run(cfg: Config) -> Result<(), String> {
         .map_err(|e| format!("bind 127.0.0.1:{}: {e}", cfg.port))?;
     tracing::info!("listening on http://127.0.0.1:{}", cfg.port);
 
-    // Optional network listener from the settings table.
+    // Optional network listener from the settings table. Unlike loopback, the
+    // 0.0.0.0 listener is reachable from the LAN, so it is served over TLS
+    // (rustls) — never plain HTTP (audit S3). The cert+key live under
+    // <data_dir>/tls and are auto-generated (self-signed) on first use.
     let mut network_task = None;
     if let Some(value) = SettingsRepo::new(pool.clone())
         .get("network_listener")
@@ -504,24 +540,38 @@ async fn run(cfg: Config) -> Result<(), String> {
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|p| u16::try_from(p).ok())
                 .unwrap_or(cfg.port);
-            match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
-                Ok(listener) => {
-                    tracing::info!("network listener on http://0.0.0.0:{port}");
+            match load_or_make_tls_config(&cfg.data_dir).await {
+                Ok(tls) => {
+                    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+                    tracing::info!("network listener on https://0.0.0.0:{port} (TLS)");
                     let router = router.clone();
+                    // axum-server drives shutdown via its own Handle; bridge the
+                    // watch signal into a graceful_shutdown so the TLS listener
+                    // drains in step with the loopback one.
+                    let handle = axum_server::Handle::new();
                     let mut rx = shutdown_rx.clone();
+                    let shutdown_handle = handle.clone();
+                    tokio::spawn(async move {
+                        let _ = rx.changed().await;
+                        shutdown_handle
+                            .graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+                    });
                     network_task = Some(tokio::spawn(async move {
-                        let shutdown = async move {
-                            let _ = rx.changed().await;
-                        };
-                        if let Err(e) = axum::serve(listener, router)
-                            .with_graceful_shutdown(shutdown)
+                        // `into_make_service_with_connect_info::<SocketAddr>` makes
+                        // each request's real socket peer available to handlers via
+                        // `ConnectInfo<SocketAddr>` (used by the login throttle, S5).
+                        if let Err(e) = axum_server::bind_rustls(addr, tls)
+                            .handle(handle)
+                            .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                             .await
                         {
                             tracing::error!("network listener: {e}");
                         }
                     }));
                 }
-                Err(e) => tracing::error!("network listener bind 0.0.0.0:{port}: {e}"),
+                Err(e) => {
+                    tracing::error!("network listener TLS setup failed: {e}");
+                }
             }
         }
     }
@@ -530,10 +580,16 @@ async fn run(cfg: Config) -> Result<(), String> {
     let shutdown = async move {
         let _ = rx.changed().await;
     };
-    axum::serve(loopback, router)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(|e| format!("serve: {e}"))?;
+    // `into_make_service_with_connect_info::<SocketAddr>` exposes the real socket
+    // peer to handlers via `ConnectInfo<SocketAddr>` — the login throttle keys on
+    // it instead of a spoofable `X-Forwarded-For` header (audit S5).
+    axum::serve(
+        loopback,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+    .map_err(|e| format!("serve: {e}"))?;
 
     if let Some(task) = network_task {
         let _ = task.await;
@@ -576,6 +632,87 @@ fn augment_path() {
     }
     parts.push(current);
     std::env::set_var("PATH", parts.join(":"));
+}
+
+/// Build the rustls config for the 0.0.0.0 network listener from a PEM cert+key
+/// under `<data_dir>/tls`. On first use (no cert present) a self-signed cert is
+/// generated, persisted, and its SHA-256 fingerprint logged so operators can pin
+/// it. Errors (bad/unreadable PEM, generation failure) abort the network
+/// listener rather than silently falling back to plain HTTP.
+async fn load_or_make_tls_config(
+    data_dir: &std::path::Path,
+) -> Result<axum_server::tls_rustls::RustlsConfig, String> {
+    use axum_server::tls_rustls::RustlsConfig;
+
+    // Both `ring` and `aws-lc-rs` are linked into rustls in this tree, so the
+    // process-default crypto provider is ambiguous. Install `ring` explicitly
+    // (idempotent: a no-op if a provider is already installed) before building
+    // any TLS config, otherwise rustls panics at first use.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let tls_dir = data_dir.join("tls");
+    let cert_path = tls_dir.join("cert.pem");
+    let key_path = tls_dir.join("key.pem");
+
+    if !cert_path.exists() || !key_path.exists() {
+        std::fs::create_dir_all(&tls_dir)
+            .map_err(|e| format!("create {}: {e}", tls_dir.display()))?;
+        // Self-signed cert valid for loopback + LAN hostnames. The listener is
+        // reachable by IP on the LAN, so include both names and the loopback IP.
+        let sans = vec![
+            "localhost".to_string(),
+            "otto.local".to_string(),
+            "127.0.0.1".to_string(),
+        ];
+        let cert = rcgen::generate_simple_self_signed(sans)
+            .map_err(|e| format!("generate self-signed cert: {e}"))?;
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+        std::fs::write(&cert_path, &cert_pem)
+            .map_err(|e| format!("write {}: {e}", cert_path.display()))?;
+        std::fs::write(&key_path, &key_pem)
+            .map_err(|e| format!("write {}: {e}", key_path.display()))?;
+        // Lock the private key down to the owner.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
+        tracing::info!(
+            "network TLS: generated self-signed cert at {} (fingerprint {})",
+            cert_path.display(),
+            cert_fingerprint(cert.cert.der())
+        );
+    } else if let Ok(der) = std::fs::read(&cert_path) {
+        // Log the fingerprint of the existing cert too, so it's discoverable.
+        if let Some(fp) = pem_cert_fingerprint(&der) {
+            tracing::info!("network TLS: using cert at {} ({fp})", cert_path.display());
+        }
+    }
+
+    RustlsConfig::from_pem_file(&cert_path, &key_path)
+        .await
+        .map_err(|e| format!("load TLS cert/key: {e}"))
+}
+
+/// SHA-256 fingerprint of a DER cert, formatted as colon-separated hex.
+fn cert_fingerprint(der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(der);
+    digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Fingerprint the first certificate in a PEM file's bytes, if parseable.
+fn pem_cert_fingerprint(pem_bytes: &[u8]) -> Option<String> {
+    let mut reader = std::io::BufReader::new(pem_bytes);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+        .filter_map(|c| c.ok())
+        .collect();
+    certs.first().map(|c| cert_fingerprint(c.as_ref()))
 }
 
 async fn wait_for_signal() {

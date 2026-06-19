@@ -915,7 +915,7 @@ pub(crate) fn stringify_value(v: &serde_json::Value) -> String {
             let parts: Vec<String> = arr
                 .iter()
                 .filter(|e| !e.is_null())
-                .map(|e| stringify_value(e))
+                .map(stringify_value)
                 .filter(|s| !s.is_empty())
                 .collect();
             parts.join(", ")

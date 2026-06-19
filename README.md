@@ -45,6 +45,19 @@ bridges so an agent can work a ticket from a chat thread.
   relayed back. One agent per ticket, auto-archived when idle.
 - **Broadcast** — send one literal message to many live agent sessions at once
   (no AI in the loop) — e.g. tell every working agent to "wrap up and commit."
+- **Agent Swarm** — assemble a *swarm*: a team of role-specialized agents with an
+  org hierarchy (CEO → CTO → VP → Team Lead → Devs) that autonomously works
+  **projects** broken into **tasks**. A built-in **recruiter** drafts each agent
+  (role, "soul"/persona, skills, schedule); a per-swarm **Coordinator** schedules
+  ready work onto agents within a **parallel-session cap**, delegates leader→reports,
+  and routes hand-offs/reviews. Agents coordinate on a **shared board** you watch
+  live; every agent runs as a normal openable session. Watch progress in an **org
+  tree**, a **run-graph (DAG)**, and per-project **Kanban + filterable runs list**;
+  set agents to **scheduled runs** (e.g. a daily trend researcher); **pause / abort
+  all / resume** any time. Five preset swarms ship in the box. It's far leaner on
+  tokens than API-driven equivalents: sessions are **persistent and resumed** (no
+  whole-history re-feed each turn) and agents' outputs are read from transcripts/
+  files (zero model tokens).
 - **Connections** — open SSH / MySQL / Redis / MongoDB / ClickHouse sessions
   side-by-side with agents.
 - **Database Explorer** — a TablePlus-class browser for MySQL, Redis, MongoDB,

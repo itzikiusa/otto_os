@@ -61,6 +61,39 @@ impl IntoResponse for ApiErr {
 type ApiResult<T> = std::result::Result<T, ApiErr>;
 
 // ---------------------------------------------------------------------------
+// Ownership authorization
+// ---------------------------------------------------------------------------
+
+/// Reject access to an issue account that the caller does not own.
+///
+/// The caller is permitted only when they are the account owner or root. This
+/// guard is the single chokepoint for every handler that resolves an
+/// `account_id` and acts with that account's Atlassian credentials — without it,
+/// any authenticated user could read or write through another user's Jira /
+/// Confluence identity.
+fn authorize_account(account: &IssueAccount, user: &AuthUser) -> Result<(), Error> {
+    if account.user_id != user.0.id && !user.0.is_root {
+        return Err(Error::Forbidden("not the account owner".into()));
+    }
+    Ok(())
+}
+
+/// Load an issue account by id and authorize the caller in one step.
+///
+/// Returns the account only when the caller owns it (or is root). Every read /
+/// use handler must obtain accounts through this helper so the ownership check
+/// can never be forgotten.
+async fn load_authorized_account<S: IssuesCtx>(
+    s: &S,
+    id: &Id,
+    user: &AuthUser,
+) -> Result<IssueAccount, Error> {
+    let account = s.issues().get_account(id).await?;
+    authorize_account(&account, user)?;
+    Ok(account)
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -158,10 +191,7 @@ async fn update_account<S: IssuesCtx>(
     Path(id): Path<Id>,
     Json(req): Json<UpdateIssueAccountReq>,
 ) -> ApiResult<Json<IssueAccount>> {
-    let account = s.issues().get_account(&id).await?;
-    if account.user_id != user.0.id && !user.0.is_root {
-        return Err(Error::Forbidden("not the account owner".into()).into());
-    }
+    let account = load_authorized_account(&s, &id, &user).await?;
 
     // Merge: absent field keeps current value; present field overwrites.
     let label = req.label.as_deref().unwrap_or(&account.label);
@@ -193,10 +223,7 @@ async fn delete_account<S: IssuesCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
-    let account = s.issues().get_account(&id).await?;
-    if account.user_id != user.0.id && !user.0.is_root {
-        return Err(Error::Forbidden("not the account owner".into()).into());
-    }
+    let account = load_authorized_account(&s, &id, &user).await?;
     let _ = s.secrets().delete(&account.token_ref);
     s.issues().delete_account(&id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -204,14 +231,14 @@ async fn delete_account<S: IssuesCtx>(
 
 async fn list_projects<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Vec<IssueProject>>> {
     let account_id: Id = params
         .get("account_id")
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -223,7 +250,7 @@ async fn list_projects<S: IssuesCtx>(
 
 async fn search_issues<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Vec<IssueSummary>>> {
     let account_id: Id = params
@@ -239,7 +266,7 @@ async fn search_issues<S: IssuesCtx>(
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -251,10 +278,10 @@ async fn search_issues<S: IssuesCtx>(
 
 async fn get_issue<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Path((account_id, key)): Path<(Id, String)>,
 ) -> ApiResult<Json<IssueDetail>> {
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -266,14 +293,14 @@ async fn get_issue<S: IssuesCtx>(
 
 async fn list_spaces_cf<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Vec<ConfluenceSpace>>> {
     let account_id: Id = params
         .get("account_id")
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -285,7 +312,7 @@ async fn list_spaces_cf<S: IssuesCtx>(
 
 async fn search_pages_cf<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Vec<ConfluencePageSummary>>> {
     let account_id: Id = params
@@ -301,7 +328,7 @@ async fn search_pages_cf<S: IssuesCtx>(
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -321,10 +348,10 @@ async fn search_pages_cf<S: IssuesCtx>(
 /// changelog, attachments, links, and all non-empty fields with display labels.
 async fn get_issue_full<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Path((account_id, key)): Path<(Id, String)>,
 ) -> ApiResult<Json<IssueFull>> {
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -339,10 +366,10 @@ async fn get_issue_full<S: IssuesCtx>(
 /// Returns the list of status transitions available for the issue.
 async fn list_transitions<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Path((account_id, key)): Path<(Id, String)>,
 ) -> ApiResult<Json<Vec<JiraTransition>>> {
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -358,7 +385,7 @@ async fn list_transitions<S: IssuesCtx>(
 /// Returns `204 No Content` on success.
 async fn do_transition<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Path((account_id, key)): Path<(Id, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
@@ -367,7 +394,7 @@ async fn do_transition<S: IssuesCtx>(
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Invalid("transition_id is required".into()))?
         .to_string();
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -382,10 +409,10 @@ async fn do_transition<S: IssuesCtx>(
 /// Returns users that can be assigned to the issue.
 async fn list_assignable<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Path((account_id, key)): Path<(Id, String)>,
 ) -> ApiResult<Json<Vec<JiraUser>>> {
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -402,7 +429,7 @@ async fn list_assignable<S: IssuesCtx>(
 /// Returns `204 No Content` on success.
 async fn assign_issue<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Path((account_id, key)): Path<(Id, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
@@ -411,7 +438,7 @@ async fn assign_issue<S: IssuesCtx>(
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Invalid("account_id is required".into()))?
         .to_string();
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -428,10 +455,10 @@ async fn assign_issue<S: IssuesCtx>(
 /// browser can render images / PDFs directly.
 async fn get_attachment<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Path((account_id, _key, attachment_id)): Path<(Id, String, String)>,
 ) -> ApiResult<Response> {
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -461,10 +488,10 @@ async fn get_attachment<S: IssuesCtx>(
 /// Returns the non-subtask issue types for a Jira project (e.g. "Story", "Task", "Bug").
 async fn list_issue_types_handler<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Path((account_id, project_key)): Path<(Id, String)>,
 ) -> ApiResult<Json<Vec<String>>> {
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -480,7 +507,7 @@ async fn list_issue_types_handler<S: IssuesCtx>(
 /// Returns a [`CommentRef`] containing the new comment's `id` and optional URL.
 async fn add_comment<S: IssuesCtx>(
     State(s): State<S>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Path((account_id, key)): Path<(Id, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<Json<CommentRef>> {
@@ -489,7 +516,7 @@ async fn add_comment<S: IssuesCtx>(
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Invalid("body is required".into()))?
         .to_string();
-    let account = s.issues().get_account(&account_id).await?;
+    let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
@@ -497,4 +524,59 @@ async fn add_comment<S: IssuesCtx>(
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let comment_ref = client.add_comment(&key, &comment_body).await?;
     Ok(Json(comment_ref))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use otto_core::domain::{IssueProviderKind, User};
+
+    fn account_owned_by(owner: &str) -> IssueAccount {
+        IssueAccount {
+            id: "acct-1".into(),
+            user_id: owner.into(),
+            provider: IssueProviderKind::Jira,
+            label: "work".into(),
+            email: "owner@example.com".into(),
+            token_ref: "issueacct-1".into(),
+            base_url: "https://example.atlassian.net".into(),
+            token_expires_at: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn user(id: &str, is_root: bool) -> AuthUser {
+        AuthUser(User {
+            id: id.into(),
+            username: id.into(),
+            display_name: id.into(),
+            is_root,
+            disabled: false,
+            created_at: Utc::now(),
+        })
+    }
+
+    #[test]
+    fn owner_is_authorized() {
+        let account = account_owned_by("alice");
+        assert!(authorize_account(&account, &user("alice", false)).is_ok());
+    }
+
+    #[test]
+    fn non_owner_is_forbidden() {
+        let account = account_owned_by("alice");
+        let err = authorize_account(&account, &user("mallory", false)).unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "expected Forbidden, got {err:?}");
+    }
+
+    #[test]
+    fn root_can_access_any_account() {
+        let account = account_owned_by("alice");
+        assert!(authorize_account(&account, &user("root", true)).is_ok());
+    }
 }

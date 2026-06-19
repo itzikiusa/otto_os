@@ -1,0 +1,97 @@
+name: CI
+
+# Lint, type-check, and test the Rust workspace + the Svelte UI on every push
+# and pull request. The Tauri desktop app (apps/desktop/src-tauri) is a separate,
+# macOS-only workspace (launchd + Keychain + codesigning) and is intentionally
+# NOT built here — `cargo build --workspace` from the repo root covers the daemon
+# crates and `ottod`, which is what CI guards.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (fmt · clippy · test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Caches ~/.cargo registry/git + ./target, keyed on Cargo.lock.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Advisory-only for now: the existing tree predates rustfmt-in-CI and is not
+      # yet fully formatted (a one-time repo-wide `cargo fmt --all` belongs in its
+      # own dedicated commit, separate from feature work, to avoid blast-radius
+      # churn over in-flight branches). Reports drift without blocking; promote to
+      # blocking by removing `continue-on-error` once that format pass has landed.
+      - name: cargo fmt --check (advisory)
+        run: cargo fmt --all --check
+        continue-on-error: true
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  ui:
+    name: UI (svelte-check · tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      # `check` = svelte-check (against tsconfig.app.json) + tsc -p tsconfig.node.json.
+      - name: npm run check
+        run: npm run check
+
+      # Catches build-only breakage that type-checking alone misses.
+      - name: npm run build
+        run: npm run build
+
+  audit:
+    name: cargo audit (advisory)
+    runs-on: ubuntu-latest
+    # Advisory-only: a new RustSec advisory in the dependency tree should warn,
+    # not block a PR. Promote to blocking once the tree is triaged.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        run: cargo audit

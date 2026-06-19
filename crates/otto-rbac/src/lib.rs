@@ -12,7 +12,7 @@ use otto_core::{Error, Id, Result};
 use otto_state::WorkspacesRepo;
 use sqlx::SqlitePool;
 
-pub use passwords::{hash_password, verify_password};
+pub use passwords::{hash_password, validate_password, verify_password, MIN_PASSWORD_LEN};
 pub use tokens::AuthRepo;
 
 /// `TokenAuthenticator` backed by [`AuthRepo`].

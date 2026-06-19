@@ -625,9 +625,9 @@ fn strip_leading_comments(sql: &str) -> &str {
     let mut s = sql.trim_start();
     loop {
         if let Some(rest) = s.strip_prefix("--") {
-            s = rest.splitn(2, '\n').nth(1).unwrap_or("").trim_start();
+            s = rest.split_once('\n').map(|x| x.1).unwrap_or("").trim_start();
         } else if let Some(rest) = s.strip_prefix("/*") {
-            s = rest.splitn(2, "*/").nth(1).unwrap_or("").trim_start();
+            s = rest.split_once("*/").map(|x| x.1).unwrap_or("").trim_start();
         } else {
             break;
         }

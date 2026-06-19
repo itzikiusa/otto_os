@@ -1,0 +1,23 @@
+[package]
+name = "otto-swarm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-core = { workspace = true }
+otto-state = { workspace = true }
+otto-context = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+include_dir = "0.7"
+serde_yaml = "0.9"
+
+[dev-dependencies]
+sqlx = { workspace = true }
+tempfile = { workspace = true }

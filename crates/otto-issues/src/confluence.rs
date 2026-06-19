@@ -785,8 +785,8 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                         out.push('\n');
                     }
                 }
-                "a" => {
-                    if !is_close {
+                "a"
+                    if !is_close => {
                         // Extract href attribute.
                         let href = extract_attr(inner, "href").unwrap_or_default();
                         // We'll buffer the text between <a> and </a> — but that
@@ -822,7 +822,6 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                         }
                     }
                     // Closing </a> is handled by the look-ahead above.
-                }
                 // ac:* structured macros and other Confluence-specific tags → skip silently.
                 _ => {}
             }
@@ -870,7 +869,7 @@ fn strip_tags(s: &str) -> String {
 
 /// Extract the value of a named attribute from tag inner content.
 /// Handles both `name="value"` and `name='value'`.
-fn extract_attr<'a>(tag_inner: &'a str, attr: &str) -> Option<String> {
+fn extract_attr(tag_inner: &str, attr: &str) -> Option<String> {
     // Look for `attr="`  or `attr='`
     let needle_dq = format!("{}=\"", attr);
     let needle_sq = format!("{}='", attr);

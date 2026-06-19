@@ -428,6 +428,7 @@ impl MysqlDriver {
         };
         // Preserve first-seen order of Key_name, columns ordered by Seq_in_index.
         let mut order: Vec<String> = Vec::new();
+        #[allow(clippy::type_complexity)]
         let mut by_name: std::collections::HashMap<String, (bool, Option<String>, Vec<(i64, String)>)> =
             std::collections::HashMap::new();
         for row in rows {
@@ -645,10 +646,10 @@ fn first_keyword(statement: &str) -> String {
     loop {
         if let Some(rest) = s.strip_prefix("--") {
             // Line comment: skip to end of line.
-            s = rest.splitn(2, '\n').nth(1).unwrap_or("").trim_start();
+            s = rest.split_once('\n').map(|x| x.1).unwrap_or("").trim_start();
         } else if let Some(rest) = s.strip_prefix("/*") {
             // Block comment: skip to closing.
-            s = rest.splitn(2, "*/").nth(1).unwrap_or("").trim_start();
+            s = rest.split_once("*/").map(|x| x.1).unwrap_or("").trim_start();
         } else {
             break;
         }
@@ -750,10 +751,8 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
         return v.map(Value::Bool).unwrap_or(Value::Null);
     }
     // JSON columns decode straight to a Value.
-    if let Ok(v) = row.try_get::<Option<Value>, _>(idx) {
-        if let Some(val) = v {
-            return val;
-        }
+    if let Ok(Some(val)) = row.try_get::<Option<Value>, _>(idx) {
+        return val;
     }
     // Text (also covers most date/time types serialized to string).
     if let Ok(v) = row.try_get::<Option<String>, _>(idx) {

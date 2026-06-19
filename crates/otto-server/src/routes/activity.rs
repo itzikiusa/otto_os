@@ -359,6 +359,7 @@ async fn notify(
             action: Some(NoticeAction::OpenSession {
                 session_id: session.id.clone(),
             }),
+            user_id: None, // global session notice
         })
         .await;
 }

@@ -43,7 +43,7 @@ pub fn skill_body(name: &str) -> Option<&'static str> {
         return None;
     }
     PRODUCT_SKILLS
-        .get_file(&format!("{name}/SKILL.md"))
+        .get_file(format!("{name}/SKILL.md"))
         .and_then(|f| f.contents_utf8())
 }
 

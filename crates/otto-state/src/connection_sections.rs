@@ -235,7 +235,7 @@ mod tests {
             .unwrap();
         assert_eq!(aws.parent_id.as_deref(), Some(a.id.as_str()));
         assert_eq!(aws.position, 0);
-        assert_eq!(ams.position, 0 + 1);
+        assert_eq!(ams.position, 1);
 
         // A "db"-scoped section is a separate tree: its top-level position
         // restarts at 0 and it never shows up in the "connections" listing.

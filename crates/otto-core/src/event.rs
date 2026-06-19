@@ -36,7 +36,15 @@ pub enum Event {
     /// A persisted notification was created (credential expiry, session event,
     /// …). The SPA appends it to the notification center and may raise a native
     /// OS notification for warn/error severities.
-    Notification { notice: Notice },
+    ///
+    /// `user_id` is the notice's owner: `None` = a global / system notice
+    /// delivered to every authenticated client; `Some(id)` is delivered only to
+    /// that user's WS connections (see `ws_events::allowed`).
+    Notification {
+        notice: Notice,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<Id>,
+    },
     /// A self-reflection run started.
     ImprovementRunStarted { workspace_id: Id, run_id: Id },
     /// A self-reflection run finished. `status` is one of
@@ -73,5 +81,32 @@ pub enum Event {
         workspace_id: Id,
         session_id: Id,
         tasks: Vec<AgentTask>,
+    },
+    /// A swarm run was created or changed. `run` is the serialized SwarmRun row
+    /// (otto-core can't depend on otto-state, so it travels as JSON).
+    SwarmRunUpdated {
+        workspace_id: Id,
+        swarm_id: Id,
+        run: serde_json::Value,
+    },
+    /// A swarm task was created or changed. `task` is the serialized SwarmTask row.
+    SwarmTaskUpdated {
+        workspace_id: Id,
+        swarm_id: Id,
+        project_id: Id,
+        task: serde_json::Value,
+    },
+    /// A new message was posted to a swarm's shared board. `message` is the
+    /// serialized SwarmMessage row.
+    SwarmMessagePosted {
+        workspace_id: Id,
+        swarm_id: Id,
+        message: serde_json::Value,
+    },
+    /// A swarm's lifecycle status changed (active | paused | aborted).
+    SwarmStatus {
+        workspace_id: Id,
+        swarm_id: Id,
+        status: String,
     },
 }

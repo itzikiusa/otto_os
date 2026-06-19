@@ -202,9 +202,24 @@ export type OttoEvent =
     }
   | { type: 'session_removed'; session_id: Id; workspace_id: Id }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; title: string; body: string }
-  | { type: 'notification'; notice: Notice }
+  | { type: 'notification'; notice: Notice; user_id?: string | null }
   | { type: 'trail_appended'; workspace_id: Id; session_id: Id; event: TrailEvent }
-  | { type: 'tasks_updated'; workspace_id: Id; session_id: Id; tasks: AgentTask[] };
+  | { type: 'tasks_updated'; workspace_id: Id; session_id: Id; tasks: AgentTask[] }
+  | { type: 'swarm_run_updated'; workspace_id: Id; swarm_id: Id; run: Record<string, unknown> }
+  | {
+      type: 'swarm_task_updated';
+      workspace_id: Id;
+      swarm_id: Id;
+      project_id: Id;
+      task: Record<string, unknown>;
+    }
+  | {
+      type: 'swarm_message_posted';
+      workspace_id: Id;
+      swarm_id: Id;
+      message: Record<string, unknown>;
+    }
+  | { type: 'swarm_status'; workspace_id: Id; swarm_id: Id; status: string };
 
 // ---------------------------------------------------------------------------
 // Notifications (notification center)
@@ -273,6 +288,28 @@ export interface LoginReq {
 export interface LoginResp {
   token: string;
   user: User;
+}
+
+/** POST /api/v1/auth/tokens — mint a long-lived API (personal access) token. */
+export interface CreateApiTokenReq {
+  label?: string | null;
+}
+
+/** Metadata for one API token. NEVER carries the secret (only its prefix). */
+export interface ApiTokenInfo {
+  id: string;
+  label?: string | null;
+  /** First 12 chars of the raw token, for identification in a list. */
+  token_prefix: string;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+}
+
+/** Response for POST /api/v1/auth/tokens: raw secret (shown once) + metadata. */
+export interface CreateApiTokenResp {
+  token: string;
+  info: ApiTokenInfo;
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ pub mod api_helpers;
 pub mod auth;
 pub mod error;
 pub mod insights;
+pub mod login_throttle;
 pub mod lsp;
 pub mod modules;
 pub mod monitor;
@@ -18,12 +19,17 @@ pub mod routes;
 pub mod skill_eval;
 pub mod spa;
 pub mod state;
+pub mod swarm_run;
+pub mod swarm_runtime;
+pub mod swarm_scheduler;
+pub mod swarm_workspace;
 pub mod workflow_engine;
 pub mod ws_events;
 
+use axum::http::{header, HeaderValue, Method};
 use axum::routing::get;
 use axum::Router;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 pub use auth::{require_ws_role, CurrentUser};
@@ -71,6 +77,84 @@ pub fn build_router(
         app = app.merge(extra);
     }
 
-    app.layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+    app.layer(TraceLayer::new_for_http()).layer(cors_layer())
+}
+
+/// CORS policy for the daemon.
+///
+/// Auth is a bearer token in the `Authorization` header (never a cookie), so
+/// CORS is not the primary security boundary — but we still drop the previous
+/// `CorsLayer::permissive()` (which echoed *any* origin) for a restricted
+/// allowlist that rejects arbitrary public web origins while keeping every way
+/// the UI actually reaches the daemon working:
+///   - the Tauri native shell (`tauri://localhost`, `http://tauri.localhost`);
+///   - same-origin / loopback (the SPA served by the daemon, and `vite` in dev);
+///   - private LAN + Tailscale hosts (the remote/mobile access feature).
+///
+/// `allow_credentials` stays off (we don't use cookies), which keeps a
+/// non-wildcard origin list valid. Methods/headers are pinned to what the API
+/// and the SPA use.
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _parts| {
+            origin
+                .to_str()
+                .map(is_allowed_origin)
+                .unwrap_or(false)
+        }))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+}
+
+/// Whether a request `Origin` is trusted by [`cors_layer`].
+///
+/// Accepts the Tauri webview origins, loopback (any port), RFC-1918 private LAN
+/// ranges, and Tailscale (`*.ts.net`) hosts — the surfaces the desktop app and
+/// the remote/mobile access feature legitimately use. Everything else (arbitrary
+/// public web origins) is rejected.
+fn is_allowed_origin(origin: &str) -> bool {
+    // Tauri native shell.
+    if origin == "tauri://localhost" || origin == "http://tauri.localhost" {
+        return true;
+    }
+    // Strip the scheme; only http(s) origins beyond this point.
+    let rest = match origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    {
+        Some(r) => r,
+        None => return false,
+    };
+    // Host is everything before an optional `:port`. IPv6 literals are bracketed
+    // (`[::1]:7700`); for those, key off the closing bracket.
+    let host = if let Some(end) = rest.find(']') {
+        &rest[..=end]
+    } else {
+        rest.split(':').next().unwrap_or(rest)
+    };
+
+    host == "localhost"
+        || host == "127.0.0.1"
+        || host == "[::1]"
+        || host.ends_with(".localhost")
+        || host.ends_with(".ts.net") // Tailscale
+        || is_private_lan_host(host)
+}
+
+/// True for RFC-1918 private IPv4 hosts (`10.0.0.0/8`, `172.16.0.0/12`,
+/// `192.168.0.0/16`) so the daemon is reachable from other devices on a home or
+/// office LAN (the remote/mobile access feature).
+fn is_private_lan_host(host: &str) -> bool {
+    let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let [a, b, ..] = ip.octets();
+    a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168)
 }

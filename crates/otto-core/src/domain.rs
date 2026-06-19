@@ -1159,20 +1159,16 @@ impl ImprovementEditStatus {
 }
 
 /// Per-workspace autonomy policy for applying edits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Autonomy {
     /// Low-risk auto-applies; structural queues.
+    #[default]
     Tiered,
     /// Everything queues for approval.
     Propose,
     /// Everything auto-applies.
     Auto,
-}
-impl Default for Autonomy {
-    fn default() -> Self {
-        Self::Tiered
-    }
 }
 impl Autonomy {
     pub fn parse(s: &str) -> Option<Self> {

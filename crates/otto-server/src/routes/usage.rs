@@ -22,17 +22,15 @@ use crate::state::ServerCtx;
 /// `settings` key the usage config is persisted under.
 const SETTINGS_KEY: &str = "usage";
 
-fn load_config(ctx: &ServerCtx) -> impl std::future::Future<Output = UsageConfig> + '_ {
-    async move {
-        SettingsRepo::new(ctx.pool.clone())
-            .get(SETTINGS_KEY)
-            .await
-            .ok()
-            .flatten()
-            .as_ref()
-            .map(|v| UsageConfig::from_json(Some(v)))
-            .unwrap_or_default()
-    }
+async fn load_config(ctx: &ServerCtx) -> UsageConfig {
+    SettingsRepo::new(ctx.pool.clone())
+        .get(SETTINGS_KEY)
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .map(|v| UsageConfig::from_json(Some(v)))
+        .unwrap_or_default()
 }
 
 async fn save_config(ctx: &ServerCtx, cfg: &UsageConfig) -> Result<(), ApiError> {
@@ -237,7 +235,13 @@ pub async fn ingest(
     let cost = if req.cost_usd > 0.0 {
         req.cost_usd
     } else {
-        otto_usage::estimate_cost(&req.model, req.input_tokens, req.output_tokens)
+        otto_usage::estimate_cost(
+            &req.model,
+            req.input_tokens,
+            req.output_tokens,
+            req.cache_read_tokens,
+            req.cache_write_tokens,
+        )
     };
     ctx.usage.record(UsageEvent {
         workspace_id: session.workspace_id,
@@ -304,8 +308,8 @@ pub fn trail_to_usage(
         .and_then(|d| d.get("cost_usd"))
         .and_then(Value::as_f64)
         .unwrap_or(0.0);
-    if cost == 0.0 && (input > 0 || output > 0) {
-        cost = otto_usage::estimate_cost(&model, input, output);
+    if cost == 0.0 && (input > 0 || output > 0 || cache_read > 0 || cache_write > 0) {
+        cost = otto_usage::estimate_cost(&model, input, output, cache_read, cache_write);
     }
 
     Some(UsageEvent {

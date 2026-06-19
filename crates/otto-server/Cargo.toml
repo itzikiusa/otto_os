@@ -37,6 +37,7 @@ otto-context.workspace = true
 otto-skills.workspace = true
 otto-usage.workspace = true
 otto-product.workspace = true
+otto-swarm.workspace = true
 otto-pty.workspace = true
 reqwest.workspace = true
 chrono.workspace = true

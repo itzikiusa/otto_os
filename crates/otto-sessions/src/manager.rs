@@ -294,7 +294,7 @@ impl SessionManager {
                 s.status,
                 SessionStatus::Running | SessionStatus::Working | SessionStatus::Idle
             );
-            let targeted = targets.map_or(true, |ids| ids.iter().any(|t| t == &s.id));
+            let targeted = targets.is_none_or(|ids| ids.iter().any(|t| t == &s.id));
             if s.kind == SessionKind::Agent && live && targeted {
                 if let Err(e) = self.submit_text(&s.id, text).await {
                     tracing::warn!(session = %s.id, "broadcast failed: {e}");
@@ -428,9 +428,7 @@ impl SessionManager {
                 let mut spec = self.providers.build_spec(&provider, &sid, &cwd, false)?;
                 // Append --add-dir args from req.meta.extra_dirs
                 let meta_val = req
-                    .meta
-                    .as_ref()
-                    .map(|m| m.clone())
+                    .meta.clone()
                     .unwrap_or(serde_json::json!({}));
                 spec.args.extend(add_dir_args(&provider, &meta_val));
                 let psid = self.providers.supports_resume(&provider).then_some(sid);

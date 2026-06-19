@@ -472,8 +472,173 @@ async fn run_widget<S: DbViewerCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Response> {
     let widget = ctx.db().get_widget(&id).await?;
-    ctx.roles()
-        .check(&user, &widget.workspace_id, WorkspaceRole::Viewer)
-        .await?;
+    // Security (audit S7): `run_widget` executes the widget's stored statement
+    // through the SAME `DbViewerService::run` path as `run_query` — which can
+    // run arbitrary SQL/commands, including writes and DDL. It must therefore
+    // require the SAME role as `run_query`: `Editor` (for global connections:
+    // root only via `check_conn_role`). Gating it on `Viewer` was a privilege
+    // escalation — a workspace Viewer could trigger arbitrary stored writes by
+    // running a dashboard tile. We deliberately do NOT try to read-only-classify
+    // the statement here: that classification is per-engine (SQL keywords vs
+    // Redis commands vs Mongo ops) and lives privately in each driver, so a
+    // route-level reimplementation would be exactly the bypassable half-measure
+    // we're trying to avoid. Gating on the connection (not just the widget's
+    // workspace) also matches every other execution path and correctly handles
+    // global connections.
+    let conn = ctx.db().get_connection(&widget.connection_id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
     Ok(Json(ctx.db().run_widget(&id).await?).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Role-gate tests for the connection-execution path that `run_widget` now
+    //! shares with `run_query` (audit S7). We exercise [`check_conn_role`]
+    //! directly: it is the load-bearing gate, and testing it with a recording
+    //! [`RoleChecker`] avoids standing up a full `DbViewerService` (DB + secrets)
+    //! while still proving the security property — a Viewer is rejected where
+    //! `Editor` is required, and global connections stay root-only.
+
+    use std::sync::Mutex;
+
+    use otto_core::auth::{BoxFuture, RoleChecker};
+    use otto_core::domain::{Connection, ConnectionKind, User, WorkspaceRole};
+    use otto_core::{new_id, Error, Id, Result};
+
+    use super::check_conn_role;
+    use crate::service::DbViewerService;
+    use std::sync::Arc;
+
+    /// A `RoleChecker` whose verdict is fixed per `(role-held)` and which records
+    /// the `min` role it was asked to verify, so a test can assert the gate
+    /// demanded `Editor` (not `Viewer`).
+    struct StubRoles {
+        /// The role this user actually holds in the workspace.
+        held: WorkspaceRole,
+        /// The last `min` role `check` was asked for.
+        last_min: Mutex<Option<WorkspaceRole>>,
+    }
+
+    impl StubRoles {
+        fn new(held: WorkspaceRole) -> Self {
+            Self {
+                held,
+                last_min: Mutex::new(None),
+            }
+        }
+    }
+
+    impl RoleChecker for StubRoles {
+        fn check<'a>(
+            &'a self,
+            _user: &'a User,
+            _workspace_id: &'a Id,
+            min: WorkspaceRole,
+        ) -> BoxFuture<'a, Result<()>> {
+            *self.last_min.lock().unwrap() = Some(min);
+            // `held >= min` (WorkspaceRole derives Ord: Viewer<Editor<Admin, the
+            // same ordering otto-rbac uses) passes; else 403.
+            let ok = self.held >= min;
+            Box::pin(async move {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(Error::Forbidden("insufficient role".into()))
+                }
+            })
+        }
+    }
+
+    /// A `DbViewerCtx` carrying only the roles stub — `db()` is never touched by
+    /// `check_conn_role`, so a check-only test needs no live service.
+    #[derive(Clone)]
+    struct TestCtx {
+        roles: Arc<dyn RoleChecker>,
+    }
+
+    impl super::DbViewerCtx for TestCtx {
+        fn db(&self) -> &Arc<DbViewerService> {
+            unreachable!("check_conn_role must not dereference the service")
+        }
+        fn roles(&self) -> &Arc<dyn RoleChecker> {
+            &self.roles
+        }
+    }
+
+    fn user(is_root: bool) -> User {
+        User {
+            id: new_id(),
+            username: "u".into(),
+            display_name: "U".into(),
+            is_root,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn conn(workspace_id: Option<Id>) -> Connection {
+        Connection {
+            id: new_id(),
+            workspace_id,
+            name: "c".into(),
+            kind: ConnectionKind::Mysql,
+            params: serde_json::json!({}),
+            secret_ref: None,
+            first_command: None,
+            section_id: None,
+            created_by: new_id(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn viewer_is_rejected_from_widget_execution_gate() {
+        // A workspace Viewer hitting the run_widget gate (Editor required) → 403.
+        let stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
+        let ctx = TestCtx {
+            roles: stub.clone(),
+        };
+        let ws = new_id();
+        let c = conn(Some(ws));
+        let err = check_conn_role(&ctx, &user(false), &c, WorkspaceRole::Editor)
+            .await
+            .expect_err("viewer must be denied Editor");
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+        // And the gate really demanded Editor, not Viewer.
+        assert_eq!(*stub.last_min.lock().unwrap(), Some(WorkspaceRole::Editor));
+    }
+
+    #[tokio::test]
+    async fn editor_passes_widget_execution_gate() {
+        // The legitimate dashboard editor still runs widgets.
+        let stub = Arc::new(StubRoles::new(WorkspaceRole::Editor));
+        let ctx = TestCtx { roles: stub };
+        let c = conn(Some(new_id()));
+        check_conn_role(&ctx, &user(false), &c, WorkspaceRole::Editor)
+            .await
+            .expect("editor allowed");
+    }
+
+    #[tokio::test]
+    async fn global_connection_requires_root() {
+        // A global (workspace-less) connection: a non-root user is denied
+        // regardless of any workspace role, while root passes — matching every
+        // other execution path.
+        let stub = Arc::new(StubRoles::new(WorkspaceRole::Admin));
+        let ctx = TestCtx {
+            roles: stub.clone(),
+        };
+        let global = conn(None);
+
+        let err = check_conn_role(&ctx, &user(false), &global, WorkspaceRole::Editor)
+            .await
+            .expect_err("non-root denied on global conn");
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+        // The roles checker isn't even consulted for a global connection.
+        assert_eq!(*stub.last_min.lock().unwrap(), None);
+
+        check_conn_role(&ctx, &user(true), &global, WorkspaceRole::Editor)
+            .await
+            .expect("root passes on global conn");
+    }
 }

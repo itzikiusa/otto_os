@@ -236,6 +236,7 @@ impl CredentialMonitor {
                 action: Some(NoticeAction::Reauth {
                     target: reauth_target.to_string(),
                 }),
+                user_id: None, // global credential notice
             })
             .await
             .map_err(|e| tracing::warn!("credential monitor: create expiry notice: {e}"));
@@ -291,6 +292,7 @@ impl CredentialMonitor {
                         action: Some(NoticeAction::Reauth {
                             target: target.to_string(),
                         }),
+                        user_id: None, // global credential notice
                     })
                     .await
                     .map_err(|e| tracing::warn!("credential monitor: agent notice {target}: {e}"));
@@ -570,6 +572,7 @@ async fn handle_session_transition(
             action: Some(NoticeAction::OpenSession {
                 session_id: session_id.clone(),
             }),
+            user_id: None, // global session notice
         })
         .await
         .map_err(|e| tracing::warn!("session events: create notice: {e}"));
@@ -696,6 +699,7 @@ impl OutputScanner for AuthScanner {
                     ),
                     source_key: Some(format!("session_auth:{session_id}")),
                     action: Some(NoticeAction::Reauth { target: provider }),
+                    user_id: None, // global credential notice
                 })
                 .await
                 .map_err(|e| tracing::warn!("mid-session auth notice: {e}"));

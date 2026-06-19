@@ -1,0 +1,271 @@
+// Agent Swarm DTOs — section-local mirror of the Rust contract (otto_state::swarm
+// + otto_swarm types). snake_case fields, ULID string ids.
+
+export type Id = string;
+
+export type SwarmStatus = 'active' | 'paused' | 'aborted';
+export type AgentStatus = 'active' | 'paused';
+export type TaskStatus =
+  | 'backlog'
+  | 'todo'
+  | 'in_progress'
+  | 'in_review'
+  | 'blocked'
+  | 'done'
+  | 'cancelled';
+export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
+export type RunStatus = 'queued' | 'running' | 'waiting' | 'done' | 'error' | 'stopped';
+export type MessageKind =
+  | 'message'
+  | 'idea'
+  | 'review_request'
+  | 'review'
+  | 'decision'
+  | 'status'
+  | 'concern'
+  | 'escalation'
+  | 'handoff'
+  | 'system';
+
+export interface SwarmConfig {
+  provider?: string;
+  model?: string | null;
+  max_parallel_sessions?: number;
+  cwd_mode?: string;
+  default_soul?: string;
+  auto_submit?: boolean;
+  [k: string]: unknown;
+}
+
+export interface Swarm {
+  id: Id;
+  workspace_id: Id;
+  name: string;
+  description: string;
+  preset_slug?: string | null;
+  status: SwarmStatus;
+  config: SwarmConfig;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentSkill {
+  name: string;
+  must_use: boolean;
+}
+
+export interface AgentSchedule {
+  cadence: 'interval' | 'daily' | 'weekly';
+  every_min?: number;
+  at?: string;
+  weekday?: number;
+  directive: string;
+  enabled: boolean;
+  last_run?: string;
+}
+
+export interface SwarmAgent {
+  id: Id;
+  swarm_id: Id;
+  workspace_id: Id;
+  name: string;
+  title: string;
+  reports_to?: Id | null;
+  provider: string;
+  model?: string | null;
+  soul_name?: string | null;
+  soul_md?: string | null;
+  specialization: string;
+  scope_md: string;
+  skills: AgentSkill[];
+  schedule?: AgentSchedule | null;
+  cwd_mode?: string | null;
+  avatar: string;
+  status: AgentStatus;
+  order_idx: number;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SwarmProject {
+  id: Id;
+  swarm_id: Id;
+  workspace_id: Id;
+  name: string;
+  description: string;
+  repo_path?: string | null;
+  goal_md?: string | null;
+  status: 'active' | 'archived';
+  order_idx: number;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SwarmTask {
+  id: Id;
+  project_id: Id;
+  swarm_id: Id;
+  workspace_id: Id;
+  title: string;
+  description: string;
+  assignee_agent_id?: Id | null;
+  status: TaskStatus;
+  priority: TaskPriority;
+  parent_task_id?: Id | null;
+  depends_on: Id[];
+  labels: string[];
+  result_ref?: string | null;
+  delegated: boolean;
+  order_idx: number;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SwarmRun {
+  id: Id;
+  swarm_id: Id;
+  workspace_id: Id;
+  project_id?: Id | null;
+  task_id?: Id | null;
+  agent_id: Id;
+  session_id?: Id | null;
+  kind: string;
+  trigger: string;
+  status: RunStatus;
+  attempt: number;
+  summary?: string | null;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+  tokens_input?: number | null;
+  tokens_output?: number | null;
+  cost_usd?: number | null;
+  enqueued_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface SwarmMessage {
+  id: Id;
+  swarm_id: Id;
+  workspace_id: Id;
+  project_id?: Id | null;
+  task_id?: Id | null;
+  run_id?: Id | null;
+  author_agent_id?: Id | null;
+  author_user_id?: Id | null;
+  to_agent_id?: Id | null;
+  kind: MessageKind;
+  body: string;
+  meta: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface SwarmCounts {
+  agents: number;
+  projects: number;
+  tasks: number;
+  running_runs: number;
+}
+
+export interface SwarmDetail extends Swarm {
+  agents: SwarmAgent[];
+  projects: SwarmProject[];
+  counts: SwarmCounts;
+}
+
+export interface GraphNode {
+  id: string;
+  kind: 'task' | 'run';
+  label: string;
+  status: string;
+  agent_id?: Id | null;
+  session_id?: Id | null;
+  project_id?: Id | null;
+}
+
+export interface GraphEdge {
+  from: string;
+  to: string;
+  kind: 'depends' | 'handoff' | 'review';
+}
+
+export interface SwarmGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface PresetAgent {
+  key: string;
+  name: string;
+  title: string;
+  reports_to?: string | null;
+  provider: string;
+  specialization: string;
+}
+
+export interface SwarmPreset {
+  slug: string;
+  name: string;
+  description: string;
+  max_parallel_sessions: number;
+  agents: PresetAgent[];
+}
+
+export interface RecruitedSkill {
+  name: string;
+  must_use: boolean;
+  why: string;
+}
+
+export interface RecruitedAgent {
+  name: string;
+  title: string;
+  reports_to_title?: string | null;
+  specialization: string;
+  soul_md: string;
+  scope_md: string;
+  skills: RecruitedSkill[];
+  suggested_provider: string;
+  suggested_model?: string | null;
+  suggested_schedule?: AgentSchedule | null;
+  avatar: string;
+}
+
+export interface CreateAgentReq {
+  name: string;
+  provider: string;
+  title?: string;
+  reports_to?: Id | null;
+  model?: string | null;
+  soul_name?: string | null;
+  soul_md?: string | null;
+  specialization?: string;
+  scope_md?: string;
+  skills?: AgentSkill[];
+  schedule?: AgentSchedule | null;
+  cwd_mode?: string | null;
+  avatar?: string;
+  order_idx?: number;
+}
+
+export type UpdateAgentReq = Partial<CreateAgentReq> & { status?: AgentStatus };
+
+export interface RunFilters {
+  swarm_id?: Id;
+  project_id?: Id;
+  agent_id?: Id;
+  status?: RunStatus;
+}
+
+export const TASK_COLUMNS: TaskStatus[] = [
+  'backlog',
+  'todo',
+  'in_progress',
+  'in_review',
+  'blocked',
+  'done',
+];

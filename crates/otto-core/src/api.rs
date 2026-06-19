@@ -62,6 +62,33 @@ pub struct LoginResp {
     pub user: User,
 }
 
+/// `POST /api/v1/auth/tokens` — mint a long-lived API (personal access) token.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateApiTokenReq {
+    /// Human-friendly name, e.g. "cli" or "ci". Optional.
+    pub label: Option<String>,
+}
+
+/// Metadata for one API token. NEVER carries the secret (only its prefix).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiTokenInfo {
+    pub id: Id,
+    pub label: Option<String>,
+    /// First 12 chars of the raw token, for identification in a list.
+    pub token_prefix: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Response for `POST /api/v1/auth/tokens`: the raw secret is returned exactly
+/// once (it is only ever stored hashed) alongside the new token's metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateApiTokenResp {
+    pub token: String,
+    pub info: ApiTokenInfo,
+}
+
 // ---------------------------------------------------------------------------
 // Users / workspaces
 // ---------------------------------------------------------------------------

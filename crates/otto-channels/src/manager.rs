@@ -48,43 +48,6 @@ pub struct ChannelHandle {
     _supervisor: JoinHandle<()>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::{TimeZone, Utc};
-    use otto_core::domain::Integration;
-
-    fn integration(channel: Channel, updated_at: chrono::DateTime<Utc>) -> Integration {
-        Integration {
-            workspace_id: "ws_1".to_string(),
-            channel,
-            enabled: true,
-            allowed_users: String::new(),
-            agent_reply: true,
-            reply_instructions: String::new(),
-            channel_id: String::new(),
-            preferred_cli: String::new(),
-            has_bot_token: true,
-            has_app_token: channel == Channel::Slack,
-            updated_at,
-        }
-    }
-
-    #[test]
-    fn generation_signature_changes_when_integration_is_updated() {
-        let old = vec![integration(
-            Channel::Slack,
-            Utc.with_ymd_and_hms(2026, 6, 13, 8, 0, 0).unwrap(),
-        )];
-        let new = vec![integration(
-            Channel::Slack,
-            Utc.with_ymd_and_hms(2026, 6, 13, 8, 1, 0).unwrap(),
-        )];
-
-        assert_ne!(generation_signature(&old), generation_signature(&new));
-    }
-}
-
 impl ChannelHandle {
     /// Signal the supervisor + all listener tasks to stop (best-effort).
     pub fn shutdown(&self) {
@@ -259,5 +222,42 @@ impl ChannelManager {
             }
         }
         count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use otto_core::domain::Integration;
+
+    fn integration(channel: Channel, updated_at: chrono::DateTime<Utc>) -> Integration {
+        Integration {
+            workspace_id: "ws_1".to_string(),
+            channel,
+            enabled: true,
+            allowed_users: String::new(),
+            agent_reply: true,
+            reply_instructions: String::new(),
+            channel_id: String::new(),
+            preferred_cli: String::new(),
+            has_bot_token: true,
+            has_app_token: channel == Channel::Slack,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn generation_signature_changes_when_integration_is_updated() {
+        let old = vec![integration(
+            Channel::Slack,
+            Utc.with_ymd_and_hms(2026, 6, 13, 8, 0, 0).unwrap(),
+        )];
+        let new = vec![integration(
+            Channel::Slack,
+            Utc.with_ymd_and_hms(2026, 6, 13, 8, 1, 0).unwrap(),
+        )];
+
+        assert_ne!(generation_signature(&old), generation_signature(&new));
     }
 }

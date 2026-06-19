@@ -139,6 +139,7 @@ impl GitStore {
     /// - `namespace` / `api_base_url` are `Option<String>` (None = clear to NULL).
     /// - `token_expires_at` is the final value (None = NULL); callers wanting
     ///   "absent keeps current" merge against the existing account first.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_account(
         &self,
         id: &Id,

@@ -12,6 +12,7 @@ pub mod meta;
 pub mod notifications;
 pub mod onboarding;
 pub mod settings;
+pub mod swarm_ingest;
 pub mod usage;
 pub mod users;
 pub mod workflows;
@@ -36,6 +37,8 @@ pub fn public_routes() -> Router<ServerCtx> {
         .route("/ingest/codex", post(activity::codex_ingest))
         // Provider token-usage ingest (same per-session token gate as above).
         .route("/ingest/usage", post(usage::ingest))
+        // Swarm agents post to the shared board via their per-session token.
+        .route("/ingest/swarm/board", post(swarm_ingest::board_ingest))
 }
 
 /// Routes that require a bearer token (the auth middleware is layered on top
@@ -44,6 +47,12 @@ pub fn protected_routes() -> Router<ServerCtx> {
     Router::new()
         .route("/auth/logout", post(auth_routes::logout))
         .route("/auth/me", get(auth_routes::me))
+        // --- API tokens (personal access tokens) ------------------------
+        .route(
+            "/auth/tokens",
+            get(auth_routes::list_tokens).post(auth_routes::create_token),
+        )
+        .route("/auth/tokens/{id}", delete(auth_routes::revoke_token))
         // --- Agent activity (live trail + task tracker) ------------------
         .route(
             "/workspaces/{wid}/sessions/{sid}/trail",

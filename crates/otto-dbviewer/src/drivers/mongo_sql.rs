@@ -473,7 +473,7 @@ fn projection_has_aggregate(items: &[SelectItem]) -> bool {
 
 fn is_count_star(expr: &Expr) -> bool {
     if let Expr::Function(f) = expr {
-        if f.name.to_string().to_ascii_lowercase() == "count" {
+        if f.name.to_string().eq_ignore_ascii_case("count") {
             if let FunctionArguments::List(list) = &f.args {
                 return list.args.len() == 1
                     && matches!(

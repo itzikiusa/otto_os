@@ -874,7 +874,7 @@ impl Driver for ClickhouseDriver {
             })
             .collect();
         // User databases first, system databases last; preserve name order within.
-        nodes.sort_by(|a, b| a.0.cmp(&b.0));
+        nodes.sort_by_key(|a| a.0);
         Ok(nodes.into_iter().map(|(_, n)| n).collect())
     }
 

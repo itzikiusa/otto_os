@@ -250,7 +250,13 @@ impl UsageTailer {
                 Some(s) => (s.workspace_id.clone(), s.otto_session_id.clone()),
                 None => (EXTERNAL_WORKSPACE.to_string(), stem.clone()),
             };
-            let cost = estimate_cost(&parsed.model, parsed.input, parsed.output);
+            let cost = estimate_cost(
+                &parsed.model,
+                parsed.input,
+                parsed.output,
+                parsed.cache_read,
+                parsed.cache_write,
+            );
             self.usage.record(UsageEvent {
                 workspace_id,
                 session_id,
@@ -335,7 +341,13 @@ impl UsageTailer {
                 Some(s) => (s.workspace_id.clone(), s.otto_session_id.clone()),
                 None => (EXTERNAL_WORKSPACE.to_string(), thread_uuid.clone()),
             };
-            let cost = estimate_cost(&parsed.model, parsed.input, parsed.output);
+            let cost = estimate_cost(
+                &parsed.model,
+                parsed.input,
+                parsed.output,
+                parsed.cache_read,
+                parsed.cache_write,
+            );
             self.usage.record(UsageEvent {
                 workspace_id,
                 session_id,

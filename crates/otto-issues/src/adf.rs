@@ -88,6 +88,7 @@ pub fn adf_to_markdown(adf: &Value) -> String {
 }
 
 /// Recursive node renderer. `list_index` is 1-based for ordered lists (0 = not in list).
+#[allow(clippy::only_used_in_recursion)]
 fn render_node(node: &Value, out: &mut String, list_index: usize, ordered: bool) {
     let node_type = node.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let children = node.get("content").and_then(|v| v.as_array());

@@ -258,7 +258,7 @@ pub async fn run(
                     let envelope_id = val["envelope_id"].as_str().unwrap_or("").to_string();
                     if !envelope_id.is_empty() {
                         let ack = format!(r#"{{"envelope_id":"{envelope_id}"}}"#);
-                        if let Err(e) = sink.send(Message::Text(ack.into())).await {
+                        if let Err(e) = sink.send(Message::Text(ack)).await {
                             error!("slack: failed to send ack: {e}");
                             break 'inner;
                         }
@@ -291,7 +291,7 @@ pub async fn run(
                     if let Some(eid) = val["envelope_id"].as_str() {
                         if !eid.is_empty() {
                             let ack = format!(r#"{{"envelope_id":"{eid}"}}"#);
-                            let _ = sink.send(Message::Text(ack.into())).await;
+                            let _ = sink.send(Message::Text(ack)).await;
                         }
                     }
                     debug!("slack: unhandled envelope type '{other}', ignored");

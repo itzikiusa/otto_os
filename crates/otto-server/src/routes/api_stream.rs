@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::response::{IntoResponse, Response};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -70,7 +70,9 @@ fn default_get() -> String {
 pub fn ws_router(authenticator: Arc<dyn TokenAuthenticator>) -> Router {
     Router::new()
         .route("/ws/api-client/stream", get(stream_ws))
-        .with_state(StreamState { auth: authenticator })
+        .with_state(StreamState {
+            auth: authenticator,
+        })
 }
 
 async fn stream_ws(
@@ -95,7 +97,11 @@ async fn send_json(socket: &mut WebSocket, v: Value) -> Result<(), axum::Error> 
 fn is_close_action(text: &str) -> bool {
     serde_json::from_str::<Value>(text)
         .ok()
-        .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(|s| s == "close"))
+        .and_then(|v| {
+            v.get("action")
+                .and_then(|a| a.as_str())
+                .map(|s| s == "close")
+        })
         .unwrap_or(false)
 }
 
@@ -112,19 +118,31 @@ async fn serve(mut socket: WebSocket) {
     let spec: OpenSpec = match serde_json::from_str(&first) {
         Ok(s) => s,
         Err(e) => {
-            let _ = send_json(&mut socket, json!({"type":"error","message":format!("bad open spec: {e}")})).await;
+            let _ = send_json(
+                &mut socket,
+                json!({"type":"error","message":format!("bad open spec: {e}")}),
+            )
+            .await;
             return;
         }
     };
     if spec.action != "open" {
-        let _ = send_json(&mut socket, json!({"type":"error","message":"first frame must be an 'open'"})).await;
+        let _ = send_json(
+            &mut socket,
+            json!({"type":"error","message":"first frame must be an 'open'"}),
+        )
+        .await;
         return;
     }
     match spec.kind.as_str() {
         "sse" => serve_sse(socket, spec).await,
         "websocket" | "ws" => serve_websocket(socket, spec).await,
         other => {
-            let _ = send_json(&mut socket, json!({"type":"error","message":format!("unknown kind: {other}")})).await;
+            let _ = send_json(
+                &mut socket,
+                json!({"type":"error","message":format!("unknown kind: {other}")}),
+            )
+            .await;
         }
     }
 }
@@ -132,7 +150,17 @@ async fn serve(mut socket: WebSocket) {
 // ── SSE upstream ────────────────────────────────────────────────────────────
 
 async fn serve_sse(mut socket: WebSocket, spec: OpenSpec) {
-    let client = match reqwest::Client::builder().user_agent("Otto-ApiClient/1.0").build() {
+    // SSRF guard: resolve + classify the upstream host before connecting.
+    if let Err(m) = crate::routes::api_client::net_guard::check_url(&spec.url).await {
+        let _ = send_json(&mut socket, json!({"type":"error","message":m})).await;
+        return;
+    }
+    let client = match reqwest::Client::builder()
+        .user_agent("Otto-ApiClient/1.0")
+        // Cap + re-validate each redirect hop's host (SSRF guard).
+        .redirect(crate::routes::api_client::net_guard::redirect_policy())
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             let _ = send_json(&mut socket, json!({"type":"error","message":e.to_string()})).await;
@@ -141,7 +169,9 @@ async fn serve_sse(mut socket: WebSocket, spec: OpenSpec) {
     };
     let method = reqwest::Method::from_bytes(spec.method.to_uppercase().as_bytes())
         .unwrap_or(reqwest::Method::GET);
-    let mut req = client.request(method, &spec.url).header("Accept", "text/event-stream");
+    let mut req = client
+        .request(method, &spec.url)
+        .header("Accept", "text/event-stream");
     for h in &spec.headers {
         if !h.key.trim().is_empty() {
             req = req.header(&h.key, &h.value);
@@ -159,7 +189,13 @@ async fn serve_sse(mut socket: WebSocket, spec: OpenSpec) {
         }
     };
     let status = resp.status();
-    if send_json(&mut socket, json!({"type":"open","detail":format!("{status} — streaming events")})).await.is_err() {
+    if send_json(
+        &mut socket,
+        json!({"type":"open","detail":format!("{status} — streaming events")}),
+    )
+    .await
+    .is_err()
+    {
         return;
     }
 
@@ -193,7 +229,11 @@ async fn serve_sse(mut socket: WebSocket, spec: OpenSpec) {
             },
         }
     }
-    let _ = send_json(&mut socket, json!({"type":"closed","detail":"stream ended"})).await;
+    let _ = send_json(
+        &mut socket,
+        json!({"type":"closed","detail":"stream ended"}),
+    )
+    .await;
     let _ = socket.send(Message::Close(None)).await;
 }
 
@@ -227,33 +267,6 @@ fn parse_sse_event(block: &str) -> Option<Value> {
     }))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_named_event_with_multiline_data() {
-        let block = "event: update\nid: 42\ndata: line1\ndata: line2\n\n";
-        let ev = parse_sse_event(block).expect("event");
-        assert_eq!(ev["event"], "update");
-        assert_eq!(ev["id"], "42");
-        assert_eq!(ev["data"], "line1\nline2");
-    }
-
-    #[test]
-    fn defaults_event_name_to_message_and_skips_comments() {
-        let block = ": keep-alive comment\ndata: hello\n\n";
-        let ev = parse_sse_event(block).expect("event");
-        assert_eq!(ev["event"], "message");
-        assert_eq!(ev["data"], "hello");
-    }
-
-    #[test]
-    fn empty_block_yields_nothing() {
-        assert!(parse_sse_event(":\n\n").is_none());
-    }
-}
-
 // ── WebSocket upstream ──────────────────────────────────────────────────────
 
 async fn serve_websocket(mut socket: WebSocket, spec: OpenSpec) {
@@ -263,10 +276,20 @@ async fn serve_websocket(mut socket: WebSocket, spec: OpenSpec) {
     use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
     use tokio_tungstenite::tungstenite::Message as TMsg;
 
+    // SSRF guard: resolve + classify the upstream host before connecting.
+    if let Err(m) = crate::routes::api_client::net_guard::check_url(&spec.url).await {
+        let _ = send_json(&mut socket, json!({"type":"error","message":m})).await;
+        return;
+    }
+
     let mut request = match spec.url.as_str().into_client_request() {
         Ok(r) => r,
         Err(e) => {
-            let _ = send_json(&mut socket, json!({"type":"error","message":format!("bad ws url: {e}")})).await;
+            let _ = send_json(
+                &mut socket,
+                json!({"type":"error","message":format!("bad ws url: {e}")}),
+            )
+            .await;
             return;
         }
     };
@@ -285,11 +308,18 @@ async fn serve_websocket(mut socket: WebSocket, spec: OpenSpec) {
     let (upstream, _resp) = match tokio_tungstenite::connect_async(request).await {
         Ok(x) => x,
         Err(e) => {
-            let _ = send_json(&mut socket, json!({"type":"error","message":format!("connect failed: {e}")})).await;
+            let _ = send_json(
+                &mut socket,
+                json!({"type":"error","message":format!("connect failed: {e}")}),
+            )
+            .await;
             return;
         }
     };
-    if send_json(&mut socket, json!({"type":"open","detail":"connected"})).await.is_err() {
+    if send_json(&mut socket, json!({"type":"open","detail":"connected"}))
+        .await
+        .is_err()
+    {
         return;
     }
     let (mut up_tx, mut up_rx) = upstream.split();
@@ -316,7 +346,7 @@ async fn serve_websocket(mut socket: WebSocket, spec: OpenSpec) {
                     match v.get("action").and_then(|a| a.as_str()) {
                         Some("send") => {
                             let data = v.get("data").and_then(|d| d.as_str()).unwrap_or("").to_string();
-                            if up_tx.send(TMsg::Text(data.clone().into())).await.is_err() {
+                            if up_tx.send(TMsg::Text(data.clone())).await.is_err() {
                                 let _ = send_json(&mut socket, json!({"type":"error","message":"upstream send failed"})).await;
                                 break;
                             }
@@ -332,6 +362,37 @@ async fn serve_websocket(mut socket: WebSocket, spec: OpenSpec) {
         }
     }
     let _ = up_tx.send(TMsg::Close(None)).await;
-    let _ = send_json(&mut socket, json!({"type":"closed","detail":"disconnected"})).await;
+    let _ = send_json(
+        &mut socket,
+        json!({"type":"closed","detail":"disconnected"}),
+    )
+    .await;
     let _ = socket.send(Message::Close(None)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_named_event_with_multiline_data() {
+        let block = "event: update\nid: 42\ndata: line1\ndata: line2\n\n";
+        let ev = parse_sse_event(block).expect("event");
+        assert_eq!(ev["event"], "update");
+        assert_eq!(ev["id"], "42");
+        assert_eq!(ev["data"], "line1\nline2");
+    }
+
+    #[test]
+    fn defaults_event_name_to_message_and_skips_comments() {
+        let block = ": keep-alive comment\ndata: hello\n\n";
+        let ev = parse_sse_event(block).expect("event");
+        assert_eq!(ev["event"], "message");
+        assert_eq!(ev["data"], "hello");
+    }
+
+    #[test]
+    fn empty_block_yields_nothing() {
+        assert!(parse_sse_event(":\n\n").is_none());
+    }
 }
