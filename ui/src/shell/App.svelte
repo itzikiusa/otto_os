@@ -12,6 +12,7 @@
   import BottomNav from './BottomNav.svelte';
   import Drawer from './Drawer.svelte';
   import NavButtons from './NavButtons.svelte';
+  import MobileActionBar from './MobileActionBar.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
@@ -104,6 +105,31 @@
     } catch (e) {
       toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
     }
+  }
+
+  // ---- mobile action bar helpers ----
+  // These are the SAME actions the keyboard map calls (App.svelte:187-270).
+  // Exposed as named functions so MobileActionBar can receive them as props
+  // without duplicating any logic.
+  function mobileOpenPalette(): void {
+    if (ui.paletteOpen) ui.paletteOpen = false;
+    else ui.openPalette('commands');
+  }
+  function mobileNewSession(): void {
+    ui.newSessionOpen = true;
+  }
+  function mobileCloseTab(): void {
+    ws.closeActiveTab();
+  }
+  function mobileFind(): void {
+    if (keyContext.terminalFocused && keyContext.openFind) {
+      keyContext.openFind();
+    } else {
+      findInPage.show();
+    }
+  }
+  function mobileBroadcast(): void {
+    ui.openBroadcast();
   }
 
   // `?` (no modifier, not while typing) opens the shortcuts cheat-sheet. The
@@ -548,6 +574,20 @@
       </button>
     {/if}
   </header>
+
+  <!-- Phone-only quick-action bar: exposes ⌘K/⌘T/⌘W/⌘F/⌘⇧B to touch users
+       who can't produce those chords. Wired to the exact same functions the
+       keyboard map calls; desktop is completely unaffected. -->
+  {#if viewport.isPhone}
+    <MobileActionBar
+      onpalette={mobileOpenPalette}
+      onnewSession={mobileNewSession}
+      oncloseTab={mobileCloseTab}
+      onfind={mobileFind}
+      showBroadcast={ws.sessions.length > 0}
+      onbroadcast={mobileBroadcast}
+    />
+  {/if}
 
   <div class="mbody">
     {#if viewport.isTablet}
