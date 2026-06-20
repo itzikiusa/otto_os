@@ -9,22 +9,28 @@ import { toasts } from '../toast.svelte';
 class BrokersStore {
   clusters: BrokerCluster[] = $state([]);
   selectedId: Id | null = $state(null);
+  /** Clusters opened as tabs (Workbench-style), in tab order. */
+  openIds: Id[] = $state([]);
   loading = $state(false);
 
   selected: BrokerCluster | null = $derived(
     this.clusters.find((c) => c.id === this.selectedId) ?? null,
   );
 
+  /** The open clusters resolved to objects, in tab order. */
+  openClusters: BrokerCluster[] = $derived(
+    this.openIds.map((id) => this.clusters.find((c) => c.id === id)).filter(Boolean) as BrokerCluster[],
+  );
+
   async load(wsId: Id): Promise<void> {
     this.loading = true;
     try {
       this.clusters = await api.get<BrokerCluster[]>(`/workspaces/${wsId}/brokers/clusters`);
-      if (this.selectedId && !this.clusters.some((c) => c.id === this.selectedId)) {
-        this.selectedId = null;
-      }
-      if (!this.selectedId && this.clusters.length > 0) {
-        this.selectedId = this.clusters[0].id;
-      }
+      // Prune tabs/selection for clusters that no longer exist.
+      const exists = (id: Id) => this.clusters.some((c) => c.id === id);
+      this.openIds = this.openIds.filter(exists);
+      if (this.selectedId && !exists(this.selectedId)) this.selectedId = null;
+      if (!this.selectedId && this.openIds.length > 0) this.selectedId = this.openIds[0];
     } catch (e) {
       toasts.error('Failed to load clusters', String(e));
     } finally {
@@ -36,8 +42,19 @@ class BrokersStore {
     if (ws.currentId) await this.load(ws.currentId);
   }
 
+  /** Open a cluster as a tab (if not already) and make it active. */
   select(id: Id): void {
+    if (!this.openIds.includes(id)) this.openIds = [...this.openIds, id];
     this.selectedId = id;
+  }
+
+  /** Close a cluster tab; activate a neighbour if it was the active one. */
+  close(id: Id): void {
+    const idx = this.openIds.indexOf(id);
+    this.openIds = this.openIds.filter((x) => x !== id);
+    if (this.selectedId === id) {
+      this.selectedId = this.openIds[Math.min(idx, this.openIds.length - 1)] ?? null;
+    }
   }
 
   async create(req: UpsertClusterReq): Promise<BrokerCluster | null> {
@@ -47,7 +64,7 @@ class BrokersStore {
       req,
     );
     await this.refresh();
-    this.selectedId = cluster.id;
+    this.select(cluster.id);
     return cluster;
   }
 
@@ -59,7 +76,7 @@ class BrokersStore {
 
   async remove(id: Id): Promise<void> {
     await api.del(`/brokers/clusters/${id}`);
-    if (this.selectedId === id) this.selectedId = null;
+    this.close(id);
     await this.refresh();
   }
 }

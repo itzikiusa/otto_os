@@ -96,6 +96,33 @@
   </aside>
 
   <main class="cluster-main">
+    {#if brokers.openClusters.length > 0}
+      <div class="tabstrip">
+        {#each brokers.openClusters as c (c.id)}
+          <div
+            class="ctab"
+            class:on={brokers.selectedId === c.id}
+            role="tab"
+            tabindex="0"
+            onclick={() => brokers.select(c.id)}
+            onkeydown={(e) => e.key === 'Enter' && brokers.select(c.id)}
+          >
+            <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
+            <span class="ctab-name">{c.name}</span>
+            <button
+              class="ctab-x"
+              title="Close tab"
+              onclick={(e) => {
+                e.stopPropagation();
+                brokers.close(c.id);
+              }}
+            >
+              <Icon name="x" size={11} />
+            </button>
+          </div>
+        {/each}
+      </div>
+    {/if}
     {#if selected}
       <header class="cluster-head">
         <div class="ch-title">
@@ -229,6 +256,56 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
+  }
+  .tabstrip {
+    display: flex;
+    align-items: stretch;
+    gap: 1px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    overflow-x: auto;
+    min-height: 36px;
+  }
+  .ctab {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 10px;
+    cursor: pointer;
+    border-right: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    border-top: 2px solid transparent;
+  }
+  .ctab:hover {
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+  }
+  .ctab.on {
+    color: var(--text);
+    background: var(--bg);
+    border-top-color: var(--accent);
+  }
+  .ctab-name {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ctab-x {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 3px;
+    padding: 2px;
+    opacity: 0.6;
+  }
+  .ctab-x:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
   }
   .cluster-head {
     display: flex;
