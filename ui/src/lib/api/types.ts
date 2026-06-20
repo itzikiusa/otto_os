@@ -31,6 +31,27 @@ export interface Workspace {
 export type SessionKind = 'agent' | 'connection';
 export type SessionStatus = 'running' | 'working' | 'idle' | 'exited' | 'reconnectable';
 
+// ---------------------------------------------------------------------------
+// WS /ws/term/{id} — frame types (docs/contracts/ws.md)
+// ---------------------------------------------------------------------------
+
+/** One match returned by a server-side ring-buffer search. */
+export interface TermSearchMatch {
+  /** Absolute ring-buffer line index (oldest = 0, newest = ringLen-1). */
+  line: number;
+  /** ANSI-stripped plain text of the matching line. */
+  text: string;
+}
+
+/** `{"type":"search_result"}` server→client frame (response to a Search frame). */
+export interface WsSearchResultFrame {
+  type: 'search_result';
+  /** The query string that was searched. */
+  query: string;
+  /** Up to 200 matching lines, oldest → newest. */
+  matches: TermSearchMatch[];
+}
+
 export interface Session {
   id: Id;
   workspace_id: Id;
@@ -68,6 +89,10 @@ export interface Connection {
   read_only: boolean;
   created_by: Id;
   created_at: string;
+  /** ISO timestamp of the last open; absent means never opened. */
+  last_opened_at?: string | null;
+  /** When true the connection floats to the top of the list regardless of recency. */
+  pinned?: boolean;
 }
 
 export interface ConnectionSection {
@@ -261,7 +286,11 @@ export type OttoEvent =
       swarm_id: Id;
       message: Record<string, unknown>;
     }
-  | { type: 'swarm_status'; workspace_id: Id; swarm_id: Id; status: string };
+  | { type: 'swarm_status'; workspace_id: Id; swarm_id: Id; status: string }
+  /** Emitted after each metrics-sampler tick so the dashboard can refresh
+   *  sparklines in near-real-time. `ts` is the sample timestamp (UTC ISO-8601).
+   *  A9 — Usage/Insights cluster. */
+  | { type: 'usage_metrics_tick'; ts: string };
 
 // ---------------------------------------------------------------------------
 // Notifications (notification center)
@@ -2176,6 +2205,10 @@ export interface RunInsightsReq {
 
 export interface RunInsightsResp {
   started: boolean;
+  /** Session id of the spawned insights run (when started === true). */
+  run_id?: string | null;
+  /** Human-readable explanation when started === false (e.g. skill not installed). */
+  reason?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2501,6 +2534,11 @@ export interface TopicStats {
   cleanup_policy: string | null;
 }
 
+/** Request body for POST /brokers/clusters/{id}/topics/stats (batch). */
+export interface BatchStatsReq {
+  names: string[];
+}
+
 export interface TestClusterResp {
   ok: boolean;
   latency_ms: number;
@@ -2516,6 +2554,10 @@ export interface ClusterOverview {
   internal_topic_count: number;
   partition_count: number;
   consumer_group_count: number;
+  /** Number of partitions with ISR count < replica count. */
+  under_replicated_partitions?: number | null;
+  /** Leadership imbalance: coefficient of variation of leader counts (0 = balanced). */
+  leadership_imbalance?: number | null;
 }
 
 export interface BrokerNode {
@@ -2683,6 +2725,22 @@ export interface GroupDetail {
   members: GroupMember[];
   offsets: GroupOffset[];
   total_lag: number;
+}
+
+export type OffsetResetMode = 'earliest' | 'latest' | 'offset' | 'timestamp';
+
+/** Request body for POST /brokers/clusters/{id}/groups/{group}/reset */
+export interface GroupResetReq {
+  /** Reset mode (earliest | latest | offset | timestamp). */
+  mode: OffsetResetMode;
+  /** Required when mode = 'offset'. */
+  offset?: number;
+  /** Required when mode = 'timestamp'. Epoch millis. */
+  timestamp_ms?: number;
+  /** Scope to a single topic (omit = all topics the group has offsets for). */
+  topic?: string;
+  /** Explicit confirm for guarded (prod / read-only) clusters. */
+  confirm?: boolean;
 }
 
 export interface ThroughputPoint {

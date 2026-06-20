@@ -32,6 +32,7 @@ Input frames from viewers are silently dropped server-side (and a single JSON
 {"type":"input","data":"<base64 bytes>"}
 {"type":"resize","cols":120,"rows":32}
 {"type":"scrollback","lines":2000}
+{"type":"search","query":"foo"}                     // server-side ring-buffer search (see below)
 ```
 
 ### Server → client
@@ -45,7 +46,18 @@ Input frames from viewers are silently dropped server-side (and a single JSON
 {"type":"exit","code":0}                            // child exited; socket stays open
 {"type":"terminated"}                               // session force-terminated (admin terminate / share-link revoke); socket closes immediately after
 {"type":"error","code":"forbidden","message":"..."}
+{"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches
 ```
+
+#### Server-side search (`{"type":"search"}`)
+
+Grep the persistent ring-buffer scrollback (10 000 lines, survives WS reconnects) for `query`
+(plain substring, case-insensitive, ANSI-stripped). The server replies with a single
+`{"type":"search_result","query":"…","matches":[{"line":<ring-index>,"text":"<plain>"},…]}`
+frame containing up to 200 matches in buffer order (oldest → newest). Empty `query` is
+a no-op (no reply). This complements the xterm `SearchAddon` (which searches only the
+current emulator viewport, lost on reconnect) — use server search when the session has
+been reopened or when looking for output that scrolled off the visible viewport.
 
 Unlike `exit` (the child process ended but the socket stays open so the user can
 read the final output), `terminated` is the server forcibly dropping this viewer:
@@ -160,3 +172,17 @@ otto-state, so the row is embedded as `serde_json::Value`):
 The UI mirrors all of these in `OttoEvent` (`ui/src/lib/events.svelte.ts`) and routes the
 `swarm_*` set into the `swarm` store, which updates the org tree, run graph, Kanban, runs
 list and board live.
+
+## Usage metrics tick (A9)
+
+Emitted by the metrics sampler after each system-metrics sample is stored:
+
+```json
+{"type":"usage_metrics_tick","ts":"2026-06-20T12:00:00Z"}
+```
+
+- `ts` — UTC ISO-8601 sample timestamp.
+- The UI subscribes and calls `usage.applyMetricsTick()` which triggers a throttled
+  `/usage/metrics` refresh so the sparklines update in near-real-time.
+- Source: `crates/otto-server/src/monitor.rs` → `spawn_metrics_sampler`.
+- Throttle: the UI ignores ticks that arrive within 10 s of the last fetch.

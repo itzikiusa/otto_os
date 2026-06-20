@@ -133,6 +133,8 @@ async fn run(cfg: Config) -> Result<(), String> {
 
     let manager = Arc::new(
         SessionManager::new(SessionsRepo::new(pool.clone()), events.clone(), providers)
+            // Runtime-configurable idle-suspend grace + per-session keep-alive pin.
+            .with_settings_repo(SettingsRepo::new(pool.clone()))
             .with_pre_spawn_hook(Arc::new(otto_context::Provisioner::new(
                 context_library.clone(),
             )))
@@ -169,6 +171,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         otto_state::BrokerClustersRepo::new(pool.clone()),
         otto_state::BrokerClusterSectionsRepo::new(pool.clone()),
         secrets.clone(),
+        // Persist an audit row for every broker write (produce/delete/config/offset-reset).
+        Some(otto_state::BrokerAuditRepo::new(pool.clone())),
     ));
     let spawner = Arc::new(PtySpawner {
         manager: Arc::clone(&manager),
