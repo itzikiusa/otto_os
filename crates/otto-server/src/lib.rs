@@ -45,6 +45,7 @@ pub use monitor::{
     spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
     spawn_usage_recorder, AuthScanner, CredentialMonitor,
 };
+pub use workflow_trigger_scheduler::spawn_workflow_event_trigger_listener;
 pub use state::ServerCtx;
 
 /// Build the full daemon router.

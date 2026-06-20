@@ -473,6 +473,23 @@ async fn analyze(
         )));
     }
 
+    // Point-of-action budget gate (A2): check the workspace budget before
+    // spawning any agent sessions. Mirrors the review start_review gate exactly.
+    {
+        let verdict = crate::routes::usage::check_budget(
+            &ctx,
+            &ws_id,
+            "", // provider resolved below; gate workspace-level cap here
+        )
+        .await;
+        if verdict.blocked {
+            return Err(ApiError(Error::Invalid(format!(
+                "Budget exceeded — analysis blocked: {}",
+                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
+            ))));
+        }
+    }
+
     // Resolve default provider (workspace → global → "claude"), mirroring the
     // `orchestrate` handler exactly.
     let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
@@ -602,6 +619,17 @@ async fn rewrite(
         )));
     }
 
+    // Point-of-action budget gate (A2): check workspace-level cap before spawning.
+    {
+        let verdict = crate::routes::usage::check_budget(&ctx, &ws_id, "").await;
+        if verdict.blocked {
+            return Err(ApiError(Error::Invalid(format!(
+                "Budget exceeded — rewrite blocked: {}",
+                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
+            ))));
+        }
+    }
+
     // Resolve default provider (workspace → global → "claude"), mirroring analyze.
     let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
     let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
@@ -654,6 +682,17 @@ async fn generate_tests(
         return Err(ApiError(Error::NotFound(
             "story not found in workspace".into(),
         )));
+    }
+
+    // Point-of-action budget gate (A2): check workspace-level cap before spawning.
+    {
+        let verdict = crate::routes::usage::check_budget(&ctx, &ws_id, "").await;
+        if verdict.blocked {
+            return Err(ApiError(Error::Invalid(format!(
+                "Budget exceeded — test generation blocked: {}",
+                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
+            ))));
+        }
     }
 
     // Resolve default provider (workspace → global → "claude"), mirroring rewrite.
@@ -709,6 +748,17 @@ async fn generate_plan(
         return Err(ApiError(Error::NotFound(
             "story not found in workspace".into(),
         )));
+    }
+
+    // Point-of-action budget gate (A2): check workspace-level cap before spawning.
+    {
+        let verdict = crate::routes::usage::check_budget(&ctx, &ws_id, "").await;
+        if verdict.blocked {
+            return Err(ApiError(Error::Invalid(format!(
+                "Budget exceeded — plan generation blocked: {}",
+                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
+            ))));
+        }
     }
 
     // Resolve default provider (workspace → global → "claude"), mirroring rewrite.

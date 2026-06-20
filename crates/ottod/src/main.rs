@@ -20,7 +20,8 @@ use otto_rbac::{RbacAuthenticator, RbacRoleChecker};
 use otto_server::modules::{module_routers, PtySpawner};
 use otto_server::{
     build_router, spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
-    spawn_usage_recorder, AuthScanner, CredentialMonitor, ServerCtx,
+    spawn_usage_recorder, spawn_workflow_event_trigger_listener, AuthScanner, CredentialMonitor,
+    ServerCtx,
 };
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
@@ -577,6 +578,14 @@ async fn run(cfg: Config) -> Result<(), String> {
         }
         Err(e) => tracing::warn!("swarm restore: {e}"),
     }
+
+    // --- Workflow event-trigger listener (B8) ---
+    // Subscribes to the daemon event bus; for each event whose kind matches an
+    // enabled `event`-kind trigger's `event_kind` spec field, starts a workflow
+    // run via the same path as schedule/webhook triggers. Best-effort: errors
+    // inside the listener are logged and never propagate to the event producer.
+    let _workflow_event_trigger_handle = spawn_workflow_event_trigger_listener(ctx.clone());
+    tracing::info!("workflow event-trigger listener started");
 
     // --- Usage tracking + system metrics (embedded ClickHouse) ---
     // The recorder mines usage from the activity-trail event stream; the

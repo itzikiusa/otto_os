@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
+use otto_core::event::Event;
 use otto_state::{TriggersRepo, WorkflowsRepo};
 use serde_json::{json, Value};
 use tracing::{info, warn};
@@ -178,6 +179,152 @@ fn parse_hhmm(v: Option<&Value>) -> (u32, u32) {
             Some((h.min(23), m.min(59)))
         })
         .unwrap_or((9, 0))
+}
+
+// ---------------------------------------------------------------------------
+// Event-trigger listener (B8): subscribes to the daemon event bus and fires
+// any enabled `event`-kind triggers whose `event_kind` spec field matches the
+// incoming event.  Reuses the same workflow run-start path as the webhook
+// trigger and the schedule scheduler.
+//
+// Event → stable `event_kind` string mapping (what the user configures in
+// the trigger spec's `event_kind` field):
+//   ReviewChanged       → "review_changed"
+//   BudgetExceeded      → "budget_exceeded"
+//   ProductChanged      → "product_changed"
+//   SwarmStatus         → "swarm_status"
+//   ImprovementRunFinished → "improvement_run_finished"
+//   InsightReady        → "insight_ready"
+//   WorkflowRunUpdated  → "workflow_run_updated"
+//
+// Keep this mapping stable: users configure it by string in the trigger spec.
+// ---------------------------------------------------------------------------
+
+/// Map a daemon `Event` to the stable `event_kind` string a user puts in
+/// their trigger's spec.  Returns `None` for events that are not useful as
+/// automation triggers (session churn, low-level ticks, etc.).
+fn event_to_kind(event: &Event) -> Option<&'static str> {
+    match event {
+        Event::ReviewChanged { .. }         => Some("review_changed"),
+        Event::BudgetExceeded { .. }        => Some("budget_exceeded"),
+        Event::ProductChanged { .. }        => Some("product_changed"),
+        Event::SwarmStatus { .. }           => Some("swarm_status"),
+        Event::ImprovementRunFinished { .. } => Some("improvement_run_finished"),
+        Event::InsightReady { .. }          => Some("insight_ready"),
+        Event::WorkflowRunUpdated { .. }    => Some("workflow_run_updated"),
+        // Session, metric, notice, trail, task, swarm-run, improvement-edit,
+        // skill-eval, swarm-message, swarm-task, meta-updated events are
+        // deliberately excluded — too noisy or not useful as macro triggers.
+        _ => None,
+    }
+}
+
+/// Start the event-trigger listener task. Returns a cancel flag; set to `true`
+/// to stop the loop (mirrors the schedule scheduler pattern).
+pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel2 = Arc::clone(&cancel);
+    let mut rx = ctx.events.subscribe();
+    tokio::spawn(async move {
+        loop {
+            if cancel2.load(Ordering::Relaxed) {
+                return;
+            }
+            let event = match rx.recv().await {
+                Ok(e) => e,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("workflow event-trigger listener: lagged by {n} events; continuing");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    info!("workflow event-trigger listener: event bus closed; stopping");
+                    return;
+                }
+            };
+
+            let Some(kind_str) = event_to_kind(&event) else {
+                continue;
+            };
+
+            // Load enabled event triggers whose spec declares this kind.
+            let triggers_repo = TriggersRepo::new(ctx.pool.clone());
+            let triggers = match triggers_repo.list_enabled_by_kind("event").await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("workflow event-trigger listener: list triggers: {e}");
+                    continue;
+                }
+            };
+
+            let matching: Vec<_> = triggers
+                .into_iter()
+                .filter(|t| {
+                    t.spec
+                        .get("event_kind")
+                        .and_then(Value::as_str)
+                        == Some(kind_str)
+                })
+                .collect();
+
+            if matching.is_empty() {
+                continue;
+            }
+
+            let workflows_repo = WorkflowsRepo::new(ctx.pool.clone());
+            for trigger in matching {
+                // Resolve the workflow; skip silently when it was deleted.
+                let wf = match workflows_repo.get(&trigger.workflow_id).await {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
+                let ws = match ctx.workspaces.get(&wf.workspace_id).await {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
+
+                // Build the run input: include the trigger kind so the workflow
+                // graph can branch or log on it.
+                let input = json!({
+                    "trigger": "event",
+                    "event_kind": kind_str,
+                });
+
+                let run = match workflows_repo
+                    .create_run(&wf.id, &wf.workspace_id, &input)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(
+                            workflow_id = %wf.id,
+                            event_kind = kind_str,
+                            "workflow event-trigger listener: create run: {e}"
+                        );
+                        continue;
+                    }
+                };
+
+                info!(
+                    workflow_id = %wf.id,
+                    run_id = %run.id,
+                    event_kind = kind_str,
+                    "workflow event-trigger listener: firing event trigger"
+                );
+
+                let ctx2 = ctx.clone();
+                let run_id = run.id.clone();
+                tokio::spawn(async move {
+                    crate::workflow_engine::run_workflow(
+                        ctx2, ws, wf, run_id,
+                        input,
+                        None, false,
+                    )
+                    .await;
+                });
+            }
+        }
+    });
+    cancel
 }
 
 #[cfg(test)]
