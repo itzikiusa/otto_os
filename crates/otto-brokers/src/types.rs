@@ -74,7 +74,13 @@ impl SecurityProtocol {
 pub enum SaslMechanism {
     #[default]
     Plain,
+    // Explicit renames: serde's snake_case would emit `scram_sha256` (no
+    // underscore before digits), but the DB strings, manual parse/as_str, and
+    // the TS types all use `scram_sha_256`/`scram_sha_512`. Keep them aligned so
+    // the JSON extractor accepts what the UI sends (else 422 on SCRAM).
+    #[serde(rename = "scram_sha_256")]
     ScramSha256,
+    #[serde(rename = "scram_sha_512")]
     ScramSha512,
 }
 
@@ -566,6 +572,25 @@ mod tests {
             assert_eq!(SaslMechanism::parse(m.as_str()), Some(m));
         }
         assert_eq!(SaslMechanism::ScramSha256.librdkafka(), "SCRAM-SHA-256");
+    }
+
+    #[test]
+    fn sasl_mechanism_serde_matches_db_strings() {
+        // serde JSON repr must equal the as_str()/DB/TS strings (regression: the
+        // default snake_case would emit `scram_sha512`, breaking the 9096 path).
+        for m in [
+            SaslMechanism::Plain,
+            SaslMechanism::ScramSha256,
+            SaslMechanism::ScramSha512,
+        ] {
+            let json = serde_json::to_string(&m).unwrap();
+            assert_eq!(json, format!("\"{}\"", m.as_str()));
+            let back: SaslMechanism = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, m);
+        }
+        // Exactly what the UI sends.
+        let m: SaslMechanism = serde_json::from_str("\"scram_sha_512\"").unwrap();
+        assert_eq!(m, SaslMechanism::ScramSha512);
     }
 
     #[test]
