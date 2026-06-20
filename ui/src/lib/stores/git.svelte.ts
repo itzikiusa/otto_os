@@ -33,6 +33,11 @@ const DEFAULT_SUB: GitSubTab = 'graph';
 
 class GitStore {
   repos: Repo[] = $state([]);
+  /** All repos across every workspace the caller may view — powers the
+   *  workspace-INDEPENDENT Git page. Kept SEPARATE from `repos` so the always-
+   *  mounted per-workspace `loadRepos` (right panel / status bar) can't clobber
+   *  the Git page's global list when the active workspace changes. */
+  allRepos: Repo[] = $state([]);
   primary: Repo | null = $state(null);
   primaryStatus: RepoStatusResp | null = $state(null);
   prs: PrSummary[] = $state([]);
@@ -63,10 +68,10 @@ class GitStore {
     if (this.allReposLoaded && !force) return;
     this.loading = true;
     try {
-      this.repos = await api.get<Repo[]>('/git/repos');
+      this.allRepos = await api.get<Repo[]>('/git/repos');
       this.allReposLoaded = true;
     } catch {
-      this.repos = [];
+      this.allRepos = [];
     } finally {
       this.loading = false;
     }
@@ -76,7 +81,7 @@ class GitStore {
    *  live repo list. Call AFTER `loadAllRepos`. Defaults each restored repo's
    *  sub-tab to 'graph' when absent. */
   restoreOpenTabs(): void {
-    const live = new Set(this.repos.map((r) => r.id));
+    const live = new Set(this.allRepos.map((r) => r.id));
     const persisted = this.readOpenTabs();
     const ids = (persisted?.openRepoIds ?? []).filter((id) => live.has(id));
     const sub: Record<string, string> = {};

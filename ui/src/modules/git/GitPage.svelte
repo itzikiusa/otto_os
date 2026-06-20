@@ -27,8 +27,8 @@
   const routeTab = $derived(router.parts[2] ?? null);
 
   // The active repo is driven by the tab store, not the route.
-  const activeRepo = $derived(git.repos.find((r) => r.id === git.activeRepoId) ?? null);
-  const prRepo = $derived(git.repos.find((r) => r.id === routeRepoId) ?? null);
+  const activeRepo = $derived(git.allRepos.find((r) => r.id === git.activeRepoId) ?? null);
+  const prRepo = $derived(git.allRepos.find((r) => r.id === routeRepoId) ?? null);
 
   // add repo sheet
   let addOpen = $state(false);
@@ -69,7 +69,7 @@
       git.restoreOpenTabs();
       // A deep-link into a repo (#/git/:id or #/git/:id/:tab, non-PR) opens that
       // repo as a tab so the route still lands somewhere useful.
-      if (routeRepoId && !isPr && git.repos.some((r) => r.id === routeRepoId)) {
+      if (routeRepoId && !isPr && git.allRepos.some((r) => r.id === routeRepoId)) {
         git.openRepoTab(routeRepoId, routeTab ?? undefined);
       }
     })();
@@ -77,7 +77,7 @@
 
   // PrDetail's "back to PRs" routes to #/git/:id/prs; honour that as a tab open.
   $effect(() => {
-    if (routeRepoId && !isPr && routeTab && git.repos.some((r) => r.id === routeRepoId)) {
+    if (routeRepoId && !isPr && routeTab && git.allRepos.some((r) => r.id === routeRepoId)) {
       git.openRepoTab(routeRepoId, routeTab);
     }
   });
@@ -206,7 +206,7 @@
 
         {#if git.loading && !git.allReposLoaded}
           <Skeleton rows={3} height={56} />
-        {:else if git.repos.length === 0}
+        {:else if git.allRepos.length === 0}
           <EmptyState
             icon="branch"
             title="No repositories yet"
@@ -216,7 +216,7 @@
           />
         {:else}
           <div class="repo-grid">
-            {#each git.repos as r (r.id)}
+            {#each git.allRepos as r (r.id)}
               <div class="repo-card card">
                 <button class="repo-main" onclick={() => openRepo(r.id)}>
                   <div class="repo-name">

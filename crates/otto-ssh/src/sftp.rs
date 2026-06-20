@@ -176,44 +176,44 @@ impl SftpSession {
 
     /// List a remote directory via `ls -la`, parsing the longname listing.
     pub async fn list(&self, path: &str) -> Result<Vec<SftpEntry>> {
-        let batch = format!("ls -la {}", quote(path));
+        let batch = format!("ls -la {}", quote_checked(path)?);
         let out = self.run(&batch).await?;
         Ok(parse_longname_listing(&out))
     }
 
     /// Download a remote file to a local path (sftp `get`).
     pub async fn download(&self, remote: &str, local: &str) -> Result<()> {
-        let batch = format!("get {} {}", quote(remote), quote(local));
+        let batch = format!("get {} {}", quote_checked(remote)?, quote_checked(local)?);
         self.run(&batch).await.map(|_| ())
     }
 
     /// Upload a local file to a remote path (sftp `put`).
     pub async fn upload(&self, local: &str, remote: &str) -> Result<()> {
-        let batch = format!("put {} {}", quote(local), quote(remote));
+        let batch = format!("put {} {}", quote_checked(local)?, quote_checked(remote)?);
         self.run(&batch).await.map(|_| ())
     }
 
     /// Create a remote directory.
     pub async fn mkdir(&self, path: &str) -> Result<()> {
-        let batch = format!("mkdir {}", quote(path));
+        let batch = format!("mkdir {}", quote_checked(path)?);
         self.run(&batch).await.map(|_| ())
     }
 
     /// Remove a remote file.
     pub async fn remove(&self, path: &str) -> Result<()> {
-        let batch = format!("rm {}", quote(path));
+        let batch = format!("rm {}", quote_checked(path)?);
         self.run(&batch).await.map(|_| ())
     }
 
     /// Remove a remote directory.
     pub async fn rmdir(&self, path: &str) -> Result<()> {
-        let batch = format!("rmdir {}", quote(path));
+        let batch = format!("rmdir {}", quote_checked(path)?);
         self.run(&batch).await.map(|_| ())
     }
 
     /// Rename/move a remote path.
     pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
-        let batch = format!("rename {} {}", quote(from), quote(to));
+        let batch = format!("rename {} {}", quote_checked(from)?, quote_checked(to)?);
         self.run(&batch).await.map(|_| ())
     }
 }
@@ -266,6 +266,23 @@ fn quote(path: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Quote a path for an sftp batch command, REJECTING any control character.
+///
+/// `sftp -b` is line-oriented and supports a `!cmd` local-shell escape, so a
+/// path containing a newline (or CR) could split the batch and smuggle a
+/// `!command` onto its own line — local command execution from a hostile remote
+/// filename the user merely browses/clicks. No legitimate path component holds a
+/// control char, so reject them all up front (defence in depth: also covers the
+/// caller-supplied local path that gets interpolated into `get`/`put`).
+fn quote_checked(path: &str) -> Result<String> {
+    if path.chars().any(char::is_control) {
+        return Err(Error::Upstream(
+            "path contains a control character (rejected for safety)".into(),
+        ));
+    }
+    Ok(quote(path))
 }
 
 /// Parse the absolute path out of sftp `pwd` output. The client prints a line
@@ -377,6 +394,19 @@ fn looks_like_mode(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quote_checked_rejects_control_chars() {
+        // A newline would split the sftp batch line and let a planted filename
+        // smuggle a `!local-command` — must be rejected (local RCE guard).
+        assert!(quote_checked("foo\n!touch /tmp/PWNED").is_err());
+        assert!(quote_checked("a\rb").is_err());
+        assert!(quote_checked("a\tb").is_err());
+        assert!(quote_checked("a\0b").is_err());
+        // Ordinary names (incl. spaces/quotes/backslashes) still quote fine.
+        assert_eq!(quote_checked("normal name").unwrap(), "\"normal name\"");
+        assert_eq!(quote_checked(r#"a"b\c"#).unwrap(), r#""a\"b\\c""#);
+    }
 
     #[test]
     fn parses_dirs_and_files() {

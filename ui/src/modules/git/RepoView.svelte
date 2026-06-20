@@ -122,10 +122,12 @@
     { id: 'review', label: 'Review' },
   ];
 
-  // Repo switcher: jump between the workspace's repositories without going back
-  // to the list. Built from the full repo set the git store holds.
+  // Repo switcher: jump between repositories without going back to the list.
+  // Prefer the workspace-independent global list (Git page); fall back to the
+  // per-workspace list when embedded in the agent right panel (global not loaded).
+  const repoPool = $derived(git.allRepos.length ? git.allRepos : git.repos);
   function openRepoSwitcher(e: MouseEvent): void {
-    const others = git.repos.filter((r) => r.id !== repo.id);
+    const others = repoPool.filter((r) => r.id !== repo.id);
     ctxMenu.show(e, [
       ...others.map((r) => ({
         label: r.name,
@@ -152,7 +154,7 @@
     >
       <Icon name="branch" size={13} />
       {repo.name}
-      {#if git.repos.length > 1}<span class="rv-count">{git.repos.length}</span>{/if}
+      {#if repoPool.length > 1}<span class="rv-count">{repoPool.length}</span>{/if}
       <Icon name="chevronDown" size={11} />
     </button>
     {#if repo.provider}<span class="chip">{repo.provider}</span>{/if}

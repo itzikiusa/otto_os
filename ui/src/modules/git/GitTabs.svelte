@@ -17,11 +17,11 @@
   }
   let { onopen }: Props = $props();
 
-  const byId = $derived(new Map(git.repos.map((r) => [r.id, r])));
+  const byId = $derived(new Map(git.allRepos.map((r) => [r.id, r])));
   const openRepos = $derived(
     git.openRepoIds.map((id) => byId.get(id)).filter((r): r is Repo => r != null),
   );
-  const closedRepos = $derived(git.repos.filter((r) => !git.openRepoIds.includes(r.id)));
+  const closedRepos = $derived(git.allRepos.filter((r) => !git.openRepoIds.includes(r.id)));
 
   // ── Per-repo status (branch + dirty dot) ─────────────────────────────────
   // Fetched lazily once per open repo, cached here so the strip shows the live
