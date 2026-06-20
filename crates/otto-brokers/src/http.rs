@@ -272,9 +272,12 @@ async fn create_cluster<S: BrokersCtx>(
     ctx.roles()
         .check(&user, &wid, WorkspaceRole::Editor)
         .await?;
+    // Broker clusters are a global infrastructure library (like DB connections):
+    // created workspace-independent so they appear in every workspace. The path
+    // workspace is used only to authorize the caller.
     let cluster = ctx
         .brokers()
-        .create_cluster(Some(wid), user.id.clone(), req)
+        .create_cluster(None, user.id.clone(), req)
         .await?;
     Ok((StatusCode::CREATED, Json(cluster)).into_response())
 }

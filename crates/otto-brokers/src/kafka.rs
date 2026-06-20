@@ -20,10 +20,10 @@ use rdkafka::admin::{
     AdminClient, AdminOptions, AlterConfig, ConfigSource, NewTopic, ResourceSpecifier,
     TopicReplication,
 };
-use rdkafka::client::DefaultClientContext;
+use rdkafka::client::{ClientContext, DefaultClientContext};
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::error::KafkaError;
+use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::{Header, Headers, Message, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
@@ -81,7 +81,7 @@ pub struct RawConsume {
 
 pub struct KafkaClient {
     admin: AdminClient<DefaultClientContext>,
-    consumer: BaseConsumer,
+    consumer: BaseConsumer<QuietContext>,
     producer: FutureProducer,
     base_config: ClientConfig,
 }
@@ -111,6 +111,37 @@ fn build_config(spec: &KafkaConnSpec) -> ClientConfig {
     c
 }
 
+/// Consumer context that downgrades two noisy-but-expected librdkafka global
+/// errors so they don't spam the daemon log at ERROR. `PartitionEOF` is the
+/// normal "reached end of partition" signal (emitted when
+/// `enable.partition.eof=true`; peek uses it to know when to stop) — logged at
+/// trace. `GroupAuthorizationFailed` means the broker's ACLs deny this principal
+/// consumer-group access; browsing/peeking still works (manual partition
+/// assignment needs no group), so it is incidental noise on the peek path
+/// (logged at debug), while the group-only features surface the failure in the
+/// UI. All other client errors keep their normal ERROR level.
+#[derive(Clone)]
+struct QuietContext;
+
+impl ClientContext for QuietContext {
+    fn error(&self, error: KafkaError, reason: &str) {
+        match error.rdkafka_error_code() {
+            Some(RDKafkaErrorCode::PartitionEOF) => {
+                tracing::trace!("kafka: end of partition ({reason})");
+            }
+            Some(RDKafkaErrorCode::GroupAuthorizationFailed) => {
+                tracing::debug!("kafka: consumer-group operation denied by broker ACLs ({reason})");
+            }
+            _ if matches!(error, KafkaError::PartitionEOF(_)) => {
+                tracing::trace!("kafka: end of partition ({reason})");
+            }
+            _ => tracing::error!("kafka client error: {error} ({reason})"),
+        }
+    }
+}
+
+impl ConsumerContext for QuietContext {}
+
 impl KafkaClient {
     pub fn connect(spec: &KafkaConnSpec) -> Result<Self> {
         let base = build_config(spec);
@@ -119,7 +150,8 @@ impl KafkaClient {
         let mut cc = base.clone();
         cc.set("group.id", "otto-brokers-meta");
         cc.set("enable.auto.commit", "false");
-        let consumer: BaseConsumer = cc.create().map_err(kerr)?;
+        let consumer: BaseConsumer<QuietContext> =
+            cc.create_with_context(QuietContext).map_err(kerr)?;
         Ok(Self {
             admin,
             consumer,
@@ -376,7 +408,8 @@ impl KafkaClient {
         cfg.set("group.id", format!("otto-peek-{}", peek_suffix(topic)));
         cfg.set("enable.auto.commit", "false");
         cfg.set("enable.partition.eof", "true");
-        let consumer: BaseConsumer = cfg.create().map_err(kerr)?;
+        let consumer: BaseConsumer<QuietContext> =
+            cfg.create_with_context(QuietContext).map_err(kerr)?;
 
         // Watermarks per partition.
         let mut ranges = Vec::new();
@@ -608,7 +641,8 @@ impl KafkaClient {
         let mut grp_cfg = self.base_config.clone();
         grp_cfg.set("group.id", group);
         grp_cfg.set("enable.auto.commit", "false");
-        let grp_consumer: BaseConsumer = grp_cfg.create().map_err(kerr)?;
+        let grp_consumer: BaseConsumer<QuietContext> =
+            grp_cfg.create_with_context(QuietContext).map_err(kerr)?;
         let committed = grp_consumer
             .committed_offsets(tpl, GROUP_TIMEOUT)
             .map_err(kerr)?;
@@ -668,7 +702,8 @@ impl KafkaClient {
         let mut grp_cfg = self.base_config.clone();
         grp_cfg.set("group.id", group);
         grp_cfg.set("enable.auto.commit", "false");
-        let consumer: BaseConsumer = grp_cfg.create().map_err(kerr)?;
+        let consumer: BaseConsumer<QuietContext> =
+            grp_cfg.create_with_context(QuietContext).map_err(kerr)?;
 
         let mut tpl = TopicPartitionList::new();
         for ((topic, partition), offset) in &positions {
