@@ -19,6 +19,7 @@
 //! can't be created it becomes a no-op recorder that still reports its status,
 //! so the rest of the daemon is unaffected.
 
+pub mod budget_dedup;
 mod clickhouse;
 mod engine;
 mod metrics;
@@ -33,6 +34,7 @@ mod types;
 /// view filter (see `UsageEngine::summary(_, otto_only)`).
 pub const EXTERNAL_WORKSPACE: &str = "external";
 
+pub use budget_dedup::{BudgetDedup, BudgetSignal};
 pub use clickhouse::ClickHouse;
 pub use engine::UsageEngine;
 pub use metrics::{Metric, MetricsSampler};

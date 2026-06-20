@@ -508,6 +508,9 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent |
+| GET /reviews/{review_id}/findings | ws viewer | — | `ReviewFindingRow[]` (persistent findings keyed by fingerprint, with lifecycle state) |
+| POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated `ReviewFindingRow` (lifecycle transition) |
+| GET /reviews/{review_id}/merge-readiness | ws viewer | — | `MergeReadiness` (open/total findings + approvals + ci_status + mergeable + conflicts + branch freshness) |
 
 ## Orchestrator & broadcast (beyond #23–#24)
 

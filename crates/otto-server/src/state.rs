@@ -13,7 +13,8 @@ use otto_sessions::SessionManager;
 use otto_core::domain::{AgentTask, Notice, TrailEvent};
 use otto_state::{
     ActivityRepo, AuditRepo, GitStore, IntegrationsRepo, IssuesRepo, NewAuditEntry, NewNotice,
-    NewTask, NewTrail, NotificationsRepo, ReviewsRepo, SkillEvalsRepo, WorkspacesRepo,
+    NewTask, NewTrail, NotificationsRepo, ReviewFindingsRepo, ReviewsRepo, SkillEvalsRepo,
+    WorkspacesRepo,
 };
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
@@ -48,6 +49,8 @@ pub struct ServerCtx {
     pub issues_store: IssuesRepo,
     pub integrations_store: IntegrationsRepo,
     pub reviews_store: ReviewsRepo,
+    /// Persistent review finding identity + lifecycle (A1 verified-review loop).
+    pub findings_store: ReviewFindingsRepo,
     pub skill_evals_store: SkillEvalsRepo,
     /// Per-run cancellation flags for in-flight skill evaluations.
     pub skill_eval_cancels: crate::skill_eval::CancelRegistry,

@@ -13,6 +13,8 @@ use otto_core::api::{
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
 
+use crate::types::CiStatus;
+
 use super::client::Http;
 use super::{map_state, ts, varr, vbool, vstr, vstr_opt, RemoteRef, RemoteRepoSummary};
 
@@ -73,6 +75,107 @@ impl Github {
                 &format!("{}/{number}", Self::prs_path(r)),
             ))
             .await
+    }
+
+    /// Fetch GitHub check-run status for the HEAD commit of `number` and
+    /// aggregate it into a [`CiStatus`]. Returns `CiStatus::none()` on any
+    /// provider error so a CI probe never fails the whole PR fetch.
+    pub async fn fetch_ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
+        // First get the head sha from the PR.
+        let pr = match self.pr_raw(r, number).await {
+            Ok(v) => v,
+            Err(_) => return CiStatus::none(),
+        };
+        let sha = vstr(&pr, &["head", "sha"]);
+        if sha.is_empty() {
+            return CiStatus::none();
+        }
+        // Fetch check-runs for the commit.
+        let path = format!("/repos/{}/{}/commits/{sha}/check-runs?per_page=100", r.owner, r.repo);
+        let v = match self.http.json(self.req(reqwest::Method::GET, &path)).await {
+            Ok(v) => v,
+            Err(_) => return CiStatus::none(),
+        };
+        let runs = varr(&v, &["check_runs"]);
+        if runs.is_empty() {
+            // Fall back to legacy commit statuses.
+            return self.fetch_commit_status(r, &sha).await;
+        }
+        let total = runs.len() as u32;
+        let mut passed = 0u32;
+        let mut failed = 0u32;
+        let mut pending = 0u32;
+        let mut run_url: Option<String> = None;
+        for run in runs {
+            let conclusion = vstr(run, &["conclusion"]);
+            let status = vstr(run, &["status"]);
+            if run_url.is_none() {
+                run_url = vstr_opt(run, &["html_url"]);
+            }
+            match (status.as_str(), conclusion.as_str()) {
+                (_, "success") | (_, "neutral") | (_, "skipped") => passed += 1,
+                (_, "failure") | (_, "cancelled") | (_, "timed_out") | (_, "action_required") => {
+                    failed += 1
+                }
+                _ => pending += 1,
+            }
+        }
+        let state = if failed > 0 {
+            "failure"
+        } else if pending > 0 {
+            "pending"
+        } else if passed == total && total > 0 {
+            "success"
+        } else {
+            "none"
+        };
+        CiStatus { state: state.to_string(), total, passed, failed, url: run_url }
+    }
+
+    /// Fallback: aggregate legacy GitHub commit statuses (the older Statuses
+    /// API, still used by some third-party integrations).
+    async fn fetch_commit_status(&self, r: &RemoteRef, sha: &str) -> CiStatus {
+        let path = format!("/repos/{}/{}/commits/{sha}/statuses?per_page=100", r.owner, r.repo);
+        let v = match self.http.json(self.req(reqwest::Method::GET, &path)).await {
+            Ok(v) => v,
+            Err(_) => return CiStatus::none(),
+        };
+        let items = varr(&v, &[]);
+        if items.is_empty() {
+            return CiStatus::none();
+        }
+        // Statuses are newest-first; keep only the latest per context name.
+        let mut seen: std::collections::HashSet<String> = Default::default();
+        let mut total = 0u32;
+        let mut passed = 0u32;
+        let mut failed = 0u32;
+        let mut pending = 0u32;
+        let mut url: Option<String> = None;
+        for item in items {
+            let ctx = vstr(item, &["context"]);
+            if !seen.insert(ctx) {
+                continue;
+            }
+            total += 1;
+            if url.is_none() {
+                url = vstr_opt(item, &["target_url"]);
+            }
+            match vstr(item, &["state"]).as_str() {
+                "success" => passed += 1,
+                "failure" | "error" => failed += 1,
+                _ => pending += 1,
+            }
+        }
+        let state = if failed > 0 {
+            "failure"
+        } else if pending > 0 {
+            "pending"
+        } else if passed == total && total > 0 {
+            "success"
+        } else {
+            "none"
+        };
+        CiStatus { state: state.to_string(), total, passed, failed, url }
     }
 }
 
@@ -231,8 +334,13 @@ impl super::GitProvider for Github {
             }
         }
 
+        // Best-effort CI status — never fails the PR fetch.
+        let ci = self.fetch_ci_status(r, number).await;
+        let mut summary = summary_from(&pr);
+        summary.ci_status = Some(ci.state.clone());
+
         Ok(PrDetail {
-            summary: summary_from(&pr),
+            summary,
             description_md: vstr(&pr, &["body"]),
             comments,
             approved_by,
@@ -519,9 +627,46 @@ fn parse_github_expiry(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+/// Parse a small inline check-runs JSON fixture into a CiStatus aggregate.
+/// Used by tests; not exposed to the public API.
+#[cfg(test)]
+fn parse_check_runs_fixture(json_str: &str) -> crate::types::CiStatus {
+    let v: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+    let runs = varr(&v, &["check_runs"]);
+    let total = runs.len() as u32;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let mut pending = 0u32;
+    let mut run_url: Option<String> = None;
+    for run in runs {
+        let conclusion = vstr(run, &["conclusion"]);
+        let status = vstr(run, &["status"]);
+        if run_url.is_none() {
+            run_url = vstr_opt(run, &["html_url"]);
+        }
+        match (status.as_str(), conclusion.as_str()) {
+            (_, "success") | (_, "neutral") | (_, "skipped") => passed += 1,
+            (_, "failure") | (_, "cancelled") | (_, "timed_out") | (_, "action_required") => {
+                failed += 1
+            }
+            _ => pending += 1,
+        }
+    }
+    let state = if failed > 0 {
+        "failure"
+    } else if pending > 0 {
+        "pending"
+    } else if passed == total && total > 0 {
+        "success"
+    } else {
+        "none"
+    };
+    crate::types::CiStatus { state: state.to_string(), total, passed, failed, url: run_url }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_github_expiry;
+    use super::{parse_check_runs_fixture, parse_github_expiry};
     use chrono::{Datelike, Timelike};
 
     #[test]
@@ -551,5 +696,50 @@ mod tests {
         assert!(parse_github_expiry("").is_none());
         assert!(parse_github_expiry("   ").is_none());
         assert!(parse_github_expiry("never").is_none());
+    }
+
+    // --- CI status aggregation unit tests (parse inline JSON fixtures) --------
+
+    #[test]
+    fn ci_status_all_success() {
+        let fixture = r#"{"check_runs":[
+            {"status":"completed","conclusion":"success","html_url":"https://ci.example.com/1"},
+            {"status":"completed","conclusion":"success","html_url":"https://ci.example.com/2"}
+        ]}"#;
+        let ci = parse_check_runs_fixture(fixture);
+        assert_eq!(ci.state, "success");
+        assert_eq!(ci.total, 2);
+        assert_eq!(ci.passed, 2);
+        assert_eq!(ci.failed, 0);
+        assert!(ci.url.is_some());
+    }
+
+    #[test]
+    fn ci_status_one_failure() {
+        let fixture = r#"{"check_runs":[
+            {"status":"completed","conclusion":"success","html_url":null},
+            {"status":"completed","conclusion":"failure","html_url":"https://ci.example.com/fail"}
+        ]}"#;
+        let ci = parse_check_runs_fixture(fixture);
+        assert_eq!(ci.state, "failure");
+        assert_eq!(ci.failed, 1);
+    }
+
+    #[test]
+    fn ci_status_pending_run() {
+        let fixture = r#"{"check_runs":[
+            {"status":"in_progress","conclusion":"","html_url":null}
+        ]}"#;
+        let ci = parse_check_runs_fixture(fixture);
+        assert_eq!(ci.state, "pending");
+        assert_eq!(ci.total, 1);
+    }
+
+    #[test]
+    fn ci_status_empty_is_none() {
+        let fixture = r#"{"check_runs":[]}"#;
+        let ci = parse_check_runs_fixture(fixture);
+        assert_eq!(ci.state, "none");
+        assert_eq!(ci.total, 0);
     }
 }

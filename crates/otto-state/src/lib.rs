@@ -23,6 +23,7 @@ pub mod issues;
 pub mod mcp_servers;
 pub mod memory;
 pub mod notifications;
+pub mod review_findings;
 pub mod reviews;
 pub mod sessions;
 pub mod settings;
@@ -62,6 +63,9 @@ pub use issues::{IssuesRepo, NewIssueAccount};
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::MemoriesRepo;
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
+pub use review_findings::{
+    compute_fingerprint, FindingState, NewFinding, ReviewFindingRow, ReviewFindingsRepo,
+};
 pub use reviews::ReviewsRepo;
 pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
 pub use settings::SettingsRepo;

@@ -12,7 +12,7 @@ use otto_core::domain::{
 use otto_core::event::Event;
 use otto_core::hooks::{McpServerProvider, PreSpawnHook};
 use otto_core::{new_id, Error, Id, Result};
-use otto_pty::{CommandSpec, PtyHandle};
+use otto_pty::{resolve_grid, CommandSpec, PtyHandle};
 use otto_state::{ActivityRepo, NewSession, NewTrail, SessionsRepo};
 use tokio::sync::broadcast;
 
@@ -588,7 +588,14 @@ impl SessionManager {
             spec.env.extend(self.ingest_env(&session.id));
         }
 
-        let handle = match PtyHandle::spawn(&spec) {
+        // Restore the saved grid from `pty_cols` / `pty_rows` in the session's
+        // metadata (written by `resize()`). Falls back to 80×24 when absent or
+        // out-of-range so the very first spawn still gets a sane default.
+        let saved_cols = session.meta.get("pty_cols").and_then(|v| v.as_u64()).map(|v| v as u16);
+        let saved_rows = session.meta.get("pty_rows").and_then(|v| v.as_u64()).map(|v| v as u16);
+        let (grid_cols, grid_rows) = resolve_grid(saved_cols, saved_rows);
+
+        let handle = match PtyHandle::spawn_sized(&spec, grid_cols, grid_rows) {
             Ok(h) => Arc::new(h),
             Err(e) => {
                 let _ = self.repo.delete(&session.id).await;
@@ -1144,7 +1151,13 @@ impl SessionManager {
             // the workspace from the initial spawn).
             spec.env.extend(self.ingest_env(&session.id));
         }
-        let handle = Arc::new(PtyHandle::spawn(&spec)?);
+        // Restore the saved grid — the client will confirm its own size via a
+        // Resize frame on connect, but we want the PTY and emulator to agree
+        // with what the user last had so the first snapshot is correctly framed.
+        let saved_cols = session.meta.get("pty_cols").and_then(|v| v.as_u64()).map(|v| v as u16);
+        let saved_rows = session.meta.get("pty_rows").and_then(|v| v.as_u64()).map(|v| v as u16);
+        let (grid_cols, grid_rows) = resolve_grid(saved_cols, saved_rows);
+        let handle = Arc::new(PtyHandle::spawn_sized(&spec, grid_cols, grid_rows)?);
         self.live.insert(id.clone(), Arc::clone(&handle));
         self.repo.update_status(id, SessionStatus::Running).await?;
         let _ = self.events.send(Event::SessionStatus {
@@ -1429,5 +1442,62 @@ mod tests {
         let pruned = mgr.prune_dead_sessions().await;
         assert_eq!(pruned, 0, "existing transcript must be kept");
         assert!(repo.get(&id).await.is_ok());
+    }
+
+    // ── Grid-size resolution tests ───────────────────────────────────────────
+
+    /// `resolve_grid` returns the clamped values when both fall in-range.
+    #[test]
+    fn resolve_grid_in_range() {
+        let (c, r) = resolve_grid(Some(132), Some(50));
+        assert_eq!(c, 132);
+        assert_eq!(r, 50);
+    }
+
+    /// Out-of-range cols fall back to the default; rows are accepted when valid.
+    #[test]
+    fn resolve_grid_cols_out_of_range_falls_back() {
+        // cols = 0 is below MIN_COLS (20) → default 80
+        let (c, r) = resolve_grid(Some(0), Some(40));
+        assert_eq!(c, otto_pty::DEFAULT_COLS, "zero cols should yield default");
+        assert_eq!(r, 40);
+
+        // cols = 501 is above MAX_COLS (500) → default 80
+        let (c, _) = resolve_grid(Some(501), Some(24));
+        assert_eq!(c, otto_pty::DEFAULT_COLS, "oversized cols should yield default");
+    }
+
+    /// Rows out-of-range fall back to the default.
+    #[test]
+    fn resolve_grid_rows_out_of_range_falls_back() {
+        let (_, r) = resolve_grid(Some(80), Some(1));
+        assert_eq!(r, otto_pty::DEFAULT_ROWS, "rows below MIN_ROWS should yield default");
+
+        let (_, r) = resolve_grid(Some(80), Some(201));
+        assert_eq!(r, otto_pty::DEFAULT_ROWS, "rows above MAX_ROWS should yield default");
+    }
+
+    /// `None` values yield the defaults.
+    #[test]
+    fn resolve_grid_none_yields_defaults() {
+        let (c, r) = resolve_grid(None, None);
+        assert_eq!(c, otto_pty::DEFAULT_COLS);
+        assert_eq!(r, otto_pty::DEFAULT_ROWS);
+    }
+
+    /// A session spawned with saved grid meta reports that size via screen_size().
+    #[tokio::test]
+    async fn spawn_sized_restores_grid() {
+        use otto_pty::{CommandSpec, PtyHandle};
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn_sized(&spec, 132, 50).expect("spawn");
+        let (rows, cols) = handle.screen_size();
+        assert_eq!(cols, 132, "restored cols");
+        assert_eq!(rows, 50, "restored rows");
     }
 }

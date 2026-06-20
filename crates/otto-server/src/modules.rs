@@ -1625,6 +1625,183 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
             "/repos/{id}/draft-commit-message",
             post(draft_commit_message),
         )
+        // A1 verified-review loop: findings list, lifecycle state update, and
+        // merge-readiness assembly. Registered here (not in routes/mod.rs) so
+        // they share the review-module handler context.
+        .route(
+            "/reviews/{review_id}/findings",
+            get(list_review_findings),
+        )
+        .route(
+            "/reviews/{review_id}/findings/{fingerprint}/state",
+            post(set_finding_state),
+        )
+        .route(
+            "/reviews/{review_id}/merge-readiness",
+            get(get_merge_readiness),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// A1 Verified review loop — findings + merge-readiness handlers
+// ---------------------------------------------------------------------------
+
+/// `GET /reviews/{review_id}/findings` — list all persistent findings for a
+/// review run, keyed by fingerprint with their current lifecycle state.
+async fn list_review_findings(
+    Path(review_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<otto_state::ReviewFindingRow>>> {
+    // Resolve the review to check workspace access.
+    let review = ctx
+        .reviews_store
+        .get_review(&review_id)
+        .await
+        .map_err(ApiError)?;
+    let repo = ctx
+        .git_store
+        .get_repo(&review.repo_id)
+        .await
+        .map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
+
+    let findings = ctx
+        .findings_store
+        .list_for_review(&review_id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(findings))
+}
+
+/// `POST /reviews/{review_id}/findings/{fingerprint}/state`
+/// Body: `{ "state": "open"|"fixing"|"resolved"|"regressed"|"declined", "fix_session_id"?: string }`
+/// — update the lifecycle state of a finding identified by its fingerprint.
+#[derive(serde::Deserialize)]
+struct SetFindingStateReq {
+    state: String,
+    #[serde(default)]
+    fix_session_id: Option<String>,
+}
+
+async fn set_finding_state(
+    Path((review_id, fingerprint)): Path<(Id, String)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<SetFindingStateReq>,
+) -> ApiResult<Json<otto_state::ReviewFindingRow>> {
+    let review = ctx
+        .reviews_store
+        .get_review(&review_id)
+        .await
+        .map_err(ApiError)?;
+    let repo = ctx
+        .git_store
+        .get_repo(&review.repo_id)
+        .await
+        .map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+
+    let new_state = otto_state::FindingState::parse(&body.state).ok_or_else(|| {
+        ApiError(Error::Invalid(format!("unknown finding state: {}", body.state)))
+    })?;
+    let row = ctx
+        .findings_store
+        .set_state(&review_id, &fingerprint, new_state, body.fix_session_id.as_deref())
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(row))
+}
+
+/// `GET /reviews/{review_id}/merge-readiness` — assemble the full merge-readiness
+/// picture: open/total findings from `review_merge_readiness` view, the PR's
+/// ci_status, approvals, and mergeable flag from the provider.
+async fn get_merge_readiness(
+    Path(review_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    let review = ctx
+        .reviews_store
+        .get_review(&review_id)
+        .await
+        .map_err(ApiError)?;
+    let repo = ctx
+        .git_store
+        .get_repo(&review.repo_id)
+        .await
+        .map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
+
+    // Findings aggregate from the persistent findings store.
+    let all_findings = ctx
+        .findings_store
+        .list_for_review(&review_id)
+        .await
+        .map_err(ApiError)?;
+    let total_findings = all_findings.len() as u64;
+    let open_findings = all_findings
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.state,
+                otto_state::FindingState::Open | otto_state::FindingState::Regressed
+            )
+        })
+        .count() as u64;
+    let blocker_count = all_findings
+        .iter()
+        .filter(|f| {
+            f.severity == "bug"
+                && matches!(
+                    f.state,
+                    otto_state::FindingState::Open | otto_state::FindingState::Regressed
+                )
+        })
+        .count() as u64;
+
+    // Best-effort: fetch live PR detail for approvals + ci_status + mergeable.
+    // This call may fail (rate-limits, no token); silently degrade.
+    let (ci_status, approvals, mergeable, conflicts) =
+        match fetch_pr_details_for_readiness(&ctx, &user, &repo, &review).await {
+            Ok(detail) => {
+                let ci = detail
+                    .summary
+                    .ci_status
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string());
+                let approved = detail.approved_by.len() as u64;
+                let can_merge = detail.mergeable;
+                (ci, approved, can_merge, false)
+            }
+            Err(_) => ("none".to_string(), 0u64, None, false),
+        };
+
+    Ok(Json(serde_json::json!({
+        "unresolved_total": open_findings,
+        "unresolved_blocker_count": blocker_count,
+        "total_findings": total_findings,
+        "resolved_count": total_findings.saturating_sub(open_findings),
+        "ci_status": ci_status,
+        "approvals": approvals,
+        "mergeable": mergeable,
+        "conflicts": conflicts,
+        "branch_freshness": null,
+        "unpushed": null,
+    })))
+}
+
+/// Helper: fetch the live PR detail (approvals, CI status, mergeable) for the
+/// repo/PR associated with a review. Best-effort: callers log-and-degrade on
+/// any error (rate limits, no token, no git account, etc.).
+async fn fetch_pr_details_for_readiness(
+    ctx: &ServerCtx,
+    user: &User,
+    repo: &otto_core::domain::Repo,
+    review: &Review,
+) -> Result<otto_core::api::PrDetail> {
+    let (provider, remote_ref) = resolve_provider_remote(ctx, user, repo).await?;
+    provider.get_pr(&remote_ref, review.pr_number).await
 }
 
 /// Tolerantly pull `{title, description}` out of an agent reply (which may wrap
@@ -1982,6 +2159,24 @@ async fn start_review(
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
     let req = body.map(|b| b.0).unwrap_or_default();
+
+    // Point-of-action budget gate (A1/A2): check the workspace budget before
+    // spawning any agent sessions. If enforcement is on and the cap is exceeded,
+    // reject with 402 before touching the DB.
+    {
+        let verdict = crate::routes::usage::check_budget(
+            &ctx,
+            &repo.workspace_id,
+            "", // provider not yet known at start — check workspace-level cap
+        )
+        .await;
+        if verdict.blocked {
+            return Err(ApiError(Error::Invalid(format!(
+                "Budget exceeded — review blocked: {}",
+                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
+            ))));
+        }
+    }
 
     // Create the review row (status=running) and return it immediately.
     let review = ctx

@@ -1,7 +1,7 @@
 <script lang="ts">
-  // AI review panel: start review agents, poll until done, approve/decline
-  // individual draft comments. Supports live per-agent progress cards and
-  // a configure-agents modal.
+  // AI review panel: start review agents, refresh via WS reviewBus (no poll),
+  // approve/decline individual draft comments. Supports live per-agent progress
+  // cards, a configure-agents modal, and a merge-readiness panel.
   import { api, ApiError } from '../../lib/api/client';
   import type {
     Review,
@@ -12,6 +12,8 @@
     DiffResp,
     FileDiff,
     DiffLine,
+    MergeReadiness,
+    ReviewFindingRow,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -22,6 +24,10 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
+  // Subscribe to the WS review_changed bus (populated by events.svelte.ts) to
+  // re-fetch when the running review for this PR completes/errors, replacing the
+  // fixed-interval visibility-gated poll for the running state.
+  import { reviewBus } from '../../lib/events.svelte';
 
   // --- Installed-skill metadata (library API; category + version are new) ----
   // Defined locally so this panel can read the extended fields without touching
@@ -54,9 +60,17 @@
   let history: Review[] = $state([]);
   let loading = $state(true);
   let starting = $state(false);
+  // Fallback poll (visibility-gated) used only while the review is running and
+  // no WS event has arrived yet — keeps the panel alive if the WS drops.
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let pollCount = $state(0);
   let pollPaused = $state(false);
+  // Merge-readiness data from the dedicated endpoint (fetched after a run completes).
+  let mergeReadiness: MergeReadiness | null = $state(null);
+  let mergeReadinessLoading = $state(false);
+  // Persistent findings (keyed by fingerprint) from the findings endpoint.
+  let findings: ReviewFindingRow[] = $state([]);
+  let findingsLoading = $state(false);
 
   function pollDelay(count: number): number {
     if (count < 5) return 2000;
@@ -173,6 +187,65 @@
     };
   });
 
+  // Subscribe to the reviewBus WS events. When a review_changed arrives for
+  // the current PR's open review, immediately re-fetch the review (and, on
+  // terminal status, also fetch findings + merge-readiness). This replaces the
+  // fixed-interval poll for the running state as the primary progress channel.
+  $effect(() => {
+    // Access reviewBus.tick reactively so this re-runs on every tick.
+    const _tick = reviewBus.tick;
+    const evReviewId = reviewBus.reviewId;
+    const evStatus = reviewBus.status;
+    if (!evReviewId) return;
+    // Only react when the event matches our open review or when this PR just
+    // started a review (review may be null during the first tick).
+    if (review && review.id !== evReviewId) return;
+    void refreshFromBus(evReviewId, evStatus);
+  });
+
+  /** Re-fetch the review when the WS bus fires. */
+  async function refreshFromBus(evReviewId: string, evStatus: string): Promise<void> {
+    try {
+      const r = await api.get<Review>(`/repos/${repoId}/prs/${prNumber}/review`);
+      review = r;
+      if (history.length > 0) {
+        history = [r, ...history.slice(1)];
+      } else {
+        history = [r];
+      }
+      // Kill the fallback poll if the review is now terminal.
+      if (r.status !== 'running') {
+        if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
+        pollCount = 0;
+        if (r.status === 'done') {
+          void loadDiff(repoId, prNumber);
+          void loadFindingsAndReadiness(r.id);
+        }
+      }
+    } catch {
+      // If the fetch fails, fall through to the fallback poll.
+    }
+  }
+
+  /** Load the merge-readiness and persistent findings for a completed review. */
+  async function loadFindingsAndReadiness(reviewId: string): Promise<void> {
+    findingsLoading = true;
+    mergeReadinessLoading = true;
+    try {
+      const [fp, mr] = await Promise.all([
+        api.get<ReviewFindingRow[]>(`/reviews/${reviewId}/findings`),
+        api.get<MergeReadiness>(`/reviews/${reviewId}/merge-readiness`),
+      ]);
+      findings = fp;
+      mergeReadiness = mr;
+    } catch {
+      // Non-blocking — the review summary still shows without these.
+    } finally {
+      findingsLoading = false;
+      mergeReadinessLoading = false;
+    }
+  }
+
   // Load installed review skills (primary one-click lenses) + the missing/
   // outdated pre-check. Non-blocking: failures just leave the fallback presets.
   $effect(() => {
@@ -206,13 +279,20 @@
   async function load(rid: string, num: number): Promise<void> {
     loading = true;
     diffData = null;
+    mergeReadiness = null;
+    findings = [];
     try {
       const runs = await api.get<Review[]>(`/repos/${rid}/prs/${num}/reviews`);
       history = runs;
       review = runs.length > 0 ? runs[0] : null;
-      if (review?.status === 'running') schedulePoll();
-      if (review?.status === 'done' && review.comments.length > 0) {
-        void loadDiff(rid, num);
+      if (review?.status === 'running') {
+        // Start the fallback poll while waiting for WS events.
+        schedulePoll();
+      }
+      if (review?.status === 'done') {
+        if (review.comments.length > 0) void loadDiff(rid, num);
+        // Load persistent findings + merge-readiness for the done review.
+        void loadFindingsAndReadiness(review.id);
       }
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
@@ -289,6 +369,8 @@
     starting = true;
     pollCount = 0;
     diffData = null;
+    mergeReadiness = null;
+    findings = [];
     try {
       const body: StartReviewReq = {};
       if (attachedIssue) {
@@ -301,6 +383,7 @@
       // Prepend new run; keep old runs in history
       review = newRun;
       history = [newRun, ...history];
+      // Start the fallback poll; the WS reviewBus will replace it when events arrive.
       if (review.status === 'running') schedulePoll();
     } catch (e) {
       toasts.error('Could not start review', e instanceof Error ? e.message : String(e));
@@ -734,6 +817,49 @@
       </div>
     {/if}
 
+    <!-- A1: Merge-readiness panel — CI pill, approvals, unresolved findings,
+         mergeable/conflicts from the /merge-readiness endpoint. -->
+    {#if mergeReadiness !== null || mergeReadinessLoading}
+      <div class="rp-readiness card">
+        <div class="rp-readiness-row">
+          <span class="rp-readiness-label">Merge readiness</span>
+          {#if mergeReadinessLoading}
+            <span class="dim" style="font-size:11px">Loading…</span>
+          {:else if mergeReadiness !== null}
+            <!-- CI status pill -->
+            {@const ciState = (mergeReadiness as any).ci_status ?? 'none'}
+            <span
+              class="chip rp-ci-pill rp-ci-{ciState}"
+              title="CI: {ciState}"
+            >
+              CI {ciState}
+            </span>
+            <!-- Approvals -->
+            {@const approvals = (mergeReadiness as any).approvals ?? 0}
+            {#if approvals > 0}
+              <span class="chip ok rp-readiness-chip">{approvals} approval{approvals === 1 ? '' : 's'}</span>
+            {:else}
+              <span class="chip rp-readiness-chip dim">0 approvals</span>
+            {/if}
+            <!-- Unresolved findings -->
+            {@const unresolved = mergeReadiness.unresolved_total}
+            {#if unresolved > 0}
+              <span class="chip rp-readiness-chip" style="background:color-mix(in srgb,var(--status-exited)12%,transparent);color:var(--status-exited)">{unresolved} open finding{unresolved === 1 ? '' : 's'}</span>
+            {:else}
+              <span class="chip ok rp-readiness-chip">No open findings</span>
+            {/if}
+            <!-- Mergeable flag -->
+            {@const mergeable = (mergeReadiness as any).mergeable}
+            {#if mergeable === true}
+              <span class="chip ok rp-readiness-chip">Mergeable</span>
+            {:else if mergeable === false}
+              <span class="chip rp-readiness-chip" style="color:var(--status-exited)">Conflicts</span>
+            {/if}
+          {/if}
+        </div>
+      </div>
+    {/if}
+
     <!-- Per-agent breakdown: open each agent's (archived) session + its own
          findings. Shared with the local review; excludes the summarizer. -->
     {#if review.agents.length > 1}
@@ -1033,6 +1159,33 @@
     font-size: 11px;
     opacity: 0.8;
   }
+
+  /* Merge-readiness panel (A1) */
+  .rp-readiness {
+    padding: 8px 12px;
+    margin: 0 0 8px;
+  }
+  .rp-readiness-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .rp-readiness-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .rp-readiness-chip {
+    font-size: 10.5px;
+    padding: 2px 7px;
+  }
+  /* CI status pill colours */
+  .rp-ci-success { background: color-mix(in srgb, #22c55e 12%, transparent); color: #15803d; }
+  .rp-ci-failure { background: color-mix(in srgb, var(--status-exited) 12%, transparent); color: var(--status-exited); }
+  .rp-ci-pending { background: color-mix(in srgb, #e0a000 12%, transparent); color: #b07d00; }
+  .rp-ci-none    { background: var(--surface-raised); color: var(--text-dim); }
 
   /* Pre-check banner: missing / outdated review skills */
   .rp-precheck {

@@ -114,10 +114,14 @@
       {/if}
       {#if agentExpanded[agent.name] && agent.findings}
         <ul class="rp-agent-findings">
-          {#each agent.findings as f, fi (fi)}
+          {#each agent.findings as f (f.fingerprint ?? f.body)}
             <li class="rp-finding">
               <span class="severity-chip sev-{f.severity}">{f.severity}</span>
               {#if f.path}<span class="mono rp-loc">{f.path}{f.line ? ':' + f.line : ''}</span>{/if}
+              <!-- Lifecycle state chip (A1): shown when a persisted state is available. -->
+              {#if f.state && f.state !== 'open'}
+                <span class="chip rp-state-chip rp-state-{f.state}" title="Finding state">{f.state}</span>
+              {/if}
               <span class="rp-finding-body">{f.body}</span>
             </li>
           {/each}
@@ -269,4 +273,18 @@
 
   .grow { flex: 1; }
   .mono { font-family: var(--font-mono, monospace); }
+
+  /* A1: finding lifecycle state chips */
+  .rp-state-chip {
+    font-size: 9.5px;
+    padding: 1px 5px;
+    text-transform: uppercase;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    flex-shrink: 0;
+  }
+  .rp-state-fixing    { background: color-mix(in srgb, #e0a000 15%, transparent); color: #b07d00; }
+  .rp-state-resolved  { background: color-mix(in srgb, #22c55e 12%, transparent); color: #15803d; }
+  .rp-state-regressed { background: color-mix(in srgb, var(--status-exited) 12%, transparent); color: var(--status-exited); }
+  .rp-state-declined  { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
 </style>

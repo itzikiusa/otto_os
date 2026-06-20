@@ -18,14 +18,14 @@ use otto_orchestrator::Orchestrator;
 use otto_rbac::{RbacAuthenticator, RbacRoleChecker};
 use otto_server::modules::{module_routers, PtySpawner};
 use otto_server::{
-    build_router, spawn_metrics_sampler, spawn_session_event_listener, spawn_usage_recorder,
-    AuthScanner, CredentialMonitor, ServerCtx,
+    build_router, spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
+    spawn_usage_recorder, AuthScanner, CredentialMonitor, ServerCtx,
 };
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
     ActivityRepo, ConnectionSectionsRepo, ConnectionsRepo, GitStore, ImprovementsRepo,
-    IntegrationsRepo, IssuesRepo, ReviewsRepo, SessionsRepo, SettingsRepo, SkillEvalsRepo,
-    UsersRepo, WorkspacesRepo,
+    IntegrationsRepo, IssuesRepo, ReviewFindingsRepo, ReviewsRepo, SessionsRepo, SettingsRepo,
+    SkillEvalsRepo, UsersRepo, WorkspacesRepo,
 };
 use tokio::sync::{broadcast, watch};
 use tracing_subscriber::layer::SubscriberExt;
@@ -261,6 +261,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         issues_store: IssuesRepo::new(pool.clone()),
         integrations_store: IntegrationsRepo::new(pool.clone()),
         reviews_store: ReviewsRepo::new(pool.clone()),
+        findings_store: ReviewFindingsRepo::new(pool.clone()),
         skill_evals_store: SkillEvalsRepo::new(pool.clone()),
         skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         orchestrator: Arc::clone(&orchestrator),
@@ -547,11 +548,13 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
 
     // --- Usage tracking + system metrics (embedded ClickHouse) ---
-    // The recorder mines usage from the activity-trail event stream; the sampler
-    // periodically writes CPU/RAM. Both are cheap no-ops until ClickHouse is
-    // available, so they're always started.
+    // The recorder mines usage from the activity-trail event stream; the
+    // metrics sampler writes CPU/RAM; the budget sampler rides the metrics tick
+    // to check spend-vs-cap and emit BudgetExceeded events (with dedupe). All
+    // three are cheap no-ops until ClickHouse is available.
     spawn_usage_recorder(ctx.clone());
     spawn_metrics_sampler(ctx.clone());
+    spawn_budget_sampler(ctx.clone());
     if usage.available() {
         tracing::info!("usage tracking started (embedded clickhouse)");
     } else {

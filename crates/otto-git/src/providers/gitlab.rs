@@ -15,6 +15,8 @@ use otto_core::api::{
 use otto_core::Result;
 use serde_json::{json, Value};
 
+use crate::types::CiStatus;
+
 use super::client::Http;
 use super::{map_state, ts, varr, vstr, vstr_opt, vu64, RemoteRef, RemoteRepoSummary};
 
@@ -68,6 +70,41 @@ impl Gitlab {
 
     fn mr_path(r: &RemoteRef, tail: &str) -> String {
         format!("/projects/{}/merge_requests{tail}", Self::project_id(r))
+    }
+
+    /// Fetch the MR pipeline (latest) for `number` and map it to [`CiStatus`].
+    /// GitLab exposes `GET /projects/:id/merge_requests/:iid/pipelines`.
+    /// Falls back to `CiStatus::none()` on any error.
+    pub async fn fetch_ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
+        let path = Self::mr_path(r, &format!("/{number}/pipelines?per_page=5"));
+        let v = match self.http.json(self.req(reqwest::Method::GET, &path)).await {
+            Ok(v) => v,
+            Err(_) => return CiStatus::none(),
+        };
+        let pipelines = varr(&v, &[]);
+        // Take the most-recent pipeline (list is newest-first).
+        let Some(latest) = pipelines.first() else {
+            return CiStatus::none();
+        };
+        let gl_status = vstr(latest, &["status"]);
+        let url = vstr_opt(latest, &["web_url"]);
+        // GitLab pipeline statuses: created, waiting_for_resource, preparing,
+        // pending, running, success, failed, canceled, skipped, manual, scheduled.
+        let (state, passed, failed) = match gl_status.as_str() {
+            "success" => ("success", 1u32, 0u32),
+            "failed" | "canceled" => ("failure", 0, 1),
+            "skipped" => ("success", 1, 0), // skipped counts as passing
+            "created" | "pending" | "running" | "waiting_for_resource" | "preparing"
+            | "manual" | "scheduled" => ("pending", 0, 0),
+            _ => ("none", 0, 0),
+        };
+        CiStatus {
+            state: state.to_string(),
+            total: 1,
+            passed,
+            failed,
+            url,
+        }
     }
 }
 
@@ -206,8 +243,13 @@ impl super::GitProvider for Gitlab {
             _ => None,
         };
 
+        // Best-effort CI pipeline status — never fails the MR fetch.
+        let ci = self.fetch_ci_status(r, number).await;
+        let mut summary = summary_from(&mr);
+        summary.ci_status = Some(ci.state.clone());
+
         Ok(PrDetail {
-            summary: summary_from(&mr),
+            summary,
             description_md: vstr(&mr, &["description"]),
             comments,
             approved_by,
@@ -527,9 +569,31 @@ fn parse_gitlab_expiry(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+/// Parse a small inline pipeline-list JSON fixture into a CiStatus aggregate.
+/// Used by unit tests; not part of the public API.
+#[cfg(test)]
+fn parse_pipeline_fixture(json_str: &str) -> crate::types::CiStatus {
+    let v: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+    let pipelines = varr(&v, &[]);
+    let Some(latest) = pipelines.first() else {
+        return crate::types::CiStatus::none();
+    };
+    let gl_status = vstr(latest, &["status"]);
+    let url = vstr_opt(latest, &["web_url"]);
+    let (state, passed, failed) = match gl_status.as_str() {
+        "success" => ("success", 1u32, 0u32),
+        "failed" | "canceled" => ("failure", 0, 1),
+        "skipped" => ("success", 1, 0),
+        "created" | "pending" | "running" | "waiting_for_resource" | "preparing"
+        | "manual" | "scheduled" => ("pending", 0, 0),
+        _ => ("none", 0, 0),
+    };
+    crate::types::CiStatus { state: state.to_string(), total: 1, passed, failed, url }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_gitlab_expiry;
+    use super::{parse_gitlab_expiry, parse_pipeline_fixture};
     use chrono::{Datelike, Timelike};
 
     #[test]
@@ -553,5 +617,37 @@ mod tests {
     fn empty_or_garbage_is_none() {
         assert!(parse_gitlab_expiry("").is_none());
         assert!(parse_gitlab_expiry("nope").is_none());
+    }
+
+    // --- CI pipeline aggregation tests (inline JSON fixtures) -----------------
+
+    #[test]
+    fn pipeline_success() {
+        let fixture = r#"[{"status":"success","web_url":"https://gitlab.example.com/pipe/1"}]"#;
+        let ci = parse_pipeline_fixture(fixture);
+        assert_eq!(ci.state, "success");
+        assert_eq!(ci.passed, 1);
+        assert!(ci.url.is_some());
+    }
+
+    #[test]
+    fn pipeline_failed() {
+        let fixture = r#"[{"status":"failed","web_url":null}]"#;
+        let ci = parse_pipeline_fixture(fixture);
+        assert_eq!(ci.state, "failure");
+        assert_eq!(ci.failed, 1);
+    }
+
+    #[test]
+    fn pipeline_pending() {
+        let fixture = r#"[{"status":"running","web_url":null}]"#;
+        let ci = parse_pipeline_fixture(fixture);
+        assert_eq!(ci.state, "pending");
+    }
+
+    #[test]
+    fn pipeline_empty_is_none() {
+        let ci = parse_pipeline_fixture(r#"[]"#);
+        assert_eq!(ci.state, "none");
     }
 }

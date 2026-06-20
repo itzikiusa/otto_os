@@ -104,25 +104,16 @@ pub async fn by_kind(
 /// the session-row `kind` badge), and fold into feature buckets. Best-effort —
 /// returns empty on any engine error so the summary still renders.
 async fn by_kind_rollup(ctx: &ServerCtx, days: u32, otto_only: bool) -> Vec<FeatureUsage> {
-    // Resolve each session's feature label up front (async SQLite lookups), then
-    // hand the engine a pure closure to fold the sums. Sessions absent from the
-    // map fall back to "external".
-    let totals = match ctx.usage.session_totals(days, otto_only).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!("usage: session totals for by-kind failed: {e}");
-            return Vec::new();
-        }
-    };
+    // Resolve feature labels in one SQLite scan (list_all) instead of one GET
+    // per session (the original N+1). Sessions absent from the map fall back
+    // to "external". `feature_usage` issues its own `session_totals` query
+    // internally, so we skip the pre-check and go straight to building the map.
     let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
-    let mut labels: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for t in &totals {
-        let label = match repo.get(&t.session_id).await {
-            Ok(sess) => session_kind_label(&sess),
-            Err(_) => "external".to_string(), // not an Otto session
-        };
-        labels.insert(t.session_id.clone(), label);
-    }
+    let all_sessions = repo.list_all().await.unwrap_or_default();
+    let labels: std::collections::HashMap<String, String> = all_sessions
+        .into_iter()
+        .map(|s| (s.id.clone(), session_kind_label(&s)))
+        .collect();
     ctx.usage
         .feature_usage(days, otto_only, |t: &SessionTotals| {
             labels
@@ -279,6 +270,18 @@ pub async fn install(
 // ---------------------------------------------------------------------------
 // Usage budgets (opt-in spend caps; secondary to MCP host config)
 // ---------------------------------------------------------------------------
+
+/// Crate-public accessor for the budget config; used by the budget sampler in
+/// `monitor.rs` without going through the route handler.
+pub(crate) async fn load_budgets_pub(ctx: &ServerCtx) -> UsageBudgetConfig {
+    load_budgets(ctx).await
+}
+
+/// Crate-public accessor for the budget status computation; used by the budget
+/// sampler in `monitor.rs`.
+pub(crate) async fn budget_status_pub(ctx: &ServerCtx, cfg: UsageBudgetConfig) -> otto_core::api::UsageBudgetStatus {
+    budget_status(ctx, cfg).await
+}
 
 /// Load the persisted budget config (defaults: enforcement off).
 async fn load_budgets(ctx: &ServerCtx) -> UsageBudgetConfig {

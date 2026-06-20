@@ -8,6 +8,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { copyAsJson } from '../../lib/components/exporters';
 
   const PAGE_SIZE = 100;
 
@@ -117,6 +118,39 @@
     offset = 0;
   }
 
+  // Quick-preset helpers: set from/to to the last N days from now.
+  function toYmd(d: Date): string {
+    // yyyy-mm-dd in local time — matches the date input value format.
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  function applyPreset(days: number): void {
+    const now = new Date();
+    const from = new Date(now);
+    from.setDate(from.getDate() - days);
+    fromDate = toYmd(from);
+    toDate = toYmd(now);
+    offset = 0;
+  }
+
+  // Per-entry copy: tracks which entry is being copied (for brief feedback).
+  let copyingId: string | null = $state(null);
+
+  async function copyEntry(e: AuditEntry): Promise<void> {
+    copyingId = e.id;
+    try {
+      await copyAsJson(e);
+    } finally {
+      // Brief flash so the user sees the button change.
+      setTimeout(() => {
+        copyingId = null;
+      }, 800);
+    }
+  }
+
   function actorLabel(e: AuditEntry): string {
     if (!e.user_id) return 'anonymous';
     return usernames[e.user_id] ? `@${usernames[e.user_id]}` : e.user_id;
@@ -218,6 +252,12 @@
       <span>To</span>
       <input class="input" type="date" bind:value={toDate} onchange={() => (offset = 0)} />
     </label>
+    <!-- Quick time-range presets -->
+    <div class="presets">
+      <button class="btn ghost preset" onclick={() => applyPreset(1)}>Last 24h</button>
+      <button class="btn ghost preset" onclick={() => applyPreset(7)}>Last 7d</button>
+      <button class="btn ghost preset" onclick={() => applyPreset(30)}>Last 30d</button>
+    </div>
     <button class="btn ghost" onclick={resetFilters} disabled={!action && !fromDate && !toDate}>
       Clear
     </button>
@@ -258,6 +298,7 @@
             <th class="col-target">Target</th>
             <th class="col-ip">IP</th>
             <th class="col-detail">Detail</th>
+            <th class="col-copy"></th>
           </tr>
         </thead>
         <tbody>
@@ -273,6 +314,15 @@
               <td class="col-target mono" title={e.target ?? ''}>{e.target ?? '—'}</td>
               <td class="col-ip mono">{e.ip ?? '—'}</td>
               <td class="col-detail mono" title={detailText(e)}>{detailText(e) || '—'}</td>
+              <td class="col-copy">
+                <button
+                  class="copy-btn"
+                  title="Copy entry as JSON"
+                  onclick={() => void copyEntry(e)}
+                >
+                  {copyingId === e.id ? '✓' : 'JSON'}
+                </button>
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -429,5 +479,50 @@
   .badge.danger {
     border-color: color-mix(in srgb, var(--err, #e03131) 45%, var(--border));
     color: var(--err, #e03131);
+  }
+
+  /* Quick time-range preset buttons */
+  .presets {
+    display: flex;
+    gap: 4px;
+    align-self: flex-end;
+  }
+  .btn.preset {
+    font-size: 11.5px;
+    padding: 0 8px;
+    height: 28px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+  }
+  .btn.preset:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: var(--accent);
+  }
+
+  /* Per-row copy-JSON button */
+  .col-copy {
+    width: 28px;
+    padding: 0 4px !important;
+  }
+  .copy-btn {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    font-size: 11px;
+    opacity: 0;
+    transition: opacity 120ms ease-out;
+  }
+  tr:hover .copy-btn {
+    opacity: 1;
+  }
+  .copy-btn:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
   }
 </style>

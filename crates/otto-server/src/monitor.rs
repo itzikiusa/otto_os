@@ -1,6 +1,6 @@
 //! Credential monitor + session-event notices (wave 2).
 //!
-//! Three independent producers, all funnelling through
+//! Independent producers, all funnelling through
 //! [`ServerCtx::notifications`]'s de-duping `create()`:
 //!
 //! 1. [`CredentialMonitor`] — a background loop (startup, then every ~6h) that
@@ -12,6 +12,12 @@
 //! 3. [`AuthScanner`] — an [`OutputScanner`] wired into the `SessionManager`
 //!    that scans live PTY output for re-auth prompts and emits an `Error`
 //!    `Credential` notice (debounced once per session).
+//! 4. [`spawn_budget_sampler`] — subscribes to [`Event::UsageMetricsTick`] and
+//!    checks budgets on each tick. Emits `Event::BudgetExceeded` with
+//!    `direction = "exceeded"` the first time a budget crosses its cap (and
+//!    `"recovered"` once when it drops back below), so each window fires at most
+//!    two events per `(scope, key)`. De-duplication is in-memory; keys that
+//!    recover are removed from the alerted set so a future re-crossing fires again.
 //!
 //! Everything here is best-effort: read/probe errors are logged and skipped;
 //! the loop never panics and never exits on a transient failure.
@@ -733,6 +739,84 @@ impl OutputScanner for AuthScanner {
                 .await
                 .map_err(|e| tracing::warn!("mid-session auth notice: {e}"));
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Budget sampler (rides the metrics tick)
+// ---------------------------------------------------------------------------
+
+/// Subscribe to `UsageMetricsTick` and check configured budgets on each tick.
+///
+/// When a budget with `enforce = true` has `spent >= cap` and it was not
+/// already in the alerted set, emit `Event::BudgetExceeded` with
+/// `direction = "exceeded"` and add the key to the set. When a key that was
+/// alerted drops back below the cap, emit `direction = "recovered"` and remove
+/// it from the set so a future re-crossing fires again.
+///
+/// De-dupe is purely in-memory; a daemon restart resets the set, which is
+/// acceptable — the UI dismisses banners on its own and re-alerting after a
+/// restart is harmless.
+pub fn spawn_budget_sampler(ctx: ServerCtx) {
+    let mut rx = ctx.events.subscribe();
+    tokio::spawn(async move {
+        // De-duplicator: emits Exceeded once per crossing, Recovered once on
+        // drop-back. Implemented in otto-usage::BudgetDedup (unit-tested there).
+        let mut dedup = otto_usage::BudgetDedup::new();
+        loop {
+            match rx.recv().await {
+                Ok(Event::UsageMetricsTick { .. }) => {
+                    check_budgets(&ctx, &mut dedup).await;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// One budget-check pass: load config + current spend, then compare each row
+/// against the de-duplication state and emit `BudgetExceeded` as needed.
+async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
+    let cfg = crate::routes::usage::load_budgets_pub(ctx).await;
+    if !cfg.enforce {
+        // Enforcement is off — clear any stale crossing state so that the next
+        // time enforcement is turned back on we start fresh.
+        dedup.clear();
+        return;
+    }
+    let status = crate::routes::usage::budget_status_pub(ctx, cfg).await;
+    for row in &status.rows {
+        let signal = dedup.apply(&row.scope, &row.key, row.exceeded);
+        let direction = match signal {
+            otto_usage::BudgetSignal::Exceeded => "exceeded",
+            otto_usage::BudgetSignal::Recovered => "recovered",
+            otto_usage::BudgetSignal::NoChange => continue,
+        };
+        let _ = ctx.events.send(Event::BudgetExceeded {
+            workspace_id: if row.scope == "workspace" {
+                row.key.clone()
+            } else {
+                String::new()
+            },
+            provider: if row.scope == "provider" {
+                row.key.clone()
+            } else {
+                String::new()
+            },
+            spend_usd: row.spent_usd,
+            cap_usd: row.limit_usd,
+            direction: direction.to_string(),
+        });
+        tracing::info!(
+            scope = %row.scope,
+            key = %row.key,
+            spent = row.spent_usd,
+            cap = row.limit_usd,
+            direction,
+            "budget crossing — BudgetExceeded emitted"
+        );
     }
 }
 

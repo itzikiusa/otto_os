@@ -73,6 +73,27 @@
     conns.filter((c) => !c.section_id || !knownSectionIds.has(c.section_id)).sort(sortByName),
   );
 
+  // "Recent" group: pinned connections first (alphabetical), then those with a
+  // last_opened_at timestamp (most-recently-opened first), capped at 6 total.
+  // Only surfaces connections that have been opened or pinned — a brand-new
+  // un-opened, un-pinned connection does not appear here.
+  const RECENT_CAP = 6;
+  const recent = $derived.by(() => {
+    const pinned = conns
+      .filter((c) => c.pinned)
+      .sort(sortByName);
+    const pinnedIds = new Set(pinned.map((c) => c.id));
+    const byRecent = conns
+      .filter((c) => !pinnedIds.has(c.id) && c.last_opened_at)
+      .sort((a, b) => {
+        // Descending: most recently opened first.
+        const ta = new Date(a.last_opened_at!).getTime();
+        const tb = new Date(b.last_opened_at!).getTime();
+        return tb - ta;
+      });
+    return [...pinned, ...byRecent].slice(0, RECENT_CAP);
+  });
+
   $effect(() => {
     const wsId = ws.currentId;
     if (!wsId) return;
@@ -388,6 +409,19 @@
     />
   {:else}
     <div class="tree">
+      <!-- Recent: pinned first, then most-recently-opened, capped at 6. Only
+           shown when there is at least one pinned or previously-opened connection. -->
+      {#if recent.length > 0}
+        <div class="section-head plain">
+          <span class="caret-spacer"></span>
+          <span class="section-name grow">Recent</span>
+          <span class="count">{recent.length}</span>
+        </div>
+        {#each recent as c (c.id)}
+          {@render connRow(c, 1)}
+        {/each}
+      {/if}
+
       {#each tree as node (node.sec.id)}
         {@render sectionNode(node, 0)}
       {/each}

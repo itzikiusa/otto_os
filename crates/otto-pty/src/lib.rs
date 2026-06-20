@@ -17,8 +17,30 @@ use tokio::sync::{broadcast, watch};
 use crate::ring::RingBuffer;
 
 /// Default terminal size on spawn.
-const DEFAULT_COLS: u16 = 80;
-const DEFAULT_ROWS: u16 = 24;
+pub const DEFAULT_COLS: u16 = 80;
+pub const DEFAULT_ROWS: u16 = 24;
+
+/// Sane column bounds for a restored grid: outside this range we fall back to
+/// the default to guard against corrupt or zero-valued metadata.
+pub const MIN_COLS: u16 = 20;
+pub const MAX_COLS: u16 = 500;
+
+/// Sane row bounds for a restored grid.
+pub const MIN_ROWS: u16 = 5;
+pub const MAX_ROWS: u16 = 200;
+
+/// Clamp and validate caller-supplied grid dimensions, falling back to
+/// `DEFAULT_COLS × DEFAULT_ROWS` when either value is out of range.
+///
+/// Used by `PtyHandle::spawn_sized` so the caller can pass raw metadata values
+/// directly and always get a safe result.
+pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
+    let c = cols.unwrap_or(DEFAULT_COLS);
+    let r = rows.unwrap_or(DEFAULT_ROWS);
+    let c = if (MIN_COLS..=MAX_COLS).contains(&c) { c } else { DEFAULT_COLS };
+    let r = if (MIN_ROWS..=MAX_ROWS).contains(&r) { r } else { DEFAULT_ROWS };
+    (c, r)
+}
 /// Capacity of the output broadcast channel (chunks).
 const BROADCAST_CAPACITY: usize = 1024;
 
@@ -53,15 +75,26 @@ fn lock_unpoisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl PtyHandle {
-    /// Spawn `spec` in a fresh 80x24 PTY. A blocking reader thread pumps
-    /// output into the scrollback ring and the broadcast channel; a waiter
-    /// thread reaps the child and publishes the exit code.
+    /// Spawn `spec` in a fresh 80×24 PTY (default size). A blocking reader
+    /// thread pumps output into the scrollback ring and the broadcast channel;
+    /// a waiter thread reaps the child and publishes the exit code.
+    ///
+    /// When you have a previously-saved grid (e.g. from session metadata) use
+    /// [`PtyHandle::spawn_sized`] to restore the exact dimensions instead.
     pub fn spawn(spec: &CommandSpec) -> Result<PtyHandle> {
+        Self::spawn_sized(spec, DEFAULT_COLS, DEFAULT_ROWS)
+    }
+
+    /// Spawn `spec` at the given `cols × rows` grid size, restoring a
+    /// previously-saved terminal size on resume so the session reopens at
+    /// exactly the dimensions the user had. Values are **not** clamped here —
+    /// call [`resolve_grid`] first to sanitise raw metadata.
+    pub fn spawn_sized(spec: &CommandSpec, cols: u16, rows: u16) -> Result<PtyHandle> {
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
-                rows: DEFAULT_ROWS,
-                cols: DEFAULT_COLS,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -112,12 +145,11 @@ impl PtyHandle {
         let (tx, _) = broadcast::channel::<Bytes>(BROADCAST_CAPACITY);
         let (exit_tx, exit_rx) = watch::channel::<Option<i32>>(None);
         let ring = Arc::new(Mutex::new(RingBuffer::default()));
-        // 1000 lines of scrollback history kept by the emulator.
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(
-            DEFAULT_ROWS,
-            DEFAULT_COLS,
-            1000,
-        )));
+        // 1000 lines of scrollback history kept by the emulator. Initialise at
+        // the requested grid size so the emulator agrees with the PTY from the
+        // very first byte — avoids a spurious SIGWINCH on reconnect when the
+        // client echoes back the same dimensions we already reported.
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
         let epoch = Instant::now();
         let last_output_ms = Arc::new(AtomicU64::new(0));
 

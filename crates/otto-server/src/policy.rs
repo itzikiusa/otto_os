@@ -344,9 +344,16 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // PR review machinery, commit/push/pull/merge/stage etc. writes=Edit.
         return Require(Git, if get { View } else { Edit });
     }
-    if p.starts_with("/pr-review-comments/") || p.starts_with("/reviews/") {
-        // approve / decline a review comment; review handoff / agent retry.
+    if p.starts_with("/pr-review-comments/") {
+        // approve / decline a review comment: these are always writes.
         return Require(Git, Edit);
+    }
+    if p.starts_with("/reviews/") {
+        // review handoff / agent retry / state mutations = Edit;
+        // findings list + merge-readiness are read-only = View.
+        // Specifically: GET .../findings and GET .../merge-readiness are View;
+        // POST .../findings/{fp}/state is Edit; all other POSTs are Edit.
+        return Require(Git, if get { View } else { Edit });
     }
     if p == "/settings/pr-review" {
         // PR-review config — read=View, write=Edit (it's a Git-feature setting,
@@ -898,6 +905,19 @@ mod tests {
         );
         assert_eq!(
             pol(Method::GET, "/api/v1/settings/pr-review"),
+            Require(Git, View)
+        );
+        // A1: new findings / merge-readiness routes — GET=View, POST=Edit.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/reviews/{rid}/findings"),
+            Require(Git, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/reviews/{rid}/findings/{fp}/state"),
+            Require(Git, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/reviews/{rid}/merge-readiness"),
             Require(Git, View)
         );
     }

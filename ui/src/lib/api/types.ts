@@ -1082,6 +1082,25 @@ export interface ReviewFinding {
   line: number | null;
   severity: string; // 'info' | 'warn' | 'bug'
   body: string;
+  /** Stable sha2 fingerprint for cross-run deduplication (added A1). */
+  fingerprint?: string | null;
+  /** Lifecycle state: open | fixing | resolved | regressed | declined (added A1). */
+  state?: string | null;
+}
+
+/** A persistent finding row from /reviews/{id}/findings (A1 verified-review loop). */
+export interface ReviewFindingRow {
+  id: string;
+  review_id: string;
+  fingerprint: string;
+  path: string | null;
+  line: number | null;
+  severity: string;
+  category: string | null;
+  body: string;
+  state: string; // open | fixing | resolved | regressed | declined
+  fix_session_id: string | null;
+  updated_at: string;
 }
 
 export interface ReviewAgentState {
@@ -1149,7 +1168,18 @@ export interface MergeReadiness {
   unresolved_blocker_count: number;
   unresolved_total: number;
   resolved_count: number;
-  last_updated: string | null;
+  last_updated?: string | null;
+  // A1 additions from the /merge-readiness endpoint:
+  total_findings?: number | null;
+  /** Aggregated CI state: "success" | "failure" | "pending" | "none" */
+  ci_status?: string | null;
+  /** Number of human approvals on the PR. */
+  approvals?: number | null;
+  /** Whether the PR is mergeable according to the provider (null = unknown). */
+  mergeable?: boolean | null;
+  conflicts?: boolean | null;
+  branch_freshness?: string | null;
+  unpushed?: boolean | null;
 }
 
 export interface StartReviewReq {

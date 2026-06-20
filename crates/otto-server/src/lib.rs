@@ -39,8 +39,8 @@ use tower_http::trace::TraceLayer;
 pub use auth::{require_ws_role, CurrentUser};
 pub use error::{ApiError, ApiResult};
 pub use monitor::{
-    spawn_metrics_sampler, spawn_session_event_listener, spawn_usage_recorder, AuthScanner,
-    CredentialMonitor,
+    spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
+    spawn_usage_recorder, AuthScanner, CredentialMonitor,
 };
 pub use state::ServerCtx;
 
