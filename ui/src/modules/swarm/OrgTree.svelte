@@ -1,6 +1,7 @@
 <script lang="ts">
   // Recursive org tree (CEO → … → devs) by `reports_to`. Each node shows the
   // agent, a status dot, task/run counts, and its open sessions (click → open).
+  // Supports drag-and-drop to reparent agents within the hierarchy.
   import Icon from '../../lib/components/Icon.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -10,8 +11,10 @@
   interface Props {
     onedit: (a: SwarmAgent) => void;
     onruntask: (a: SwarmAgent) => void;
+    /** Called when + button is clicked to add a new direct report to `parent`. */
+    onadd?: (parent: SwarmAgent | null) => void;
   }
-  let { onedit, onruntask }: Props = $props();
+  let { onedit, onruntask, onadd }: Props = $props();
 
   const agents = $derived(swarm.detail?.agents ?? []);
   const roots = $derived(agents.filter((a) => !a.reports_to));
@@ -40,19 +43,93 @@
     ctxMenu.show(e, [
       { label: 'Edit agent', icon: 'edit', action: () => onedit(a) },
       { label: 'Run a task…', icon: 'play', action: () => onruntask(a) },
+      { label: 'Add direct report', icon: 'plus', action: () => onadd?.(a) },
+      { separator: true },
+      { label: 'Move to top level', icon: 'user', action: () => swarm.updateAgent(a.id, { reports_to: null }) },
       { separator: true },
       { label: 'Delete agent', icon: 'trash', danger: true, action: () => swarm.deleteAgent(a.id) },
     ]);
   }
+
+  // --- Drag-and-drop reparenting -------------------------------------------
+  let draggingAgentId = $state<string | null>(null);
+  let dropTargetId = $state<string | null>(null); // null = root drop zone
+
+  function onAgentDragStart(e: DragEvent, a: SwarmAgent) {
+    draggingAgentId = a.id;
+    e.dataTransfer?.setData('text/plain', a.id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+
+  function onAgentDragEnd() {
+    draggingAgentId = null;
+    dropTargetId = null;
+  }
+
+  function onNodeDragOver(e: DragEvent, targetId: string | null) {
+    // Prevent dropping on self or a descendant.
+    if (draggingAgentId === targetId) return;
+    if (targetId !== null && isDescendant(draggingAgentId, targetId)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    dropTargetId = targetId;
+  }
+
+  function onNodeDragLeave(targetId: string | null) {
+    if (dropTargetId === targetId) dropTargetId = null;
+  }
+
+  async function onNodeDrop(e: DragEvent, newParentId: string | null) {
+    e.preventDefault();
+    const aid = e.dataTransfer?.getData('text/plain') ?? draggingAgentId;
+    draggingAgentId = null;
+    dropTargetId = null;
+    if (!aid) return;
+    const a = agents.find((x) => x.id === aid);
+    if (!a) return;
+    if (a.reports_to === newParentId) return; // no change
+    if (newParentId !== null && isDescendant(aid, newParentId)) return; // cycle guard
+    await swarm.updateAgent(aid, { reports_to: newParentId });
+  }
+
+  /** Returns true if `potentialChild` is a descendant of `ancestorId`. */
+  function isDescendant(potentialChildId: string | null, ancestorId: string): boolean {
+    if (!potentialChildId) return false;
+    let cur: string | null = ancestorId;
+    let safety = 0;
+    while (cur && safety++ < 50) {
+      const a = agents.find((x) => x.id === cur);
+      if (!a) break;
+      if (a.reports_to === potentialChildId) return true;
+      cur = a.reports_to ?? null;
+    }
+    return false;
+  }
 </script>
 
-<div class="tree">
+<div
+  class="tree"
+  role="tree"
+  tabindex="-1"
+  ondragover={(e) => onNodeDragOver(e, null)}
+  ondragleave={() => onNodeDragLeave(null)}
+  ondrop={(e) => onNodeDrop(e, null)}
+>
   {#if roots.length === 0}
     <p class="dim pad">No agents yet. Use <strong>Recruit</strong> to add one.</p>
+  {:else if draggingAgentId}
+    <div class="drop-zone" class:drop-active={dropTargetId === null}>
+      <Icon name="user" size={13} /> Drop here to make top-level
+    </div>
   {/if}
   {#each roots as r (r.id)}
     {@render node(r, 0)}
   {/each}
+  {#if !draggingAgentId}
+    <button class="add-top-btn dim" onclick={() => onadd?.(null)} title="Add agent at top level">
+      <Icon name="plus" size={13} /> Add agent
+    </button>
+  {/if}
 </div>
 
 {#snippet node(a: SwarmAgent, depth: number)}
@@ -60,7 +137,22 @@
   {@const sessions = agentSessions(a.id)}
   {@const isOpen = open[a.id] ?? true}
   {@const running = runCount(a.id)}
-  <div class="row" style="padding-left:{depth * 14 + 6}px" oncontextmenu={(e) => menu(e, a)} role="treeitem" aria-selected="false" tabindex="-1">
+  <div
+    class="row"
+    class:drag-over={dropTargetId === a.id}
+    class:dragging-self={draggingAgentId === a.id}
+    style="padding-left:{depth * 14 + 6}px"
+    draggable="true"
+    ondragstart={(e) => onAgentDragStart(e, a)}
+    ondragend={onAgentDragEnd}
+    ondragover={(e) => onNodeDragOver(e, a.id)}
+    ondragleave={() => onNodeDragLeave(a.id)}
+    ondrop={(e) => onNodeDrop(e, a.id)}
+    oncontextmenu={(e) => menu(e, a)}
+    role="treeitem"
+    aria-selected="false"
+    tabindex="-1"
+  >
     {#if kids.length > 0 || sessions.length > 0}
       <button class="twist" onclick={() => toggle(a.id)} aria-label="toggle">
         <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
@@ -80,6 +172,9 @@
       <span class="chip accent" title="active runs">{running}●</span>
     {/if}
     <span class="state {a.status}" title={a.status}></span>
+    <button class="icon-btn small" onclick={() => onadd?.(a)} aria-label="add direct report" title="Add direct report">
+      <Icon name="plus" size={11} />
+    </button>
     <button class="icon-btn small" onclick={(e) => menu(e, a)} aria-label="agent menu">
       <Icon name="dot" size={14} />
     </button>
@@ -117,10 +212,50 @@
     align-items: center;
     gap: 6px;
     height: 30px;
-    cursor: default;
+    cursor: grab;
   }
   .row:hover {
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  }
+  .row.drag-over {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    outline: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+  .row.dragging-self {
+    opacity: 0.4;
+  }
+  .drop-zone {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-s);
+    margin: 4px 6px;
+  }
+  .drop-zone.drop-active {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    color: var(--accent);
+  }
+  .add-top-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    padding: 6px 10px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .add-top-btn:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .twist,
   .twist-spacer {

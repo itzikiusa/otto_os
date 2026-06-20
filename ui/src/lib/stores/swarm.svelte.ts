@@ -38,6 +38,7 @@ class SwarmStore {
   pendingKanban = $state(false);
 
   private wsId: string | null = null;
+  private graphDebounce: ReturnType<typeof setTimeout> | null = null;
 
   get openId(): string | null {
     return this.detail?.id ?? null;
@@ -227,9 +228,10 @@ class SwarmStore {
   async createTask(
     pid: string,
     body: { title: string; description?: string; assignee_agent_id?: string; priority?: string },
-  ): Promise<void> {
-    await api.post<SwarmTask>(`/swarm/projects/${pid}/tasks`, body);
+  ): Promise<SwarmTask> {
+    const created = await api.post<SwarmTask>(`/swarm/projects/${pid}/tasks`, body);
     await this.loadTasks(pid);
+    return created;
   }
 
   async updateTask(task: SwarmTask, patch: Partial<SwarmTask>): Promise<void> {
@@ -341,6 +343,7 @@ class SwarmStore {
         const next = idx >= 0 ? list.map((t) => (t.id === task.id ? task : t)) : [...list, task];
         this.tasksByProject[ev.project_id] = next;
         this.tasksByProject = { ...this.tasksByProject };
+        this.scheduleGraphRefresh();
         return true;
       }
       case 'swarm_run_updated': {
@@ -348,6 +351,7 @@ class SwarmStore {
         const run = ev.run as unknown as SwarmRun;
         const idx = this.runs.findIndex((r) => r.id === run.id);
         this.runs = idx >= 0 ? this.runs.map((r) => (r.id === run.id ? run : r)) : [run, ...this.runs];
+        this.scheduleGraphRefresh();
         return true;
       }
       case 'swarm_message_posted': {
@@ -360,6 +364,16 @@ class SwarmStore {
       default:
         return false;
     }
+  }
+
+  private scheduleGraphRefresh(): void {
+    if (!this.detail) return;
+    if (this.graphDebounce) clearTimeout(this.graphDebounce);
+    const sid = this.detail.id;
+    this.graphDebounce = setTimeout(() => {
+      this.graphDebounce = null;
+      void this.loadGraph(sid);
+    }, 800);
   }
 
   private async refreshDetail(): Promise<void> {

@@ -3,6 +3,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import type { MessageKind } from './types';
 
   let kindFilter = $state<string>('');
@@ -30,14 +31,6 @@
     if (m.author_agent_id) return swarm.agentById(m.author_agent_id)?.name ?? 'agent';
     if (m.author_user_id) return 'you';
     return 'system';
-  }
-
-  function rel(ts: string): string {
-    const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
-    if (s < 60) return `${s}s`;
-    if (s < 3600) return `${Math.floor(s / 60)}m`;
-    if (s < 86400) return `${Math.floor(s / 3600)}h`;
-    return `${Math.floor(s / 86400)}d`;
   }
 
   const KIND_CLASS: Record<string, string> = {

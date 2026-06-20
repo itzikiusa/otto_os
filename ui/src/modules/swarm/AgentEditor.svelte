@@ -4,6 +4,7 @@
   import { untrack } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { contextApi } from '../../lib/api/context';
   import { toasts } from '../../lib/toast.svelte';
   import type { AgentSchedule, AgentSkill, CreateAgentReq, SwarmAgent } from './types';
 
@@ -45,6 +46,10 @@
   );
 
   let busy = $state(false);
+  let knownSkills = $state<string[]>([]);
+  $effect(() => {
+    contextApi.listSkills().then((s) => { knownSkills = s.map((sk) => sk.name); }).catch(() => {});
+  });
 
   function addSkill() {
     const n = newSkill.trim();
@@ -145,8 +150,12 @@
         class="input grow"
         placeholder="skill name…"
         bind:value={newSkill}
+        list="ag-skill-list"
         onkeydown={(e) => e.key === 'Enter' && addSkill()}
       />
+      <datalist id="ag-skill-list">
+        {#each knownSkills as sk (sk)}<option value={sk}></option>{/each}
+      </datalist>
       <button class="btn small" onclick={addSkill}>Add</button>
     </div>
     <div class="skills">

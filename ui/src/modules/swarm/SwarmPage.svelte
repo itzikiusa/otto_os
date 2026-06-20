@@ -17,7 +17,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { SwarmAgent } from './types';
+  import type { Swarm, SwarmAgent } from './types';
 
   type View = 'tree' | 'graph' | 'kanban' | 'runs' | 'board';
   let view = $state<View>('tree');
@@ -102,15 +102,37 @@
     }
     const title = await confirmer.promptText('Task for ' + a.name, { title: 'Run a task', confirmLabel: 'Create & run' });
     if (!title) return;
-    await swarm.createTask(pid, { title, assignee_agent_id: a.id });
-    const t = swarm.tasks(pid).find((x) => x.title === title && x.assignee_agent_id === a.id);
-    if (t) await swarm.runTask(t);
+    const created = await swarm.createTask(pid, { title, assignee_agent_id: a.id });
+    await swarm.runTask(created);
     view = 'kanban';
   }
 
   function openEditor(a: SwarmAgent | null) {
     editAgent = a;
     editorOpen = true;
+  }
+
+  // Prefill the editor to add a new agent reporting to `parent` (or top-level
+  // when parent is null). OrgTree calls this via its `onadd` prop.
+  let newAgentReportsTo = $state<string | null>(null);
+  function openEditorWithParent(parent: SwarmAgent | null) {
+    editAgent = null;
+    newAgentReportsTo = parent?.id ?? null;
+    editorOpen = true;
+  }
+
+  let showBudgetModal = $state(false);
+  let extraRuns = $state(20);
+  let extraCostUsd = $state(5);
+
+  async function raiseBudgetAndResume() {
+    if (!detail) return;
+    const patch: Partial<Swarm> = {};
+    if (detail.max_total_runs != null) patch.max_total_runs = detail.max_total_runs + extraRuns;
+    if (detail.max_cost_usd != null) patch.max_cost_usd = detail.max_cost_usd + extraCostUsd;
+    await swarm.updateSwarm(detail.id, patch);
+    await lifecycle('resume');
+    showBudgetModal = false;
   }
 </script>
 
@@ -151,6 +173,25 @@
           <span class="status-pill {detail.status}">{detail.status}</span>
           <span class="dim counts">{detail.counts.agents} agents · {detail.counts.projects} projects · {running} running · {queued} queued</span>
         </div>
+        {#if detail.pause_reason}
+          <span class="pause-reason" title={detail.pause_reason}>Paused: {detail.pause_reason}</span>
+        {/if}
+        <div class="budget-bars">
+          {#if detail.max_total_runs != null}
+            {@const pct = Math.min(100, (detail.counts.total_runs / detail.max_total_runs) * 100)}
+            <span class="budget-label dim">runs {detail.counts.total_runs}/{detail.max_total_runs}</span>
+            <div class="budget-bar" title="Run budget: {detail.counts.total_runs}/{detail.max_total_runs}">
+              <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
+            </div>
+          {/if}
+          {#if detail.max_cost_usd != null}
+            {@const pct = Math.min(100, (detail.counts.cost_usd / detail.max_cost_usd) * 100)}
+            <span class="budget-label dim">cost ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}</span>
+            <div class="budget-bar" title="Cost budget: ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}">
+              <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
+            </div>
+          {/if}
+        </div>
         <div class="grow"></div>
         <div class="cap">
           <label for="cap">parallel</label>
@@ -161,6 +202,9 @@
           <button class="btn small danger" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all</button>
         {:else if detail.status === 'paused'}
           <button class="btn small primary" onclick={() => lifecycle('resume')}><Icon name="play" size={12} /> Resume</button>
+          {#if detail.pause_reason}
+            <button class="btn small" onclick={() => (showBudgetModal = true)}><Icon name="play" size={12} /> Raise budget & resume</button>
+          {/if}
           <button class="btn small danger" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all</button>
         {:else}
           <button class="btn small primary" onclick={() => lifecycle('start')}><Icon name="play" size={12} /> Start</button>
@@ -181,7 +225,7 @@
       <div class="body" class:split={swarm.selectedSessionId}>
         <div class="view">
           {#if view === 'tree'}
-            <OrgTree onedit={(a) => openEditor(a)} onruntask={runForAgent} />
+            <OrgTree onedit={(a) => openEditor(a)} onruntask={runForAgent} onadd={openEditorWithParent} />
           {:else if view === 'graph'}
             <RunGraph />
           {:else if view === 'kanban'}
@@ -218,18 +262,46 @@
   <RecruiterWizard onclose={() => (showRecruit = false)} />
 {/if}
 {#if editorOpen}
-  <AgentEditor agent={editAgent} onclose={() => (editorOpen = false)} />
+  <AgentEditor
+    agent={editAgent}
+    prefill={editAgent ? null : { reports_to: newAgentReportsTo }}
+    onclose={() => { editorOpen = false; newAgentReportsTo = null; }}
+  />
 {/if}
 {#if projModal}
   <Modal title="New project" width={480} onclose={() => (projModal = false)}>
-    <div class="field"><label for="p-name">Name</label><input id="p-name" class="input" bind:value={projName} /></div>
-    <div class="field"><label for="p-repo">Repo path (optional, for code projects)</label><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></div>
-    <div class="field"><label for="p-goal">Goal (optional — used by “Plan from goal”)</label><textarea id="p-goal" class="input" rows="3" bind:value={projGoal}></textarea></div>
+    <div class=”field”><label for=”p-name”>Name</label><input id=”p-name” class=”input” bind:value={projName} /></div>
+    <div class=”field”><label for=”p-repo”>Repo path (optional, for code projects)</label><input id=”p-repo” class=”input” bind:value={projRepo} placeholder=”/path/to/repo” /></div>
+    <div class=”field”><label for=”p-goal”>Goal (optional, used by Plan from goal)</label><textarea id=”p-goal” class=”input” rows={3} bind:value={projGoal}></textarea></div>
     {#snippet footer()}
-      <button class="btn ghost" onclick={() => (projModal = false)}>Cancel</button>
-      <button class="btn primary" onclick={createProject} disabled={!projName.trim()}>Create</button>
+      <button class=”btn” class:ghost={true} onclick={() => (projModal = false)}>Cancel</button>
+      <button class=”btn” class:primary={true} onclick={createProject} disabled={!projName.trim()}>Create</button>
     {/snippet}
   </Modal>
+{/if}
+{#if showBudgetModal}
+  {#if detail}
+    {@const budgetTitle = 'Raise budget & resume'}
+    <Modal title={budgetTitle} width={360} onclose={() => (showBudgetModal = false)}>
+      {#if detail.pause_reason}<p class=”dim”>{detail.pause_reason}</p>{/if}
+      {#if detail.max_total_runs != null}
+        <div class=”field”>
+          <label for=”extra-runs”>Add runs (current max: {detail.max_total_runs})</label>
+          <input id=”extra-runs” class=”input” type=”number” min=”1” bind:value={extraRuns} />
+        </div>
+      {/if}
+      {#if detail.max_cost_usd != null}
+        <div class=”field”>
+          <label for=”extra-cost”>Add budget $USD (current max: ${detail.max_cost_usd})</label>
+          <input id=”extra-cost” class=”input” type=”number” min=”0” step=”1” bind:value={extraCostUsd} />
+        </div>
+      {/if}
+      {#snippet footer()}
+        <button class=”btn” class:ghost={true} onclick={() => (showBudgetModal = false)}>Cancel</button>
+        <button class=”btn” class:primary={true} onclick={raiseBudgetAndResume}>Raise &amp; resume</button>
+      {/snippet}
+    </Modal>
+  {/if}
 {/if}
 
 <style>
@@ -329,6 +401,43 @@
   }
   .counts {
     font-size: 11.5px;
+  }
+  .pause-reason {
+    font-size: 11px;
+    color: var(--status-exited);
+    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    border-radius: var(--radius-s);
+    padding: 2px 8px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .budget-bars {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+  .budget-label {
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+  .budget-bar {
+    width: 60px;
+    height: 5px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-dim) 20%, transparent);
+    overflow: hidden;
+  }
+  .budget-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width 0.3s;
+  }
+  .budget-fill.budget-warn {
+    background: var(--status-exited);
   }
   .status-pill {
     font-size: 10.5px;

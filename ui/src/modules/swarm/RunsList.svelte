@@ -3,7 +3,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import RunInspector from './RunInspector.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import type { RunStatus, SwarmRun } from './types';
 
   let agentFilter = $state<string>('');
@@ -25,16 +27,6 @@
         (!statusFilter || r.status === statusFilter),
     ),
   );
-
-  function rel(ts?: string | null): string {
-    if (!ts) return '—';
-    const d = new Date(ts).getTime();
-    const s = Math.floor((Date.now() - d) / 1000);
-    if (s < 60) return `${s}s ago`;
-    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-    return `${Math.floor(s / 86400)}d ago`;
-  }
 
   function active(r: SwarmRun): boolean {
     return r.status === 'queued' || r.status === 'running' || r.status === 'waiting';
@@ -79,31 +71,33 @@
         <span class="c-tok">Tokens</span>
         <span class="c-act"></span>
       </div>
-      {#each filtered as r (r.id)}
-        {@const agent = swarm.agentById(r.agent_id)}
-        <div class="trow" role="button" tabindex="0" onclick={() => (inspecting = r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (inspecting = r)}>
-          <span class="c-agent">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
-          <span class="c-kind dim">{r.kind}{r.summary ? ` · ${r.summary}` : ''}</span>
-          <span class="c-status"><span class="badge {r.status}">{r.status}</span></span>
-          <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at)}</span>
-          <span class="c-tok mono dim">
-            {r.tokens_input != null || r.tokens_output != null
-              ? `${r.tokens_input ?? 0}/${r.tokens_output ?? 0}`
-              : '—'}
-          </span>
-          <span class="c-act">
-            <button class="icon-btn" title="Inspect run" aria-label="inspect run" onclick={(e) => { e.stopPropagation(); inspecting = r; }}>
-              <Icon name="eye" size={14} />
-            </button>
-            {#if r.session_id}
-              <button class="btn small ghost" onclick={(e) => { e.stopPropagation(); swarm.selectedSessionId = r.session_id!; }}>Open</button>
-            {/if}
-            {#if active(r)}
-              <button class="btn small danger" onclick={(e) => { e.stopPropagation(); swarm.stopRun(r.id); }}>Stop</button>
-            {/if}
-          </span>
-        </div>
-      {/each}
+      <VirtualList items={filtered} estimateHeight={37} class="vlist-runs">
+        {#snippet row(r: SwarmRun)}
+          {@const agent = swarm.agentById(r.agent_id)}
+          <div class="trow" role="button" tabindex="0" onclick={() => (inspecting = r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (inspecting = r)}>
+            <span class="c-agent">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
+            <span class="c-kind dim">{r.kind}{r.summary ? ` · ${r.summary}` : ''}</span>
+            <span class="c-status"><span class="badge {r.status}">{r.status}</span></span>
+            <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at ?? '')}</span>
+            <span class="c-tok mono dim">
+              {r.tokens_input != null || r.tokens_output != null
+                ? `${r.tokens_input ?? 0}/${r.tokens_output ?? 0}`
+                : '—'}
+            </span>
+            <span class="c-act">
+              <button class="icon-btn" title="Inspect run" aria-label="inspect run" onclick={(e) => { e.stopPropagation(); inspecting = r; }}>
+                <Icon name="eye" size={14} />
+              </button>
+              {#if r.session_id}
+                <button class="btn small ghost" onclick={(e) => { e.stopPropagation(); swarm.selectedSessionId = r.session_id!; }}>Open</button>
+              {/if}
+              {#if active(r)}
+                <button class="btn small danger" onclick={(e) => { e.stopPropagation(); swarm.stopRun(r.id); }}>Stop</button>
+              {/if}
+            </span>
+          </div>
+        {/snippet}
+      </VirtualList>
     </div>
   {/if}
 </div>
@@ -138,7 +132,12 @@
     background: transparent;
   }
   .table {
-    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+  }
+  .vlist-runs {
     flex: 1;
     min-height: 0;
   }

@@ -125,6 +125,21 @@
       <div class="muted small">No usage recorded for this run (usage tracking off, or not flushed yet).</div>
     {/if}
 
+    <!-- Concerns / findings chips -->
+    {#if result?.concerns?.length}
+      <section>
+        <h3>Findings <span class="count">{result.concerns.length}</span></h3>
+        <div class="findings">
+          {#each (result.concerns ?? []) as c, i (i)}
+            <div class="finding {c.severity}">
+              <span class="sev-chip {c.severity}">{c.severity}</span>
+              <span class="finding-text">{c.text}</span>
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
     <!-- Summary -->
     {#if result?.summary}
       <section>
@@ -437,6 +452,51 @@
   }
   .muted {
     color: var(--text-dim);
+  }
+  .findings {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .finding {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 6px 9px;
+    background: var(--surface);
+  }
+  .finding.error {
+    border-color: color-mix(in srgb, var(--status-exited) 40%, var(--border));
+  }
+  .finding.warn {
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  }
+  .sev-chip {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    white-space: nowrap;
+    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    color: var(--text-dim);
+    flex: none;
+  }
+  .sev-chip.error {
+    background: color-mix(in srgb, var(--status-exited) 20%, transparent);
+    color: var(--status-exited);
+  }
+  .sev-chip.warn {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    color: var(--accent);
+  }
+  .sev-chip.info {
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  }
+  .finding-text {
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
   .badge {
     font-size: 10.5px;

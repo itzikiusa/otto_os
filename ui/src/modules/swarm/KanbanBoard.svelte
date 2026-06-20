@@ -1,6 +1,7 @@
 <script lang="ts">
   // Per-project Kanban: columns by task status, cards = tasks. Move status,
   // reassign, run now, delete via a card menu. Add task + Plan-from-goal.
+  // Cards support HTML5 drag-and-drop to change status columns.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -89,6 +90,47 @@
     medium: '',
     low: 'dim',
   };
+
+  // --- Drag-and-drop state --------------------------------------------------
+  // draggingId: the task id being dragged; dropCol: the column being hovered over.
+  let draggingId = $state<string | null>(null);
+  let dropCol = $state<TaskStatus | null>(null);
+
+  function onDragStart(e: DragEvent, t: SwarmTask) {
+    draggingId = t.id;
+    e.dataTransfer?.setData('text/plain', t.id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+
+  function onDragEnd() {
+    draggingId = null;
+    dropCol = null;
+  }
+
+  function onDragOver(e: DragEvent, col: TaskStatus) {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    dropCol = col;
+  }
+
+  function onDragLeave(col: TaskStatus) {
+    if (dropCol === col) dropCol = null;
+  }
+
+  async function onDrop(e: DragEvent, col: TaskStatus) {
+    e.preventDefault();
+    dropCol = null;
+    const tid = e.dataTransfer?.getData('text/plain') ?? draggingId;
+    draggingId = null;
+    if (!tid) return;
+    const t = tasks.find((x) => x.id === tid);
+    if (!t || t.status === col) return;
+    try {
+      await swarm.updateTask(t, { status: col });
+    } catch (err) {
+      toasts.error('Move failed', err instanceof Error ? err.message : String(err));
+    }
+  }
 </script>
 
 <div class="kanban">
@@ -129,7 +171,14 @@
   {:else}
     <div class="columns">
       {#each TASK_COLUMNS as col (col)}
-        <div class="column">
+        <div
+          class="column"
+          role="group"
+          class:drop-target={dropCol === col}
+          ondragover={(e) => onDragOver(e, col)}
+          ondragleave={() => onDragLeave(col)}
+          ondrop={(e) => onDrop(e, col)}
+        >
           <div class="col-head">
             <span>{COLUMN_LABEL[col]}</span>
             <span class="count">{byStatus(col).length}</span>
@@ -137,7 +186,16 @@
           <div class="col-body">
             {#each byStatus(col) as t (t.id)}
               {@const agent = swarm.agentById(t.assignee_agent_id)}
-              <div class="card" oncontextmenu={(e) => cardMenu(e, t)} role="button" tabindex="0">
+              <div
+                class="card"
+                class:dragging={draggingId === t.id}
+                draggable="true"
+                ondragstart={(e) => onDragStart(e, t)}
+                ondragend={onDragEnd}
+                oncontextmenu={(e) => cardMenu(e, t)}
+                role="button"
+                tabindex="0"
+              >
                 <div class="card-title">{t.title}</div>
                 <div class="card-meta">
                   {#if agent}
@@ -219,10 +277,18 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 8px;
-    cursor: default;
+    cursor: grab;
   }
   .card:hover {
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  }
+  .card.dragging {
+    opacity: 0.4;
+    cursor: grabbing;
+  }
+  .column.drop-target {
+    background: color-mix(in srgb, var(--accent) 8%, var(--surface-2));
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
   }
   .card-title {
     font-size: 12.5px;
