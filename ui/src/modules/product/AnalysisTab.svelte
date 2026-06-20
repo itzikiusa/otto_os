@@ -750,7 +750,7 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    max-width: 860px;
+    max-width: min(860px, 92vw);
     width: 100%;
   }
 

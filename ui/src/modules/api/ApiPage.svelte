@@ -224,4 +224,17 @@
     display: flex;
     flex-direction: column;
   }
+
+  @media (max-width: 640px) {
+    .api-page {
+      flex-direction: column;
+    }
+    .api-side {
+      width: 100%;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      max-height: 35vh;
+      overflow-y: auto;
+    }
+  }
 </style>

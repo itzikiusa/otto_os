@@ -1121,4 +1121,17 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+
+  @media (max-width: 640px) {
+    .db-page {
+      flex-direction: column;
+    }
+    .db-side {
+      width: 100%;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      max-height: 40vh;
+      overflow-y: auto;
+    }
+  }
 </style>

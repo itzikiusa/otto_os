@@ -299,7 +299,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    max-width: 820px;
+    max-width: min(820px, 92vw);
   }
   .report-card {
     display: flex;

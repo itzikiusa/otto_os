@@ -164,4 +164,23 @@
     min-width: 0;
     overflow-y: auto;
   }
+
+  @media (max-width: 640px) {
+    .settings {
+      flex-direction: column;
+    }
+    .settings-nav {
+      width: 100%;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 10px 8px;
+      overflow-x: auto;
+    }
+    .settings-nav-title {
+      display: none;
+    }
+  }
 </style>

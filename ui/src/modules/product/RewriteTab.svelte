@@ -344,7 +344,7 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    max-width: 1100px;
+    max-width: min(1100px, 92vw);
     width: 100%;
   }
 

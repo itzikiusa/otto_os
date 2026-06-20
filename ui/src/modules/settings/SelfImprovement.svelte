@@ -443,7 +443,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    max-width: 760px;
+    max-width: min(760px, 92vw);
   }
 
   .edit-card,

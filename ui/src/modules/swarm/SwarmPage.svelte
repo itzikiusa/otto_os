@@ -404,4 +404,17 @@
     min-height: 0;
     display: flex;
   }
+
+  @media (max-width: 640px) {
+    .swarm-page {
+      flex-direction: column;
+    }
+    .rail {
+      width: 100%;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      max-height: 30vh;
+      overflow-y: auto;
+    }
+  }
 </style>

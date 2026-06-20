@@ -807,6 +807,16 @@
     grid-template-columns: repeat(4, 1fr);
     gap: 12px;
   }
+  @media (min-width: 641px) and (max-width: 1024px) {
+    .cards {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+  @media (max-width: 640px) {
+    .cards {
+      grid-template-columns: 1fr;
+    }
+  }
   .stat {
     padding: 12px 14px;
     display: flex;
@@ -1150,7 +1160,7 @@
     grid-template-columns: 200px 1fr;
     gap: 10px 12px;
     align-items: center;
-    max-width: 620px;
+    max-width: min(620px, 92vw);
   }
   .cfg-grid label {
     font-size: 12px;

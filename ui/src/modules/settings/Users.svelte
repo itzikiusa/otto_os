@@ -394,7 +394,7 @@
     color: var(--text-dim);
   }
   .matrix {
-    max-width: 640px;
+    max-width: min(640px, 92vw);
   }
   .matrix-head {
     display: flex;
@@ -424,7 +424,7 @@
   }
   /* ---- feature grant matrix ---- */
   .grant-matrix {
-    max-width: 700px;
+    max-width: min(700px, 92vw);
   }
   .grant-head {
     display: flex;

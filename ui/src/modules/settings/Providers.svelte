@@ -284,7 +284,7 @@
 <style>
   .page {
     padding: 24px 28px;
-    max-width: 640px;
+    max-width: min(640px, 92vw);
     display: flex;
     flex-direction: column;
     gap: 18px;

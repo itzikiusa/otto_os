@@ -175,7 +175,7 @@
 <style>
   .page {
     padding: 24px;
-    max-width: 800px;
+    max-width: min(800px, 92vw);
   }
 
   .page-header {

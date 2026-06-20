@@ -320,7 +320,7 @@
     flex-direction: column;
     gap: 16px;
     padding: 16px 18px;
-    max-width: 640px;
+    max-width: min(640px, 92vw);
   }
 
   .field {
@@ -412,7 +412,7 @@
 
   .card-info {
     font-size: 12px;
-    max-width: 640px;
+    max-width: min(640px, 92vw);
   }
 
   .preview-prov {
@@ -429,6 +429,6 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
-    max-width: 720px;
+    max-width: min(720px, 92vw);
   }
 </style>

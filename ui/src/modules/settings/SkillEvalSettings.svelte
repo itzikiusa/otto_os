@@ -138,7 +138,7 @@
 
 <style>
   .page {
-    max-width: 720px;
+    max-width: min(720px, 92vw);
     display: flex;
     flex-direction: column;
     gap: 12px;

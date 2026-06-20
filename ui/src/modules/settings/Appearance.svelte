@@ -108,7 +108,7 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
     gap: 12px;
-    max-width: 620px;
+    max-width: min(620px, 92vw);
   }
   .theme-card {
     text-align: left;
@@ -160,7 +160,7 @@
     font-size: 11.5px;
     color: var(--text-dim);
     margin: 8px 0 0;
-    max-width: 620px;
+    max-width: min(620px, 92vw);
   }
   .hint-line.warn {
     color: var(--status-exited);

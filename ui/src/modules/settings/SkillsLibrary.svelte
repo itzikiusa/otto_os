@@ -292,7 +292,7 @@
 
 <style>
   .cat {
-    max-width: 720px;
+    max-width: min(720px, 92vw);
     margin-bottom: 22px;
   }
   .cat-head {
