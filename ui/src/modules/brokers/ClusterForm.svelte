@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type {
@@ -8,6 +9,7 @@
     Environment,
     SaslMechanism,
     SecurityProtocol,
+    SshTunnelConfig,
     UpsertClusterReq,
   } from '../../lib/api/types';
 
@@ -38,12 +40,38 @@
   let color = $state(init?.color ?? '');
   let saving = $state(false);
 
+  // SSH tunnel (bastion) — for private clusters like AWS MSK in a VPC.
+  let tunnelOpen = $state(!!init?.ssh);
+  let tunHost = $state(init?.ssh?.host ?? '');
+  let tunPort = $state(init?.ssh?.port != null ? String(init.ssh.port) : '');
+  let tunUser = $state(init?.ssh?.user ?? '');
+  let tunIdentity = $state(init?.ssh?.identity_file ?? '');
+  let showTunnelFilePicker = $state(false);
+
   const usesSasl = $derived(security === 'sasl_plaintext' || security === 'sasl_ssl');
   const usesTls = $derived(security === 'ssl' || security === 'sasl_ssl');
 
   async function save() {
     if (!name.trim() || !bootstrap.trim()) {
       toasts.error('Name and bootstrap servers are required');
+      return;
+    }
+    // ssh: omit on create (keep) when off; send null on edit to clear.
+    let ssh: SshTunnelConfig | null | undefined;
+    if (tunnelOpen && tunHost.trim() && tunUser.trim()) {
+      ssh = {
+        host: tunHost.trim(),
+        port: tunPort.trim() ? Number(tunPort) : undefined,
+        user: tunUser.trim(),
+        identity_file: tunIdentity.trim() || null,
+      };
+    } else if (editing) {
+      ssh = null;
+    } else {
+      ssh = undefined;
+    }
+    if (tunnelOpen && (!tunHost.trim() || !tunUser.trim())) {
+      toasts.error('SSH tunnel needs a host and user');
       return;
     }
     const req: UpsertClusterReq = {
@@ -59,6 +87,7 @@
       schema_registry_password: srPass ? srPass : undefined,
       metrics_url: metricsUrl.trim() || null,
       color: color.trim() || null,
+      ssh,
       environment,
       read_only: readOnly,
     };
@@ -160,6 +189,36 @@
       <input bind:value={metricsUrl} placeholder="http://broker:9644/public_metrics" />
     </label>
 
+    <label class="check">
+      <input type="checkbox" bind:checked={tunnelOpen} />
+      <span>SSH tunnel <em>(reach a private cluster — e.g. AWS MSK — through a bastion)</em></span>
+    </label>
+    {#if tunnelOpen}
+      <div class="ssh-section">
+        <div class="row">
+          <label class="field" style="flex: 1;">
+            <span>Tunnel host</span>
+            <input bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" />
+          </label>
+          <label class="field" style="flex: 0 0 90px;">
+            <span>Port</span>
+            <input type="number" bind:value={tunPort} placeholder="22" />
+          </label>
+        </div>
+        <label class="field">
+          <span>Tunnel user</span>
+          <input bind:value={tunUser} placeholder="ec2-user" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>Identity file <em>(optional — defaults to ssh-agent)</em></span>
+          <div class="file-input-row">
+            <input bind:value={tunIdentity} placeholder="~/.ssh/id_rsa" spellcheck="false" />
+            <button class="btn browse-btn" onclick={() => (showTunnelFilePicker = true)}>Browse…</button>
+          </div>
+        </label>
+      </div>
+    {/if}
+
     <div class="row">
       <label class="field">
         <span>Environment</span>
@@ -187,6 +246,16 @@
     </button>
   {/snippet}
 </Modal>
+
+{#if showTunnelFilePicker}
+  <FolderPicker
+    title="Choose Identity File"
+    start={tunIdentity ? tunIdentity.replace(/\/[^/]+$/, '') : ''}
+    files={true}
+    onpick={(path) => { tunIdentity = path; showTunnelFilePicker = false; }}
+    onclose={() => (showTunnelFilePicker = false)}
+  />
+{/if}
 
 <style>
   .form {
@@ -229,5 +298,32 @@
     gap: 8px;
     font-size: 12px;
     color: var(--text-dim);
+  }
+  .check span em {
+    font-style: normal;
+    opacity: 0.7;
+  }
+  .ssh-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 2px;
+    padding: 12px;
+    border-radius: var(--radius-m, 8px);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+  }
+  .file-input-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .file-input-row input {
+    flex: 1;
+    min-width: 0;
+  }
+  .browse-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 </style>

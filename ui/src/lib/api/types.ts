@@ -2429,6 +2429,15 @@ export interface IngestTextReq {
 export type SecurityProtocol = 'plaintext' | 'ssl' | 'sasl_plaintext' | 'sasl_ssl';
 export type SaslMechanism = 'plain' | 'scram_sha_256' | 'scram_sha_512';
 
+/** SSH tunnel (bastion) config — shared with the DB Explorer connection form.
+ * Auth is key-file/agent only (no password). Mirrors otto_ssh::SshTunnelConfig. */
+export interface SshTunnelConfig {
+  host: string;
+  port?: number;
+  user: string;
+  identity_file?: string | null;
+}
+
 export interface BrokerCluster {
   id: Id;
   workspace_id: Id | null;
@@ -2444,6 +2453,8 @@ export interface BrokerCluster {
   has_sr_password: boolean;
   metrics_url: string | null;
   color: string | null;
+  /** SSH tunnel to reach a private cluster (e.g. MSK) through a bastion. */
+  ssh?: SshTunnelConfig | null;
   environment: Environment;
   read_only: boolean;
   created_by: Id;
@@ -2463,6 +2474,8 @@ export interface UpsertClusterReq {
   schema_registry_password?: string | null;
   metrics_url?: string | null;
   color?: string | null;
+  /** SSH tunnel. Omit to keep the stored value; `null` to clear; object to set. */
+  ssh?: SshTunnelConfig | null;
   environment?: Environment | null;
   read_only?: boolean | null;
 }

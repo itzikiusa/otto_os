@@ -1049,12 +1049,23 @@ require `confirm=true` (403 otherwise). Cluster secrets (SASL / schema-registry
 passwords) are stored in the Keychain — only `has_*_password` flags are ever
 returned. `BrokerCluster.workspace_id=null` = global profile.
 
+A cluster may carry an optional `ssh` tunnel (`SshTunnelConfig`:
+`{ host, port?, user, identity_file? }`, key/agent auth only) to reach a private
+cluster (e.g. AWS MSK in a VPC) through a bastion. When set, the daemon opens one
+`ssh -D` SOCKS5 tunnel and runs an in-process Kafka-aware proxy (librdkafka has no
+SOCKS support and can't override advertised broker addresses): librdkafka talks
+plaintext to a local proxy that dials brokers via SOCKS, terminates TLS to the
+broker, and rewrites the broker addresses in `Metadata`/`FindCoordinator`
+responses. The Schema Registry + metrics endpoints ride the same SOCKS tunnel. On
+`UpsertClusterReq`, `ssh` follows the same PATCH rule as passwords: absent = keep,
+`null` = clear, object = set.
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{wid}/brokers/clusters | ws viewer | — | `BrokerCluster[]` (workspace + global) |
 | POST /workspaces/{wid}/brokers/clusters | ws editor | `UpsertClusterReq` | `BrokerCluster` (201) |
 | GET /brokers/clusters/{id} | ws viewer | — | `BrokerCluster` |
-| PATCH /brokers/clusters/{id} | ws editor | `UpsertClusterReq` (absent `*_password`=keep, ``=clear; absent `environment`/`read_only` preserve the guard) | `BrokerCluster` |
+| PATCH /brokers/clusters/{id} | ws editor | `UpsertClusterReq` (absent `*_password`/`ssh`=keep, ``/`null`=clear; absent `environment`/`read_only` preserve the guard) | `BrokerCluster` |
 | DELETE /brokers/clusters/{id} | ws editor | — | 204 (deletes Keychain secrets too) |
 | POST /brokers/clusters/{id}/test | ws editor | — | `TestClusterResp` (never 5xx — `ok:false` carries the error) |
 | GET /brokers/clusters/{id}/overview | ws viewer | — | `ClusterOverview` |
