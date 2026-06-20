@@ -23,6 +23,14 @@
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+
+  // Explicit exit: go back to where you were, or home (Agents) if there's no
+  // history — so you don't have to click another module to leave Settings.
+  function exit(): void {
+    if (router.canBack) router.back();
+    else router.go('agents');
+  }
 
   const page = $derived(router.parts[1] ?? 'appearance');
 
@@ -59,7 +67,12 @@
 
 <div class="settings">
   <nav class="settings-nav">
-    <div class="settings-nav-title">Settings</div>
+    <div class="settings-nav-title">
+      <span>Settings</span>
+      <button class="settings-close" title="Close settings (⌘⇧←)" aria-label="Close settings" onclick={exit}>
+        <Icon name="x" size={14} />
+      </button>
+    </div>
     {#each items as it (it.id)}
       <button
         class="settings-nav-item"
@@ -136,12 +149,31 @@
     gap: 2px;
   }
   .settings-nav-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
     padding: 0 8px 8px;
+  }
+  .settings-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    color: var(--text-dim);
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+  .settings-close:hover {
+    background: var(--surface-2, rgba(255, 255, 255, 0.06));
+    color: var(--text, inherit);
   }
   .settings-nav-item {
     height: 28px;
