@@ -110,6 +110,14 @@
     return () => { clearPoll(); };
   });
 
+  // Subscribe to `product_changed { section: 'testcases' }` WS events.
+  $effect(() => {
+    const off = product.onSectionChange('testcases', (_status: string) => {
+      void pollTestcases(); // immediate refresh; clears poll if new run appeared
+    });
+    return off;
+  });
+
   // ── Derived ─────────────────────────────────────────────────────────────────
   const story = $derived(product.detail?.story ?? null);
 

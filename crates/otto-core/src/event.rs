@@ -113,4 +113,14 @@ pub enum Event {
     /// subscribe to refresh the `/usage/metrics` sparklines in near-real-time
     /// instead of polling blindly. `ts` is the sample timestamp (UTC ISO-8601).
     UsageMetricsTick { ts: String },
+    /// A product story AI run (analysis, rewrite, plan, testcases) completed or
+    /// changed section. Lets the UI drop polling for that tab and switch to
+    /// event-driven refresh. `section` is one of "analysis" | "rewrite" |
+    /// "plan" | "testcases". `status` mirrors the run status ("done" | "error" | "partial").
+    ProductChanged {
+        workspace_id: Id,
+        story_id: Id,
+        section: String,
+        status: String,
+    },
 }

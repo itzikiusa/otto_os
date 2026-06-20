@@ -118,6 +118,14 @@
     return () => { clearPoll(); };
   });
 
+  // Subscribe to `product_changed { section: 'plan' }` WS events for faster feedback.
+  $effect(() => {
+    const off = product.onSectionChange('plan', (_status: string) => {
+      void pollForPlan(); // trigger an immediate poll that also clears timer if ready
+    });
+    return off;
+  });
+
   const story = $derived(product.detail?.story ?? null);
 
   async function initialLoad(): Promise<void> {
@@ -167,29 +175,50 @@
   }
 
   // Cycle a single item's status todo → in_progress → done → todo, optimistic
-  // local re-parse, then persist the whole body in place.
+  // local re-parse, then persist the whole body in place. Debounced ~500ms so
+  // rapid clicks don't fire a POST per click.
   const NEXT: Record<Status, Status> = {
     todo: 'in_progress',
     in_progress: 'done',
     done: 'todo',
   };
 
+  // Debounce state for savePlan
+  let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let savedTick = $state(false); // briefly true after a successful save
+
+  function scheduleSave(latestBody: string): void {
+    if (saveDebounceTimer !== null) clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = setTimeout(() => {
+      saveDebounceTimer = null;
+      saving = true;
+      product.savePlan(latestBody).then(() => {
+        savedTick = true;
+        setTimeout(() => { savedTick = false; }, 1500);
+      }).catch((e) => {
+        toasts.error('Could not save progress', product.errMsg(e));
+        // Best-effort reload to resync with the server.
+        const plan = latestPlan();
+        if (plan) void loadPlanBody(plan);
+      }).finally(() => {
+        saving = false;
+      });
+    }, 500);
+  }
+
+  // Cleanup debounce timer on unmount.
+  $effect(() => {
+    return () => {
+      if (saveDebounceTimer !== null) clearTimeout(saveDebounceTimer);
+    };
+  });
+
   async function cycleItem(lineIndex: number, current: Status): Promise<void> {
     const next = NEXT[current];
     const updated = setItemStatus(body, lineIndex, next);
     if (updated === body) return; // unrecognized line — no-op
     body = updated; // optimistic; `tasks` re-derives automatically
-    saving = true;
-    try {
-      await product.savePlan(body);
-    } catch (e) {
-      toasts.error('Could not save progress', product.errMsg(e));
-      // Best-effort reload to resync with the server.
-      const plan = latestPlan();
-      if (plan) await loadPlanBody(plan);
-    } finally {
-      saving = false;
-    }
+    scheduleSave(body);
   }
 
   function statusLabel(s: Status): string {
@@ -331,7 +360,7 @@
             </div>
           </div>
           <div class="ph-actions">
-            {#if saving}<span class="saving">saving…</span>{/if}
+            {#if saving}<span class="saving">saving…</span>{:else if savedTick}<span class="saved-tick">saved ✓</span>{/if}
             {#if swarmLink}
               <span class="swarm-badge" title="This story is linked to a swarm project">
                 ⚡ {swarmLink.project_name}
@@ -468,6 +497,7 @@
   }
   .ph-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
   .saving { font-size: 11.5px; color: var(--text-dim); font-style: italic; }
+  .saved-tick { font-size: 11.5px; color: var(--status-idle, #3a8c3a); font-weight: 600; }
 
   /* Buttons */
   .action-btn {

@@ -1,5 +1,7 @@
 //! Jira Cloud / Server REST API v3 client.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -15,9 +17,27 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// (and stack up in the watcher) indefinitely — bound every call.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Build the shared HTTP client with connect + overall timeouts. Falls back to a
-/// default client if the builder fails (keeps `JiraClient::new` infallible).
-fn build_http_client() -> reqwest::Client {
+/// Process-wide cache: auth_header (already encodes base_url+email+token) → shared client.
+/// `reqwest::Client` is `Clone` and internally reference-counted — cheap to clone out.
+static CLIENT_CACHE: OnceLock<Mutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
+
+/// Return a cached `reqwest::Client` for the given auth_header, building one on first use.
+/// Falls back to a freshly-built client if the cache lock is poisoned (keeps callers infallible).
+fn get_or_build_client(auth_header: &str) -> reqwest::Client {
+    let cache = CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = cache.lock() {
+        if let Some(c) = map.get(auth_header) {
+            return c.clone();
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_default();
+        map.insert(auth_header.to_string(), client.clone());
+        return client;
+    }
+    // Poisoned lock — fall back to a fresh client rather than panicking.
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
@@ -168,10 +188,12 @@ impl JiraClient {
         let base_url = base_url.trim_end_matches('/').to_string();
         let credentials = format!("{email}:{token}");
         let auth_header = format!("Basic {}", B64.encode(credentials.as_bytes()));
+        // Reuse a cached client keyed by the auth header (encodes base_url + credentials).
+        let http = get_or_build_client(&format!("{base_url}\x00{auth_header}"));
         Self {
             base_url,
             auth_header,
-            http: build_http_client(),
+            http,
         }
     }
 
@@ -259,9 +281,19 @@ impl JiraClient {
     ///   - otherwise → text/summary search within the project
     ///
     /// When `project` is `None`, the original unrestricted behaviour is kept.
-    pub async fn search(&self, q: &str, project: Option<&str>) -> Result<Vec<IssueSummary>> {
+    /// `start_at` enables cursor-style pagination ("load more"). Pass `0` for the
+    /// first page. An empty `q` uses the recency-default JQL so the picker is useful
+    /// without the user having typed anything.
+    pub async fn search(
+        &self,
+        q: &str,
+        project: Option<&str>,
+        start_at: u32,
+    ) -> Result<Vec<IssueSummary>> {
         let jql = build_jql(q, project);
         let fields = "summary,status,issuetype";
+        let max_results = "25";
+        let start_at_s = start_at.to_string();
 
         // Try the newer endpoint first.
         let new_url = format!("{}/rest/api/3/search/jql", self.base_url);
@@ -271,9 +303,10 @@ impl JiraClient {
             .header("Authorization", &self.auth_header)
             .header("Accept", "application/json")
             .query(&[
-                ("jql", &jql),
-                ("maxResults", &"25".to_string()),
-                ("fields", &fields.to_string()),
+                ("jql", jql.as_str()),
+                ("maxResults", max_results),
+                ("startAt", start_at_s.as_str()),
+                ("fields", fields),
             ])
             .send()
             .await
@@ -289,9 +322,10 @@ impl JiraClient {
                 .header("Authorization", &self.auth_header)
                 .header("Accept", "application/json")
                 .query(&[
-                    ("jql", &jql),
-                    ("maxResults", &"25".to_string()),
-                    ("fields", &fields.to_string()),
+                    ("jql", jql.as_str()),
+                    ("maxResults", max_results),
+                    ("startAt", start_at_s.as_str()),
+                    ("fields", fields),
                 ])
                 .send()
                 .await
@@ -1444,6 +1478,9 @@ fn extract_linked_issue(issue: &serde_json::Value, rel: &str) -> Option<JiraLink
 
 /// Build a JQL query from a search string and optional project key.
 ///
+/// Empty `q` (no typed search) → recency default: issues assigned to the current
+/// user ordered by last-updated, so the picker is useful before any text is typed.
+///
 /// When `project` is `Some(key)`:
 ///   - all-digits `q` → `project = "KEY" AND (key = "KEY-q" OR summary ~ "q*" OR text ~ "q")`
 ///   - full issue-key `q` → `project = "KEY" AND key = "q"`
@@ -1451,6 +1488,19 @@ fn extract_linked_issue(issue: &serde_json::Value, rel: &str) -> Option<JiraLink
 ///
 /// When `project` is `None`, falls back to the original unrestricted behaviour.
 fn build_jql(q: &str, project: Option<&str>) -> String {
+    // Empty query: return recently-updated issues for the current user so the
+    // picker has content before any typing.
+    if q.trim().is_empty() {
+        let base = "assignee = currentUser() ORDER BY updated DESC";
+        return match project {
+            Some(proj) => {
+                let ep = escape_jql(proj);
+                format!("project = \"{ep}\" AND {base}")
+            }
+            None => base.to_string(),
+        };
+    }
+
     let eq = escape_jql(q);
     match project {
         Some(proj) => {

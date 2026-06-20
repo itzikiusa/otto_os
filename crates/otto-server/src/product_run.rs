@@ -1176,6 +1176,13 @@ pub async fn run_analysis(
     {
         warn!("product_run: set_analysis_status: {e}");
     }
+    // Notify subscribed UI tabs so they can refresh without waiting for the next poll.
+    let _ = ctx.events.send(otto_core::event::Event::ProductChanged {
+        workspace_id: ws.id.clone(),
+        story_id: story_id.clone(),
+        section: "analysis".into(),
+        status: final_status.into(),
+    });
 
     // 7. Update story stage to "analyzed" -------------------------------------
     if let Err(e) = ctx
@@ -1745,6 +1752,13 @@ pub async fn run_rewrite(
             {
                 warn!("product_run(rewrite): add_event: {e}");
             }
+            // Notify UI so the Rewrite tab can refresh without waiting for a poll.
+            let _ = ctx.events.send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "rewrite".into(),
+                status: "done".into(),
+            });
         }
         None => {
             let reason = if result.errored {
@@ -1767,6 +1781,12 @@ pub async fn run_rewrite(
                     meta_json: None,
                 })
                 .await;
+            let _ = ctx.events.send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "rewrite".into(),
+                status: "error".into(),
+            });
         }
     }
 }
@@ -2062,6 +2082,12 @@ pub async fn run_generate_tests(
             {
                 warn!("product_run(generate_tests): add_event: {e}");
             }
+            let _ = ctx.events.send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "testcases".into(),
+                status: "done".into(),
+            });
         }
         None => {
             let reason = if result.errored {
@@ -2084,6 +2110,12 @@ pub async fn run_generate_tests(
                     meta_json: None,
                 })
                 .await;
+            let _ = ctx.events.send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "testcases".into(),
+                status: "error".into(),
+            });
         }
     }
 }
@@ -2382,6 +2414,12 @@ pub async fn run_generate_plan(
             {
                 warn!("product_run(plan): add_event: {e}");
             }
+            let _ = ctx.events.send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "plan".into(),
+                status: "done".into(),
+            });
         }
         _ => {
             let reason = if result.errored {
@@ -2404,6 +2442,12 @@ pub async fn run_generate_plan(
                     meta_json: None,
                 })
                 .await;
+            let _ = ctx.events.send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "plan".into(),
+                status: "error".into(),
+            });
         }
     }
 }

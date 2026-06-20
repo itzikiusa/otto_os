@@ -1374,6 +1374,19 @@ impl ProductRepo {
         rows.iter().map(row_to_testcase).collect()
     }
 
+    /// `COUNT(*)` across all testcases for a story — O(1) instead of fetching
+    /// every row. Used by `get_story` to fill `StoryCounts.testcases`.
+    pub async fn count_testcases_for_story(&self, story: &Id) -> Result<i64> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS cnt FROM product_testcases WHERE story_id = ?",
+        )
+        .bind(story)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("count testcases for story"))?;
+        Ok(row.get::<i64, _>("cnt"))
+    }
+
     pub async fn get_testcase(&self, id: &Id) -> Result<ProductTestcase> {
         let row = sqlx::query("SELECT * FROM product_testcases WHERE id = ?")
             .bind(id)

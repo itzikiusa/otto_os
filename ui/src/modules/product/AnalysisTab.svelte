@@ -77,6 +77,9 @@
 
   // ── Polling ────────────────────────────────────────────────────────────────────
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  const POLL_INTERVAL_MS = 3000;
+  const POLL_MAX_MS = 120_000;
+  let pollStartedAt = 0;
 
   function clearPoll(): void {
     if (pollTimer !== null) {
@@ -91,6 +94,11 @@
 
   async function pollOnce(): Promise<void> {
     if (!activeId) return;
+    if (Date.now() - pollStartedAt > POLL_MAX_MS) {
+      clearPoll();
+      toasts.warn('Analysis timed out', 'No result appeared within 2 minutes.');
+      return;
+    }
     try {
       const detail = await product.getAnalysis(activeId);
       activeDetail = detail;
@@ -103,9 +111,19 @@
   function startPolling(id: string): void {
     clearPoll();
     activeId = id;
+    pollStartedAt = Date.now();
     void pollOnce();
-    pollTimer = setInterval(() => { void pollOnce(); }, 3000);
+    pollTimer = setInterval(() => { void pollOnce(); }, POLL_INTERVAL_MS);
   }
+
+  // Subscribe to `product_changed { section: 'analysis' }` WS events so we can
+  // clear the poll and refresh immediately instead of waiting for the next tick.
+  $effect(() => {
+    const off = product.onSectionChange('analysis', (_status: string) => {
+      void pollOnce(); // final refresh
+    });
+    return off;
+  });
 
   // Stop polling when story changes or tab unmounts.
   $effect(() => {

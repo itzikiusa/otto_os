@@ -34,6 +34,11 @@
   let jiraResults: IssueSummary[] = $state([]);
   let confluenceResults: ConfluencePageSummary[] = $state([]);
   let searching = $state(false);
+  let loadingMore = $state(false);
+  // Tracks how many Jira results have been fetched so far (cursor for "load more").
+  let jiraOffset = $state(0);
+  // Whether more Jira results are likely available (last page returned a full 25).
+  let jiraHasMore = $state(false);
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   // --- load projects / spaces when accountId or sourceKind changes ---
@@ -43,7 +48,11 @@
     if (!aid) return;
     resetSearch();
     if (kind === 'jira') {
-      void loadProjects(aid);
+      void loadProjects(aid).then(() => {
+        // Fire an empty-query search immediately so the picker shows recent issues
+        // even before the user types anything.
+        void search('', 0, false);
+      });
     } else {
       void loadSpaces(aid);
     }
@@ -53,6 +62,8 @@
     query = '';
     jiraResults = [];
     confluenceResults = [];
+    jiraOffset = 0;
+    jiraHasMore = false;
     selectedProjectKey = '';
     selectedSpaceKey = '';
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
@@ -88,36 +99,66 @@
 
   // --- reset results when project/space selector changes ---
   $effect(() => {
-    selectedProjectKey;
-    selectedSpaceKey;
+    const proj = selectedProjectKey;
+    const space = selectedSpaceKey;
     jiraResults = [];
     confluenceResults = [];
+    jiraOffset = 0;
+    jiraHasMore = false;
     query = '';
+    // Reload with the new project/space filter.
+    if (accountId && sourceKind === 'jira') {
+      void search('', 0, false, proj || undefined);
+    } else if (accountId && sourceKind === 'confluence' && space) {
+      // Confluence: wait for user to type (spaces are wide).
+    }
   });
 
   // --- search ---
   function onQueryInput(): void {
     if (debounceTimer) clearTimeout(debounceTimer);
     const q = query.trim();
-    if (!q || !accountId) {
-      jiraResults = [];
-      confluenceResults = [];
-      return;
-    }
-    debounceTimer = setTimeout(() => void search(q), 350);
+    if (!accountId) return;
+    // Empty query re-triggers the recency default; no early return.
+    debounceTimer = setTimeout(() => void search(q, 0, false), 350);
   }
 
-  async function search(q: string): Promise<void> {
+  /**
+   * Perform a search.
+   *
+   * @param q - The search string (empty = recency default for Jira).
+   * @param startAt - Cursor offset for pagination.
+   * @param append - When true, new results are appended (load-more); otherwise replaces.
+   * @param projectOverride - Optional project key override (used on filter change before
+   *   selectedProjectKey reactive state has settled).
+   */
+  async function search(
+    q: string,
+    startAt: number,
+    append: boolean,
+    projectOverride?: string,
+  ): Promise<void> {
     if (!accountId) return;
-    searching = true;
+    if (append) {
+      loadingMore = true;
+    } else {
+      searching = true;
+    }
     try {
       if (sourceKind === 'jira') {
-        const projectParam = selectedProjectKey
-          ? `&project=${encodeURIComponent(selectedProjectKey)}`
-          : '';
-        jiraResults = await api.get<IssueSummary[]>(
-          `/issue/search?account_id=${encodeURIComponent(accountId)}&q=${encodeURIComponent(q)}${projectParam}`,
+        const proj = projectOverride ?? selectedProjectKey;
+        const projectParam = proj ? `&project=${encodeURIComponent(proj)}` : '';
+        const page = await api.get<IssueSummary[]>(
+          `/issue/search?account_id=${encodeURIComponent(accountId)}&q=${encodeURIComponent(q)}${projectParam}&start_at=${startAt}`,
         );
+        if (append) {
+          jiraResults = [...jiraResults, ...page];
+        } else {
+          jiraResults = page;
+        }
+        jiraOffset = startAt + page.length;
+        // If a full page came back, assume there may be more.
+        jiraHasMore = page.length >= 25;
       } else {
         const spaceParam = selectedSpaceKey
           ? `&space=${encodeURIComponent(selectedSpaceKey)}`
@@ -128,11 +169,18 @@
       }
     } catch (e) {
       toasts.error('Search failed', e instanceof Error ? e.message : String(e));
-      jiraResults = [];
-      confluenceResults = [];
+      if (!append) {
+        jiraResults = [];
+        confluenceResults = [];
+      }
     } finally {
       searching = false;
+      loadingMore = false;
     }
+  }
+
+  function loadMoreJira(): void {
+    void search(query.trim(), jiraOffset, true);
   }
 
   function pickIssue(issue: IssueSummary): void {
@@ -228,6 +276,15 @@
         <span class="chip status-chip">{issue.status}</span>
       </button>
     {/each}
+    {#if jiraHasMore}
+      <button
+        class="load-more-btn"
+        onclick={loadMoreJira}
+        disabled={loadingMore}
+      >
+        {loadingMore ? 'Loading…' : 'Load more'}
+      </button>
+    {/if}
   {:else}
     {#each confluenceResults as page (page.id)}
       <button class="issue-row" onclick={() => pickPage(page)}>
@@ -324,5 +381,25 @@
     padding: 16px;
     text-align: center;
     font-size: 12.5px;
+  }
+  .load-more-btn {
+    width: 100%;
+    padding: 7px 0;
+    margin-top: 2px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    background: transparent;
+    border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    transition: background 120ms ease-out;
+  }
+  .load-more-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .load-more-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
 </style>

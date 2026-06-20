@@ -70,13 +70,22 @@
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
-  // Strip a Confluence URL down to the numeric pageId if the user pastes a URL.
+  // Normalise a raw user-entered key or URL:
+  //  · Jira: extract PROJ-123 from a Jira browse URL (e.g. .../browse/PROJ-123)
+  //          or from arbitrary pasted text that contains an issue key pattern.
+  //  · Confluence: strip to numeric pageId from ?pageId=NNN or /pages/NNN/.
   function normaliseSourceKey(raw: string): string {
-    if (sourceKind !== 'confluence') return raw.trim();
-    // Match ?pageId=NNN or /pages/NNN/
-    const m = raw.match(/(?:pageId=|\/pages\/)(\d+)/);
+    const s = raw.trim();
+    if (sourceKind === 'jira') {
+      // https://xxx.atlassian.net/browse/PROJ-123 or text containing PROJ-123
+      const m = s.match(/(?:\/browse\/|^|\s)([A-Z][A-Z0-9]{1,9}-\d+)(?:[/?#\s]|$)/);
+      if (m) return m[1];
+      return s;
+    }
+    // Confluence: Match ?pageId=NNN or /pages/NNN/
+    const m = s.match(/(?:pageId=|\/pages\/)(\d+)/);
     if (m) return m[1];
-    return raw.trim();
+    return s;
   }
 
   // The effective key submitted: manual field wins if filled, else selectedKey.

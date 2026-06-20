@@ -8,6 +8,7 @@ import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
 import { swarm } from './stores/swarm.svelte';
 import { usage } from './api/usage.svelte';
+import { product } from './stores/product.svelte';
 
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
@@ -74,6 +75,9 @@ class EventsClient {
         } else if (parsed.type === 'usage_metrics_tick') {
           // Drive a near-real-time metrics sparkline refresh without polling.
           usage.applyMetricsTick();
+        } else if (parsed.type === 'product_changed') {
+          // Let product section tabs know a run completed (kills a poll cycle).
+          product.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

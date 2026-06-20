@@ -312,16 +312,9 @@ async fn get_story<S: ProductCtx>(
     let analyses = ctx.product_repo().list_analyses(&sid).await?;
     let questions = ctx.product_repo().list_questions(&sid).await?;
     let notes = ctx.product_repo().list_notes(&sid).await?;
-    let runs = ctx.product_repo().list_testcase_runs(&sid).await?;
     let open_questions = questions.iter().filter(|q| q.status == "open").count() as i64;
-    let testcases: i64 = {
-        let mut tc_count: i64 = 0;
-        for run in &runs {
-            let tcs = ctx.product_repo().list_testcases(&run.id).await?;
-            tc_count += tcs.len() as i64;
-        }
-        tc_count
-    };
+    // Use a single COUNT(*) query instead of fetching every testcase row.
+    let testcases = ctx.product_repo().count_testcases_for_story(&sid).await?;
     let swarm_link = ctx.product_repo().swarm_link_for_story(&sid).await?;
     let detail = crate::types::ProductStoryDetail {
         story,

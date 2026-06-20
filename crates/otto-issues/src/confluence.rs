@@ -1,5 +1,7 @@
 //! Confluence Cloud REST API v1 client (storage-format XHTML ↔ Markdown helpers included).
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -13,9 +15,24 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Overall per-request deadline so a hung endpoint can't block the caller.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Build the shared HTTP client with connect + overall timeouts. Falls back to a
-/// default client if the builder fails (keeps `ConfluenceClient::new` infallible).
-fn build_http_client() -> reqwest::Client {
+/// Process-wide cache: composite key (site_base + auth_header) → shared client.
+static CLIENT_CACHE: OnceLock<Mutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
+
+/// Return a cached `reqwest::Client`, building one on first use for this key.
+fn get_or_build_client(cache_key: &str) -> reqwest::Client {
+    let cache = CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = cache.lock() {
+        if let Some(c) = map.get(cache_key) {
+            return c.clone();
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_default();
+        map.insert(cache_key.to_string(), client.clone());
+        return client;
+    }
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
@@ -91,10 +108,13 @@ impl ConfluenceClient {
 
         let credentials = format!("{email}:{token}");
         let auth_header = format!("Basic {}", B64.encode(credentials.as_bytes()));
+        // Reuse a cached client keyed by site + credentials to avoid rebuilding the
+        // connection pool on every request.
+        let http = get_or_build_client(&format!("{site_base}\x00{auth_header}"));
         Self {
             site_base,
             auth_header,
-            http: build_http_client(),
+            http,
         }
     }
 

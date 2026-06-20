@@ -1,6 +1,7 @@
 //! ProductService — orchestrates multi-step product story workflows.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use otto_core::auth::authorize_owner;
 use otto_core::domain::{IssueAccount, User};
@@ -20,6 +21,11 @@ pub struct ProductService {
     pub(crate) repo: ProductRepo,
     pub(crate) issues: IssuesRepo,
     pub(crate) secrets: Arc<dyn SecretStore>,
+    /// Per-run Jira context cache: `(story_id, jira_updated_at)` → rendered Markdown.
+    /// Avoids re-fetching `get_issue_full` when the story hasn't changed in Jira between
+    /// multiple agent runs in the same daemon process. Bounded to 64 entries by a simple
+    /// FIFO eviction (remove oldest when full).
+    context_cache: Mutex<HashMap<(Id, String), String>>,
 }
 
 /// A single comment fetched from the issue tracker (Jira or Confluence).
@@ -66,6 +72,7 @@ impl ProductService {
             repo,
             issues,
             secrets,
+            context_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1058,8 +1065,20 @@ impl ProductService {
 
         // --- Full Jira context (only for jira stories) ---
         if story.source_kind == "jira" {
+            // Cache key: story id + story updated_at (proxy for Jira staleness; the watcher
+            // updates updated_at on every reconcile fetch). Bounded to 64 entries.
+            let cache_key = (story.id.clone(), story.updated_at.to_rfc3339());
+            let cached_section = self
+                .context_cache
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&cache_key).cloned());
+
+            let jira_section: Option<String> = if let Some(s) = cached_section {
+                Some(s)
+            } else {
             // Load account + token; tolerate missing account gracefully.
-            let jira_section: Option<String> = async {
+            let fetched: Option<String> = async {
                 let account = self.issues.get_account(&story.account_id).await.ok()?;
                 let token = self.account_token(&account).ok()?;
                 let client = JiraClient::new(&account.base_url, &account.email, &token);
@@ -1160,6 +1179,21 @@ impl ProductService {
                 }
             }
             .await;
+            // Store in cache, evicting oldest when at cap.
+            if let Some(ref s) = fetched {
+                if let Ok(mut map) = self.context_cache.lock() {
+                    const CACHE_CAP: usize = 64;
+                    if map.len() >= CACHE_CAP {
+                        // Simple FIFO: remove one arbitrary entry.
+                        if let Some(k) = map.keys().next().cloned() {
+                            map.remove(&k);
+                        }
+                    }
+                    map.insert(cache_key, s.clone());
+                }
+            }
+            fetched
+            }; // end cache-miss branch
 
             if let Some(section) = jira_section {
                 doc.push_str(&section);

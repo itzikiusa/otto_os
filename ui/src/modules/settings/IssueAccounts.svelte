@@ -47,6 +47,17 @@
     return `expires ${new Date(iso).toLocaleDateString()}`;
   }
 
+  /** Returns 'expired', 'soon' (within 14 days), or '' for no warning. */
+  function expiryWarning(iso: string | null): '' | 'soon' | 'expired' {
+    if (!iso) return '';
+    const day = 86_400_000;
+    const diff = new Date(iso).getTime() - Date.now();
+    const days = Math.ceil(diff / day);
+    if (days < 0) return 'expired';
+    if (days <= 14) return 'soon';
+    return '';
+  }
+
   $effect(() => {
     void load();
   });
@@ -177,6 +188,11 @@
             <div class="acct-label">
               {a.label}
               <span class="chip">jira</span>
+              {#if expiryWarning(a.token_expires_at) === 'expired'}
+                <span class="expiry-badge expiry-badge-expired" title="Token has expired — re-enter it to restore access">expired</span>
+              {:else if expiryWarning(a.token_expires_at) === 'soon'}
+                <span class="expiry-badge expiry-badge-soon" title="Token expiring soon — update before it lapses">{expiryLabel(a.token_expires_at!)}</span>
+              {/if}
             </div>
             <div class="acct-sub dim">
               {a.email} · <span class="mono">{a.base_url}</span> · token ••••••
@@ -313,5 +329,22 @@
   .expiry.expired {
     color: #d9534f;
     font-weight: 600;
+  }
+  .expiry-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 999px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+  .expiry-badge-expired {
+    background: color-mix(in srgb, #d9534f 15%, transparent);
+    color: #d9534f;
+  }
+  .expiry-badge-soon {
+    background: color-mix(in srgb, #e0a000 15%, transparent);
+    color: #b07d00;
+    text-transform: none;
   }
 </style>

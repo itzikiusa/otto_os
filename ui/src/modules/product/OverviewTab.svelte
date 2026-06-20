@@ -4,6 +4,7 @@
   // button, watch toggle, and (for Jira stories) a rich section with status,
   // assignee, details, linked issues, comments, history, and attachments.
   import Icon from '../../lib/components/Icon.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { toasts } from '../../lib/toast.svelte';
@@ -734,6 +735,7 @@
         <div class="col-right">
           <div class="jira-section">
             {#if issueLoading}
+              <Skeleton rows={6} height={36} />
               <div class="jira-loading">Loading Jira details…</div>
             {:else if issueError}
               <div class="jira-error">Could not load Jira details: {issueError}</div>

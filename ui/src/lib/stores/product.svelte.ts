@@ -499,6 +499,33 @@ class ProductStore {
     return l;
   }
 
+  // ── WS event integration ───────────────────────────────────────────────────
+  // Registered callbacks that the AnalysisTab/RewriteTab/PlanTab/TestCasesTab
+  // subscribe to so they can refresh on `product_changed` without waiting for
+  // the next 3-second poll tick.
+  private sectionListeners: Map<string, Set<(status: string) => void>> = new Map();
+
+  onSectionChange(section: string, cb: (status: string) => void): () => void {
+    if (!this.sectionListeners.has(section)) {
+      this.sectionListeners.set(section, new Set());
+    }
+    this.sectionListeners.get(section)!.add(cb);
+    return () => {
+      this.sectionListeners.get(section)?.delete(cb);
+    };
+  }
+
+  applyEvent(ev: import('../api/types').OttoEvent): boolean {
+    if (ev.type !== 'product_changed') return false;
+    // Only fire if the event is for the currently-selected story.
+    if (ev.story_id !== this.selectedId) return true;
+    const listeners = this.sectionListeners.get(ev.section);
+    if (listeners) {
+      for (const cb of listeners) cb(ev.status);
+    }
+    return true;
+  }
+
   // ── Error helper (convenience for callers) ─────────────────────────────────
   errMsg = errMsg;
 }

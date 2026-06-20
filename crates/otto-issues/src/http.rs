@@ -255,22 +255,25 @@ async fn search_issues<S: IssuesCtx>(
         .get("account_id")
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
-    let q = params
-        .get("q")
-        .ok_or_else(|| Error::Invalid("q query param required".into()))?
-        .clone();
+    // `q` defaults to "" — empty triggers the recency-default JQL.
+    let q = params.get("q").cloned().unwrap_or_default();
     let project = params
         .get("project")
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    // `start_at` supports cursor-style "load more" pagination (default 0).
+    let start_at: u32 = params
+        .get("start_at")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = s
         .secrets()
         .get(&account.token_ref)?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
-    let results = client.search(&q, project.as_deref()).await?;
+    let results = client.search(&q, project.as_deref(), start_at).await?;
     Ok(Json(results))
 }
 

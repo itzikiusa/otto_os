@@ -5,6 +5,7 @@
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
+  import DiffView from '../../lib/components/DiffView.svelte';
   import type { ProductStoryVersion } from './types';
 
   const PROVIDERS = ['claude', 'openai'] as const;
@@ -79,6 +80,14 @@
       void initialLoad();
     }
     return () => { clearPoll(); };
+  });
+
+  // Subscribe to `product_changed { section: 'rewrite' }` WS events.
+  $effect(() => {
+    const off = product.onSectionChange('rewrite', (_status: string) => {
+      void pollVersions(); // final refresh — clears poll if version appeared
+    });
+    return off;
   });
 
   // ── Derived ─────────────────────────────────────────────────────────────────
@@ -254,46 +263,25 @@
       <div class="view-toggle-row">
         <span class="field-label">View</span>
         <div class="segmented">
-          <button class:active={diffView === 'split'} onclick={() => (diffView = 'split')}>Split diff</button>
+          <button class:active={diffView === 'split'} onclick={() => (diffView = 'split')}>Word diff</button>
           <button class:active={diffView === 'source'} onclick={() => (diffView = 'source')}>Source only</button>
           <button class:active={diffView === 'suggested'} onclick={() => (diffView = 'suggested')}>Suggested only</button>
         </div>
       </div>
 
-      <!-- Two-column before/after -->
+      <!-- Word-level diff using the shared DiffView component (T3) -->
       {#if diffView === 'split'}
-        <div class="split-diff">
-          <div class="diff-pane">
-            <div class="pane-header">
-              <span class="pane-label source-label">Source</span>
-              {#if sourceVersion}
-                <span class="pane-meta">v{sourceVersion.version_no} — {sourceVersion.kind}</span>
-              {/if}
-            </div>
-            <div class="pane-body md-body">
-              {#if renderedSource}
-                {@html renderedSource}
-              {:else}
-                <span class="muted">No source content.</span>
-              {/if}
-            </div>
+        <div class="diff-wrap card">
+          <div class="pane-header diff-pane-header">
+            <span class="pane-label source-label">Source{sourceVersion ? ` v${sourceVersion.version_no}` : ''}</span>
+            <span class="pane-label suggested-label">Suggested v{suggestedVersion.version_no}</span>
           </div>
-
-          <div class="diff-divider"></div>
-
-          <div class="diff-pane">
-            <div class="pane-header">
-              <span class="pane-label suggested-label">Suggested</span>
-              <span class="pane-meta">v{suggestedVersion.version_no}</span>
-            </div>
-            <div class="pane-body md-body">
-              {#if renderedSuggested}
-                {@html renderedSuggested}
-              {:else}
-                <span class="muted">No suggested content.</span>
-              {/if}
-            </div>
-          </div>
+          <DiffView
+            before={sourceVersion?.body_md ?? ''}
+            after={suggestedVersion?.body_md ?? ''}
+            mode="split"
+            contextLines={4}
+          />
         </div>
       {:else if diffView === 'source'}
         <div class="single-pane card">
@@ -522,26 +510,19 @@
     font-weight: 600;
   }
 
-  /* ── Split diff ──────────────────────────────────────────────── */
-  .split-diff {
-    display: flex;
-    gap: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
+  /* ── DiffView wrapper (split word-diff view, T3) ────────────── */
+  .diff-wrap {
+    padding: 0;
     overflow: hidden;
-    background: var(--surface-raised, var(--surface));
     min-height: 300px;
   }
-  .diff-pane {
-    flex: 1;
-    min-width: 0;
+  .diff-pane-header {
     display: flex;
-    flex-direction: column;
-  }
-  .diff-divider {
-    width: 1px;
-    background: var(--border);
-    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px 7px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-raised, var(--surface));
   }
   .pane-header {
     display: flex;
@@ -571,11 +552,6 @@
   .pane-meta {
     font-size: 11px;
     color: var(--text-dim);
-  }
-  .pane-body {
-    flex: 1;
-    padding: 14px 16px;
-    overflow-y: auto;
   }
 
   /* ── Single pane ─────────────────────────────────────────────── */

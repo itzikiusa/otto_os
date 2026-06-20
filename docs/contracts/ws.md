@@ -186,3 +186,25 @@ Emitted by the metrics sampler after each system-metrics sample is stored:
   `/usage/metrics` refresh so the sparklines update in near-real-time.
 - Source: `crates/otto-server/src/monitor.rs` → `spawn_metrics_sampler`.
 - Throttle: the UI ignores ticks that arrive within 10 s of the last fetch.
+
+## Product AI-run completion (A3)
+
+Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs` at the end of every
+AI-run task (analysis, rewrite, test-case generation, plan generation).
+
+```json
+{
+  "type": "product_changed",
+  "workspace_id": "<Id>",
+  "story_id": "<Id>",
+  "section": "analysis|rewrite|testcases|plan",
+  "status": "done|error"
+}
+```
+
+- `section` — which product tab completed: `analysis`, `rewrite`, `testcases`, or `plan`.
+- `status` — final state of the run.
+- UI routing: `events.svelte.ts` dispatches to `product.applyEvent()` in the product store,
+  which fires per-section subscriber callbacks registered by each product tab (`AnalysisTab`,
+  `PlanTab`, `RewriteTab`, `TestCasesTab`). Each tab's callback triggers a single poll to
+  refresh its data immediately, supplementing the existing timed polling as a fallback.
