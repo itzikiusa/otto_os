@@ -2867,6 +2867,7 @@ dependencies = [
  "http-body-util",
  "otto-core",
  "otto-pty",
+ "otto-ssh",
  "otto-state",
  "serde",
  "serde_json",

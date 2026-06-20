@@ -421,6 +421,33 @@ Notes:
   long-lived secrets belong in the user's own MCP config until Keychain secret-refs land. The
   merge preserves all other `.mcp.json` keys and never overwrites Otto's `otto-browser` entry.
 
+## SFTP file browser (`/connections/{id}/sftp/*`)
+
+File browse / read / transfer over an **SSH** connection's existing auth. Otto
+drives the system `sftp` binary (one `ControlMaster`/`ControlPersist` socket per
+op-session), reusing the connection's keys/ssh-agent/`~/.ssh/config` and
+`ProxyJump` exactly as the terminal `open` does — there is no separate password.
+Because the daemon runs on the user's machine, `download`/`upload` read/write the
+**daemon host's** real local disk. All routes require `kind == ssh` (else 400).
+Browse/read = `ws viewer` (`Connections:View`); transfers/mutations = `ws editor`
+(`Connections:Edit`). A leading `~` in a local path expands to the daemon user's
+home; for downloads the parent dir is created and, if the local path is an
+existing directory, the remote file's basename is used.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /connections/{id}/sftp/list?path= | ws viewer | — | SftpListResp `{path, entries: SftpEntry[]}` — empty/absent `path` ⇒ remote `pwd` then list |
+| GET /connections/{id}/sftp/read?path= | ws viewer | — | SftpReadResp `{text, truncated}` — downloads to a temp file, returns up to 1 MiB of UTF-8 text |
+| POST /connections/{id}/sftp/download | ws editor | SftpDownloadReq `{remote_path, local_path}` | SftpDownloadResp `{local_path, bytes}` |
+| POST /connections/{id}/sftp/upload | ws editor | SftpUploadReq `{local_path, remote_path}` | 200 |
+| POST /connections/{id}/sftp/mkdir | ws editor | SftpMkdirReq `{path}` | 200 |
+| POST /connections/{id}/sftp/remove | ws editor | SftpRemoveReq `{path, dir?}` | 200 — `dir:true` ⇒ `rmdir`, else `rm` |
+| POST /connections/{id}/sftp/rename | ws editor | SftpRenameReq `{from, to}` | 200 |
+
+`SftpEntry { name, kind: "dir"|"file"|"symlink"|"other", size, mtime?, perms,
+symlink_target? }`. Errors surface the `sftp` client's stderr (e.g. permission
+denied, no such file) as a `502 upstream`.
+
 ## DB Explorer — engine access (`/connections/{id}/db/*`)
 
 Native data-access for a connection profile (reuses its keychain secret). Reads use the

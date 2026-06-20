@@ -264,6 +264,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // Toggle pin/recency-order — Edit tier (personal preference, not admin).
         return Require(Connections, Edit);
     }
+    if p.starts_with("/connections/{id}/sftp/") {
+        // SFTP file browser over an SSH connection: browse/read (GET) = View;
+        // download/upload/mkdir/remove/rename (POST, mutate the user's disk or
+        // the remote) = Edit. Distinct from the `/db/` (Database) prefix above.
+        return Require(Connections, if get { View } else { Edit });
+    }
     if p == "/connections" {
         // Workspace-less (global) connection create — management tier.
         return Require(Connections, Admin);
@@ -574,6 +580,36 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{id}/connections"),
+            Require(Connections, Edit)
+        );
+    }
+
+    #[test]
+    fn sftp_browse_is_view_transfer_is_edit() {
+        // Browse/read the remote tree = Connections:View.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/connections/{id}/sftp/list"),
+            Require(Connections, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/connections/{id}/sftp/read"),
+            Require(Connections, View)
+        );
+        // Transfers / mutations = Connections:Edit.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/connections/{id}/sftp/download"),
+            Require(Connections, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/connections/{id}/sftp/upload"),
+            Require(Connections, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/connections/{id}/sftp/remove"),
+            Require(Connections, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/connections/{id}/sftp/rename"),
             Require(Connections, Edit)
         );
     }

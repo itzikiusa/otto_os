@@ -26,6 +26,9 @@ use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 
+pub mod sftp;
+pub use sftp::{SftpEntry, SftpParams, SftpSession};
+
 /// SSH tunnel config. Auth uses the system ssh client, so it honours the
 /// ssh-agent, `~/.ssh/config`, and known_hosts. Provide an `identity_file` for
 /// key auth, or rely on the agent.

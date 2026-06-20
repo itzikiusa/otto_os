@@ -18,6 +18,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ConnectionForm from './ConnectionForm.svelte';
+  import SftpBrowser from './SftpBrowser.svelte';
 
   interface TreeNode {
     sec: ConnectionSection;
@@ -34,6 +35,8 @@
   let loading = $state(true);
   let formOpen = $state(false);
   let editing: Connection | null = $state(null);
+  // The SSH connection whose SFTP file browser is open (null = none).
+  let sftpFor: Connection | null = $state(null);
   let testing: Record<string, boolean> = $state({});
   let testResults: Record<string, TestConnectionResp> = $state({});
   let opening: Record<string, boolean> = $state({});
@@ -553,6 +556,16 @@
     <button class="btn small" disabled={testing[c.id]} onclick={() => test(c)}>
       {testing[c.id] ? 'Testing…' : 'Test'}
     </button>
+    {#if c.kind === 'ssh'}
+      <button
+        class="icon-btn"
+        title="Browse files (SFTP)"
+        aria-label="Browse files"
+        onclick={() => (sftpFor = c)}
+      >
+        <Icon name="folder" size={13} />
+      </button>
+    {/if}
     <button
       class="icon-btn"
       title="Edit"
@@ -583,6 +596,10 @@
     onclose={() => (formOpen = false)}
     onsaved={onSaved}
   />
+{/if}
+
+{#if sftpFor}
+  <SftpBrowser conn={sftpFor} onclose={() => (sftpFor = null)} />
 {/if}
 
 <style>

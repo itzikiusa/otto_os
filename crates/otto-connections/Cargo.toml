@@ -8,6 +8,7 @@ license.workspace = true
 otto-core = { workspace = true }
 otto-state = { workspace = true }
 otto-pty = { workspace = true }
+otto-ssh = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

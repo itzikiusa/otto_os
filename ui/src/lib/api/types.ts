@@ -740,6 +740,72 @@ export interface TestConnectionResp {
 }
 
 // ---------------------------------------------------------------------------
+// SFTP file browser (over an SSH connection's existing auth)
+// ---------------------------------------------------------------------------
+
+/** One entry in a remote directory listing (GET /connections/{id}/sftp/list). */
+export interface SftpEntry {
+  name: string;
+  kind: 'dir' | 'file' | 'symlink' | 'other';
+  size: number;
+  /** Raw date/time field from the listing (e.g. "Jun 20 12:00"), if present. */
+  mtime: string | null;
+  /** The 10-char permission string (e.g. "drwxr-xr-x"). */
+  perms: string;
+  /** For symlinks, the link target; null otherwise. */
+  symlink_target: string | null;
+}
+
+export interface SftpListResp {
+  /** Absolute remote path that was listed (resolved from pwd when omitted). */
+  path: string;
+  entries: SftpEntry[];
+}
+
+/** `POST /api/v1/connections/{id}/sftp/download`. */
+export interface SftpDownloadReq {
+  remote_path: string;
+  /** Local destination (file path or dir). Leading `~` expands to daemon home. */
+  local_path: string;
+}
+
+export interface SftpDownloadResp {
+  local_path: string;
+  bytes: number;
+}
+
+/** `POST /api/v1/connections/{id}/sftp/upload`. */
+export interface SftpUploadReq {
+  /** Local source (leading `~` expands to daemon home). */
+  local_path: string;
+  remote_path: string;
+}
+
+/** `POST /api/v1/connections/{id}/sftp/mkdir`. */
+export interface SftpMkdirReq {
+  path: string;
+}
+
+/** `POST /api/v1/connections/{id}/sftp/remove` — `dir:true` ⇒ rmdir, else rm. */
+export interface SftpRemoveReq {
+  path: string;
+  dir?: boolean;
+}
+
+/** `POST /api/v1/connections/{id}/sftp/rename`. */
+export interface SftpRenameReq {
+  from: string;
+  to: string;
+}
+
+/** `GET /api/v1/connections/{id}/sftp/read?path=` — text view of a small file. */
+export interface SftpReadResp {
+  text: string;
+  /** True when the file exceeded the read cap (content is the capped prefix). */
+  truncated: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------
 

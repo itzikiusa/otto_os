@@ -8,12 +8,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
-    MoveSectionReq, Problem, ReorderSectionsReq, SectionScopeQuery, TestConnectionResp,
-    UpsertConnectionReq, UpsertSectionReq,
+    MoveSectionReq, Problem, ReorderSectionsReq, SectionScopeQuery, SftpDownloadReq,
+    SftpDownloadResp, SftpListResp, SftpMkdirReq, SftpReadResp, SftpRemoveReq, SftpRenameReq,
+    SftpUploadReq, TestConnectionResp, UpsertConnectionReq, UpsertSectionReq,
 };
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{Connection, ConnectionKind, ConnectionSection, Session, User, WorkspaceRole};
 use otto_core::{Error, Id};
+use otto_ssh::{SftpParams, SftpSession};
 use otto_state::SqlitePool;
 use serde::Deserialize;
 
@@ -118,6 +120,14 @@ pub fn api_router<S: ConnectionsCtx>() -> Router<S> {
         .route("/connections/{id}/open", post(open_connection::<S>))
         .route("/connections/{id}/test", post(test_connection::<S>))
         .route("/connections/{id}/pin", patch(pin_connection::<S>))
+        // --- SFTP file browser (SSH connections only) ---
+        .route("/connections/{id}/sftp/list", get(sftp_list::<S>))
+        .route("/connections/{id}/sftp/read", get(sftp_read::<S>))
+        .route("/connections/{id}/sftp/download", post(sftp_download::<S>))
+        .route("/connections/{id}/sftp/upload", post(sftp_upload::<S>))
+        .route("/connections/{id}/sftp/mkdir", post(sftp_mkdir::<S>))
+        .route("/connections/{id}/sftp/remove", post(sftp_remove::<S>))
+        .route("/connections/{id}/sftp/rename", post(sftp_rename::<S>))
         .route(
             "/workspaces/{id}/connection-sections",
             get(list_sections::<S>).post(create_section::<S>),
@@ -291,6 +301,261 @@ async fn pin_connection<S: ConnectionsCtx>(
     let conn = ctx.connections().get(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
     Ok(Json(ctx.connections().set_pinned(&id, req.pinned).await?))
+}
+
+// --- SFTP file browser ------------------------------------------------------
+//
+// Browse/read/transfer files over a connection's existing SSH auth by driving
+// the system `sftp` binary (see `otto_ssh::SftpSession`). Mutations and
+// transfers require Connections:Edit (enforced by the central policy guard) and
+// the connection's workspace Editor role (enforced here, mirroring sibling
+// handlers); browse/read require View / Viewer. Only `kind == ssh` is allowed.
+
+/// Read a string param off a connection's JSON params (empty → None).
+fn conn_param<'a>(conn: &'a Connection, key: &str) -> Option<&'a str> {
+    conn.params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+/// Build `SftpParams` from an SSH connection's profile. Errors if the kind is
+/// not `ssh` or the host is missing.
+fn sftp_params_for(conn: &Connection) -> Result<SftpParams, Error> {
+    if conn.kind != ConnectionKind::Ssh {
+        return Err(Error::Invalid(
+            "SFTP is only available for SSH connections".into(),
+        ));
+    }
+    let host = conn_param(conn, "host").ok_or_else(|| {
+        Error::Invalid("connection has no host — SFTP requires an SSH host".into())
+    })?;
+    // Port: accept a JSON number or numeric string; default 22.
+    let port = match conn.params.get("port") {
+        Some(serde_json::Value::Number(n)) => n
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+            .ok_or_else(|| Error::Invalid("connection port is not a valid port number".into()))?,
+        Some(serde_json::Value::String(s)) if !s.is_empty() => s
+            .parse::<u16>()
+            .map_err(|_| Error::Invalid("connection port is not a valid port number".into()))?,
+        _ => 22,
+    };
+    Ok(SftpParams {
+        host: host.to_string(),
+        port,
+        user: conn_param(conn, "user").map(str::to_string),
+        identity_file: conn_param(conn, "identity_file").map(str::to_string),
+        jump: conn_param(conn, "jump").map(str::to_string),
+    })
+}
+
+/// Resolve the connection, enforce the workspace role, ensure it's SSH, and
+/// build a live `SftpSession`. Shared by every SFTP handler.
+async fn open_sftp<S: ConnectionsCtx>(
+    ctx: &S,
+    user: &User,
+    id: &Id,
+    min: WorkspaceRole,
+) -> Result<SftpSession, ApiErr> {
+    let conn = ctx.connections().get(id).await?;
+    check_conn_role(ctx, user, &conn, min).await?;
+    if owner_private_enabled(ctx).await {
+        require_conn_owner_or_root(user, &conn)?;
+    }
+    let params = sftp_params_for(&conn)?;
+    Ok(SftpSession::new(params)?)
+}
+
+/// Expand a leading `~` to the daemon user's `$HOME`.
+fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix('~') {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Query params for `GET …/sftp/list` and `…/sftp/read`.
+#[derive(Debug, Default, Deserialize)]
+pub struct SftpPathQuery {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// GET /connections/{id}/sftp/list?path= — Connections:View. Empty path → pwd().
+async fn sftp_list<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<SftpPathQuery>,
+) -> ApiResult<Json<SftpListResp>> {
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let path = match q.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => p.to_string(),
+        None => sftp.pwd().await.map_err(ApiErr)?,
+    };
+    let entries = sftp.list(&path).await.map_err(ApiErr)?;
+    Ok(Json(SftpListResp {
+        path,
+        entries: entries
+            .into_iter()
+            .map(|e| otto_core::api::SftpEntry {
+                name: e.name,
+                kind: e.kind,
+                size: e.size,
+                mtime: e.mtime,
+                perms: e.perms,
+                symlink_target: e.symlink_target,
+            })
+            .collect(),
+    }))
+}
+
+/// POST /connections/{id}/sftp/download — Connections:Edit.
+async fn sftp_download<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<SftpDownloadReq>,
+) -> ApiResult<Json<SftpDownloadResp>> {
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let local = expand_home(&req.local_path);
+    // If the destination is an existing directory, sftp `get` lands the file
+    // under it using the remote basename; otherwise treat it as a full file
+    // path and ensure its parent dir exists.
+    let local_path = std::path::Path::new(&local);
+    let dest = if local_path.is_dir() {
+        let base = std::path::Path::new(&req.remote_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "download".to_string());
+        local_path.join(base)
+    } else {
+        if let Some(parent) = local_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| ApiErr(Error::Invalid(format!("create local dir: {e}"))))?;
+            }
+        }
+        local_path.to_path_buf()
+    };
+    let dest_str = dest.to_string_lossy().into_owned();
+    sftp.download(&req.remote_path, &dest_str)
+        .await
+        .map_err(ApiErr)?;
+    let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    Ok(Json(SftpDownloadResp {
+        local_path: dest_str,
+        bytes,
+    }))
+}
+
+/// POST /connections/{id}/sftp/upload — Connections:Edit.
+async fn sftp_upload<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<SftpUploadReq>,
+) -> ApiResult<StatusCode> {
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let local = expand_home(&req.local_path);
+    sftp.upload(&local, &req.remote_path).await.map_err(ApiErr)?;
+    Ok(StatusCode::OK)
+}
+
+/// POST /connections/{id}/sftp/mkdir — Connections:Edit.
+async fn sftp_mkdir<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<SftpMkdirReq>,
+) -> ApiResult<StatusCode> {
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    sftp.mkdir(&req.path).await.map_err(ApiErr)?;
+    Ok(StatusCode::OK)
+}
+
+/// POST /connections/{id}/sftp/remove — Connections:Edit. `dir` → rmdir else rm.
+async fn sftp_remove<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<SftpRemoveReq>,
+) -> ApiResult<StatusCode> {
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    if req.dir {
+        sftp.rmdir(&req.path).await.map_err(ApiErr)?;
+    } else {
+        sftp.remove(&req.path).await.map_err(ApiErr)?;
+    }
+    Ok(StatusCode::OK)
+}
+
+/// POST /connections/{id}/sftp/rename — Connections:Edit.
+async fn sftp_rename<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<SftpRenameReq>,
+) -> ApiResult<StatusCode> {
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    sftp.rename(&req.from, &req.to).await.map_err(ApiErr)?;
+    Ok(StatusCode::OK)
+}
+
+/// Max bytes returned by the SFTP text viewer (1 MiB).
+const SFTP_READ_CAP: u64 = 1024 * 1024;
+
+/// GET /connections/{id}/sftp/read?path= — Connections:View. Downloads to a
+/// temp file, reads up to a size cap, returns text + a truncated flag.
+async fn sftp_read<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<SftpPathQuery>,
+) -> ApiResult<Json<SftpReadResp>> {
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let remote = q
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| ApiErr(Error::Invalid("'path' is required".into())))?;
+
+    // Download to a private temp file, then read+cap it locally.
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "otto-sftp-read-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|e| ApiErr(Error::Internal(format!("create temp dir: {e}"))))?;
+    let tmp_file = tmp_dir.join("file");
+    let tmp_str = tmp_file.to_string_lossy().into_owned();
+
+    let result = sftp.download(remote, &tmp_str).await;
+    let resp = result.map_err(ApiErr).and_then(|_| {
+        read_capped(&tmp_file).map_err(|e| ApiErr(Error::Invalid(format!("read file: {e}"))))
+    });
+    // Always clean up the temp dir, success or not.
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let (text, truncated) = resp?;
+    Ok(Json(SftpReadResp { text, truncated }))
+}
+
+/// Read up to `SFTP_READ_CAP` bytes from a local file, returning the UTF-8
+/// (lossy) text and whether it was truncated by the cap.
+fn read_capped(path: &std::path::Path) -> std::io::Result<(String, bool)> {
+    use std::io::Read;
+    let size = std::fs::metadata(path)?.len();
+    let truncated = size > SFTP_READ_CAP;
+    let mut buf = Vec::with_capacity((size.min(SFTP_READ_CAP)) as usize);
+    std::fs::File::open(path)?
+        .take(SFTP_READ_CAP)
+        .read_to_end(&mut buf)?;
+    Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
 }
 
 // --- Connection sections ----------------------------------------------------

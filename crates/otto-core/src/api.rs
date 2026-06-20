@@ -679,6 +679,87 @@ pub struct TestConnectionResp {
 pub type ConnectionResp = Connection;
 
 // ---------------------------------------------------------------------------
+// SFTP file browser (over an SSH connection's existing auth)
+// ---------------------------------------------------------------------------
+
+/// One entry in a remote directory listing (`GET /connections/{id}/sftp/list`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpEntry {
+    pub name: String,
+    /// "dir" | "file" | "symlink" | "other".
+    pub kind: String,
+    pub size: u64,
+    /// Raw date/time field from the listing (e.g. "Jun 20 12:00"), if present.
+    pub mtime: Option<String>,
+    /// The 10-char permission string (e.g. "drwxr-xr-x").
+    pub perms: String,
+    /// For symlinks, the link target (part after " -> "); `None` otherwise.
+    pub symlink_target: Option<String>,
+}
+
+/// `GET /api/v1/connections/{id}/sftp/list?path=` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpListResp {
+    /// The absolute remote path that was listed (resolved from `pwd` when the
+    /// request omitted `path`).
+    pub path: String,
+    pub entries: Vec<SftpEntry>,
+}
+
+/// `POST /api/v1/connections/{id}/sftp/download` — pull a remote file to local.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpDownloadReq {
+    pub remote_path: String,
+    /// Local destination (file path, or a dir for the default-name case).
+    /// A leading `~` is expanded to the daemon user's home.
+    pub local_path: String,
+}
+
+/// `POST /api/v1/connections/{id}/sftp/download` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpDownloadResp {
+    pub local_path: String,
+    pub bytes: u64,
+}
+
+/// `POST /api/v1/connections/{id}/sftp/upload` — push a local file to remote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpUploadReq {
+    /// Local source (leading `~` expanded to the daemon user's home).
+    pub local_path: String,
+    pub remote_path: String,
+}
+
+/// `POST /api/v1/connections/{id}/sftp/mkdir`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpMkdirReq {
+    pub path: String,
+}
+
+/// `POST /api/v1/connections/{id}/sftp/remove` — `dir=true` → rmdir, else rm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpRemoveReq {
+    pub path: String,
+    #[serde(default)]
+    pub dir: bool,
+}
+
+/// `POST /api/v1/connections/{id}/sftp/rename`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpRenameReq {
+    pub from: String,
+    pub to: String,
+}
+
+/// `GET /api/v1/connections/{id}/sftp/read?path=` — text view of a small file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpReadResp {
+    pub text: String,
+    /// True when the file exceeded the read cap (content is the capped prefix).
+    pub truncated: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Git: accounts, repos, local ops
 // ---------------------------------------------------------------------------
 
