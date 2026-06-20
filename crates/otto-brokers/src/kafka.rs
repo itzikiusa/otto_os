@@ -33,6 +33,11 @@ use std::time::{Duration, Instant};
 const META_TIMEOUT: Duration = Duration::from_secs(15);
 const WATERMARK_TIMEOUT: Duration = Duration::from_secs(8);
 const GROUP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bulk watermark scans (throughput total) are best-effort: a short per-call
+/// timeout and an overall budget keep the metrics endpoint responsive on large
+/// or slow (tunnelled) clusters.
+const BULK_WATERMARK_TIMEOUT: Duration = Duration::from_millis(1500);
+const BULK_BUDGET: Duration = Duration::from_secs(3);
 
 fn kerr(e: KafkaError) -> Error {
     Error::Upstream(format!("kafka: {e}"))
@@ -187,6 +192,11 @@ impl KafkaClient {
         })
     }
 
+    /// List topics from a single metadata pass. **No per-partition watermark
+    /// fetch** — on a large cluster (or over an SSH tunnel) that is hundreds of
+    /// blocking round-trips and makes the topic list take minutes. `message_count`
+    /// is therefore `-1` ("not computed"); the exact per-partition counts are
+    /// loaded lazily by `topic_partitions` when a topic is opened.
     pub fn list_topics(&self) -> Result<Vec<TopicSummary>> {
         let md = self
             .consumer
@@ -194,27 +204,17 @@ impl KafkaClient {
             .map_err(kerr)?;
         let mut out = Vec::with_capacity(md.topics().len());
         for t in md.topics() {
-            let partitions = t.partitions().len();
             let rf = t
                 .partitions()
                 .iter()
                 .map(|p| p.replicas().len())
                 .max()
                 .unwrap_or(0);
-            let mut messages = 0i64;
-            for p in t.partitions() {
-                if let Ok((low, high)) =
-                    self.consumer
-                        .fetch_watermarks(t.name(), p.id(), WATERMARK_TIMEOUT)
-                {
-                    messages += (high - low).max(0);
-                }
-            }
             out.push(TopicSummary {
                 name: t.name().to_string(),
-                partitions,
+                partitions: t.partitions().len(),
                 replication_factor: rf,
-                message_count: messages,
+                message_count: -1, // lazy: computed on topic open
                 cleanup_policy: None,
                 internal: is_internal(t.name()),
             });
@@ -224,21 +224,28 @@ impl KafkaClient {
     }
 
     /// Total message count across all non-internal partitions (drives the
-    /// throughput sampler). One metadata pass + a watermark call per partition.
+    /// throughput sampler). One metadata pass + a watermark call per partition,
+    /// but bounded by a wall-clock budget with a short per-call timeout so a
+    /// large cluster (or a slow/tunnelled link) can't make the metrics endpoint
+    /// hang for minutes — it returns a best-effort partial instead.
     pub fn total_messages(&self) -> Result<i64> {
         let md = self
             .consumer
             .fetch_metadata(None, META_TIMEOUT)
             .map_err(kerr)?;
+        let deadline = Instant::now() + BULK_BUDGET;
         let mut total = 0i64;
-        for t in md.topics() {
+        'outer: for t in md.topics() {
             if is_internal(t.name()) {
                 continue;
             }
             for p in t.partitions() {
+                if Instant::now() >= deadline {
+                    break 'outer; // best-effort: stop scanning, return what we have
+                }
                 if let Ok((low, high)) =
                     self.consumer
-                        .fetch_watermarks(t.name(), p.id(), WATERMARK_TIMEOUT)
+                        .fetch_watermarks(t.name(), p.id(), BULK_WATERMARK_TIMEOUT)
                 {
                     total += (high - low).max(0);
                 }

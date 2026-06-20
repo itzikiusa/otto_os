@@ -14,6 +14,16 @@ export class ApiError extends Error {
   }
 }
 
+/** Infra endpoints whose 5xx means the connected target (Kafka/DB/SSH) is
+ *  unreachable, not a git-provider outage — excluded from the outage banner. */
+function isInfraPath(path: string): boolean {
+  return (
+    path.includes('/brokers') ||
+    path.includes('/connections') ||
+    path.startsWith('/db')
+  );
+}
+
 export function baseUrl(): string {
   // Native app + remote browser both talk to the daemon. When the SPA is
   // served BY the daemon, same-origin works; the localStorage override is for
@@ -55,8 +65,12 @@ async function request<T>(
     signal,
   });
 
-  // Surface provider/upstream outages (daemon maps provider failures to 502).
-  serviceHealth.report(resp.status);
+  // Surface git-provider/upstream outages (daemon maps provider failures to a
+  // 502). Skip infra endpoints (Kafka brokers, DB connections, DB Explorer):
+  // a 5xx there means *that* target is unreachable — shown as a real error
+  // toast by the caller — not a Bitbucket/GitHub outage, so the global banner
+  // would be misleading.
+  if (!isInfraPath(path)) serviceHealth.report(resp.status);
 
   // No-content responses: 204, async-accepted 202, or any explicitly empty body.
   // (Avoids resp.json() throwing on bodyless endpoints like rewrite/testcase-generate.)

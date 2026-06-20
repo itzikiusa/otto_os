@@ -38,6 +38,9 @@ struct ProxyShared {
     tls: Option<TlsConnector>,
     /// real (host, port) → local listener port.
     endpoints: AsyncMutex<HashMap<(String, u16), u16>>,
+    /// local listener port → real (host, port), for displaying real broker
+    /// addresses (the metadata the client sees is rewritten to 127.0.0.1).
+    reverse: Mutex<HashMap<u16, (String, u16)>>,
     /// Accept-loop handles, aborted when the tunnel drops.
     handles: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -73,6 +76,7 @@ impl BrokerTunnel {
             uses_tls,
             tls,
             endpoints: AsyncMutex::new(HashMap::new()),
+            reverse: Mutex::new(HashMap::new()),
             handles: Mutex::new(Vec::new()),
         });
 
@@ -106,6 +110,12 @@ impl BrokerTunnel {
     /// Whether the underlying `ssh` tunnel is still up.
     pub fn is_alive(&self) -> bool {
         self._ssh.is_alive()
+    }
+
+    /// Real broker `(host, port)` for a local proxy listener port — used to show
+    /// the actual broker address instead of the rewritten `127.0.0.1:<local>`.
+    pub fn real_endpoint(&self, local_port: u16) -> Option<(String, u16)> {
+        self.shared.reverse.lock().ok()?.get(&local_port).cloned()
     }
 }
 
@@ -141,6 +151,9 @@ impl ProxyShared {
                 return Ok(*existing);
             }
             map.insert(key, lp);
+        }
+        if let Ok(mut rev) = self.reverse.lock() {
+            rev.insert(lp, (host.to_string(), port));
         }
 
         let shared = self.clone();
@@ -490,6 +503,7 @@ mod tests {
             uses_tls: false,
             tls: None,
             endpoints: AsyncMutex::new(HashMap::new()),
+            reverse: Mutex::new(HashMap::new()),
             handles: Mutex::new(Vec::new()),
         });
 

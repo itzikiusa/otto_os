@@ -97,7 +97,7 @@
         {#each filtered as t (t.name)}
           <button class="trow" class:sel={selected === t.name} onclick={() => (selected = t.name)}>
             <span class="tn" class:internal={t.internal}>{t.name}</span>
-            <span class="meta">{t.partitions}p · {t.message_count.toLocaleString()}</span>
+            <span class="meta">{t.partitions}p · {t.message_count < 0 ? '—' : t.message_count.toLocaleString()}</span>
           </button>
         {/each}
         {#if filtered.length === 0}<p class="muted pad">No topics.</p>{/if}

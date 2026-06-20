@@ -368,9 +368,20 @@ impl BrokersService {
 
     pub async fn overview(&self, id: &Id) -> Result<ClusterOverview> {
         let (client, _) = self.client_for(id).await?;
-        tokio::task::spawn_blocking(move || client.overview())
+        let mut ov = tokio::task::spawn_blocking(move || client.overview())
             .await
-            .map_err(join)?
+            .map_err(join)??;
+        // Over a tunnel the metadata is rewritten to 127.0.0.1:<local>; show the
+        // real broker addresses by reverse-mapping through the proxy.
+        if let Some(t) = self.tunnels.get(id) {
+            for b in &mut ov.brokers {
+                if let Some((host, port)) = t.real_endpoint(b.port as u16) {
+                    b.host = host;
+                    b.port = port as i32;
+                }
+            }
+        }
+        Ok(ov)
     }
 
     pub async fn list_topics(&self, id: &Id) -> Result<Vec<TopicSummary>> {
