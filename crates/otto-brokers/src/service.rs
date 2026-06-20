@@ -8,6 +8,7 @@
 use crate::decode::{avro_payload, avro_to_json, confluent_frame, decode_payload};
 use crate::kafka::{is_internal, KafkaClient, KafkaConnSpec};
 use crate::metrics::{self, ClusterMetricState};
+use crate::proxy::BrokerTunnel;
 use crate::schema_registry::SchemaRegistry;
 use crate::types::*;
 use dashmap::DashMap;
@@ -23,6 +24,8 @@ const MAX_CONSUME: usize = 5000;
 struct Pooled {
     client: Arc<KafkaClient>,
     registry: Option<Arc<SchemaRegistry>>,
+    /// Held so the SSH tunnel/proxy stays up for the life of the pooled client.
+    tunnel: Option<Arc<BrokerTunnel>>,
     created: Instant,
 }
 
@@ -30,6 +33,8 @@ pub struct BrokersService {
     repo: BrokerClustersRepo,
     secrets: Arc<dyn SecretStore>,
     pool: DashMap<Id, Pooled>,
+    /// Per-cluster SSH tunnel + Kafka proxy (only for clusters with `ssh`).
+    tunnels: DashMap<Id, Arc<BrokerTunnel>>,
     samplers: DashMap<Id, Mutex<ClusterMetricState>>,
 }
 
@@ -49,6 +54,7 @@ impl BrokersService {
             repo,
             secrets,
             pool: DashMap::new(),
+            tunnels: DashMap::new(),
             samplers: DashMap::new(),
         }
     }
@@ -213,26 +219,84 @@ impl BrokersService {
 
     fn evict(&self, id: &Id) {
         self.pool.remove(id);
+        // Dropping the tunnel tears down the ssh child + local listeners.
+        self.tunnels.remove(id);
     }
 
     // ---- connection pool --------------------------------------------------
 
-    fn resolve(
+    /// Get-or-open the cached SSH tunnel + Kafka proxy for a cluster.
+    async fn tunnel_for(
+        &self,
+        id: &Id,
+        ssh: &SshTunnelConfig,
+        bootstrap: &str,
+        uses_tls: bool,
+        skip_verify: bool,
+    ) -> Result<Arc<BrokerTunnel>> {
+        if let Some(t) = self.tunnels.get(id) {
+            if t.is_alive() {
+                return Ok(t.clone());
+            }
+        }
+        let t = Arc::new(BrokerTunnel::open(ssh, bootstrap, uses_tls, skip_verify).await?);
+        self.tunnels.insert(id.clone(), t.clone());
+        Ok(t)
+    }
+
+    /// Resolve a cluster row into a librdkafka spec + schema-registry client,
+    /// establishing the SSH tunnel first when the profile carries one. With a
+    /// tunnel, librdkafka talks plaintext to the local proxy (TLS/SASL ride
+    /// through it), and the registry/metrics clients use the SOCKS proxy.
+    async fn prepare(
         &self,
         row: &BrokerClusterRow,
-    ) -> Result<(KafkaConnSpec, Option<Arc<SchemaRegistry>>)> {
+    ) -> Result<(
+        KafkaConnSpec,
+        Option<Arc<SchemaRegistry>>,
+        Option<Arc<BrokerTunnel>>,
+    )> {
         let sasl_password = match &row.secret_ref {
             Some(r) => self.secrets.get(r)?,
             None => None,
         };
-        let spec = KafkaConnSpec {
+        let security = SecurityProtocol::parse(&row.security_protocol).unwrap_or_default();
+        let mut spec = KafkaConnSpec {
             bootstrap_servers: row.bootstrap_servers.clone(),
-            security_protocol: SecurityProtocol::parse(&row.security_protocol).unwrap_or_default(),
+            security_protocol: security,
             sasl_mechanism: row.sasl_mechanism.as_deref().and_then(SaslMechanism::parse),
             sasl_username: row.sasl_username.clone(),
             sasl_password,
             tls_skip_verify: row.tls_skip_verify,
         };
+
+        let ssh: Option<SshTunnelConfig> = row
+            .ssh_config
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
+        let (tunnel, socks_url) = match &ssh {
+            Some(cfg) => {
+                let t = self
+                    .tunnel_for(
+                        &row.id,
+                        cfg,
+                        &row.bootstrap_servers,
+                        security.uses_tls(),
+                        row.tls_skip_verify,
+                    )
+                    .await?;
+                // librdkafka connects in plaintext to the local proxy; the proxy
+                // performs the real TLS to the broker and relays SASL untouched.
+                spec.bootstrap_servers = t.local_bootstrap();
+                spec.security_protocol = local_security(security);
+                spec.tls_skip_verify = false;
+                let url = t.socks_url();
+                (Some(t), Some(url))
+            }
+            None => (None, None),
+        };
+
         let registry = match &row.schema_registry_url {
             Some(url) if !url.is_empty() => {
                 let pw = match &row.sr_secret_ref {
@@ -244,28 +308,36 @@ impl BrokersService {
                     row.schema_registry_username.clone(),
                     pw,
                     row.tls_skip_verify,
+                    socks_url.clone(),
                 )?))
             }
             _ => None,
         };
-        Ok((spec, registry))
+        Ok((spec, registry, tunnel))
     }
 
-    /// Pooled client for a cluster (reconnects if missing or older than the TTL).
+    /// Pooled client for a cluster (reconnects if missing, stale, or its tunnel
+    /// has died).
     async fn client_for(&self, id: &Id) -> Result<(Arc<KafkaClient>, Option<Arc<SchemaRegistry>>)> {
         if let Some(p) = self.pool.get(id) {
-            if p.created.elapsed() < POOL_TTL {
+            let tunnel_ok = p.tunnel.as_ref().is_none_or(|t| t.is_alive());
+            if p.created.elapsed() < POOL_TTL && tunnel_ok {
                 return Ok((p.client.clone(), p.registry.clone()));
             }
         }
         let row = self.repo.get(id).await?;
-        let (spec, registry) = self.resolve(&row)?;
-        let client = Arc::new(KafkaClient::connect(&spec)?);
+        let (spec, registry, tunnel) = self.prepare(&row).await?;
+        let client = Arc::new(
+            tokio::task::spawn_blocking(move || KafkaClient::connect(&spec))
+                .await
+                .map_err(join)??,
+        );
         self.pool.insert(
             id.clone(),
             Pooled {
                 client: client.clone(),
                 registry: registry.clone(),
+                tunnel,
                 created: Instant::now(),
             },
         );
@@ -276,7 +348,8 @@ impl BrokersService {
 
     pub async fn test(&self, id: &Id) -> Result<TestClusterResp> {
         let row = self.repo.get(id).await?;
-        let (spec, _) = self.resolve(&row)?;
+        // `_tunnel` keeps the SSH proxy alive across the blocking connect/test.
+        let (spec, _registry, _tunnel) = self.prepare(&row).await?;
         // Transient client so a bad config never poisons the pool.
         let res =
             tokio::task::spawn_blocking(move || KafkaClient::connect(&spec).and_then(|c| c.test()))
@@ -484,8 +557,14 @@ impl BrokersService {
             .await
             .map_err(join)??;
 
+        // Reach a private metrics endpoint through the same SSH SOCKS tunnel.
+        let socks = self.tunnels.get(id).map(|t| t.socks_url());
         let prom = match &row.metrics_url {
-            Some(url) if !url.is_empty() => metrics::scrape(url, row.tls_skip_verify).await.ok(),
+            Some(url) if !url.is_empty() => {
+                metrics::scrape(url, row.tls_skip_verify, socks.as_deref())
+                    .await
+                    .ok()
+            }
             _ => None,
         };
 
@@ -561,6 +640,17 @@ fn full_update(
 /// Serialize a tunnel config to the JSON we persist (None → no tunnel).
 fn ssh_to_json(ssh: Option<&SshTunnelConfig>) -> Option<String> {
     ssh.and_then(|c| serde_json::to_string(c).ok())
+}
+
+/// The security protocol librdkafka uses on the local (loopback) hop to the
+/// proxy: TLS is stripped because the proxy terminates it to the real broker,
+/// but SASL is kept so the SASL/SCRAM handshake still runs end-to-end.
+fn local_security(p: SecurityProtocol) -> SecurityProtocol {
+    match p {
+        SecurityProtocol::SaslSsl => SecurityProtocol::SaslPlaintext,
+        SecurityProtocol::Ssl => SecurityProtocol::Plaintext,
+        other => other,
+    }
 }
 
 fn validate(req: &UpsertClusterReq) -> Result<()> {

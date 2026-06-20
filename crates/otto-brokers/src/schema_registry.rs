@@ -10,6 +10,10 @@ pub struct SchemaRegistry {
     base: String,
     client: reqwest::Client,
     auth: Option<(String, Option<String>)>,
+    /// True when requests ride an SSH SOCKS tunnel — the registry is reached
+    /// through the user's bastion, so the SSRF guard is intentionally skipped
+    /// (private targets are the point, and the bastion creds are the authority).
+    via_tunnel: bool,
     /// schema id → schema document (registries are append-only, so cacheable).
     cache: DashMap<i32, String>,
 }
@@ -20,13 +24,22 @@ impl SchemaRegistry {
         username: Option<String>,
         password: Option<String>,
         skip_tls_verify: bool,
+        socks_proxy: Option<String>,
     ) -> Result<Self> {
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .danger_accept_invalid_certs(skip_tls_verify)
             // SSRF guard (audit S1): bound + re-validate redirect hops so the
             // user-supplied registry URL can't 30x-bounce into the internal net.
             .redirect(otto_netguard::redirect_policy())
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10));
+        let via_tunnel = socks_proxy.is_some();
+        if let Some(proxy) = socks_proxy {
+            builder = builder.proxy(
+                reqwest::Proxy::all(&proxy)
+                    .map_err(|e| Error::Internal(format!("schema registry socks proxy: {e}")))?,
+            );
+        }
+        let client = builder
             .build()
             .map_err(|e| Error::Internal(format!("schema registry client: {e}")))?;
         let auth = username.map(|u| (u, password));
@@ -34,6 +47,7 @@ impl SchemaRegistry {
             base: base.trim_end_matches('/').to_string(),
             client,
             auth,
+            via_tunnel,
             cache: DashMap::new(),
         })
     }
@@ -53,6 +67,12 @@ impl SchemaRegistry {
     /// host, so guarding the base once per call covers the per-subject fan-out;
     /// redirect hops are re-validated by the client's redirect policy.
     async fn guard(&self, url: &str) -> Result<()> {
+        if self.via_tunnel {
+            // Reached through the user's SSH bastion; the private endpoint is the
+            // intent and the tunnel handles routing, so the loopback SSRF guard
+            // would only false-positive here.
+            return Ok(());
+        }
         otto_netguard::check_url(url)
             .await
             .map_err(|m| Error::Forbidden(format!("schema registry blocked: {m}")))
