@@ -18,5 +18,6 @@
 //! is the async tunnel + listener plumbing built on top.
 
 pub mod protocol;
-// pub mod runtime;  // added in the next step
-// pub use runtime::BrokerTunnel;
+pub mod runtime;
+
+pub use runtime::BrokerTunnel;
