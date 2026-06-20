@@ -282,6 +282,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // ---- Agents (sessions, orchestration, broadcast, handover, input, LSP) ----
     // §3.2: list/inspect own = View; create/restart/archive/input/broadcast/
     // orchestrate = Edit. No Admin tier.
+    // Send-to-agent context packets (preview + send) inject into a session = Edit
+    // (the handler additionally enforces session owner/admin).
+    if p.starts_with("/workspaces/{wid}/agents/") {
+        return Require(Agents, Edit);
+    }
     if p == "/workspaces/{id}/sessions" {
         return Require(Agents, if get { View } else { Edit });
     }
@@ -423,12 +428,18 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
 
     // ---- Workflows ------------------------------------------------------------
     // §3.2: view=View; create/edit/run=Edit. (node-types catalog already exempt.)
+    // Webhook trigger is PUBLIC-by-token (registered in public_routes); the handler
+    // validates the path token against workflow_triggers — exempt from feature gate.
+    if p == "/workflows/{id}/webhook/{token}" {
+        return Exempt;
+    }
     if p == "/workflows/templates" {
         return Require(Workflows, View);
     }
     if p.starts_with("/workflows/")
         || p == "/workflows"
         || p.starts_with("/workflow-runs/")
+        || p.starts_with("/workflow-triggers/")
         || p.starts_with("/workspaces/{wid}/workflows")
     {
         return Require(Workflows, if get { View } else { Edit });
@@ -471,6 +482,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // (audit-log, security-posture) and daemon logs are daemon-wide diagnostics —
     // map them to Settings:Admin (their `require_root` handler gate stays).
     if p == "/settings" {
+        return Require(Settings, Admin);
+    }
+    // Capability/health registry + support bundle — daemon diagnostics (root),
+    // same tier as the audit log / security posture below.
+    if matches!(p, "/capabilities" | "/support-bundle") {
         return Require(Settings, Admin);
     }
     if matches!(p, "/audit-log" | "/security-posture" | "/logs/daemon") {

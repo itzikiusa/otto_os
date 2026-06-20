@@ -21,6 +21,7 @@ pub mod product;
 pub mod improvements;
 pub mod integrations;
 pub mod issues;
+pub mod mcp_audit;
 pub mod mcp_servers;
 pub mod memory;
 pub mod notifications;
@@ -31,6 +32,7 @@ pub mod settings;
 pub mod skill_evals;
 pub mod swarm;
 pub mod users;
+pub mod workflow_triggers;
 pub mod workflows;
 pub mod workspaces;
 
@@ -62,6 +64,7 @@ pub use product::*;
 pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
 pub use issues::{IssuesRepo, NewIssueAccount};
+pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
@@ -70,7 +73,7 @@ pub use review_findings::{
 };
 pub use reviews::ReviewsRepo;
 pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
-pub use settings::SettingsRepo;
+pub use settings::{otto_mcp_enabled_for, SettingsRepo, OTTO_MCP_ENABLED_KEY};
 pub use skill_evals::SkillEvalsRepo;
 // Note: `swarm::NewTask` collides with `activity::NewTask`; access it via the
 // module path (`otto_state::swarm::NewTask`). The rest are re-exported here.
@@ -79,6 +82,7 @@ pub use swarm::{
     RunPatch, Swarm, SwarmAgent, SwarmMessage, SwarmPatch, SwarmProject, SwarmRepo, SwarmRun,
     SwarmTask, TaskPatch,
 };
+pub use workflow_triggers::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger};
 pub use workflows::WorkflowsRepo;
 pub use users::{UserRecord, UsersRepo};
 pub use workspaces::{Member, WorkspacesRepo};

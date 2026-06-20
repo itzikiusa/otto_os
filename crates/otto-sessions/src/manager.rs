@@ -13,6 +13,7 @@ use otto_core::event::Event;
 use otto_core::hooks::{McpServerProvider, PreSpawnHook};
 use otto_core::{new_id, Error, Id, Result};
 use otto_pty::{resolve_grid, CommandSpec, PtyHandle};
+use otto_rbac::AuthRepo;
 use otto_state::{ActivityRepo, NewSession, NewTrail, SessionsRepo};
 use tokio::sync::broadcast;
 
@@ -173,6 +174,19 @@ pub struct SessionManager {
     /// period (`idle_suspend_grace_secs`). Falls back to [`SUSPEND_GRACE`] when
     /// absent or when the key is not set.
     settings: Option<otto_state::SettingsRepo>,
+    /// Optional auth-token repo. When set (and `otto_mcp_enabled` is on for the
+    /// workspace), an agent spawn mints a per-session token for Otto's first-party
+    /// read-only MCP tool server (Task B2b) and injects the `otto` entry into
+    /// `.mcp.json`. Absent ⇒ the feature is entirely off.
+    auth: Option<AuthRepo>,
+    /// Absolute path to the `ottod` binary that backs the `otto` MCP tool server
+    /// (`<path> mcp-tools`). Defaults to the running executable's own path so the
+    /// tools subcommand is always the same build as the daemon.
+    mcp_tools_bin: String,
+    /// Per-session MCP-token ids (the auth-token row id, NOT the secret), so the
+    /// token minted for the `otto` server can be revoked when the session is
+    /// removed. Keyed like `ingest_tokens`.
+    mcp_tokens: Arc<DashMap<Id, String>>,
 }
 
 impl SessionManager {
@@ -199,6 +213,13 @@ impl SessionManager {
             activity: None,
             evict: Arc::new(DashMap::new()),
             settings: None,
+            auth: None,
+            // Default to this daemon's own binary so `mcp-tools` is the same build.
+            mcp_tools_bin: std::env::current_exe()
+                .ok()
+                .and_then(|p| p.to_str().map(str::to_owned))
+                .unwrap_or_else(|| "ottod".to_string()),
+            mcp_tokens: Arc::new(DashMap::new()),
         }
     }
 
@@ -214,6 +235,21 @@ impl SessionManager {
     /// without it all parameters fall back to their compiled-in defaults.
     pub fn with_settings_repo(mut self, settings: otto_state::SettingsRepo) -> Self {
         self.settings = Some(settings);
+        self
+    }
+
+    /// Attach the auth-token repo used to mint the per-session token for the
+    /// first-party `otto` MCP tool server (Task B2b). Without it the feature is
+    /// off even if `otto_mcp_enabled` is set. Builder-style.
+    pub fn with_auth_repo(mut self, auth: AuthRepo) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Override the `ottod` binary path that backs the `otto` MCP tool server
+    /// (`<path> mcp-tools`). Defaults to the running executable. Builder-style.
+    pub fn with_mcp_tools_bin(mut self, bin: impl Into<String>) -> Self {
+        self.mcp_tools_bin = bin.into();
         self
     }
 
@@ -467,6 +503,81 @@ impl SessionManager {
         ]
     }
 
+    /// Is Otto's first-party MCP tool server opted-in for `workspace_id`?
+    /// Reads the `otto_mcp_enabled` setting and applies the shared precedence
+    /// rules (see [`otto_state::otto_mcp_enabled_for`]); default OFF.
+    async fn otto_mcp_enabled(&self, workspace_id: &str) -> bool {
+        let Some(settings) = &self.settings else {
+            return false;
+        };
+        let value = settings
+            .get(otto_state::OTTO_MCP_ENABLED_KEY)
+            .await
+            .ok()
+            .flatten();
+        otto_state::otto_mcp_enabled_for(value.as_ref(), workspace_id)
+    }
+
+    /// When the workspace has opted into Otto's first-party tools, mint a
+    /// per-session token and inject the read-only `otto` MCP server into the
+    /// workspace `.mcp.json` (Task B2b).
+    ///
+    /// The token is a per-session auth token (the existing token system) minted
+    /// for the session's owner; its row id is recorded in `mcp_tokens` so it is
+    /// revoked when the session is removed. The tools binary is **read-only by
+    /// construction** (it issues only allow-listed GETs), so the token is the
+    /// owner's identity confined by what the tools choose to expose. Best-effort:
+    /// any failure here is logged and never blocks the spawn.
+    async fn maybe_enable_otto_tools(&self, session: &Session) {
+        if !self.otto_mcp_enabled(&session.workspace_id).await {
+            return;
+        }
+        let Some(auth) = &self.auth else {
+            return; // feature wired off (no token minter)
+        };
+        // Mint a per-session token for the owner. Labeled so it is identifiable
+        // in the token list and revoked on session removal.
+        let label = format!("otto-mcp:{}", session.id);
+        let (token, info) = match auth.issue_api_token(&session.created_by, Some(&label)).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!("otto MCP tools: mint token failed: {e}");
+                return;
+            }
+        };
+        self.mcp_tokens.insert(session.id.clone(), info.id);
+
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("OTTO_MCP_TOKEN".to_string(), token);
+        env.insert("OTTO_MCP_BASE".to_string(), self.ingest_base.clone());
+        env.insert("OTTO_SESSION_ID".to_string(), session.id.to_string());
+        env.insert(
+            "OTTO_WORKSPACE_ID".to_string(),
+            session.workspace_id.to_string(),
+        );
+        let server = crate::mcp::OttoToolsServer {
+            command: self.mcp_tools_bin.clone(),
+            args: vec!["mcp-tools".to_string()],
+            env,
+        };
+        if let Err(e) = crate::mcp::enable_otto_tools(&session.cwd, &server) {
+            tracing::warn!("otto MCP tools: write .mcp.json failed: {e}");
+        }
+    }
+
+    /// Revoke the per-session MCP token minted for `session_id` (if any). Called
+    /// from the session-removal path so the `otto` tool server's credential dies
+    /// with the session. Best-effort.
+    async fn revoke_mcp_token(&self, owner: &Id, session_id: &Id) {
+        if let Some((_, token_id)) = self.mcp_tokens.remove(session_id) {
+            if let Some(auth) = &self.auth {
+                if let Err(e) = auth.revoke_api_token(owner, &token_id).await {
+                    tracing::warn!("otto MCP tools: revoke token failed: {e}");
+                }
+            }
+        }
+    }
+
     /// All `(provider_name, update_command)` pairs for providers that have an
     /// update command configured. Delegates to the registry.
     pub fn provider_update_commands(&self) -> Vec<(String, String)> {
@@ -587,6 +698,11 @@ impl SessionManager {
                     }
                 }
             }
+            // Otto's first-party read-only tool server: when the workspace has
+            // opted in (`otto_mcp_enabled`), mint a per-session token and inject
+            // the `otto` MCP entry alongside the user/browser servers. Opt-in,
+            // best-effort — never blocks spawn.
+            self.maybe_enable_otto_tools(&session).await;
             // Otto context provisioning: materialize the workspace's active
             // skills + soul + context into this CLI's native form. Best-effort —
             // the hook logs and swallows its own errors, never blocking spawn.
@@ -1125,6 +1241,9 @@ impl SessionManager {
         }
         self.repo.delete(id).await?;
         self.ingest_tokens.remove(id);
+        // Revoke the per-session token minted for the `otto` MCP tool server, so
+        // its read-only credential dies with the session (best-effort).
+        self.revoke_mcp_token(&session.created_by, id).await;
         // Drop the per-session disconnect sender; any attached viewers were
         // already evicted by the terminate path before removal.
         self.evict.remove(id);

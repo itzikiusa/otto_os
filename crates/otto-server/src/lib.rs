@@ -6,6 +6,7 @@
 pub mod agent_run;
 pub mod api_helpers;
 pub mod auth;
+pub mod context_packet;
 pub mod memory_gov;
 pub mod cli_update;
 pub mod error;
@@ -29,6 +30,7 @@ pub mod swarm_runtime;
 pub mod swarm_scheduler;
 pub mod swarm_workspace;
 pub mod workflow_engine;
+pub mod workflow_trigger_scheduler;
 pub mod ws_events;
 
 use axum::http::{header, HeaderValue, Method};

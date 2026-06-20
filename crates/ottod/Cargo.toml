@@ -34,6 +34,9 @@ otto-usage.workspace = true
 otto-product.workspace = true
 otto-swarm.workspace = true
 otto-memory.workspace = true
+# `ottod mcp-tools` (Task B2b): the first-party MCP tool server calls back into
+# the running daemon over loopback HTTP with a per-session read-only token.
+reqwest.workspace = true
 
 # TLS for the optional 0.0.0.0 network listener (S3). rustls-only to match the
 # rest of the tree (reqwest uses rustls). `tls-rustls-no-provider` so we install

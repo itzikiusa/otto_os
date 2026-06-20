@@ -17,6 +17,11 @@
     TopicDetail,
     ValueFormat,
   } from '../../lib/api/types';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
+
+  // ── Send-to-agent dialog (B2a) ─────────────────────────────────────────────
+  let sendToAgentOpen = $state(false);
 
   interface Props {
     cluster: BrokerCluster;
@@ -539,6 +544,11 @@
             <button class="btn tiny" onclick={copySelectedAsJson} title="Copy message as JSON">
               <Icon name="copy" size={11} /> Copy
             </button>
+            {#if ws.current}
+              <button class="btn tiny" onclick={() => (sendToAgentOpen = true)} title="Send message to a running agent (redacted preview)">
+                <Icon name="send" size={11} /> To agent
+              </button>
+            {/if}
           </div>
           {#if selected.key}
             <h5>Key <span class="muted">({selected.key.format})</span></h5>
@@ -645,6 +655,25 @@
     </div>
   {/if}
 </div>
+
+{#if sendToAgentOpen && selected && ws.current}
+  <ContextPacketDialog
+    workspaceId={ws.current.id}
+    sessionId={ws.targetAgentId}
+    kind="broker"
+    payload={{
+      cluster: cluster.name,
+      topic,
+      partition: selected.partition,
+      offset: selected.offset,
+      key: selected.key?.text ?? null,
+      value: selected.value?.text ?? null,
+      headers: selected.headers,
+      timestamp_ms: selected.timestamp_ms,
+    }}
+    onclose={() => (sendToAgentOpen = false)}
+  />
+{/if}
 
 <style>
   .td {

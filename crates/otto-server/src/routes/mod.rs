@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod admin_sessions;
 pub mod api_client;
+pub mod capabilities;
 pub mod api_stream;
 pub mod audit;
 pub mod auth_routes;
@@ -58,6 +59,15 @@ pub fn public_routes() -> Router<ServerCtx> {
         // PUBLIC by design (the share token IS the auth) and reachable after the
         // window elapses. Rate-limited per peer IP inside the handler.
         .route("/share/extend", post(share::extend_share))
+        // Workflow webhook trigger: PUBLIC-by-token. The 64-char hex token in the
+        // URL path is the credential; no bearer auth required. The handler validates
+        // the token against the `workflow_triggers` table before starting any run.
+        // POLICY EXEMPTION: the orchestrator must add this path prefix to the
+        // allowlist in policy.rs (same treatment as /share/* endpoints).
+        .route(
+            "/workflows/{id}/webhook/{token}",
+            post(workflows::webhook_trigger),
+        )
 }
 
 /// Routes that require a bearer token (the auth middleware is layered on top
@@ -306,6 +316,17 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/workflows/{id}/run", post(workflows::run_workflow))
         .route("/workflows/{id}/runs", get(workflows::list_runs))
+        // Workflow triggers CRUD (schedule / event kinds; webhook is in public_routes).
+        .route(
+            "/workflows/{id}/triggers",
+            get(workflows::list_triggers).post(workflows::create_trigger),
+        )
+        .route(
+            "/workflow-triggers/{id}",
+            patch(workflows::update_trigger).delete(workflows::delete_trigger),
+        )
         .route("/workflow-runs/{id}", get(workflows::get_run))
         .route("/workflow-runs/{id}/cancel", post(workflows::cancel_run))
+        // Human-approval resume: requires bearer auth, Editor in the run's workspace.
+        .route("/workflow-runs/{id}/approve", post(workflows::approve_run))
 }

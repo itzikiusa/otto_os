@@ -14,6 +14,10 @@
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
+
+  // ── Send-to-agent dialog ────────────────────────────────────────────────────
+  let sendToAgentOpen = $state(false);
 
   const resp = $derived(apiClient.lastResponse);
 
@@ -270,6 +274,11 @@
           <Icon name="check" size={11} />Save
         </button>
       {/if}
+      {#if resp && ws.current}
+        <button class="save-btn" onclick={() => (sendToAgentOpen = true)} title="Send response to a running agent">
+          <Icon name="send" size={11} />To agent
+        </button>
+      {/if}
     </div>
 
     <div class="rtabs" role="tablist">
@@ -373,6 +382,16 @@
     </div>
   {/if}
 </div>
+
+{#if sendToAgentOpen && resp && ws.current}
+  <ContextPacketDialog
+    workspaceId={ws.current.id}
+    sessionId={ws.activeSessionId}
+    kind="api"
+    payload={{ status: resp.status, content_type: resp.content_type, body: resp.body }}
+    onclose={() => (sendToAgentOpen = false)}
+  />
+{/if}
 
 <style>
   .viewer {

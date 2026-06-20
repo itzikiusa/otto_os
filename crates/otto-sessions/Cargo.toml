@@ -19,6 +19,10 @@ base64 = { workspace = true }
 tracing = { workspace = true }
 uuid.workspace = true
 chrono = { workspace = true }
+# Minting the per-session read-only token for the first-party MCP tool server
+# (Task B2b): the `otto` MCP entry, when the workspace opts in, carries a scoped
+# token the tools authorize with. Reuses the existing auth-token system.
+otto-rbac = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -26,6 +30,5 @@ chrono = { workspace = true }
 sqlx = { workspace = true }
 # Session-isolation tests drive the real REST router via tower's oneshot, read
 # the response body, and build a `RoleChecker` from a migrated SQLite pool.
-otto-rbac = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

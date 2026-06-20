@@ -2003,6 +2003,50 @@ export interface WorkflowRun {
   error?: string | null;
   started_at: string;
   finished_at?: string | null;
+  /** True when the run is paused waiting for a human_approval node decision. */
+  waiting_approval?: boolean;
+  /** The node id of the human_approval node the run is paused at. */
+  approval_node_id?: string | null;
+  /** User id of the person who approved (null if rejected or pending). */
+  approved_by?: string | null;
+  /** Human note attached to the approval/rejection decision. */
+  approval_note?: string | null;
+  /** RFC-3339 timestamp when the decision was recorded. */
+  approved_at?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow triggers (schedule / webhook / event)
+// ---------------------------------------------------------------------------
+
+export type TriggerKind = 'schedule' | 'webhook' | 'event';
+
+/** A workflow trigger row from the database. */
+export interface WorkflowTrigger {
+  id: Id;
+  workflow_id: Id;
+  kind: TriggerKind;
+  /** Kind-specific configuration object. */
+  spec: Record<string, unknown>;
+  enabled: boolean;
+  created_at: string;
+}
+
+export interface CreateTriggerReq {
+  kind: TriggerKind;
+  spec?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface UpdateTriggerReq {
+  spec?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface ApproveRunReq {
+  node_id: string;
+  approved: boolean;
+  note?: string | null;
 }
 
 export interface NodeTypeSpec {
@@ -2892,4 +2936,37 @@ export interface SchemaSubject {
   id: number;
   schema_type: string;
   schema: string;
+}
+
+// ---------------------------------------------------------------------------
+// Context-packet (B2a) — send API/DB/broker payloads to agent sessions
+// ---------------------------------------------------------------------------
+
+/** Source kind for a context packet. */
+export type ContextPacketKind = 'api' | 'db' | 'broker';
+
+/** Request body for `/context-packet/preview` and `/context-packet/send`. */
+export interface ContextPacketReq {
+  kind: ContextPacketKind;
+  payload: unknown;
+}
+
+/** Per-kind redaction tally entry (mirrors `RedactionHit` in otto-core). */
+export interface RedactionHit {
+  kind: string;
+  count: number;
+}
+
+/** Response from `POST /context-packet/preview`. */
+export interface ContextPacketPreviewResp {
+  redacted: unknown;
+  redactions: RedactionHit[];
+  size_bytes: number;
+}
+
+/** Response from `POST /context-packet/send`. */
+export interface ContextPacketSendResp {
+  ok: boolean;
+  size_bytes: number;
+  redactions: RedactionHit[];
 }
