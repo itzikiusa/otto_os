@@ -229,9 +229,13 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::SwarmMessagePosted { workspace_id, .. }
         | Event::SwarmStatus { workspace_id, .. }
         // Product events are workspace-scoped.
-        | Event::ProductChanged { workspace_id, .. } => Scope::Workspace(workspace_id),
-        // Usage tick is a global notice (no workspace scope — everyone sees it).
-        Event::UsageMetricsTick { .. } => Scope::Everyone,
+        | Event::ProductChanged { workspace_id, .. }
+        // Review, workflow, and skill-eval events are workspace-scoped too.
+        | Event::ReviewChanged { workspace_id, .. }
+        | Event::WorkflowRunUpdated { workspace_id, .. }
+        | Event::SkillEvalUpdated { workspace_id, .. } => Scope::Workspace(workspace_id),
+        // Usage tick + self-improvement updates are global notices (everyone sees them).
+        Event::UsageMetricsTick { .. } | Event::ImprovementUpdated { .. } => Scope::Everyone,
     }
 }
 

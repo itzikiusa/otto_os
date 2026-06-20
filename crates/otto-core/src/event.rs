@@ -123,4 +123,33 @@ pub enum Event {
         section: String,
         status: String,
     },
+    /// A PR/code-review row changed state (queued | running | done | error |
+    /// cancelled). The Review Panel uses this to poll immediately instead of
+    /// waiting for its back-off timer. `session_id` is the orchestrating session
+    /// (may be `None` for externally-triggered reviews).
+    ReviewChanged {
+        workspace_id: Id,
+        session_id: Option<Id>,
+        review_id: Id,
+        status: String,
+    },
+    /// A self-improvement run finished or an approval became pending. Lets the
+    /// Self-Improvement settings pane refresh on the event instead of guessing.
+    /// `kind` is "run_finished" | "approval_pending".
+    ImprovementUpdated { kind: String, id: Option<Id> },
+    /// A workflow run advanced (a node started/finished, or the run completed).
+    /// `node_id` is the node that changed, when applicable.
+    WorkflowRunUpdated {
+        workspace_id: Id,
+        run_id: Id,
+        status: String,
+        node_id: Option<Id>,
+    },
+    /// A skill-evaluation run advanced. Lets the Skill-Eval UI switch from
+    /// fixed-interval polling to event-driven refresh.
+    SkillEvalUpdated {
+        workspace_id: Id,
+        run_id: Id,
+        status: String,
+    },
 }

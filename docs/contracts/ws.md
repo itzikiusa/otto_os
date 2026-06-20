@@ -187,6 +187,34 @@ Emitted by the metrics sampler after each system-metrics sample is stored:
 - Source: `crates/otto-server/src/monitor.rs` → `spawn_metrics_sampler`.
 - Throttle: the UI ignores ticks that arrive within 10 s of the last fetch.
 
+## PR-review status change (A2)
+
+Workspace-scoped. Emitted by `crates/otto-server/src/modules.rs` whenever a
+review row transitions state (queued → running → done / error / cancelled).
+Clients that have the Review Panel open use this to trigger an immediate poll
+instead of waiting for the next timed tick.
+
+```json
+{
+  "type": "review_changed",
+  "workspace_id": "<Id>",
+  "session_id": "<session_id | null>",
+  "review_id": "<review_uuid>",
+  "status": "queued|running|done|error|cancelled"
+}
+```
+
+- `session_id` — the orchestrating session that owns the review; may be `null`
+  for externally-triggered reviews.
+- `review_id` — UUID of the `reviews` row that changed.
+- `status` — the new status string (mirrors the `status` column in `reviews`).
+- UI routing: `ReviewPanel.svelte` subscribes to `review_changed` events and
+  calls `schedulePoll()` immediately when the event's `review_id` matches the
+  currently viewed review, short-cutting the exponential back-off timer.
+- TypeScript type: added to the `OttoEvent` discriminated union in
+  `ui/src/lib/api/types.ts` as `{ type: 'review_changed'; workspace_id: string;
+  session_id?: string | null; review_id: string; status: string }`.
+
 ## Product AI-run completion (A3)
 
 Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs` at the end of every
