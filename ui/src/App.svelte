@@ -4,7 +4,9 @@
   import Onboarding from './modules/settings/Onboarding.svelte';
   import Login from './modules/settings/Login.svelte';
   import Toasts from './lib/components/Toasts.svelte';
+  import SharePage from './modules/share/SharePage.svelte';
   import { auth } from './lib/stores/auth.svelte';
+  import { router } from './lib/router.svelte';
   import { ui } from './lib/stores/ui.svelte';
 
   ui.applyTheme();
@@ -22,7 +24,12 @@
   });
 </script>
 
-{#if auth.phase === 'loading'}
+{#if router.module === 's'}
+  <!-- Guest share view: a scoped share-link recipient has no account, so this
+       route must bypass the login/onboarding gate entirely and render the
+       single-session SharePage using the token captured from the URL fragment. -->
+  <SharePage sessionId={router.parts[1] ?? ''} />
+{:else if auth.phase === 'loading'}
   <div class="boot">
     <div class="boot-mark">Otto</div>
     <div class="boot-sub">connecting to daemon…</div>
