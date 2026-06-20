@@ -336,6 +336,8 @@ mod tests {
             read_only: false,
             created_by: "u1".into(),
             created_at: chrono::Utc::now(),
+            last_opened_at: None,
+            pinned: false,
         }
     }
 

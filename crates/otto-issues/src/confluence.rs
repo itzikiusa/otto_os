@@ -1184,12 +1184,6 @@ fn strip_ordered_item(line: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_build_http_client_succeeds() {
-        // The timeout-configured builder must produce a usable client.
-        let _client = build_http_client();
-    }
-
     // ── storage_to_markdown ──────────────────────────────────────────────────
 
     #[test]

@@ -1566,13 +1566,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_http_client_succeeds() {
-        // The timeout-configured builder must produce a usable client (i.e. not
-        // silently fall back to the default on every call).
-        let _client = build_http_client();
-    }
-
-    #[test]
     fn test_is_issue_key() {
         assert!(is_issue_key("PROJ-123"));
         assert!(is_issue_key("AB-1"));

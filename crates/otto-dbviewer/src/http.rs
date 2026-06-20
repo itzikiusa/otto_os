@@ -843,6 +843,8 @@ mod tests {
             read_only: false,
             created_by: new_id(),
             created_at: chrono::Utc::now(),
+            last_opened_at: None,
+            pinned: false,
         }
     }
 
