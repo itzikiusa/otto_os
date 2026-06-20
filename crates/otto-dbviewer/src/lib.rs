@@ -17,7 +17,6 @@ pub mod http;
 pub mod registry;
 pub mod service;
 pub mod tls;
-pub mod tunnel;
 pub mod types;
 
 pub use driver::Driver;

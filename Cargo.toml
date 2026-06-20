@@ -24,6 +24,7 @@ members = [
     "crates/otto-memory",
     "crates/otto-brokers",
     "crates/otto-netguard",
+    "crates/otto-ssh",
 ]
 
 [workspace.package]
@@ -54,6 +55,7 @@ otto-swarm = { path = "crates/otto-swarm" }
 otto-memory = { path = "crates/otto-memory" }
 otto-brokers = { path = "crates/otto-brokers" }
 otto-netguard = { path = "crates/otto-netguard" }
+otto-ssh = { path = "crates/otto-ssh" }
 
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
@@ -75,7 +77,7 @@ keyring = { version = "3", features = ["apple-native"] }
 portable-pty = "0.9"
 bytes = "1"
 dashmap = "6"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream", "cookies", "socks"] }
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

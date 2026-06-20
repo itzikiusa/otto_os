@@ -102,23 +102,10 @@ impl TlsConfig {
 
 // --- SSH tunnel -------------------------------------------------------------
 
-/// SSH tunnel (local port-forward) config. Auth uses the system ssh client, so
-/// it honours the ssh-agent, `~/.ssh/config`, and known_hosts. Provide an
-/// `identity_file` for key auth, or rely on the agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SshTunnelConfig {
-    pub host: String,
-    #[serde(default = "default_ssh_port")]
-    pub port: u16,
-    pub user: String,
-    /// Path to a private key on disk (optional; agent is used otherwise).
-    #[serde(default)]
-    pub identity_file: Option<String>,
-}
-
-fn default_ssh_port() -> u16 {
-    22
-}
+/// SSH tunnel config now lives in the shared `otto-ssh` crate (reused by the
+/// Kafka brokers proxy). Re-exported here so existing `crate::types` /
+/// `otto_dbviewer::SshTunnelConfig` paths keep resolving.
+pub use otto_ssh::SshTunnelConfig;
 
 // --- Resolved config (what a driver receives) -------------------------------
 

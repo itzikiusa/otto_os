@@ -1,4 +1,4 @@
-//! SSH tunneling via the system `ssh` client.
+//! Shared SSH tunnelling via the system `ssh` client.
 //!
 //! We shell out to `ssh` rather than embedding an SSH stack, so the tunnel
 //! honours the user's ssh-agent, `~/.ssh/config`, and known_hosts — the same
@@ -7,26 +7,46 @@
 //!
 //! - **Local forward** (`ssh -N -L <local>:<remote_host>:<remote_port>`): a
 //!   fixed local port maps to one remote endpoint. Used for the single-endpoint
-//!   engines (MySQL, Redis, ClickHouse), whose driver connects to the local end.
+//!   database engines (MySQL, Redis, ClickHouse), whose driver connects to the
+//!   local end.
 //! - **Dynamic SOCKS5** (`ssh -N -D <local>`): a local SOCKS5 proxy through
 //!   which a SOCKS-aware client resolves + dials arbitrary hosts from the SSH
-//!   server's network. Used for MongoDB, where `mongodb+srv` SRV discovery and
-//!   replica-set topology yield the *real* shard hostnames at runtime — a single
-//!   local forward can't represent that, and the real SNI must reach Atlas's
-//!   SNI-routing load balancer, which the proxy preserves end-to-end.
+//!   server's network. Used for MongoDB (Atlas SRV/replica-set topology) and
+//!   for the Kafka brokers proxy (MSK advertises per-broker private DNS names a
+//!   single local forward can't represent).
+//!
+//! This crate is intentionally dependency-light (just `otto-core` + `tokio` +
+//! `serde`) so any feature crate can reuse it without pulling in a driver stack.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use otto_core::{Error, Result};
+use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 
-use crate::types::SshTunnelConfig;
+/// SSH tunnel config. Auth uses the system ssh client, so it honours the
+/// ssh-agent, `~/.ssh/config`, and known_hosts. Provide an `identity_file` for
+/// key auth, or rely on the agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshTunnelConfig {
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub user: String,
+    /// Path to a private key on disk (optional; agent is used otherwise).
+    #[serde(default)]
+    pub identity_file: Option<String>,
+}
 
-/// A live SSH local port-forward. The `ssh` child is killed on drop, tearing
-/// down the tunnel. The `child` is behind a `Mutex` so a shared, cached tunnel
-/// (held as `Arc<SshTunnel>`) can be liveness-probed via `&self`.
+fn default_ssh_port() -> u16 {
+    22
+}
+
+/// A live SSH port-forward. The `ssh` child is killed on drop, tearing down the
+/// tunnel. The `child` is behind a `Mutex` so a shared, cached tunnel (held as
+/// `Arc<SshTunnel>`) can be liveness-probed via `&self`.
 pub struct SshTunnel {
     child: Mutex<Child>,
     local_port: u16,
@@ -67,10 +87,9 @@ impl SshTunnel {
     }
 
     /// Open a dynamic SOCKS5 forward (`ssh -D`) on an ephemeral local port
-    /// through the SSH server in `cfg`. A SOCKS-aware client (the mongodb
-    /// driver) then resolves + dials arbitrary hosts from the SSH server's
-    /// network, which is what reaches a `mongodb+srv` Atlas replica set through
-    /// a bastion. Returns once the local SOCKS port accepts a TCP connection.
+    /// through the SSH server in `cfg`. A SOCKS-aware client then resolves +
+    /// dials arbitrary hosts from the SSH server's network. Returns once the
+    /// local SOCKS port accepts a TCP connection.
     pub async fn open_socks(cfg: &SshTunnelConfig) -> Result<SshTunnel> {
         let local_port = free_local_port().await?;
         let args = socks_forward_args(cfg, local_port);
@@ -135,7 +154,7 @@ impl Drop for SshTunnel {
 }
 
 /// Ask the OS for a free local TCP port by binding to :0, then releasing it.
-async fn free_local_port() -> Result<u16> {
+pub async fn free_local_port() -> Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .map_err(|e| Error::Internal(format!("reserve local port: {e}")))?;
@@ -211,24 +230,23 @@ mod tests {
     #[test]
     fn local_forward_args_shape() {
         let args = local_forward_args(&cfg(), 54321, "db.internal", 3306);
-        // Forward spec and target are the last two args, in order.
         assert_eq!(args[args.len() - 2], "127.0.0.1:54321:db.internal:3306");
         assert_eq!(args.last().unwrap(), "itziklavon@bastion.example.com");
-        // The `-L` flag precedes its spec; no `-D` present.
         let l = args.iter().position(|a| a == "-L").unwrap();
         assert_eq!(args[l + 1], "127.0.0.1:54321:db.internal:3306");
         assert!(!args.iter().any(|a| a == "-D"));
-        // Common options + identity carried through.
         assert!(args.iter().any(|a| a == "BatchMode=yes"));
         assert!(args.iter().any(|a| a == "ExitOnForwardFailure=yes"));
         assert_eq!(args[args.iter().position(|a| a == "-p").unwrap() + 1], "2222");
-        assert_eq!(args[args.iter().position(|a| a == "-i").unwrap() + 1], "/home/me/.ssh/id_rsa");
+        assert_eq!(
+            args[args.iter().position(|a| a == "-i").unwrap() + 1],
+            "/home/me/.ssh/id_rsa"
+        );
     }
 
     #[test]
     fn socks_forward_args_shape() {
         let args = socks_forward_args(&cfg(), 1080);
-        // Dynamic SOCKS bind on the local port, then the target; no `-L`.
         let d = args.iter().position(|a| a == "-D").unwrap();
         assert_eq!(args[d + 1], "127.0.0.1:1080");
         assert_eq!(args.last().unwrap(), "itziklavon@bastion.example.com");
@@ -241,5 +259,13 @@ mod tests {
         c.identity_file = None;
         let args = socks_forward_args(&c, 1080);
         assert!(!args.iter().any(|a| a == "-i"));
+    }
+
+    #[test]
+    fn ssh_config_default_port() {
+        let c: SshTunnelConfig =
+            serde_json::from_str(r#"{"host":"h","user":"u"}"#).unwrap();
+        assert_eq!(c.port, 22);
+        assert!(c.identity_file.is_none());
     }
 }

@@ -29,7 +29,7 @@ use tokio::sync::Mutex;
 use crate::config::{self};
 use crate::driver::Driver;
 use crate::registry::Registry;
-use crate::tunnel::SshTunnel;
+use otto_ssh::SshTunnel;
 use crate::types::{
     statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse, Engine,
     GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest,

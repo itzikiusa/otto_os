@@ -2911,6 +2911,7 @@ dependencies = [
  "klickhouse",
  "mongodb",
  "otto-core",
+ "otto-ssh",
  "otto-state",
  "redis",
  "reqwest",
@@ -3174,6 +3175,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "otto-ssh"
+version = "0.1.0"
+dependencies = [
+ "otto-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
