@@ -175,6 +175,33 @@ pub struct ListSharesResp {
     pub shares: Vec<ShareInfo>,
 }
 
+/// `PUT /api/v1/email-sender` — configure the caller's Gmail App Password sender
+/// (foundation of the email-OTP share gate, mobile plan Task 7.1).
+///
+/// The `app_password` is stored in the macOS **Keychain** (never the DB); only an
+/// opaque `secret_ref` is persisted. The handler validates the pair via a real
+/// Gmail SMTP login before marking it verified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetEmailSenderReq {
+    /// The Gmail address mail is sent from (also the SMTP AUTH username).
+    pub gmail_address: String,
+    /// The 16-char Gmail App Password (SMTP AUTH password). Never stored in the
+    /// DB nor echoed back.
+    pub app_password: String,
+}
+
+/// Response for `PUT` and `GET /api/v1/email-sender`. NEVER carries the app
+/// password. `gmail_address` is absent on `GET` when no sender is configured;
+/// `verified` is `true` once a real SMTP login with the app password succeeded.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EmailSenderResp {
+    /// The configured Gmail address, or `None` when no sender is set up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gmail_address: Option<String>,
+    /// `true` once the app password passed a real Gmail SMTP login.
+    pub verified: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Grants / capabilities (RBAC Task 2.1)
 // ---------------------------------------------------------------------------

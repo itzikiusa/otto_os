@@ -6,6 +6,7 @@ pub mod api_client;
 pub mod api_stream;
 pub mod audit;
 pub mod auth_routes;
+pub mod email_sender;
 pub mod grants;
 pub mod grpc;
 pub mod fs;
@@ -65,6 +66,13 @@ pub fn protected_routes() -> Router<ServerCtx> {
             delete(share::revoke_share),
         )
         .route("/auth/shares/revoke-all", post(share::revoke_all_shares))
+        // --- Per-user email sender (Gmail App Password → Keychain; mobile
+        // plan Task 7.1). Self-owned (any authed user sets their OWN sender):
+        // Exempt in policy, like `/auth/tokens`.
+        .route(
+            "/email-sender",
+            get(email_sender::get_email_sender).put(email_sender::set_email_sender),
+        )
         // --- Agent activity (live trail + task tracker) ------------------
         .route(
             "/workspaces/{wid}/sessions/{sid}/trail",

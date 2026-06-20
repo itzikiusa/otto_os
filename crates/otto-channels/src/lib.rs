@@ -3,6 +3,7 @@
 
 pub mod adapter;
 pub mod bridge;
+pub mod email;
 pub mod http;
 pub mod improve_notify;
 pub mod manager;
@@ -12,5 +13,6 @@ pub mod slack;
 pub mod telegram;
 pub mod transcript;
 
+pub use email::GmailSender;
 pub use http::{router, ChannelsCtx};
 pub use manager::ChannelManager;

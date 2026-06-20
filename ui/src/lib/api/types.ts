@@ -2219,3 +2219,26 @@ export interface CreateShareResp {
   /** Metadata for the newly-minted share. */
   info: ShareInfo;
 }
+
+// ---------------------------------------------------------------------------
+// Email sender (Gmail App Password → Keychain; mobile plan Task 7.1).
+// Mirrors crates/otto-core/src/api.rs SetEmailSenderReq / EmailSenderResp.
+// ---------------------------------------------------------------------------
+
+/** `PUT /api/v1/email-sender` request body. The app password is stored in the
+ *  macOS Keychain (never the DB) and validated via a real Gmail SMTP login. */
+export interface SetEmailSenderReq {
+  /** The Gmail address mail is sent from (also the SMTP AUTH username). */
+  gmail_address: string;
+  /** The 16-char Gmail App Password. Never echoed back nor stored in the DB. */
+  app_password: string;
+}
+
+/** Response for `PUT` and `GET /api/v1/email-sender`. Never carries the app
+ *  password. `gmail_address` is absent on GET when no sender is configured. */
+export interface EmailSenderResp {
+  /** The configured Gmail address, or absent when no sender is set up. */
+  gmail_address?: string;
+  /** `true` once the app password passed a real Gmail SMTP login. */
+  verified: boolean;
+}

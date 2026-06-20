@@ -256,6 +256,34 @@ TTL is FIXED (never slid); `expires_at = created_at + ttl_secs`.
 
 ---
 
+## Email sender (Gmail App Password, mobile plan Task 7.1)
+
+The per-user Gmail sender that powers the email-OTP share gate (later tasks email
+one-time codes to share-link recipients). Each user configures ONE sender: their
+Gmail address + a 16-char **Gmail App Password** (Google Account → Security → App
+passwords; requires 2-Step Verification). The app password is stored in the macOS
+**Keychain** (`otto-keychain`) under `email-sender-{user_id}` — **never** in the
+DB, which holds only the opaque `secret_ref`. Both routes are **self-owned** (any
+authed member manages their OWN sender; `Exempt` in the feature policy, like
+`/auth/tokens`).
+
+`PUT` stores the secret, upserts the row, then validates the pair via a real
+Gmail SMTP login (`smtp.gmail.com:587`, STARTTLS + AUTH) — sending a tiny probe
+mail from the address to itself. Only on success is `verified_at` recorded; a bad
+app password fails closed (502) and the sender stays unverified. `GET` returns the
+configured address + verified flag and **never** the password.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| PUT /api/v1/email-sender | member (self-owned) | `SetEmailSenderReq {gmail_address, app_password}` | `EmailSenderResp {gmail_address, verified}` (502 on SMTP verify failure → not verified) |
+| GET /api/v1/email-sender | member (self-owned) | — | `EmailSenderResp {gmail_address?, verified}` (never the password) |
+
+`EmailSenderResp` = `{gmail_address?, verified}` — `gmail_address` is omitted on
+`GET` when no sender is configured; `verified` is `true` once a real SMTP login
+with the app password succeeded.
+
+---
+
 # Otto API Contract — extended surface (v1, mounted)
 
 The tables above (#1–#89) are the original frozen core. The sections below complete the

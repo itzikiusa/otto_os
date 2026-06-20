@@ -103,6 +103,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/notifications" || p.starts_with("/notifications/") {
         return Exempt;
     }
+    // Per-user email sender (Gmail App Password → Keychain; mobile plan Task
+    // 7.1). Self-owned — any authed user configures/reads their OWN sender, like
+    // `/auth/tokens`; no feature grant needed. The app password lives in the
+    // Keychain, never the DB.
+    if p == "/email-sender" {
+        return Exempt;
+    }
     // FS-browse sandbox (cross-cutting; sandboxed in the handler).
     if matches!(p, "/fs/browse" | "/fs/read") {
         return Exempt;
@@ -598,6 +605,9 @@ mod tests {
         assert_eq!(pol(Method::POST, "/api/v1/notifications/{id}/read"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Exempt);
+        // Per-user email sender (Gmail App Password → Keychain): self-owned.
+        assert_eq!(pol(Method::GET, "/api/v1/email-sender"), Exempt);
+        assert_eq!(pol(Method::PUT, "/api/v1/email-sender"), Exempt);
     }
 
     #[test]
