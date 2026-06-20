@@ -279,14 +279,18 @@ pub fn parse_log(out: &str) -> Result<Vec<CommitInfo>> {
             Vec::new()
         };
 
-        // refs field (index 6): comma-separated decoration names from %D
-        // Strip leading "HEAD -> " from any token, then drop empties
+        // refs field (index 6): comma-separated decoration names from %D, e.g.
+        //   "HEAD -> main, origin/main, origin/HEAD, tag: v1.0".
+        // PRESERVE the HEAD marker so the client can tell which commit is checked
+        // out: a "HEAD -> <branch>" token is emitted verbatim (the frontend reads
+        // the branch after the arrow and the HEAD-ness from the prefix); a bare
+        // "HEAD" (detached) is kept too. Everything else (branches/tags) passes
+        // through unchanged. Empties are dropped.
         let refs: Vec<String> = if fields.len() > 6 {
             fields[6]
                 .split(',')
-                .map(|s| s.trim())
+                .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .map(|s| s.strip_prefix("HEAD -> ").unwrap_or(s).to_string())
                 .collect()
         } else {
             Vec::new()
@@ -654,6 +658,41 @@ u UU N... 100644 100644 100644 100644 h1 h2 h3 conflict.rs
         assert_eq!(log[0].subject, "feat: one");
         assert_eq!(log[0].date.to_rfc3339(), "2026-06-01T08:00:00+00:00");
         assert_eq!(log[1].subject, "fix: two");
+    }
+
+    #[test]
+    fn log_parse_preserves_head_decoration() {
+        // The HEAD commit carries a "%D" decoration with the checked-out branch,
+        // remote refs and a tag. The parser must PRESERVE "HEAD -> <branch>" (so the
+        // client can render the checked-out branch + a "you are here" marker) and
+        // keep a bare "HEAD" for the detached case. Parents are space-separated.
+        let out = concat!(
+            "abc123\u{1f}abc\u{1f}Alice\u{1f}2026-06-01T10:00:00+02:00\u{1f}feat: one",
+            "\u{1f}p1 p2\u{1f}HEAD -> main, origin/main, origin/HEAD, tag: v1.0\u{1e}\n",
+            // detached HEAD on the next commit: %D = "HEAD, origin/release"
+            "def456\u{1f}def\u{1f}Bob\u{1f}2026-05-31T09:00:00Z\u{1f}fix: two",
+            "\u{1f}p3\u{1f}HEAD, origin/release\u{1e}"
+        );
+        let log = parse_log(out).unwrap();
+        assert_eq!(log.len(), 2);
+
+        // HEAD -> main is kept verbatim (NOT stripped) alongside the other refs.
+        assert_eq!(
+            log[0].refs,
+            vec![
+                "HEAD -> main".to_string(),
+                "origin/main".to_string(),
+                "origin/HEAD".to_string(),
+                "tag: v1.0".to_string(),
+            ]
+        );
+        assert_eq!(log[0].parents, vec!["p1".to_string(), "p2".to_string()]);
+
+        // Detached HEAD: a bare "HEAD" token survives.
+        assert_eq!(
+            log[1].refs,
+            vec!["HEAD".to_string(), "origin/release".to_string()]
+        );
     }
 
     #[test]

@@ -477,6 +477,7 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /git/accounts/{id}/remote-repos | member (owner) | — | remote repos visible to the git account |
+| GET /git/repos | Git:View | — | `Repo[]` across **all** workspaces the caller may view (root → all); workspace-independent list backing the Git page's top-level repo tabs + landing |
 | POST /workspaces/{id}/repos/detect | ws editor | DetectRepoReq | detect a local git repo (resolve remote/provider) |
 | GET /repos/{id}/refs | ws viewer | — | branch/tag refs |
 | POST /repos/{id}/fetch | ws editor | — | `{output}` |

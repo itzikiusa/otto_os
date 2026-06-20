@@ -335,6 +335,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // remote-repos (GET) = View; account update/delete = Edit.
         return Require(Git, if get { View } else { Edit });
     }
+    if p == "/git/repos" {
+        // Workspace-independent global repo list (GET only) — read = View.
+        // The handler additionally filters to the workspaces the caller may see.
+        return Require(Git, View);
+    }
     if p == "/workspaces/{id}/repos" || p == "/workspaces/{id}/repos/detect" {
         // list workspace repos (GET=View); add/detect repo (POST=Edit).
         return Require(Git, if get { View } else { Edit });

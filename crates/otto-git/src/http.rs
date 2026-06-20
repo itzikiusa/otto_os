@@ -52,6 +52,8 @@ pub fn router<S: GitCtx>() -> Router<S> {
             axum::routing::patch(update_account::<S>).delete(delete_account::<S>),
         )
         .route("/git/accounts/{id}/remote-repos", get(remote_repos::<S>))
+        // global repo list (workspace-independent Git page)
+        .route("/git/repos", get(list_all_repos::<S>))
         // repos (#34–36)
         .route(
             "/workspaces/{id}/repos",
@@ -400,6 +402,35 @@ async fn remote_repos<S: GitCtx>(
 // ---------------------------------------------------------------------------
 // Repos (#34–36)
 // ---------------------------------------------------------------------------
+
+/// `GET /git/repos` — every repo across the workspaces the caller may view,
+/// ordered by name. Backs the workspace-independent Git page (top-level repo
+/// tabs + landing list). Root sees all repos; a non-root user sees repos only in
+/// workspaces they are a member of (any role ≥ Viewer — membership grants at
+/// least Viewer). Per-repo operations still authorize against the repo's own
+/// workspace, so this only widens *discovery*, not access.
+async fn list_all_repos<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+) -> ApiResult<Json<Vec<Repo>>> {
+    let all = s.store().list_all_repos().await?;
+    if user.0.is_root {
+        return Ok(Json(all));
+    }
+    // Membership in a workspace implies ≥ Viewer; filter to the caller's set.
+    let visible: std::collections::HashSet<Id> = s
+        .workspaces()
+        .list_for_user(&user.0.id)
+        .await?
+        .into_iter()
+        .map(|(ws, _role)| ws.id)
+        .collect();
+    Ok(Json(
+        all.into_iter()
+            .filter(|r| visible.contains(&r.workspace_id))
+            .collect(),
+    ))
+}
 
 async fn list_repos<S: GitCtx>(
     State(s): State<S>,

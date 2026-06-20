@@ -300,6 +300,62 @@
     return ref.replace(/^tag:\s*/, '');
   }
 
+  // ── Ref-chip classification (GitKraken-style) ─────────────────────────────
+  // Decoration strings from `git log %D` arrive as e.g. "HEAD -> main",
+  // "HEAD" (detached), "origin/main", "main", "tag: v1.0". We classify each into
+  // a chip kind so the row instantly shows what's local vs remote vs the
+  // checked-out branch. `RefsResp` (local/remote names) disambiguates a bare
+  // name when the decoration alone is ambiguous.
+  type ChipKind = 'head' | 'local' | 'remote' | 'tag' | 'detached';
+  interface RefChip {
+    kind: ChipKind;
+    label: string; // text shown on the chip
+    current: boolean; // the checked-out branch (most prominent)
+  }
+
+  // Set of remote-branch names (e.g. "origin/main") from the refs response, used
+  // to classify a decoration token that isn't obviously a tag/HEAD.
+  // Snapshot the refs response into plain arrays + lookup sets. Reading `refs`
+  // through a local const sidesteps a runes/null-narrowing quirk in svelte-check.
+  const refKnowledge = $derived.by(() => {
+    const r: RefsResp | null = refs;
+    const local = r?.local ?? [];
+    const remote = r?.remote ?? [];
+    return {
+      remoteNames: new Set<string>(remote.map((b) => b.name)),
+      localNames: new Set<string>(local.map((b) => b.name)),
+      currentBranch: local.find((b) => b.is_current)?.name ?? status.branch ?? null,
+    };
+  });
+
+  function classifyRef(ref: string): RefChip {
+    if (isTagRef(ref)) return { kind: 'tag', label: refLabel(ref), current: false };
+    // "HEAD -> branch": the checked-out branch — the most prominent chip.
+    const arrow = ref.match(/^HEAD\s*->\s*(.+)$/);
+    if (arrow) return { kind: 'head', label: arrow[1].trim(), current: true };
+    // A bare "HEAD" decoration = detached HEAD (no branch).
+    if (ref === 'HEAD') return { kind: 'detached', label: 'HEAD', current: false };
+    // Remote-tracking ref (origin/…): match the refs response, else fall back to
+    // the "<remote>/<name>" shape (but never a purely-local name).
+    const { remoteNames, localNames, currentBranch } = refKnowledge;
+    if (remoteNames.has(ref) || (/^[^/]+\/.+/.test(ref) && !localNames.has(ref))) {
+      return { kind: 'remote', label: ref, current: false };
+    }
+    // Otherwise a local branch; it's "current" if it's the checked-out branch.
+    return { kind: 'local', label: ref, current: ref === currentBranch };
+  }
+
+  // Chips for one commit row, ordered head → local → remote → tag for a tidy row.
+  function chipsFor(c: CommitInfo): RefChip[] {
+    const order: Record<ChipKind, number> = { head: 0, detached: 0, local: 1, remote: 2, tag: 3 };
+    return c.refs.map(classifyRef).sort((a, b) => order[a.kind] - order[b.kind]);
+  }
+
+  // A commit is the HEAD ("you are here") when any decoration is HEAD-ish.
+  function isHeadCommit(c: CommitInfo): boolean {
+    return c.refs.some((r) => r === 'HEAD' || /^HEAD\s*->/.test(r));
+  }
+
   // ── Inline diff helpers ───────────────────────────────────────────────────
   function changedLinesCount(f: FileDiff): { add: number; del: number } {
     let add = 0;
@@ -375,9 +431,19 @@
                 ? `Merge ${dragSourceName()} → ${b.name}`
                 : b.name}
             >
-              <Icon name="dot" size={10} />
+              {#if b.is_current}
+                <span class="cur-pip" title="Checked out"><Icon name="check" size={9} /></span>
+              {:else}
+                <Icon name="dot" size={10} />
+              {/if}
               <span class="mono ref-name">{b.name}</span>
-              {#if b.is_current}<span class="current-badge">✓</span>{/if}
+              {#if b.is_current && (status.ahead > 0 || status.behind > 0)}
+                <span class="ref-ab" title="{status.ahead} ahead · {status.behind} behind">
+                  {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
+                  {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
+                </span>
+              {/if}
+              {#if b.upstream}<span class="ref-upstream mono dim" title="upstream: {b.upstream}">{b.upstream}</span>{/if}
               {#if checkoutBusy === b.name}<span class="dim">…</span>{/if}
             </button>
           {:else}
@@ -452,11 +518,13 @@
           {@const cy = 14}
           {@const totalH = 28}
           {@const isSelected = selectedSha === row.commit.sha}
+          {@const isHead = isHeadCommit(row.commit)}
           <button
             class="graph-row"
             class:graph-row-selected={isSelected}
+            class:graph-row-head={isHead}
             onclick={() => selectCommit(row.commit)}
-            title={row.commit.subject}
+            title={isHead ? `${row.commit.subject} — you are here (HEAD)` : row.commit.subject}
             aria-pressed={isSelected}
           >
             <!-- SVG gutter -->
@@ -491,9 +559,29 @@
             <!-- commit info -->
             <div class="commit-info">
               <div class="ci-top">
+                {#if isHead}
+                  <span class="here-pip" title="You are here (HEAD)" aria-label="HEAD">
+                    <Icon name="check" size={8} />
+                  </span>
+                {/if}
                 <span class="ci-subject">{row.commit.subject}</span>
-                {#each row.commit.refs as ref}
-                  <span class="ref-chip" class:tag-chip={isTagRef(ref)}>{refLabel(ref)}</span>
+                {#each chipsFor(row.commit) as chip}
+                  <span
+                    class="ref-chip kind-{chip.kind}"
+                    class:current-chip={chip.current}
+                    title={chip.current ? `Checked out · ${chip.label}` : chip.label}
+                  >
+                    {#if chip.current}<Icon name="check" size={8} />{/if}
+                    {#if chip.kind === 'remote'}<Icon name="globe" size={8} />{/if}
+                    {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
+                    {chip.label}
+                    {#if chip.current && (status.ahead > 0 || status.behind > 0)}
+                      <span class="chip-ab">
+                        {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
+                        {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
+                      </span>
+                    {/if}
+                  </span>
                 {/each}
               </div>
               <div class="ci-meta">
@@ -522,8 +610,13 @@
         <div class="detail-header-main">
           <div class="detail-title-row">
             <span class="mono detail-sha">{selectedCommit.short_sha}</span>
-            {#each selectedCommit.refs as ref}
-              <span class="ref-chip" class:tag-chip={isTagRef(ref)}>{refLabel(ref)}</span>
+            {#each chipsFor(selectedCommit) as chip}
+              <span class="ref-chip kind-{chip.kind}" class:current-chip={chip.current}>
+                {#if chip.current}<Icon name="check" size={8} />{/if}
+                {#if chip.kind === 'remote'}<Icon name="globe" size={8} />{/if}
+                {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
+                {chip.label}
+              </span>
             {/each}
             <span class="grow"></span>
             <button class="detail-close" onclick={clearSelection} title="Close" aria-label="Close commit detail">
@@ -712,10 +805,32 @@
     white-space: nowrap;
     font-size: 11.5px;
   }
-  .current-badge {
+  /* Left-panel current-branch marker: a filled accent check pip. */
+  .cur-pip {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+  }
+  .ref-ab {
+    display: inline-flex;
+    gap: 3px;
+    flex-shrink: 0;
     font-size: 10px;
-    color: var(--accent);
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .ref-upstream {
+    flex-shrink: 0;
+    font-size: 9.5px;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .ref-empty {
     padding: 4px 22px 6px;
@@ -770,6 +885,12 @@
     color: var(--accent);
     font-weight: 600;
   }
+  /* The HEAD commit ("you are here") — a left accent rail + faint wash so the
+     checked-out tip is obvious at a glance, even when not selected. */
+  .graph-row-head:not(.graph-row-selected) {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
+  }
   .gutter {
     display: block;
     flex-shrink: 0;
@@ -799,22 +920,81 @@
     flex: 1;
     min-width: 0;
   }
+  /* ── Color-coded ref chips (classified local / remote / tag / HEAD) ── */
   .ref-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     flex-shrink: 0;
     font-size: 9.5px;
     font-weight: 600;
     padding: 1px 5px;
     border-radius: 3px;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border: 1px solid transparent;
     white-space: nowrap;
-    max-width: 120px;
+    max-width: 160px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .ref-chip.tag-chip {
-    background: color-mix(in srgb, #E5C07B 22%, transparent);
+  /* Local branch — subtle, neutral. */
+  .ref-chip.kind-local {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+  }
+  /* Remote-tracking branch — distinct teal/cyan so it never reads as local. */
+  .ref-chip.kind-remote {
+    background: color-mix(in srgb, #56b6c2 18%, transparent);
+    color: #2a8d99;
+  }
+  /* Tag — gold. */
+  .ref-chip.kind-tag {
+    background: color-mix(in srgb, #e5c07b 22%, transparent);
     color: #b8860b;
+  }
+  /* Detached HEAD — muted warning. */
+  .ref-chip.kind-detached {
+    background: color-mix(in srgb, #e06c75 18%, transparent);
+    color: #c0392b;
+  }
+  /* The checked-out branch — the most prominent chip (filled accent). */
+  .ref-chip.kind-head,
+  .ref-chip.current-chip {
+    background: var(--accent);
+    color: #fff;
+    border-color: color-mix(in srgb, var(--accent) 60%, #000);
+  }
+  .chip-ab {
+    display: inline-flex;
+    gap: 2px;
+    margin-left: 2px;
+    padding-left: 3px;
+    border-left: 1px solid color-mix(in srgb, #fff 45%, transparent);
+    font-variant-numeric: tabular-nums;
+  }
+  /* "You are here" pip on the HEAD row. */
+  .here-pip {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+  }
+  .ab-ahead {
+    color: var(--status-working, #98c379);
+  }
+  .ab-behind {
+    color: var(--status-exited, #e06c75);
+  }
+  .current-chip .ab-ahead,
+  .current-chip .ab-behind,
+  .kind-head .ab-ahead,
+  .kind-head .ab-behind {
+    color: #fff;
   }
   .ci-meta {
     display: flex;

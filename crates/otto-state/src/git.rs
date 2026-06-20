@@ -223,6 +223,18 @@ impl GitStore {
         rows.iter().map(row_to_repo).collect()
     }
 
+    /// Every repo across all workspaces, ordered by name. Backs the global Git
+    /// page repo list (`GET /git/repos`): the page is workspace-independent, so
+    /// the caller filters the result to the workspaces it may view (root sees
+    /// all). Cheap — repos are a small, hand-registered set.
+    pub async fn list_all_repos(&self) -> Result<Vec<Repo>> {
+        let rows = sqlx::query("SELECT * FROM repos ORDER BY name")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("repos"))?;
+        rows.iter().map(row_to_repo).collect()
+    }
+
     pub async fn delete_repo(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM repos WHERE id = ?")
             .bind(id)
@@ -309,6 +321,50 @@ mod tests {
         let all = store.list_all_accounts().await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].token_expires_at, Some(exp2));
+    }
+
+    #[tokio::test]
+    async fn list_all_repos_spans_workspaces_ordered_by_name() {
+        let pool = mem_pool().await;
+        let store = GitStore::new(pool.clone());
+
+        // Two workspaces, each with a repo; names chosen so name-ordering is
+        // observable across the workspace boundary.
+        let now = fmt(Utc::now());
+        for ws in ["ws-a", "ws-b"] {
+            sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
+                .bind(ws)
+                .bind(ws)
+                .bind("/tmp")
+                .bind(&now)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (ws, name, path) in [
+            ("ws-a", "zebra", "/tmp/zebra"),
+            ("ws-b", "alpha", "/tmp/alpha"),
+        ] {
+            store
+                .create_repo(NewRepo {
+                    workspace_id: ws.to_string(),
+                    name: name.into(),
+                    path: path.into(),
+                    remote_url: None,
+                    provider: None,
+                    git_account_id: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let all = store.list_all_repos().await.unwrap();
+        assert_eq!(all.len(), 2);
+        // ORDER BY name → alpha (ws-b) then zebra (ws-a).
+        assert_eq!(all[0].name, "alpha");
+        assert_eq!(all[0].workspace_id, "ws-b");
+        assert_eq!(all[1].name, "zebra");
+        assert_eq!(all[1].workspace_id, "ws-a");
     }
 
     #[tokio::test]

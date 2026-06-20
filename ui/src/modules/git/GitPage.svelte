@@ -1,6 +1,10 @@
 <script lang="ts">
-  // Git module router: #/git → repo list, #/git/:id/:tab → RepoView,
-  // #/git/:id/pr/:n → PrDetail. Also handles add (register path / clone URL).
+  // Git module page. Workspace-INDEPENDENT: shows GitKraken-style top-level repo
+  // tabs (one per open repo) above the active repo's RepoView. With no tab open
+  // it shows a full-width landing — the repo browser/list + "Add Repository"
+  // flow + EmptyState. Open repos persist across restarts (global localStorage,
+  // via the git store). PR detail (#/git/:id/pr/:n) is still routed; a plain
+  // #/git/:id/:tab deep-link opens that repo as a tab.
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { GitAccount, Repo, RemoteRepoSummary } from '../../lib/api/types';
@@ -8,6 +12,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import GitTabs from './GitTabs.svelte';
   import RepoView from './RepoView.svelte';
   import PrDetail from './PrDetail.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -16,10 +21,14 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
-  const repoId = $derived(router.parts[1] ?? null);
+  // Route awareness is now limited to PR detail + deep-links into a repo tab.
+  const routeRepoId = $derived(router.parts[1] ?? null);
   const isPr = $derived(router.parts[2] === 'pr' && router.parts[3] !== undefined);
-  const repoTab = $derived(router.parts[2] ?? 'graph');
-  const selectedRepo = $derived(git.repos.find((r) => r.id === repoId) ?? null);
+  const routeTab = $derived(router.parts[2] ?? null);
+
+  // The active repo is driven by the tab store, not the route.
+  const activeRepo = $derived(git.repos.find((r) => r.id === git.activeRepoId) ?? null);
+  const prRepo = $derived(git.repos.find((r) => r.id === routeRepoId) ?? null);
 
   // add repo sheet
   let addOpen = $state(false);
@@ -46,6 +55,38 @@
     // default the browse account to the first one that has a namespace
     if (browseAccount === '' && accountsWithNs.length > 0) browseAccount = accountsWithNs[0].id;
   });
+
+  // ── Load the GLOBAL repo list + restore open tabs (once, on mount) ─────────
+  // Workspace-independent: the page does NOT re-load when the active workspace
+  // changes. `restoreOpenTabs` prunes ids that no longer exist. Guarded so it
+  // runs a single time even if the effect re-fires.
+  let restored = false;
+  $effect(() => {
+    if (restored) return;
+    restored = true;
+    void (async () => {
+      await git.loadAllRepos();
+      git.restoreOpenTabs();
+      // A deep-link into a repo (#/git/:id or #/git/:id/:tab, non-PR) opens that
+      // repo as a tab so the route still lands somewhere useful.
+      if (routeRepoId && !isPr && git.repos.some((r) => r.id === routeRepoId)) {
+        git.openRepoTab(routeRepoId, routeTab ?? undefined);
+      }
+    })();
+  });
+
+  // PrDetail's "back to PRs" routes to #/git/:id/prs; honour that as a tab open.
+  $effect(() => {
+    if (routeRepoId && !isPr && routeTab && git.repos.some((r) => r.id === routeRepoId)) {
+      git.openRepoTab(routeRepoId, routeTab);
+    }
+  });
+
+  function openRepo(repoId: string): void {
+    git.openRepoTab(repoId);
+    // Drop any lingering deep-link route so the tab UI fully owns navigation.
+    if (router.parts[0] === 'git' && router.parts.length > 1) router.go('git');
+  }
 
   function scheduleRemoteSearch(): void {
     if (searchTimer) clearTimeout(searchTimer);
@@ -78,17 +119,13 @@
       });
       toasts.success('Clone started', created.name);
       addOpen = false;
-      await git.loadRepos(ws.currentId, true);
+      await git.loadAllRepos(true);
     } catch (e) {
       toasts.error('Clone failed', e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
     }
   }
-
-  $effect(() => {
-    if (ws.currentId) void git.loadRepos(ws.currentId, true);
-  });
 
   $effect(() => {
     if (addOpen) {
@@ -115,7 +152,9 @@
       toasts.success(addMode === 'clone' ? 'Clone started' : 'Repo registered', repo.name);
       addOpen = false;
       addPath = addUrl = addName = '';
-      await git.loadRepos(ws.currentId, true);
+      await git.loadAllRepos(true);
+      // Newly registered (not async-cloning) repos open straight into a tab.
+      if (addMode === 'register') openRepo(repo.id);
     } catch (e) {
       toasts.error('Add failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -127,7 +166,8 @@
     if (!(await confirmer.ask(`Unregister “${r.name}”? Files on disk are not touched.`, { title: 'Unregister repo', confirmLabel: 'Unregister' }))) return;
     try {
       await api.del(`/repos/${r.id}`);
-      if (ws.currentId) await git.loadRepos(ws.currentId, true);
+      git.closeRepoTab(r.id);
+      await git.loadAllRepos(true);
       toasts.info('Repo unregistered', r.name);
     } catch (e) {
       toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
@@ -135,54 +175,71 @@
   }
 </script>
 
-{#if selectedRepo && isPr}
-  <PrDetail repoId={selectedRepo.id} number={Number(router.parts[3])} />
-{:else if selectedRepo}
-  <RepoView repo={selectedRepo} tab={repoTab} />
+{#if prRepo && isPr}
+  <!-- PR detail is still routed (deep-linkable). -->
+  <PrDetail repoId={prRepo.id} number={Number(router.parts[3])} />
 {:else}
-  <div class="page">
-    <div class="page-header">
-      <div>
-        <h1>Git</h1>
-        <div class="sub">Repositories in {ws.current?.name ?? 'this workspace'}</div>
-      </div>
-      <button class="btn primary" onclick={() => (addOpen = true)}>Add Repository</button>
-    </div>
+  <div class="gitpage">
+    <GitTabs onopen={openRepo} />
 
-    {#if git.loading}
-      <Skeleton rows={3} height={56} />
-    {:else if git.repos.length === 0}
-      <EmptyState
-        icon="branch"
-        title="No repositories yet"
-        body="Register an existing local repo or clone one from GitHub, Bitbucket or GitLab."
-        actionLabel="Add Repository"
-        onaction={() => (addOpen = true)}
-      />
+    {#if activeRepo}
+      {#key activeRepo.id}
+        <div class="gitpage-body">
+          <RepoView
+            repo={activeRepo}
+            tab={git.subTabFor(activeRepo.id)}
+            embedded
+            onTab={(t) => git.setSubTab(activeRepo.id, t)}
+          />
+        </div>
+      {/key}
     {:else}
-      <div class="repo-grid">
-        {#each git.repos as r (r.id)}
-          <div class="repo-card card">
-            <button class="repo-main" onclick={() => router.go(`git/${r.id}/graph`)}>
-              <div class="repo-name">
-                <Icon name="branch" size={14} />
-                {r.name}
-                {#if r.provider}<span class="chip">{r.provider}</span>{/if}
-              </div>
-              <div class="repo-path mono">{r.path}</div>
-              {#if r.remote_url}<div class="repo-remote mono dim">{r.remote_url}</div>{/if}
-            </button>
-            <div class="repo-actions">
-              <button class="btn small" onclick={() => router.go(`git/${r.id}/prs`)}>
-                <Icon name="pr" size={11} /> PRs
-              </button>
-              <span class="grow"></span>
-              <button class="icon-btn" title="Unregister" onclick={() => removeRepo(r)}>
-                <Icon name="trash" size={13} />
-              </button>
-            </div>
+      <!-- ── Full-width landing (no tab open) ─────────────────────────────── -->
+      <div class="landing">
+        <div class="page-header">
+          <div>
+            <h1>Git</h1>
+            <div class="sub">Repositories</div>
           </div>
-        {/each}
+          <button class="btn primary" onclick={() => (addOpen = true)}>Add Repository</button>
+        </div>
+
+        {#if git.loading && !git.allReposLoaded}
+          <Skeleton rows={3} height={56} />
+        {:else if git.repos.length === 0}
+          <EmptyState
+            icon="branch"
+            title="No repositories yet"
+            body="Register an existing local repo or clone one from GitHub, Bitbucket or GitLab."
+            actionLabel="Add Repository"
+            onaction={() => (addOpen = true)}
+          />
+        {:else}
+          <div class="repo-grid">
+            {#each git.repos as r (r.id)}
+              <div class="repo-card card">
+                <button class="repo-main" onclick={() => openRepo(r.id)}>
+                  <div class="repo-name">
+                    <Icon name="branch" size={14} />
+                    {r.name}
+                    {#if r.provider}<span class="chip">{r.provider}</span>{/if}
+                  </div>
+                  <div class="repo-path mono">{r.path}</div>
+                  {#if r.remote_url}<div class="repo-remote mono dim">{r.remote_url}</div>{/if}
+                </button>
+                <div class="repo-actions">
+                  <button class="btn small" onclick={() => git.openRepoTab(r.id, 'prs')}>
+                    <Icon name="pr" size={11} /> PRs
+                  </button>
+                  <span class="grow"></span>
+                  <button class="icon-btn" title="Unregister" onclick={() => removeRepo(r)}>
+                    <Icon name="trash" size={13} />
+                  </button>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -305,6 +362,26 @@
 {/if}
 
 <style>
+  /* Full-bleed: tabs + active repo / landing fill the whole center column.
+     No `.page` max-width or reserved right column. */
+  .gitpage {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .gitpage-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .landing {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 20px 24px 40px;
+  }
   .path-row {
     display: flex;
     gap: 8px;

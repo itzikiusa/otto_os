@@ -14,6 +14,23 @@ import type {
   RepoStatusResp,
 } from '../api/types';
 
+/** Sub-tab inside an open repo (mirrors RepoView's tab set). */
+export type GitSubTab = 'graph' | 'changes' | 'history' | 'prs' | 'review';
+
+/** Shape of the global open-tabs persistence blob. */
+interface GitOpenTabsState {
+  openRepoIds: string[];
+  activeRepoId: string | null;
+  /** Per-repo active sub-tab. */
+  sub: Record<string, string>;
+}
+
+/** GLOBAL (workspace-independent) localStorage key for the Git page's open
+ *  repo tabs. Survives Tauri restarts; deliberately NOT keyed by workspace so
+ *  the Git page is decoupled from the active workspace. */
+const OPEN_TABS_KEY = 'otto_git_open_tabs';
+const DEFAULT_SUB: GitSubTab = 'graph';
+
 class GitStore {
   repos: Repo[] = $state([]);
   primary: Repo | null = $state(null);
@@ -29,6 +46,137 @@ class GitStore {
   notARepo = $state(false);
   private loadedFor: Id | null = null;
   private detectedCwd: string | null = null;
+
+  // ── Git page top-level repo tabs (GitKraken-style, workspace-independent) ──
+  // The set of repos the user has OPEN as tabs, the active one, and each repo's
+  // last-used sub-tab. Persisted globally so it survives reloads/restarts.
+  openRepoIds: string[] = $state([]);
+  activeRepoId: string | null = $state(null);
+  subTab: Record<string, string> = $state({});
+  /** True once the page has loaded the global repo list at least once. */
+  allReposLoaded = $state(false);
+
+  /** All repos across every workspace the caller may view (root → all). Powers
+   *  the workspace-independent Git page; does NOT touch `loadedFor` so a later
+   *  per-workspace `loadRepos` (right-panel/status-bar) still runs. */
+  async loadAllRepos(force = false): Promise<void> {
+    if (this.allReposLoaded && !force) return;
+    this.loading = true;
+    try {
+      this.repos = await api.get<Repo[]>('/git/repos');
+      this.allReposLoaded = true;
+    } catch {
+      this.repos = [];
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  /** Restore open tabs from localStorage, dropping ids no longer present in the
+   *  live repo list. Call AFTER `loadAllRepos`. Defaults each restored repo's
+   *  sub-tab to 'graph' when absent. */
+  restoreOpenTabs(): void {
+    const live = new Set(this.repos.map((r) => r.id));
+    const persisted = this.readOpenTabs();
+    const ids = (persisted?.openRepoIds ?? []).filter((id) => live.has(id));
+    const sub: Record<string, string> = {};
+    for (const id of ids) sub[id] = persisted?.sub?.[id] ?? DEFAULT_SUB;
+    this.openRepoIds = ids;
+    this.subTab = sub;
+    const wanted = persisted?.activeRepoId;
+    this.activeRepoId = wanted && ids.includes(wanted) ? wanted : (ids[0] ?? null);
+    // Re-persist the pruned set so stale ids don't linger.
+    this.persistOpenTabs();
+  }
+
+  /** Open `repoId` as a tab (or just activate it if already open). */
+  openRepoTab(repoId: string, sub?: string): void {
+    if (!this.openRepoIds.includes(repoId)) {
+      this.openRepoIds = [...this.openRepoIds, repoId];
+    }
+    if (this.subTab[repoId] == null) {
+      this.subTab = { ...this.subTab, [repoId]: sub ?? DEFAULT_SUB };
+    } else if (sub) {
+      this.subTab = { ...this.subTab, [repoId]: sub };
+    }
+    this.activeRepoId = repoId;
+    this.persistOpenTabs();
+  }
+
+  /** Close a repo tab; pick a sensible neighbour as the new active tab. */
+  closeRepoTab(repoId: string): void {
+    const idx = this.openRepoIds.indexOf(repoId);
+    if (idx === -1) return;
+    this.openRepoIds = this.openRepoIds.filter((id) => id !== repoId);
+    const { [repoId]: _drop, ...rest } = this.subTab;
+    this.subTab = rest;
+    if (this.activeRepoId === repoId) {
+      // Prefer the previous tab, else the next, else none.
+      this.activeRepoId =
+        this.openRepoIds[Math.min(idx, this.openRepoIds.length - 1)] ?? null;
+    }
+    this.persistOpenTabs();
+  }
+
+  /** Activate an already-open repo tab. */
+  activateRepoTab(repoId: string): void {
+    if (!this.openRepoIds.includes(repoId)) return;
+    this.activeRepoId = repoId;
+    this.persistOpenTabs();
+  }
+
+  /** Move `repoId` to the position currently held by `targetIdx` (drag-reorder). */
+  reorderRepoTab(repoId: string, targetIdx: number): void {
+    const from = this.openRepoIds.indexOf(repoId);
+    if (from === -1) return;
+    const next = [...this.openRepoIds];
+    next.splice(from, 1);
+    const clamped = Math.max(0, Math.min(targetIdx, next.length));
+    next.splice(clamped, 0, repoId);
+    this.openRepoIds = next;
+    this.persistOpenTabs();
+  }
+
+  /** Set the active sub-tab for a repo (graph/changes/history/prs/review). */
+  setSubTab(repoId: string, sub: string): void {
+    this.subTab = { ...this.subTab, [repoId]: sub };
+    this.persistOpenTabs();
+  }
+
+  /** The currently-active sub-tab for a repo (default 'graph'). */
+  subTabFor(repoId: string): string {
+    return this.subTab[repoId] ?? DEFAULT_SUB;
+  }
+
+  private persistOpenTabs(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      const blob: GitOpenTabsState = {
+        openRepoIds: this.openRepoIds,
+        activeRepoId: this.activeRepoId,
+        sub: this.subTab,
+      };
+      localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(blob));
+    } catch {
+      /* storage full / unavailable — non-fatal */
+    }
+  }
+
+  private readOpenTabs(): GitOpenTabsState | null {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(OPEN_TABS_KEY);
+    if (!raw) return null;
+    try {
+      const p = JSON.parse(raw) as Partial<GitOpenTabsState>;
+      return {
+        openRepoIds: Array.isArray(p.openRepoIds) ? p.openRepoIds : [],
+        activeRepoId: typeof p.activeRepoId === 'string' ? p.activeRepoId : null,
+        sub: p.sub && typeof p.sub === 'object' ? p.sub : {},
+      };
+    } catch {
+      return null;
+    }
+  }
 
   async loadRepos(workspaceId: Id, force = false): Promise<void> {
     if (!force && this.loadedFor === workspaceId) return;
