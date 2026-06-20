@@ -18,6 +18,7 @@ use otto_state::{NewSavedQuery, NewWidget};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::export::ExportFormat as PathFormat;
 use crate::service::DbViewerService;
 use crate::types::{statement_is_write, CompletionContext, Engine, QueryRequest};
 
@@ -169,6 +170,10 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/schema-graph", post(schema_graph::<S>))
         .route("/connections/{id}/db/query", post(run_query::<S>))
         .route("/connections/{id}/db/export", post(export_query::<S>))
+        .route(
+            "/connections/{id}/db/export-to-path",
+            post(export_to_path::<S>),
+        )
         .route("/connections/{id}/db/cancel", post(cancel_query::<S>))
         .route("/connections/{id}/db/completion", post(completion::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
@@ -470,6 +475,106 @@ fn csv_value(v: &Value) -> String {
         Value::String(s) => csv_field(s),
         other => csv_field(&other.to_string()),
     }
+}
+
+/// Request body for the **streaming** local-file export endpoint.
+#[derive(Debug, Deserialize)]
+struct ExportToPathReq {
+    /// The statement to run, uncapped (unless `max_rows` is set).
+    statement: String,
+    /// Optional node context (active database) — same semantics as `QueryRequest.node`.
+    #[serde(default)]
+    node: Option<String>,
+    /// Selectable output format (default `csv`).
+    #[serde(default)]
+    format: PathFormat,
+    /// Destination on the daemon host. A leading `~` is expanded to the daemon
+    /// user's home. If it's an existing directory, the file is written as
+    /// `<dir>/export.<ext>`; otherwise it's the full file path and its parent
+    /// directory is created if missing.
+    local_path: String,
+    /// Optional cap; blank/absent = all rows. Stops the stream early when set.
+    #[serde(default)]
+    max_rows: Option<usize>,
+}
+
+/// Response from the streaming local-file export endpoint.
+#[derive(Debug, serde::Serialize)]
+struct ExportToPathResp {
+    /// The absolute file path actually written.
+    local_path: String,
+    /// Rows written.
+    rows: u64,
+    /// Bytes written to the file.
+    bytes: u64,
+    /// Wall-clock duration of the export, in milliseconds.
+    duration_ms: u64,
+}
+
+/// Expand a leading `~` to the daemon user's `$HOME` (mirrors the SFTP handler).
+fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix('~') {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Resolve `local_path` (with `~` expanded) + the format's extension into the
+/// final destination file path, ensuring the parent directory exists. When the
+/// path is an existing directory, the file is `<dir>/export.<ext>`; otherwise the
+/// path is taken as the full file path and its parent dir is created.
+fn resolve_export_dest(local_path: &str, format: PathFormat) -> Result<std::path::PathBuf, ApiErr> {
+    let expanded = expand_home(local_path);
+    let p = std::path::Path::new(&expanded);
+    let dest = if p.is_dir() {
+        p.join(format!("export.{}", format.extension()))
+    } else {
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| ApiErr(Error::Invalid(format!("create local dir: {e}"))))?;
+            }
+        }
+        p.to_path_buf()
+    };
+    Ok(dest)
+}
+
+/// Stream a query result to a **local file** on the daemon host, in a selectable
+/// format, with bounded daemon memory (the driver streams row/chunk-by-chunk —
+/// see `Driver::export_to_path`). For ClickHouse over an SSH tunnel this writes
+/// the user's local path instead of a server-side `INTO OUTFILE` that would land
+/// on the tunnel/remote host. Gated at `Editor` (global connections: root only),
+/// same as `run_query` — it executes a statement against the live database.
+async fn export_to_path<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<ExportToPathReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+
+    if req.local_path.trim().is_empty() {
+        return Err(ApiErr(Error::Invalid("local_path is required".into())));
+    }
+    let dest = resolve_export_dest(&req.local_path, req.format)?;
+
+    let node = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let (counts, duration_ms) = ctx
+        .db()
+        .export_to_path(&id, &user.id, &req.statement, node, req.format, req.max_rows, &dest)
+        .await?;
+
+    Ok(Json(ExportToPathResp {
+        local_path: dest.to_string_lossy().into_owned(),
+        rows: counts.rows,
+        bytes: counts.bytes,
+        duration_ms,
+    })
+    .into_response())
 }
 
 async fn completion<S: DbViewerCtx>(

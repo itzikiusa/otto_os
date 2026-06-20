@@ -21,6 +21,7 @@ use sqlx::{Column as _, Row, TypeInfo};
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
+use crate::export::{open_sink, ExportCounts, ExportFormat};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionItem,
@@ -425,6 +426,80 @@ impl Driver for MysqlDriver {
         }
 
         Ok(CompletionResponse { items })
+    }
+
+    /// Streaming export: use sqlx's row CURSOR (`.fetch(&mut conn)`) so the
+    /// (potentially huge) result is pulled one row at a time and written straight
+    /// to the file — daemon memory stays bounded (NOT `fetch_all`). Only
+    /// row-returning statements are exportable; a write/DDL is rejected (the
+    /// service's write-gate already blocks guarded writes, but an export of a
+    /// non-read makes no sense).
+    async fn export_to_path(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+        format: ExportFormat,
+        max_rows: Option<usize>,
+        dest: &std::path::Path,
+    ) -> Result<ExportCounts> {
+        use futures_util::TryStreamExt as _;
+
+        let statement = statement.trim();
+        if statement.is_empty() {
+            return Err(types::invalid("empty statement"));
+        }
+        if !is_read_statement(statement) {
+            return Err(types::invalid("export supports row-returning statements only"));
+        }
+
+        let pool = self.pool(cfg).await?;
+        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
+            sqlx::query(&format!("USE `{}`", esc_ident(db)))
+                .execute(&mut *conn)
+                .await
+                .map_err(types::upstream)?;
+        }
+
+        // A real cursor over the wire: each `try_next().await` fetches the next
+        // row; nothing buffers the whole result.
+        let mut rows = sqlx::query(statement).fetch(&mut *conn);
+        let mut sink = open_sink(dest, format)
+            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+
+        let mut header_written = false;
+        let mut n: usize = 0;
+        while let Some(row) = rows.try_next().await.map_err(types::upstream)? {
+            if let Some(cap) = max_rows {
+                if n >= cap {
+                    break;
+                }
+            }
+            if !header_written {
+                let columns: Vec<Column> = row
+                    .columns()
+                    .iter()
+                    .map(|c| Column::typed(c.name(), c.type_info().name()))
+                    .collect();
+                sink.write_header(&columns)
+                    .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
+                header_written = true;
+            }
+            let cells: Vec<Value> = (0..row.columns().len())
+                .map(|i| mysql_value_to_json(&row, i))
+                .collect();
+            sink.write_row(&cells)
+                .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
+            n += 1;
+        }
+        // An empty result still needs the header (with-names) / `[]` (json).
+        if !header_written {
+            sink.write_header(&[])
+                .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
+        }
+        sink.finish()
+            .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
     }
 }
 

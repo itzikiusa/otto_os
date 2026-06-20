@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::drivers::{mongo_parse, mongo_sql};
+use crate::export::{open_sink, ExportCounts, ExportFormat};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, Column, CompletionContext, CompletionItem, CompletionKind,
@@ -288,6 +289,126 @@ impl Driver for MongoDriver {
     ) -> Result<CompletionResponse> {
         self.completion_impl(cfg, ctx).await
     }
+
+    /// Streaming export: iterate the `Cursor` (a `Stream`) document-by-document
+    /// and write each straight to the file — the cursor is NEVER collected into a
+    /// `Vec`, so daemon memory stays bounded for an arbitrarily large result.
+    ///
+    /// Only the row-returning ops (`find` / `aggregate`) are exportable. For the
+    /// delimited formats (CSV/TSV) the column set is fixed from the FIRST document
+    /// (Mongo is schemaless and we can't pre-scan the whole result without
+    /// buffering it); later documents are projected onto those columns and any
+    /// extra fields are dropped. JSON / NDJSON carry each document's full shape.
+    async fn export_to_path(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+        format: ExportFormat,
+        max_rows: Option<usize>,
+        dest: &std::path::Path,
+    ) -> Result<ExportCounts> {
+        let parsed = parse_command(statement.trim())?;
+        if !matches!(parsed.op, MongoOp::Find | MongoOp::Aggregate) {
+            return Err(types::invalid("export supports find / aggregate only"));
+        }
+        let db_name = cfg
+            .database
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                node.map(str::trim).filter(|s| !s.is_empty()).map(|n| {
+                    NodePath::parse(n)
+                        .get("db")
+                        .map(str::to_string)
+                        .unwrap_or_else(|| n.to_string())
+                })
+            })
+            .ok_or_else(|| types::invalid("no database selected for this connection"))?;
+
+        let client = self.connect(cfg).await?;
+        let db = client.database(&db_name);
+        let coll: Collection<Document> = db.collection(&parsed.collection);
+
+        // Open the cursor (a Stream). We do NOT collect it.
+        let mut cursor: mongodb::Cursor<Document> = match parsed.op {
+            MongoOp::Find => {
+                let mut action = coll.find(parsed.filter.unwrap_or_default());
+                if let Some(p) = parsed.projection {
+                    action = action.projection(p);
+                }
+                if let Some(s) = parsed.sort {
+                    action = action.sort(s);
+                }
+                // Honour an explicit `.limit(n)`; otherwise unbounded (capped by
+                // max_rows below, streaming).
+                if let Some(l) = parsed.limit {
+                    action = action.limit(l);
+                }
+                action.await.map_err(types::upstream)?
+            }
+            MongoOp::Aggregate => coll
+                .aggregate(parsed.pipeline.unwrap_or_default())
+                .await
+                .map_err(types::upstream)?
+                .with_type::<Document>(),
+            _ => unreachable!("guarded above"),
+        };
+
+        let mut sink = open_sink(dest, format)
+            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+
+        let mut columns: Vec<String> = Vec::new();
+        let mut header_written = false;
+        let mut n: usize = 0;
+        while let Some(next) = cursor.next().await {
+            if let Some(cap) = max_rows {
+                if n >= cap {
+                    break;
+                }
+            }
+            let doc = next.map_err(types::upstream)?;
+            if !header_written {
+                // Fix the column order from the first document (`_id` first).
+                columns = first_doc_columns(&doc);
+                let cols: Vec<Column> = columns.iter().cloned().map(Column::new).collect();
+                sink.write_header(&cols)
+                    .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
+                header_written = true;
+            }
+            // Project onto the fixed columns for delimited formats; pass the full
+            // document shape (keyed by the fixed columns, with extras dropped) for
+            // JSON/NDJSON too so the row aligns with the header.
+            let row: Vec<Value> = columns
+                .iter()
+                .map(|c| doc.get(c).map(bson_to_json).unwrap_or(Value::Null))
+                .collect();
+            sink.write_row(&row)
+                .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
+            n += 1;
+        }
+        if !header_written {
+            sink.write_header(&[])
+                .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
+        }
+        sink.finish()
+            .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
+    }
+}
+
+/// Column order for the streaming Mongo export, taken from the first document:
+/// `_id` first (when present), then the remaining keys in document order.
+fn first_doc_columns(doc: &Document) -> Vec<String> {
+    let mut cols: Vec<String> = Vec::with_capacity(doc.len());
+    if doc.contains_key("_id") {
+        cols.push("_id".to_string());
+    }
+    for key in doc.keys() {
+        if key != "_id" {
+            cols.push(key.clone());
+        }
+    }
+    cols
 }
 
 // --- statement execution -----------------------------------------------------

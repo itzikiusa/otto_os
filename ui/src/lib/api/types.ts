@@ -2193,6 +2193,49 @@ export interface QueryResult {
   truncated: boolean;
 }
 
+/** Selectable output format for the streaming local-file export. */
+export type DbExportFormat =
+  | 'csv'
+  | 'csv_with_names'
+  | 'tsv'
+  | 'tsv_with_names'
+  | 'json'
+  | 'ndjson';
+
+/**
+ * `POST /connections/{id}/db/export-to-path` — stream an uncapped result to a
+ * local file on the daemon host (selectable format, configurable path). The
+ * daemon streams the result row/chunk-by-chunk so its memory stays bounded
+ * regardless of size.
+ */
+export interface ExportToPathReq {
+  statement: string;
+  /** Active database to scope unqualified names (same as a query's `node`). */
+  node?: string | null;
+  /** Output format; default `csv`. */
+  format?: DbExportFormat;
+  /**
+   * Destination on the daemon host. A leading `~` expands to the daemon user's
+   * home. An existing directory → `<dir>/export.<ext>`; otherwise a full file
+   * path whose parent dir is created.
+   */
+  local_path: string;
+  /** Optional row cap; blank/absent = all rows. */
+  max_rows?: number | null;
+}
+
+/** `POST /connections/{id}/db/export-to-path` response. */
+export interface ExportToPathResp {
+  /** The absolute file path actually written. */
+  local_path: string;
+  /** Rows written. */
+  rows: number;
+  /** Bytes written to the file. */
+  bytes: number;
+  /** Wall-clock duration of the export, in milliseconds. */
+  duration_ms: number;
+}
+
 export type DbCompletionKind =
   | 'keyword'
   | 'function'

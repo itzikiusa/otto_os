@@ -13,6 +13,7 @@
 pub mod config;
 pub mod driver;
 pub mod drivers;
+pub mod export;
 pub mod http;
 pub mod registry;
 pub mod service;
@@ -20,6 +21,7 @@ pub mod tls;
 pub mod types;
 
 pub use driver::Driver;
+pub use export::{ExportCounts, ExportFormat};
 pub use http::{api_router, DbViewerCtx};
 pub use registry::Registry;
 pub use service::DbViewerService;

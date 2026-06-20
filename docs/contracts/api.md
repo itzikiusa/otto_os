@@ -466,7 +466,27 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/completion | ws viewer | `{text,cursor}` | SQL completion suggestions |
 | GET /connections/{id}/db/history | ws viewer | — | recent query history |
 | POST /connections/{id}/db/explain-with-agent | ws editor | `{sql}` | AI explanation of a query (spawns an agent) |
-| POST /connections/{id}/db/export | ws editor | `{sql, params?, max_rows?}` | Stream full query results as CSV/JSON past the UI row cap |
+| POST /connections/{id}/db/export | ws editor | `{sql, params?, max_rows?}` | Stream full query results as CSV/JSON past the UI row cap (browser download) |
+| POST /connections/{id}/db/export-to-path | ws editor | ExportToPathReq | Stream an uncapped result to a **local file** on the daemon host, selectable format; returns ExportToPathResp |
+
+`ExportToPathReq` = `{ statement, node?, format?, local_path, max_rows? }`. `format`
+is one of `csv` (no header), `csv_with_names` (header row), `tsv`, `tsv_with_names`,
+`json` (a JSON array of row objects), `ndjson` (one JSON object per line); default
+`csv`. `local_path` is a path on the daemon host (leading `~` expands to the daemon
+user's home); if it is an existing directory the file is written as
+`<dir>/export.<ext>` (ext per format: `csv`/`tsv`/`json`/`ndjson`), else it is the
+full file path and its parent directory is created. `max_rows` (optional, blank =
+all rows) caps the export, stopping the stream early. `ExportToPathResp` =
+`{ local_path, rows, bytes, duration_ms }` (the absolute file written, rows & bytes
+written, wall-clock ms). The export **streams** row/chunk-by-chunk from the driver
+straight to a buffered file writer so daemon memory stays bounded regardless of
+result size — MySQL via the sqlx row cursor, MongoDB by iterating the `Cursor`,
+ClickHouse (HTTP) by requesting an explicit `FORMAT` and splicing the response
+body (so a tunnelled ClickHouse writes the user's local path, **not** a
+server-side `INTO OUTFILE` on the tunnel host). Only row-returning statements are
+exportable; a write/DDL is rejected (and a write on a guarded production/read-only
+connection is blocked as elsewhere). Gated at the same role as `query` (`ws
+editor`; global connections: root).
 
 `RunQueryReq` may include an optional client-generated `query_id` (string). When
 present, the server registers the in-flight query under it; `POST …/db/cancel`

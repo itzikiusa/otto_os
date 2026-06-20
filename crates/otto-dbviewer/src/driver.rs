@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use otto_core::Result;
 
+use crate::export::{ExportCounts, ExportFormat};
 use crate::types::{
     Capabilities, CancelToken, CompletionContext, CompletionResponse, Engine, NodePath,
     ObjectDetail, QueryHandle, QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
@@ -84,6 +85,43 @@ pub trait Driver: Send + Sync {
         cfg: &ResolvedConfig,
         ctx: &CompletionContext,
     ) -> Result<CompletionResponse>;
+
+    /// Stream a (potentially huge) **uncapped** read result to a local file at
+    /// `dest`, in `format`, with **bounded daemon memory** — pull one row/chunk
+    /// at a time from the engine's native cursor/stream and write it straight to a
+    /// `BufWriter` on disk. `node` scopes the active database (same semantics as
+    /// `QueryRequest::node`); `max_rows`, when set, stops the stream early.
+    ///
+    /// Engines that can stream (MySQL/ClickHouse/MongoDB) **override** this. The
+    /// trait default is a **last-resort buffering fallback**: it runs the
+    /// statement via [`Driver::run`] (which materialises the whole result in RAM)
+    /// and then writes it out. It `tracing::warn!`s so the buffering is never
+    /// silent. This default is what Redis (no row stream) uses, and a safety net
+    /// for any engine whose streaming path isn't wired yet.
+    async fn export_to_path(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+        format: ExportFormat,
+        max_rows: Option<usize>,
+        dest: &std::path::Path,
+    ) -> Result<ExportCounts> {
+        tracing::warn!(
+            engine = self.engine().as_str(),
+            "db export: driver has no streaming path — buffering the full result in memory \
+             (last-resort fallback); large exports may use significant RAM"
+        );
+        let req = QueryRequest {
+            statement: statement.to_string(),
+            max_rows,
+            node: node.map(str::to_string),
+            ..QueryRequest::default()
+        };
+        let result = self.run(cfg, &req).await?;
+        crate::export::write_buffered_result(dest, format, &result)
+            .map_err(|e| otto_core::Error::Internal(format!("write export file: {e}")))
+    }
 }
 
 #[cfg(test)]

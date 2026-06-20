@@ -27,6 +27,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
+use crate::export::{open_sink, ExportCounts, ExportFormat};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionItem,
@@ -452,6 +453,30 @@ impl Conn {
             return Err(types::upstream(text.trim().to_string()));
         }
         Ok(text)
+    }
+
+    /// POST a body and return the streaming `reqwest::Response` (for
+    /// `bytes_stream()`), WITHOUT buffering it — the large-batch export path. On a
+    /// non-2xx the error body is small, so we read it fully to surface the
+    /// server's message; on success the body is left unread for the caller to
+    /// stream chunk-by-chunk to disk.
+    async fn post_stream(&self, body: String) -> Result<reqwest::Response> {
+        let mut req = self.client.post(&self.base).headers(self.headers.clone());
+        if let Some(tz) = &self.timezone {
+            req = req.query(&[("session_timezone", tz.as_str())]);
+        }
+        if let Some(db) = &self.database {
+            req = req.query(&[("database", db.as_str())]);
+        }
+        if let Some(qid) = &self.query_id {
+            req = req.query(&[("query_id", qid.as_str())]);
+        }
+        let resp = req.body(body).send().await.map_err(req_err)?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.map_err(types::upstream)?;
+            return Err(types::upstream(text.trim().to_string()));
+        }
+        Ok(resp)
     }
 }
 
@@ -1253,6 +1278,133 @@ impl Driver for ClickhouseDriver {
 
         Ok(CompletionResponse { items })
     }
+
+    /// Streaming export. On the HTTP transport (the common case, incl. over an
+    /// SSH tunnel) we ask ClickHouse for an explicit `FORMAT <fmt>` and stream the
+    /// response body (`reqwest` `bytes_stream()`) straight to the file — constant
+    /// memory, native formatting, and it lands on the user's LOCAL path (NOT a
+    /// server-side `INTO OUTFILE` that would write to the tunnel host). The `json`
+    /// array format has no single-pass CH FORMAT, so it falls back to the
+    /// daemon-side row formatter (logged); on the native transport we stream
+    /// result blocks and format rows ourselves.
+    async fn export_to_path(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+        format: ExportFormat,
+        max_rows: Option<usize>,
+        dest: &std::path::Path,
+    ) -> Result<ExportCounts> {
+        let sql = statement.trim();
+        if sql.is_empty() {
+            return Err(types::invalid("clickhouse: empty statement"));
+        }
+        if !returns_rows(sql) {
+            return Err(types::invalid("export supports row-returning statements only"));
+        }
+        let active_db = node.map(str::trim).filter(|s| !s.is_empty());
+
+        // HTTP + a streamable FORMAT → native streaming, the preferred path.
+        if transport_for(cfg) == Transport::Http {
+            if let Some(ch_format) = format.clickhouse_format() {
+                return self
+                    .export_http_format(cfg, sql, active_db, ch_format, max_rows, format, dest)
+                    .await;
+            }
+            // JSON-array format: no single CH FORMAT — fall back to the buffered
+            // daemon-side formatter (logged so it's never silent).
+            tracing::warn!(
+                "clickhouse export: 'json' array format has no streaming CH FORMAT — \
+                 buffering the result to format it daemon-side"
+            );
+            let resp = self
+                .query_rows_db(cfg, &capped_sql(sql, max_rows), active_db, None)
+                .await?;
+            return write_rawrows(dest, format, &resp, max_rows);
+        }
+
+        // Native transport: stream result blocks (already done by native_query,
+        // which decodes block-by-block) and format rows ourselves. The native
+        // client doesn't expose active-db scoping here (see query_rows_db TODO),
+        // so unqualified names resolve against the profile database.
+        tracing::warn!(
+            "clickhouse export: native transport materialises decoded blocks before \
+             formatting (no FORMAT streaming); large exports may use more memory than HTTP"
+        );
+        let resp = self.native_query(cfg, &capped_sql(sql, max_rows)).await?;
+        write_rawrows(dest, format, &resp, max_rows)
+    }
+}
+
+impl ClickhouseDriver {
+    /// The HTTP `FORMAT`-streaming export: issue `<sql> FORMAT <ch_format>` and
+    /// splice the response body to the file chunk-by-chunk. Row count isn't known
+    /// from the streamed bytes, so it's reported as 0 (bytes are exact).
+    #[allow(clippy::too_many_arguments)]
+    async fn export_http_format(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        ch_format: &str,
+        max_rows: Option<usize>,
+        format: ExportFormat,
+        dest: &std::path::Path,
+    ) -> Result<ExportCounts> {
+        use futures_util::StreamExt as _;
+
+        let conn = self.connect_id(cfg, active_db, None).await?;
+        let body = format!("{}\nFORMAT {ch_format}", capped_sql(sql, max_rows));
+        let resp = conn.post_stream(body).await?;
+
+        let mut sink = open_sink(dest, format)
+            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(req_err)?;
+            sink.write_raw(&chunk)
+                .map_err(|e| otto_core::Error::Internal(format!("write export chunk: {e}")))?;
+        }
+        sink.finish()
+            .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
+    }
+}
+
+/// Append a `LIMIT n` to cap the export when `max_rows` is set (ClickHouse honours
+/// a trailing LIMIT on the export query so the stream stops server-side). Reuses
+/// the conservative limit injector shared with the interactive path.
+fn capped_sql(sql: &str, max_rows: Option<usize>) -> String {
+    match max_rows {
+        Some(n) => types::inject_row_limit(sql, n),
+        None => sql.to_string(),
+    }
+}
+
+/// Write a materialised [`RawRows`] (the JSON-array fallback / native path) to the
+/// file through the row formatter, honouring `max_rows`.
+fn write_rawrows(
+    dest: &std::path::Path,
+    format: ExportFormat,
+    resp: &RawRows,
+    max_rows: Option<usize>,
+) -> Result<ExportCounts> {
+    let columns: Vec<Column> = resp
+        .meta
+        .iter()
+        .map(|(name, ty)| Column::typed(name, ty))
+        .collect();
+    let mut sink = open_sink(dest, format)
+        .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+    sink.write_header(&columns)
+        .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
+    let take = max_rows.unwrap_or(usize::MAX);
+    for row in resp.data.iter().take(take) {
+        sink.write_row(row)
+            .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
+    }
+    sink.finish()
+        .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
 }
 
 // --- Static completion sources ----------------------------------------------

@@ -550,6 +550,73 @@ impl DbViewerService {
         result
     }
 
+    /// Export a (potentially huge) **uncapped** read result to a local file, in
+    /// the chosen [`ExportFormat`], **streaming** through the driver's native
+    /// cursor/stream so daemon memory stays bounded regardless of result size.
+    ///
+    /// Resolves the connection + SSH tunnel exactly like [`Self::run`] (the
+    /// driver receives the resolved endpoint), then dispatches to
+    /// [`crate::driver::Driver::export_to_path`]. The write-guard still applies —
+    /// a write statement on a guarded connection is refused (export is for reads)
+    /// — but here `confirm_write` is implicitly false (no UI confirmation path),
+    /// so a guarded write is always blocked. Returns the rows/bytes written and
+    /// the wall-clock duration.
+    ///
+    /// `user_id` is recorded in history like a normal run.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn export_to_path(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        statement: &str,
+        node: Option<&str>,
+        format: crate::export::ExportFormat,
+        max_rows: Option<usize>,
+        dest: &std::path::Path,
+    ) -> Result<(crate::export::ExportCounts, u64)> {
+        // Reuse the write-gate: an export is a read; a write/DDL on a guarded
+        // (production / read-only) connection is refused (no confirm path here).
+        let guard_req = QueryRequest {
+            statement: statement.to_string(),
+            node: node.map(str::to_string),
+            ..QueryRequest::default()
+        };
+        self.guard_write(conn_id, &guard_req).await?;
+
+        let r = self.resolve(conn_id).await?;
+        let started = Instant::now();
+        let result = r
+            .driver
+            .export_to_path(&r.config, statement, node, format, max_rows, dest)
+            .await;
+        let elapsed = started.elapsed().as_millis() as u64;
+
+        // Record in history (best-effort), mirroring `run`.
+        match &result {
+            Ok(counts) => {
+                let _ = self
+                    .repo
+                    .add_history(
+                        conn_id,
+                        user_id,
+                        statement,
+                        true,
+                        elapsed as i64,
+                        counts.rows as i64,
+                        None,
+                    )
+                    .await;
+            }
+            Err(e) => {
+                let _ = self
+                    .repo
+                    .add_history(conn_id, user_id, statement, false, elapsed as i64, 0, Some(&e.to_string()))
+                    .await;
+            }
+        }
+        result.map(|counts| (counts, elapsed))
+    }
+
     /// Cancel an in-flight query (issued via [`Self::run`] with the same
     /// `query_id`) using engine-native cancellation. The cancel runs on a FRESH
     /// connection re-resolved to the query's endpoint — you can't `KILL` on the
