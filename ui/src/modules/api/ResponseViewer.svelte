@@ -12,12 +12,27 @@
   import { toasts } from '../../lib/toast.svelte';
   import { apiStream } from '../../lib/stores/apiStream.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
 
   const resp = $derived(apiClient.lastResponse);
 
+  // ── Pretty-print: memoized + size-gated ────────────────────────────────────
+  // Bodies over 256 KB are shown raw (re-parsing would block the main thread).
+  const PRETTY_SIZE_LIMIT = 256 * 1024;
+  const STREAM_RING_MAX = 500;
+
   // JSONPath-ish filter ($.a.b[0].c) applied to JSON bodies.
   let jsonFilter = $state('');
+  // Debounced version applied to $derived so the parser doesn't run every keystroke.
+  let jsonFilterDebounced = $state('');
+  let _filterTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const v = jsonFilter;
+    clearTimeout(_filterTimer);
+    _filterTimer = setTimeout(() => { jsonFilterDebounced = v; }, 150);
+  });
+
   const isJsonResp = $derived(!!resp && isJson(resp.content_type, resp.body));
   function respExt(ct: string | null, body: string): string {
     const c = (ct ?? '').toLowerCase();
@@ -44,19 +59,54 @@
     }
     return cur;
   }
+
+  // Memoize the parsed JSON object so JSONPath queries don't re-parse each time.
+  // Key is the body string; cleared when the response changes.
+  let _parsedCache: { body: string; parsed: unknown } | null = null;
+  function getCachedParsed(body: string): unknown {
+    if (_parsedCache?.body !== body) {
+      try { _parsedCache = { body, parsed: JSON.parse(body) }; }
+      catch { _parsedCache = null; }
+    }
+    return _parsedCache?.parsed;
+  }
+
+  const prettyBody = $derived.by(() => {
+    if (!resp) return '';
+    if (resp.body.length > PRETTY_SIZE_LIMIT) return resp.body; // size-gate
+    if (isJson(resp.content_type, resp.body)) {
+      const parsed = getCachedParsed(resp.body);
+      if (parsed !== undefined) {
+        try { return JSON.stringify(parsed, null, 2); } catch { /* fall through */ }
+      }
+    }
+    return resp.body;
+  });
+
   const displayBody = $derived.by(() => {
     if (!resp) return '';
     const base = bodyView === 'pretty' ? prettyBody : resp.body;
-    if (jsonFilter.trim() && isJsonResp) {
+    const f = jsonFilterDebounced.trim(); // use debounced value
+    if (f && isJsonResp && resp.body.length <= PRETTY_SIZE_LIMIT) {
       try {
-        const result = evalJsonPath(JSON.parse(resp.body), jsonFilter);
-        return result === undefined ? `// no match for ${jsonFilter}` : JSON.stringify(result, null, 2);
+        const parsed = getCachedParsed(resp.body);
+        const result = evalJsonPath(parsed, f);
+        return result === undefined ? `// no match for ${f}` : JSON.stringify(result, null, 2);
       } catch {
         return base;
       }
     }
     return base;
   });
+
+  // ── Capped stream ring-buffer ───────────────────────────────────────────────
+  // Cap visible stream items so the DOM never grows unbounded (T2).
+  const streamItems = $derived(
+    apiStream.items.length > STREAM_RING_MAX
+      ? apiStream.items.slice(apiStream.items.length - STREAM_RING_MAX)
+      : apiStream.items,
+  );
+
   const streamKind = $derived(apiClient.draft.kind);
   const isStream = $derived(streamKind === 'sse' || streamKind === 'websocket');
   let wsSend = $state('');
@@ -149,18 +199,6 @@
     return (t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'));
   }
 
-  const prettyBody = $derived.by(() => {
-    if (!resp) return '';
-    if (isJson(resp.content_type, resp.body)) {
-      try {
-        return JSON.stringify(JSON.parse(resp.body), null, 2);
-      } catch {
-        return resp.body;
-      }
-    }
-    return resp.body;
-  });
-
   function fmtSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -181,16 +219,21 @@
         {#if apiStream.items.length === 0}
           <div class="empty-mini">{streamKind === 'sse' ? 'Connect to start receiving events.' : 'Connect, then send messages.'}</div>
         {:else}
-          {#each apiStream.items as it, i (i)}
-            <div class="stream-item {it.kind} {it.dir ?? ''}">
-              <span class="si-tag">
-                {#if it.kind === 'event'}{it.event || 'event'}
-                {:else if it.kind === 'message'}{it.dir === 'out' ? '▲ sent' : '▼ recv'}
-                {:else}{it.kind}{/if}
-              </span>
-              <span class="si-data">{it.data}</span>
-            </div>
-          {/each}
+          {#if apiStream.items.length > STREAM_RING_MAX}
+            <div class="ring-note">Showing last {STREAM_RING_MAX} of {apiStream.items.length} messages.</div>
+          {/if}
+          <VirtualList items={streamItems} estimateHeight={28} class="stream-vlist">
+            {#snippet row(it)}
+              <div class="stream-item {it.kind} {it.dir ?? ''}">
+                <span class="si-tag">
+                  {#if it.kind === 'event'}{it.event || 'event'}
+                  {:else if it.kind === 'message'}{it.dir === 'out' ? '▲ sent' : '▼ recv'}
+                  {:else}{it.kind}{/if}
+                </span>
+                <span class="si-data">{it.data}</span>
+              </div>
+            {/snippet}
+          </VirtualList>
         {/if}
       </div>
       {#if streamKind === 'websocket'}
@@ -675,11 +718,23 @@
   .stream-log {
     flex: 1;
     min-height: 0;
-    overflow: auto;
+    overflow: hidden; /* VirtualList owns the scroll */
     display: flex;
     flex-direction: column;
     gap: 3px;
     padding: 4px 0;
+  }
+  :global(.stream-vlist) {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+  }
+  .ring-note {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    font-style: italic;
+    padding: 2px 8px 4px;
+    flex-shrink: 0;
   }
   .stream-item {
     display: flex;

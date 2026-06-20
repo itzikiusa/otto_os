@@ -4,6 +4,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
   import type { ApiHistoryEntry } from '../../lib/api/types';
 
   function statusClass(status: number | null): string {
@@ -47,8 +48,8 @@
   {#if apiClient.history.length === 0}
     <div class="empty-mini">No requests yet.</div>
   {:else}
-    <div class="hist-list">
-      {#each apiClient.history as h (h.id)}
+    <VirtualList items={apiClient.history} estimateHeight={28} class="hist-vlist">
+      {#snippet row(h: ApiHistoryEntry)}
         <button class="hist-row" onclick={() => reload(h)} title={h.url}>
           <span class="rm rm-{h.method.toLowerCase()}">{h.method}</span>
           <span class="hurl mono ellipsis grow">{h.url}</span>
@@ -57,8 +58,8 @@
           {/if}
           <span class="htime">{fmtTime(h.executed_at)}</span>
         </button>
-      {/each}
-    </div>
+      {/snippet}
+    </VirtualList>
   {/if}
 </div>
 
@@ -70,6 +71,7 @@
     min-width: 0;
     max-width: 100%;
     overflow: hidden;
+    flex: 1;
   }
   .hist-head {
     display: flex;
@@ -84,10 +86,11 @@
     letter-spacing: 0.05em;
     color: var(--text-dim);
   }
-  .hist-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
+  /* VirtualList container replaces .hist-list direct flex; keep for fallback reference */
+  :global(.hist-vlist) {
+    flex: 1;
+    min-height: 0;
+    max-height: 100%;
   }
   .hist-row {
     display: flex;

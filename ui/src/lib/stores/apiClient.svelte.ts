@@ -2,7 +2,7 @@
 // environments, history, plus a live "draft" request the builder edits and
 // executes through the daemon. Reads `ws.currentId` only (never mutates it).
 
-import { api } from '../api/client';
+import { api, isAbortError } from '../api/client';
 import type {
   ApiAuth,
   ApiAutomation,
@@ -169,6 +169,13 @@ class ApiClientStore {
   /** In-flight send. */
   sending = $state(false);
   loading = $state(false);
+  /** AbortController for the currently in-flight execute() call; null when idle. */
+  private _abortCtrl: AbortController | null = null;
+  /** Cancel the in-flight HTTP request (if any). No-op when idle. */
+  cancelExecute(): void {
+    this._abortCtrl?.abort();
+    this._abortCtrl = null;
+  }
 
   /** Active environment (is_active), or null. */
   activeEnv: ApiEnvironment | null = $derived(
@@ -561,9 +568,11 @@ class ApiClientStore {
       verify_ssl: s?.verify_ssl ?? true,
       vars: Object.keys(this.runtimeVars).length ? this.runtimeVars : undefined,
     };
+    this._abortCtrl = new AbortController();
+    const { signal } = this._abortCtrl;
     this.sending = true;
     try {
-      const resp = await api.post<ApiResponse>(`${base}/execute`, body);
+      const resp = await api.post<ApiResponse>(`${base}/execute`, body, signal);
       this.lastResponse = resp;
       void this.loadHistory();
 
@@ -585,10 +594,11 @@ class ApiClientStore {
       return resp;
     } catch (e) {
       this.scriptLogs = logs;
-      toasts.error('Request failed', errMsg(e));
+      if (!isAbortError(e)) toasts.error('Request failed', errMsg(e));
       return null;
     } finally {
       this.sending = false;
+      this._abortCtrl = null;
     }
   }
 

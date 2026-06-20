@@ -531,6 +531,38 @@
       send();
     }
   }
+
+  // ── Global keyboard shortcuts ─────────────────────────────────────────────
+  // ⌘↵ (or Ctrl+↵ on Windows/Linux) → send/connect
+  // ⌘S                              → save
+  // ⌘T                              → open new tab
+  function onDocKeydown(e: KeyboardEvent): void {
+    if (!e.metaKey && !e.ctrlKey) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      send();
+    } else if (e.key === 's') {
+      e.preventDefault();
+      void save();
+    } else if (e.key === 't') {
+      e.preventDefault();
+      apiClient.openTab();
+    }
+  }
+
+  /** Stop an in-flight HTTP request or streaming connection. */
+  function stopRequest(): void {
+    if (draft.kind === 'http') {
+      apiClient.cancelExecute();
+    } else {
+      apiStream.disconnect();
+    }
+  }
+  const canStop = $derived(
+    (draft.kind === 'http' && apiClient.sending) ||
+    ((draft.kind === 'sse' || draft.kind === 'websocket') && apiStream.active),
+  );
+
   /** Paste a curl command straight into the address bar → import it. */
   function onUrlPaste(e: ClipboardEvent): void {
     const text = e.clipboardData?.getData('text') ?? '';
@@ -625,6 +657,8 @@
   }
 </script>
 
+<svelte:window onkeydown={onDocKeydown} />
+
 <div class="builder" class:compact>
   <!-- request-type selector (HTTP / SSE / WebSocket / gRPC) -->
   <div class="kindbar">
@@ -675,13 +709,18 @@
         aria-label="Request URL"
       />
     </div>
-    <button class="btn primary send" class:danger={isStreaming && apiStream.active} onclick={send} disabled={sendBusy}>
+    <button class="btn primary send" class:danger={isStreaming && apiStream.active} onclick={send} disabled={sendBusy} title="Send request (⌘↵)">
       {#if sendBusy}
         <Icon name="refresh" size={12} />…
       {:else}
         <Icon name="send" size={12} />{sendLabel}
       {/if}
     </button>
+    {#if canStop}
+      <button class="btn ghost stop" onclick={stopRequest} title="Cancel in-flight request">
+        <Icon name="x" size={12} />Stop
+      </button>
+    {/if}
   </div>
 
   <!-- toolbar: curl in/out + save -->
@@ -705,7 +744,7 @@
     {#if apiClient.activeEnv}
       <span class="chip accent" title="Active environment">{apiClient.activeEnv.name}</span>
     {/if}
-    <button class="btn small" onclick={save}>
+    <button class="btn small" onclick={save} title="Save request (⌘S)">
       <Icon name="check" size={11} />Save
     </button>
   </div>
@@ -1289,6 +1328,15 @@
   .send {
     height: 30px;
     flex-shrink: 0;
+  }
+  .stop {
+    height: 30px;
+    flex-shrink: 0;
+    color: var(--status-exited);
+    border-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
+  }
+  .stop:hover {
+    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   .toolbar {
     display: flex;
