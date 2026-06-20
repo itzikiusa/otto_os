@@ -15,7 +15,7 @@
   }
   let { cluster }: Props = $props();
 
-  const PAGE_SIZE = 20;
+  const PAGE_SIZE = 50;
   const STATS_CONCURRENCY = 4;
 
   let topics = $state<TopicSummary[]>([]);
