@@ -8,6 +8,7 @@ pub mod decode;
 pub mod http;
 pub mod kafka;
 pub mod metrics;
+pub mod proxy;
 pub mod schema_registry;
 pub mod service;
 pub mod types;
