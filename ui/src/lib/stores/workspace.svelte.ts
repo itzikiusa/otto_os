@@ -206,8 +206,30 @@ class WorkspaceStore {
     try {
       this.sessions = await api.get<Session[]>(`/workspaces/${this.currentId}/sessions`);
       for (const s of this.sessions) this.statusMap[s.id] = s.status;
+      this.reconcileTabs();
     } finally {
       this.sessionsLoading = false;
+    }
+  }
+
+  /** Drop tabs/panes that reference a session no longer present (a "phantom"
+   *  tab left behind when a session ends or is reaped server-side without a
+   *  `session_removed` event reaching this client). Keeps the DB-Explorer
+   *  sentinel pane, which has no session row. */
+  private reconcileTabs(): void {
+    const exists = (t: Id): boolean =>
+      t === DB_PANE_ID || this.sessions.some((s) => s.id === t);
+    const tabs = this.openTabs.filter(exists);
+    if (tabs.length !== this.openTabs.length) {
+      this.openTabs = tabs;
+      this.persistTabs();
+    }
+    const panes = this.panes.filter(exists);
+    if (panes.length !== this.panes.length) {
+      this.panes = panes.length > 0 ? panes : tabs.length > 0 ? [tabs[0]] : [];
+      if (this.focusedPane >= this.panes.length) {
+        this.focusedPane = Math.max(0, this.panes.length - 1);
+      }
     }
   }
 
@@ -226,6 +248,13 @@ class WorkspaceStore {
    * {@link navigateToSession} instead.
    */
   openSession(id: Id): void {
+    // Don't open a tab for a session that's known not to exist — e.g. a stale id
+    // left in the `#/agents/<id>` route hash after the session was reaped (the
+    // cause of an undismissable "phantom" tab). Allowed while sessions are still
+    // loading; reconcileTabs() prunes any that turn out invalid once loaded.
+    if (id !== DB_PANE_ID && !this.sessionsLoading && !this.sessions.some((s) => s.id === id)) {
+      return;
+    }
     // Opening a session counts as attending to it — drop any "needs you" flag.
     this.clearNeedsYou(id);
     if (!this.openTabs.includes(id)) {
