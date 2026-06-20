@@ -15,10 +15,12 @@
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
+  import { viewport } from '../stores/viewport.svelte';
   import { ws } from '../stores/workspace.svelte';
   import { openFile } from '../stores/openfile.svelte';
   import { openExternal, isExternalUrl } from '../external';
   import { keyContext } from '../keys';
+  import TermKeysBar from './TermKeysBar.svelte';
 
   interface Props {
     sessionId: string;
@@ -71,6 +73,22 @@
     }, delay);
   }
 
+  // ── Phone-only touch/keyboard state (Tasks 5.1–5.3) ────────────────────────
+  // All of these are only read when viewport.isPhone; desktop code paths are
+  // entirely unaffected — no gating changes are needed in the existing handlers.
+
+  /** Whether the on-screen key accessory bar is shown on phone. */
+  let keybarVisible = $state(false);
+
+  // Touch-scroll state (Task 5.3): track single-finger pointer drags and convert
+  // them to xterm line-scroll deltas. Only active on phone; desktop mouse-wheel
+  // scroll uses xterm's own built-in handler (untouched here).
+  let touchScrolling = $state(false);
+  let touchScrollStartY = 0;
+  let touchScrollAccum = 0;     // accumulated px before rounding to lines
+  /** Pixels of dragged distance per terminal line (approximate; refined at runtime). */
+  const PX_PER_LINE = 20;
+
   // find bar
   let findOpen = $state(false);
   let findQuery = $state('');
@@ -78,6 +96,51 @@
 
   function sendJson(obj: unknown): void {
     if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(obj));
+  }
+
+  // ── sendSeqToTerm (Task 5.2) ─────────────────────────────────────────────
+  // Shared send path for TermKeysBar — identical to what term.onData uses.
+  // readOnly is enforced here so viewer shares can't type via the accessory bar.
+  function sendSeqToTerm(seq: string): void {
+    if (readOnly) return;
+    sendJson({ type: 'input', data: textToBase64(seq) });
+  }
+
+  // ── Touch scroll handlers (Task 5.3) ─────────────────────────────────────
+  // These are only wired to the container on phone (see the template below).
+  // Desktop mouse-wheel scroll goes through xterm's own built-in — untouched.
+
+  function onTouchPointerDown(e: PointerEvent): void {
+    if (!viewport.isPhone || e.pointerType === 'mouse') return;
+    // Only handle single-finger primary pointer
+    if (!e.isPrimary) return;
+    touchScrolling = true;
+    touchScrollStartY = e.clientY;
+    touchScrollAccum = 0;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    // Prevent xterm from receiving this as a text-selection drag
+    e.preventDefault();
+  }
+
+  function onTouchPointerMove(e: PointerEvent): void {
+    if (!touchScrolling || !viewport.isPhone) return;
+    if (!e.isPrimary) return;
+    const dy = touchScrollStartY - e.clientY; // positive = scrolled up (toward older output)
+    touchScrollAccum += dy;
+    touchScrollStartY = e.clientY;
+
+    // Convert accumulated pixels to whole lines and flush
+    const lines = Math.trunc(touchScrollAccum / PX_PER_LINE);
+    if (lines !== 0) {
+      touchScrollAccum -= lines * PX_PER_LINE;
+      term?.scrollLines(lines);
+    }
+    e.preventDefault();
+  }
+
+  function onTouchPointerUp(e: PointerEvent): void {
+    if (!e.isPrimary) return;
+    touchScrolling = false;
   }
 
   function connect(): void {
@@ -555,58 +618,139 @@
   }
 </script>
 
-<div class="term-wrap" class:force-dark-wrap={forceDark}>
-  {#if findOpen}
-    <div class="find-bar">
-      <input
-        bind:this={findInput}
-        bind:value={findQuery}
-        placeholder="Find in terminal"
-        onkeydown={(e) => {
-          if (e.key === 'Enter') findNext(e.shiftKey);
-          if (e.key === 'Escape') closeFind();
-        }}
-      />
-      <button class="icon-btn" onclick={() => findNext(true)} title="Previous (⇧↵)">↑</button>
-      <button class="icon-btn" onclick={() => findNext(false)} title="Next (↵)">↓</button>
-      <button class="icon-btn" onclick={closeFind} title="Close (esc)">✕</button>
-    </div>
-  {/if}
+<!-- term-outer wraps the terminal canvas + the phone-only key bar below it.
+     On desktop this is just a transparent flex pass-through; on phone it stacks
+     the key bar underneath the canvas so the bar doesn't overlap the scrollback. -->
+<div class="term-outer" class:phone={viewport.isPhone}>
+  <div class="term-wrap" class:force-dark-wrap={forceDark}>
+    {#if findOpen}
+      <div class="find-bar">
+        <input
+          bind:this={findInput}
+          bind:value={findQuery}
+          placeholder="Find in terminal"
+          onkeydown={(e) => {
+            if (e.key === 'Enter') findNext(e.shiftKey);
+            if (e.key === 'Escape') closeFind();
+          }}
+        />
+        <button class="icon-btn" onclick={() => findNext(true)} title="Previous (⇧↵)">↑</button>
+        <button class="icon-btn" onclick={() => findNext(false)} title="Next (↵)">↓</button>
+        <button class="icon-btn" onclick={closeFind} title="Close (esc)">✕</button>
+      </div>
+    {/if}
 
-  <div
-    class="term-host"
-    class:force-dark={forceDark}
-    class:rtl-bidi={ui.rtlBidi}
-    bind:this={container}
-  ></div>
+    <!-- Task 5.3: touch-scroll — pointer events drive term.scrollLines on phone.
+         onpointerdown/move/up are no-ops on desktop (we check viewport.isPhone
+         + e.pointerType inside the handlers). Desktop mouse-wheel uses xterm's
+         own built-in scroll handler which is completely untouched. -->
+    <!-- role="none" because this is a pure rendering surface managed by xterm.js;
+         ARIA structure is inside the xterm canvas layer, not this host div. -->
+    <div
+      class="term-host"
+      class:force-dark={forceDark}
+      class:rtl-bidi={ui.rtlBidi}
+      bind:this={container}
+      role="none"
+      onpointerdown={onTouchPointerDown}
+      onpointermove={onTouchPointerMove}
+      onpointerup={onTouchPointerUp}
+      onpointercancel={onTouchPointerUp}
+    ></div>
 
-  {#if exitCode !== null}
-    <div class="term-overlay">
-      <span class="badge {exitCode === 0 ? 'ok' : 'bad'}">exited ({exitCode})</span>
-      {#if resumable && !readOnly}
-        <button class="btn" onclick={() => { exitCode = null; connect(); }}>Resume</button>
-      {/if}
-    </div>
-  {:else if reconnecting}
-    <div class="term-overlay dim">
-      <span class="badge">reconnecting…</span>
-      <button class="btn" onclick={() => { reconnectAttempts = 0; connect(); }}>Now</button>
-    </div>
-  {:else if disconnected}
-    <div class="term-overlay">
-      <span class="badge bad">disconnected</span>
-      <button class="btn" onclick={connect}>Reconnect</button>
-    </div>
-  {:else if !connected}
-    <div class="term-overlay dim"><span class="badge">connecting…</span></div>
-  {/if}
+    {#if exitCode !== null}
+      <div class="term-overlay">
+        <span class="badge {exitCode === 0 ? 'ok' : 'bad'}">exited ({exitCode})</span>
+        {#if resumable && !readOnly}
+          <button class="btn" onclick={() => { exitCode = null; connect(); }}>Resume</button>
+        {/if}
+      </div>
+    {:else if reconnecting}
+      <div class="term-overlay dim">
+        <span class="badge">reconnecting…</span>
+        <button class="btn" onclick={() => { reconnectAttempts = 0; connect(); }}>Now</button>
+      </div>
+    {:else if disconnected}
+      <div class="term-overlay">
+        <span class="badge bad">disconnected</span>
+        <button class="btn" onclick={connect}>Reconnect</button>
+      </div>
+    {:else if !connected}
+      <div class="term-overlay dim"><span class="badge">connecting…</span></div>
+    {/if}
 
-  {#if readOnly}
-    <div class="ro-chip" title="Viewer role — input disabled">read-only</div>
+    {#if readOnly}
+      <div class="ro-chip" title="Viewer role — input disabled">read-only</div>
+    {/if}
+
+    <!-- Task 5.1 + 5.3: phone-only floating control strip (keyboard + zoom).
+         Positioned in the top-right corner (below the overlay badges).
+         Tap-to-focus: the ⌨ button focuses term.textarea to raise the soft
+         keyboard on iOS/Android (iOS requires a real user-gesture → onclick).
+         Zoom: calls termZoomIn/Out (fontSize-based, same as keyboard shortcut). -->
+    {#if viewport.isPhone}
+      <div class="phone-controls">
+        <!-- Task 5.3: on-screen zoom buttons (fontSize-based — no CSS zoom) -->
+        <button
+          class="phone-btn"
+          onclick={() => ui.termZoomOut()}
+          aria-label="Zoom out terminal"
+          title="Zoom out"
+        >−</button>
+        <button
+          class="phone-btn"
+          onclick={() => ui.termZoomIn()}
+          aria-label="Zoom in terminal"
+          title="Zoom in"
+        >+</button>
+        <!-- Task 5.1: keyboard toggle — focuses term.textarea (real user gesture) -->
+        <button
+          class="phone-btn"
+          class:active={keybarVisible}
+          onclick={() => {
+            keybarVisible = !keybarVisible;
+            // iOS/Android: focus MUST happen inside the onclick to count as a
+            // user gesture; the soft keyboard only appears for that gesture.
+            if (keybarVisible) {
+              term?.focus();
+            }
+          }}
+          aria-label="Toggle keyboard"
+          title="Show/hide keyboard"
+        >⌨</button>
+      </div>
+    {/if}
+  </div>
+
+  <!-- Task 5.2: key accessory bar — only mounted on phone, only shown when the
+       keyboard is toggled on. Rendered below the terminal canvas (not overlaid)
+       so it never covers the scrollback. The sendSeq prop wires directly to
+       sendSeqToTerm which uses the same sendJson path as term.onData. -->
+  {#if viewport.isPhone && keybarVisible}
+    <TermKeysBar sendSeq={sendSeqToTerm} {readOnly} />
   {/if}
 </div>
 
 <style>
+  /* ── Task 5.1/5.2/5.3: phone outer wrapper ───────────────────────────────
+     On phone the outer div is a vertical flex column: the canvas fills the
+     available height (flex:1) and TermKeysBar stacks below it with its natural
+     height. On desktop this wrapper is transparent — just passes 100%/100%
+     through to .term-wrap exactly as before. */
+  .term-outer {
+    width: 100%;
+    height: 100%;
+    display: contents; /* desktop: no layout impact — children see the parent's box */
+  }
+  .term-outer.phone {
+    display: flex;
+    flex-direction: column;
+  }
+  .term-outer.phone .term-wrap {
+    flex: 1;
+    min-height: 0; /* allow flex child to shrink below its content height */
+  }
+
   .term-wrap {
     position: relative;
     width: 100%;
@@ -722,5 +866,48 @@
     padding: 2px 7px;
     border-radius: 999px;
     opacity: 0.85;
+  }
+
+  /* ── Task 5.1 + 5.3: phone-only floating controls (keyboard toggle + zoom) ──
+     Positioned bottom-left so it doesn't collide with the overlay badges
+     (which sit top-right). Only rendered when viewport.isPhone. */
+  .phone-controls {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    z-index: 7;
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    align-items: center;
+  }
+  .phone-btn {
+    /* ≥44×44px tap target (WCAG 2.5.5 / iOS HIG) */
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-s, 8px);
+    border: 1px solid var(--border, #444);
+    background: color-mix(in srgb, var(--surface, #28282e) 85%, transparent);
+    color: var(--text, #e8e8e0);
+    font-size: 18px;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    transition: background 0.1s;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .phone-btn:active {
+    background: var(--accent, #0066cc);
+    color: #fff;
+  }
+  .phone-btn.active {
+    background: var(--accent, #0066cc);
+    color: #fff;
+    border-color: var(--accent, #0066cc);
   }
 </style>
