@@ -25,7 +25,7 @@ jobs:
     name: Rust (fmt · clippy · test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -35,6 +35,13 @@ jobs:
       # Caches ~/.cargo registry/git + ./target, keyed on Cargo.lock.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      # librdkafka (rdkafka-sys, for the Message Brokers viewer) builds with
+      # OAUTHBEARER/OIDC support, which links libcurl. Ubuntu runners ship the
+      # libcurl runtime but NOT its dev headers, so the cmake build aborts on
+      # <curl/curl.h>. Install the headers (macOS already has them in the SDK).
+      - name: Install librdkafka build deps
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
 
       # Advisory-only for now: the existing tree predates rustfmt-in-CI and is not
       # yet fully formatted (a one-time repo-wide `cargo fmt --all` belongs in its
@@ -58,12 +65,12 @@ jobs:
       run:
         working-directory: ui
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -85,7 +92,7 @@ jobs:
     # not block a PR. Promote to blocking once the tree is triaged.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -94,4 +101,8 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: cargo audit
-        run: cargo audit
+        # RUSTSEC-2023-0071 (rsa "Marvin Attack" timing sidechannel) has NO fixed
+        # upgrade available and reaches us only transitively via sqlx-mysql's
+        # caching_sha2_password auth (not used at runtime by our SQLite-only
+        # state). Ignore until sqlx-mysql swaps its RSA backend.
+        run: cargo audit --ignore RUSTSEC-2023-0071
