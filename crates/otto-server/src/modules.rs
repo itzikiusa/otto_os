@@ -1177,6 +1177,12 @@ async fn run_review(
             {
                 tracing::error!(review = %review_id, "set status done: {e}");
             }
+            let _ = ctx.events.send(Event::ReviewChanged {
+                workspace_id: workspace.id.clone(),
+                session_id: None,
+                review_id: review_id.clone(),
+                status: ReviewStatus::Done.as_str().to_string(),
+            });
         }
         Err(e) => {
             tracing::warn!(review = %review_id, "review error: {e}");
@@ -1185,6 +1191,12 @@ async fn run_review(
                 .reviews_store
                 .set_status(&review_id, ReviewStatus::Error, Some(&msg))
                 .await;
+            let _ = ctx.events.send(Event::ReviewChanged {
+                workspace_id: workspace.id.clone(),
+                session_id: None,
+                review_id: review_id.clone(),
+                status: ReviewStatus::Error.as_str().to_string(),
+            });
         }
     }
 }
@@ -1945,6 +1957,7 @@ async fn start_review(
     let review_id = review.id.clone();
     let ctx_bg = ctx.clone();
     let repo_path = repo.path.clone();
+    let ws_id = repo.workspace_id.clone();
     let issue_account_id = req.issue_account_id;
     let issue_key = req.issue_key;
     let user_context = req.context;
@@ -1952,6 +1965,13 @@ async fn start_review(
     // enforced against the user who started the review, not whoever happens to
     // own the repo's bound accounts.
     let review_user = user.clone();
+    // Notify subscribers that a review is now running.
+    let _ = ctx.events.send(Event::ReviewChanged {
+        workspace_id: ws_id.clone(),
+        session_id: None,
+        review_id: review_id.clone(),
+        status: ReviewStatus::Running.as_str().to_string(),
+    });
     tokio::spawn(async move {
         let result = run_pr_review_inner(
             &ctx_bg,
@@ -1974,6 +1994,12 @@ async fn start_review(
                 {
                     tracing::error!(review = %review_id, "set status done: {e}");
                 }
+                let _ = ctx_bg.events.send(Event::ReviewChanged {
+                    workspace_id: ws_id.clone(),
+                    session_id: None,
+                    review_id: review_id.clone(),
+                    status: ReviewStatus::Done.as_str().to_string(),
+                });
             }
             Err(e) => {
                 tracing::warn!(review = %review_id, "PR review error: {e}");
@@ -1982,6 +2008,12 @@ async fn start_review(
                     .reviews_store
                     .set_status(&review_id, ReviewStatus::Error, Some(&msg))
                     .await;
+                let _ = ctx_bg.events.send(Event::ReviewChanged {
+                    workspace_id: ws_id.clone(),
+                    session_id: None,
+                    review_id: review_id.clone(),
+                    status: ReviewStatus::Error.as_str().to_string(),
+                });
             }
         }
         drop(repo_path); // keep bound
@@ -2147,12 +2179,26 @@ async fn start_local_review(
         tracing::info!(review = %review_id, "{note}");
         let ctx_note = ctx.clone();
         let rid = review_id.clone();
+        let ws_id_local = repo.workspace_id.clone();
+        // Notify that the review started (running) and will complete immediately.
+        let _ = ctx.events.send(Event::ReviewChanged {
+            workspace_id: ws_id_local.clone(),
+            session_id: None,
+            review_id: rid.clone(),
+            status: ReviewStatus::Running.as_str().to_string(),
+        });
         tokio::spawn(async move {
             // Seed an empty agent list and mark done immediately.
             let _ = ctx_note
                 .reviews_store
                 .set_status(&rid, ReviewStatus::Done, None)
                 .await;
+            let _ = ctx_note.events.send(Event::ReviewChanged {
+                workspace_id: ws_id_local,
+                session_id: None,
+                review_id: rid.clone(),
+                status: ReviewStatus::Done.as_str().to_string(),
+            });
         });
     } else {
         // Spawn the review core in the background.
@@ -2161,6 +2207,13 @@ async fn start_local_review(
             .get(&repo.workspace_id)
             .await
             .map_err(crate::error::ApiError)?;
+        // Notify that the review runner is starting; run_review emits done/error.
+        let _ = ctx.events.send(Event::ReviewChanged {
+            workspace_id: workspace.id.clone(),
+            session_id: None,
+            review_id: review_id.clone(),
+            status: ReviewStatus::Running.as_str().to_string(),
+        });
         let ctx_bg = ctx.clone();
         let repo_path = repo.path.clone();
         tokio::spawn(async move {
