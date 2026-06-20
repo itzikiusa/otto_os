@@ -373,14 +373,17 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Product, if get { View } else { Edit });
     }
 
-    // ---- Message Brokers (Kafka viewer: clusters / topics / groups / schema) --
+    // ---- Message Brokers (Kafka viewer: clusters / topics / groups / schema / --
+    // sidebar cluster-sections) --
     // The brokers layer has no dedicated Feature key; it is data-infrastructure
     // browsing, a sibling of the DB Explorer (connect to a system, inspect/peek/
     // produce). We gate it on the *Database* feature: read=View, mutate=Edit.
     // Connectivity test and message consume/peek are non-mutating reads (View),
-    // mirroring the `/db/test` precedent above. Root bypasses.
-    if p.starts_with("/brokers/clusters")
-        || p.starts_with("/workspaces/{wid}/brokers/clusters")
+    // mirroring the `/db/test` precedent above. The `/brokers/cluster` prefix
+    // covers both `/brokers/clusters*` and `/brokers/cluster-sections*`. Root
+    // bypasses.
+    if p.starts_with("/brokers/cluster")
+        || p.starts_with("/workspaces/{wid}/brokers/cluster")
     {
         let read = get
             || p.ends_with("/test") // connectivity probe — non-mutating
