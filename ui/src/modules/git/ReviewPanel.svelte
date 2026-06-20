@@ -56,6 +56,13 @@
   let starting = $state(false);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let pollCount = $state(0);
+  let pollPaused = $state(false);
+
+  function pollDelay(count: number): number {
+    if (count < 5) return 2000;
+    if (count < 15) return 5000;
+    return 10000;
+  }
   // Which older run indices are expanded (history[1+])
   let historyExpanded: Record<number, boolean> = $state({});
   // A child <ReviewAgents> retried one agent: adopt the refreshed review and
@@ -159,8 +166,10 @@
 
   $effect(() => {
     void load(repoId, prNumber);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       if (pollTimer !== null) clearTimeout(pollTimer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   });
 
@@ -229,9 +238,20 @@
     }
   }
 
-  function schedulePoll(delay = 2000): void {
+  function schedulePoll(delay?: number): void {
     if (pollTimer !== null) clearTimeout(pollTimer);
-    pollTimer = setTimeout(() => void poll(), delay);
+    if (pollPaused) return;
+    pollTimer = setTimeout(() => void poll(), delay ?? pollDelay(pollCount));
+  }
+
+  function handleVisibilityChange(): void {
+    if (document.hidden) {
+      pollPaused = true;
+      if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
+    } else {
+      pollPaused = false;
+      if (review?.status === 'running') schedulePoll(0);
+    }
   }
 
   async function poll(): Promise<void> {
@@ -251,9 +271,7 @@
         (a) => a.status === 'pending' || a.status === 'running' || a.status === 'waiting',
       );
       if (r.status === 'running' || anyActive) {
-        // Slow down past the cap rather than giving up, so a long live review
-        // still updates without a refresh.
-        schedulePoll(pollCount > MAX_POLLS ? 5000 : 2000);
+        schedulePoll();
       } else {
         pollCount = 0;
         if (r.status === 'done' && r.comments.length > 0) {
@@ -563,6 +581,11 @@
     return cs.filter((c: ReviewComment) => c.state === 'draft').length;
   });
   const totalCount = $derived.by(() => review?.comments?.length ?? 0);
+  const blockerCount = $derived.by(() => review?.blocker_count ?? 0);
+  const mergeReady = $derived.by(() => {
+    const r = review;
+    return r !== null && r.status === 'done' && blockerCount === 0;
+  });
 
   /** Format an ISO timestamp as "X ago" */
   function timeAgo(iso: string): string {
@@ -696,6 +719,20 @@
         bind:value={reviewContext}
       ></textarea>
     </div>
+
+    <!-- Merge-readiness banner (item 13) -->
+    {#if review.blocker_count != null || review.verdict != null}
+      <div class="rp-merge-gate" class:rp-merge-ok={mergeReady} class:rp-merge-blocked={!mergeReady}>
+        {#if mergeReady}
+          <Icon name="check" size={13} /> Merge-ready — no bug-severity blockers
+        {:else}
+          <Icon name="zap" size={13} /> {blockerCount} blocker{blockerCount === 1 ? '' : 's'} before merge
+        {/if}
+        {#if review.verdict}
+          <span class="rp-verdict">Verdict: {review.verdict}</span>
+        {/if}
+      </div>
+    {/if}
 
     <!-- Per-agent breakdown: open each agent's (archived) session + its own
          findings. Shared with the local review; excludes the summarizer. -->
@@ -968,6 +1005,33 @@
 <style>
   .rp {
     padding: 4px 0 32px;
+  }
+
+  .rp-merge-gate {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    margin: 0 0 8px;
+    border-radius: var(--radius-s, 4px);
+    font-size: 11.5px;
+    font-weight: 500;
+  }
+  .rp-merge-ok {
+    background: color-mix(in srgb, #22c55e 12%, transparent);
+    border: 1px solid color-mix(in srgb, #22c55e 40%, var(--border));
+    color: #15803d;
+  }
+  .rp-merge-blocked {
+    background: color-mix(in srgb, #ef4444 10%, transparent);
+    border: 1px solid color-mix(in srgb, #ef4444 35%, var(--border));
+    color: #b91c1c;
+  }
+  .rp-verdict {
+    margin-left: auto;
+    font-weight: 400;
+    font-size: 11px;
+    opacity: 0.8;
   }
 
   /* Pre-check banner: missing / outdated review skills */

@@ -48,6 +48,11 @@ const MAX_REVIEW_ATTEMPTS: u32 = 3;
 /// Backoff before each review-agent retry.
 const REVIEW_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 
+/// Effective max attempts: config override or the compiled-in default.
+pub fn effective_max_attempts(max_attempts: Option<u32>) -> u32 {
+    max_attempts.unwrap_or(MAX_REVIEW_ATTEMPTS)
+}
+
 /// Absolute temp path an agent writes its findings JSON to (unique per run).
 pub fn findings_path(review_id: &str, agent_index: usize) -> PathBuf {
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
@@ -262,12 +267,11 @@ fn review_error_note(reason: Option<FailReason>) -> String {
     .to_string()
 }
 
-/// Run a review agent with bounded auto-recovery: up to `MAX_REVIEW_ATTEMPTS`
-/// attempts, killing the prior stuck/failed session and backing off between
-/// tries. Mirrors the product analysis recovery wrapper. Returns the first
-/// successful result, or the last failure. (PR review agents are autonomous like
-/// analysis agents — unlike interactive chat sessions, which must NOT be
-/// auto-retried.)
+/// Run a review agent with bounded auto-recovery: up to `max_attempts`
+/// (defaults to `MAX_REVIEW_ATTEMPTS`) total attempts, killing the prior
+/// stuck/failed session and backing off between tries. Returns the first
+/// successful result, or the last failure. (PR review agents are autonomous
+/// — unlike interactive chat sessions, which must NOT be auto-retried.)
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_session_with_recovery(
     manager: &Arc<SessionManager>,
@@ -281,11 +285,13 @@ pub async fn run_agent_session_with_recovery(
     agent_index: usize,
     base_prompt: &str,
     timeout: Duration,
+    max_attempts: Option<u32>,
 ) -> AgentRunResult {
+    let attempts = effective_max_attempts(max_attempts);
     // Shared retry loop (kills the prior session + backs off between attempts).
     let outcome = run_with_recovery(
         manager,
-        MAX_REVIEW_ATTEMPTS,
+        attempts,
         &[REVIEW_RETRY_BACKOFF],
         None, // PR review has no manual-Stop cancel flag
         |_attempt| {

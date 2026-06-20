@@ -91,6 +91,12 @@ fn summary_from(v: &Value) -> PrSummary {
         target_branch: vstr(v, &["base", "ref"]),
         updated_at: ts(&vstr(v, &["updated_at"])),
         url: vstr(v, &["html_url"]),
+        draft: Some(v.get("draft").and_then(|d| d.as_bool()).unwrap_or(false)),
+        ci_status: None,
+        labels: v.get("labels")
+            .and_then(|l| l.as_array())
+            .map(|arr| arr.iter().filter_map(|l| l.get("name").and_then(|n| n.as_str()).map(str::to_string)).collect())
+            .unwrap_or_default(),
     }
 }
 
@@ -114,14 +120,16 @@ impl super::GitProvider for Github {
             PrState::Merged | PrState::Declined => "closed",
             PrState::All => "all",
         };
-        let v = self
+        let items = self
             .http
-            .json(
+            .paginate_json(
                 self.req(reqwest::Method::GET, &Self::prs_path(r))
-                    .query(&[("state", gh_state), ("per_page", "50")]),
+                    .query(&[("state", gh_state), ("per_page", "100")]),
+                self.http.client(),
+                ("Authorization", format!("Bearer {}", self.token)),
             )
             .await?;
-        let mut prs: Vec<PrSummary> = varr(&v, &[]).iter().map(summary_from).collect();
+        let mut prs: Vec<PrSummary> = items.iter().map(summary_from).collect();
         if matches!(state, PrState::Merged | PrState::Declined) {
             prs.retain(|p| p.state == state);
         }

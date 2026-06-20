@@ -15,6 +15,7 @@ pub fn detect(remote_url: &str) -> Option<(GitProviderKind, RemoteRef)> {
         "bitbucket.org" | "www.bitbucket.org" => GitProviderKind::Bitbucket,
         "gitlab.com" | "www.gitlab.com" => GitProviderKind::Gitlab,
         h if h.contains("gitlab") => GitProviderKind::Gitlab, // self-hosted gitlab.<corp>.com
+        h if h.contains("github") => GitProviderKind::Github, // GitHub Enterprise (github.corp.com)
         _ => return None,
     };
 
@@ -137,5 +138,21 @@ mod tests {
         assert_eq!(detect("not a url"), None);
         assert_eq!(detect("https://github.com/only-owner"), None);
         assert_eq!(detect(""), None);
+    }
+
+    #[test]
+    fn github_enterprise() {
+        assert_eq!(
+            detect("https://github.corp.example.com/octo/hello.git"),
+            Some((Github, rr("octo", "hello")))
+        );
+        assert_eq!(
+            detect("git@github.myco.net:team/app.git"),
+            Some((Github, rr("team", "app")))
+        );
+        assert_eq!(
+            detect("https://github.internal/org/repo"),
+            Some((Github, rr("org", "repo")))
+        );
     }
 }

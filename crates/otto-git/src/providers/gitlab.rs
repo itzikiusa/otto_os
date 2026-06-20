@@ -87,6 +87,11 @@ fn summary_from(v: &Value) -> PrSummary {
         source_branch: vstr(v, &["source_branch"]),
         target_branch: vstr(v, &["target_branch"]),
         updated_at: ts(&vstr(v, &["updated_at"])),
+        draft: Some(vstr(v, &["title"]).starts_with("Draft:") || vstr(v, &["title"]).starts_with("WIP:")),
+        ci_status: None,
+        labels: v.get("labels").and_then(|l| l.as_array())
+            .map(|arr| arr.iter().filter_map(|l| l.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
         url: vstr(v, &["web_url"]),
     }
 }
@@ -242,6 +247,10 @@ impl super::GitProvider for Gitlab {
                 old_path: if renamed { Some(old_path) } else { None },
                 is_binary: is_binary && !diff_text.is_empty(),
                 hunks,
+                too_large: None,
+                added: None,
+                deleted: None,
+                language: None,
             });
         }
         Ok(DiffResp { files })

@@ -50,6 +50,9 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow, comments: Vec<ReviewComment>) -> R
         comments,
         agents,
         created_at: ts(&r.get::<String, _>("created_at"))?,
+        verdict: None,
+        blocker_count: None,
+        summary_md: None,
     })
 }
 

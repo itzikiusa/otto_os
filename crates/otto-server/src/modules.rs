@@ -1095,6 +1095,8 @@ fn default_review_config(default_provider: &str) -> ReviewConfig {
                 .to_string(),
         },
         custom_presets: vec![],
+        max_attempts: None,
+        timeout_secs: None,
     }
 }
 
@@ -1128,9 +1130,12 @@ fn model_opt(model: &str) -> Option<&str> {
 }
 
 /// Per-agent grace period before an agent is marked stuck/failed. 30 min for
-/// large diffs, scaled down for small ones so short PRs fail fast rather than
-/// hang for half an hour. (A per-config override is a follow-up.)
-fn review_agent_timeout(diff_len: usize) -> Duration {
+/// large diffs, scaled down for small ones so short PRs fail fast. An explicit
+/// `override_secs` (from `ReviewConfig.timeout_secs`) wins over the heuristic.
+fn review_agent_timeout(diff_len: usize, override_secs: Option<u64>) -> Duration {
+    if let Some(s) = override_secs {
+        return Duration::from_secs(s);
+    }
     let secs = if diff_len < 4_000 {
         600 // ≲ small diff: 10 min
     } else if diff_len < 20_000 {
@@ -1287,7 +1292,7 @@ async fn run_review_core(
         .ok()
         .and_then(|us| us.into_iter().find(|u| u.is_root))
         .ok_or_else(|| Error::Internal("no root user to run review agents".into()))?;
-    let timeout = review_agent_timeout(diff_text.len());
+    let timeout = review_agent_timeout(diff_text.len(), cfg.timeout_secs);
 
     // Pre-trust the repo folder for every provider we'll run (reviewers + the
     // claude summarizer) so no agent stalls on the interactive "trust this
@@ -1346,6 +1351,7 @@ async fn run_review_core(
         );
         // Persist the prompt so a per-agent Retry can re-run exactly this agent.
         let _ = std::fs::write(crate::review_session::prompt_path(review_id, i), &prompt);
+        let max_attempts = cfg.max_attempts;
         set.spawn(async move {
             let res = crate::review_session::run_agent_session_with_recovery(
                 &manager,
@@ -1359,6 +1365,7 @@ async fn run_review_core(
                 i,
                 &prompt,
                 timeout,
+                max_attempts,
             )
             .await;
             (i, res)
@@ -1489,11 +1496,14 @@ async fn run_pr_review_inner(
     // 2. Fetch the PR diff.
     tracing::info!(review = %review_id, "fetching PR diff for PR #{pr_number}");
     let diff_resp = provider.get_pr_diff(&remote, pr_number).await?;
-    // The diff is written to a file the agent reads (not pasted into the
-    // prompt), so there's no need to cap it — render the FULL diff so no files
-    // are omitted from the review. Large diffs are fine: the agent reads the
-    // file in chunks, and its per-agent grace-period timeout is the backstop.
-    let (diff_for_agents, _truncated) = render_diff(&diff_resp, usize::MAX);
+    // Cap at 200 KB of rendered diff text — beyond that single agents struggle
+    // to produce useful output and timeouts are hit. too_large is surfaced to
+    // the UI per-file so the user knows which files were skipped.
+    const DIFF_RENDER_CAP: usize = 200_000;
+    let (diff_for_agents, diff_truncated) = render_diff(&diff_resp, DIFF_RENDER_CAP);
+    if diff_truncated {
+        tracing::warn!("diff truncated to {} chars for review {}", DIFF_RENDER_CAP, review_id);
+    }
 
     // 3. Optionally fetch the linked Jira story.
     let jira_context = match (issue_account_id, issue_key) {
@@ -1869,7 +1879,7 @@ async fn retry_review_agent(
         std::fs::metadata(std::env::temp_dir().join(format!("otto-review-{review_id}.diff")))
             .map(|m| m.len() as usize)
             .unwrap_or(0);
-    let timeout = review_agent_timeout(diff_len);
+    let timeout = review_agent_timeout(diff_len, None);
     let manager = Arc::clone(&ctx.manager);
     let reviews = ctx.reviews_store.clone();
     let review_id_bg = review_id.clone();
@@ -1886,6 +1896,7 @@ async fn retry_review_agent(
             index,
             &prompt,
             timeout,
+            None,
         )
         .await;
     });

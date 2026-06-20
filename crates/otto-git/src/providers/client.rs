@@ -84,6 +84,36 @@ impl Http {
         self.send(rb).await.map(|_| ())
     }
 
+    /// Fetch all pages of a JSON array endpoint by following GitHub-style
+    /// `Link: <url>; rel="next"` headers. Collects into a flat `Vec<Value>`.
+    /// Stops after 20 pages as a safety guard against runaway pagination.
+    pub async fn paginate_json(
+        &self,
+        first_rb: reqwest::RequestBuilder,
+        client: &reqwest::Client,
+        auth_header: (&'static str, String),
+    ) -> Result<Vec<Value>> {
+        const MAX_PAGES: usize = 20;
+        let mut all: Vec<Value> = Vec::new();
+        let resp = self.send(first_rb).await?;
+        let next = parse_next_link(resp.headers());
+        let page: Value = resp.json().await.map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))?;
+        if let Some(arr) = page.as_array() { all.extend_from_slice(arr); }
+        let mut next_url = next;
+        let mut pages = 1usize;
+        while let Some(url) = next_url {
+            if pages >= MAX_PAGES { break; }
+            let rb = client.get(&url).header(auth_header.0, &auth_header.1);
+            let resp = self.send(rb).await?;
+            let nxt = parse_next_link(resp.headers());
+            let page: Value = resp.json().await.map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))?;
+            if let Some(arr) = page.as_array() { all.extend_from_slice(arr); }
+            next_url = nxt;
+            pages += 1;
+        }
+        Ok(all)
+    }
+
     /// Send WITHOUT erroring on non-2xx so callers can inspect the status.
     pub async fn send_raw(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         rb.send()
@@ -144,4 +174,18 @@ fn value_to_msg(v: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string().chars().take(200).collect(),
     }
+}
+
+/// Extract the `rel="next"` URL from a GitHub/GitLab Link response header, if present.
+/// Format: `<https://…>; rel="next", <https://…>; rel="last"`
+pub fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let link = headers.get("link")?.to_str().ok()?;
+    for part in link.split(',') {
+        let part = part.trim();
+        if part.contains(r#"rel="next""#) {
+            let url = part.splitn(2, ';').next()?.trim().trim_start_matches('<').trim_end_matches('>');
+            return Some(url.to_string());
+        }
+    }
+    None
 }

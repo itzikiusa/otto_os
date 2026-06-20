@@ -254,9 +254,62 @@
 
   const viewedCount = $derived(viewed.size);
   const totalFiles = $derived(diff.files.length);
+
+  // --- Keyboard file navigation: ] / n = next file, [ / N = prev file --------
+  // Tracks which file in the filtered list is the "keyboard cursor" so ][ nav
+  // works predictably when search is active.
+  let navFocusIdx = $state(-1);
+
+  function navToFile(delta: number): void {
+    const files = filteredFiles;
+    if (files.length === 0) return;
+    const next = Math.max(0, Math.min(files.length - 1, navFocusIdx + delta));
+    navFocusIdx = next;
+    scrollToFile(files[next].path);
+  }
+
+  function onDiffKeydown(e: KeyboardEvent): void {
+    // Don't steal keys while the user is typing in a text field.
+    const tag = (e.target as HTMLElement).tagName.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if (e.key === ']' || e.key === 'n') {
+      e.preventDefault();
+      navToFile(+1);
+    } else if (e.key === '[' || e.key === 'N') {
+      e.preventDefault();
+      navToFile(-1);
+    }
+  }
+
+  // --- Per-hunk line cap: render first N lines; "Show more" expands ------------
+  // Keeps large hunks from pushing every line into the DOM at once.
+  const HUNK_LINE_CAP = 500;
+  let expandedHunks: Set<string> = $state(new Set());
+
+  function hunkKey(filePath: string, hunkIdx: number): string {
+    return `${filePath}::${hunkIdx}`;
+  }
+
+  function isHunkExpanded(filePath: string, hunkIdx: number): boolean {
+    return expandedHunks.has(hunkKey(filePath, hunkIdx));
+  }
+
+  function expandHunk(filePath: string, hunkIdx: number): void {
+    const next = new Set(expandedHunks);
+    next.add(hunkKey(filePath, hunkIdx));
+    expandedHunks = next;
+  }
 </script>
 
-<div class="diff-root" class:with-nav={showNav && prMode}>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div
+  class="diff-root"
+  class:with-nav={showNav && prMode}
+  onkeydown={onDiffKeydown}
+  role="region"
+  aria-label="Diff viewer"
+  tabindex="-1"
+>
   <!-- File Navigator Sidebar -->
   {#if showNav && prMode}
     <aside class="diff-nav" class:nav-collapsed={navCollapsed}>
@@ -264,9 +317,7 @@
         {#if !navCollapsed}
           <span class="nav-title">
             {totalFiles} file{totalFiles === 1 ? '' : 's'}
-            {#if viewedCount > 0}
-              <span class="nav-viewed-count">· {viewedCount}/{totalFiles} viewed</span>
-            {/if}
+            <span class="nav-viewed-count">· {viewedCount}/{totalFiles} viewed</span>
           </span>
         {/if}
         <button
@@ -418,9 +469,11 @@
               <div class="hunk-header mono">{hunk.header}</div>
 
               {#if mode === 'unified'}
+                {@const hunkCapped = !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
+                {@const visibleLines = hunkCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
                 <table class="dtable">
                   <tbody>
-                    {#each hunk.lines as line, li (li)}
+                    {#each visibleLines as line, li (li)}
                       <tr class="dline {line.origin}">
                         <td
                           class="gut old"
@@ -467,12 +520,26 @@
                         </tr>
                       {/if}
                     {/each}
+                    {#if hunkCapped}
+                      <tr class="hunk-cap-row">
+                        <td colspan="4" class="hunk-cap-cell">
+                          <button
+                            class="btn small ghost hunk-cap-btn"
+                            onclick={() => expandHunk(file.path, hi)}
+                          >
+                            Show {hunk.lines.length - HUNK_LINE_CAP} more lines
+                          </button>
+                        </td>
+                      </tr>
+                    {/if}
                   </tbody>
                 </table>
               {:else}
+                {@const hunkSplitCapped = !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
+                {@const splitLines = hunkSplitCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
                 <table class="dtable split">
                   <tbody>
-                    {#each splitRows(hunk.lines) as row, ri (ri)}
+                    {#each splitRows(splitLines) as row, ri (ri)}
                       {@const leftComments = row.left ? inlineCommentsForLine(fc.anchored, row.left) : []}
                       {@const rightComments = row.right ? inlineCommentsForLine(fc.anchored, row.right) : []}
                       {@const rowComments = leftComments.length > 0 ? leftComments : rightComments}
@@ -530,6 +597,18 @@
                         </tr>
                       {/if}
                     {/each}
+                    {#if hunkSplitCapped}
+                      <tr class="hunk-cap-row">
+                        <td colspan="4" class="hunk-cap-cell">
+                          <button
+                            class="btn small ghost hunk-cap-btn"
+                            onclick={() => expandHunk(file.path, hi)}
+                          >
+                            Show {hunk.lines.length - HUNK_LINE_CAP} more lines
+                          </button>
+                        </td>
+                      </tr>
+                    {/if}
                   </tbody>
                 </table>
               {/if}
@@ -892,5 +971,22 @@
       min-width: 32px;
       max-width: 32px;
     }
+  }
+
+  /* Hunk line cap: "Show N more lines" affordance */
+  .hunk-cap-row {
+    background: var(--surface);
+  }
+  .hunk-cap-cell {
+    text-align: center;
+    padding: 5px 8px;
+    border-top: 1px dashed var(--border);
+  }
+  .hunk-cap-btn {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .hunk-cap-btn:hover {
+    color: var(--text);
   }
 </style>

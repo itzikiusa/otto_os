@@ -354,6 +354,8 @@ struct FileState {
     old_line: u32,
     new_line: u32,
     in_hunk: bool,
+    added_lines: u32,
+    deleted_lines: u32,
 }
 
 impl FileState {
@@ -371,6 +373,8 @@ impl FileState {
             old_line: 0,
             new_line: 0,
             in_hunk: false,
+            added_lines: 0,
+            deleted_lines: 0,
         }
     }
 
@@ -430,11 +434,13 @@ impl FileState {
             LineOrigin::Add => {
                 let p = (None, Some(self.new_line));
                 self.new_line += 1;
+                self.added_lines += 1;
                 p
             }
             LineOrigin::Del => {
                 let p = (Some(self.old_line), None);
                 self.old_line += 1;
+                self.deleted_lines += 1;
                 p
             }
         };
@@ -473,13 +479,35 @@ impl FileState {
                 (Some(o), Some(n)) if o != n => Some(o.clone()),
                 _ => None,
             });
+        let language = lang_from_ext(&path);
         FileDiff {
             path,
             old_path,
             is_binary: self.is_binary,
             hunks: self.hunks,
+            too_large: None,
+            added: Some(self.added_lines),
+            deleted: Some(self.deleted_lines),
+            language,
         }
     }
+}
+
+fn lang_from_ext(path: &str) -> Option<String> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?;
+    let lang = match ext {
+        "rs" => "rust", "go" => "go", "py" => "python", "js" | "mjs" | "cjs" => "javascript",
+        "ts" | "mts" | "cts" => "typescript", "tsx" => "tsx", "jsx" => "jsx",
+        "svelte" => "svelte", "vue" => "vue",
+        "java" => "java", "kt" => "kotlin", "scala" => "scala",
+        "c" | "h" => "c", "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "cs" => "csharp", "rb" => "ruby", "php" => "php", "swift" => "swift",
+        "sh" | "bash" | "zsh" => "shell", "yaml" | "yml" => "yaml", "toml" => "toml",
+        "json" => "json", "md" => "markdown", "sql" => "sql", "html" => "html",
+        "css" => "css", "scss" | "sass" => "scss", "xml" => "xml",
+        _ => return None,
+    };
+    Some(lang.to_string())
 }
 
 /// "--- a/path" → Some("path"); "--- /dev/null" → None. Quoted paths get the

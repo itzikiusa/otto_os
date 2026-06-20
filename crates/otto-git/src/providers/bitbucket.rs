@@ -142,6 +142,9 @@ fn summary_from(v: &Value) -> PrSummary {
         target_branch: vstr(v, &["destination", "branch", "name"]),
         updated_at: ts(&vstr(v, &["updated_on"])),
         url: vstr(v, &["links", "html", "href"]),
+        draft: None,
+        ci_status: None,
+        labels: vec![],
     }
 }
 
