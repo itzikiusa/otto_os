@@ -329,3 +329,29 @@ pub struct InjectSessionReq {
     #[serde(default)]
     pub cwd: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Product↔Swarm closure response  (`GET /product/stories/{sid}/swarm`)
+// ---------------------------------------------------------------------------
+
+/// Aggregated view of the swarm project spawned from a Product story
+/// (Plan → Swarm back-link).  Read-only; assembled from the swarm state without
+/// any migration.  Returned by `GET /product/stories/{sid}/swarm`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorySwarmLink {
+    /// The linked swarm project, if one exists.
+    pub project: Option<otto_state::SwarmProject>,
+    /// All tasks in the linked project (empty when no project).
+    pub tasks: Vec<otto_state::SwarmTask>,
+    /// All runs in the linked project (empty when no project).
+    pub runs: Vec<otto_state::SwarmRun>,
+    /// Artifact paths / references collected from run results that contain an
+    /// `"artifacts"` array.  Best-effort extraction from `result_json`.
+    pub artifacts: Vec<String>,
+    /// PR numbers/references found in run results.  Best-effort.
+    pub prs: Vec<String>,
+    /// Review ids found in run results.  Best-effort.
+    pub reviews: Vec<String>,
+    /// Accumulated cost in USD across all runs in the linked project.
+    pub cost_usd: f64,
+}

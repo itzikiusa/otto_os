@@ -790,13 +790,27 @@ async fn recruit(
         }
         None => ("New swarm".to_string(), String::new(), Vec::new()),
     };
-    let skills: Vec<String> = ctx.context_library.list_skills().into_iter().map(|s| s.name).collect();
+    // Collect ALL known skill names so we can validate the recruiter's reply,
+    // but only inject a bounded subset into the prompt.  Injecting the full
+    // library (potentially hundreds of skills) wastes tokens and can produce
+    // bloated, irrelevant skill lists.  `cap_skills_for_role` ranks by name-
+    // relevance to the requested role and hard-caps at `RECRUITER_SKILL_CAP`.
+    let all_skills: Vec<String> = ctx.context_library.list_skills().into_iter().map(|s| s.name).collect();
+    let capped_skills = otto_swarm::recruiter::cap_skills_for_role(
+        &all_skills,
+        &req.role,
+        otto_swarm::recruiter::RECRUITER_SKILL_CAP,
+    );
+    tracing::debug!(
+        "recruiter: injecting {} / {} skills into prompt (cap={})",
+        capped_skills.len(), all_skills.len(), otto_swarm::recruiter::RECRUITER_SKILL_CAP
+    );
     let providers = {
         use otto_swarm::SwarmCtx;
         ctx.available_providers()
     };
     let prompt = otto_swarm::recruiter::recruiter_prompt(
-        &req.role, &swarm_name, &mission, &titles, &skills, &providers, req.context.as_deref(),
+        &req.role, &swarm_name, &mission, &titles, &capped_skills, &providers, req.context.as_deref(),
     );
     let cwd = std::env::temp_dir().to_string_lossy().to_string();
     let reply = ctx
@@ -806,8 +820,9 @@ async fn recruit(
         .map_err(ApiError)?;
     let mut recruited = otto_swarm::recruiter::parse_recruited(&reply)
         .ok_or_else(|| ApiError(Error::Upstream("recruiter returned no usable definition".into())))?;
-    // Validate skills against the real library; drop unknowns.
-    let known: std::collections::HashSet<String> = skills.into_iter().collect();
+    // Validate skills against the FULL library (not just the capped list); any
+    // skill the recruiter invents that is not in the real library is dropped.
+    let known: std::collections::HashSet<String> = all_skills.into_iter().collect();
     recruited.skills.retain(|s| known.contains(&s.name));
     // Force the provider to an available one.
     if !providers.iter().any(|p| p == &recruited.suggested_provider) {

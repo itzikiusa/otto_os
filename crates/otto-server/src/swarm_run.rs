@@ -337,13 +337,23 @@ async fn run_turn_inner(
         |_attempt| {
             let ctx = ctx.clone();
             let ws = ws.clone();
-            let swarm_meta = json!({
+            // Stamp the work-graph ref so the usage layer can attribute cost to the
+    // originating swarm task. story_id is included when the project was created
+    // from a Product story (Plan → Swarm link; project.story_id is Some).
+    let work_ref = otto_core::workref::WorkRef {
+                    swarm_task_id: task.as_ref().map(|t| t.id.clone()),
+                    story_id: project.as_ref().and_then(|p| p.story_id.clone()),
+                    origin: Some("swarm".into()),
+                    ..Default::default()
+                };
+    let swarm_meta = json!({
                 "source": "swarm",
                 "swarm_id": swarm.id,
                 "agent_id": agent.id,
                 "project_id": project.as_ref().map(|p| p.id.clone()),
                 "task_id": task.as_ref().map(|t| t.id.clone()),
                 "run_id": run.id,
+                "work": serde_json::to_value(&work_ref).unwrap_or_default(),
             });
             let provider = provider.clone();
             let cwd = cwd.clone();

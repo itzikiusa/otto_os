@@ -16,7 +16,8 @@ use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use otto_state::{
     BrokerAuditRepo, BrokerClusterRow, BrokerClusterSectionRow, BrokerClusterSectionsRepo,
-    BrokerClustersRepo, NewBrokerCluster, UpdateBrokerCluster,
+    BrokerClustersRepo, BrokerOpsRepo, LagAlertRow, NewBrokerCluster, NewLagAlert,
+    UpdateBrokerCluster,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,6 +48,9 @@ pub struct BrokersService {
     /// credential change re-probes.
     group_denied: DashMap<Id, ()>,
     audit: Option<BrokerAuditRepo>,
+    /// Broker operator workflow tables (lag alerts + replay evidence). Optional
+    /// so the crate can be constructed without a state pool in unit tests.
+    ops: Option<BrokerOpsRepo>,
 }
 
 fn secret_ref_for(id: &Id) -> String {
@@ -75,7 +79,15 @@ impl BrokersService {
             samplers: DashMap::new(),
             group_denied: DashMap::new(),
             audit,
+            ops: None,
         }
+    }
+
+    /// Attach the operator-workflow repo (lag alerts + replay evidence). Called
+    /// by the server wiring after the pool is available.
+    pub fn with_ops(mut self, ops: BrokerOpsRepo) -> Self {
+        self.ops = Some(ops);
+        self
     }
 
     /// Whether the broker has refused consumer-group access for this cluster
@@ -788,6 +800,287 @@ impl BrokersService {
         }
     }
 
+    /// Fetch all registered versions for a subject (version history).
+    pub async fn schema_subject_versions(
+        &self,
+        id: &Id,
+        subject: &str,
+    ) -> Result<Vec<SchemaVersion>> {
+        let (_, registry) = self.client_for(id).await?;
+        match registry {
+            Some(reg) => reg.subject_versions(subject).await,
+            None => Err(Error::Invalid(
+                "no schema registry configured for this cluster".into(),
+            )),
+        }
+    }
+
+    /// Fetch a specific version (or "latest") of a subject.
+    pub async fn schema_subject_version_detail(
+        &self,
+        id: &Id,
+        subject: &str,
+        version: &str,
+    ) -> Result<SchemaVersionDetail> {
+        let (_, registry) = self.client_for(id).await?;
+        match registry {
+            Some(reg) => reg.subject_version_detail(subject, version).await,
+            None => Err(Error::Invalid(
+                "no schema registry configured for this cluster".into(),
+            )),
+        }
+    }
+
+    /// Check whether a candidate schema is compatible with the subject's latest version.
+    pub async fn schema_check_compatibility(
+        &self,
+        id: &Id,
+        subject: &str,
+        req: &CompatCheckReq,
+    ) -> Result<CompatCheckResp> {
+        let (_, registry) = self.client_for(id).await?;
+        match registry {
+            Some(reg) => reg.check_compatibility(subject, req).await,
+            None => Err(Error::Invalid(
+                "no schema registry configured for this cluster".into(),
+            )),
+        }
+    }
+
+    // ---- dry-run offset reset -----------------------------------------------
+
+    /// Compute what an offset reset would do without committing anything.
+    /// Returns the per-partition target offsets + lag delta.
+    pub async fn dry_run_reset(
+        &self,
+        id: &Id,
+        group: &str,
+        req: &GroupResetReq,
+    ) -> Result<DryRunResp> {
+        if self.group_denied.contains_key(id) {
+            return Err(Error::Forbidden(crate::kafka::GROUP_ACL_DENIED.to_string()));
+        }
+        let (client, _) = self.client_for(id).await?;
+        let g = group.to_string();
+        let mode = req.mode.clone();
+        let ts_ms = req.timestamp_ms;
+        let topic_filter = req.topic.clone();
+
+        // Fetch current committed offsets (same path as the real reset).
+        let detail = {
+            let client = client.clone();
+            let g2 = g.clone();
+            tokio::task::spawn_blocking(move || client.describe_group(&g2))
+                .await
+                .map_err(join)??
+        };
+
+        // Resolve target offsets without writing them.
+        let partitions: Vec<DryRunPartition> = {
+            let client = client.clone();
+            let offsets = detail.offsets.clone();
+            let filter = topic_filter.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut out = Vec::new();
+                for o in &offsets {
+                    if let Some(f) = &filter {
+                        if &o.topic != f {
+                            continue;
+                        }
+                    }
+                    let target = client.resolve_offset(&o.topic, o.partition, &mode, ts_ms)?;
+                    // lag_delta: positive means lag decreases (reset forward),
+                    // negative means lag increases (rewinding into already-committed range).
+                    let old_lag = (o.high_watermark - o.current_offset).max(0);
+                    let new_lag = (o.high_watermark - target).max(0);
+                    out.push(DryRunPartition {
+                        topic: o.topic.clone(),
+                        partition: o.partition,
+                        current_offset: o.current_offset,
+                        target_offset: target,
+                        lag_delta: old_lag - new_lag,
+                    });
+                }
+                Ok::<_, Error>(out)
+            })
+            .await
+            .map_err(join)??
+        };
+
+        // Derive totals from the lag_delta each partition computed above.
+        // lag_delta = old_lag - new_lag, so:
+        //   total_lag_before = sum(old_lag)  = sum(new_lag + lag_delta)
+        //   total_lag_after  = total_lag_before - sum(lag_delta)
+        let total_lag_before: i64 = detail.offsets.iter()
+            .filter(|o| topic_filter.as_deref().is_none_or(|f| o.topic == f))
+            .map(|o| o.lag)
+            .sum();
+        let total_lag_after: i64 = (total_lag_before - partitions.iter().map(|p| p.lag_delta).sum::<i64>()).max(0);
+
+        Ok(DryRunResp {
+            group: group.to_string(),
+            partitions,
+            total_lag_before,
+            total_lag_after,
+        })
+    }
+
+    // ---- DLQ / replay -------------------------------------------------------
+
+    /// Read messages from `source_topic`, apply an optional transform, and produce
+    /// each one to `target_topic`, recording an evidence row.
+    pub async fn replay(&self, cluster_id: &Id, req: &ReplayReq) -> Result<ReplayResp> {
+        let (client, registry) = self.client_for(cluster_id).await?;
+
+        // Build a consume request from the replay selector.
+        let consume_req = selector_to_consume_req(&req.selector);
+
+        let raw = {
+            let client = client.clone();
+            let src = req.source_topic.clone();
+            let cr = consume_req.clone();
+            tokio::task::spawn_blocking(move || client.consume_raw(&src, &cr))
+                .await
+                .map_err(join)??
+        };
+
+        let mut evidence = Vec::with_capacity(raw.messages.len());
+        for m in &raw.messages {
+            // Decode key for evidence preview (best-effort; no schema registry needed).
+            let key_preview = m.key.as_deref().and_then(|k| {
+                std::str::from_utf8(k).ok().map(|s| {
+                    let s = s.trim_end_matches('\0');
+                    if s.len() > 64 { format!("{}…", &s[..64]) } else { s.to_string() }
+                })
+            });
+
+            // Apply transform: override key if requested.
+            let key: Option<Vec<u8>> = if let Some(t) = &req.transform {
+                t.set_key.as_deref().map(|k| k.as_bytes().to_vec())
+                    .or_else(|| m.key.clone())
+            } else {
+                m.key.clone()
+            };
+
+            // Build headers: original + any added by the transform.
+            let mut headers: Vec<(String, Vec<u8>)> = m.headers.clone();
+            if let Some(t) = &req.transform {
+                if let Some((hk, hv)) = &t.add_header {
+                    // Overwrite existing header with the same key, else append.
+                    if let Some(pos) = headers.iter().position(|(k, _)| k == hk) {
+                        headers[pos] = (hk.clone(), hv.as_bytes().to_vec());
+                    } else {
+                        headers.push((hk.clone(), hv.as_bytes().to_vec()));
+                    }
+                }
+            }
+
+            let value = m.value.clone().unwrap_or_default();
+            let produce_req = ProduceReq {
+                partition: None, // let the broker choose
+                key: key.as_deref().and_then(|k| std::str::from_utf8(k).ok().map(|s| s.to_string())),
+                value: String::from_utf8_lossy(&value).into_owned(),
+                headers: headers
+                    .into_iter()
+                    .map(|(k, v)| MessageHeader {
+                        key: k,
+                        value: String::from_utf8_lossy(&v).into_owned(),
+                    })
+                    .collect(),
+                key_base64: false,
+                value_base64: false,
+                confirm: true, // guard already checked by the HTTP handler
+            };
+
+            let target = req.target_topic.clone();
+            let resp = client.produce(&target, &produce_req).await?;
+            let _ = registry; // kept alive for the duration
+
+            evidence.push(ReplayEvidence {
+                partition: m.partition,
+                offset: m.offset,
+                key_preview,
+                target_partition: resp.partition,
+                target_offset: resp.offset,
+            });
+        }
+
+        let count = evidence.len();
+
+        // Persist the evidence row so operators can audit replays.
+        let replay_id = if let Some(ops) = &self.ops {
+            let ev_json = serde_json::to_value(&evidence).unwrap_or(serde_json::Value::Array(vec![]));
+            let row = ops
+                .record_replay(
+                    cluster_id,
+                    &req.source_topic,
+                    &req.target_topic,
+                    count as i64,
+                    ev_json,
+                )
+                .await?;
+            row.id
+        } else {
+            otto_core::new_id()
+        };
+
+        Ok(ReplayResp {
+            replay_id,
+            source_topic: req.source_topic.clone(),
+            target_topic: req.target_topic.clone(),
+            count,
+            evidence,
+        })
+    }
+
+    // ---- lag alerts ---------------------------------------------------------
+
+    /// List all lag alerts for a cluster, enriched with the current breach lag
+    /// where the alert is enabled and the sampler has a recent lag reading.
+    pub async fn list_lag_alerts(
+        &self,
+        cluster_id: &Id,
+        current_lags: &std::collections::HashMap<String, i64>,
+    ) -> Result<Vec<LagAlert>> {
+        let ops = self
+            .ops
+            .as_ref()
+            .ok_or_else(|| Error::Internal("ops repo not initialised".into()))?;
+        let rows = ops.list_alerts(cluster_id).await?;
+        Ok(rows.into_iter().map(|r| lag_alert_from_row(r, current_lags)).collect())
+    }
+
+    pub async fn create_lag_alert(
+        &self,
+        cluster_id: &Id,
+        req: &NewLagAlertReq,
+    ) -> Result<LagAlert> {
+        if req.threshold <= 0 {
+            return Err(Error::Invalid("threshold must be > 0".into()));
+        }
+        let ops = self
+            .ops
+            .as_ref()
+            .ok_or_else(|| Error::Internal("ops repo not initialised".into()))?;
+        let row = ops
+            .create_alert(NewLagAlert {
+                cluster_id: cluster_id.clone(),
+                topic: req.topic.clone(),
+                group_name: req.group_name.clone(),
+                threshold: req.threshold,
+            })
+            .await?;
+        Ok(lag_alert_from_row(row, &std::collections::HashMap::new()))
+    }
+
+    pub async fn delete_lag_alert(&self, alert_id: &Id) -> Result<()> {
+        let ops = self
+            .ops
+            .as_ref()
+            .ok_or_else(|| Error::Internal("ops repo not initialised".into()))?;
+        ops.delete_alert(alert_id).await
+    }
+
     pub async fn consume(&self, id: &Id, topic: &str, req: &ConsumeReq) -> Result<ConsumeResp> {
         let (client, registry) = self.client_for(id).await?;
         let raw = {
@@ -1036,4 +1329,63 @@ fn norm(s: Option<String>) -> Option<String> {
 
 fn nonempty(s: Option<String>) -> Option<String> {
     s.filter(|v| !v.is_empty())
+}
+
+/// Convert a `ReplaySelector` into a `ConsumeReq` for the kafka driver.
+fn selector_to_consume_req(sel: &ReplaySelector) -> ConsumeReq {
+    match sel {
+        ReplaySelector::Latest { count } => ConsumeReq {
+            partition: None,
+            start: StartPosition::Latest,
+            limit: *count,
+            max_wait_ms: Some(10_000),
+            key_filter: None,
+            value_filter: None,
+            find_from_beginning: false,
+            decode: ValueFormat::Auto,
+        },
+        ReplaySelector::OffsetRange { partition, from, to } => ConsumeReq {
+            partition: Some(*partition),
+            start: StartPosition::Offset { offset: *from },
+            limit: (*to - *from + 1).max(1) as usize,
+            max_wait_ms: Some(30_000),
+            key_filter: None,
+            value_filter: None,
+            find_from_beginning: false,
+            decode: ValueFormat::Auto,
+        },
+        ReplaySelector::Timestamp { timestamp_ms, limit } => ConsumeReq {
+            partition: None,
+            start: StartPosition::Timestamp { timestamp_ms: *timestamp_ms },
+            limit: *limit,
+            max_wait_ms: Some(15_000),
+            key_filter: None,
+            value_filter: None,
+            find_from_beginning: false,
+            decode: ValueFormat::Auto,
+        },
+    }
+}
+
+/// Map a persisted `LagAlertRow` to the API type, enriching with the current
+/// lag for that group+topic if available.
+fn lag_alert_from_row(
+    r: LagAlertRow,
+    current_lags: &std::collections::HashMap<String, i64>,
+) -> LagAlert {
+    // Key convention: "{group_name}:{topic}" — matches what the metrics sweep writes.
+    let key = format!("{}:{}", r.group_name, r.topic);
+    let breach_lag = current_lags.get(&key).and_then(|&lag| {
+        if r.enabled && lag >= r.threshold { Some(lag) } else { None }
+    });
+    LagAlert {
+        id: r.id,
+        cluster_id: r.cluster_id,
+        topic: r.topic,
+        group_name: r.group_name,
+        threshold: r.threshold,
+        enabled: r.enabled,
+        created_at: r.created_at,
+        breach_lag,
+    }
 }

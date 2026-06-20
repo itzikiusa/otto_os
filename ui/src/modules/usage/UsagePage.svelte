@@ -10,6 +10,9 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { budgetBus } from '../../lib/events.svelte';
+  // Work-graph attribution drilldown + cost forecast (B1).
+  import AttributionDrilldown from './AttributionDrilldown.svelte';
+  import CostForecastChip from './CostForecastChip.svelte';
 
   // Navigate to a session from the top-sessions table (click-through drill-down).
   function openSession(sessionId: string): void {
@@ -433,7 +436,17 @@
           <div class="stat card">
             <span class="stat-label">Est. cost</span>
             <span class="stat-value">{fmtCost(usage.summary.total_cost_usd)}</span>
-            <span class="stat-sub">over {usage.summary.days}d</span>
+            <span class="stat-sub">
+              over {usage.summary.days}d
+              <!-- Pre-launch forecast chip: projects the cost of the next run
+                   using the most-used provider over the current window. -->
+              {#if usage.summary.providers.length > 0}
+                <CostForecastChip
+                  feature="agent"
+                  provider={usage.summary.providers[0].provider}
+                />
+              {/if}
+            </span>
           </div>
           <div class="stat card">
             <span class="stat-label">Activity</span>
@@ -628,6 +641,12 @@
           <p class="dim small">No usage recorded yet. Cost splits by feature (review, product, channels, agents…) appear here as work runs.</p>
         {/if}
       </div>
+
+      <!-- Work-graph attribution drilldown (B1): "why did this cost so much?" -->
+      <!-- Shows only when the engine is available (same guard as other panels). -->
+      {#if usage.status?.available}
+        <AttributionDrilldown days={usage.days} />
+      {/if}
 
       <!-- Budgets (opt-in spend caps) -->
       <div class="panel card">

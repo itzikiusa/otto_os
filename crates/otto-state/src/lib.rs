@@ -7,6 +7,7 @@ pub mod api_client;
 pub mod audit;
 pub mod broker_audit;
 pub mod broker_cluster_sections;
+pub mod broker_ops;
 pub mod broker_clusters;
 pub mod connection_sections;
 pub mod connections;
@@ -40,6 +41,7 @@ pub use api_client::{
     NewApiRequest,
 };
 pub use broker_audit::{BrokerAuditRepo, BrokerAuditRow};
+pub use broker_ops::{BrokerOpsRepo, LagAlertRow, NewLagAlert, ReplayRow};
 pub use broker_cluster_sections::{BrokerClusterSectionRow, BrokerClusterSectionsRepo};
 pub use broker_clusters::{
     BrokerClusterRow, BrokerClustersRepo, NewBrokerCluster, UpdateBrokerCluster,
@@ -61,7 +63,7 @@ pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
 pub use issues::{IssuesRepo, NewIssueAccount};
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
-pub use memory::MemoriesRepo;
+pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
 pub use review_findings::{
     compute_fingerprint, FindingState, NewFinding, ReviewFindingRow, ReviewFindingsRepo,

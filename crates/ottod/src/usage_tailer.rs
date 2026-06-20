@@ -269,6 +269,7 @@ impl UsageTailer {
                 cache_write_tokens: parsed.cache_write,
                 cost_usd: cost,
                 duration_ms: 0,
+                ..Default::default()
             });
         }
 
@@ -360,6 +361,7 @@ impl UsageTailer {
                 cache_write_tokens: parsed.cache_write,
                 cost_usd: cost,
                 duration_ms: 0,
+                ..Default::default()
             });
         }
 

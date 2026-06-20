@@ -40,6 +40,26 @@ fn add_dir_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     out
 }
 
+/// Build `["--model", name]` args when `meta.model` is set and the provider
+/// supports an explicit `--model` flag (claude — same flag codex accepts).
+/// Returns an empty vec for shell or unknown providers, or when `meta.model`
+/// is absent/empty.  The model flag is provider-specific:
+///   - claude/codex: `--model <name>`
+///   - agy, shell: unsupported — silently omitted (agy has no model flag).
+fn model_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
+    if !matches!(provider, "claude" | "codex") {
+        return vec![];
+    }
+    let Some(model) = meta.get("model").and_then(|v| v.as_str()) else {
+        return vec![];
+    };
+    let model = model.trim();
+    if model.is_empty() {
+        return vec![];
+    }
+    vec!["--model".to_string(), model.to_string()]
+}
+
 /// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
 /// Used for one-line trail summaries.
 fn trail_clip(s: &str, max: usize) -> String {
@@ -501,6 +521,7 @@ impl SessionManager {
                     .meta.clone()
                     .unwrap_or(serde_json::json!({}));
                 spec.args.extend(add_dir_args(&provider, &meta_val));
+                spec.args.extend(model_args(&provider, &meta_val));
                 let psid = self.providers.supports_resume(&provider).then_some(sid);
                 (provider, spec, psid)
             }
@@ -1137,9 +1158,9 @@ impl SessionManager {
                 let mut spec =
                     self.providers
                         .build_spec(&session.provider, &sid, &session.cwd, resume)?;
-                // Append --add-dir args from session.meta.extra_dirs
-                spec.args
-                    .extend(add_dir_args(&session.provider, &session.meta));
+                // Append --add-dir and --model args from session.meta.
+                spec.args.extend(add_dir_args(&session.provider, &session.meta));
+                spec.args.extend(model_args(&session.provider, &session.meta));
                 spec
             }
         };
@@ -1483,6 +1504,64 @@ mod tests {
         let (c, r) = resolve_grid(None, None);
         assert_eq!(c, otto_pty::DEFAULT_COLS);
         assert_eq!(r, otto_pty::DEFAULT_ROWS);
+    }
+
+    // ── model_args tests ────────────────────────────────────────────────────
+
+    /// claude with a model set → ["--model", name].
+    #[test]
+    fn model_args_claude_with_model() {
+        let meta = serde_json::json!({ "model": "claude-opus-4-8" });
+        let args = model_args("claude", &meta);
+        assert_eq!(args, vec!["--model", "claude-opus-4-8"]);
+    }
+
+    /// codex also accepts --model.
+    #[test]
+    fn model_args_codex_with_model() {
+        let meta = serde_json::json!({ "model": "gpt-5-codex" });
+        let args = model_args("codex", &meta);
+        assert_eq!(args, vec!["--model", "gpt-5-codex"]);
+    }
+
+    /// agy does not support --model; args must be empty.
+    #[test]
+    fn model_args_agy_skipped() {
+        let meta = serde_json::json!({ "model": "some-model" });
+        let args = model_args("agy", &meta);
+        assert!(args.is_empty(), "agy has no --model flag");
+    }
+
+    /// shell provider → empty regardless of meta.
+    #[test]
+    fn model_args_shell_skipped() {
+        let meta = serde_json::json!({ "model": "some-model" });
+        let args = model_args("shell", &meta);
+        assert!(args.is_empty(), "shell has no --model flag");
+    }
+
+    /// No model in meta → empty vec.
+    #[test]
+    fn model_args_absent_model_empty() {
+        let meta = serde_json::json!({});
+        let args = model_args("claude", &meta);
+        assert!(args.is_empty(), "no model key should yield no args");
+    }
+
+    /// Whitespace-only model is silently skipped.
+    #[test]
+    fn model_args_blank_model_empty() {
+        let meta = serde_json::json!({ "model": "   " });
+        let args = model_args("claude", &meta);
+        assert!(args.is_empty(), "blank model should yield no args");
+    }
+
+    /// Leading/trailing whitespace is trimmed from the model name.
+    #[test]
+    fn model_args_model_is_trimmed() {
+        let meta = serde_json::json!({ "model": "  opus  " });
+        let args = model_args("claude", &meta);
+        assert_eq!(args, vec!["--model", "opus"]);
     }
 
     /// A session spawned with saved grid meta reports that size via screen_size().

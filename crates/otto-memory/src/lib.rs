@@ -3,6 +3,7 @@
 //! domain-agnostic (collections), so other areas can adopt it later.
 
 pub mod embed;
+pub mod governance;
 pub mod http;
 pub mod index;
 pub mod ingest;
@@ -13,6 +14,10 @@ pub mod test_support;
 pub mod types;
 pub mod vault;
 
+pub use governance::{
+    ForgetResp, ImportReq, ImportResp, MergeReq, MergeResp, SetStateReq, SplitPart, SplitReq,
+    SplitResp, UndoForgetReq,
+};
 pub use http::{router, GraphData, GraphNode, MemoryCtx};
 pub use service::MemoryService;
 pub use types::*;

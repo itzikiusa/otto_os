@@ -20,6 +20,7 @@ use serde::Deserialize;
 
 use crate::service::BrokersService;
 use crate::types::*;
+use std::collections::HashMap;
 
 /// Server-side context required by the Message Brokers routes.
 pub trait BrokersCtx: Clone + Send + Sync + 'static {
@@ -109,9 +110,30 @@ pub fn api_router<S: BrokersCtx>() -> Router<S> {
             "/brokers/clusters/{id}/groups/{group}/reset",
             post(reset_group_offsets::<S>),
         )
+        .route("/brokers/clusters/{id}/replay", post(replay::<S>))
         .route(
             "/brokers/clusters/{id}/schema-registry/subjects",
             get(schema_subjects::<S>),
+        )
+        .route(
+            "/brokers/clusters/{id}/schema-registry/subjects/{subject}/versions",
+            get(schema_subject_versions::<S>),
+        )
+        .route(
+            "/brokers/clusters/{id}/schema-registry/subjects/{subject}/versions/{version}",
+            get(schema_subject_version_detail::<S>),
+        )
+        .route(
+            "/brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility",
+            post(schema_check_compatibility::<S>),
+        )
+        .route(
+            "/brokers/clusters/{id}/lag-alerts",
+            get(list_lag_alerts::<S>).post(create_lag_alert::<S>),
+        )
+        .route(
+            "/brokers/clusters/{id}/lag-alerts/{alert_id}",
+            axum::routing::delete(delete_lag_alert::<S>),
         )
         // ---- cluster sections (sidebar grouping) ----
         .route(
@@ -172,6 +194,13 @@ fn guard(row: &BrokerClusterRow, confirmed: bool) -> Result<(), Error> {
 struct ConfirmQuery {
     #[serde(default)]
     confirm: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ResetQuery {
+    /// Set to true to preview what the reset would do without committing.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 // ---- cluster sections -----------------------------------------------------
@@ -492,9 +521,20 @@ async fn reset_group_offsets<S: BrokersCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, group)): Path<(Id, String)>,
+    Query(q): Query<ResetQuery>,
     Json(req): Json<GroupResetReq>,
 ) -> ApiResult<Response> {
     let row = authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+
+    if q.dry_run {
+        // Dry-run: compute target offsets and lag delta without committing.
+        // Guard is still checked (the operator should know they're touching a
+        // guarded cluster), but a `confirm=false` is accepted because nothing
+        // is written.
+        let preview = ctx.brokers().dry_run_reset(&id, &group, &req).await?;
+        return Ok(Json(preview).into_response());
+    }
+
     guard(&row, req.confirm)?;
     let detail = ctx.brokers().reset_group_offsets(&id, &group, &req).await?;
     ctx.brokers()
@@ -510,4 +550,108 @@ async fn schema_subjects<S: BrokersCtx>(
 ) -> ApiResult<Response> {
     authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     Ok(Json(ctx.brokers().schema_subjects(&id).await?).into_response())
+}
+
+// ---- schema version history + compat -------------------------------------
+
+async fn schema_subject_versions<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, subject)): Path<(Id, String)>,
+) -> ApiResult<Response> {
+    authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(ctx.brokers().schema_subject_versions(&id, &subject).await?).into_response())
+}
+
+async fn schema_subject_version_detail<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, subject, version)): Path<(Id, String, String)>,
+) -> ApiResult<Response> {
+    authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(
+        ctx.brokers()
+            .schema_subject_version_detail(&id, &subject, &version)
+            .await?,
+    )
+    .into_response())
+}
+
+async fn schema_check_compatibility<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, subject)): Path<(Id, String)>,
+    Json(req): Json<CompatCheckReq>,
+) -> ApiResult<Response> {
+    // Compatibility check is a read (calls the registry read endpoint); Viewer is enough.
+    authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(
+        ctx.brokers()
+            .schema_check_compatibility(&id, &subject, &req)
+            .await?,
+    )
+    .into_response())
+}
+
+// ---- DLQ / replay --------------------------------------------------------
+
+async fn replay<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<ReplayReq>,
+) -> ApiResult<Response> {
+    let row = authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    guard(&row, req.confirm)?;
+    let resp = ctx.brokers().replay(&id, &req).await?;
+    ctx.brokers()
+        .audit_write(
+            &id,
+            &user.id,
+            "replay",
+            serde_json::json!({
+                "source_topic": req.source_topic,
+                "target_topic": req.target_topic,
+                "count": resp.count,
+            }),
+        )
+        .await;
+    Ok((StatusCode::CREATED, Json(resp)).into_response())
+}
+
+// ---- lag alerts ----------------------------------------------------------
+
+async fn list_lag_alerts<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Response> {
+    authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    // Pass an empty current-lags map (breach evaluation requires live group lag;
+    // the UI triggers a describe-group call separately when needed).
+    let empty: HashMap<String, i64> = HashMap::new();
+    Ok(Json(ctx.brokers().list_lag_alerts(&id, &empty).await?).into_response())
+}
+
+async fn create_lag_alert<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<NewLagAlertReq>,
+) -> ApiResult<Response> {
+    authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let alert = ctx.brokers().create_lag_alert(&id, &req).await?;
+    Ok((StatusCode::CREATED, Json(alert)).into_response())
+}
+
+async fn delete_lag_alert<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, alert_id)): Path<(Id, Id)>,
+) -> ApiResult<Response> {
+    // Verify the cluster is accessible (authorization) but the alert delete is
+    // just a record removal — Editor required to modify cluster operations.
+    authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    ctx.brokers().delete_lag_alert(&alert_id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }

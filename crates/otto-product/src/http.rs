@@ -20,7 +20,7 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
 use otto_state::{
     LearningPatch, NewEvent, NewLearning, NewNote, NewQuestion, NewTranscript, ProductRepo,
-    QuestionPatch, StoryPatch, TestcasePatch,
+    QuestionPatch, RunFilter, StoryPatch, TestcasePatch,
 };
 use serde::Deserialize;
 
@@ -28,8 +28,8 @@ use crate::service::ProductService;
 use crate::types::{
     BulkApproveTestcasesReq, NewDraftReq, NewLearningReq, NewNoteReq, NewQuestionReq,
     NewTranscriptReq, PostQuestionsReq, PublishAsRfcReq, PublishAsStoryReq, PublishTestsReq,
-    ReorderTestcasesReq, UpdateDraftReq, UpdateLearningReq, UpdateNoteReq, UpdateQuestionReq,
-    UpdateStoryReq, UpdateTestcaseReq,
+    ReorderTestcasesReq, StorySwarmLink, UpdateDraftReq, UpdateLearningReq, UpdateNoteReq,
+    UpdateQuestionReq, UpdateStoryReq, UpdateTestcaseReq,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,6 +41,12 @@ pub trait ProductCtx: Clone + Send + Sync + 'static {
     fn product(&self) -> &Arc<ProductService>;
     fn product_repo(&self) -> &ProductRepo;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
+    /// Swarm repository — used by the Product↔Swarm closure endpoint to read
+    /// swarm projects/tasks/runs linked to a story.  Implementors that have no
+    /// swarm layer return `None`; the endpoint returns an empty `StorySwarmLink`.
+    fn swarm_repo(&self) -> Option<&otto_state::SwarmRepo> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +263,11 @@ pub fn router<S: ProductCtx>() -> Router<S> {
         .route(
             "/product/stories/{sid}/publish-as-story",
             post(publish_as_story::<S>),
+        )
+        // Product↔Swarm closure: full swarm project view linked to a story.
+        .route(
+            "/product/stories/{sid}/swarm",
+            get(story_swarm_link::<S>),
         )
 }
 
@@ -1065,6 +1076,106 @@ async fn publish_as_story<S: ProductCtx>(
         .publish_as_story(&sid, &req.account_id, &req.project_key, &req.issue_type, &user.id)
         .await?;
     Ok(Json(detail).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Product↔Swarm closure  (GET /product/stories/{sid}/swarm)
+// ---------------------------------------------------------------------------
+
+/// `GET /product/stories/{sid}/swarm` — Aggregate view of the swarm project
+/// that was created from this story's implementation plan (Plan → Swarm).
+///
+/// Read-only join across the swarm state; requires workspace Viewer. Assembles
+/// tasks, runs, and accumulated cost from the linked project. Artifacts/PRs/
+/// reviews are extracted best-effort from run `result_json` blobs. Returns an
+/// empty `StorySwarmLink` (no project, empty collections) when no swarm project
+/// is linked — never 404; the caller can distinguish by `project: null`.
+async fn story_swarm_link<S: ProductCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(StoryId { sid }): Path<StoryId>,
+) -> ApiResult<Json<StorySwarmLink>> {
+    ws_from_story(&ctx, &user, &sid, WorkspaceRole::Viewer).await?;
+
+    let Some(swarm_repo) = ctx.swarm_repo() else {
+        // Host application has no swarm layer; return empty link.
+        return Ok(Json(StorySwarmLink {
+            project: None,
+            tasks: vec![],
+            runs: vec![],
+            artifacts: vec![],
+            prs: vec![],
+            reviews: vec![],
+            cost_usd: 0.0,
+        }));
+    };
+
+    // Look up the swarm project that was created from this story.
+    let project = swarm_repo.project_for_story(&sid).await?;
+
+    let Some(ref proj) = project else {
+        return Ok(Json(StorySwarmLink {
+            project: None,
+            tasks: vec![],
+            runs: vec![],
+            artifacts: vec![],
+            prs: vec![],
+            reviews: vec![],
+            cost_usd: 0.0,
+        }));
+    };
+
+    let tasks = swarm_repo.list_tasks(&proj.id).await.unwrap_or_default();
+    let runs = swarm_repo
+        .list_runs(&RunFilter {
+            project_id: Some(proj.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_or_default();
+
+    // Accumulated cost (best-effort; cost_usd may be null/0 until usage attribution).
+    let cost_usd: f64 = runs.iter().filter_map(|r| r.cost_usd).sum();
+
+    // Best-effort extraction of artifacts/PRs/reviews from run result blobs.
+    let mut artifacts: Vec<String> = Vec::new();
+    let mut prs: Vec<String> = Vec::new();
+    let mut reviews: Vec<String> = Vec::new();
+    for run in &runs {
+        if let Some(result) = &run.result {
+            if let Some(arr) = result.get("artifacts").and_then(|v| v.as_array()) {
+                for v in arr {
+                    if let Some(s) = v.as_str() {
+                        artifacts.push(s.to_string());
+                    }
+                }
+            }
+            if let Some(arr) = result.get("prs").and_then(|v| v.as_array()) {
+                for v in arr {
+                    if let Some(s) = v.as_str() {
+                        prs.push(s.to_string());
+                    }
+                }
+            }
+            if let Some(arr) = result.get("reviews").and_then(|v| v.as_array()) {
+                for v in arr {
+                    if let Some(s) = v.as_str() {
+                        reviews.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Json(StorySwarmLink {
+        project,
+        tasks,
+        runs,
+        artifacts,
+        prs,
+        reviews,
+        cost_usd,
+    }))
 }
 
 // ---------------------------------------------------------------------------

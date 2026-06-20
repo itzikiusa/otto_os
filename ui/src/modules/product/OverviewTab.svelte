@@ -12,6 +12,7 @@
   import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser } from './types';
   import { confirmer } from '../../lib/confirm.svelte';
   import PublishDialog from './PublishDialog.svelte';
+  import SwarmLinkCard from './SwarmLinkCard.svelte';
   import type { ProductTranscript } from './types';
 
   // Version picker state — null means "show current (source) version".
@@ -1131,6 +1132,9 @@
         </div>
       {/if}
     {/if}
+
+    <!-- ── Swarm link (cross-link back to the project this story spawned) ── -->
+    <SwarmLinkCard storyId={story.id} />
 
     <!-- ── Related by tag ───────────────────────────────────────── -->
     {#if relatedStories.length > 0}

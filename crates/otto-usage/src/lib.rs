@@ -44,6 +44,7 @@ pub use tailer::{
     ParsedUsage,
 };
 pub use types::{
-    DailyUsage, FeatureUsage, MetricPoint, ProviderUsage, SessionTotals, SessionUsage, UsageConfig,
-    UsageEvent, UsageStatus, UsageSummary,
+    AttributionDimension, AttributionRow, DailyUsage, FeatureUsage, ForecastReq, ForecastResp,
+    MetricPoint, ProviderUsage, SessionTotals, SessionUsage, UsageConfig, UsageEvent, UsageStatus,
+    UsageSummary,
 };

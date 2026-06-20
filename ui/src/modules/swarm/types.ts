@@ -327,3 +327,16 @@ export const TASK_COLUMNS: TaskStatus[] = [
   'blocked',
   'done',
 ];
+
+// ---------------------------------------------------------------------------
+// Swarm↔Product closure types  (GET /swarm/tasks/{tid}/story)
+// ---------------------------------------------------------------------------
+
+/** Back-link from a swarm task to the Product story that originated it.
+ *  Returned by `GET /swarm/tasks/{tid}/story`. */
+export interface TaskStoryLink {
+  /** Source Product story, null when the task was not created from a story plan. */
+  story: import('../product/types').ProductStory | null;
+  /** Acceptance criteria from the task description (convenience field). */
+  acceptance: string | null;
+}

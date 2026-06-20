@@ -1139,3 +1139,49 @@ Notes:
 - `ProduceReq` now honors `headers: MessageHeader[]`, `key_base64: bool`, `value_base64: bool`
   (already in the DTO). A tombstone is produced by sending an empty string `value` with
   `value_base64: false`.
+
+## Must-have wave (Wave 2) — additional routes
+
+Extensions to existing features (work-graph attribution, broker operator workflows,
+product↔swarm closure, vault governance). Auth is covered by the existing per-feature
+policy prefixes (`/usage/`→Usage, `/brokers/cluster`→Database, `/product/`→Product,
+`/swarm/`→Swarm, `/workspaces/{ws}/memory/`→Product).
+
+**Work-graph attribution (Usage):**
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /usage/attribution | ws viewer (Usage:View) | `?by=repo\|branch\|pr\|story\|swarm_task\|workflow\|channel\|review\|origin` | grouped `{key, cost_usd, tokens, sessions}[]` |
+| POST /usage/forecast | ws viewer (Usage:View) | `{feature, provider, est_tokens?}` | `{projected_cost_usd, basis}` |
+
+**Broker operator workflows (Database tier; `/brokers/cluster` prefix):**
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /brokers/clusters/{id}/replay | ws editor | `ReplayReq {source_topic, target_topic, selector, transform?}` | `ReplayResp {produced, evidence_id}` |
+| GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions | ws viewer | — | `SchemaVersion[]` |
+| GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions/{version} | ws viewer | — | `SchemaVersionDetail` |
+| POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws editor | `{schema}` | `CompatibilityResult {compatible, messages}` |
+| GET /brokers/clusters/{id}/lag-alerts | ws viewer | — | `LagAlert[]` |
+| POST /brokers/clusters/{id}/lag-alerts | ws editor | `UpsertLagAlertReq` | `LagAlert` |
+| DELETE /brokers/clusters/{id}/lag-alerts/{alert_id} | ws editor | — | 204 |
+
+`POST /brokers/clusters/{id}/groups/{group}/reset` now also accepts `?dry_run=true` — returns the computed target vs current offsets + lag delta **without writing**.
+
+**Product↔Swarm closure:**
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /product/stories/{sid}/swarm | ws viewer (Product:View) | — | `StorySwarmLink {project?, tasks, runs, artifacts, prs, reviews, cost_usd}` |
+| GET /swarm/tasks/{tid}/story | ws viewer (Swarm:View) | — | `TaskStoryLink {story?, acceptance}` |
+
+**Vault governance (Memory; Product tier; `/workspaces/{ws}/memory/` prefix):**
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /workspaces/{ws}/memory/{mid}/state | ws editor | `{state}` (suggested\|accepted\|stale\|contradicted) | updated `Memory` |
+| POST /workspaces/{ws}/memory/{mid}/forget | ws editor | — | `{undo_token}` (soft-delete) |
+| POST /workspaces/{ws}/memory/{mid}/forget/undo | ws editor | `{undo_token}` | restored `Memory` |
+| POST /workspaces/{ws}/memory/merge | ws editor | `{ids}` | merged `Memory` |
+| POST /workspaces/{ws}/memory/{mid}/split | ws editor | `{parts}` | `Memory[]` |
+| POST /workspaces/{ws}/memory/import | ws editor | `{kind, content}` (AGENTS.md\|CLAUDE.md\|.cursorrules) | `{imported}` |

@@ -17,8 +17,9 @@ use crate::clickhouse::ClickHouse;
 use crate::metrics::{Metric, MetricsSampler};
 use crate::schema;
 use crate::types::{
-    DailyUsage, FeatureUsage, MetricPoint, ProviderUsage, SessionTotals, SessionUsage, UsageConfig,
-    UsageEvent, UsageStatus, UsageSummary,
+    AttributionDimension, AttributionRow, DailyUsage, FeatureUsage, ForecastReq, ForecastResp,
+    MetricPoint, ProviderUsage, SessionTotals, SessionUsage, UsageConfig, UsageEvent, UsageStatus,
+    UsageSummary,
 };
 
 /// Flush the usage buffer at least this often.
@@ -71,6 +72,13 @@ impl UsageEngine {
                     let ch = Arc::new(ClickHouse::new(bin.clone(), ch_dir));
                     match ch.exec(&schema::schema_sql(config.retention_days)).await {
                         Ok(()) => {
+                            // Additive migration: add work-attribution columns to
+                            // tables created before B1. IF NOT EXISTS makes this
+                            // idempotent; errors are warnings so a quirky ClickHouse
+                            // build doesn't prevent the engine from starting.
+                            if let Err(e) = ch.exec(&schema::add_workref_columns_sql()).await {
+                                tracing::warn!("usage: add workref columns failed (non-fatal): {e}");
+                            }
                             let (tx, rx) = mpsc::unbounded_channel();
                             spawn_writer(Arc::clone(&ch), rx);
                             tracing::info!(
@@ -367,6 +375,139 @@ impl UsageEngine {
                 .then(b.cost_usd.total_cmp(&a.cost_usd))
         });
         Ok(out)
+    }
+
+    // ── Work-graph attribution + forecast (B1) ───────────────────────────────
+
+    /// `GET /usage/attribution?by=<dim>` — GROUP BY one work-graph dimension over
+    /// the last `days`. Returns rows sorted by cost descending, filtering out the
+    /// empty-string "not set" key so callers only see attributed work. Returns an
+    /// empty vec when the engine is disabled or the column doesn't exist yet
+    /// (pre-migration installs that haven't restarted will get empty rows for the
+    /// new columns until the migration runs — that's correct and safe).
+    pub async fn attribution(
+        &self,
+        dim: &AttributionDimension,
+        days: u32,
+    ) -> otto_core::Result<Vec<AttributionRow>> {
+        let col = dim.column();
+        // Guard: the column must be a safe identifier (no injection via the
+        // dimension enum — all arms are string literals above).
+        let since = since(days);
+        // Note: alias `cost_usd` would shadow the column name and trigger
+        // NOT_AN_AGGREGATE in ClickHouse's strict alias-resolution mode.
+        // Use a distinct alias `cost` and rename client-side via the
+        // `AttributionRow.cost_usd` field mapping.
+        self.rows(&format!(
+            "SELECT {col} AS key,
+                    round(sum(cost_usd), 6) AS cost,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS tokens,
+                    uniqExact(session_id) AS sessions
+             FROM usage_events
+             WHERE event_date >= today() - {since}
+               AND {col} != ''
+             GROUP BY {col}
+             ORDER BY cost DESC, tokens DESC"
+        ))
+        .await
+    }
+
+    /// `POST /usage/forecast` — estimate the cost of a future run from recent
+    /// per-run averages. `req.feature` is the usage-kind label ("review",
+    /// "product", "agent", …). When `req.est_tokens` is given the projected cost
+    /// is priced directly; otherwise it is derived from the average tokens per
+    /// session over the last 30 days for the feature + provider pair.
+    ///
+    /// Returns a [`ForecastResp`] that is always `Ok` — if the engine is down or
+    /// has no history the resp carries a "$0 (no data)" basis string.
+    pub async fn forecast(&self, req: &ForecastReq) -> ForecastResp {
+        // Price a caller-supplied token estimate directly (most actionable path).
+        if let Some(est) = req.est_tokens.filter(|&t| t > 0) {
+            // Split evenly between input / output for pricing (conservative).
+            let half = est / 2;
+            let cost = crate::pricing::estimate_cost(&req.provider, half, half, 0, 0);
+            return ForecastResp {
+                projected_cost_usd: cost,
+                basis: format!(
+                    "priced {est} estimated tokens ({half} in / {half} out) at {provider} rates",
+                    provider = req.provider
+                ),
+            };
+        }
+
+        // No explicit token count — derive from recent-run averages for this
+        // feature + provider pair over the last 30 days. We query the per-session
+        // totals and compute the average cost per session for matching sessions.
+        let Some(ch) = self.ch() else {
+            return ForecastResp {
+                projected_cost_usd: 0.0,
+                basis: "usage engine not available".into(),
+            };
+        };
+
+        // We need to join with the SQLite session metadata to know a session's
+        // feature label — but the engine has no SQLite access. Instead we use
+        // the `origin` dimension (stamped by the runner) as a proxy. "review" →
+        // origin="review"; "product" → "product"; plain sessions → "manual".
+        // This is best-effort: un-attributed sessions return the "no data" path.
+        let feature = req.feature.replace('\'', "''");
+        let provider = req.provider.replace('\'', "''");
+
+        // Per-session totals subquery — one row per session_id, all within the
+        // last 30 days, matching origin + provider. The outer query averages them.
+        // Uses explicit column aliases that don't collide with column names.
+        let inner_sql = format!(
+            "SELECT session_id,
+                    round(sum(cost_usd), 6) AS sess_cost,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS sess_tokens
+             FROM usage_events
+             WHERE event_date >= today() - 29
+               AND origin = '{feature}'
+               AND provider = '{provider}'
+             GROUP BY session_id
+             HAVING count() > 0"
+        );
+        let agg_sql = format!(
+            "SELECT count() AS n,
+                    avg(sess_cost) AS mean_cost,
+                    avg(sess_tokens) AS mean_tokens
+             FROM ({inner_sql}) AS s"
+        );
+
+        let rows: Vec<serde_json::Value> = match ch.query_rows(&agg_sql).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("usage: forecast query failed: {e}");
+                return ForecastResp {
+                    projected_cost_usd: 0.0,
+                    basis: "forecast query failed".into(),
+                };
+            }
+        };
+
+        let row = rows.first();
+        let n = row.and_then(|r| r["n"].as_u64()).unwrap_or(0);
+        let mean_cost = row.and_then(|r| r["mean_cost"].as_f64()).unwrap_or(0.0);
+        let mean_tokens = row.and_then(|r| r["mean_tokens"].as_f64()).unwrap_or(0.0);
+
+        if n == 0 || mean_cost == 0.0 {
+            return ForecastResp {
+                projected_cost_usd: 0.0,
+                basis: format!(
+                    "no recent {feature}/{provider} runs in the last 30 days to base a forecast on"
+                ),
+            };
+        }
+
+        let cost = (mean_cost * 1_000_000.0).round() / 1_000_000.0;
+        ForecastResp {
+            projected_cost_usd: cost,
+            basis: format!(
+                "average of {n} {feature}/{provider} sessions over last 30d \
+                 (mean {:.0} tokens, mean ${:.4} each)",
+                mean_tokens, mean_cost
+            ),
+        }
     }
 
     /// Token/cost totals for a single `session_id`, optionally bounded to events

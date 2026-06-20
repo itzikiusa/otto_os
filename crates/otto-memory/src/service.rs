@@ -110,6 +110,13 @@ impl MemoryService {
         &self.repo
     }
 
+    /// Raw pool access — used by governance operations that need to run SQL
+    /// statements not yet exposed on `MemoriesRepo` (e.g. updating
+    /// `provenance_json` for in-flight imports).
+    pub fn pool(&self) -> &sqlx::SqlitePool {
+        self.repo.pool()
+    }
+
     async fn embed_one(&self, m: &Memory) {
         if let Some(e) = &self.embedder {
             let text = format!("{}\n{}", m.title, m.body);

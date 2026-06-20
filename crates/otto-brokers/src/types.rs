@@ -655,6 +655,156 @@ pub struct SchemaSubject {
     pub schema: String,
 }
 
+/// One entry in a subject's version history.
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaVersion {
+    pub version: i32,
+    pub id: i32,
+    pub schema_type: String,
+    pub schema: String,
+}
+
+/// Full detail for a specific schema version, including the raw schema text.
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaVersionDetail {
+    pub subject: String,
+    pub version: i32,
+    pub id: i32,
+    pub schema_type: String,
+    pub schema: String,
+}
+
+/// Request body to check compatibility of a new schema against an existing subject.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompatCheckReq {
+    /// The candidate schema document (JSON string).
+    pub schema: String,
+    /// Optional schema type override (default: AVRO).
+    #[serde(default)]
+    pub schema_type: Option<String>,
+}
+
+/// Response from a compatibility check.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompatCheckResp {
+    pub compatible: bool,
+    pub messages: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// DLQ / Replay
+// ---------------------------------------------------------------------------
+
+/// How to select messages from the source topic for replay.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ReplaySelector {
+    /// Re-read the last `count` messages from the source topic.
+    Latest { count: usize },
+    /// Re-read from absolute offset `from` to `to` (inclusive) on a single partition.
+    OffsetRange { partition: i32, from: i64, to: i64 },
+    /// Re-read messages at or after the given epoch-ms timestamp.
+    Timestamp { timestamp_ms: i64, limit: usize },
+}
+
+/// Optional per-message key/value transform applied before producing to the target.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplayTransform {
+    /// When set, overwrite the message key with this literal (UTF-8).
+    #[serde(default)]
+    pub set_key: Option<String>,
+    /// When set, add/overwrite a header with this name and value.
+    #[serde(default)]
+    pub add_header: Option<(String, String)>,
+}
+
+/// Request body for `POST /brokers/clusters/{id}/replay`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplayReq {
+    pub source_topic: String,
+    pub target_topic: String,
+    pub selector: ReplaySelector,
+    /// Optional transform applied to every replayed message.
+    #[serde(default)]
+    pub transform: Option<ReplayTransform>,
+    /// Explicit confirm for guarded (prod / read-only) clusters.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// Evidence row for one replayed message.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayEvidence {
+    pub partition: i32,
+    pub offset: i64,
+    pub key_preview: Option<String>,
+    pub target_partition: i32,
+    pub target_offset: i64,
+}
+
+/// Response from a replay run.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayResp {
+    pub replay_id: String,
+    pub source_topic: String,
+    pub target_topic: String,
+    pub count: usize,
+    pub evidence: Vec<ReplayEvidence>,
+}
+
+// ---------------------------------------------------------------------------
+// Offset-reset dry-run
+// ---------------------------------------------------------------------------
+
+/// Per-partition preview of what an offset reset would do (dry-run mode).
+#[derive(Debug, Clone, Serialize)]
+pub struct DryRunPartition {
+    pub topic: String,
+    pub partition: i32,
+    pub current_offset: i64,
+    pub target_offset: i64,
+    pub lag_delta: i64,
+}
+
+/// Response from `POST /groups/{group}/reset?dry_run=true` — shows what
+/// would change without committing anything.
+#[derive(Debug, Clone, Serialize)]
+pub struct DryRunResp {
+    pub group: String,
+    pub partitions: Vec<DryRunPartition>,
+    pub total_lag_before: i64,
+    pub total_lag_after: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Lag alerts
+// ---------------------------------------------------------------------------
+
+/// A configured lag alert for a topic/group pair on a cluster.
+#[derive(Debug, Clone, Serialize)]
+pub struct LagAlert {
+    pub id: String,
+    pub cluster_id: String,
+    pub topic: String,
+    pub group_name: String,
+    pub threshold: i64,
+    pub enabled: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When the most-recently-evaluated lag exceeded the threshold, the breach
+    /// delta is surfaced here (None = no current breach or not yet evaluated).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub breach_lag: Option<i64>,
+}
+
+/// Request body to create a new lag alert.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewLagAlertReq {
+    pub topic: String,
+    pub group_name: String,
+    /// Lag count that triggers a breach notice.
+    pub threshold: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

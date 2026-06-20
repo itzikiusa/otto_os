@@ -1,7 +1,8 @@
 //! Confluent Schema Registry client — fetch schemas by id (to decode
-//! Confluent-framed Avro values) and list subjects for the schema browser.
+//! Confluent-framed Avro values), list subjects for the schema browser, and
+//! expose version history + compatibility checking for the operator workflow.
 
-use crate::types::SchemaSubject;
+use crate::types::{CompatCheckReq, CompatCheckResp, SchemaSubject, SchemaVersion, SchemaVersionDetail};
 use dashmap::DashMap;
 use otto_core::{Error, Result};
 use std::time::Duration;
@@ -146,6 +147,152 @@ impl SchemaRegistry {
         out.sort_by(|a, b| a.subject.cmp(&b.subject));
         Ok(out)
     }
+
+    /// Fetch the version history for a subject (all registered versions, oldest first).
+    pub async fn subject_versions(&self, subject: &str) -> Result<Vec<SchemaVersion>> {
+        // First get the list of version numbers from the registry.
+        let url = format!("{}/subjects/{}/versions", self.base, urlenc(subject));
+        self.guard(&url).await?;
+        let resp = self.get(url).send().await.map_err(up)?;
+        if !resp.status().is_success() {
+            return Err(Error::Upstream(format!(
+                "schema registry returned {} listing versions for {subject}",
+                resp.status()
+            )));
+        }
+        let version_nums: Vec<i32> = resp.json().await.map_err(up)?;
+
+        #[derive(serde::Deserialize)]
+        struct VersionResp {
+            version: i32,
+            id: i32,
+            schema: String,
+            #[serde(rename = "schemaType")]
+            schema_type: Option<String>,
+        }
+
+        let mut out = Vec::with_capacity(version_nums.len());
+        for v in version_nums {
+            let vu = format!("{}/subjects/{}/versions/{v}", self.base, urlenc(subject));
+            let Ok(r) = self.get(vu).send().await else {
+                continue;
+            };
+            if !r.status().is_success() {
+                continue;
+            }
+            if let Ok(vr) = r.json::<VersionResp>().await {
+                out.push(SchemaVersion {
+                    version: vr.version,
+                    id: vr.id,
+                    schema_type: vr.schema_type.unwrap_or_else(|| "AVRO".into()),
+                    schema: vr.schema,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch one specific version of a subject. `version` may be a number string
+    /// or `"latest"`.
+    pub async fn subject_version_detail(
+        &self,
+        subject: &str,
+        version: &str,
+    ) -> Result<SchemaVersionDetail> {
+        let url = format!("{}/subjects/{}/versions/{version}", self.base, urlenc(subject));
+        self.guard(&url).await?;
+        let resp = self.get(url).send().await.map_err(up)?;
+        if !resp.status().is_success() {
+            return Err(Error::Upstream(format!(
+                "schema registry returned {} for {subject}/versions/{version}",
+                resp.status()
+            )));
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            subject: String,
+            version: i32,
+            id: i32,
+            schema: String,
+            #[serde(rename = "schemaType")]
+            schema_type: Option<String>,
+        }
+        let r: Resp = resp.json().await.map_err(up)?;
+        Ok(SchemaVersionDetail {
+            subject: r.subject,
+            version: r.version,
+            id: r.id,
+            schema_type: r.schema_type.unwrap_or_else(|| "AVRO".into()),
+            schema: r.schema,
+        })
+    }
+
+    /// Check compatibility of a candidate schema against the latest registered
+    /// version of a subject. Calls the registry's `/compatibility/…/versions/latest`
+    /// endpoint and returns the is_compatible flag + any violation messages.
+    pub async fn check_compatibility(
+        &self,
+        subject: &str,
+        req: &CompatCheckReq,
+    ) -> Result<CompatCheckResp> {
+        let url = format!(
+            "{}/compatibility/subjects/{}/versions/latest",
+            self.base,
+            urlenc(subject)
+        );
+        self.guard(&url).await?;
+
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            schema: &'a str,
+            #[serde(rename = "schemaType", skip_serializing_if = "Option::is_none")]
+            schema_type: Option<&'a str>,
+        }
+        let body = Body {
+            schema: &req.schema,
+            schema_type: req.schema_type.as_deref(),
+        };
+        let rb = self.client.post(&url).json(&body);
+        let rb = match &self.auth {
+            Some((u, p)) => rb.basic_auth(u, p.as_ref()),
+            None => rb,
+        };
+        let resp = rb.send().await.map_err(up)?;
+        if !resp.status().is_success() {
+            return Err(Error::Upstream(format!(
+                "schema registry compatibility check returned {}",
+                resp.status()
+            )));
+        }
+        #[derive(serde::Deserialize)]
+        struct CompatResp {
+            is_compatible: bool,
+            #[serde(default)]
+            messages: Vec<String>,
+        }
+        let r: CompatResp = resp.json().await.map_err(up)?;
+        Ok(CompatCheckResp {
+            compatible: r.is_compatible,
+            messages: r.messages,
+        })
+    }
+}
+
+/// URL-encode a schema subject name (subjects may contain `/`, `:` etc.).
+fn urlenc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
+            other => {
+                let mut buf = [0u8; 4];
+                for byte in other.encode_utf8(&mut buf).bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn up(e: reqwest::Error) -> Error {

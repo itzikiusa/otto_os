@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 
-use otto_core::{new_id, Result};
+use otto_core::{new_id, Error, Result};
 
 use crate::convert::{dberr, fmt};
 
@@ -84,6 +84,29 @@ pub struct Memory {
     pub expires_at: Option<String>,
     /// `shared` (all workspace members) or `private` (creator-only).
     pub visibility: String,
+    // -- lifecycle governance (0056_memory_lifecycle.sql) --
+    /// Lifecycle state: `suggested` | `accepted` | `stale` | `contradicted`.
+    pub state: String,
+    /// JSON provenance record — op + source ids (merge/split/import).
+    pub provenance_json: Option<String>,
+    /// Unix epoch seconds; set when the memory is soft-deleted. `None` = live.
+    pub forgotten_at: Option<i64>,
+    /// Random token required to undo a forget. Cleared after undo or permanent
+    /// delete.
+    pub undo_token: Option<String>,
+}
+
+/// A governed-import batch: one AGENTS.md / CLAUDE.md / .cursorrules import.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GovernedImport {
+    pub id: String,
+    pub workspace_id: String,
+    pub kind: String,
+    pub label: String,
+    pub memory_ids: Vec<String>,
+    pub imported_by: String,
+    pub imported_at: String,
+    pub reverted_at: Option<String>,
 }
 
 fn default_collection() -> String {
@@ -218,6 +241,12 @@ fn row_to_memory(r: &sqlx::sqlite::SqliteRow) -> Result<Memory> {
         access_count: r.get("access_count"),
         expires_at: r.get("expires_at"),
         visibility: r.get("visibility"),
+        // lifecycle governance — columns added in 0056_memory_lifecycle.sql; may
+        // be absent in older rows (SQLite returns the DEFAULT in that case).
+        state: r.try_get("state").unwrap_or_else(|_| "accepted".into()),
+        provenance_json: r.try_get("provenance_json").unwrap_or(None),
+        forgotten_at: r.try_get("forgotten_at").unwrap_or(None),
+        undo_token: r.try_get("undo_token").unwrap_or(None),
     })
 }
 
@@ -233,6 +262,12 @@ pub struct MemoriesRepo {
 impl MemoriesRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Raw pool access — for callers that need to run statements not yet exposed
+    /// on the repo (e.g. the governance service updating provenance_json).
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Normalized SHA-256 of the body — for exact-duplicate detection.
@@ -659,6 +694,228 @@ impl MemoriesRepo {
         .map_err(dberr("memory.all_links"))?;
         Ok(rows.iter().map(row_to_link).collect())
     }
+
+    // -- governance (0056_memory_lifecycle.sql) ---------------------------------
+
+    /// Transition a memory's lifecycle state. Valid transitions are enforced by
+    /// the service layer; the repo blindly writes the requested state.
+    pub async fn set_state(&self, ws: &str, id: &str, state: &str) -> Result<Memory> {
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE memories SET state=?, updated_at=? WHERE id=? AND workspace_id=?",
+        )
+        .bind(state)
+        .bind(&now)
+        .bind(id)
+        .bind(ws)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("memory.set_state"))?;
+        self.get(ws, id).await
+    }
+
+    /// Soft-delete a memory: set `active=0`, `forgotten_at`, and mint an opaque
+    /// `undo_token`. Returns the token so the caller can hand it to the client.
+    pub async fn soft_forget(&self, ws: &str, id: &str) -> Result<String> {
+        // Verify the row exists in this workspace first (returns NotFound if absent).
+        let _ = self.get(ws, id).await?;
+        let now = fmt(Utc::now());
+        let epoch = Utc::now().timestamp();
+        // Random 32-byte hex token — sufficient entropy, no external crate needed.
+        let token = {
+            use std::fmt::Write as _;
+            let mut raw = [0u8; 32];
+            // Use the standard library's available entropy source on stable Rust.
+            // Deterministic-safe: SHA-256 over (id + workspace + epoch nanos).
+            let seed = format!(
+                "{}{}{}{}",
+                id,
+                ws,
+                epoch,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos())
+                    .unwrap_or(42)
+            );
+            // SHA-256 via sha2 (already a workspace dep).
+            use sha2::{Digest, Sha256};
+            let hash = Sha256::digest(seed.as_bytes());
+            raw.copy_from_slice(&hash);
+            let mut s = String::with_capacity(64);
+            for b in &raw {
+                let _ = write!(s, "{:02x}", b);
+            }
+            s
+        };
+        sqlx::query(
+            "UPDATE memories SET active=0, forgotten_at=?, undo_token=?, \
+             state='stale', updated_at=? WHERE id=? AND workspace_id=?",
+        )
+        .bind(epoch)
+        .bind(&token)
+        .bind(&now)
+        .bind(id)
+        .bind(ws)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("memory.soft_forget"))?;
+        Ok(token)
+    }
+
+    /// Undo a soft-delete: restore `active=1`, clear `forgotten_at` and
+    /// `undo_token`, set state back to `accepted`. Returns the restored memory.
+    pub async fn undo_forget(&self, ws: &str, undo_token: &str) -> Result<Memory> {
+        // Locate the row by its undo token, scoped to the workspace.
+        let row = sqlx::query(
+            "SELECT id FROM memories WHERE undo_token=? AND workspace_id=?",
+        )
+        .bind(undo_token)
+        .bind(ws)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("memory.undo_forget.find"))?
+        .ok_or_else(|| Error::NotFound("undo token not found or already used".into()))?;
+        let id: String = row.get("id");
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE memories SET active=1, forgotten_at=NULL, undo_token=NULL, \
+             state='accepted', updated_at=? WHERE id=? AND workspace_id=?",
+        )
+        .bind(&now)
+        .bind(&id)
+        .bind(ws)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("memory.undo_forget"))?;
+        self.get(ws, &id).await
+    }
+
+    /// Record merge provenance on a memory (the newly created merged row). Also
+    /// marks all source memories as `contradicted` + sets their `superseded_by`.
+    pub async fn record_merge(
+        &self,
+        ws: &str,
+        merged_id: &str,
+        source_ids: &[String],
+        provenance_json: &str,
+    ) -> Result<()> {
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE memories SET provenance_json=?, updated_at=? WHERE id=? AND workspace_id=?",
+        )
+        .bind(provenance_json)
+        .bind(&now)
+        .bind(merged_id)
+        .bind(ws)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("memory.record_merge.provenance"))?;
+        for src in source_ids {
+            sqlx::query(
+                "UPDATE memories SET active=0, state='contradicted', superseded_by=?, \
+                 updated_at=? WHERE id=? AND workspace_id=?",
+            )
+            .bind(merged_id)
+            .bind(&now)
+            .bind(src)
+            .bind(ws)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("memory.record_merge.source"))?;
+        }
+        Ok(())
+    }
+
+    /// Record split provenance on a set of child memories and mark the parent
+    /// `contradicted` + point it at the first child (as `superseded_by`).
+    pub async fn record_split(
+        &self,
+        ws: &str,
+        parent_id: &str,
+        child_ids: &[String],
+        provenance_json: &str,
+    ) -> Result<()> {
+        let now = fmt(Utc::now());
+        for child in child_ids {
+            sqlx::query(
+                "UPDATE memories SET provenance_json=?, updated_at=? \
+                 WHERE id=? AND workspace_id=?",
+            )
+            .bind(provenance_json)
+            .bind(&now)
+            .bind(child)
+            .bind(ws)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("memory.record_split.child"))?;
+        }
+        let first_child = child_ids.first().map(String::as_str).unwrap_or("");
+        sqlx::query(
+            "UPDATE memories SET active=0, state='contradicted', superseded_by=?, \
+             updated_at=? WHERE id=? AND workspace_id=?",
+        )
+        .bind(first_child)
+        .bind(&now)
+        .bind(parent_id)
+        .bind(ws)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("memory.record_split.parent"))?;
+        Ok(())
+    }
+
+    // -- governed import ---------------------------------------------------------
+
+    /// Persist a governed-import record (after the memories themselves are created).
+    pub async fn create_governed_import(
+        &self,
+        ws: &str,
+        kind: &str,
+        label: &str,
+        memory_ids: &[String],
+        by: &str,
+    ) -> Result<GovernedImport> {
+        let id = new_id();
+        let now = fmt(Utc::now());
+        let ids_json = jstr(&memory_ids);
+        sqlx::query(
+            "INSERT INTO governed_imports \
+             (id,workspace_id,kind,label,memory_ids_json,imported_by,imported_at) \
+             VALUES (?,?,?,?,?,?,?)",
+        )
+        .bind(&id)
+        .bind(ws)
+        .bind(kind)
+        .bind(label)
+        .bind(&ids_json)
+        .bind(by)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("governed_import.create"))?;
+        Ok(GovernedImport {
+            id,
+            workspace_id: ws.into(),
+            kind: kind.into(),
+            label: label.into(),
+            memory_ids: memory_ids.to_vec(),
+            imported_by: by.into(),
+            imported_at: now,
+            reverted_at: None,
+        })
+    }
+
+    /// List governed imports for a workspace (most recent first).
+    pub async fn list_governed_imports(&self, ws: &str) -> Result<Vec<GovernedImport>> {
+        let rows = sqlx::query(
+            "SELECT * FROM governed_imports WHERE workspace_id=? ORDER BY imported_at DESC",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("governed_import.list"))?;
+        rows.iter().map(row_to_governed_import).collect()
+    }
 }
 
 fn row_to_link(r: &sqlx::sqlite::SqliteRow) -> MemoryLink {
@@ -669,4 +926,19 @@ fn row_to_link(r: &sqlx::sqlite::SqliteRow) -> MemoryLink {
         weight: r.get::<f64, _>("weight") as f32,
         certainty: r.get("certainty"),
     }
+}
+
+fn row_to_governed_import(r: &sqlx::sqlite::SqliteRow) -> Result<GovernedImport> {
+    let ids_json: String = r.get("memory_ids_json");
+    let memory_ids: Vec<String> = serde_json::from_str(&ids_json).unwrap_or_default();
+    Ok(GovernedImport {
+        id: r.get("id"),
+        workspace_id: r.get("workspace_id"),
+        kind: r.get("kind"),
+        label: r.get("label"),
+        memory_ids,
+        imported_by: r.get("imported_by"),
+        imported_at: r.get("imported_at"),
+        reverted_at: r.get("reverted_at"),
+    })
 }

@@ -169,6 +169,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/usage/budgets",
             get(usage::budgets).put(usage::put_budgets),
         )
+        // Work-graph attribution drilldown + pre-launch cost forecast (B1).
+        .route("/usage/attribution", get(usage::attribution))
+        .route("/usage/forecast", post(usage::forecast))
         .route(
             "/notifications",
             get(notifications::list).delete(notifications::clear),

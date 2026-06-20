@@ -222,6 +222,9 @@ impl otto_product::ProductCtx for ServerCtx {
     fn roles(&self) -> &Arc<dyn RoleChecker> {
         &self.roles
     }
+    fn swarm_repo(&self) -> Option<&otto_state::SwarmRepo> {
+        Some(&self.swarm_repo)
+    }
 }
 
 impl otto_memory::MemoryCtx for ServerCtx {
@@ -254,6 +257,9 @@ impl otto_swarm::SwarmCtx for ServerCtx {
             .into_iter()
             .filter(|n| n != "shell")
             .collect()
+    }
+    fn product_repo(&self) -> Option<&otto_state::ProductRepo> {
+        Some(&self.product_repo)
     }
 }
 
@@ -3324,6 +3330,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_brokers::api_router::<ServerCtx>(),
         otto_product::router::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
+        crate::memory_gov::memory_gov_routes(),
         otto_git::router::<ServerCtx>(),
         otto_issues::router::<ServerCtx>(),
         otto_channels::router::<ServerCtx>(),
