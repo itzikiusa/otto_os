@@ -191,6 +191,21 @@ pub struct VerifyShareResp {
     pub verified: bool,
 }
 
+/// `POST /api/v1/share/extend` — re-issue a FRESH OTP for an existing OTP share,
+/// emailed to the **LOCKED original recipient ONLY** (mobile plan Task 7.4).
+///
+/// Public/Exempt: the `token` (the share link) is the auth. The request carries
+/// NO email field by design — the destination is read from the share row's
+/// immutable `recipient_email`, never from the request. This prevents redirecting
+/// access to a different mailbox. The fresh code re-pends the share
+/// (`verified_at` cleared) and opens a fresh ≤12h window; the guest re-verifies
+/// via `POST /api/v1/share/verify`. IP rate-limited (the share throttle).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendShareReq {
+    /// The raw share token (from the `#/s/<session>/<token>` link).
+    pub token: String,
+}
+
 /// Response for `POST /api/v1/sessions/{id}/share`. The raw token is returned
 /// exactly once (only its SHA-256 hash is stored). `url` is the ready-to-share
 /// fragment URL (`<origin>/#/s/<session_id>/<token>`).

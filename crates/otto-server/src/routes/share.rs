@@ -33,7 +33,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use otto_channels::GmailSender;
 use otto_core::api::{
-    CreateShareReq, CreateShareResp, ListSharesResp, VerifyShareReq, VerifyShareResp,
+    CreateShareReq, CreateShareResp, ExtendShareReq, ListSharesResp, VerifyShareReq,
+    VerifyShareResp,
 };
 use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
@@ -299,6 +300,133 @@ pub async fn mint_otp_share(
     }
 
     Ok((token, info))
+}
+
+/// Re-issue a FRESH OTP for an existing OTP share AND deliver it to the LOCKED
+/// original recipient (mobile plan Task 7.4 / `POST /api/v1/share/extend`).
+///
+/// The destination is read from the share row's immutable `recipient_email` —
+/// **never from the request** (the request body carries no email). This is the
+/// locked-recipient guarantee: there is no parameter by which a caller can
+/// redirect the code to another mailbox. Factored out of the route so a unit test
+/// can inject a capturing [`OtpMailer`] and assert the new code lands on the
+/// ORIGINAL address WITHOUT real SMTP.
+///
+/// `repo.extend_share_otp` re-pends the share (clears `verified_at`), stores the
+/// fresh `otp_hash` (~10-min expiry) and a fresh ≤12h window; this helper then
+/// emails the new code to the row's recipient. A non-OTP / missing / revoked
+/// share yields `400` (it is not extendable).
+pub async fn extend_otp_share(
+    repo: &AuthRepo,
+    expected_owner: &Id,
+    token: &str,
+    mailer: &dyn OtpMailer,
+) -> ApiResult<()> {
+    // The repo reads the destination from the row — the caller cannot influence
+    // WHERE the code goes. `None` ⇒ not an extendable OTP share ⇒ 400.
+    let (otp, recipient, owner_id) = repo
+        .extend_share_otp(token)
+        .await?
+        .ok_or_else(|| {
+            ApiError(Error::Invalid(
+                "this share is not extendable (only email-OTP shares can be extended)".into(),
+            ))
+        })?;
+    // Defensive: the row's owner must be the owner we resolved the sender for, so
+    // we never email via a different user's sender than the share belongs to.
+    debug_assert_eq!(&owner_id, expected_owner);
+
+    // Email the fresh code to the STORED recipient — never an address from the
+    // request (there is none).
+    mailer.send_otp(&recipient, &otp).await.map_err(|e| {
+        ApiError(Error::Upstream(format!(
+            "failed to re-email the access code to {recipient}: {e}"
+        )))
+    })?;
+    Ok(())
+}
+
+/// `POST /api/v1/share/extend` — re-issue a FRESH OTP for an existing OTP share,
+/// emailed to the **LOCKED original recipient ONLY** (mobile plan Task 7.4).
+/// **Public / Exempt**: the `token` (the share link) is the auth, so this route
+/// is reachable even after the share's window has elapsed (the share is then
+/// OTP-pending). IP rate-limited via the share throttle.
+///
+/// Flow: IP rate-limit → load the share by the token's hash; it MUST be a
+/// `kind='share'` row WITH a `recipient_email` (only OTP shares are extendable) →
+/// generate a fresh OTP, clear `verified_at` (forces re-verification), set a fresh
+/// ≤12h window → resolve the OWNER's verified sender and **email the code to the
+/// STORED `recipient_email` ONLY** (the request body has no email field; the
+/// destination is read from the DB row, never the request). Returns `{ ok: true }`;
+/// the guest then re-verifies via `POST /api/v1/share/verify`.
+pub async fn extend_share(
+    State(ctx): State<ServerCtx>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<ExtendShareReq>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let ip = peer.ip();
+
+    // 1. IP rate-limit BEFORE doing any work → 429 with Retry-After.
+    if let Err(locked) = otto_sessions::share_throttle::global().check(ip) {
+        let secs = locked.retry_after.as_secs().max(1);
+        let body = otto_core::api::Problem {
+            code: "too_many_requests".to_string(),
+            message: "too many share-extend attempts; try again later".to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", secs.to_string())],
+            Json(body),
+        )
+            .into_response();
+    }
+
+    let repo = AuthRepo::new(ctx.pool.clone());
+
+    // 2. Re-issue the OTP (re-pends the share + fresh ≤12h window). The recipient
+    //    and owner come from the DB row — NEVER from the request. `None` ⇒ not an
+    //    extendable OTP share ⇒ 400.
+    let (otp, recipient, owner_id) = match repo.extend_share_otp(&req.token).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            // Record a throttle failure so this can't be brute-forced to probe
+            // which tokens are extendable OTP shares.
+            otto_sessions::share_throttle::global().record_failure(ip);
+            return ApiError(Error::Invalid(
+                "this share is not extendable (only email-OTP shares can be extended)".into(),
+            ))
+            .into_response();
+        }
+        Err(e) => return ApiError(e).into_response(),
+    };
+
+    // 3. Resolve the SHARE OWNER's verified sender and email the fresh code to the
+    //    LOCKED `recipient` (read from the row above). 400 when the owner no longer
+    //    has a verified sender.
+    let mailer = match gmail_mailer_for(&ctx, &owner_id).await {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = mailer.send_otp(&recipient, &otp).await {
+        return ApiError(Error::Upstream(format!(
+            "failed to re-email the access code to {recipient}: {e}"
+        )))
+        .into_response();
+    }
+
+    // Success: clear the IP's failure tally and audit the extension.
+    otto_sessions::share_throttle::global().clear(ip);
+    ctx.audit(NewAuditEntry {
+        user_id: Some(owner_id.clone()),
+        action: "share.extend".into(),
+        target: None,
+        detail: None,
+        ip: Some(ip.to_string()),
+    })
+    .await;
+
+    Json(serde_json::json!({ "ok": true })).into_response()
 }
 
 /// `POST /api/v1/share/verify` — redeem an emailed OTP for a share token

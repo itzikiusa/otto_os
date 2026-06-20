@@ -2233,6 +2233,18 @@ export interface VerifyShareResp {
   verified: boolean;
 }
 
+/** `POST /api/v1/share/extend` — re-issue a FRESH OTP for an existing OTP share,
+ *  emailed to the LOCKED original recipient ONLY (mobile plan Task 7.4).
+ *  Public/Exempt: the `token` (the share link) is the auth. The request carries
+ *  NO email field by design — the destination is read from the share row, never
+ *  the request — so access can never be redirected to a different mailbox. The
+ *  fresh code re-pends the share and opens a fresh ≤12h window; the guest then
+ *  re-verifies via `POST /api/v1/share/verify`. Returns `{ ok: true }`. */
+export interface ExtendShareReq {
+  /** The raw share token (from the `#/s/<session>/<token>` link). */
+  token: string;
+}
+
 /** Response for `POST /api/v1/sessions/{id}/share`. The raw token is returned
  *  exactly once — store or copy it immediately. */
 export interface CreateShareResp {

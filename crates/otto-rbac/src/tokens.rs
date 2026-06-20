@@ -686,6 +686,97 @@ impl AuthRepo {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Extend an email-OTP share with a **fresh** code, re-emailed to the LOCKED
+    /// original recipient (mobile plan Task 7.4 / `POST /api/v1/share/extend`).
+    ///
+    /// The recipient address is **immutable on extend** — it is read from the row
+    /// and returned to the caller so the route emails the new code there and
+    /// NOWHERE else. There is no parameter to redirect delivery; this is the
+    /// locked-recipient guarantee that prevents access hijack to another mailbox.
+    ///
+    /// On a matching, live OTP share this:
+    /// - generates a new 6-digit OTP and stores only its SHA-256 (`otp_hash`);
+    /// - sets `otp_expires_at = now + SHARE_OTP_TTL_SECS` (~10 min);
+    /// - **clears `verified_at`** so the share is OTP-pending again (the guest
+    ///   must re-verify the new code before it re-opens);
+    /// - opens a **fresh ≤12h window**: `max_expires_at` and the bearer-token
+    ///   `expires_at` are both pushed to `now + min(window, SHARE_OTP_WINDOW_MAX_SECS)`,
+    ///   where `window` is the share's original duration (reconstructed from the
+    ///   row's `created_at`→`expires_at` span), clamped so each granted window
+    ///   stays ≤12h.
+    ///
+    /// Returns `Ok(Some((new_otp, recipient_email, owner_user_id)))` on success
+    /// (the caller emails the code to that recipient via the owner's verified
+    /// sender); `Ok(None)` when the token is not an extendable OTP share (no row /
+    /// not `kind='share'` / no `recipient_email` / revoked) — the route maps
+    /// `None` to a `400`. The raw OTP is returned exactly once; the DB only ever
+    /// holds its hash.
+    pub async fn extend_share_otp(
+        &self,
+        token: &str,
+    ) -> Result<Option<(String, String, Id)>> {
+        let hash = token_hash(token);
+        let row = sqlx::query(
+            "SELECT user_id, recipient_email, revoked, created_at, expires_at
+             FROM auth_sessions
+             WHERE token_hash = ? AND kind = 'share'",
+        )
+        .bind(&hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("extend share otp lookup: {e}")))?;
+
+        let Some(row) = row else { return Ok(None) };
+        // A revoked share is not extendable.
+        if row.get::<i64, _>("revoked") != 0 {
+            return Ok(None);
+        }
+        // Only OTP shares (those locked to a recipient) are extendable.
+        let recipient: Option<String> = row.get("recipient_email");
+        let Some(recipient) = recipient else {
+            return Ok(None); // plain (non-OTP) share — nothing to re-email
+        };
+        let owner_id: Id = Id::from(row.get::<String, _>("user_id"));
+
+        // Reconstruct the original session-window duration from the row's span so
+        // the extension grants the SAME length window the share was minted with,
+        // re-clamped to ≤12h (so each granted window stays bounded).
+        let created_at = parse_ts(&row.get::<String, _>("created_at"))?;
+        let prev_expires_at = parse_ts(&row.get::<String, _>("expires_at"))?;
+        let original_window = (prev_expires_at - created_at).num_seconds();
+        let window_secs = original_window.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_OTP_WINDOW_MAX_SECS);
+
+        let otp = generate_otp();
+        let now = Utc::now();
+        // Fresh ≤12h window; the bearer-token TTL tracks it so the token can never
+        // outlive the window it grants.
+        let expires_at = now + Duration::seconds(window_secs);
+        let max_expires_at = expires_at.timestamp();
+        let otp_expires_at = (now + Duration::seconds(SHARE_OTP_TTL_SECS)).timestamp();
+
+        let res = sqlx::query(
+            "UPDATE auth_sessions
+             SET otp_hash = ?, otp_expires_at = ?, verified_at = NULL,
+                 max_expires_at = ?, expires_at = ?
+             WHERE token_hash = ? AND kind = 'share' AND revoked = 0
+                   AND recipient_email IS NOT NULL",
+        )
+        .bind(token_hash(&otp))
+        .bind(otp_expires_at)
+        .bind(max_expires_at)
+        .bind(expires_at.to_rfc3339())
+        .bind(&hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("extend share otp update: {e}")))?;
+
+        if res.rows_affected() == 0 {
+            // Lost a race (revoked / recipient cleared between read and write).
+            return Ok(None);
+        }
+        Ok(Some((otp, recipient, owner_id)))
+    }
+
     /// List the **live** (non-revoked, non-expired) share tokens for one session,
     /// newest first. Metadata only — never the secret.
     pub async fn list_shares_for_session(&self, session_id: &Id) -> Result<Vec<ShareInfo>> {

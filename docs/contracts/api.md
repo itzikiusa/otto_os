@@ -308,6 +308,7 @@ except `/share/verify`: the feature guard `403`s every protected route (even
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /api/v1/share/verify | **public** (the share token is the auth) | `VerifyShareReq {token, otp}` | `VerifyShareResp {verified: true}` on success |
+| POST /api/v1/share/extend | **public** (the share token is the auth) | `ExtendShareReq {token}` | `{ "ok": true }` on success |
 
 `POST /api/v1/share/verify` is **Exempt** (public) — the share `token` in the body
 is the auth. It is **IP rate-limited** (the share throttle; `429` with
@@ -318,6 +319,20 @@ failure and returns `401`. After verification the guest may attach (`/ws/term`)
 and `GET` the session until `max_expires_at` (≤12h); once the window elapses the
 share re-pends and must be re-verified (Task 7.4 extension re-emails the LOCKED
 original recipient only).
+
+`POST /api/v1/share/extend` is **Exempt** (public) — re-issues a **FRESH OTP** for
+an existing OTP share and re-emails it to the **LOCKED original `recipient_email`
+ONLY**. The request body carries **no email field by design**: the destination is
+read from the share row, never from the request, so access can never be redirected
+to a different mailbox. It is **IP rate-limited** (the share throttle), generates a
+new 6-digit OTP (`OsRng`), stores only its `sha256` (`otp_hash`, ~10-min expiry),
+**clears `verified_at`** (re-pending the share so the guest must re-verify), and
+opens a fresh **≤12h** window (`max_expires_at`, the bearer-token `expires_at`
+tracks it). Only `kind='share'` rows **with** a `recipient_email` are extendable —
+a plain (non-OTP) / missing / revoked share returns `400`. The code is emailed via
+the **share owner's** verified email sender; if the owner no longer has a verified
+sender → `400`. The guest then re-verifies the new code via
+`POST /api/v1/share/verify` to re-open the window.
 
 ---
 

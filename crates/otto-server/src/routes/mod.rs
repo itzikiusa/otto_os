@@ -51,6 +51,12 @@ pub fn public_routes() -> Router<ServerCtx> {
         // auth, so this must be reachable BEFORE the (still OTP-pending) scoped
         // token can attach. Rate-limited per peer IP inside the handler.
         .route("/share/verify", post(share::verify_share))
+        // Email-OTP share EXTENSION (mobile plan Task 7.4): re-issue a fresh OTP
+        // for an existing OTP share, emailed to the LOCKED original recipient ONLY
+        // (the body carries no email — the destination is read from the share row).
+        // PUBLIC by design (the share token IS the auth) and reachable after the
+        // window elapses. Rate-limited per peer IP inside the handler.
+        .route("/share/extend", post(share::extend_share))
 }
 
 /// Routes that require a bearer token (the auth middleware is layered on top

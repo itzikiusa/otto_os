@@ -118,6 +118,16 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/share/verify" {
         return Exempt;
     }
+    // Email-OTP share EXTENSION (mobile plan Task 7.4). PUBLIC by design, same as
+    // `/share/verify`: the share token in the request body is the auth, and extend
+    // must be reachable even after the window elapses (when the scoped token is
+    // OTP-pending and the feature guard denies everything else). The fresh OTP is
+    // emailed to the LOCKED original recipient read from the row — never the
+    // request — so there is no email field to validate here. Mounted as a public
+    // route; the coverage test still requires this explicit Exempt entry.
+    if p == "/share/extend" {
+        return Exempt;
+    }
     // FS-browse sandbox (cross-cutting; sandboxed in the handler).
     if matches!(p, "/fs/browse" | "/fs/read") {
         return Exempt;

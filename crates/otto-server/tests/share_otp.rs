@@ -33,7 +33,7 @@ use otto_core::{new_id, Error, Id};
 use otto_rbac::AuthRepo;
 use otto_server::feature_guard::feature_guard;
 use otto_core::secrets::SecretStore;
-use otto_server::routes::share::{mint_otp_share, resolve_verified_sender, OtpMailer};
+use otto_server::routes::share::{extend_otp_share, mint_otp_share, resolve_verified_sender, OtpMailer};
 use otto_state::{EmailSendersRepo, GrantsRepo, SqlitePool};
 use std::collections::HashMap;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -407,6 +407,180 @@ async fn otp_mint_requires_verified_sender() {
         .expect("verified sender resolves");
     assert_eq!(addr, "owner@gmail.com");
     assert_eq!(pw, "app-pw");
+}
+
+// ---------------------------------------------------------------------------
+// 7.4: extend re-emails a FRESH OTP to the LOCKED original recipient ONLY.
+//
+// The locked-recipient property is the security crux: extend takes NO email in
+// its request (its signature is `(repo, owner, token, mailer)`), so there is no
+// code path by which it can send anywhere but the address stored on the row. The
+// destination asserted below is the recipient captured at MINT time, proven to be
+// the one extend re-emails — never an attacker-supplied address.
+// ---------------------------------------------------------------------------
+
+/// Extending an OTP share re-emails a fresh code to the ORIGINAL recipient only,
+/// re-pends the share (verified_at cleared), the new code differs from the old,
+/// the NEW code re-verifies (≤12h window) and the OLD code no longer works.
+#[tokio::test]
+async fn extend_emails_fresh_otp_to_locked_recipient_and_re_pends() {
+    let pool = mem_pool().await;
+    let repo = AuthRepo::new(pool.clone());
+    let owner = seed_user(&pool, "owner").await;
+    let mailer = CaptureMailer::default();
+
+    // Mint, redeem, and verify the share once (the normal happy path).
+    let (token, _info) = mint_otp_share(
+        &repo,
+        &owner,
+        &Id::from("S1"),
+        WorkspaceRole::Viewer,
+        3600,
+        Some("for guest".into()),
+        "guest@example.com",
+        &mailer,
+    )
+    .await
+    .expect("mint otp share");
+    let old_otp = mailer.sent.lock().unwrap()[0].1.clone();
+    assert!(repo.verify_share_otp(&token, &old_otp).await.unwrap());
+    assert!(
+        !repo.authenticate(&token).await.unwrap().scope.unwrap().otp_pending,
+        "verified share is not pending before extend"
+    );
+
+    // EXTEND — note the call carries NO email; the destination is read from the
+    // share row. The handler signature is the proof: it cannot redirect delivery.
+    extend_otp_share(&repo, &owner, &token, &mailer)
+        .await
+        .expect("extend otp share");
+
+    // A SECOND email went out, and it went to the SAME locked recipient.
+    let sent = mailer.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2, "extend sends exactly one more OTP email");
+    assert_eq!(
+        sent[1].0, "guest@example.com",
+        "extend re-emails the LOCKED original recipient, never elsewhere"
+    );
+    let new_otp = sent[1].1.clone();
+    assert_eq!(new_otp.len(), 6, "the fresh OTP is 6 digits");
+    assert_ne!(new_otp, old_otp, "the fresh OTP differs from the old one");
+
+    // The share is OTP-pending again (verified_at was cleared on extend).
+    assert!(
+        repo.authenticate(&token).await.unwrap().scope.unwrap().otp_pending,
+        "after extend the share must be OTP-pending again (re-verify required)"
+    );
+
+    // The OLD code no longer works; the NEW code re-verifies and re-opens ≤12h.
+    assert!(
+        !repo.verify_share_otp(&token, &old_otp).await.unwrap(),
+        "the old OTP must not work after extend"
+    );
+    assert!(
+        repo.verify_share_otp(&token, &new_otp).await.unwrap(),
+        "the fresh OTP re-verifies the share"
+    );
+    assert!(
+        !repo.authenticate(&token).await.unwrap().scope.unwrap().otp_pending,
+        "the share re-opens after re-verifying with the fresh code"
+    );
+
+    // The new window end is in the future and within 12h of now (≤12h per window).
+    let max_expires_at: Option<i64> =
+        sqlx::query_scalar("SELECT max_expires_at FROM auth_sessions WHERE token_hash = ?")
+            .bind(otto_rbac::tokens::token_hash(&token))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let now = Utc::now().timestamp();
+    let window = max_expires_at.expect("max_expires_at is set") - now;
+    assert!(window > 0, "the extended window is in the future");
+    assert!(window <= 12 * 60 * 60, "each granted window stays ≤12h");
+}
+
+/// Extending a share that has NO recipient_email (a plain, non-OTP share) is a
+/// `400` — only OTP shares are extendable.
+#[tokio::test]
+async fn extend_rejects_plain_non_otp_share() {
+    let pool = mem_pool().await;
+    let repo = AuthRepo::new(pool.clone());
+    let owner = seed_user(&pool, "owner").await;
+    let mailer = CaptureMailer::default();
+
+    // A plain scoped share (no recipient_email → no OTP gate).
+    let (token, _info) = repo
+        .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+        .await
+        .unwrap();
+
+    let err = extend_otp_share(&repo, &owner, &token, &mailer)
+        .await
+        .expect_err("extending a plain share must error");
+    assert!(
+        matches!(err.0, Error::Invalid(_)),
+        "extending a non-OTP share is a 400 Invalid, got {:?}",
+        err.0
+    );
+    // Nothing was emailed.
+    assert!(
+        mailer.sent.lock().unwrap().is_empty(),
+        "no OTP is emailed when there is no recipient to lock onto"
+    );
+}
+
+/// Locked-recipient proof at the repository layer: `extend_share_otp` returns the
+/// destination it read from the row — there is no parameter by which a caller can
+/// influence WHERE the code goes. The address it hands back equals the one stored
+/// at mint, regardless of anything the caller might wish.
+#[tokio::test]
+async fn extend_destination_is_read_from_row_not_request() {
+    let pool = mem_pool().await;
+    let repo = AuthRepo::new(pool.clone());
+    let owner = seed_user(&pool, "owner").await;
+    let mailer = CaptureMailer::default();
+
+    let (token, _info) = mint_otp_share(
+        &repo,
+        &owner,
+        &Id::from("S1"),
+        WorkspaceRole::Viewer,
+        3600,
+        None,
+        "original@example.com",
+        &mailer,
+    )
+    .await
+    .unwrap();
+
+    // The repo-layer extend takes ONLY the token — no email argument exists. It
+    // hands back the destination it READ from the row (recipient) plus the share's
+    // owner (so the route can resolve the owner's verified sender).
+    let (new_otp, recipient, row_owner) = repo
+        .extend_share_otp(&token)
+        .await
+        .expect("extend lookup")
+        .expect("an OTP share is extendable");
+    assert_eq!(
+        recipient, "original@example.com",
+        "the destination is the STORED recipient, read from the row"
+    );
+    assert_eq!(row_owner, owner, "the owner is read from the row");
+    assert_eq!(new_otp.len(), 6, "a fresh 6-digit OTP is generated");
+}
+
+// ---------------------------------------------------------------------------
+// Policy: /share/extend is Exempt (public; the share token is the auth).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn share_extend_is_exempt() {
+    use otto_server::policy::{policy_for, PolicyDecision};
+    assert_eq!(
+        policy_for(&Method::POST, "/api/v1/share/extend"),
+        PolicyDecision::Exempt,
+        "POST /share/extend must be Exempt (token-in-body is the auth)"
+    );
 }
 
 // ---------------------------------------------------------------------------
