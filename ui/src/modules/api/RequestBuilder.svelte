@@ -1294,6 +1294,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-wrap: wrap;
   }
   .curl-box {
     display: flex;
@@ -1706,5 +1707,53 @@
     font-size: 12px;
     color: var(--text-dim);
     padding: 8px 2px;
+  }
+
+  @media (max-width: 640px) {
+    .builder {
+      min-width: 0;
+      max-width: 100%;
+    }
+    .urlbar {
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .url-wrap {
+      flex: 1 1 100%;
+      order: 2;
+      min-width: 0;
+    }
+    .method {
+      order: 1;
+    }
+    .send {
+      order: 1;
+      flex-shrink: 0;
+    }
+    .kv-row {
+      flex-wrap: wrap;
+    }
+    .kv-key,
+    .kv-val {
+      flex: 1 1 calc(50% - 20px);
+      min-width: 0;
+    }
+    .auth-type {
+      gap: 4px;
+    }
+    .field-row {
+      flex-wrap: wrap;
+    }
+    .field-row > label,
+    .field-spacer {
+      width: auto;
+      min-width: 70px;
+    }
+    .field-row .grow {
+      min-width: 0;
+    }
+    .body-radios {
+      gap: 8px;
+    }
   }
 </style>

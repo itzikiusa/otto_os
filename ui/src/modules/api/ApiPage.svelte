@@ -231,10 +231,27 @@
     }
     .api-side {
       width: 100%;
+      min-width: 0;
       border-right: none;
       border-bottom: 1px solid var(--border);
       max-height: 35vh;
       overflow-y: auto;
+    }
+    .api-main {
+      min-width: 0;
+      width: 100%;
+      overflow-x: hidden;
+    }
+    .req-tabs {
+      overflow-x: auto;
+      flex-shrink: 0;
+    }
+    .builder-pane,
+    .resp-pane {
+      padding-left: 8px;
+      padding-right: 8px;
+      min-width: 0;
+      overflow-x: hidden;
     }
   }
 </style>

@@ -608,47 +608,49 @@
       <div class="panel card">
         <h3>Top sessions</h3>
         {#if usage.summary && usage.summary.sessions.length > 0}
-          <table class="tbl">
-            <thead>
-              <tr>
-                <th>Session</th>
-                <th>Workspace</th>
-                <th>Provider</th>
-                <th class="num">Events</th>
-                <th class="num">Tokens</th>
-                <th class="num">Cost</th>
-                <th>Last active</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each usage.summary.sessions as s (s.session_id)}
+          <div class="tbl-scroll">
+            <table class="tbl">
+              <thead>
                 <tr>
-                  <td title={s.session_id}>
-                    <div class="sess-top">
-                      <span class="mono">{s.session_id.slice(0, 12)}</span>
-                      {#if s.kind}<span class="kind-badge kind-{s.kind}">{s.kind}</span>{/if}
-                    </div>
-                    {#if s.title}<div class="sess-title ellip" title={s.title}>{s.title}</div>{/if}
-                  </td>
-                  <td class="dim ellip">{s.workspace_name ?? '—'}</td>
-                  <td>{s.provider}</td>
-                  <td class="num">{fmtNum(s.events)}</td>
-                  <td class="num">
-                    <div class="sess-tok">
-                      <span>{fmtNum(s.total_tokens)}</span>
-                      <div class="seg-bar mini" title={breakdownTitle(s)}>
-                        {#each tokenSegs(s) as seg (seg.label)}
-                          {#if seg.pct > 0}<div style="width: {seg.pct}%; background: {seg.color}"></div>{/if}
-                        {/each}
-                      </div>
-                    </div>
-                  </td>
-                  <td class="num">{fmtCost(s.cost_usd)}</td>
-                  <td class="dim">{fmtLastActive(s.last_active)}</td>
+                  <th>Session</th>
+                  <th>Workspace</th>
+                  <th>Provider</th>
+                  <th class="num">Events</th>
+                  <th class="num">Tokens</th>
+                  <th class="num">Cost</th>
+                  <th>Last active</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {#each usage.summary.sessions as s (s.session_id)}
+                  <tr>
+                    <td title={s.session_id}>
+                      <div class="sess-top">
+                        <span class="mono">{s.session_id.slice(0, 12)}</span>
+                        {#if s.kind}<span class="kind-badge kind-{s.kind}">{s.kind}</span>{/if}
+                      </div>
+                      {#if s.title}<div class="sess-title ellip" title={s.title}>{s.title}</div>{/if}
+                    </td>
+                    <td class="dim ellip">{s.workspace_name ?? '—'}</td>
+                    <td>{s.provider}</td>
+                    <td class="num">{fmtNum(s.events)}</td>
+                    <td class="num">
+                      <div class="sess-tok">
+                        <span>{fmtNum(s.total_tokens)}</span>
+                        <div class="seg-bar mini" title={breakdownTitle(s)}>
+                          {#each tokenSegs(s) as seg (seg.label)}
+                            {#if seg.pct > 0}<div style="width: {seg.pct}%; background: {seg.color}"></div>{/if}
+                          {/each}
+                        </div>
+                      </div>
+                    </td>
+                    <td class="num">{fmtCost(s.cost_usd)}</td>
+                    <td class="dim">{fmtLastActive(s.last_active)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {:else}
           <p class="dim small">No sessions recorded yet.</p>
         {/if}
@@ -712,6 +714,7 @@
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
+    flex-wrap: wrap;
   }
   .title {
     display: flex;
@@ -1058,6 +1061,10 @@
     stroke: #10b981;
   }
 
+  .tbl-scroll {
+    width: 100%;
+    overflow-x: auto;
+  }
   .tbl {
     width: 100%;
     border-collapse: collapse;
@@ -1396,5 +1403,100 @@
   .editor-actions {
     display: flex;
     justify-content: flex-end;
+  }
+
+  @media (max-width: 640px) {
+    .usage-head {
+      padding: 8px 12px;
+      gap: 6px;
+    }
+    /* The grow spacer collapses so the seg groups wrap to their own rows */
+    .grow {
+      flex-basis: 100%;
+    }
+    .body {
+      padding: 10px;
+    }
+    /* Two-column card grid → single column */
+    .grid {
+      grid-template-columns: 1fr;
+    }
+    /* Bar rows: replace fixed-width name + cost columns with a wrapping layout */
+    .bar-row {
+      grid-template-columns: 1fr 56px;
+      grid-template-rows: auto auto;
+      gap: 4px 8px;
+    }
+    .bar-row .bar-name {
+      grid-column: 1;
+      grid-row: 1;
+    }
+    .bar-row .bar-val {
+      grid-column: 2;
+      grid-row: 1;
+      text-align: right;
+    }
+    .bar-row .bar-track {
+      grid-column: 1 / 3;
+      grid-row: 2;
+    }
+    .bar-row .bar-cost {
+      display: none; /* keep layout tight; cost shown on bar hover title */
+    }
+    .feat-row {
+      grid-template-columns: 1fr 56px;
+      grid-template-rows: auto auto;
+      gap: 4px 8px;
+    }
+    .feat-row .bar-name {
+      grid-column: 1;
+      grid-row: 1;
+      overflow: visible;
+    }
+    .feat-row .bar-val {
+      grid-column: 2;
+      grid-row: 1;
+      text-align: right;
+    }
+    .feat-row .bar-track {
+      grid-column: 1 / 3;
+      grid-row: 2;
+    }
+    .feat-row .bar-cost {
+      display: none;
+    }
+    /* Budget rows: narrower label column */
+    .budget-row {
+      grid-template-columns: minmax(80px, 1fr) 1.5fr;
+      grid-template-rows: auto auto;
+      gap: 4px 8px;
+    }
+    .budget-row .budget-name {
+      grid-column: 1;
+      grid-row: 1;
+    }
+    .budget-row .budget-val {
+      grid-column: 2;
+      grid-row: 1;
+      text-align: right;
+      white-space: normal;
+      font-size: 11px;
+    }
+    .budget-row .bar-track {
+      grid-column: 1 / 3;
+      grid-row: 2;
+    }
+    /* Config grid: one column */
+    .cfg-grid {
+      grid-template-columns: 1fr;
+    }
+    /* Sessions table: scrolls horizontally within its container */
+    .tbl {
+      min-width: 520px;
+    }
+    /* Metrics: stack vertically */
+    .metrics {
+      grid-template-columns: 1fr;
+    }
   }
 </style>
