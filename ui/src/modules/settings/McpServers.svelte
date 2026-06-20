@@ -295,7 +295,7 @@
 <style>
   .page {
     padding: 20px 24px;
-    max-width: 760px;
+    max-width: min(760px, 92vw);
   }
   .page-header {
     display: flex;

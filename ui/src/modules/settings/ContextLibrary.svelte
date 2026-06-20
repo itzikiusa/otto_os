@@ -376,7 +376,7 @@
     grid-template-columns: 260px 1fr;
     gap: 16px;
     align-items: start;
-    max-width: 960px;
+    max-width: min(960px, 92vw);
   }
 
   .list-pane {
