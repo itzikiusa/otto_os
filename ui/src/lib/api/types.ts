@@ -2455,8 +2455,21 @@ export interface BrokerCluster {
   color: string | null;
   /** SSH tunnel to reach a private cluster (e.g. MSK) through a bastion. */
   ssh?: SshTunnelConfig | null;
+  /** Section the cluster is filed under in the sidebar (null = ungrouped). */
+  section_id?: Id | null;
   environment: Environment;
   read_only: boolean;
+  created_by: Id;
+  created_at: string;
+}
+
+/** A user-defined section (folder) grouping clusters in the sidebar. */
+export interface BrokerClusterSection {
+  id: Id;
+  workspace_id: Id;
+  parent_id: Id | null;
+  name: string;
+  position: number;
   created_by: Id;
   created_at: string;
 }
@@ -2476,6 +2489,8 @@ export interface UpsertClusterReq {
   color?: string | null;
   /** SSH tunnel. Omit to keep the stored value; `null` to clear; object to set. */
   ssh?: SshTunnelConfig | null;
+  /** Section assignment. Omit = keep; `null` = ungroup; id = file under section. */
+  section_id?: Id | null;
   environment?: Environment | null;
   read_only?: boolean | null;
 }

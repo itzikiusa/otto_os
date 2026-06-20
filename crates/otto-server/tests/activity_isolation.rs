@@ -218,6 +218,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
     ));
     let brokers = Arc::new(otto_brokers::BrokersService::new(
         otto_state::BrokerClustersRepo::new(pool.clone()),
+        otto_state::BrokerClusterSectionsRepo::new(pool.clone()),
         secrets.clone(),
     ));
     let swarm_repo = SwarmRepo::new(pool.clone());

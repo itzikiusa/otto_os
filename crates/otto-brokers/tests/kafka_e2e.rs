@@ -118,7 +118,8 @@ async fn build_app() -> (Router, Id) {
         .unwrap();
 
     let svc = Arc::new(BrokersService::new(
-        otto_state::BrokerClustersRepo::new(pool),
+        otto_state::BrokerClustersRepo::new(pool.clone()),
+        otto_state::BrokerClusterSectionsRepo::new(pool),
         Arc::new(MemSecrets::default()),
     ));
     let ctx = TestCtx {

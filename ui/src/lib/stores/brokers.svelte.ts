@@ -2,12 +2,14 @@
 // their own per-cluster data (topics, groups, metrics) on demand.
 
 import { api } from '../api/client';
-import type { BrokerCluster, Id, UpsertClusterReq } from '../api/types';
+import type { BrokerCluster, BrokerClusterSection, Id, UpsertClusterReq } from '../api/types';
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
 
 class BrokersStore {
   clusters: BrokerCluster[] = $state([]);
+  /** User-defined sidebar sections (folders), a nestable tree via parent_id. */
+  sections: BrokerClusterSection[] = $state([]);
   selectedId: Id | null = $state(null);
   /** Clusters opened as tabs (Workbench-style), in tab order. */
   openIds: Id[] = $state([]);
@@ -36,6 +38,77 @@ class BrokersStore {
     } finally {
       this.loading = false;
     }
+    // Sections are best-effort: a failure shouldn't blank the cluster list.
+    try {
+      this.sections = await api.get<BrokerClusterSection[]>(
+        `/workspaces/${wsId}/brokers/cluster-sections`,
+      );
+    } catch {
+      this.sections = [];
+    }
+  }
+
+  // ---- sections (sidebar grouping) ----------------------------------------
+
+  async createSection(parentId: Id | null, name: string): Promise<void> {
+    if (!ws.currentId) return;
+    const sec = await api.post<BrokerClusterSection>(
+      `/workspaces/${ws.currentId}/brokers/cluster-sections`,
+      { name, parent_id: parentId },
+    );
+    this.sections = [...this.sections, sec];
+  }
+
+  async renameSection(id: Id, name: string): Promise<void> {
+    const updated = await api.patch<BrokerClusterSection>(`/brokers/cluster-sections/${id}`, {
+      name,
+    });
+    this.sections = this.sections.map((s) => (s.id === id ? updated : s));
+  }
+
+  async deleteSection(id: Id): Promise<void> {
+    await api.del(`/brokers/cluster-sections/${id}`);
+    // Drop the section + descendants locally; ungroup their clusters.
+    const removed = new Set<Id>();
+    const collect = (sid: Id) => {
+      removed.add(sid);
+      for (const s of this.sections) if (s.parent_id === sid) collect(s.id);
+    };
+    collect(id);
+    this.sections = this.sections.filter((s) => !removed.has(s.id));
+    this.clusters = this.clusters.map((c) =>
+      c.section_id && removed.has(c.section_id) ? { ...c, section_id: null } : c,
+    );
+  }
+
+  async reparentSection(id: Id, parentId: Id | null): Promise<void> {
+    const updated = await api.post<BrokerClusterSection>(`/brokers/cluster-sections/${id}/move`, {
+      parent_id: parentId,
+    });
+    this.sections = this.sections.map((s) => (s.id === id ? updated : s));
+  }
+
+  /** File a cluster into a section (null = ungrouped). Sends the full non-secret
+   *  state (+ section_id); omitted passwords/ssh are kept by PATCH semantics. */
+  async moveCluster(id: Id, sectionId: Id | null): Promise<void> {
+    const c = this.clusters.find((x) => x.id === id);
+    if (!c || (c.section_id ?? null) === sectionId) return;
+    const saved = await api.patch<BrokerCluster>(`/brokers/clusters/${id}`, {
+      name: c.name,
+      bootstrap_servers: c.bootstrap_servers,
+      security_protocol: c.security_protocol,
+      sasl_mechanism: c.sasl_mechanism,
+      sasl_username: c.sasl_username,
+      tls_skip_verify: c.tls_skip_verify,
+      schema_registry_url: c.schema_registry_url,
+      schema_registry_username: c.schema_registry_username,
+      metrics_url: c.metrics_url,
+      color: c.color,
+      environment: c.environment,
+      read_only: c.read_only,
+      section_id: sectionId,
+    } as UpsertClusterReq);
+    this.clusters = this.clusters.map((x) => (x.id === id ? saved : x));
   }
 
   async refresh(): Promise<void> {

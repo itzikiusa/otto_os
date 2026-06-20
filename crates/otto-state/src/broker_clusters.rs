@@ -34,6 +34,8 @@ pub struct BrokerClusterRow {
     pub color: Option<String>,
     /// JSON-encoded SSH tunnel config (`otto_ssh::SshTunnelConfig`); None = none.
     pub ssh_config: Option<String>,
+    /// Section the cluster is filed under (None = ungrouped).
+    pub section_id: Option<Id>,
     pub environment: String,
     pub read_only: bool,
     pub created_by: Id,
@@ -56,6 +58,7 @@ pub struct NewBrokerCluster {
     pub metrics_url: Option<String>,
     pub color: Option<String>,
     pub ssh_config: Option<String>,
+    pub section_id: Option<Id>,
     pub environment: String,
     pub read_only: bool,
     pub created_by: Id,
@@ -77,6 +80,9 @@ pub struct UpdateBrokerCluster {
     pub color: Option<String>,
     /// Three-state: None = keep, Some(None) = clear, Some(Some(json)) = set.
     pub ssh_config: Option<Option<String>>,
+    /// Three-state section assignment: None = keep, Some(None) = ungroup,
+    /// Some(Some(id)) = file under that section.
+    pub section_id: Option<Option<Id>>,
     pub secret_ref: Option<Option<String>>,
     pub sr_secret_ref: Option<Option<String>>,
     pub environment: Option<String>,
@@ -100,6 +106,7 @@ fn row_to_cluster(r: &sqlx::sqlite::SqliteRow) -> Result<BrokerClusterRow> {
         metrics_url: r.get("metrics_url"),
         color: r.get("color"),
         ssh_config: r.get("ssh_config"),
+        section_id: r.get("section_id"),
         environment: r.get("environment"),
         read_only: r.get::<i64, _>("read_only") != 0,
         created_by: r.get("created_by"),
@@ -120,9 +127,9 @@ impl BrokerClustersRepo {
                 id, workspace_id, name, bootstrap_servers, security_protocol,
                 sasl_mechanism, sasl_username, secret_ref, tls_skip_verify,
                 schema_registry_url, schema_registry_username, sr_secret_ref,
-                metrics_url, color, ssh_config, environment, read_only,
+                metrics_url, color, ssh_config, section_id, environment, read_only,
                 created_by, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&c.workspace_id)
@@ -139,6 +146,7 @@ impl BrokerClustersRepo {
         .bind(&c.metrics_url)
         .bind(&c.color)
         .bind(&c.ssh_config)
+        .bind(&c.section_id)
         .bind(&c.environment)
         .bind(i64::from(c.read_only))
         .bind(&c.created_by)
@@ -198,6 +206,14 @@ impl BrokerClustersRepo {
         if let Some(ssh_config) = u.ssh_config {
             sqlx::query("UPDATE broker_clusters SET ssh_config = ? WHERE id = ?")
                 .bind(ssh_config)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update broker cluster"))?;
+        }
+        if let Some(section_id) = u.section_id {
+            sqlx::query("UPDATE broker_clusters SET section_id = ? WHERE id = ?")
+                .bind(section_id)
                 .bind(id)
                 .execute(&self.pool)
                 .await
@@ -299,6 +315,7 @@ mod tests {
             metrics_url: None,
             color: None,
             ssh_config: None,
+            section_id: None,
             environment: "dev".into(),
             read_only: false,
             created_by: user.clone(),
@@ -336,6 +353,7 @@ mod tests {
                     ssh_config: Some(Some(
                         r#"{"host":"bastion","port":22,"user":"ec2-user"}"#.into(),
                     )),
+                    section_id: None,
                     secret_ref: Some(Some(format!("broker-{}", created.id))),
                     sr_secret_ref: None,
                     environment: Some("prod".into()),
@@ -368,6 +386,7 @@ mod tests {
                     metrics_url: updated.metrics_url.clone(),
                     color: updated.color.clone(),
                     ssh_config: Some(None), // explicit clear
+                    section_id: None,
                     secret_ref: Some(None),
                     sr_secret_ref: None,
                     environment: None,

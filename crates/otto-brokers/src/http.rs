@@ -105,6 +105,19 @@ pub fn api_router<S: BrokersCtx>() -> Router<S> {
             "/brokers/clusters/{id}/schema-registry/subjects",
             get(schema_subjects::<S>),
         )
+        // ---- cluster sections (sidebar grouping) ----
+        .route(
+            "/workspaces/{wid}/brokers/cluster-sections",
+            get(list_sections::<S>).post(create_section::<S>),
+        )
+        .route(
+            "/brokers/cluster-sections/{id}",
+            axum::routing::patch(rename_section::<S>).delete(delete_section::<S>),
+        )
+        .route(
+            "/brokers/cluster-sections/{id}/move",
+            post(move_section::<S>),
+        )
 }
 
 // ---- authorization helpers ------------------------------------------------
@@ -151,6 +164,81 @@ fn guard(row: &BrokerClusterRow, confirmed: bool) -> Result<(), Error> {
 struct ConfirmQuery {
     #[serde(default)]
     confirm: bool,
+}
+
+// ---- cluster sections -----------------------------------------------------
+
+/// Fetch a section and enforce the role in its workspace.
+async fn authorize_section<S: BrokersCtx>(
+    ctx: &S,
+    user: &User,
+    id: &Id,
+    min: WorkspaceRole,
+) -> Result<BrokerClusterSection, Error> {
+    let sec = ctx.brokers().get_section(id).await?;
+    ctx.roles().check(user, &sec.workspace_id, min).await?;
+    Ok(sec)
+}
+
+async fn list_sections<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(wid): Path<Id>,
+) -> ApiResult<Response> {
+    ctx.roles().check(&user, &wid, WorkspaceRole::Viewer).await?;
+    Ok(Json(ctx.brokers().list_sections(&wid).await?).into_response())
+}
+
+async fn create_section<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(wid): Path<Id>,
+    Json(req): Json<UpsertSectionReq>,
+) -> ApiResult<Response> {
+    ctx.roles().check(&user, &wid, WorkspaceRole::Editor).await?;
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("section name required".into()).into());
+    }
+    let sec = ctx
+        .brokers()
+        .create_section(&wid, &user.id, req.parent_id.as_deref(), name)
+        .await?;
+    Ok((StatusCode::CREATED, Json(sec)).into_response())
+}
+
+async fn rename_section<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<UpsertSectionReq>,
+) -> ApiResult<Response> {
+    authorize_section(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("section name required".into()).into());
+    }
+    Ok(Json(ctx.brokers().rename_section(&id, name).await?).into_response())
+}
+
+async fn delete_section<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Response> {
+    authorize_section(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    ctx.brokers().delete_section(&id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn move_section<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<MoveSectionReq>,
+) -> ApiResult<Response> {
+    authorize_section(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    Ok(Json(ctx.brokers().move_section(&id, req.parent_id.as_deref()).await?).into_response())
 }
 
 // ---- cluster CRUD ---------------------------------------------------------

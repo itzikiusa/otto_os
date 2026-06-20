@@ -14,7 +14,10 @@ use crate::types::*;
 use dashmap::DashMap;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
-use otto_state::{BrokerClusterRow, BrokerClustersRepo, NewBrokerCluster, UpdateBrokerCluster};
+use otto_state::{
+    BrokerClusterRow, BrokerClusterSectionRow, BrokerClusterSectionsRepo, BrokerClustersRepo,
+    NewBrokerCluster, UpdateBrokerCluster,
+};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,6 +34,7 @@ struct Pooled {
 
 pub struct BrokersService {
     repo: BrokerClustersRepo,
+    sections: BrokerClusterSectionsRepo,
     secrets: Arc<dyn SecretStore>,
     pool: DashMap<Id, Pooled>,
     /// Per-cluster SSH tunnel + Kafka proxy (only for clusters with `ssh`).
@@ -49,14 +53,64 @@ fn join(e: tokio::task::JoinError) -> Error {
 }
 
 impl BrokersService {
-    pub fn new(repo: BrokerClustersRepo, secrets: Arc<dyn SecretStore>) -> Self {
+    pub fn new(
+        repo: BrokerClustersRepo,
+        sections: BrokerClusterSectionsRepo,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Self {
         Self {
             repo,
+            sections,
             secrets,
             pool: DashMap::new(),
             tunnels: DashMap::new(),
             samplers: DashMap::new(),
         }
+    }
+
+    // ---- cluster sections (sidebar grouping) ------------------------------
+
+    pub async fn list_sections(&self, ws: &Id) -> Result<Vec<BrokerClusterSection>> {
+        Ok(self
+            .sections
+            .list_for_ws(ws)
+            .await?
+            .into_iter()
+            .map(row_to_section)
+            .collect())
+    }
+
+    /// Fetch a section row (handlers need `workspace_id` for the role gate).
+    pub async fn get_section(&self, id: &Id) -> Result<BrokerClusterSection> {
+        Ok(row_to_section(self.sections.get(id).await?))
+    }
+
+    pub async fn create_section(
+        &self,
+        ws: &Id,
+        created_by: &Id,
+        parent_id: Option<&str>,
+        name: &str,
+    ) -> Result<BrokerClusterSection> {
+        Ok(row_to_section(
+            self.sections.create(ws, parent_id, name, created_by).await?,
+        ))
+    }
+
+    pub async fn rename_section(&self, id: &Id, name: &str) -> Result<BrokerClusterSection> {
+        Ok(row_to_section(self.sections.rename(id, name).await?))
+    }
+
+    pub async fn move_section(
+        &self,
+        id: &Id,
+        parent_id: Option<&str>,
+    ) -> Result<BrokerClusterSection> {
+        Ok(row_to_section(self.sections.reparent(id, parent_id).await?))
+    }
+
+    pub async fn delete_section(&self, id: &Id) -> Result<()> {
+        self.sections.delete(id).await
     }
 
     // ---- cluster CRUD -----------------------------------------------------
@@ -104,6 +158,7 @@ impl BrokersService {
                 metrics_url: norm(req.metrics_url.clone()),
                 color: norm(req.color.clone()),
                 ssh_config: ssh_to_json(req.ssh.clone().flatten().as_ref()),
+                section_id: req.section_id.clone().flatten(),
                 environment: req.environment.unwrap_or_default().as_str().to_string(),
                 read_only: req.read_only.unwrap_or(false),
                 created_by,
@@ -167,6 +222,8 @@ impl BrokersService {
             color: norm(req.color),
             // absent ssh = keep; null = clear; object = set.
             ssh_config: req.ssh.map(|inner| ssh_to_json(inner.as_ref())),
+            // absent section = keep; null = ungroup; id = file under section.
+            section_id: req.section_id,
             secret_ref,
             sr_secret_ref,
             // absent environment/read_only PRESERVE the write-guard.
@@ -640,8 +697,22 @@ fn row_to_cluster(r: BrokerClusterRow) -> BrokerCluster {
             .ssh_config
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok()),
+        section_id: r.section_id,
         environment: otto_core::domain::Environment::parse(&r.environment).unwrap_or_default(),
         read_only: r.read_only,
+        created_by: r.created_by,
+        created_at: r.created_at,
+    }
+}
+
+/// Map a persisted section row to the API domain type.
+fn row_to_section(r: BrokerClusterSectionRow) -> BrokerClusterSection {
+    BrokerClusterSection {
+        id: r.id,
+        workspace_id: r.workspace_id,
+        parent_id: r.parent_id,
+        name: r.name,
+        position: r.position,
         created_by: r.created_by,
         created_at: r.created_at,
     }
@@ -669,6 +740,7 @@ fn full_update(
         metrics_url: row.metrics_url.clone(),
         color: row.color.clone(),
         ssh_config,
+        section_id: None, // preserved (this path only stashes secrets)
         secret_ref,
         sr_secret_ref,
         environment,

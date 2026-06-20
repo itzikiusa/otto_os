@@ -167,6 +167,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     // + an rdkafka client pool for overview/topics/peek/produce/groups/metrics.
     let brokers = Arc::new(otto_brokers::BrokersService::new(
         otto_state::BrokerClustersRepo::new(pool.clone()),
+        otto_state::BrokerClusterSectionsRepo::new(pool.clone()),
         secrets.clone(),
     ));
     let spawner = Arc::new(PtySpawner {

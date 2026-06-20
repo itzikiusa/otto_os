@@ -4,7 +4,8 @@
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { BrokerCluster, TestClusterResp } from '../../lib/api/types';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import type { BrokerCluster, BrokerClusterSection, TestClusterResp } from '../../lib/api/types';
   import ClusterForm from './ClusterForm.svelte';
   import OverviewTab from './OverviewTab.svelte';
   import TopicsTab from './TopicsTab.svelte';
@@ -65,30 +66,188 @@
     editTarget = null;
     formOpen = true;
   }
+
+  // ---- sidebar sections (grouping tree) ------------------------------------
+  interface TreeNode {
+    sec: BrokerClusterSection;
+    items: BrokerCluster[];
+    children: TreeNode[];
+  }
+  const byName = (a: BrokerCluster, b: BrokerCluster) => a.name.localeCompare(b.name);
+
+  function buildTree(parentId: string | null): TreeNode[] {
+    return brokers.sections
+      .filter((s) => (s.parent_id ?? null) === parentId)
+      .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
+      .map((sec) => ({
+        sec,
+        items: brokers.clusters.filter((c) => c.section_id === sec.id).sort(byName),
+        children: buildTree(sec.id),
+      }));
+  }
+  const tree = $derived(buildTree(null));
+  const knownSectionIds = $derived(new Set(brokers.sections.map((s) => s.id)));
+  const ungrouped = $derived(
+    brokers.clusters.filter((c) => !c.section_id || !knownSectionIds.has(c.section_id)).sort(byName),
+  );
+
+  let collapsed = $state<Record<string, boolean>>({});
+  let draggedClusterId = $state<string | null>(null);
+  let draggedSectionId = $state<string | null>(null);
+  // Right-click context menu (cluster row or section header).
+  let menu = $state<{ x: number; y: number; kind: 'cluster' | 'section'; id: string } | null>(null);
+
+  function openMenu(e: MouseEvent, kind: 'cluster' | 'section', id: string): void {
+    e.preventDefault();
+    menu = { x: e.clientX, y: e.clientY, kind, id };
+  }
+  const menuCluster = $derived(
+    menu?.kind === 'cluster' ? (brokers.clusters.find((c) => c.id === menu!.id) ?? null) : null,
+  );
+  const menuSection = $derived(
+    menu?.kind === 'section' ? (brokers.sections.find((s) => s.id === menu!.id) ?? null) : null,
+  );
+
+  async function newSection(parentId: string | null): Promise<void> {
+    const name = await confirmer.promptText(parentId ? 'Sub-section name' : 'Section name', {
+      title: parentId ? 'New sub-section' : 'New section',
+      confirmLabel: 'Create',
+      placeholder: 'e.g. Production',
+    });
+    if (!name) return;
+    try {
+      await brokers.createSection(parentId, name);
+    } catch (e) {
+      toasts.error('Create section failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function renameSec(sec: BrokerClusterSection): Promise<void> {
+    const name = await confirmer.promptText('Rename section', {
+      title: 'Rename section',
+      confirmLabel: 'Rename',
+      initial: sec.name,
+    });
+    if (!name || name === sec.name) return;
+    try {
+      await brokers.renameSection(sec.id, name);
+    } catch (e) {
+      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function delSec(sec: BrokerClusterSection): Promise<void> {
+    if (
+      !(await confirmer.ask(
+        `Delete section “${sec.name}”? Sub-sections are removed too and their clusters become ungrouped.`,
+        { title: 'Delete section' },
+      ))
+    )
+      return;
+    try {
+      await brokers.deleteSection(sec.id);
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function isDescendantOf(nodeId: string, ancestorId: string): boolean {
+    let cur = brokers.sections.find((s) => s.id === nodeId);
+    while (cur?.parent_id) {
+      if (cur.parent_id === ancestorId) return true;
+      cur = brokers.sections.find((s) => s.id === cur!.parent_id);
+    }
+    return false;
+  }
+
+  async function moveCluster(id: string, sectionId: string | null): Promise<void> {
+    try {
+      await brokers.moveCluster(id, sectionId);
+    } catch (e) {
+      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function reparent(id: string, parentId: string | null): Promise<void> {
+    const sec = brokers.sections.find((s) => s.id === id);
+    if (!sec || (sec.parent_id ?? null) === parentId) return;
+    if (parentId && (parentId === id || isDescendantOf(parentId, id))) {
+      toasts.error('Invalid move', 'Cannot nest a section inside itself');
+      return;
+    }
+    try {
+      await brokers.reparentSection(id, parentId);
+    } catch (e) {
+      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function onSectionDrop(sectionId: string): void {
+    if (draggedClusterId) {
+      const id = draggedClusterId;
+      draggedClusterId = null;
+      void moveCluster(id, sectionId);
+    } else if (draggedSectionId) {
+      const src = draggedSectionId;
+      draggedSectionId = null;
+      void reparent(src, sectionId);
+    }
+  }
+  function onRootDrop(): void {
+    if (draggedClusterId) {
+      const id = draggedClusterId;
+      draggedClusterId = null;
+      void moveCluster(id, null);
+    } else if (draggedSectionId) {
+      const src = draggedSectionId;
+      draggedSectionId = null;
+      void reparent(src, null);
+    }
+  }
 </script>
 
 <div class="brokers-page">
   <aside class="clusters">
     <div class="aside-head">
       <span class="title">Clusters</span>
-      <button class="btn small" onclick={openAdd} title="Add cluster"><Icon name="plus" size={13} /></button>
+      <div class="head-btns">
+        <button class="btn small" onclick={() => newSection(null)} title="New section">
+          <Icon name="folder" size={13} />
+        </button>
+        <button class="btn small" onclick={openAdd} title="Add cluster"><Icon name="plus" size={13} /></button>
+      </div>
     </div>
     <div class="cluster-list">
       {#if brokers.loading && brokers.clusters.length === 0}
         <p class="muted pad">Loading…</p>
       {:else}
-        {#each brokers.clusters as c (c.id)}
-          <button
-            class="cluster"
-            class:sel={brokers.selectedId === c.id}
-            onclick={() => brokers.select(c.id)}
-          >
-            <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
-            <span class="cn">{c.name}</span>
-            <span class="env {c.environment}">{envBadge(c)}</span>
-          </button>
+        {#each tree as node (node.sec.id)}
+          {@render sectionNode(node, 0)}
         {/each}
-        {#if brokers.clusters.length === 0}
+
+        <!-- Ungrouped doubles as the top-level / no-section drop target. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="sec-head plain"
+          class:drop={draggedClusterId || draggedSectionId}
+          ondragover={(e) => {
+            if (draggedClusterId || draggedSectionId) e.preventDefault();
+          }}
+          ondrop={(e) => {
+            e.preventDefault();
+            onRootDrop();
+          }}
+          title="Clusters with no section (drop here to remove from a section / make a section top-level)"
+        >
+          <span class="caret-spacer"></span>
+          <span class="sec-name grow">Ungrouped</span>
+          {#if ungrouped.length > 0}<span class="count">{ungrouped.length}</span>{/if}
+        </div>
+        {#each ungrouped as c (c.id)}
+          {@render clusterRow(c, 1)}
+        {/each}
+
+        {#if brokers.clusters.length === 0 && brokers.sections.length === 0}
           <p class="muted pad small">No clusters yet. Add one to connect to Kafka.</p>
         {/if}
       {/if}
@@ -172,6 +331,93 @@
   </main>
 </div>
 
+{#snippet sectionNode(node: TreeNode, depth: number)}
+  {@const isOpen = !collapsed[node.sec.id]}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="sec-head"
+    class:drop={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedClusterId}
+    style="padding-left: {depth * 14 + 6}px"
+    draggable="true"
+    ondragstart={(e) => {
+      draggedSectionId = node.sec.id;
+      e.stopPropagation();
+    }}
+    ondragend={() => (draggedSectionId = null)}
+    ondragover={(e) => {
+      if (draggedClusterId || (draggedSectionId && draggedSectionId !== node.sec.id))
+        e.preventDefault();
+    }}
+    ondrop={(e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSectionDrop(node.sec.id);
+    }}
+    oncontextmenu={(e) => openMenu(e, 'section', node.sec.id)}
+  >
+    <button
+      class="caret"
+      onclick={() => (collapsed[node.sec.id] = !collapsed[node.sec.id])}
+      title={isOpen ? 'Collapse' : 'Expand'}
+    >
+      <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+    </button>
+    <Icon name="folder" size={13} />
+    <span class="sec-name grow">{node.sec.name}</span>
+    {#if node.items.length > 0}<span class="count">{node.items.length}</span>{/if}
+  </div>
+  {#if isOpen}
+    {#each node.children as child (child.sec.id)}
+      {@render sectionNode(child, depth + 1)}
+    {/each}
+    {#each node.items as c (c.id)}
+      {@render clusterRow(c, depth + 1)}
+    {/each}
+  {/if}
+{/snippet}
+
+{#snippet clusterRow(c: BrokerCluster, depth: number)}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="cluster"
+    class:sel={brokers.selectedId === c.id}
+    style="padding-left: {depth * 14 + 6}px"
+    draggable="true"
+    ondragstart={(e) => {
+      draggedClusterId = c.id;
+      e.stopPropagation();
+    }}
+    ondragend={() => (draggedClusterId = null)}
+    onclick={() => brokers.select(c.id)}
+    onkeydown={(e) => e.key === 'Enter' && brokers.select(c.id)}
+    oncontextmenu={(e) => openMenu(e, 'cluster', c.id)}
+    role="button"
+    tabindex="0"
+  >
+    <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
+    <span class="cn">{c.name}</span>
+    <span class="env {c.environment}">{envBadge(c)}</span>
+  </div>
+{/snippet}
+
+{#if menu}
+  <button class="menu-backdrop" aria-label="Close menu" onclick={() => (menu = null)}></button>
+  <div class="ctxmenu" style="left: {menu.x}px; top: {menu.y}px" role="menu">
+    {#if menuCluster}
+      {@const c = menuCluster}
+      <button role="menuitem" onclick={() => { brokers.select(c.id); menu = null; }}>Open in tab</button>
+      <button role="menuitem" onclick={() => { void testConn(c); menu = null; }}>Test</button>
+      <button role="menuitem" onclick={() => { openEdit(c); menu = null; }}>Edit…</button>
+      <button role="menuitem" class="danger" onclick={() => { void removeCluster(c); menu = null; }}>Remove</button>
+    {:else if menuSection}
+      {@const s = menuSection}
+      <button role="menuitem" onclick={() => { void newSection(s.id); menu = null; }}>New sub-section</button>
+      <button role="menuitem" onclick={() => { void renameSec(s); menu = null; }}>Rename…</button>
+      <button role="menuitem" class="danger" onclick={() => { void delSec(s); menu = null; }}>Delete</button>
+    {/if}
+  </div>
+{/if}
+
 {#if formOpen}
   <ClusterForm cluster={editTarget} onclose={() => (formOpen = false)} />
 {/if}
@@ -201,9 +447,110 @@
     letter-spacing: 0.04em;
     color: var(--text-dim);
   }
+  .head-btns {
+    display: flex;
+    gap: 4px;
+  }
   .cluster-list {
     flex: 1;
     overflow: auto;
+    padding-bottom: 8px;
+  }
+  /* Section headers (folders) */
+  .sec-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 8px 6px 6px;
+    cursor: grab;
+    color: var(--text-dim);
+    border-left: 2px solid transparent;
+    user-select: none;
+  }
+  .sec-head:hover {
+    background: color-mix(in srgb, var(--text-dim) 6%, transparent);
+  }
+  .sec-head.drop {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-left-color: var(--accent);
+  }
+  .sec-head.plain {
+    cursor: default;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.8;
+    margin-top: 4px;
+  }
+  .sec-name {
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .grow {
+    flex: 1;
+    min-width: 0;
+  }
+  .caret {
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    padding: 0;
+    width: 14px;
+    flex: none;
+  }
+  .caret-spacer {
+    width: 14px;
+    flex: none;
+  }
+  .count {
+    font-size: 10px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    border-radius: 8px;
+    padding: 0 6px;
+    flex: none;
+  }
+  /* Right-click context menu */
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    border: none;
+    background: transparent;
+    cursor: default;
+  }
+  .ctxmenu {
+    position: fixed;
+    z-index: 41;
+    min-width: 150px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m, 8px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+  }
+  .ctxmenu button {
+    text-align: left;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: var(--radius-s, 6px);
+    cursor: pointer;
+    font-size: 12.5px;
+  }
+  .ctxmenu button:hover {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  }
+  .ctxmenu button.danger {
+    color: var(--status-exited, #ff5f57);
   }
   .cluster {
     width: 100%;
