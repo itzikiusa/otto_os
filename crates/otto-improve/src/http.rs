@@ -10,7 +10,7 @@ use axum::{Extension, Json, Router};
 use otto_core::api::{Problem, RunNowResp, SelfImprovementConfig, UpdateSelfImprovementReq};
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{
-    ImprovementEdit, ImprovementEditStatus, ImprovementRun, WorkspaceRole,
+    ImprovementEdit, ImprovementEditStatus, ImprovementRun, SessionStatus, WorkspaceRole,
 };
 use otto_core::{Error, Id};
 use otto_state::WorkspacesRepo;
@@ -61,6 +61,10 @@ pub fn router<S: ImproveCtx>() -> Router<S> {
         .route("/improvement/edits/{eid}/approve", post(approve::<S>))
         .route("/improvement/edits/{eid}/reject", post(reject::<S>))
         .route("/improvement/edits/{eid}/rollback", post(rollback::<S>))
+        // Trigger a live single-session evolve pass for the given session.
+        // Only available when the session is live (waiting/idle); rejected if
+        // already running an improvement pass or the session is archived/done.
+        .route("/sessions/{id}/evolve", post(evolve_session::<S>))
 }
 
 async fn get_config<S: ImproveCtx>(
@@ -203,4 +207,67 @@ async fn rollback<S: ImproveCtx>(
 ) -> ApiResult<Json<ImprovementEdit>> {
     check_edit_ws(&s, &user, &eid).await?;
     Ok(Json(s.engine().rollback_edit(&eid, &user.0.id).await?))
+}
+
+/// `POST /sessions/{id}/evolve` — manually trigger a single-session live
+/// evolve pass for the given session.
+///
+/// Guards:
+/// - Caller must have `SelfImprovement:Edit` on the session's workspace.
+/// - The session must be in a live status (waiting/idle); archived/done sessions
+///   are rejected so we don't evolve on stale transcripts.
+/// - If a run is already in progress for the workspace, we return `409 Conflict`.
+///
+/// The evolve runs in the background (fire-and-forget); the run id is returned
+/// immediately so the caller can poll `GET /improvement/runs/{run_id}` for the
+/// result, or subscribe to the `improvement_updated` WS event.
+async fn evolve_session<S: ImproveCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(session_id): Path<Id>,
+) -> ApiResult<Json<RunNowResp>> {
+    // Resolve the session via the engine's sessions repo (avoids adding a new
+    // field to ImproveCtx — ImprovementEngine already carries SessionsRepo).
+    let session = s.engine().sessions.get(&session_id).await?;
+    s.roles().check(&user.0, &session.workspace_id, WorkspaceRole::Editor).await?;
+
+    // Reject sessions that are no longer live: evolving an archived transcript
+    // produces low-quality edits and conflicts with the live-evolver's logic.
+    // Running / Working / Idle are the "live" states; Exited and Reconnectable
+    // mean the child is gone and an evolve pass would operate on a stale transcript.
+    let live = matches!(
+        session.status,
+        SessionStatus::Running | SessionStatus::Working | SessionStatus::Idle
+    );
+    if !live {
+        return Err(ApiErr(Error::Invalid(
+            "session must be live (running/working/idle) to trigger an evolve pass".into(),
+        )));
+    }
+
+    // Conflict guard: mirror `run_now`'s check so a queued workspace pass and a
+    // per-session pass don't run concurrently.
+    if s.engine().improvements.has_running(&session.workspace_id).await? {
+        return Err(ApiErr(Error::Conflict("an improvement run is already in progress for this workspace".into())));
+    }
+
+    let engine = Arc::clone(s.engine());
+    let sid = session_id.clone();
+    // The run row is created inside `evolve_session`, so we spawn first and
+    // return the run id from the background task result.  Instead, mirror the
+    // pattern used by `run_now`: create the run row here, spawn background work.
+    let run = s
+        .engine()
+        .improvements
+        .create_run(&session.workspace_id, otto_core::domain::ImprovementTrigger::Live)
+        .await?;
+    let run_id = run.id.clone();
+    let ws_id = session.workspace_id.clone();
+    let bg_run_id = run_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = engine.execute_evolve_session(&bg_run_id, &ws_id, &sid).await {
+            tracing::warn!(session = %sid, "manual evolve-session failed: {e}");
+        }
+    });
+    Ok(Json(RunNowResp { run_id }))
 }

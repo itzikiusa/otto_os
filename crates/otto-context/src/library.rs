@@ -10,17 +10,37 @@
 //! Entry names are validated as safe single segments (alphanumeric / `-` / `_`,
 //! non-empty, not `.` or `..`), mirroring `otto-improve::pathsafe`, to prevent
 //! path traversal into (or out of) the library tree.
+//!
+//! ## Skill cache
+//!
+//! `list_skills` and `get_skill` parse the YAML frontmatter (description,
+//! category, version) on every call. With many skills or frequent spawns this
+//! adds up. We keep an in-process `Arc<Mutex<HashMap<name, LibrarySkill>>>` that
+//! is populated on first parse and invalidated (evicted) when a skill is written
+//! or deleted. Reads hold the lock only for the map lookup; the actual
+//! `fs::read_to_string` + parse happen outside the lock, followed by a brief
+//! re-acquire to insert.  The cache is entirely best-effort: a poisoned mutex
+//! falls back to the direct-disk path.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use otto_core::api::{LibraryContext, LibrarySkill, LibrarySoul};
+
+/// In-process skill cache: keyed by skill name, holds the last-read
+/// `LibrarySkill`. Wrapped in `Arc<Mutex<…>>` so `Library::clone` shares the
+/// same cache across all handle copies (e.g., the Axum state clone).
+type SkillCache = Arc<Mutex<HashMap<String, LibrarySkill>>>;
 
 /// Handle to the on-disk library rooted at `root`.
 #[derive(Clone)]
 pub struct Library {
     pub root: PathBuf,
+    /// Shared across clones — invalidated on writes/deletes.
+    skill_cache: SkillCache,
 }
 
 /// An entry name must be a single safe path segment.
@@ -79,7 +99,7 @@ fn parse_version(body: &str) -> u32 {
 
 impl Library {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self { root: root.into(), skill_cache: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     // -- skills --------------------------------------------------------------
@@ -119,17 +139,32 @@ impl Library {
 
     pub fn get_skill(&self, name: &str) -> Option<LibrarySkill> {
         let path = self.skill_path(name)?;
+
+        // Cache hit: return without touching disk.
+        if let Ok(cache) = self.skill_cache.lock() {
+            if let Some(cached) = cache.get(name) {
+                return Some(cached.clone());
+            }
+        }
+
+        // Cache miss: read and parse outside the lock.
         let body = fs::read_to_string(&path).ok()?;
         let description = parse_description(&body);
         let category = parse_category(&body);
         let version = parse_version(&body);
-        Some(LibrarySkill {
+        let skill = LibrarySkill {
             name: name.to_string(),
             category,
             version,
             description,
             body,
-        })
+        };
+
+        // Insert into cache (best-effort — a poisoned mutex is ignored).
+        if let Ok(mut cache) = self.skill_cache.lock() {
+            cache.insert(name.to_string(), skill.clone());
+        }
+        Some(skill)
     }
 
     pub fn put_skill(&self, name: &str, body: &str) -> io::Result<()> {
@@ -139,7 +174,12 @@ impl Library {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, body)
+        fs::write(path, body)?;
+        // Evict the stale cached entry so the next read picks up the new content.
+        if let Ok(mut cache) = self.skill_cache.lock() {
+            cache.remove(name);
+        }
+        Ok(())
     }
 
     pub fn delete_skill(&self, name: &str) -> io::Result<()> {
@@ -148,7 +188,12 @@ impl Library {
         }
         let dir = self.skills_dir().join(name);
         match fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Ok(mut cache) = self.skill_cache.lock() {
+                    cache.remove(name);
+                }
+                Ok(())
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         }

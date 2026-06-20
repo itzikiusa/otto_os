@@ -300,6 +300,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // POST only (mint). A GET on this path would be a typo; map it Edit too.
         return Require(Agents, Edit);
     }
+    if p == "/sessions/{id}/evolve" {
+        // Manual trigger for the per-session live-evolve pass.
+        // Requires SelfImprovement:Edit so it obeys the same gate as a workspace run.
+        return Require(SelfImprovement, Edit);
+    }
     if p.starts_with("/sessions/") {
         // restart / archive / unarchive / input / handover / handover-brief /
         // attach-product — all session-control writes.

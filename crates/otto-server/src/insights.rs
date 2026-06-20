@@ -43,6 +43,8 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use otto_core::event::Event;
+
 use crate::auth::{require_root, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
@@ -710,19 +712,35 @@ impl InsightsScheduler {
             let word = kind.word();
             info!(kind = word, "insights: scheduled catch-up run is due");
             tokio::spawn(async move {
-                match run_insights(&ctx, kind, 1).await {
-                    Ok(Some(_)) => {}
+                let session_id = match run_insights(&ctx, kind, 1).await {
+                    Ok(Some(id)) => Some(id),
                     Ok(None) => {
                         // Skill not installed / no host — already logged inside.
+                        None
                     }
-                    Err(e) => warn!(kind = word, "insights: scheduled run failed: {e}"),
-                }
+                    Err(e) => {
+                        warn!(kind = word, "insights: scheduled run failed: {e}");
+                        None
+                    }
+                };
                 // The session runs headlessly; release the in-flight slot after a
                 // grace window so we don't re-trigger the same period mid-run
                 // (idempotency would catch it once artifacts land, but this avoids
                 // double-spawning before the index is written).
                 tokio::time::sleep(RUN_TIMEOUT).await;
                 flight.lock().await.remove(word);
+
+                // After the grace window, check whether the period's report landed.
+                // If so, emit `InsightReady` so the channel notifier + UI can react
+                // without polling. Best-effort: a missed send is not an error.
+                let (start, end) = due_period(kind, chrono::Utc::now());
+                if period_done(&insights_dir(&ctx), kind, start, end) {
+                    let period_label = format!("{} {}", word, start.format("%Y-%m-%d"));
+                    let _ = ctx.events.send(Event::InsightReady {
+                        period: period_label,
+                        session_id,
+                    });
+                }
             });
         }
     }

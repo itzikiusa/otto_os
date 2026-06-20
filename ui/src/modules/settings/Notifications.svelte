@@ -28,33 +28,81 @@
   // The backend `improve_notify` task reads it live from the global SettingsRepo.
   // Root-only (matches GET/PUT /api/v1/settings permission gate).
   // ---------------------------------------------------------------------------
+  // Per-event channel notify toggles (all off by default, root-only).
+  // ---------------------------------------------------------------------------
 
-  const NOTIFY_KEY = 'channels.notify_self_improvement';
-  let notifyImprove = $state(false);
-  let notifyImproveLoading = $state(false);
+  type NotifyFlag = {
+    key: string;
+    label: string;
+    sub: string;
+    value: boolean;
+    loading: boolean;
+  };
+
+  const CHANNEL_NOTIFY_FLAGS: Array<{ key: string; label: string; sub: string }> = [
+    {
+      key: 'channels.notify_self_improvement',
+      label: 'Push self-improvement events to Slack / Telegram',
+      sub: 'Posts a one-line summary when a run finishes or an approval is pending.',
+    },
+    {
+      key: 'channels.notify_review_done',
+      label: 'Code-review completed',
+      sub: 'Sends a message when a code-review run finishes or fails.',
+    },
+    {
+      key: 'channels.notify_swarm_done',
+      label: 'Agent swarm completed',
+      sub: 'Sends a message when a swarm run finishes, is aborted, or fails.',
+    },
+    {
+      key: 'channels.notify_insight_ready',
+      label: 'Insights report ready',
+      sub: 'Sends a message when a daily / weekly / monthly insights report becomes available.',
+    },
+    {
+      key: 'channels.notify_budget_exceeded',
+      label: 'Budget cap exceeded',
+      sub: 'Sends a message when a spend cap is crossed (requires budget enforcement to be on).',
+    },
+  ];
+
+  // Reactive state for each flag: keyed by the settings key.
+  let flagValues: Record<string, boolean> = $state(
+    Object.fromEntries(CHANNEL_NOTIFY_FLAGS.map((f) => [f.key, false]))
+  );
+  let flagLoading: Record<string, boolean> = $state(
+    Object.fromEntries(CHANNEL_NOTIFY_FLAGS.map((f) => [f.key, false]))
+  );
 
   $effect(() => {
-    if (auth.isRoot) void loadNotifyImprove();
+    if (auth.isRoot) void loadChannelFlags();
   });
 
-  async function loadNotifyImprove(): Promise<void> {
-    notifyImproveLoading = true;
+  async function loadChannelFlags(): Promise<void> {
+    for (const f of CHANNEL_NOTIFY_FLAGS) {
+      flagLoading[f.key] = true;
+    }
     try {
       const all = await api.get<Record<string, unknown>>('/settings');
-      notifyImprove = all?.[NOTIFY_KEY] === true;
+      for (const f of CHANNEL_NOTIFY_FLAGS) {
+        flagValues[f.key] = all?.[f.key] === true;
+      }
     } catch {
-      // Not root or settings not reachable — stay false.
+      // Not root or settings not reachable — keep defaults.
     } finally {
-      notifyImproveLoading = false;
+      for (const f of CHANNEL_NOTIFY_FLAGS) {
+        flagLoading[f.key] = false;
+      }
     }
   }
 
-  async function toggleNotifyImprove(checked: boolean): Promise<void> {
-    notifyImprove = checked;
+  async function toggleFlag(key: string, checked: boolean): Promise<void> {
+    flagValues[key] = checked;
     try {
-      await api.put('/settings', { [NOTIFY_KEY]: checked });
+      await api.put('/settings', { [key]: checked });
     } catch (e) {
-      notifyImprove = !checked; // revert
+      flagValues[key] = !checked; // revert
       toasts.error('Could not save setting', e instanceof Error ? e.message : String(e));
     }
   }
@@ -119,25 +167,28 @@
 
   {#if auth.isRoot}
     <div class="section-title">Channel notifications</div>
+    <div class="sub dim" style="max-width:520px;margin-bottom:8px">
+      Each toggle below sends a one-line push notification to your configured
+      Slack / Telegram integration. All are off by default.
+    </div>
     <div class="card pad">
-      <label class="opt">
-        <span class="opt-text">
-          <span class="opt-title">Push self-improvement events to Slack / Telegram</span>
-          <span class="opt-sub dim">
-            Posts a one-line summary when a run finishes or an approval is pending.
-            Requires a Slack or Telegram integration to be configured in Channels.
+      {#each CHANNEL_NOTIFY_FLAGS as flag (flag.key)}
+        <label class="opt">
+          <span class="opt-text">
+            <span class="opt-title">{flag.label}</span>
+            <span class="opt-sub dim">{flag.sub}</span>
           </span>
-        </span>
-        <span class="toggle">
-          <input
-            type="checkbox"
-            checked={notifyImprove}
-            disabled={notifyImproveLoading}
-            onchange={(e) => void toggleNotifyImprove(e.currentTarget.checked)}
-          />
-          <span class="toggle-track"></span>
-        </span>
-      </label>
+          <span class="toggle">
+            <input
+              type="checkbox"
+              checked={flagValues[flag.key]}
+              disabled={flagLoading[flag.key]}
+              onchange={(e) => void toggleFlag(flag.key, e.currentTarget.checked)}
+            />
+            <span class="toggle-track"></span>
+          </span>
+        </label>
+      {/each}
     </div>
   {/if}
 </div>

@@ -233,9 +233,16 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // Review, workflow, and skill-eval events are workspace-scoped too.
         | Event::ReviewChanged { workspace_id, .. }
         | Event::WorkflowRunUpdated { workspace_id, .. }
-        | Event::SkillEvalUpdated { workspace_id, .. } => Scope::Workspace(workspace_id),
-        // Usage tick + self-improvement updates are global notices (everyone sees them).
-        Event::UsageMetricsTick { .. } | Event::ImprovementUpdated { .. } => Scope::Everyone,
+        | Event::SkillEvalUpdated { workspace_id, .. }
+        // Budget-exceeded alerts are scoped to the workspace that crossed the cap
+        // (it carries `workspace_id`), so they go to that workspace's members.
+        | Event::BudgetExceeded { workspace_id, .. } => Scope::Workspace(workspace_id),
+        // Usage tick, self-improvement updates, and insight-ready are global
+        // (no workspace axis — insights are a cross-workspace cadence report).
+        // Deliver them to every authenticated client, matching the `Notice` pattern.
+        Event::UsageMetricsTick { .. }
+        | Event::ImprovementUpdated { .. }
+        | Event::InsightReady { .. } => Scope::Everyone,
     }
 }
 

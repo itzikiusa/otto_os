@@ -578,12 +578,17 @@ fn score_findings(findings: &[EvalFinding]) -> (bool, f64) {
     (passed, score.clamp(0.0, 100.0))
 }
 
-/// A minimal LCS-based line diff in unified-ish form (`-`/`+`/` ` prefixes).
-fn simple_diff(old: &str, new: &str) -> String {
+/// Produce a GNU unified diff between `old` and `new`, with `context_lines`
+/// lines of unchanged context around each hunk.  The output is the standard
+/// unified-diff format (`--- a/SKILL.md`, `+++ b/SKILL.md`, `@@ … @@` hunks)
+/// so it renders cleanly in the UI's `<DiffView>` component and is instantly
+/// readable without any client-side transformation.
+fn unified_diff(old: &str, new: &str, context_lines: usize) -> String {
     let a: Vec<&str> = old.lines().collect();
     let b: Vec<&str> = new.lines().collect();
     let (n, m) = (a.len(), b.len());
-    // LCS length table.
+
+    // LCS length table (same algorithm, now drives a proper hunk builder).
     let mut lcs = vec![vec![0u32; m + 1]; n + 1];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
@@ -594,40 +599,148 @@ fn simple_diff(old: &str, new: &str) -> String {
             };
         }
     }
-    let mut out = String::new();
+
+    // Collect edit operations: ('=', old_line), ('-', old_line), ('+', new_line).
+    #[derive(Clone)]
+    enum Op {
+        Keep(usize, usize), // (a_idx, b_idx)
+        Delete(usize),      // a_idx
+        Insert(usize),      // b_idx
+    }
+    let mut ops: Vec<Op> = Vec::with_capacity(n + m);
     let (mut i, mut j) = (0usize, 0usize);
     while i < n && j < m {
         if a[i] == b[j] {
-            out.push_str("  ");
-            out.push_str(a[i]);
-            out.push('\n');
+            ops.push(Op::Keep(i, j));
             i += 1;
             j += 1;
         } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-            out.push_str("- ");
-            out.push_str(a[i]);
-            out.push('\n');
+            ops.push(Op::Delete(i));
             i += 1;
         } else {
-            out.push_str("+ ");
-            out.push_str(b[j]);
-            out.push('\n');
+            ops.push(Op::Insert(j));
             j += 1;
         }
     }
     while i < n {
-        out.push_str("- ");
-        out.push_str(a[i]);
-        out.push('\n');
+        ops.push(Op::Delete(i));
         i += 1;
     }
     while j < m {
-        out.push_str("+ ");
-        out.push_str(b[j]);
-        out.push('\n');
+        ops.push(Op::Insert(j));
         j += 1;
     }
+
+    if ops.is_empty() {
+        return String::new();
+    }
+
+    // Group ops into hunks separated by more than `context_lines * 2` unchanged
+    // lines.  Each hunk records the op-index range [hunk_start, hunk_end).
+    let mut hunks: Vec<(usize, usize)> = Vec::new();
+    let mut hunk_start: Option<usize> = None;
+    let mut last_change = 0usize;
+    for (idx, op) in ops.iter().enumerate() {
+        let is_change = !matches!(op, Op::Keep(..));
+        if is_change {
+            if hunk_start.is_none() {
+                // Begin a new hunk with leading context.
+                let start = idx.saturating_sub(context_lines);
+                hunk_start = Some(start);
+            }
+            last_change = idx;
+        }
+        if let Some(hs) = hunk_start {
+            // Close the hunk once we've run `context_lines` unchanged lines past
+            // the last change (or reached the end).
+            let trailing = idx.saturating_sub(last_change);
+            if !is_change && trailing > context_lines {
+                hunks.push((hs, idx - context_lines + context_lines.min(trailing)));
+                hunk_start = None;
+            }
+        }
+    }
+    if let Some(hs) = hunk_start {
+        let end = (last_change + context_lines + 1).min(ops.len());
+        hunks.push((hs, end));
+    }
+
+    if hunks.is_empty() {
+        return String::new(); // no differences
+    }
+
+    // Render.
+    let mut out = String::new();
+    out.push_str("--- a/SKILL.md\n");
+    out.push_str("+++ b/SKILL.md\n");
+    for (hs, he) in hunks {
+        let slice = &ops[hs..he];
+        // Count old/new lines in this hunk for the @@ header.
+        let old_count = slice
+            .iter()
+            .filter(|o| matches!(o, Op::Keep(..) | Op::Delete(_)))
+            .count();
+        let new_count = slice
+            .iter()
+            .filter(|o| matches!(o, Op::Keep(..) | Op::Insert(_)))
+            .count();
+        let old_start = match slice.first() {
+            Some(Op::Keep(ai, _)) | Some(Op::Delete(ai)) => ai + 1,
+            Some(Op::Insert(_)) => {
+                // Leading inserts — find the first keep/delete for old start.
+                slice
+                    .iter()
+                    .find_map(|o| match o {
+                        Op::Keep(ai, _) | Op::Delete(ai) => Some(ai + 1),
+                        _ => None,
+                    })
+                    .unwrap_or(1)
+            }
+            None => 1,
+        };
+        let new_start = match slice.first() {
+            Some(Op::Keep(_, bi)) | Some(Op::Insert(bi)) => bi + 1,
+            Some(Op::Delete(_)) => {
+                slice
+                    .iter()
+                    .find_map(|o| match o {
+                        Op::Keep(_, bi) | Op::Insert(bi) => Some(bi + 1),
+                        _ => None,
+                    })
+                    .unwrap_or(1)
+            }
+            None => 1,
+        };
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            old_start, old_count, new_start, new_count
+        ));
+        for op in slice {
+            match op {
+                Op::Keep(ai, _) => {
+                    out.push(' ');
+                    out.push_str(a[*ai]);
+                    out.push('\n');
+                }
+                Op::Delete(ai) => {
+                    out.push('-');
+                    out.push_str(a[*ai]);
+                    out.push('\n');
+                }
+                Op::Insert(bi) => {
+                    out.push('+');
+                    out.push_str(b[*bi]);
+                    out.push('\n');
+                }
+            }
+        }
+    }
     out
+}
+
+/// Convenience wrapper: 3-line context, matching GNU diff defaults.
+fn simple_diff(old: &str, new: &str) -> String {
+    unified_diff(old, new, 3)
 }
 
 // ---------------------------------------------------------------------------

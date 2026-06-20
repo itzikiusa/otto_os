@@ -122,8 +122,8 @@ impl ImprovementEngine {
             .iter()
             .flat_map(|d| d.skills_used.clone())
             .collect();
-        let current_skills = self.read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist);
-        let current_memory = self.read_memory(&ws.root_path);
+        let current_skills = self.read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist).await;
+        let current_memory = self.read_memory(&ws.root_path).await;
 
         let skill_instructions = load_skill_instructions(&ws.root_path);
         let prompt = build_prompt(
@@ -204,6 +204,80 @@ impl ImprovementEngine {
             kind: "run_finished".into(),
             id: Some(run_id.clone()),
         });
+        Ok(())
+    }
+
+    /// Execute an already-created run row as a per-session live evolve. Used by
+    /// the `POST /sessions/{id}/evolve` HTTP handler which creates the run row
+    /// first (to return the id immediately) then spawns this in the background.
+    /// Mirrors the body of [`evolve_session`] but accepts the pre-created run id.
+    pub async fn execute_evolve_session(
+        &self,
+        run_id: &Id,
+        ws_id: &Id,
+        session_id: &Id,
+    ) -> Result<()> {
+        let session = self.sessions.get(session_id).await?;
+        let ws = self.workspaces.get(ws_id).await?;
+        let cfg = effective_config(&ws.settings);
+
+        let _ = self.events.send(Event::ImprovementRunStarted {
+            workspace_id: ws.id.clone(),
+            run_id: run_id.clone(),
+        });
+
+        let Some(digest) = build_digest(&session) else {
+            self.improvements
+                .finish_run(run_id, ImprovementRunStatus::Skipped, "no transcript yet", 0, 0, 0, None)
+                .await?;
+            self.emit_finished(&ws.id, run_id, "skipped", 0, 0);
+            return Ok(());
+        };
+
+        let used = digest.skills_used.clone();
+        let current_skills = self.read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist).await;
+        let current_memory = self.read_memory(&ws.root_path).await;
+        let skill_instructions = load_skill_instructions(&ws.root_path);
+        let mut prompt = build_prompt(
+            &skill_instructions,
+            &ws.name,
+            std::slice::from_ref(&digest),
+            &current_skills,
+            &current_memory,
+            &cfg.skill_allowlist,
+        );
+        prompt.push_str(
+            "\n\nNOTE: This is a LIVE single-interaction review (manually triggered). Focus \
+             narrowly on improving the skill(s) THIS one session used. Be conservative — only \
+             propose a change you have clear evidence for from this interaction.\n",
+        );
+        let provider = effective_providers(&cfg.providers)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "claude".to_string());
+
+        match self.producer.produce(&prompt, &ws.root_path, &provider).await {
+            Ok(proposal) => {
+                let (applied, pending) = self
+                    .process_edits(&ws.id, &ws.root_path, run_id, &proposal, &cfg.skill_allowlist, cfg.autonomy)
+                    .await;
+                self.improvements
+                    .finish_run(run_id, ImprovementRunStatus::Done, &proposal.run_summary, 1, applied, pending, None)
+                    .await?;
+                self.emit_finished(&ws.id, run_id, "done", applied, pending);
+                let _ = self.events.send(Event::ImprovementUpdated {
+                    kind: "run_finished".into(),
+                    id: Some(run_id.clone()),
+                });
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                self.improvements
+                    .finish_run(run_id, ImprovementRunStatus::Failed, "", 1, 0, 0, Some(&msg))
+                    .await?;
+                self.emit_finished(&ws.id, run_id, "failed", 0, 0);
+            }
+        }
         Ok(())
     }
 
@@ -296,8 +370,8 @@ impl ImprovementEngine {
         };
 
         let used = digest.skills_used.clone();
-        let current_skills = self.read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist);
-        let current_memory = self.read_memory(&ws.root_path);
+        let current_skills = self.read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist).await;
+        let current_memory = self.read_memory(&ws.root_path).await;
         let skill_instructions = load_skill_instructions(&ws.root_path);
         let mut prompt = build_prompt(
             &skill_instructions,
@@ -558,8 +632,8 @@ impl ImprovementEngine {
             .cloned()
             .collect();
         let current_skills =
-            self.read_candidate_skills(&ws.root_path, &candidates, &cfg.skill_allowlist);
-        let current_memory = self.read_memory(&ws.root_path);
+            self.read_candidate_skills(&ws.root_path, &candidates, &cfg.skill_allowlist).await;
+        let current_memory = self.read_memory(&ws.root_path).await;
         let skill_instructions = load_skill_instructions(&ws.root_path);
         // The prompt's "allow-list" section reflects what may actually auto-apply
         // (the configured allow-list ∩ targeted candidates), not the raw
@@ -638,54 +712,83 @@ impl ImprovementEngine {
         Ok(id)
     }
 
-    /// Read allow-listed skills that were actually used in-window. (Allow-list
+    /// Read allow-listed skills that were actually used in-window. Runs on the
+    /// blocking thread pool so it does not hold up the async executor. (Allow-list
     /// scoping keeps the prompt focused and bounds blast radius.)
-    fn read_candidate_skills(
+    async fn read_candidate_skills(
         &self,
         root: &str,
         used: &[String],
         allowlist: &[String],
     ) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        for name in allowlist {
-            if !used.iter().any(|u| u == name) {
-                continue; // not exercised this window — nothing new to learn
-            }
-            if let Ok(path) =
-                resolve_target(root, ImprovementTarget::Skill, name, Some(self.library_root.as_path()))
-            {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let content = if content.len() > 8000 { content[..8000].to_string() } else { content };
-                    out.push((name.clone(), content));
-                }
-            }
-        }
-        out
+        let root = root.to_string();
+        let used: Vec<String> = used.to_vec();
+        let allowlist: Vec<String> = allowlist.to_vec();
+        let library_root = self.library_root.clone();
+        tokio::task::spawn_blocking(move || {
+            blocking_read_candidate_skills(&root, &used, &allowlist, &library_root)
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Read `MEMORY.md` + sibling `*.md` files from the workspace's project
-    /// memory dir. Bounded to keep the prompt small.
-    fn read_memory(&self, root: &str) -> Vec<(String, String)> {
-        let dir = otto_orchestrator::claude_pty::project_dir(root).join("memory");
-        let mut out = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                    if let (Some(name), Ok(content)) =
-                        (path.file_name().and_then(|n| n.to_str()), std::fs::read_to_string(&path))
-                    {
-                        let content = if content.len() > 8000 { content[..8000].to_string() } else { content };
-                        out.push((name.to_string(), content));
-                    }
-                }
-                if out.len() >= 20 {
-                    break;
-                }
+    /// memory dir. Runs on the blocking thread pool. Bounded to keep the prompt small.
+    async fn read_memory(&self, root: &str) -> Vec<(String, String)> {
+        let root = root.to_string();
+        tokio::task::spawn_blocking(move || blocking_read_memory(&root))
+            .await
+            .unwrap_or_default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blocking I/O helpers — called from spawn_blocking, so they may use std::fs
+// ---------------------------------------------------------------------------
+
+/// Blocking impl of `read_candidate_skills` (called from `spawn_blocking`).
+fn blocking_read_candidate_skills(
+    root: &str,
+    used: &[String],
+    allowlist: &[String],
+    library_root: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for name in allowlist {
+        if !used.iter().any(|u| u == name) {
+            continue; // not exercised this window — nothing new to learn
+        }
+        if let Ok(path) = resolve_target(root, ImprovementTarget::Skill, name, Some(library_root)) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let content = if content.len() > 8000 { content[..8000].to_string() } else { content };
+                out.push((name.clone(), content));
             }
         }
-        out
     }
+    out
+}
+
+/// Blocking impl of `read_memory` (called from `spawn_blocking`).
+fn blocking_read_memory(root: &str) -> Vec<(String, String)> {
+    let dir = otto_orchestrator::claude_pty::project_dir(root).join("memory");
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if let (Some(name), Ok(content)) =
+                    (path.file_name().and_then(|n| n.to_str()), std::fs::read_to_string(&path))
+                {
+                    let content = if content.len() > 8000 { content[..8000].to_string() } else { content };
+                    out.push((name.to_string(), content));
+                }
+            }
+            if out.len() >= 20 {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Result of an auto-apply write attempt.

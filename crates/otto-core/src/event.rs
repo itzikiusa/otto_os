@@ -152,4 +152,24 @@ pub enum Event {
         run_id: Id,
         status: String,
     },
+    /// An insights report became available for a cadence period. Used by the
+    /// channel notifier (opt-in) and the Insights UI to refresh without polling.
+    /// `period` is the human label for the completed period ("daily 2026-06-20",
+    /// "weekly 2026-W25", etc.). `session_id` is the completing session (for
+    /// cross-link in the UI; may be omitted if the caller doesn't have it).
+    InsightReady {
+        period: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<Id>,
+    },
+    /// A usage budget was exceeded (or recovered). Emitted by the usage-sampler
+    /// when `enforce = true` and a cap is crossed. The channel notifier (opt-in)
+    /// can forward this to Slack/Telegram. `direction` is "exceeded" | "recovered".
+    BudgetExceeded {
+        workspace_id: Id,
+        provider: String,
+        spend_usd: f64,
+        cap_usd: f64,
+        direction: String,
+    },
 }
