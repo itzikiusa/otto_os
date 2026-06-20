@@ -287,6 +287,18 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/workspaces/{wid}/agents/") {
         return Require(Agents, Edit);
     }
+    // Mission Control (B4): work-queue read aggregation = View; saved-view
+    // create/delete = Edit (the handler adds the per-view owner guard).
+    if p.starts_with("/workspaces/{id}/mission") {
+        return Require(Agents, if get { View } else { Edit });
+    }
+    if p.starts_with("/mission-views/") {
+        return Require(Agents, Edit);
+    }
+    // Cross-module workspace search (B5): broad read-only fan-out.
+    if p == "/workspaces/{id}/search" {
+        return Require(Agents, View);
+    }
     if p == "/workspaces/{id}/sessions" {
         return Require(Agents, if get { View } else { Edit });
     }
@@ -487,6 +499,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // Capability/health registry + support bundle — daemon diagnostics (root),
     // same tier as the audit log / security posture below.
     if matches!(p, "/capabilities" | "/support-bundle") {
+        return Require(Settings, Admin);
+    }
+    // Settings export/import + state backup/restore (C3) — root diagnostics, same
+    // tier as the audit log; handlers also enforce require_root.
+    if matches!(
+        p,
+        "/settings/export" | "/settings/import" | "/state/backup" | "/state/restore"
+    ) {
         return Require(Settings, Admin);
     }
     if matches!(p, "/audit-log" | "/security-posture" | "/logs/daemon") {

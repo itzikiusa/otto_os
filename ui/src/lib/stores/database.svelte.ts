@@ -277,6 +277,12 @@ export interface QueryTab {
    * 0 or null = no limit.
    */
   timeout_ms: number | null;
+  /**
+   * When true, the server redacts PII/secrets from result cells before returning
+   * them. The response `masked` flag confirms it was applied. Persisted per-tab
+   * so the toggle survives statement changes.
+   */
+  mask: boolean;
 }
 
 let nextTabId = 1;
@@ -290,6 +296,7 @@ function blankTab(statement = ''): QueryTab {
     error: null,
     filters: [],
     timeout_ms: null,
+    mask: false,
   };
 }
 
@@ -1032,6 +1039,7 @@ class DatabaseStore {
       // Per-tab timeout (opt-in; null / 0 = no limit).
       const tabTimeoutMs = this.tab?.timeout_ms ?? null;
 
+      const tabMask = this.tab?.mask ?? false;
       const post = (confirmWrite: boolean): Promise<QueryResult> =>
         api.post<QueryResult>(
           `${this.connBase(id)}/query`,
@@ -1045,6 +1053,9 @@ class DatabaseStore {
             query_id: queryId,
             // Driver-enforced timeout (engine-native, e.g. MySQL MAX_EXECUTION_TIME).
             ...(tabTimeoutMs && tabTimeoutMs > 0 ? { timeout_ms: tabTimeoutMs } : {}),
+            // Server-side PII/prod masking: redacts cell values before they leave
+            // the server. Only sent when the toggle is explicitly on.
+            ...(tabMask ? { mask: true } : {}),
           },
           controller.signal,
         );

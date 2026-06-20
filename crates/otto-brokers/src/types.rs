@@ -445,6 +445,12 @@ pub struct ConsumeReq {
     pub find_from_beginning: bool,
     #[serde(default)]
     pub decode: ValueFormat,
+    /// When `true`, the service runs every message key, value, and header value
+    /// through `otto_core::redact` server-side before returning — raw data never
+    /// leaves unmasked when this flag is set. The response carries `masked: true`
+    /// when masking was applied.
+    #[serde(default)]
+    pub mask: Option<bool>,
 }
 
 fn default_limit() -> usize {
@@ -457,6 +463,10 @@ pub struct ConsumeResp {
     pub partitions: Vec<PartitionRange>,
     /// True when the limit/timeout was hit before draining the range.
     pub truncated: bool,
+    /// Set when message payloads were run through `otto_core::redact` server-side
+    /// (because `ConsumeReq::mask` was `true`). The UI surfaces this as a badge.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub masked: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

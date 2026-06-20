@@ -3352,6 +3352,9 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::context_packet::context_packet_routes(),
         crate::lsp::api_router(),
         crate::routes::capabilities::capabilities_routes(),
+        crate::routes::mission::mission_routes(),
+        crate::routes::search::search_routes(),
+        crate::routes::backup::backup_routes(),
     ];
     let root = vec![
         otto_sessions::ws_router(ctx.authenticator.clone(), ctx.clone()),

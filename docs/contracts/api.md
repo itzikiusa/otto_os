@@ -1213,3 +1213,26 @@ at spawn when the per-workspace `otto_mcp_enabled` setting is on (default off, v
 It runs as `ottod mcp-tools` (stdio JSON-RPC) exposing read-only, redacted, row/timeout-capped,
 audited tools — `otto_db_schema`, `otto_git_pr_review`, `otto_product_story` (db_query / swarm_task /
 broker_topic deferred). Tool calls are logged to `mcp_tool_calls` (migration 0060).
+
+## Must-have wave (Wave 4) — additional routes
+
+Mission Control (work-queue + saved views), cross-module search, and settings/state
+portability. DB per-statement timeouts + schema filter + masking ride EXISTING query/peek
+routes via request flags (`timeout_ms` / `filter` / `mask`) — no new route.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{id}/mission | ws viewer (Agents:View) | — | `MissionView` (needs_you/working/review_ready/waiting/failed/budget_warn) |
+| GET /workspaces/{id}/mission/views | ws viewer (Agents:View) | — | `SavedView[]` |
+| POST /workspaces/{id}/mission/views | ws editor (Agents:Edit) | `{name, filter}` | `SavedView` (201) |
+| DELETE /mission-views/{id} | ws editor (Agents:Edit, owner) | — | 204 |
+| GET /workspaces/{id}/search | ws viewer (Agents:View) | `?q=` | `SearchHit[]` (ranked cross-module: stories/workflows/api-requests/swarm/memories/repos/broker-clusters) |
+| GET /settings/export | root | — | redacted settings JSON + `excluded_keys` |
+| POST /settings/import | root | settings JSON (secret-keyed entries rejected) | `{accepted, rejected}` |
+| GET /state/backup | root | — | non-secret state snapshot (settings + manifest + migration level) |
+| POST /state/restore | root | `{backup, confirm:true}` | `{restored}` |
+
+DB Explorer query/peek now honor `timeout_ms` on all engines (ClickHouse/Mongo/Redis, not
+just MySQL), a server-side schema-children `filter`, and a `mask` flag that redacts result
+cells / broker payloads server-side via `otto_core::redact` (the response carries a `masked`
+flag) — all on the EXISTING query/consume routes.

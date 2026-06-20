@@ -48,6 +48,8 @@
   let keyFilter = $state('');
   let keyFromBeginning = $state(false);
   let valueFilter = $state('');
+  /** When true, message key/value/headers are redacted server-side before returning. */
+  let maskPayloads = $state(false);
   let consuming = $state(false);
   let result = $state<ConsumeResp | null>(null);
   let selected = $state<KafkaMessage | null>(null);
@@ -238,6 +240,9 @@
       key_filter: keyFilter.trim() || null,
       find_from_beginning: keyFilter.trim() ? keyFromBeginning : false,
       value_filter: valueFilter.trim() || null,
+      // Server-side PII masking: redacts key/value/headers before they leave
+      // the server. Only sent when the toggle is explicitly on.
+      ...(maskPayloads ? { mask: true } : {}),
     };
     consuming = true;
     selected = null;
@@ -459,6 +464,14 @@
       <label class="auto" class:on={autoPoll} title="Append new messages every minute (incremental, capped at {TAIL_CAP})">
         <input type="checkbox" bind:checked={autoPoll} /> Live · 1m
       </label>
+      <label
+        class="auto"
+        class:on={maskPayloads}
+        title="Mask PII/prod — server redacts sensitive values (emails, tokens, keys) before returning messages"
+      >
+        <input type="checkbox" bind:checked={maskPayloads} />
+        <Icon name="lock" size={11} /> Mask
+      </label>
       <button class="btn primary small" onclick={consume} disabled={consuming}>
         {consuming ? 'Reading…' : 'Peek'}
       </button>
@@ -511,6 +524,9 @@
         {/if}
         {#if result?.truncated}
           <p class="muted pad small">Showing first {result.messages.length} — increase the limit for more.</p>
+        {/if}
+        {#if result?.masked}
+          <p class="masked-badge pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}
         {#if autoPoll && tailOffsets.size > 0}
           <p class="muted pad small tail-note">Live tail active — appending new messages (cap {TAIL_CAP}).</p>
@@ -768,6 +784,11 @@
   }
   .auto.on {
     color: var(--accent);
+  }
+  /* Server-side PII masking active badge — shown below the message list. */
+  .masked-badge {
+    color: var(--accent);
+    font-weight: 600;
   }
   .grow {
     flex: 1;

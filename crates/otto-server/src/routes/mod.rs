@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod admin_sessions;
 pub mod api_client;
+pub mod backup;
 pub mod capabilities;
 pub mod api_stream;
 pub mod audit;
@@ -16,6 +17,7 @@ pub mod impersonate;
 pub mod logs;
 pub mod mcp_servers;
 pub mod meta;
+pub mod mission;
 pub mod notifications;
 pub mod onboarding;
 pub mod product_memory;
@@ -25,6 +27,7 @@ pub mod swarm_ingest;
 pub mod usage;
 pub mod users;
 pub mod workflows;
+pub mod search;
 pub mod workspaces;
 
 use axum::routing::{delete, get, patch, post, put};

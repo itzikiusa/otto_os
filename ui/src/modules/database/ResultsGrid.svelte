@@ -1091,6 +1091,11 @@
             title="Expand all nested JSON cells inline (instead of clicking each)"
           ><Icon name={expandJson ? 'minimize' : 'maximize'} size={11} />{expandJson ? 'Collapse' : 'Expand'} JSON</button>
         {/if}
+        {#if result?.masked}
+          <span class="tb-masked" title="Server-side PII masking was applied — sensitive values were redacted before leaving the server">
+            <Icon name="lock" size={11} />Masked
+          </span>
+        {/if}
         <button class="tb-btn" onclick={sendToRunningAgent} title="Paste this query + result into your running agent (so it sees the real DB state)"><Icon name="comment" size={11} />→ Agent</button>
         <button class="tb-btn" onclick={copyTsv} title="Copy as TSV{exportScope}"><Icon name="file" size={11} />Copy</button>
         <button class="tb-btn" onclick={exportCsv} title="Export CSV{exportScope}"><Icon name="arrowDown" size={11} />CSV</button>
@@ -1774,6 +1779,20 @@
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent);
+  }
+  /* Server-side masking badge — shown in toolbar when result.masked is true. */
+  .tb-masked {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 9px;
+    border-radius: var(--radius-s);
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    font-size: 11.5px;
+    font-weight: 600;
   }
   .grid-scroll {
     flex: 1;

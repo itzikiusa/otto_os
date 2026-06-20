@@ -711,6 +711,7 @@ async fn execute_node(
                 value_filter: None,
                 find_from_beginning: false,
                 decode: ValueFormat::Auto,
+                mask: None,
             };
             let resp = ctx
                 .brokers

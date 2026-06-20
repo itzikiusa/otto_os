@@ -12,6 +12,7 @@ use crate::proxy::BrokerTunnel;
 use crate::schema_registry::SchemaRegistry;
 use crate::types::*;
 use dashmap::DashMap;
+use otto_core::redact;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use otto_state::{
@@ -1132,10 +1133,29 @@ impl BrokersService {
                 size_bytes: m.size,
             });
         }
+        // Apply server-side PII masking when the caller opts in. Key text, value
+        // text, and header values are run through `otto_core::redact::redact_text`
+        // before leaving the server — raw payloads never reach the client when
+        // this flag is set.
+        let masked = req.mask == Some(true);
+        if masked {
+            for msg in &mut messages {
+                if let Some(ref mut kp) = msg.key {
+                    kp.text = redact::redact_text(&kp.text).value;
+                }
+                if let Some(ref mut vp) = msg.value {
+                    vp.text = redact::redact_text(&vp.text).value;
+                }
+                for hdr in &mut msg.headers {
+                    hdr.value = redact::redact_text(&hdr.value).value;
+                }
+            }
+        }
         Ok(ConsumeResp {
             messages,
             partitions: raw.partitions,
             truncated: raw.truncated,
+            masked,
         })
     }
 
@@ -1343,6 +1363,7 @@ fn selector_to_consume_req(sel: &ReplaySelector) -> ConsumeReq {
             value_filter: None,
             find_from_beginning: false,
             decode: ValueFormat::Auto,
+            mask: None,
         },
         ReplaySelector::OffsetRange { partition, from, to } => ConsumeReq {
             partition: Some(*partition),
@@ -1353,6 +1374,7 @@ fn selector_to_consume_req(sel: &ReplaySelector) -> ConsumeReq {
             value_filter: None,
             find_from_beginning: false,
             decode: ValueFormat::Auto,
+            mask: None,
         },
         ReplaySelector::Timestamp { timestamp_ms, limit } => ConsumeReq {
             partition: None,
@@ -1363,6 +1385,7 @@ fn selector_to_consume_req(sel: &ReplaySelector) -> ConsumeReq {
             value_filter: None,
             find_from_beginning: false,
             decode: ValueFormat::Auto,
+            mask: None,
         },
     }
 }

@@ -27,6 +27,7 @@ pub mod memory;
 pub mod notifications;
 pub mod review_findings;
 pub mod reviews;
+pub mod saved_views;
 pub mod sessions;
 pub mod settings;
 pub mod skill_evals;
@@ -72,6 +73,7 @@ pub use review_findings::{
     compute_fingerprint, FindingState, NewFinding, ReviewFindingRow, ReviewFindingsRepo,
 };
 pub use reviews::ReviewsRepo;
+pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
 pub use settings::{otto_mcp_enabled_for, SettingsRepo, OTTO_MCP_ENABLED_KEY};
 pub use skill_evals::SkillEvalsRepo;

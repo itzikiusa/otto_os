@@ -21,6 +21,7 @@
   import TrustSafety from './TrustSafety.svelte';
   import EmailSenderSetup from './EmailSenderSetup.svelte';
   import PersonalAccessTokens from './PersonalAccessTokens.svelte';
+  import BackupRestore from './BackupRestore.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -48,7 +49,7 @@
     { id: 'language-servers', label: 'Language Servers' },
     { id: 'sharing', label: 'Sharing' },
     { id: 'tokens', label: 'API Tokens' },
-    // skills + skill-eval + context-library: settings:admin covers these root-managed items.
+    // skills + skill-eval + context-library + backup: settings:admin covers root-managed items.
     ...(auth.can('settings', 'admin')
       ? [
           { id: 'skills', label: 'Skills' },
@@ -58,6 +59,7 @@
           { id: 'daemon', label: 'Daemon' },
           { id: 'trust-safety', label: 'Trust & Safety' },
           { id: 'logs', label: 'Logs' },
+          { id: 'backup', label: 'Backup & Restore' },
         ]
       : []),
     // users management: users:admin gate.
@@ -132,6 +134,8 @@
       <TrustSafety />
     {:else if page === 'logs' && auth.can('settings', 'admin')}
       <Logs />
+    {:else if page === 'backup' && auth.can('settings', 'admin')}
+      <BackupRestore />
     {:else}
       <Appearance />
     {/if}

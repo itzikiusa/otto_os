@@ -452,6 +452,11 @@ pub struct QueryRequest {
     /// SELECTs; other engines: context deadline). 0 means no limit (same as absent).
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// When `true`, the driver runs the result rows through `otto_core::redact`
+    /// server-side before returning — raw data never leaves unmasked when set.
+    /// No migration needed; this is a request-level flag only.
+    #[serde(default)]
+    pub mask: Option<bool>,
 }
 
 /// An engine-native handle the driver captured for an executing query, so the
@@ -540,6 +545,10 @@ pub struct QueryResult {
     /// True when `max_rows` clipped the result.
     #[serde(default)]
     pub truncated: bool,
+    /// Set when the result cells were run through `otto_core::redact` server-side
+    /// (because `QueryRequest::mask` was `true`). The UI surfaces this as a badge.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub masked: bool,
 }
 
 impl QueryResult {
@@ -551,6 +560,7 @@ impl QueryResult {
             stats: QueryStats::default(),
             message: None,
             truncated: false,
+            masked: false,
         }
     }
 
@@ -564,6 +574,7 @@ impl QueryResult {
             stats: QueryStats::default(),
             message: Some(text),
             truncated: false,
+            masked: false,
         }
     }
 }

@@ -2199,6 +2199,8 @@ export interface QueryResult {
   stats: QueryStats;
   message?: string | null;
   truncated: boolean;
+  /** True when the server ran cell values through `otto_core::redact` (QueryRequest.mask=true). */
+  masked?: boolean;
 }
 
 export type DbCompletionKind =
@@ -2798,6 +2800,10 @@ export interface ConsumeReq {
   /** Applied post-decode in the service layer. */
   value_filter?: string | null;
   decode?: ValueFormat;
+  /** When true, the server runs message key/value/headers through
+   * `otto_core::redact` before returning. Raw payloads never leave the server
+   * when this flag is set. The response `masked` field confirms it. */
+  mask?: boolean;
 }
 
 export interface DecodedPayload {
@@ -2832,6 +2838,9 @@ export interface ConsumeResp {
   messages: KafkaMessage[];
   partitions: PartitionRange[];
   truncated: boolean;
+  /** True when message payloads were run through `otto_core::redact` server-side
+   * (ConsumeReq.mask=true). The UI surfaces this as a badge. */
+  masked?: boolean;
 }
 
 export interface ProduceReq {
@@ -2969,4 +2978,27 @@ export interface ContextPacketSendResp {
   ok: boolean;
   size_bytes: number;
   redactions: RedactionHit[];
+}
+
+// ---------------------------------------------------------------------------
+// Cross-module search  (GET /workspaces/{id}/search?q=)
+// ---------------------------------------------------------------------------
+
+/**
+ * One ranked result from the cross-module search endpoint.
+ * `kind` discriminates the object type; `actions[0]` is always the primary
+ * "open" navigation action.
+ */
+export interface SearchHit {
+  /** Object type: "story" | "workflow" | "api_request" | "swarm_task" |
+   *  "swarm_project" | "memory" | "repo" | "broker_cluster" */
+  kind: string;
+  /** Row id in the originating table. */
+  id: string;
+  /** Primary display title. */
+  title: string;
+  /** Secondary display text (method+URL, status, collection, …). */
+  subtitle?: string;
+  /** Contextual action labels; first entry is the primary "open" action. */
+  actions: string[];
 }
