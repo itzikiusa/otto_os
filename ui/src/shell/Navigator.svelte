@@ -339,6 +339,13 @@
         </button>
       {/if}
 
+      <!-- "Message Brokers" ships without an RBAC feature key (like "Vault"), so
+           it is rendered un-gated — visible to any authenticated member. -->
+      <button class="nav-item" class:active={router.module === 'brokers'} onclick={() => router.go('brokers')}>
+        <Icon name="box" size={14} />
+        <span class="grow">Message Brokers</span>
+      </button>
+
       {#if auth.can('workflows', 'view')}
         <button
           class="nav-item"

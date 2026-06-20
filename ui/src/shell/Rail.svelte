@@ -8,8 +8,9 @@
 
   // Each entry carries the feature name used by auth.can(); all are gated at
   // 'view'. Root always passes (can() returns true for root). The memory-layer
-  // "Vault" module predates RBAC and has no feature key, so it is appended
-  // unconditionally (visible to any authenticated member) rather than filtered.
+  // "Vault" module and the "Message Brokers" module predate (resp. ship without)
+  // an RBAC feature key, so they are appended unconditionally (visible to any
+  // authenticated member) rather than filtered.
   const ALL_MODULES = [
     { id: 'agents',     icon: 'terminal', label: 'Agents',           feature: 'agents'      as const },
     { id: 'swarm',      icon: 'grid',     label: 'Swarm',            feature: 'swarm'       as const },
@@ -25,7 +26,8 @@
   ];
   // Filter to only the modules the current user has at least view on, then
   // splice in the un-gated "Vault" (memory) module after Product (or at the end
-  // when Product itself is not visible) so it is always reachable.
+  // when Product itself is not visible) and "Message Brokers" after Database
+  // (or at the end when Database is not visible) so they are always reachable.
   const modules = $derived.by(() => {
     const gated = ALL_MODULES.filter(m => auth.can(m.feature, 'view')).map(m => ({
       id: m.id,
@@ -33,9 +35,12 @@
       label: m.label,
     }));
     const vault = { id: 'vault', icon: 'note', label: 'Vault' };
-    const i = gated.findIndex(m => m.id === 'product');
-    if (i === -1) return [...gated, vault];
-    return [...gated.slice(0, i + 1), vault, ...gated.slice(i + 1)];
+    const vi = gated.findIndex(m => m.id === 'product');
+    let out = vi === -1 ? [...gated, vault] : [...gated.slice(0, vi + 1), vault, ...gated.slice(vi + 1)];
+    const brokers = { id: 'brokers', icon: 'box', label: 'Message Brokers' };
+    const bi = out.findIndex(m => m.id === 'database');
+    out = bi === -1 ? [...out, brokers] : [...out.slice(0, bi + 1), brokers, ...out.slice(bi + 1)];
+    return out;
   });
 </script>
 

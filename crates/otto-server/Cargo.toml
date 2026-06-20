@@ -28,6 +28,7 @@ mime_guess = { workspace = true, optional = true }
 otto-sessions.workspace = true
 otto-connections.workspace = true
 otto-dbviewer.workspace = true
+otto-brokers.workspace = true
 otto-orchestrator.workspace = true
 otto-git.workspace = true
 otto-issues.workspace = true

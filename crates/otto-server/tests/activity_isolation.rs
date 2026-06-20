@@ -216,6 +216,10 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         secrets.clone(),
         DbExplorerRepo::new(pool.clone()),
     ));
+    let brokers = Arc::new(otto_brokers::BrokersService::new(
+        otto_state::BrokerClustersRepo::new(pool.clone()),
+        secrets.clone(),
+    ));
     let swarm_repo = SwarmRepo::new(pool.clone());
     let swarm = Arc::new(otto_swarm::SwarmService::new(swarm_repo.clone()));
     let product_repo = ProductRepo::new(pool.clone());
@@ -243,6 +247,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         workspaces: WorkspacesRepo::new(pool.clone()),
         connections,
         db_explorer,
+        brokers,
         spawner: Arc::new(NoopSpawner),
         git_store: GitStore::new(pool.clone()),
         issues_store: IssuesRepo::new(pool.clone()),

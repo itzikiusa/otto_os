@@ -163,6 +163,12 @@ async fn run(cfg: Config) -> Result<(), String> {
         secrets.clone(),
         otto_state::DbExplorerRepo::new(pool.clone()),
     ));
+    // Message Brokers (Kafka) viewer: cluster profiles (secrets in the Keychain)
+    // + an rdkafka client pool for overview/topics/peek/produce/groups/metrics.
+    let brokers = Arc::new(otto_brokers::BrokersService::new(
+        otto_state::BrokerClustersRepo::new(pool.clone()),
+        secrets.clone(),
+    ));
     let spawner = Arc::new(PtySpawner {
         manager: Arc::clone(&manager),
         workspaces: workspaces.clone(),
@@ -236,6 +242,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         workspaces: workspaces.clone(),
         connections,
         db_explorer,
+        brokers,
         spawner,
         git_store: GitStore::new(pool.clone()),
         issues_store: IssuesRepo::new(pool.clone()),

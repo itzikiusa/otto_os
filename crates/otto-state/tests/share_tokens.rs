@@ -1,4 +1,4 @@
-//! Regression test for migration `0043_share_tokens.sql`: the scope columns and
+//! Regression test for migration `0044_share_tokens.sql`: the scope columns and
 //! kill-switch that scoped "share link" tokens need must exist on `auth_sessions`
 //! after a fresh migrate. Mirrors the `pragma_table_info` shape used elsewhere in
 //! the workspace to assert a migration's effect on the schema.

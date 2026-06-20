@@ -37,6 +37,8 @@ pub struct ServerCtx {
     pub connections: Arc<ConnectionsService>,
     /// Native data-access layer for the DB Explorer (browse/query/schema).
     pub db_explorer: Arc<DbViewerService>,
+    /// Message Brokers (Kafka) viewer engine — cluster CRUD + rdkafka client pool.
+    pub brokers: Arc<otto_brokers::BrokersService>,
     pub spawner: Arc<dyn Spawner>,
     pub git_store: GitStore,
     pub issues_store: IssuesRepo,
