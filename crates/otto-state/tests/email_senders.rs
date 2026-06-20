@@ -1,4 +1,4 @@
-//! Regression test for migration `0042_email_senders.sql`: the per-user email
+//! Regression test for migration `0044_email_senders.sql`: the per-user email
 //! sender table the email-OTP gate needs must exist after a fresh migrate, with
 //! the `secret_ref` (Keychain reference, NOT the password) and `verified_at`
 //! columns. Mirrors the `pragma_table_info` shape used in `share_tokens.rs`.

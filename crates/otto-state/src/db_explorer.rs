@@ -30,7 +30,7 @@ pub struct HistoryEntry {
     pub duration_ms: i64,
     pub row_count: i64,
     pub error: Option<String>,
-    /// Who ran this query. `None` for rows recorded before migration 0039
+    /// Who ran this query. `None` for rows recorded before migration 0041
     /// (legacy single-user data). Non-admin filtered views only show rows
     /// where `user_id` matches the caller; legacy rows are invisible to them.
     pub user_id: Option<Id>,
@@ -202,7 +202,7 @@ impl DbExplorerRepo {
     // -- History ------------------------------------------------------------
 
     /// Insert a history row. `user_id` is the caller who executed the statement;
-    /// it is recorded since migration 0039 and used to scope per-user history views.
+    /// it is recorded since migration 0041 and used to scope per-user history views.
     #[allow(clippy::too_many_arguments)]
     pub async fn add_history(
         &self,
@@ -253,7 +253,7 @@ impl DbExplorerRepo {
     /// Return history for a connection scoped to a single user. Used for
     /// non-root callers: only shows rows where `user_id = caller_id`.
     ///
-    /// Legacy rows with `user_id = NULL` (pre-0039) are excluded — they predate
+    /// Legacy rows with `user_id = NULL` (pre-0041) are excluded — they predate
     /// multi-user and cannot be attributed to any specific user.
     pub async fn list_history_for_user(
         &self,

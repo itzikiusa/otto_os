@@ -351,7 +351,7 @@ async fn history<S: DbViewerCtx>(
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     // Root sees all history on the connection; non-root callers see only
-    // their own rows (#L11). Legacy rows (user_id = NULL, pre-0039) are
+    // their own rows (#L11). Legacy rows (user_id = NULL, pre-0041) are
     // invisible to non-root callers — acceptable, as they predate multi-user.
     let entries = if user.is_root {
         ctx.db().list_history(&id, limit).await?

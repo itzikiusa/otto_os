@@ -1,4 +1,4 @@
-//! Regression test for migration `0041_share_tokens.sql`: the scope columns and
+//! Regression test for migration `0043_share_tokens.sql`: the scope columns and
 //! kill-switch that scoped "share link" tokens need must exist on `auth_sessions`
 //! after a fresh migrate. Mirrors the `pragma_table_info` shape used elsewhere in
 //! the workspace to assert a migration's effect on the schema.
@@ -25,7 +25,7 @@ async fn mem_pool() -> SqlitePool {
 }
 
 /// After migrating, `auth_sessions` carries the share-link scope columns added in
-/// `0041`: the single-session scope, the capped role, and the explicit kill switch.
+/// `0043`: the single-session scope, the capped role, and the explicit kill switch.
 #[tokio::test]
 async fn auth_sessions_has_share_scope_columns() {
     let pool = mem_pool().await;

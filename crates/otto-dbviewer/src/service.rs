@@ -460,7 +460,7 @@ impl DbViewerService {
     /// Run a query/command and record it in history (best-effort).
     ///
     /// `user_id` identifies the caller and is written into `db_query_history.user_id`
-    /// (since migration 0039) so history can later be filtered per-user.
+    /// (since migration 0041) so history can later be filtered per-user.
     ///
     /// When `req.query_id` is set, the query is registered in the in-flight map
     /// for its duration (via [`InFlightGuard`], which removes it on drop even if
@@ -654,7 +654,7 @@ impl DbViewerService {
 
     /// Run a widget's query for rendering.
     ///
-    /// `user_id` is threaded through to history recording (since migration 0039).
+    /// `user_id` is threaded through to history recording (since migration 0041).
     pub async fn run_widget(&self, id: &Id, user_id: &Id) -> Result<QueryResult> {
         let widget = self.repo.get_widget(id).await?;
         let req = QueryRequest {
