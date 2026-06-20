@@ -34,7 +34,7 @@
       icon: m.icon,
       label: m.label,
     }));
-    const vault = { id: 'vault', icon: 'note', label: 'Vault' };
+    const vault = { id: 'vault', icon: 'globe', label: 'Vault' };
     const vi = gated.findIndex(m => m.id === 'product');
     let out = vi === -1 ? [...gated, vault] : [...gated.slice(0, vi + 1), vault, ...gated.slice(vi + 1)];
     const brokers = { id: 'brokers', icon: 'box', label: 'Message Brokers' };

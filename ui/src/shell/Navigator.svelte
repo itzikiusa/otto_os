@@ -325,6 +325,13 @@
         </button>
       {/if}
 
+      <!-- "Vault" (memory layer) ships without an RBAC feature key, so it is
+           rendered un-gated — visible to any authenticated member. -->
+      <button class="nav-item" class:active={router.module === 'vault'} onclick={() => router.go('vault')}>
+        <Icon name="globe" size={14} />
+        <span class="grow">Vault</span>
+      </button>
+
       {#if auth.can('api_client', 'view')}
         <button class="nav-item" class:active={router.module === 'api'} onclick={() => router.go('api')}>
           <Icon name="send" size={14} />
