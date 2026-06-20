@@ -67,6 +67,24 @@ bridges so an agent can work a ticket from a chat thread.
   visual JOIN builder, Superset-style dashboards/widgets for ClickHouse, and
   "examine this schema with an agent". Read queries get an automatic row `LIMIT`
   so a huge table is never fully scanned, and any running query is cancelable.
+- **Message Brokers (Kafka)** — connect Kafka clusters (incl. **AWS MSK over an
+  SSH bastion**) to browse topics, **peek/produce** messages, inspect
+  consumer-group lag, edit topic configs, and view a Schema Registry, with an
+  Overview of brokers/partitions/throughput. Supports PLAINTEXT/TLS and SASL
+  (PLAIN/SCRAM) auth, prod/read-only guards, and an in-process Kafka-aware proxy
+  so a private cluster is reachable through a single SSH tunnel (librdkafka can't
+  SOCKS, so Otto rewrites the advertised broker addresses on the fly).
+- **Vault** — a workspace knowledge store: notes with `[[backlinks]]` and
+  keyword + **semantic (vector) hybrid recall** (`otto-memory`). The core is
+  domain-agnostic, so other areas (e.g. Product) recall from it instead of
+  re-fetching context each turn.
+- **Multi-user, RBAC & sharing** — per-feature roles (None < View < Edit <
+  Admin), per-session isolation, an admin overview + audited impersonation, and
+  **session sharing** via scoped, expiring, revocable links gated by an
+  email-OTP access code. Optional **remote/mobile access** (Cloudflare tunnel +
+  installable PWA + responsive, touch-friendly shell) keeps the daemon
+  loopback-only by default. See `docs/MULTI-USER-RBAC.md` and
+  `docs/remote-access-runbook.md`.
 - **Self-improvement** — an optional, gated engine that reflects on recent
   sessions and proposes edits to the workspace's skills/memory (tiered autonomy:
   safe edits auto-apply, risky ones queue for approval). Can run on multiple
@@ -110,10 +128,13 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   `otto-sessions` (session manager + PTY + trust + prompt-guard), `otto-pty`,
   `otto-orchestrator`, `otto-git`, `otto-issues` (Jira/Confluence),
   `otto-channels`, `otto-connections`, `otto-dbviewer` (Database Explorer),
+  `otto-brokers` (Kafka viewer), `otto-ssh` (shared SSH-tunnel helper),
+  `otto-swarm` (Agent Swarm), `otto-memory` (Vault knowledge store),
   `otto-product` (Jira/Confluence story workflows), `otto-improve`
   (self-improvement), `otto-usage` (ClickHouse usage/metrics), `otto-skills`
-  (bundled skill library), `otto-context`, `otto-rbac`, `otto-keychain` (macOS
-  Keychain secret storage), `otto-server` (routes), `ottod` (binary).
+  (bundled skill library), `otto-context`, `otto-rbac`, `otto-netguard`
+  (SSRF guard), `otto-keychain` (macOS Keychain secret storage),
+  `otto-server` (routes), `ottod` (binary).
 
 ## Prerequisites
 
