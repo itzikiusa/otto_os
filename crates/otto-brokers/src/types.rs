@@ -7,7 +7,11 @@
 use chrono::{DateTime, Utc};
 use otto_core::domain::Environment;
 use otto_core::id::Id;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// SSH tunnel config (shared with the DB Explorer). When present on a cluster,
+/// the brokers service reaches it through a bastion (see `proxy` module).
+pub use otto_ssh::SshTunnelConfig;
 
 // ---------------------------------------------------------------------------
 // Cluster connection profile
@@ -127,6 +131,9 @@ pub struct BrokerCluster {
     pub metrics_url: Option<String>,
     /// Optional UI accent color (e.g. `#ff5f57`).
     pub color: Option<String>,
+    /// Optional SSH tunnel (bastion) used to reach a private cluster (e.g. MSK).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshTunnelConfig>,
     #[serde(default)]
     pub environment: Environment,
     #[serde(default)]
@@ -170,10 +177,24 @@ pub struct UpsertClusterReq {
     pub metrics_url: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
+    /// SSH tunnel. Double-option so the handler can tell apart: absent = keep
+    /// the stored tunnel; explicit `null` = clear it; object = set it.
+    #[serde(default, deserialize_with = "double_option")]
+    pub ssh: Option<Option<SshTunnelConfig>>,
     #[serde(default)]
     pub environment: Option<Environment>,
     #[serde(default)]
     pub read_only: Option<bool>,
+}
+
+/// Deserialize so a present-but-null field becomes `Some(None)` while an absent
+/// field stays `None` — the PATCH "keep vs clear" distinction.
+fn double_option<'de, T, D>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -545,6 +566,27 @@ mod tests {
             assert_eq!(SaslMechanism::parse(m.as_str()), Some(m));
         }
         assert_eq!(SaslMechanism::ScramSha256.librdkafka(), "SCRAM-SHA-256");
+    }
+
+    #[test]
+    fn upsert_ssh_three_state() {
+        let base = r#""name":"c","bootstrap_servers":"b:9092""#;
+        // Absent → keep (None).
+        let req: UpsertClusterReq = serde_json::from_str(&format!("{{{base}}}")).unwrap();
+        assert!(req.ssh.is_none());
+        // Explicit null → clear (Some(None)).
+        let req: UpsertClusterReq =
+            serde_json::from_str(&format!("{{{base},\"ssh\":null}}")).unwrap();
+        assert_eq!(req.ssh, Some(None));
+        // Object → set (Some(Some(..))).
+        let req: UpsertClusterReq = serde_json::from_str(&format!(
+            "{{{base},\"ssh\":{{\"host\":\"bastion\",\"user\":\"ec2-user\"}}}}"
+        ))
+        .unwrap();
+        let cfg = req.ssh.unwrap().unwrap();
+        assert_eq!(cfg.host, "bastion");
+        assert_eq!(cfg.port, 22);
+        assert_eq!(cfg.user, "ec2-user");
     }
 
     #[test]

@@ -97,6 +97,7 @@ impl BrokersService {
                 sr_secret_ref: None,
                 metrics_url: norm(req.metrics_url.clone()),
                 color: norm(req.color.clone()),
+                ssh_config: ssh_to_json(req.ssh.clone().flatten().as_ref()),
                 environment: req.environment.unwrap_or_default().as_str().to_string(),
                 read_only: req.read_only.unwrap_or(false),
                 created_by,
@@ -121,7 +122,7 @@ impl BrokersService {
                 .repo
                 .update(
                     &row.id,
-                    full_update(&row, secret_ref, sr_secret_ref, None, None),
+                    full_update(&row, secret_ref, sr_secret_ref, None, None, None),
                 )
                 .await?;
             return Ok(row_to_cluster(updated));
@@ -158,6 +159,8 @@ impl BrokersService {
             schema_registry_username: norm(req.schema_registry_username),
             metrics_url: norm(req.metrics_url),
             color: norm(req.color),
+            // absent ssh = keep; null = clear; object = set.
+            ssh_config: req.ssh.map(|inner| ssh_to_json(inner.as_ref())),
             secret_ref,
             sr_secret_ref,
             // absent environment/read_only PRESERVE the write-guard.
@@ -515,6 +518,10 @@ fn row_to_cluster(r: BrokerClusterRow) -> BrokerCluster {
         has_sr_password: r.sr_secret_ref.is_some(),
         metrics_url: r.metrics_url,
         color: r.color,
+        ssh: r
+            .ssh_config
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok()),
         environment: otto_core::domain::Environment::parse(&r.environment).unwrap_or_default(),
         read_only: r.read_only,
         created_by: r.created_by,
@@ -523,10 +530,12 @@ fn row_to_cluster(r: BrokerClusterRow) -> BrokerCluster {
 }
 
 /// Build a full update from an existing row, overriding only secrets/guards.
+#[allow(clippy::too_many_arguments)]
 fn full_update(
     row: &BrokerClusterRow,
     secret_ref: Option<Option<String>>,
     sr_secret_ref: Option<Option<String>>,
+    ssh_config: Option<Option<String>>,
     environment: Option<String>,
     read_only: Option<bool>,
 ) -> UpdateBrokerCluster {
@@ -541,11 +550,17 @@ fn full_update(
         schema_registry_username: row.schema_registry_username.clone(),
         metrics_url: row.metrics_url.clone(),
         color: row.color.clone(),
+        ssh_config,
         secret_ref,
         sr_secret_ref,
         environment,
         read_only,
     }
+}
+
+/// Serialize a tunnel config to the JSON we persist (None → no tunnel).
+fn ssh_to_json(ssh: Option<&SshTunnelConfig>) -> Option<String> {
+    ssh.and_then(|c| serde_json::to_string(c).ok())
 }
 
 fn validate(req: &UpsertClusterReq) -> Result<()> {

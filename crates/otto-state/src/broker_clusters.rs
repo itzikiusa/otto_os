@@ -32,6 +32,8 @@ pub struct BrokerClusterRow {
     pub sr_secret_ref: Option<String>,
     pub metrics_url: Option<String>,
     pub color: Option<String>,
+    /// JSON-encoded SSH tunnel config (`otto_ssh::SshTunnelConfig`); None = none.
+    pub ssh_config: Option<String>,
     pub environment: String,
     pub read_only: bool,
     pub created_by: Id,
@@ -53,6 +55,7 @@ pub struct NewBrokerCluster {
     pub sr_secret_ref: Option<String>,
     pub metrics_url: Option<String>,
     pub color: Option<String>,
+    pub ssh_config: Option<String>,
     pub environment: String,
     pub read_only: bool,
     pub created_by: Id,
@@ -72,6 +75,8 @@ pub struct UpdateBrokerCluster {
     pub schema_registry_username: Option<String>,
     pub metrics_url: Option<String>,
     pub color: Option<String>,
+    /// Three-state: None = keep, Some(None) = clear, Some(Some(json)) = set.
+    pub ssh_config: Option<Option<String>>,
     pub secret_ref: Option<Option<String>>,
     pub sr_secret_ref: Option<Option<String>>,
     pub environment: Option<String>,
@@ -94,6 +99,7 @@ fn row_to_cluster(r: &sqlx::sqlite::SqliteRow) -> Result<BrokerClusterRow> {
         sr_secret_ref: r.get("sr_secret_ref"),
         metrics_url: r.get("metrics_url"),
         color: r.get("color"),
+        ssh_config: r.get("ssh_config"),
         environment: r.get("environment"),
         read_only: r.get::<i64, _>("read_only") != 0,
         created_by: r.get("created_by"),
@@ -114,8 +120,9 @@ impl BrokerClustersRepo {
                 id, workspace_id, name, bootstrap_servers, security_protocol,
                 sasl_mechanism, sasl_username, secret_ref, tls_skip_verify,
                 schema_registry_url, schema_registry_username, sr_secret_ref,
-                metrics_url, color, environment, read_only, created_by, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                metrics_url, color, ssh_config, environment, read_only,
+                created_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&c.workspace_id)
@@ -131,6 +138,7 @@ impl BrokerClustersRepo {
         .bind(&c.sr_secret_ref)
         .bind(&c.metrics_url)
         .bind(&c.color)
+        .bind(&c.ssh_config)
         .bind(&c.environment)
         .bind(i64::from(c.read_only))
         .bind(&c.created_by)
@@ -187,6 +195,14 @@ impl BrokerClustersRepo {
         .await
         .map_err(dberr("update broker cluster"))?;
 
+        if let Some(ssh_config) = u.ssh_config {
+            sqlx::query("UPDATE broker_clusters SET ssh_config = ? WHERE id = ?")
+                .bind(ssh_config)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update broker cluster"))?;
+        }
         if let Some(secret_ref) = u.secret_ref {
             sqlx::query("UPDATE broker_clusters SET secret_ref = ? WHERE id = ?")
                 .bind(secret_ref)
@@ -282,6 +298,7 @@ mod tests {
             sr_secret_ref: None,
             metrics_url: None,
             color: None,
+            ssh_config: None,
             environment: "dev".into(),
             read_only: false,
             created_by: user.clone(),
@@ -316,6 +333,9 @@ mod tests {
                     schema_registry_username: None,
                     metrics_url: Some("http://broker:9644/metrics".into()),
                     color: Some("#ff5f57".into()),
+                    ssh_config: Some(Some(
+                        r#"{"host":"bastion","port":22,"user":"ec2-user"}"#.into(),
+                    )),
                     secret_ref: Some(Some(format!("broker-{}", created.id))),
                     sr_secret_ref: None,
                     environment: Some("prod".into()),
@@ -328,6 +348,7 @@ mod tests {
         assert_eq!(updated.security_protocol, "sasl_ssl");
         assert_eq!(updated.sasl_mechanism.as_deref(), Some("scram_sha_256"));
         assert!(updated.secret_ref.is_some());
+        assert!(updated.ssh_config.as_deref().unwrap().contains("bastion"));
         assert_eq!(updated.environment, "prod");
         assert!(updated.read_only);
 
@@ -346,6 +367,7 @@ mod tests {
                     schema_registry_username: None,
                     metrics_url: updated.metrics_url.clone(),
                     color: updated.color.clone(),
+                    ssh_config: Some(None), // explicit clear
                     secret_ref: Some(None),
                     sr_secret_ref: None,
                     environment: None,
@@ -355,6 +377,7 @@ mod tests {
             .await
             .unwrap();
         assert!(cleared.secret_ref.is_none());
+        assert!(cleared.ssh_config.is_none());
         assert_eq!(cleared.environment, "prod"); // preserved (None)
 
         repo.delete(&created.id).await.unwrap();

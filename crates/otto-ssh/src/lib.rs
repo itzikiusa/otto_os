@@ -29,7 +29,7 @@ use tokio::process::{Child, Command};
 /// SSH tunnel config. Auth uses the system ssh client, so it honours the
 /// ssh-agent, `~/.ssh/config`, and known_hosts. Provide an `identity_file` for
 /// key auth, or rely on the agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshTunnelConfig {
     pub host: String,
     #[serde(default = "default_ssh_port")]

@@ -8,6 +8,7 @@ license.workspace = true
 otto-core = { workspace = true }
 otto-state = { workspace = true }
 otto-netguard = { workspace = true }
+otto-ssh = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
@@ -23,6 +24,12 @@ base64 = { workspace = true }
 hex = { workspace = true }
 rdkafka = { workspace = true }
 apache-avro = { workspace = true }
+# SSH-tunnel Kafka proxy: SOCKS5 dial to brokers + broker-side TLS termination.
+tokio-socks = "0.5"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
