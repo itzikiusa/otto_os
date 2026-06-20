@@ -4,7 +4,9 @@
   // fixes, the score, before/after regression vs the previous round, and the
   // improver's skill diff. Header actions: cancel, delete, promote the winning
   // skill. Polls while running.
+  import { untrack } from 'svelte';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
+  import { skillEvalBus } from '../../lib/events.svelte';
   import type {
     EvalFinding,
     EvalIteration,
@@ -57,6 +59,19 @@
     return () => {
       if (pollTimer !== null) clearTimeout(pollTimer);
     };
+  });
+
+  // Live refresh: a `skill_eval_updated` WS event for this run triggers an
+  // immediate poll instead of waiting for the 2s timer. The last-tick guard +
+  // untrack keep this from self-triggering (the timed poll remains as fallback).
+  let lastEvalTick = 0;
+  $effect(() => {
+    const t = skillEvalBus.tick;
+    if (t === lastEvalTick) return;
+    lastEvalTick = t;
+    untrack(() => {
+      if (skillEvalBus.runId === evalId && run && isActive(run)) void poll();
+    });
   });
 
   async function load(id: string): Promise<void> {
