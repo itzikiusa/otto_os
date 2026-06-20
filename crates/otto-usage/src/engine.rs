@@ -280,6 +280,7 @@ impl UsageEngine {
             "SELECT session_id,
                     any(workspace_id) AS workspace_id,
                     any(provider) AS provider,
+                    any(model) AS model,
                     count() AS events,
                     sum(input_tokens) AS input_tokens,
                     sum(output_tokens) AS output_tokens,

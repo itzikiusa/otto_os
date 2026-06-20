@@ -110,6 +110,12 @@ pub struct SessionUsage {
     pub session_id: String,
     pub workspace_id: String,
     pub provider: String,
+    /// Most-common model used by this session (from `any(model)` in ClickHouse).
+    /// Used to detect fallback-priced sessions: when the model is unrecognised
+    /// the engine applies the conservative Opus-tier fallback, so the UI tags
+    /// the row as "estimated".
+    #[serde(default)]
+    pub model: String,
     pub events: u64,
     #[serde(default)]
     pub input_tokens: u64,
@@ -132,6 +138,10 @@ pub struct SessionUsage {
     /// Human-readable workspace name (not the id).
     #[serde(default)]
     pub workspace_name: Option<String>,
+    /// True when this session's cost was estimated using the conservative Opus-tier
+    /// fallback (unrecognised model). UI should render the cost as "estimated".
+    #[serde(default)]
+    pub fallback_priced: bool,
 }
 
 /// Per-feature rollup over the window — usage grouped by the kind of Otto work

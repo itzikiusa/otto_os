@@ -9,6 +9,12 @@
   import type { UsageBudgetConfig } from '../../lib/api/usage.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
 
+  // Navigate to a session from the top-sessions table (click-through drill-down).
+  function openSession(sessionId: string): void {
+    // Only known Otto sessions (those with a title or kind) can be navigated to.
+    ws.navigateToSession(sessionId);
+  }
+
   const WINDOWS = [
     { days: 7, label: '7d' },
     { days: 30, label: '30d' },
@@ -36,6 +42,10 @@
 
   onMount(() => {
     if (auth.isRoot) void usage.loadAll();
+    return () => {
+      // Tear down auto-refresh on unmount so we don't poll in the background.
+      usage.setAutoRefresh(false);
+    };
   });
 
   // Mirror server status into the editable fields whenever it refreshes.
@@ -235,6 +245,23 @@
       <button class="btn" onclick={() => usage.loadAll()} disabled={usage.loading} title="Refresh">
         <Icon name="refresh" size={13} /> Refresh
       </button>
+      <button
+        class="btn"
+        class:active={usage.autoRefresh}
+        onclick={() => usage.setAutoRefresh(!usage.autoRefresh)}
+        title={usage.autoRefresh ? 'Auto-refresh ON — click to stop' : 'Auto-refresh OFF — click to enable (refreshes every 60s)'}
+      >
+        <Icon name="clock" size={13} />
+        {usage.autoRefresh ? 'Live' : 'Auto'}
+      </button>
+      <button
+        class="btn"
+        disabled={!usage.summary}
+        onclick={() => usage.exportSummaryJson()}
+        title="Download full summary as JSON"
+      >
+        <Icon name="download" size={13} /> Export
+      </button>
       <button class="btn" class:active={configOpen} onclick={() => (configOpen = !configOpen)} title="Settings">
         <Icon name="gear" size={13} />
       </button>
@@ -288,6 +315,12 @@
           <span class="dim">Detected: <span class="mono">{usage.status.binary}</span></span>
         {/if}
       </div>
+      {#if usage.status?.priced_as_of}
+        <p class="install-meta dim">
+          Cost estimates use rates priced as of <strong>{usage.status.priced_as_of}</strong>.
+          Unknown models fall back to the Opus tier (flagged as "estimated" in session rows).
+        </p>
+      {/if}
     </div>
   {:else}
     <div class="body">
@@ -354,7 +387,14 @@
       <div class="grid">
         <!-- Provider breakdown -->
         <div class="panel card">
-          <h3>By provider</h3>
+          <div class="panel-head">
+            <h3>By provider</h3>
+            {#if usage.summary && usage.summary.providers.length > 0}
+              <button class="link-btn" onclick={() => usage.exportProvidersCsv()} title="Download as CSV">
+                <Icon name="download" size={11} /> CSV
+              </button>
+            {/if}
+          </div>
           {#if usage.summary && usage.summary.providers.length > 0}
             {@const pmax = Math.max(1, ...usage.summary.providers.map((p) => p.total_tokens))}
             <div class="bars">
@@ -380,7 +420,14 @@
 
         <!-- Daily tokens -->
         <div class="panel card">
-          <h3>Daily tokens</h3>
+          <div class="panel-head">
+            <h3>Daily tokens</h3>
+            {#if usage.summary && usage.summary.daily.length > 0}
+              <button class="link-btn" onclick={() => usage.exportDailyCsv()} title="Download as CSV">
+                <Icon name="download" size={11} /> CSV
+              </button>
+            {/if}
+          </div>
           {#if usage.summary && usage.summary.daily.length > 0}
             <div class="daily">
               {#each usage.summary.daily as d (d.day)}
@@ -606,7 +653,14 @@
 
       <!-- Sessions table -->
       <div class="panel card">
-        <h3>Top sessions</h3>
+        <div class="panel-head">
+          <h3>Top sessions</h3>
+          {#if usage.summary && usage.summary.sessions.length > 0}
+            <button class="link-btn" onclick={() => usage.exportSessionsCsv()} title="Download sessions as CSV">
+              <Icon name="download" size={11} /> CSV
+            </button>
+          {/if}
+        </div>
         {#if usage.summary && usage.summary.sessions.length > 0}
           <div class="tbl-scroll">
             <table class="tbl">
@@ -614,7 +668,7 @@
                 <tr>
                   <th>Session</th>
                   <th>Workspace</th>
-                  <th>Provider</th>
+                  <th>Provider / Model</th>
                   <th class="num">Events</th>
                   <th class="num">Tokens</th>
                   <th class="num">Cost</th>
@@ -623,7 +677,12 @@
               </thead>
               <tbody>
                 {#each usage.summary.sessions as s (s.session_id)}
-                  <tr>
+                  {@const isOttoSession = s.kind != null || s.title != null}
+                  <tr
+                    class:sess-clickable={isOttoSession}
+                    onclick={isOttoSession ? () => openSession(s.session_id) : undefined}
+                    title={isOttoSession ? 'Open this session' : undefined}
+                  >
                     <td title={s.session_id}>
                       <div class="sess-top">
                         <span class="mono">{s.session_id.slice(0, 12)}</span>
@@ -632,7 +691,14 @@
                       {#if s.title}<div class="sess-title ellip" title={s.title}>{s.title}</div>{/if}
                     </td>
                     <td class="dim ellip">{s.workspace_name ?? '—'}</td>
-                    <td>{s.provider}</td>
+                    <td>
+                      <div class="model-cell">
+                        <span>{s.provider}</span>
+                        {#if s.model}
+                          <span class="model-name dim" title={s.model}>{s.model.slice(0, 22)}</span>
+                        {/if}
+                      </div>
+                    </td>
                     <td class="num">{fmtNum(s.events)}</td>
                     <td class="num">
                       <div class="sess-tok">
@@ -644,7 +710,10 @@
                         </div>
                       </div>
                     </td>
-                    <td class="num">{fmtCost(s.cost_usd)}</td>
+                    <td class="num" title={s.fallback_priced ? 'Estimated — model not in the rate table; priced at the Opus tier' : undefined}>
+                      {fmtCost(s.cost_usd)}
+                      {#if s.fallback_priced}<span class="est-tag">est.</span>{/if}
+                    </td>
                     <td class="dim">{fmtLastActive(s.last_active)}</td>
                   </tr>
                 {/each}
@@ -691,8 +760,16 @@
           <div class="engine-meta">
             <span>Version: <span class="mono">{usage.status.version ?? '—'}</span></span>
             <span>Data: <span class="mono">{usage.status.data_dir}</span></span>
-            <span>On disk: {fmtBytes(usage.status.disk_bytes)}</span>
-            <span>{usage.status.usage_rows.toLocaleString()} usage rows · {usage.status.metric_rows.toLocaleString()} metric rows</span>
+            <span title="{usage.status.usage_rows.toLocaleString()} usage rows · {usage.status.metric_rows.toLocaleString()} metric rows">
+              On disk: {fmtBytes(usage.status.disk_bytes)}
+              <span class="dim">({usage.status.usage_rows.toLocaleString()} rows)</span>
+            </span>
+            <span>Retention: {usage.status.retention_days}d</span>
+            {#if usage.status.priced_as_of}
+              <span title="Cost estimates use published rates as of this date. Unknown models fall back to the Opus tier.">
+                Priced as of: <strong>{usage.status.priced_as_of}</strong>
+              </span>
+            {/if}
           </div>
         </div>
       {/if}
@@ -1498,5 +1575,51 @@
     .metrics {
       grid-template-columns: 1fr;
     }
+  }
+
+  /* "Estimated" cost tag — shown when the model is not in the rate table. */
+  .est-tag {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 4px;
+    border-radius: 3px;
+    margin-left: 4px;
+    background: color-mix(in srgb, #f59e0b 22%, transparent);
+    color: #b45309;
+    vertical-align: middle;
+  }
+
+  /* Clickable session row: hover highlight + pointer cursor. */
+  .sess-clickable {
+    cursor: pointer;
+    transition: background 120ms ease-out;
+  }
+  .sess-clickable:hover td {
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+
+  /* Provider / model two-line cell in the sessions table. */
+  .model-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .model-name {
+    font-size: 10.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+  }
+
+  /* Pricing note shown at the bottom of the install card. */
+  .install-meta {
+    font-size: 11px;
+    text-align: center;
+    max-width: 420px;
+    line-height: 1.5;
   }
 </style>

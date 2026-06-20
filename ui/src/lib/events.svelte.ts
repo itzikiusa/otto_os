@@ -7,6 +7,7 @@ import { ws } from './stores/workspace.svelte';
 import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
 import { swarm } from './stores/swarm.svelte';
+import { usage } from './api/usage.svelte';
 
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
@@ -70,6 +71,9 @@ class EventsClient {
           parsed.type === 'swarm_status'
         ) {
           swarm.applyEvent(parsed);
+        } else if (parsed.type === 'usage_metrics_tick') {
+          // Drive a near-real-time metrics sparkline refresh without polling.
+          usage.applyMetricsTick();
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

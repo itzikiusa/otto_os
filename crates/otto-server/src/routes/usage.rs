@@ -135,20 +135,55 @@ async fn by_kind_rollup(ctx: &ServerCtx, days: u32, otto_only: bool) -> Vec<Feat
 }
 
 /// Enrich top-session rows with the Otto session title (pane name), kind
-/// (review / product / channel / agent…), and workspace name — looked up from
-/// SQLite. External (non-Otto) sessions have no matching row and are left as-is.
+/// (review / product / channel / agent…), and workspace name — all looked up
+/// from SQLite in one pass rather than N individual GETs.
+///
+/// Strategy: `list_all` returns every session (admin read); we filter by the
+/// set of ids we need, then walk the result building the same enrichment the
+/// old N-sequential-get path did. For the typical top-50 session leaderboard
+/// this cuts N round-trips to a single SQLite scan.
 async fn enrich_sessions(ctx: &ServerCtx, sessions: &mut [otto_usage::SessionUsage]) {
+    if sessions.is_empty() {
+        return;
+    }
+
+    let needed_ids: std::collections::HashSet<String> =
+        sessions.iter().map(|s| s.session_id.clone()).collect();
+
     let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
+    // list_all is the unfiltered cross-workspace read; it's root-only at the
+    // route, so no ownership narrowing is needed here.
+    let all_sessions = match repo.list_all().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("usage: could not list sessions for enrichment: {e}");
+            return;
+        }
+    };
+    let sess_map: std::collections::HashMap<String, otto_core::domain::Session> = all_sessions
+        .into_iter()
+        .filter(|s| needed_ids.contains(&s.id))
+        .map(|s| (s.id.clone(), s))
+        .collect();
+
+    // Resolve workspace names in a second pass (one GET per unique workspace;
+    // most top-50 sets share a handful of workspaces so this stays cheap).
     let mut ws_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for s in sessions.iter_mut() {
-        let Ok(sess) = repo.get(&s.session_id).await else {
+        let Some(sess) = sess_map.get(&s.session_id) else {
             continue; // external / unknown session
         };
         let title = sess.title.trim();
         if !title.is_empty() {
             s.title = Some(title.to_string());
         }
-        s.kind = Some(session_kind_label(&sess));
+        s.kind = Some(session_kind_label(sess));
+        // Mark rows whose cost was estimated via the conservative FALLBACK rate
+        // card (unrecognised model). The `model` field comes from ClickHouse via
+        // `any(model)`; non-empty + not-priced → "estimated".
+        if !s.model.is_empty() {
+            s.fallback_priced = !otto_usage::is_priced(&s.model);
+        }
         let wsid = sess.workspace_id.clone();
         if let Some(name) = ws_names.get(&wsid) {
             s.workspace_name = Some(name.clone());

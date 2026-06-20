@@ -13,16 +13,27 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { downloadText } from '../../lib/components/exporters';
 
   let reports: InsightReport[] = $state([]);
   let loading = $state(true);
   let running = $state(false);
+  /** Reason the last run did not start (e.g. skill not installed). */
+  let runFailReason: string | null = $state(null);
+  /** Whether we are polling for the in-flight run to complete. */
+  let pollRunId: string | null = $state(null);
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Maximum times to poll before giving up (avoid infinite loops). */
+  const POLL_MAX = 20;
+  let pollCount = $state(0);
 
   // Filter: 'all' | kind
   let filter: 'all' | InsightKind = $state('all');
 
-  // Run-now period picker
+  // Run-now period + offset picker. Offset = 0 → most recent complete period;
+  // offset = 1 → the one before that, etc. (mirrors --offset in the skill CLI).
   let runPeriod: InsightRunPeriod = $state('day');
+  let runOffset: number = $state(1);
 
   // Currently-open report (rendered in the iframe overlay).
   let openReport: InsightReport | null = $state(null);
@@ -50,6 +61,9 @@
     if (loaded) return;
     loaded = true;
     void load();
+    return () => {
+      if (pollTimer) clearTimeout(pollTimer);
+    };
   });
 
   async function load(): Promise<void> {
@@ -64,22 +78,59 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Run now
+  // Run now — with real run_id polling
   // ---------------------------------------------------------------------------
 
   async function runNow(): Promise<void> {
     if (running) return;
     running = true;
+    runFailReason = null;
+    pollRunId = null;
+    pollCount = 0;
     try {
-      await insightsApi.run({ period: runPeriod });
-      toasts.success('Insights run started', 'The report will appear shortly.');
-      // Refresh after a short delay so a fast-completing report shows up.
-      setTimeout(() => void load(), 2500);
+      const resp = await insightsApi.run({ period: runPeriod, offset: runOffset });
+      if (!resp.started) {
+        // skill not installed or no workspace available
+        runFailReason = resp.reason ?? 'Could not start a run — check that the insights skill is installed.';
+        return;
+      }
+      // We have a run_id: poll /insights/reports until the new report appears
+      // (the backend writes it when the session finishes). Fall back to the
+      // old blind 2.5 s wait if run_id was not returned (shouldn't happen).
+      if (resp.run_id) {
+        pollRunId = resp.run_id;
+        schedulePoll();
+      } else {
+        setTimeout(() => void load(), 2500);
+        toasts.success('Insights run started', 'The report will appear shortly.');
+      }
     } catch (e) {
       toasts.error('Run failed', e instanceof Error ? e.message : String(e));
     } finally {
       running = false;
     }
+  }
+
+  /** Poll /insights/reports every 3 s to detect when the new report lands. */
+  function schedulePoll(): void {
+    if (pollCount >= POLL_MAX || !pollRunId) {
+      pollRunId = null;
+      // Reload one final time in case we hit the cap.
+      void load();
+      return;
+    }
+    pollTimer = setTimeout(async () => {
+      pollCount += 1;
+      const prev = reports.length;
+      await load();
+      if (reports.length > prev) {
+        // A new report appeared — done.
+        pollRunId = null;
+        toasts.success('Insights report ready', 'Open it from the list below.');
+      } else {
+        schedulePoll();
+      }
+    }, 3_000);
   }
 
   // ---------------------------------------------------------------------------
@@ -107,10 +158,37 @@
     openLoading = false;
   }
 
+  /** Download the currently-open report HTML as a file. */
+  async function downloadReport(r: InsightReport): Promise<void> {
+    try {
+      const url = await insightsApi.reportUrl(r.html_path);
+      // Fetch the blob behind the object URL so we can re-download it.
+      const res = await fetch(url);
+      const text = await res.text();
+      URL.revokeObjectURL(url);
+      const filename = r.html_path.split('/').at(-1) ?? `insight-${r.kind}-${r.period_start}.html`;
+      downloadText(text, filename, 'text/html');
+    } catch (e) {
+      toasts.error('Download failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Open the report in a new browser tab (Tauri webview). */
+  async function openInTab(r: InsightReport): Promise<void> {
+    try {
+      const url = await insightsApi.reportUrl(r.html_path);
+      window.open(url, '_blank', 'noopener');
+      // Don't revoke — the new tab needs the URL. It'll be GC'd on close.
+    } catch (e) {
+      toasts.error('Could not open tab', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   // Revoke any live object URL on unmount.
   $effect(() => {
     return () => {
       if (openUrl) URL.revokeObjectURL(openUrl);
+      if (pollTimer) clearTimeout(pollTimer);
     };
   });
 
@@ -155,12 +233,46 @@
         <option value="week">Last week</option>
         <option value="month">Last month</option>
       </select>
-      <button class="btn primary" disabled={running} onclick={runNow}>
+      <select
+        class="input run-offset"
+        bind:value={runOffset}
+        disabled={running}
+        aria-label="How many periods back"
+        title="0 = most recent complete period; 1 = the one before that, etc."
+      >
+        <option value={1}>Previous</option>
+        <option value={2}>2 periods ago</option>
+        <option value={3}>3 periods ago</option>
+        <option value={4}>4 periods ago</option>
+      </select>
+      <button class="btn primary" disabled={running || !!pollRunId} onclick={runNow}>
         <Icon name="play" size={13} />
-        {running ? 'Starting…' : 'Run now'}
+        {running ? 'Starting…' : pollRunId ? 'Running…' : 'Run now'}
       </button>
     </div>
   </div>
+
+  {#if runFailReason}
+    <!-- Skill not installed or no workspace available -->
+    <div class="skill-missing card">
+      <Icon name="alert" size={20} />
+      <div class="skill-missing-body">
+        <strong>Insights skill not available</strong>
+        <p>{runFailReason}</p>
+        <button class="btn" onclick={() => router.go('settings/skills')}>
+          <Icon name="gear" size={13} />
+          Open Settings → Skills
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  {#if pollRunId}
+    <div class="run-progress dim">
+      <Icon name="refresh" size={13} />
+      Running insights… checking every 3 s (attempt {pollCount}/{20})
+    </div>
+  {/if}
 
   {#if loading && reports.length === 0}
     <Skeleton rows={3} height={72} />
@@ -212,11 +324,20 @@
 
 <!-- Full report overlay -->
 {#if openReport}
+  {@const rep = openReport}
   <div class="overlay" role="dialog" aria-modal="true" aria-label="Insight report">
     <div class="overlay-bar">
-      <span class="chip kind {openReport.kind}">{kindLabel(openReport.kind)}</span>
-      <span class="overlay-title">{periodLabel(openReport)}</span>
+      <span class="chip kind {rep.kind}">{kindLabel(rep.kind)}</span>
+      <span class="overlay-title">{periodLabel(rep)}</span>
       <span class="grow"></span>
+      <button class="btn" onclick={() => openInTab(rep)} aria-label="Open in new tab" title="Open in new tab">
+        <Icon name="external" size={13} />
+        New tab
+      </button>
+      <button class="btn" onclick={() => downloadReport(rep)} aria-label="Download report" title="Download HTML">
+        <Icon name="download" size={13} />
+        Download
+      </button>
       <button class="btn" onclick={close} aria-label="Close report">
         <Icon name="x" size={13} />
         Close
@@ -247,7 +368,8 @@
     gap: 8px;
     flex-shrink: 0;
   }
-  .run-period {
+  .run-period,
+  .run-offset {
     width: auto;
     height: 30px;
   }
@@ -385,5 +507,38 @@
     height: 100%;
     border: none;
     background: #fff;
+  }
+
+  /* Skill-not-installed empty state */
+  .skill-missing {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 16px 18px;
+    margin: 10px 0;
+    border-left: 3px solid var(--warn, #d08a18);
+    background: color-mix(in srgb, var(--warn, #d08a18) 10%, transparent);
+    border-radius: var(--radius-m, 8px);
+    color: var(--text);
+    font-size: 13px;
+  }
+  .skill-missing-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .skill-missing-body p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+
+  /* Run-in-progress poll indicator */
+  .run-progress {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    padding: 6px 0;
   }
 </style>

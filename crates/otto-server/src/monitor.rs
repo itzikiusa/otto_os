@@ -467,6 +467,12 @@ pub fn spawn_metrics_sampler(ctx: ServerCtx) {
                         if let Err(e) = ctx.usage.store_metric(&metric).await {
                             tracing::warn!("usage: store metric failed: {e}");
                         }
+                        // Broadcast a tick so the dashboard can refresh
+                        // sparklines in near-real-time without polling blindly.
+                        let ts = chrono::Utc::now()
+                            .format("%Y-%m-%dT%H:%M:%SZ")
+                            .to_string();
+                        let _ = ctx.events.send(Event::UsageMetricsTick { ts });
                     }
                     Err(e) => tracing::warn!("usage: metrics sampler join error: {e}"),
                 }

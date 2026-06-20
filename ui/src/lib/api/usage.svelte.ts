@@ -4,6 +4,7 @@
 
 import { api } from './client';
 import { toasts } from '../toast.svelte';
+import { exportCsv, downloadJson } from '../components/exporters';
 import type { Id } from './types';
 
 export interface ProviderUsage {
@@ -32,6 +33,8 @@ export interface SessionUsage {
   session_id: string;
   workspace_id: string;
   provider: string;
+  /** Most-common model used by this session (any(model) from ClickHouse). */
+  model: string;
   events: number;
   input_tokens: number;
   output_tokens: number;
@@ -46,6 +49,9 @@ export interface SessionUsage {
   kind: string | null;
   /** Human-readable workspace name — null for external. */
   workspace_name: string | null;
+  /** True when cost was estimated via the Opus-tier FALLBACK (unrecognised
+   *  model). The UI renders these as "estimated". */
+  fallback_priced?: boolean | null;
 }
 
 /** Per-feature (by-kind) rollup: usage grouped by the kind of Otto work
@@ -104,6 +110,9 @@ export interface UsageStatus {
   usage_rows: number;
   metric_rows: number;
   disk_bytes: number;
+  /** Date the pricing rate table was last reconciled (YYYY-MM-DD). Used by the
+   *  UI to label cost estimates as "priced as of <date>". */
+  priced_as_of?: string | null;
 }
 
 export interface UsageConfigReq {
@@ -164,6 +173,11 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** Maximum time between background metrics refreshes driven by `applyMetricsTick`
+ *  (capped poll fallback). Even if WS events come faster, we only re-fetch once
+ *  per this window. */
+const METRICS_REFRESH_THROTTLE_MS = 10_000;
+
 class UsageStore {
   status: UsageStatus | null = $state(null);
   summary: UsageSummary | null = $state(null);
@@ -179,6 +193,17 @@ class UsageStore {
   /** Usage budgets (caps + live spend status). Null until loaded. */
   budgets: UsageBudgetStatus | null = $state(null);
   savingBudgets = $state(false);
+
+  // --- Auto-refresh (opt-in) -----------------------------------------------
+  /** Whether the dashboard should auto-refresh the full summary on a timer. */
+  autoRefresh = $state(false);
+  private autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  /** Default auto-refresh cadence in ms (mirrors the Brokers panel pattern). */
+  static readonly AUTO_REFRESH_MS = 60_000;
+
+  // --- Metrics-tick throttle -----------------------------------------------
+  private lastMetricsFetch = 0;
+  private metricsFetching = false;
 
   /** Query string shared by every summary fetch (window + scope). */
   private summaryQuery(): string {
@@ -205,6 +230,7 @@ class UsageStore {
         ]);
         this.summary = summary;
         this.metrics = metrics;
+        this.lastMetricsFetch = Date.now();
       } else {
         this.summary = null;
         this.metrics = [];
@@ -253,6 +279,50 @@ class UsageStore {
     await this.refreshSummary();
   }
 
+  // --- Auto-refresh toggle (mirrors Brokers pattern) -----------------------
+
+  /** Turn opt-in auto-refresh on or off. When on, fires every `AUTO_REFRESH_MS`. */
+  setAutoRefresh(on: boolean): void {
+    this.autoRefresh = on;
+    if (on) {
+      if (!this.autoRefreshTimer) {
+        this.autoRefreshTimer = setInterval(() => {
+          void this.loadAll();
+        }, UsageStore.AUTO_REFRESH_MS);
+      }
+    } else {
+      if (this.autoRefreshTimer) {
+        clearInterval(this.autoRefreshTimer);
+        this.autoRefreshTimer = null;
+      }
+    }
+  }
+
+  // --- WS event handler (usage_metrics_tick) --------------------------------
+
+  /** Called by the events client when a `usage_metrics_tick` WS event arrives.
+   *  Refreshes the metrics sparkline in near-real-time; throttled so a burst of
+   *  ticks doesn't hammer the API. Kept as a capped fallback even if ticks stop. */
+  applyMetricsTick(): void {
+    if (!this.status?.available) return;
+    const now = Date.now();
+    if (now - this.lastMetricsFetch < METRICS_REFRESH_THROTTLE_MS) return;
+    if (this.metricsFetching) return;
+    this.metricsFetching = true;
+    this.lastMetricsFetch = now;
+    api
+      .get<MetricPoint[]>('/usage/metrics?minutes=180')
+      .then((m) => {
+        this.metrics = m;
+      })
+      .catch(() => {
+        /* silent — sparkline lag is benign */
+      })
+      .finally(() => {
+        this.metricsFetching = false;
+      });
+  }
+
   private async refreshSummary(): Promise<void> {
     if (!this.status?.available) return;
     try {
@@ -260,6 +330,71 @@ class UsageStore {
     } catch (e) {
       toasts.error('Could not load usage', errMsg(e));
     }
+  }
+
+  // --- Export helpers -------------------------------------------------------
+
+  /** Export the provider rollup as CSV. */
+  exportProvidersCsv(): void {
+    if (!this.summary) return;
+    exportCsv(
+      this.summary.providers.map((p) => ({
+        provider: p.provider,
+        events: p.events,
+        input_tokens: p.input_tokens,
+        output_tokens: p.output_tokens,
+        cache_read_tokens: p.cache_read_tokens,
+        cache_write_tokens: p.cache_write_tokens,
+        total_tokens: p.total_tokens,
+        cost_usd: p.cost_usd,
+      })),
+      `otto-usage-providers-${this.days}d.csv`,
+    );
+  }
+
+  /** Export the daily rollup as CSV. */
+  exportDailyCsv(): void {
+    if (!this.summary) return;
+    exportCsv(
+      this.summary.daily.map((d) => ({
+        day: d.day,
+        events: d.events,
+        input_tokens: d.input_tokens,
+        output_tokens: d.output_tokens,
+        cache_read_tokens: d.cache_read_tokens,
+        cache_write_tokens: d.cache_write_tokens,
+        total_tokens: d.total_tokens,
+        cost_usd: d.cost_usd,
+      })),
+      `otto-usage-daily-${this.days}d.csv`,
+    );
+  }
+
+  /** Export the top-sessions table as CSV. */
+  exportSessionsCsv(): void {
+    if (!this.summary) return;
+    exportCsv(
+      this.summary.sessions.map((s) => ({
+        session_id: s.session_id,
+        title: s.title ?? '',
+        kind: s.kind ?? '',
+        workspace: s.workspace_name ?? '',
+        provider: s.provider,
+        model: s.model,
+        events: s.events,
+        total_tokens: s.total_tokens,
+        cost_usd: s.cost_usd,
+        fallback_priced: s.fallback_priced ? 'yes' : 'no',
+        last_active: s.last_active,
+      })),
+      `otto-usage-sessions-${this.days}d.csv`,
+    );
+  }
+
+  /** Export the full summary payload as JSON (for programmatic consumption). */
+  exportSummaryJson(): void {
+    if (!this.summary) return;
+    downloadJson(this.summary, `otto-usage-summary-${this.days}d.json`);
   }
 
   /** Install/update ClickHouse via the official installer (large download). */

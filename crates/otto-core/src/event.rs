@@ -109,4 +109,8 @@ pub enum Event {
         swarm_id: Id,
         status: String,
     },
+    /// Throttle marker emitted after each metrics-sampler tick. The UI can
+    /// subscribe to refresh the `/usage/metrics` sparklines in near-real-time
+    /// instead of polling blindly. `ts` is the sample timestamp (UTC ISO-8601).
+    UsageMetricsTick { ts: String },
 }

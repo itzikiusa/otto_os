@@ -228,6 +228,8 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::SwarmTaskUpdated { workspace_id, .. }
         | Event::SwarmMessagePosted { workspace_id, .. }
         | Event::SwarmStatus { workspace_id, .. } => Scope::Workspace(workspace_id),
+        // Usage tick is a global notice (no workspace scope — everyone sees it).
+        Event::UsageMetricsTick { .. } => Scope::Everyone,
     }
 }
 

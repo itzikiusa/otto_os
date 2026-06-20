@@ -928,7 +928,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | PUT /insights/config | root | InsightsConfig | config |
 | GET /insights/reports | root | — | generated report list |
 | GET /insights/report | root | — | one report's HTML |
-| POST /insights/run | root | — | trigger an insights run now |
+| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, reason? }` — `run_id` when started; `reason` when not (e.g. skill not installed) |
 
 ## LSP (language server bridge)
 
@@ -1074,6 +1074,7 @@ responses. The Schema Registry + metrics endpoints ride the same SOCKS tunnel. O
 | POST /brokers/clusters/{id}/topics | ws editor | `CreateTopicReq` | `TopicSummary` (201; 409 if exists) |
 | GET /brokers/clusters/{id}/topics/{topic} | ws viewer | — | `TopicDetail` |
 | GET /brokers/clusters/{id}/topics/{topic}/stats | ws viewer | — | `TopicStats` (lazy `message_count` + `cleanup_policy`; the topic list is metadata-only for speed) |
+| POST /brokers/clusters/{id}/topics/stats | ws viewer | `BatchStatsReq {names: string[]}` (≤500) | `Record<string, TopicStats>` (bulk load via `WATERMARK_WORKERS` thread pool; replaces N×1 GET calls from topics table) |
 | DELETE /brokers/clusters/{id}/topics/{topic}?confirm=B | ws editor | — | 204 |
 | GET /brokers/clusters/{id}/topics/{topic}/configs | ws viewer | — | `TopicConfigEntry[]` |
 | PUT /brokers/clusters/{id}/topics/{topic}/configs | ws editor | `AlterConfigsReq` | `TopicConfigEntry[]` (merges over existing dynamic overrides) |
@@ -1081,6 +1082,7 @@ responses. The Schema Registry + metrics endpoints ride the same SOCKS tunnel. O
 | POST /brokers/clusters/{id}/topics/{topic}/produce | ws editor | `ProduceReq` | `ProduceResp` |
 | GET /brokers/clusters/{id}/groups | ws viewer | — | `GroupSummary[]` |
 | GET /brokers/clusters/{id}/groups/{group} | ws viewer | — | `GroupDetail` (members + per-partition lag) |
+| POST /brokers/clusters/{id}/groups/{group}/reset | ws editor | `GroupResetReq` | `GroupDetail` (updated detail after reset; 403 if guarded + `confirm≠true`) |
 | GET /brokers/clusters/{id}/schema-registry/subjects | ws viewer | — | `SchemaSubject[]` (400 if no registry configured) |
 | GET /workspaces/{wid}/brokers/cluster-sections | ws viewer | — | `BrokerClusterSection[]` (sidebar grouping tree) |
 | POST /workspaces/{wid}/brokers/cluster-sections | ws editor | `UpsertSectionReq` (`{name, parent_id?}`) | `BrokerClusterSection` (201) |
@@ -1098,3 +1100,11 @@ Notes:
 - `ClusterMetrics.brokers` is populated from the optional Prometheus `metrics_url`
   (Redpanda `:9644/public_metrics`, or a Kafka JMX exporter); `prometheus_available`
   is false otherwise. Throughput is derived from watermark deltas between calls.
+- `ClusterOverview` now includes optional `under_replicated_partitions` (ISR < replicas)
+  and `leadership_imbalance` (coefficient of variation of leader counts per broker, 0=balanced).
+- `GroupResetReq` body: `{mode: 'earliest'|'latest'|'offset'|'timestamp', offset?: number,
+  timestamp_ms?: number, topic?: string, confirm?: boolean}`. Mutations on guarded clusters
+  (production / read-only) require `confirm: true`. Writes an audit row to `broker_write_audit`.
+- `ProduceReq` now honors `headers: MessageHeader[]`, `key_base64: bool`, `value_base64: bool`
+  (already in the DTO). A tombstone is produced by sending an empty string `value` with
+  `value_base64: false`.
