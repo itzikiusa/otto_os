@@ -2250,10 +2250,13 @@ mod tests {
 
     #[test]
     fn diff_marks_changes() {
+        // simple_diff now emits GNU unified-diff format: `-b` (removed), `+B`
+        // (added), ` a` (single-space context), with `@@` hunk headers.
         let d = simple_diff("a\nb\nc\n", "a\nB\nc\n");
-        assert!(d.contains("- b"));
-        assert!(d.contains("+ B"));
-        assert!(d.contains("  a"));
+        assert!(d.contains("-b"), "removed line marked: {d}");
+        assert!(d.contains("+B"), "added line marked: {d}");
+        assert!(d.contains(" a"), "context line preserved: {d}");
+        assert!(d.contains("@@"), "unified-diff hunk header present: {d}");
     }
 
     #[test]
