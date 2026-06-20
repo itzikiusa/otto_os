@@ -9,9 +9,9 @@
 
 use crate::types::{
     BrokerNode, ClusterOverview, ConfigKv, ConsumeReq, CreateTopicReq, GroupDetail, GroupMember,
-    GroupOffset, GroupSummary, PartitionInfo, PartitionRange, ProduceReq, ProduceResp,
-    SaslMechanism, SecurityProtocol, StartPosition, TestClusterResp, TopicConfigEntry,
-    TopicPartition, TopicSummary,
+    GroupOffset, GroupSummary, OffsetResetMode, PartitionInfo, PartitionRange, ProduceReq,
+    ProduceResp, SaslMechanism, SecurityProtocol, StartPosition, TestClusterResp,
+    TopicConfigEntry, TopicPartition, TopicSummary,
 };
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -37,7 +37,7 @@ const GROUP_TIMEOUT: Duration = Duration::from_secs(15);
 /// is thread-safe, so we fan the per-partition ListOffsets queries across worker
 /// threads — a few hundred partitions over a slow/tunnelled link complete in a
 /// couple of round-trip batches instead of one-by-one (minutes).
-const WATERMARK_WORKERS: usize = 16;
+pub const WATERMARK_WORKERS: usize = 16;
 
 fn kerr(e: KafkaError) -> Error {
     Error::Upstream(format!("kafka: {e}"))
@@ -151,6 +151,7 @@ impl KafkaClient {
 
         let mut leaders: HashMap<i32, usize> = HashMap::new();
         let (mut topic_count, mut internal, mut partition_count) = (0usize, 0usize, 0usize);
+        let mut under_replicated = 0usize;
         for t in md.topics() {
             topic_count += 1;
             if is_internal(t.name()) {
@@ -159,6 +160,9 @@ impl KafkaClient {
             for p in t.partitions() {
                 partition_count += 1;
                 *leaders.entry(p.leader()).or_default() += 1;
+                if p.isr().len() < p.replicas().len() {
+                    under_replicated += 1;
+                }
             }
         }
         let mut brokers: Vec<BrokerNode> = md
@@ -175,6 +179,21 @@ impl KafkaClient {
             .collect();
         brokers.sort_by_key(|b| b.id);
 
+        // Leadership-imbalance: coefficient of variation of leader counts.
+        let leadership_imbalance = if brokers.len() >= 2 {
+            let counts: Vec<f64> = brokers.iter().map(|b| b.partition_leaders as f64).collect();
+            let mean = counts.iter().sum::<f64>() / counts.len() as f64;
+            if mean > 0.0 {
+                let variance = counts.iter().map(|&c| (c - mean).powi(2)).sum::<f64>()
+                    / counts.len() as f64;
+                Some((variance.sqrt() / mean * 100.0).round() / 100.0)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let groups = self
             .consumer
             .fetch_group_list(None, GROUP_TIMEOUT)
@@ -189,6 +208,8 @@ impl KafkaClient {
             internal_topic_count: internal,
             partition_count,
             consumer_group_count: groups,
+            under_replicated_partitions: Some(under_replicated),
+            leadership_imbalance,
         })
     }
 
@@ -579,6 +600,79 @@ impl KafkaClient {
             offsets,
             total_lag,
         })
+    }
+
+    /// Reset (commit) consumer-group offsets. `positions` maps each topic-partition
+    /// to the desired offset (already resolved by the caller from
+    /// earliest/latest/explicit/timestamp). The group must exist. This commits
+    /// via a fresh consumer client so the existing metadata consumer is untouched.
+    ///
+    /// # Safety
+    /// This is a destructive write: a consumer group that is actively consuming will
+    /// have its committed offset overwritten. The caller is responsible for requiring
+    /// `guard()` + a typed UI confirm before invoking this.
+    pub fn reset_offsets(
+        &self,
+        group: &str,
+        positions: HashMap<(String, i32), i64>,
+    ) -> Result<()> {
+        if positions.is_empty() {
+            return Ok(());
+        }
+        let mut grp_cfg = self.base_config.clone();
+        grp_cfg.set("group.id", group);
+        grp_cfg.set("enable.auto.commit", "false");
+        let consumer: BaseConsumer = grp_cfg.create().map_err(kerr)?;
+
+        let mut tpl = TopicPartitionList::new();
+        for ((topic, partition), offset) in &positions {
+            tpl.add_partition_offset(topic, *partition, Offset::Offset(*offset))
+                .map_err(kerr)?;
+        }
+        consumer
+            .commit(&tpl, rdkafka::consumer::CommitMode::Sync)
+            .map_err(kerr)?;
+        Ok(())
+    }
+
+    /// Resolve the target offset for a single topic-partition given a reset mode.
+    /// Used by `reset_group_offsets` to fan across all group assignments.
+    pub fn resolve_offset(
+        &self,
+        topic: &str,
+        partition: i32,
+        mode: &OffsetResetMode,
+        timestamp_ms: Option<i64>,
+    ) -> Result<i64> {
+        let (low, high) = self
+            .consumer
+            .fetch_watermarks(topic, partition, WATERMARK_TIMEOUT)
+            .map_err(kerr)?;
+        match mode {
+            OffsetResetMode::Earliest => Ok(low),
+            OffsetResetMode::Latest => Ok(high),
+            OffsetResetMode::Offset(o) => Ok((*o).clamp(low, high)),
+            OffsetResetMode::Timestamp => {
+                let ts = timestamp_ms.unwrap_or(0);
+                let mut q = TopicPartitionList::new();
+                q.add_partition_offset(topic, partition, Offset::Offset(ts))
+                    .map_err(kerr)?;
+                let resolved = self
+                    .consumer
+                    .offsets_for_times(q, WATERMARK_TIMEOUT)
+                    .map_err(kerr)?;
+                let off = resolved
+                    .elements()
+                    .first()
+                    .map(|e| match e.offset() {
+                        Offset::Offset(o) => o,
+                        Offset::End => high,
+                        _ => low,
+                    })
+                    .unwrap_or(low);
+                Ok(off)
+            }
+        }
     }
 
     // ---- async (admin / producer) ops — awaited directly ------------------

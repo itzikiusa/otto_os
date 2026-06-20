@@ -15,8 +15,8 @@ use dashmap::DashMap;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use otto_state::{
-    BrokerClusterRow, BrokerClusterSectionRow, BrokerClusterSectionsRepo, BrokerClustersRepo,
-    NewBrokerCluster, UpdateBrokerCluster,
+    BrokerAuditRepo, BrokerClusterRow, BrokerClusterSectionRow, BrokerClusterSectionsRepo,
+    BrokerClustersRepo, NewBrokerCluster, UpdateBrokerCluster,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,6 +40,7 @@ pub struct BrokersService {
     /// Per-cluster SSH tunnel + Kafka proxy (only for clusters with `ssh`).
     tunnels: DashMap<Id, Arc<BrokerTunnel>>,
     samplers: DashMap<Id, Mutex<ClusterMetricState>>,
+    audit: Option<BrokerAuditRepo>,
 }
 
 fn secret_ref_for(id: &Id) -> String {
@@ -57,6 +58,7 @@ impl BrokersService {
         repo: BrokerClustersRepo,
         sections: BrokerClusterSectionsRepo,
         secrets: Arc<dyn SecretStore>,
+        audit: Option<BrokerAuditRepo>,
     ) -> Self {
         Self {
             repo,
@@ -65,6 +67,22 @@ impl BrokersService {
             pool: DashMap::new(),
             tunnels: DashMap::new(),
             samplers: DashMap::new(),
+            audit,
+        }
+    }
+
+    /// Persist an audit row for a broker write (best-effort; no-op without an
+    /// audit repo). Called from the HTTP write handlers, which hold the
+    /// authenticated `user_id`.
+    pub(crate) async fn audit_write(
+        &self,
+        cluster_id: &Id,
+        user_id: &Id,
+        op: &str,
+        detail: serde_json::Value,
+    ) {
+        if let Some(ref a) = self.audit {
+            let _ = a.record(cluster_id, user_id, op, detail).await;
         }
     }
 
@@ -496,6 +514,81 @@ impl BrokersService {
         })
     }
 
+    /// Batch-load message counts for multiple topics in parallel, reusing the
+    /// same shared `KafkaClient` (thread-safe). This replaces N individual
+    /// `/topics/{name}/stats` calls with a single HTTP round-trip from the UI.
+    /// Cleanup policy is best-effort (skipped on DESCRIBE_CONFIGS permission errors).
+    pub async fn batch_topic_stats(
+        &self,
+        id: &Id,
+        names: Vec<String>,
+    ) -> Result<std::collections::HashMap<String, TopicStats>> {
+        if names.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let (client, _) = self.client_for(id).await?;
+        // Fan-out message counts using the existing WATERMARK_WORKERS pool.
+        let counts: std::collections::HashMap<String, i64> = {
+            let client = client.clone();
+            let ns = names.clone();
+            tokio::task::spawn_blocking(move || {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                use std::sync::Mutex;
+                let results = Mutex::new(std::collections::HashMap::new());
+                let next = AtomicUsize::new(0);
+                let workers = crate::kafka::WATERMARK_WORKERS.min(ns.len());
+                std::thread::scope(|s| {
+                    for _ in 0..workers {
+                        s.spawn(|| loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(name) = ns.get(i) else { break };
+                            match client.topic_message_count(name) {
+                                Ok(n) => {
+                                    results.lock().unwrap().insert(name.clone(), n);
+                                }
+                                Err(_) => {
+                                    results.lock().unwrap().insert(name.clone(), -1);
+                                }
+                            }
+                        });
+                    }
+                });
+                results.into_inner().unwrap()
+            })
+            .await
+            .map_err(join)?
+        };
+
+        // Fetch cleanup policies (best-effort; fail silently per topic).
+        let mut out = std::collections::HashMap::with_capacity(names.len());
+        for name in &names {
+            let count = counts.get(name).copied().unwrap_or(-1);
+            // Only fetch config if the count succeeded (avoids double-erroring on
+            // permission issues where the cluster can't be reached at all).
+            let cleanup_policy = if count >= 0 {
+                client
+                    .topic_configs(name)
+                    .await
+                    .ok()
+                    .and_then(|cfgs| {
+                        cfgs.into_iter()
+                            .find(|c| c.name == "cleanup.policy")
+                            .and_then(|c| c.value)
+                    })
+            } else {
+                None
+            };
+            out.insert(
+                name.clone(),
+                TopicStats {
+                    message_count: count,
+                    cleanup_policy,
+                },
+            );
+        }
+        Ok(out)
+    }
+
     pub async fn topic_configs(&self, id: &Id, topic: &str) -> Result<Vec<TopicConfigEntry>> {
         let (client, _) = self.client_for(id).await?;
         client.topic_configs(topic).await
@@ -546,6 +639,71 @@ impl BrokersService {
         let (client, _) = self.client_for(id).await?;
         let g = group.to_string();
         tokio::task::spawn_blocking(move || client.describe_group(&g))
+            .await
+            .map_err(join)?
+    }
+
+    /// Reset consumer-group committed offsets. The group's current committed
+    /// offsets are fetched first to discover which topic-partitions to reset,
+    /// then each offset is resolved per the requested mode and written back via
+    /// `commit_offsets`. Guarded (prod/read-only) clusters require `confirm=true`;
+    /// the HTTP handler enforces that before calling here.
+    pub async fn reset_group_offsets(
+        &self,
+        id: &Id,
+        group: &str,
+        req: &crate::types::GroupResetReq,
+    ) -> Result<GroupDetail> {
+        let (client, _) = self.client_for(id).await?;
+        let g = group.to_string();
+        let mode = req.mode.clone();
+        let ts_ms = req.timestamp_ms;
+        let topic_filter = req.topic.clone();
+
+        // Fetch existing committed offsets to discover the set of partitions to reset.
+        let detail = {
+            let client = client.clone();
+            let g2 = g.clone();
+            tokio::task::spawn_blocking(move || client.describe_group(&g2))
+                .await
+                .map_err(join)??
+        };
+
+        // Build (topic, partition) → target offset map.
+        let positions: std::collections::HashMap<(String, i32), i64> = {
+            let client = client.clone();
+            let offsets = detail.offsets.clone();
+            let filter = topic_filter.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut map = std::collections::HashMap::new();
+                for o in &offsets {
+                    if let Some(f) = &filter {
+                        if &o.topic != f {
+                            continue;
+                        }
+                    }
+                    let resolved = client.resolve_offset(&o.topic, o.partition, &mode, ts_ms)?;
+                    map.insert((o.topic.clone(), o.partition), resolved);
+                }
+                Ok::<_, Error>(map)
+            })
+            .await
+            .map_err(join)??
+        };
+
+        // Write the offsets.
+        {
+            let client = client.clone();
+            let g3 = g.clone();
+            tokio::task::spawn_blocking(move || client.reset_offsets(&g3, positions))
+                .await
+                .map_err(join)??;
+        }
+
+        // Return updated detail.
+        let client2 = client.clone();
+        let g4 = g.clone();
+        tokio::task::spawn_blocking(move || client2.describe_group(&g4))
             .await
             .map_err(join)?
     }
@@ -649,9 +807,38 @@ impl BrokersService {
     pub async fn metrics(&self, id: &Id) -> Result<ClusterMetrics> {
         let row = self.repo.get(id).await?;
         let (client, _) = self.client_for(id).await?;
-        let total = tokio::task::spawn_blocking(move || client.total_messages())
-            .await
-            .map_err(join)??;
+
+        // Check if the cached watermark total has expired; if so, re-sweep.
+        // The sweep is expensive over a tunnel (hundreds of ListOffsets round-trips),
+        // so we skip it when the cached value is still fresh (< 8 s).
+        let needs_sweep = self
+            .samplers
+            .entry(id.clone())
+            .or_insert_with(|| Mutex::new(ClusterMetricState::default()))
+            .lock()
+            .map_err(|_| Error::Internal("metrics lock".into()))?
+            .needs_sweep();
+
+        let total = if needs_sweep {
+            let swept = tokio::task::spawn_blocking(move || client.total_messages())
+                .await
+                .map_err(join)??;
+            // Store fresh total; hold the ref in a named binding to extend lifetime.
+            let entry = self
+                .samplers
+                .entry(id.clone())
+                .or_insert_with(|| Mutex::new(ClusterMetricState::default()));
+            entry
+                .lock()
+                .map_err(|_| Error::Internal("metrics lock".into()))?
+                .store_watermark(swept);
+            swept
+        } else {
+            self.samplers
+                .get(id)
+                .and_then(|e| e.lock().ok().and_then(|g| g.cached_total()))
+                .unwrap_or(0)
+        };
 
         // Reach a private metrics endpoint through the same SSH SOCKS tunnel.
         let socks = self.tunnels.get(id).map(|t| t.socks_url());

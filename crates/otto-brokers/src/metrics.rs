@@ -9,6 +9,10 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Duration;
 
 const MAX_POINTS: usize = 120;
+/// Minimum interval between full watermark sweeps. The UI polls every 4 s;
+/// sweeps are expensive over a tunnel, so we reuse the last value within this
+/// window. The sweep runs on the FIRST call and then every WATERMARK_TTL_MS.
+const WATERMARK_TTL_MS: i64 = 8_000;
 
 /// One parsed Prometheus line: `name{labels} value`.
 #[derive(Debug, Clone)]
@@ -115,13 +119,38 @@ fn instance_of(s: &Sample) -> String {
 }
 
 /// Rolling per-cluster metric state. Throughput is sampled on demand (the UI
-/// polls `/metrics`); CPU counters are rated between consecutive scrapes.
+/// polls `/metrics`); CPU counters are rated between consecutive scrapes. The
+/// watermark sweep total is cached for `WATERMARK_TTL_MS` so a 4 s UI poll
+/// doesn't issue a full per-partition scan on every request.
 #[derive(Default)]
 pub struct ClusterMetricState {
     throughput: VecDeque<ThroughputPoint>,
     last_total: Option<(i64, i64)>,
+    /// Cached watermark total (ts_ms, total) from the last sweep.
+    cached_watermark: Option<(i64, i64)>,
     /// instance → (ts_ms, summed cpu-seconds counter) from the previous scrape.
     last_cpu: HashMap<String, (i64, f64)>,
+}
+
+impl ClusterMetricState {
+    /// Check if a new watermark sweep is due (first call or older than TTL).
+    pub fn needs_sweep(&self) -> bool {
+        match self.cached_watermark {
+            None => true,
+            Some((ts, _)) => chrono::Utc::now().timestamp_millis() - ts >= WATERMARK_TTL_MS,
+        }
+    }
+
+    /// Store a freshly-fetched watermark total and return it.
+    pub fn store_watermark(&mut self, total: i64) -> i64 {
+        self.cached_watermark = Some((chrono::Utc::now().timestamp_millis(), total));
+        total
+    }
+
+    /// Return the cached total without fetching.
+    pub fn cached_total(&self) -> Option<i64> {
+        self.cached_watermark.map(|(_, t)| t)
+    }
 }
 
 impl ClusterMetricState {

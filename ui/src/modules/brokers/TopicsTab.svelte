@@ -20,7 +20,8 @@
 
   let topics = $state<TopicSummary[]>([]);
   // Lazily-filled per-topic stats (count + cleanup policy), keyed by name.
-  let stats = $state<Record<string, TopicStats>>({});
+  // null = in-flight, 'err' = failed (retry available), TopicStats = loaded.
+  let stats = $state<Record<string, TopicStats | null | 'err'>>({});
   let loading = $state(true);
   let query = $state('');
   let showInternal = $state(false);
@@ -39,7 +40,11 @@
     topics
       .filter((t) => showInternal || !t.internal)
       .filter((t) => t.name.toLowerCase().includes(query.toLowerCase()))
-      .filter((t) => !cleanupFilter || stats[t.name]?.cleanup_policy === cleanupFilter)
+      .filter((t) => {
+        if (!cleanupFilter) return true;
+        const s = stats[t.name];
+        return s != null && s !== 'err' && s.cleanup_policy === cleanupFilter;
+      })
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
   const pageCount = $derived(Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)));
@@ -47,7 +52,12 @@
   const visible = $derived(filtered.slice(pageStart, pageStart + PAGE_SIZE));
   // Cleanup-policy values discovered so far (for the filter dropdown).
   const cleanupOptions = $derived(
-    [...new Set(Object.values(stats).map((s) => s.cleanup_policy).filter(Boolean))] as string[],
+    [...new Set(
+      Object.values(stats)
+        .filter((s): s is TopicStats => s != null && s !== 'err')
+        .map((s) => s.cleanup_policy)
+        .filter(Boolean)
+    )] as string[],
   );
 
   function load() {
@@ -63,30 +73,57 @@
       .finally(() => (loading = false));
   }
 
-  // Background-fill stats for the topics currently on screen (cached; bounded
-  // concurrency so a slow/tunnelled cluster stays responsive).
+  // Background-fill stats for the topics currently on screen via the batch
+  // endpoint (one HTTP call vs N×1). Bounded by STATS_CONCURRENCY batches of
+  // PAGE_SIZE so very large topic lists don't hammer the server with huge
+  // request bodies.
   let statsToken = 0;
-  async function fillStats(names: string[]) {
-    const pending = names.filter((n) => stats[n] === undefined);
+  async function fillStats(names: string[], retry = false) {
+    // Skip already-loaded (TopicStats) and in-flight (null) entries unless retrying errors.
+    const pending = names.filter((n) => {
+      const v = stats[n];
+      if (v === undefined) return true;
+      if (retry && v === 'err') return true;
+      return false;
+    });
     if (pending.length === 0) return;
     const token = ++statsToken;
-    // Mark as in-flight (null) so we don't refetch.
-    stats = { ...stats, ...Object.fromEntries(pending.map((n) => [n, null as unknown as TopicStats])) };
-    const queue = [...pending];
-    const worker = async () => {
-      while (queue.length) {
-        const name = queue.shift()!;
-        try {
-          const s = await api.get<TopicStats>(
-            `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(name)}/stats`,
-          );
-          if (token === statsToken) stats = { ...stats, [name]: s };
-        } catch {
-          // leave as in-flight/null; count shows "—"
-        }
+    // Mark as in-flight (null) so parallel calls don't duplicate fetches.
+    stats = { ...stats, ...Object.fromEntries(pending.map((n) => [n, null as null])) };
+    try {
+      // Single batch call to replace per-topic N×1 round-trips.
+      const result = await api.post<Record<string, TopicStats>>(
+        `/brokers/clusters/${cluster.id}/topics/stats`,
+        { names: pending },
+      );
+      if (token !== statsToken) return;
+      const update: Record<string, TopicStats | 'err'> = {};
+      for (const name of pending) {
+        update[name] = result[name] ?? ('err' as const);
       }
-    };
-    await Promise.all(Array.from({ length: STATS_CONCURRENCY }, worker));
+      stats = { ...stats, ...update };
+    } catch {
+      // Batch endpoint unavailable (older server); fall back to per-topic calls.
+      const queue = [...pending];
+      const worker = async () => {
+        while (queue.length) {
+          const name = queue.shift()!;
+          try {
+            const s = await api.get<TopicStats>(
+              `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(name)}/stats`,
+            );
+            if (token === statsToken) stats = { ...stats, [name]: s };
+          } catch {
+            if (token === statsToken) stats = { ...stats, [name]: 'err' as const };
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: STATS_CONCURRENCY }, worker));
+    }
+  }
+
+  function retryStats() {
+    void fillStats(visible.map((t) => t.name), true);
   }
 
   $effect(() => {
@@ -114,8 +151,12 @@
     const s = stats[name];
     if (s === undefined) return '';
     if (s === null) return '…';
+    if (s === 'err') return '—';
     return s.message_count.toLocaleString();
   }
+
+  // True when any visible topic's stats failed — show the retry button.
+  const hasStatErrors = $derived(visible.some((t) => stats[t.name] === 'err'));
 
   async function createTopic() {
     if (!newName.trim()) return;
@@ -169,6 +210,11 @@
       {/if}
       <span class="spacer"></span>
       <span class="count">{filtered.length} topic{filtered.length === 1 ? '' : 's'}</span>
+      {#if hasStatErrors}
+        <button class="btn small" onclick={retryStats} title="Retry failed message-count fetches">
+          <Icon name="refreshCw" size={12} /> Retry counts
+        </button>
+      {/if}
       <button class="btn small" onclick={() => (creating = !creating)} title="New topic">
         <Icon name="plus" size={13} /> New
       </button>
@@ -206,7 +252,11 @@
                 <td class="tname" class:internal={t.internal}>{t.name}</td>
                 <td class="num">{t.partitions}</td>
                 <td class="num">{t.replication_factor}</td>
-                <td class="num">{countText(t.name)}</td>
+                <td
+                  class="num"
+                  class:err-cell={stats[t.name] === 'err'}
+                  title={stats[t.name] === 'err' ? 'Count unavailable — click "Retry counts" to try again' : undefined}
+                >{countText(t.name)}</td>
                 <td class="num muted" title="On-disk size isn't exposed by this Kafka client">—</td>
               </tr>
             {/each}
@@ -370,6 +420,10 @@
   table.grid td.num {
     text-align: right;
     font-variant-numeric: tabular-nums;
+  }
+  table.grid td.err-cell {
+    color: var(--text-dim);
+    cursor: help;
   }
   table.grid td.tname {
     font-family: var(--font-mono);

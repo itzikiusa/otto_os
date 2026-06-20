@@ -121,6 +121,7 @@ async fn build_app() -> (Router, Id) {
         otto_state::BrokerClustersRepo::new(pool.clone()),
         otto_state::BrokerClusterSectionsRepo::new(pool),
         Arc::new(MemSecrets::default()),
+        None,
     ));
     let ctx = TestCtx {
         brokers: svc,

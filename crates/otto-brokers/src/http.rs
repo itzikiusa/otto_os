@@ -85,6 +85,10 @@ pub fn api_router<S: BrokersCtx>() -> Router<S> {
             get(topic_stats::<S>),
         )
         .route(
+            "/brokers/clusters/{id}/topics/stats",
+            post(batch_topic_stats::<S>),
+        )
+        .route(
             "/brokers/clusters/{id}/topics/{topic}/configs",
             get(get_configs::<S>).put(put_configs::<S>),
         )
@@ -100,6 +104,10 @@ pub fn api_router<S: BrokersCtx>() -> Router<S> {
         .route(
             "/brokers/clusters/{id}/groups/{group}",
             get(describe_group::<S>),
+        )
+        .route(
+            "/brokers/clusters/{id}/groups/{group}/reset",
+            post(reset_group_offsets::<S>),
         )
         .route(
             "/brokers/clusters/{id}/schema-registry/subjects",
@@ -370,6 +378,21 @@ async fn topic_stats<S: BrokersCtx>(
     Ok(Json(ctx.brokers().topic_stats(&id, &topic).await?).into_response())
 }
 
+/// Batch-load message counts for multiple topics in one call. The UI uses this
+/// instead of N×1 `/topics/{name}/stats` calls to reduce round-trips.
+async fn batch_topic_stats<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<BatchStatsReq>,
+) -> ApiResult<Response> {
+    authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    if req.names.len() > 500 {
+        return Err(Error::Invalid("batch stats: at most 500 names per call".into()).into());
+    }
+    Ok(Json(ctx.brokers().batch_topic_stats(&id, req.names).await?).into_response())
+}
+
 async fn delete_topic<S: BrokersCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -379,6 +402,9 @@ async fn delete_topic<S: BrokersCtx>(
     let row = authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     guard(&row, q.confirm)?;
     ctx.brokers().delete_topic(&id, &topic).await?;
+    ctx.brokers()
+        .audit_write(&id, &user.id, "delete_topic", serde_json::json!({ "topic": topic }))
+        .await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -403,6 +429,14 @@ async fn put_configs<S: BrokersCtx>(
         .brokers()
         .alter_configs(&id, &topic, &req.configs)
         .await?;
+    ctx.brokers()
+        .audit_write(
+            &id,
+            &user.id,
+            "alter_configs",
+            serde_json::json!({ "topic": topic, "count": req.configs.len() }),
+        )
+        .await;
     Ok(Json(configs).into_response())
 }
 
@@ -424,7 +458,11 @@ async fn produce<S: BrokersCtx>(
 ) -> ApiResult<Response> {
     let row = authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     guard(&row, req.confirm)?;
-    Ok(Json(ctx.brokers().produce(&id, &topic, &req).await?).into_response())
+    let resp = ctx.brokers().produce(&id, &topic, &req).await?;
+    ctx.brokers()
+        .audit_write(&id, &user.id, "produce", serde_json::json!({ "topic": topic }))
+        .await;
+    Ok(Json(resp).into_response())
 }
 
 // ---- consumer groups + schema registry ------------------------------------
@@ -445,6 +483,21 @@ async fn describe_group<S: BrokersCtx>(
 ) -> ApiResult<Response> {
     authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     Ok(Json(ctx.brokers().describe_group(&id, &group).await?).into_response())
+}
+
+async fn reset_group_offsets<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, group)): Path<(Id, String)>,
+    Json(req): Json<GroupResetReq>,
+) -> ApiResult<Response> {
+    let row = authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    guard(&row, req.confirm)?;
+    let detail = ctx.brokers().reset_group_offsets(&id, &group, &req).await?;
+    ctx.brokers()
+        .audit_write(&id, &user.id, "reset_group_offsets", serde_json::json!({ "group": group }))
+        .await;
+    Ok(Json(detail).into_response())
 }
 
 async fn schema_subjects<S: BrokersCtx>(

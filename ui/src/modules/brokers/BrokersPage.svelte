@@ -49,7 +49,11 @@
   }
 
   async function removeCluster(c: BrokerCluster) {
-    if (!confirm(`Remove cluster "${c.name}"? (Topics on the broker are not touched.)`)) return;
+    const ok = await confirmer.ask(
+      `Remove cluster "${c.name}"? Topics on the broker are not touched.`,
+      { title: 'Remove cluster', confirmLabel: 'Remove', danger: true },
+    );
+    if (!ok) return;
     try {
       await brokers.remove(c.id);
       toasts.success('Cluster removed');
@@ -57,6 +61,26 @@
       toasts.error('Remove failed', String(e));
     }
   }
+
+  // ---- warm tunnel on cluster select ----------------------------------------
+  // When a cluster with an SSH tunnel is opened, fire the /test endpoint in the
+  // background so the SOCKS proxy warms up and the tunnel pill shows quickly.
+  let warmingId = $state<string | null>(null);
+  let tunnelReady = $state(false);
+  $effect(() => {
+    const c = brokers.selected;
+    tunnelReady = false;
+    if (!c?.ssh) return;
+    warmingId = c.id;
+    const id = c.id;
+    void api.post<TestClusterResp>(`/brokers/clusters/${id}/test`, {})
+      .then((r) => {
+        if (warmingId === id) tunnelReady = r.ok;
+      })
+      .catch(() => {
+        // silent — tunnel pill stays grey until a real op succeeds
+      });
+  });
 
   function openEdit(c: BrokerCluster) {
     editTarget = c;
@@ -289,6 +313,11 @@
           <span class="name">{selected.name}</span>
           <span class="env {selected.environment}">{selected.environment}</span>
           {#if selected.read_only}<span class="ro">read-only</span>{/if}
+          {#if selected.ssh}
+            <span class="tunnel-pill" class:ready={tunnelReady} title={tunnelReady ? 'SSH tunnel connected' : 'SSH tunnel warming…'}>
+              <Icon name="zap" size={10} /> {tunnelReady ? 'Tunnel' : 'Connecting…'}
+            </span>
+          {/if}
           <span class="boot mono">{selected.bootstrap_servers}</span>
         </div>
         <div class="actions">
@@ -678,6 +707,20 @@
     border: 1px solid currentColor;
     border-radius: 4px;
     padding: 0 5px;
+  }
+  .tunnel-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    color: var(--text-dim);
+  }
+  .tunnel-pill.ready {
+    background: color-mix(in srgb, var(--status-working, #28c840) 18%, transparent);
+    color: var(--status-working, #28c840);
   }
   .boot {
     font-size: 11px;

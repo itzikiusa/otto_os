@@ -3,11 +3,14 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { copyAsJson, downloadJson, exportCsv } from '../../lib/components/exporters';
   import type {
     BrokerCluster,
     ConsumeReq,
     ConsumeResp,
     KafkaMessage,
+    MessageHeader,
     ProduceReq,
     StartPosition,
     TopicDetail,
@@ -50,6 +53,11 @@
   let pKey = $state('');
   let pValue = $state('');
   let pPartition = $state<number | ''>('');
+  let pTombstone = $state(false);
+  let pKeyBase64 = $state(false);
+  let pValueBase64 = $state(false);
+  // Extra headers for produce: list of {key, value} pairs.
+  let pHeaders = $state<{ key: string; value: string }[]>([]);
   let producing = $state(false);
 
   // ---- config editing ----
@@ -124,16 +132,33 @@
     }
   }
 
+  function addHeader() {
+    pHeaders = [...pHeaders, { key: '', value: '' }];
+  }
+  function removeHeader(i: number) {
+    pHeaders = pHeaders.filter((_, idx) => idx !== i);
+  }
+
   async function produce() {
-    if (!pValue) {
-      toasts.error('Value is required');
+    if (!pTombstone && !pValue) {
+      toasts.error('Value is required (or enable Tombstone)');
       return;
     }
-    if (guarded && !confirm(`Produce to "${topic}" on guarded cluster "${cluster.name}"?`)) return;
+    if (guarded) {
+      const ok = await confirmer.ask(
+        `Produce to "${topic}" on guarded cluster "${cluster.name}"?`,
+        { title: 'Produce to guarded cluster', confirmLabel: 'Produce', danger: true },
+      );
+      if (!ok) return;
+    }
+    const headers: MessageHeader[] = pHeaders.filter((h) => h.key.trim());
     const req: ProduceReq = {
       partition: pPartition === '' ? null : Number(pPartition),
       key: pKey || null,
-      value: pValue,
+      value: pTombstone ? '' : pValue,
+      headers: headers.length ? headers : undefined,
+      key_base64: pKeyBase64,
+      value_base64: pTombstone ? false : pValueBase64,
       confirm: guarded,
     };
     producing = true;
@@ -145,6 +170,8 @@
       toasts.success(`Produced to partition ${r.partition} @ offset ${r.offset}`);
       pValue = '';
       pKey = '';
+      pTombstone = false;
+      pHeaders = [];
       loadDetail();
     } catch (e) {
       toasts.error('Produce failed', String(e));
@@ -155,7 +182,13 @@
 
   async function setConfig() {
     if (!cfgName.trim()) return;
-    if (guarded && !confirm(`Change config on guarded cluster "${cluster.name}"?`)) return;
+    if (guarded) {
+      const ok = await confirmer.ask(
+        `Change config on guarded cluster "${cluster.name}"?`,
+        { title: 'Alter config on guarded cluster', confirmLabel: 'Apply', danger: true },
+      );
+      if (!ok) return;
+    }
     cfgSaving = true;
     try {
       detail = {
@@ -176,7 +209,11 @@
   }
 
   async function deleteTopic() {
-    if (!confirm(`Delete topic "${topic}"? This is irreversible.`)) return;
+    const typed = await confirmer.promptText(
+      `Type the topic name to confirm deletion. This is irreversible.`,
+      { title: `Delete topic "${topic}"`, confirmLabel: 'Delete', placeholder: topic },
+    );
+    if (typed !== topic) return;
     try {
       await api.del(
         `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}?confirm=${guarded}`,
@@ -186,6 +223,39 @@
     } catch (e) {
       toasts.error('Delete failed', String(e));
     }
+  }
+
+  // ---- export helpers -------------------------------------------------------
+
+  function exportMessages(fmt: 'json' | 'csv') {
+    if (!result) return;
+    const rows = result.messages.map((m) => ({
+      partition: m.partition,
+      offset: m.offset,
+      timestamp_ms: m.timestamp_ms,
+      key: m.key?.text ?? null,
+      value: m.value?.text ?? null,
+      size_bytes: m.size_bytes,
+      headers: m.headers.length ? JSON.stringify(m.headers) : null,
+    }));
+    if (fmt === 'json') {
+      downloadJson(rows, `${topic}-peek.json`);
+    } else {
+      exportCsv(rows, `${topic}-peek.csv`);
+    }
+  }
+
+  async function copySelectedAsJson() {
+    if (!selected) return;
+    await copyAsJson({
+      partition: selected.partition,
+      offset: selected.offset,
+      timestamp_ms: selected.timestamp_ms,
+      key: selected.key,
+      value: selected.value,
+      headers: selected.headers,
+    });
+    toasts.success('Copied to clipboard');
   }
 </script>
 
@@ -247,6 +317,14 @@
       <button class="btn primary small" onclick={consume} disabled={consuming}>
         {consuming ? 'Reading…' : 'Peek'}
       </button>
+      {#if result && result.messages.length > 0}
+        <button class="btn small" onclick={() => exportMessages('json')} title="Export all as JSON">
+          <Icon name="download" size={12} /> JSON
+        </button>
+        <button class="btn small" onclick={() => exportMessages('csv')} title="Export all as CSV">
+          <Icon name="download" size={12} /> CSV
+        </button>
+      {/if}
     </div>
 
     <div class="msg-layout">
@@ -289,11 +367,17 @@
             {#if selected.value?.format}
               <span class="badge">{selected.value.format}{selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}</span>
             {/if}
+            {#if selected.headers.length > 0}
+              <span class="badge muted-badge">{selected.headers.length} header{selected.headers.length === 1 ? '' : 's'}</span>
+            {/if}
             {#if selected.value?.raw_base64}
               <button class="btn tiny" onclick={() => (rawView = !rawView)}>
                 {rawView ? 'Decoded' : 'Raw'}
               </button>
             {/if}
+            <button class="btn tiny" onclick={copySelectedAsJson} title="Copy message as JSON">
+              <Icon name="copy" size={11} /> Copy
+            </button>
           </div>
           {#if selected.key}
             <h5>Key <span class="muted">({selected.key.format})</span></h5>
@@ -357,7 +441,17 @@
     </table>
   {:else if tab === 'produce'}
     <div class="produce">
-      <label class="field"><span>Key (optional)</span><input bind:value={pKey} /></label>
+      <div class="produce-opts">
+        <label class="chk-opt"><input type="checkbox" bind:checked={pTombstone} /> Tombstone (null value)</label>
+        <label class="chk-opt"><input type="checkbox" bind:checked={pKeyBase64} /> Key is Base64</label>
+        {#if !pTombstone}
+          <label class="chk-opt"><input type="checkbox" bind:checked={pValueBase64} /> Value is Base64</label>
+        {/if}
+      </div>
+      <label class="field">
+        <span>Key (optional){pKeyBase64 ? ' — base64' : ''}</span>
+        <input bind:value={pKey} placeholder={pKeyBase64 ? 'base64-encoded bytes' : 'string key'} />
+      </label>
       <label class="field">
         <span>Partition (optional)</span>
         <select bind:value={pPartition}>
@@ -365,12 +459,27 @@
           {#each detail?.partitions ?? [] as p (p.id)}<option value={p.id}>P{p.id}</option>{/each}
         </select>
       </label>
-      <label class="field grow">
-        <span>Value</span>
-        <textarea bind:value={pValue} rows="8" placeholder={'{ "hello": "world" }'}></textarea>
-      </label>
+      {#if !pTombstone}
+        <label class="field grow">
+          <span>Value{pValueBase64 ? ' — base64' : ''}</span>
+          <textarea bind:value={pValue} rows="6" placeholder={pValueBase64 ? 'base64-encoded bytes' : '{ "hello": "world" }'}></textarea>
+        </label>
+      {/if}
+      <div class="headers-section">
+        <div class="headers-title">
+          <span class="dim-label">Headers</span>
+          <button class="btn tiny" onclick={addHeader}>+ Add</button>
+        </div>
+        {#each pHeaders as h, i (i)}
+          <div class="header-row">
+            <input bind:value={h.key} placeholder="key" class="header-key" />
+            <input bind:value={h.value} placeholder="value" class="header-val" />
+            <button class="btn tiny danger-tiny" onclick={() => removeHeader(i)} title="Remove header">×</button>
+          </div>
+        {/each}
+      </div>
       <button class="btn primary" onclick={produce} disabled={producing}>
-        {producing ? 'Producing…' : 'Produce message'}
+        {producing ? 'Producing…' : pTombstone ? 'Produce tombstone' : 'Produce message'}
       </button>
     </div>
   {/if}
@@ -585,6 +694,68 @@
     gap: 10px;
     padding: 14px;
     overflow: auto;
+  }
+  .produce-opts {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 6px 0;
+  }
+  .chk-opt {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .headers-section {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .headers-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .dim-label {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .header-row {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+  }
+  .header-key {
+    width: 140px;
+    padding: 5px 7px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .header-val {
+    flex: 1;
+    padding: 5px 7px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .danger-tiny {
+    color: var(--status-exited, #ff5f57);
+    padding: 2px 7px;
+    font-size: 14px;
+    line-height: 1;
+  }
+  .muted-badge {
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    color: var(--text-dim);
   }
   .field {
     display: flex;

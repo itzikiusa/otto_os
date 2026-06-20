@@ -90,6 +90,24 @@
         <span class="v">{Math.round(metrics?.messages_per_sec ?? 0)}<small>/s</small></span>
         <span class="sub">{fmtNum(metrics?.total_messages ?? 0)} total</span>
       </div>
+      {#if overview.under_replicated_partitions != null}
+        <div class="card" class:warn-card={overview.under_replicated_partitions > 0}>
+          <span class="k">Under-replicated</span>
+          <span class="v" class:warn-v={overview.under_replicated_partitions > 0}>
+            {overview.under_replicated_partitions}
+          </span>
+          <span class="sub">partition{overview.under_replicated_partitions === 1 ? '' : 's'}</span>
+        </div>
+      {/if}
+      {#if overview.leadership_imbalance != null}
+        <div class="card" class:warn-card={overview.leadership_imbalance > 0.2}>
+          <span class="k">Leader skew</span>
+          <span class="v" class:warn-v={overview.leadership_imbalance > 0.2}>
+            {(overview.leadership_imbalance * 100).toFixed(0)}%
+          </span>
+          <span class="sub">CoV of leader counts</span>
+        </div>
+      {/if}
       {#if overview.cluster_id}
         <div class="card wide">
           <span class="k">Cluster ID</span><span class="mono">{overview.cluster_id}</span>
@@ -194,6 +212,9 @@
   .card.wide {
     grid-column: 1 / -1;
   }
+  .card.warn-card {
+    border-color: color-mix(in srgb, #f5a623 50%, transparent);
+  }
   .card .k {
     font-size: 11px;
     text-transform: uppercase;
@@ -203,6 +224,9 @@
   .card .v {
     font-size: 26px;
     font-weight: 600;
+  }
+  .card .v.warn-v {
+    color: #f5a623;
   }
   .card .v small {
     font-size: 13px;

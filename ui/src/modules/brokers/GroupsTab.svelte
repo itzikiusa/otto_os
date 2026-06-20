@@ -1,18 +1,29 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
-  import type { BrokerCluster, GroupDetail, GroupSummary } from '../../lib/api/types';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import type { BrokerCluster, GroupDetail, GroupOffset, GroupSummary } from '../../lib/api/types';
 
   interface Props {
     cluster: BrokerCluster;
   }
   let { cluster }: Props = $props();
 
+  const guarded = $derived(cluster.read_only || cluster.environment === 'prod');
+
   let groups = $state<GroupSummary[]>([]);
   let loading = $state(true);
   let selected = $state<string | null>(null);
   let detail = $state<GroupDetail | null>(null);
   let detailLoading = $state(false);
+  // Sort offsets table by lag descending; toggle to sort by topic+partition.
+  let sortByLag = $state(true);
+  // Offset reset state.
+  let resetting = $state(false);
+  let resetMode = $state<'earliest' | 'latest' | 'offset' | 'timestamp'>('latest');
+  let resetOffset = $state(0);
+  let resetTs = $state('');
+  let resetTopic = $state('');
 
   $effect(() => {
     void cluster.id;
@@ -30,6 +41,7 @@
     selected = id;
     detail = null;
     detailLoading = true;
+    resetTopic = '';
     api
       .get<GroupDetail>(`/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(id)}`)
       .then((d) => (detail = d))
@@ -42,6 +54,72 @@
     if (v.includes('stable')) return 'ok';
     if (v.includes('empty') || v.includes('dead')) return 'dim';
     return 'warn';
+  }
+
+  // Per-topic subtotals: sum lag across partitions.
+  const topicSubtotals = $derived.by(() => {
+    if (!detail) return new Map<string, number>();
+    const m = new Map<string, number>();
+    for (const o of detail.offsets) {
+      m.set(o.topic, (m.get(o.topic) ?? 0) + o.lag);
+    }
+    return m;
+  });
+
+  // Sorted offsets view.
+  const sortedOffsets = $derived.by(() => {
+    if (!detail) return [] as GroupOffset[];
+    const offsets = [...detail.offsets];
+    if (sortByLag) {
+      offsets.sort((a, b) => b.lag - a.lag);
+    }
+    // else keep the default (topic+partition order from the server)
+    return offsets;
+  });
+
+  // Max lag across all partitions — used to scale the per-row bars.
+  const maxLag = $derived(Math.max(1, ...sortedOffsets.map((o) => o.lag)));
+
+  // Unique topics in the current group (for the topic filter dropdown).
+  const groupTopics = $derived(
+    [...new Set(detail?.offsets.map((o) => o.topic) ?? [])].sort(),
+  );
+
+  async function resetOffsets() {
+    if (!selected) return;
+    const typed = await confirmer.promptText(
+      `Type the group name to confirm offset reset.`,
+      { title: `Reset offsets for "${selected}"`, confirmLabel: 'Reset', placeholder: selected },
+    );
+    if (typed !== selected) return;
+
+    let body: Record<string, unknown>;
+    if (resetMode === 'offset') {
+      body = { mode: 'offset', offset: Number(resetOffset), confirm: guarded };
+    } else if (resetMode === 'timestamp') {
+      body = {
+        mode: 'timestamp',
+        timestamp_ms: new Date(resetTs).getTime() || Date.now(),
+        confirm: guarded,
+      };
+    } else {
+      body = { mode: resetMode, confirm: guarded };
+    }
+    if (resetTopic) body['topic'] = resetTopic;
+
+    resetting = true;
+    try {
+      const updated = await api.post<GroupDetail>(
+        `/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(selected)}/reset`,
+        body,
+      );
+      detail = updated;
+      toasts.success(`Offsets reset for "${selected}"`);
+    } catch (e) {
+      toasts.error('Offset reset failed', String(e));
+    } finally {
+      resetting = false;
+    }
   }
 </script>
 
@@ -93,24 +171,87 @@
         </table>
       {/if}
 
-      <h5>Committed offsets &amp; lag</h5>
+      <div class="offsets-header">
+        <h5>Committed offsets &amp; lag</h5>
+        <label class="sort-toggle">
+          <input type="checkbox" bind:checked={sortByLag} />
+          Sort by lag
+        </label>
+      </div>
       <table>
-        <thead><tr><th>Topic</th><th>P</th><th>Current</th><th>End</th><th>Lag</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Topic</th><th>P</th><th>Current</th><th>End</th>
+            <th class="lag-col">Lag</th><th class="bar-col"></th>
+          </tr>
+        </thead>
         <tbody>
-          {#each detail.offsets as o (o.topic + '-' + o.partition)}
+          {#each sortedOffsets as o (o.topic + '-' + o.partition)}
             <tr>
               <td class="mono">{o.topic}</td>
               <td>{o.partition}</td>
               <td class="muted">{o.current_offset.toLocaleString()}</td>
               <td class="muted">{o.high_watermark.toLocaleString()}</td>
               <td class:has-lag={o.lag > 0}>{o.lag.toLocaleString()}</td>
+              <td class="bar-col">
+                {#if o.lag > 0}
+                  <div class="lag-bar">
+                    <div class="lag-fill" style="width: {Math.round((o.lag / maxLag) * 100)}%"></div>
+                  </div>
+                {/if}
+              </td>
             </tr>
           {/each}
         </tbody>
       </table>
+      {#if topicSubtotals.size > 1}
+        <h5>Per-topic totals</h5>
+        <table>
+          <thead><tr><th>Topic</th><th>Total lag</th></tr></thead>
+          <tbody>
+            {#each [...topicSubtotals.entries()].sort((a, b) => b[1] - a[1]) as [t, lag] (t)}
+              <tr>
+                <td class="mono">{t}</td>
+                <td class:has-lag={lag > 0}>{lag.toLocaleString()}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
       {#if detail.offsets.length === 0}
         <p class="muted pad">No committed offsets.</p>
       {/if}
+
+      <!-- Offset reset panel (Editor only; typed confirm required) -->
+      <h5>Reset offsets</h5>
+      <div class="reset-bar">
+        <select bind:value={resetMode}>
+          <option value="earliest">Earliest</option>
+          <option value="latest">Latest</option>
+          <option value="offset">Specific offset</option>
+          <option value="timestamp">From timestamp</option>
+        </select>
+        {#if resetMode === 'offset'}
+          <input type="number" class="sm-input" bind:value={resetOffset} placeholder="offset" />
+        {/if}
+        {#if resetMode === 'timestamp'}
+          <input type="datetime-local" class="sm-input wide" bind:value={resetTs} />
+        {/if}
+        {#if groupTopics.length > 1}
+          <select bind:value={resetTopic} title="Scope to one topic (blank = all)">
+            <option value="">All topics</option>
+            {#each groupTopics as t (t)}<option value={t}>{t}</option>{/each}
+          </select>
+        {/if}
+        <button
+          class="btn small danger"
+          onclick={resetOffsets}
+          disabled={resetting}
+          title={guarded ? 'Cluster is guarded — requires confirmation' : 'Reset committed offsets'}
+        >
+          {resetting ? 'Resetting…' : 'Reset'}
+        </button>
+      </div>
     {:else}
       <p class="muted pad">Select a consumer group to see members and lag.</p>
     {/if}
@@ -203,6 +344,61 @@
     color: #f5a623;
     font-weight: 600;
   }
+  .offsets-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .sort-toggle {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+    margin-left: auto;
+  }
+  .lag-col {
+    min-width: 70px;
+  }
+  .bar-col {
+    width: 80px;
+    padding: 4px 8px;
+  }
+  .lag-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: color-mix(in srgb, #f5a623 15%, transparent);
+    overflow: hidden;
+  }
+  .lag-fill {
+    height: 100%;
+    background: #f5a623;
+    border-radius: 3px;
+  }
+  .reset-bar {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 8px 0 4px;
+  }
+  .reset-bar select,
+  .reset-bar input {
+    padding: 5px 7px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .sm-input {
+    width: 120px;
+  }
+  .sm-input.wide {
+    width: 190px;
+  }
   h5 {
     margin: 16px 0 6px;
     font-size: 11px;
@@ -237,5 +433,8 @@
   }
   .pad {
     padding: 12px;
+  }
+  .btn.danger {
+    color: var(--status-exited, #ff5f57);
   }
 </style>

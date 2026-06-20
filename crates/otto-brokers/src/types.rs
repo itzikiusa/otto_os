@@ -264,6 +264,13 @@ pub struct ClusterOverview {
     pub internal_topic_count: usize,
     pub partition_count: usize,
     pub consumer_group_count: usize,
+    /// Number of partitions with ISR count < replica count (under-replicated).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub under_replicated_partitions: Option<usize>,
+    /// Leadership-imbalance ratio: std-dev of leader counts / mean leader count
+    /// (0.0 = perfectly balanced, higher = more skewed). None when < 2 brokers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leadership_imbalance: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -298,6 +305,14 @@ pub struct TopicSummary {
 pub struct TopicStats {
     pub message_count: i64,
     pub cleanup_policy: Option<String>,
+}
+
+/// Request body for the batch stats endpoint `POST /topics/stats`.
+/// Returns a map of topic name → stats, fetching counts in parallel using
+/// the shared `WATERMARK_WORKERS` pool (avoids N×1 HTTP round-trips from the UI).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchStatsReq {
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -537,6 +552,41 @@ pub struct GroupOffset {
     pub current_offset: i64,
     pub high_watermark: i64,
     pub lag: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Group offset reset
+// ---------------------------------------------------------------------------
+
+/// How to interpret the target position when resetting group offsets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum OffsetResetMode {
+    /// Reset to the earliest available offset (beginning) for each partition.
+    Earliest,
+    /// Reset to the latest offset (end) for each partition.
+    Latest,
+    /// Reset to an explicit absolute offset (requires `offset` field).
+    Offset(i64),
+    /// Reset to the first offset at or after `timestamp_ms`.
+    Timestamp,
+}
+
+/// Request body for `POST /brokers/clusters/{id}/groups/{group}/reset`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GroupResetReq {
+    #[serde(flatten)]
+    pub mode: OffsetResetMode,
+    /// Required when `mode = "timestamp"`.
+    #[serde(default)]
+    pub timestamp_ms: Option<i64>,
+    /// Scope to a single topic (all its partitions committed by this group).
+    /// None = all topics the group has offsets for.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Explicit confirm for guarded (prod / read-only) clusters.
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 // ---------------------------------------------------------------------------
