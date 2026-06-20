@@ -200,6 +200,10 @@ impl ImprovementEngine {
             )
             .await?;
         self.emit_finished(ws_id, run_id, "done", applied, pending);
+        let _ = self.events.send(Event::ImprovementUpdated {
+            kind: "run_finished".into(),
+            id: Some(run_id.clone()),
+        });
         Ok(())
     }
 
@@ -250,8 +254,12 @@ impl ImprovementEngine {
                         let _ = self.events.send(Event::ImprovementApprovalPending {
                             workspace_id: ws_id.clone(),
                             run_id: run_id.clone(),
-                            edit_id: last.id,
+                            edit_id: last.id.clone(),
                             target_ref: edit.target_ref.clone(),
+                        });
+                        let _ = self.events.send(Event::ImprovementUpdated {
+                            kind: "approval_pending".into(),
+                            id: Some(last.id.clone()),
                         });
                     }
                 }
@@ -620,6 +628,10 @@ impl ImprovementEngine {
             .finish_run(&id, ImprovementRunStatus::Done, &summary, 1, applied, pending, None)
             .await?;
         self.emit_finished(ws_id, &id, "done", applied, pending);
+        let _ = self.events.send(Event::ImprovementUpdated {
+            kind: "run_finished".into(),
+            id: Some(id.clone()),
+        });
 
         // Note: we deliberately do NOT advance the scheduler — this is an
         // on-demand run, not a scheduled one.
@@ -643,6 +655,7 @@ impl ImprovementEngine {
                 resolve_target(root, ImprovementTarget::Skill, name, Some(self.library_root.as_path()))
             {
                 if let Ok(content) = std::fs::read_to_string(&path) {
+                    let content = if content.len() > 8000 { content[..8000].to_string() } else { content };
                     out.push((name.clone(), content));
                 }
             }
@@ -662,10 +675,11 @@ impl ImprovementEngine {
                     if let (Some(name), Ok(content)) =
                         (path.file_name().and_then(|n| n.to_str()), std::fs::read_to_string(&path))
                     {
+                        let content = if content.len() > 8000 { content[..8000].to_string() } else { content };
                         out.push((name.to_string(), content));
                     }
                 }
-                if out.len() >= 25 {
+                if out.len() >= 20 {
                     break;
                 }
             }

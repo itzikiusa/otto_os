@@ -18,8 +18,6 @@ use tracing::{debug, error, info, warn};
 use crate::adapter::{Adapter, Inbound};
 use crate::bridge::Bridge;
 
-const RETRY_SLEEP: Duration = Duration::from_secs(3);
-const RECONNECT_SLEEP: Duration = Duration::from_secs(5);
 const CANCEL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Cap on the dedup set size; cleared when exceeded to avoid unbounded growth.
 const DEDUP_CAP: usize = 2000;
@@ -110,6 +108,38 @@ impl Adapter for SlackAdapter {
         }
         let ts = val["ts"].as_str().unwrap_or("").to_string();
         Ok(ts)
+    }
+
+    /// Send with Slack mrkdwn rendering enabled. Slack surfaces `*bold*`,
+    /// `_italic_`, `` `code` ``, and `<URL|label>` links when `mrkdwn: true`.
+    async fn send_formatted(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        let mut body = serde_json::json!({
+            "channel": chat,
+            "text": text,
+            "mrkdwn": true,
+        });
+        if let Some(ts) = thread {
+            body["thread_ts"] = serde_json::json!(ts);
+        }
+        let resp = self
+            .http
+            .post("https://slack.com/api/chat.postMessage")
+            .header("Authorization", format!("Bearer {}", self.bot_token))
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let val: serde_json::Value = resp.json().await?;
+        if !val["ok"].as_bool().unwrap_or(false) {
+            let err = val["error"].as_str().unwrap_or("unknown").to_string();
+            return Err(anyhow::anyhow!("slack chat.postMessage (formatted): {err}"));
+        }
+        Ok(val["ts"].as_str().unwrap_or("").to_string())
     }
 
     async fn edit(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()> {
@@ -273,6 +303,9 @@ pub async fn run(
     // In-memory dedup set: keyed by "channel:ts".
     let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
+    let mut backoff_ms: u64 = 3_000;
+    const BACKOFF_MAX_MS: u64 = 60_000;
+
     'outer: loop {
         if cancel.load(Ordering::Relaxed) {
             debug!("slack listener stopping (cancel)");
@@ -283,8 +316,9 @@ pub async fn run(
         let wss_url = match open_socket_mode_connection(&http, &app_token).await {
             Some(url) => url,
             None => {
-                error!("slack: failed to open socket mode connection, retrying in 5s");
-                tokio::time::sleep(RECONNECT_SLEEP).await;
+                error!("slack: failed to open socket mode connection, retrying in {backoff_ms}ms");
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
             }
         };
@@ -295,7 +329,8 @@ pub async fn run(
             Ok((stream, _)) => stream,
             Err(e) => {
                 error!("slack: websocket connect failed: {e}");
-                tokio::time::sleep(RETRY_SLEEP).await;
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
             }
         };
@@ -331,12 +366,14 @@ pub async fn run(
                 Some(Ok(_)) => continue 'inner, // binary / pong frames
                 Some(Err(e)) => {
                     error!("slack: websocket error: {e}, reconnecting");
-                    tokio::time::sleep(RETRY_SLEEP).await;
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                     break 'inner;
                 }
                 None => {
                     info!("slack: stream ended, reconnecting");
-                    tokio::time::sleep(RETRY_SLEEP).await;
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                     break 'inner;
                 }
             };
@@ -354,6 +391,7 @@ pub async fn run(
             match msg_type {
                 "hello" => {
                     info!("slack: socket mode connected (hello received)");
+                    backoff_ms = 3_000;
                 }
                 "disconnect" => {
                     info!("slack: disconnect requested by server, reconnecting");
@@ -405,8 +443,9 @@ pub async fn run(
             }
         }
 
-        // Brief pause before reconnecting.
-        tokio::time::sleep(RETRY_SLEEP).await;
+        // Pause before reconnecting (exponential backoff, reset on successful hello).
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
     }
 }
 

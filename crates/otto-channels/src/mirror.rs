@@ -485,11 +485,13 @@ async fn upload_file_path(
 
 /// Post one reply message to the channel via the adapter (the bot that received
 /// the message). Long replies post a short head + an `investigation.md` upload.
+/// Uses `send_formatted` so Slack mrkdwn and Telegram Markdown entities render
+/// (bold, italic, code, links) in the relayed agent reply.
 async fn post_reply(adapter: &Arc<dyn Adapter>, chat: &str, thread: Option<&str>, text: &str) {
     if text.chars().count() > LONG_REPLY_THRESHOLD {
         let head = truncate_to_char_boundary(text, LONG_REPLY_HEAD_CHARS);
         let head_msg = format!("{head}\n\n📎 full reply attached as investigation.md");
-        if let Err(e) = adapter.send(chat, thread, &head_msg).await {
+        if let Err(e) = adapter.send_formatted(chat, thread, &head_msg).await {
             warn!("mirror final-head-send: {e}");
         }
         if let Err(e) = adapter
@@ -498,7 +500,7 @@ async fn post_reply(adapter: &Arc<dyn Adapter>, chat: &str, thread: Option<&str>
         {
             warn!("mirror upload: {e}");
         }
-    } else if let Err(e) = adapter.send(chat, thread, text).await {
+    } else if let Err(e) = adapter.send_formatted(chat, thread, text).await {
         warn!("mirror final-send: {e}");
     }
 }

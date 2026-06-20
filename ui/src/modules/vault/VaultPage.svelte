@@ -5,6 +5,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
   import type { Memory } from '../../lib/api/types';
+  import { copyAsJson } from '../../lib/components/exporters';
 
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -39,6 +40,11 @@
     });
     return map;
   });
+
+  /** Rough token estimate: ~4 chars per token (tiktoken p50 approximation). */
+  function estimateTokens(m: Memory): number {
+    return Math.ceil((m.title.length + m.body.length) / 4);
+  }
 
   function nodeColor(kind: string): string {
     switch (kind) {
@@ -193,6 +199,12 @@
       {/if}
 
       <footer class="note-actions">
+        <span class="token-badge" title="Estimated token count (~4 chars/token)">
+          ~{estimateTokens(m).toLocaleString()} tokens
+        </span>
+        <button class="copy-btn" onclick={() => void copyAsJson(m)} title="Copy memory as JSON">
+          Copy JSON
+        </button>
         <button class="danger" onclick={() => void vault.forget(m)}>Forget</button>
       </footer>
     {:else}
@@ -332,6 +344,30 @@
   }
   .note-actions {
     margin-top: 24px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .token-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--surface-2, #1e2330);
+    border: 1px solid var(--border, #333);
+    color: var(--text-dim, #888);
+  }
+  .copy-btn {
+    font-size: 11.5px;
+    padding: 2px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border, #333);
+    background: transparent;
+    cursor: pointer;
+    color: var(--text-dim, #aaa);
+  }
+  .copy-btn:hover {
+    background: var(--surface-2, #1e2330);
   }
   .danger {
     color: #ff6b6b;

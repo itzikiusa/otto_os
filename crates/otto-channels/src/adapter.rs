@@ -25,6 +25,24 @@ pub trait Adapter: Send + Sync {
     /// Returns the channel-native message id of the new message.
     async fn send(&self, chat: &str, thread: Option<&str>, text: &str) -> anyhow::Result<String>;
 
+    /// Post a message with channel-native rich-text formatting enabled.
+    ///
+    /// For Slack this sets `mrkdwn: true` so `*bold*`, `_italic_`, `` `code` ``
+    /// and `<URL|label>` links render. For Telegram this uses `Markdown` parse
+    /// mode (V1 legacy — less strict than MarkdownV2) so `*bold*`, `_italic_`,
+    /// `` `code` `` and `[text](url)` links render.
+    ///
+    /// The default implementation falls back to plain `send` so adapters that
+    /// don't support formatted text still work.
+    async fn send_formatted(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        self.send(chat, thread, text).await
+    }
+
     /// Edit a previously sent message in-place (used for the rolling activity feed).
     async fn edit(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()>;
 

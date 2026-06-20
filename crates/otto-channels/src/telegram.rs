@@ -16,7 +16,6 @@ use crate::bridge::Bridge;
 
 const API_BASE: &str = "https://api.telegram.org";
 const LONG_POLL_TIMEOUT: u64 = 25;
-const RETRY_SLEEP: Duration = Duration::from_secs(3);
 
 /// How long to wait for a TCP/TLS connection to the Telegram Bot API.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -156,6 +155,47 @@ impl Adapter for TelegramAdapter {
         Ok(msg_id)
     }
 
+    /// Send with Telegram Markdown parse mode enabled. Uses V1 legacy Markdown
+    /// (less strict than MarkdownV2) so `*bold*`, `_italic_`, `` `code` ``,
+    /// and `[text](url)` links render without requiring extensive escaping.
+    /// Falls back to plain `send` if the formatted send fails (e.g. parse error).
+    async fn send_formatted(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        let mut body = serde_json::json!({
+            "chat_id": chat,
+            "text": text,
+            "parse_mode": "Markdown",
+        });
+        if let Some(t) = thread {
+            body["reply_to_message_id"] = serde_json::json!(t.parse::<i64>().unwrap_or(0));
+        }
+        let resp = self
+            .http
+            .post(self.api_url("sendMessage"))
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let tg: TgResponse<TgMessage> = resp.json().await?;
+        if !tg.ok {
+            // Parse error from Markdown mode → fall back to plain text.
+            let desc = tg.description.unwrap_or_default();
+            if desc.contains("can't parse") || desc.contains("parse entities") {
+                return self.send(chat, thread, text).await;
+            }
+            return Err(anyhow::anyhow!("Telegram sendMessage (formatted) failed: {desc}"));
+        }
+        Ok(tg
+            .result
+            .as_ref()
+            .map(|m| m.message_id.to_string())
+            .unwrap_or_default())
+    }
+
     async fn edit(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()> {
         let body = serde_json::json!({
             "chat_id": chat,
@@ -267,6 +307,8 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
     // held-open getUpdates request is not cut off mid-poll.
     let http = build_long_poll_client();
     let mut offset: i64 = 0;
+    let mut backoff_ms: u64 = 3_000;
+    const BACKOFF_MAX_MS: u64 = 60_000;
     info!(workspace = %integ.workspace_id, "telegram: listener loop started");
 
     loop {
@@ -284,7 +326,8 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
             Ok(r) => r,
             Err(e) => {
                 error!("telegram getUpdates: {e}");
-                tokio::time::sleep(RETRY_SLEEP).await;
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue;
             }
         };
@@ -293,7 +336,8 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
             Ok(v) => v,
             Err(e) => {
                 error!("telegram getUpdates parse: {e}");
-                tokio::time::sleep(RETRY_SLEEP).await;
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue;
             }
         };
@@ -303,9 +347,13 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
                 "telegram getUpdates not ok: {}",
                 tg.description.unwrap_or_default()
             );
-            tokio::time::sleep(RETRY_SLEEP).await;
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
             continue;
         }
+
+        // Successful poll — reset backoff.
+        backoff_ms = 3_000;
 
         let updates = tg.result.unwrap_or_default();
         for update in &updates {

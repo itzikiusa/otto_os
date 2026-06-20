@@ -13,8 +13,10 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { improvementBus } from '../../lib/events.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import DiffView from '../../lib/components/DiffView.svelte';
 
   // ---------------------------------------------------------------------------
   // State
@@ -59,6 +61,42 @@
 
   $effect(() => {
     if (wsId) void load(wsId);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Live-refresh driven by improvement_updated WS event (T1).
+  // Falls back to a capped 30s poll when the page is visible — the poll is
+  // intentionally slower so the WS path is the primary update mechanism.
+  // ---------------------------------------------------------------------------
+
+  const POLL_INTERVAL_MS = 30_000;
+  const POLL_MAX_TICKS = 20; // stop polling after 10 minutes of inactivity
+
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let pollTicks = 0;
+
+  function schedulePoll(id: string): void {
+    if (pollTicks >= POLL_MAX_TICKS) return;
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(() => {
+      pollTicks += 1;
+      void load(id);
+      schedulePoll(id);
+    }, POLL_INTERVAL_MS);
+  }
+
+  $effect(() => {
+    // Subscribe to improvementBus: re-load whenever the bus fires.
+    const _tick = improvementBus.tick;
+    if (wsId) void load(wsId);
+  });
+
+  $effect(() => {
+    if (wsId) {
+      pollTicks = 0;
+      schedulePoll(wsId);
+    }
+    return () => clearTimeout(pollTimer);
   });
 
   async function load(id: string): Promise<void> {
@@ -278,16 +316,12 @@
             {/if}
             <details class="diff">
               <summary>Before / after diff</summary>
-              <div class="diff-cols">
-                <div class="diff-col">
-                  <div class="diff-label del">Before {e.before_content === null ? '(new file)' : ''}</div>
-                  <pre class="diff-pre before">{e.before_content ?? '(file did not exist)'}</pre>
-                </div>
-                <div class="diff-col">
-                  <div class="diff-label add">After</div>
-                  <pre class="diff-pre after">{e.after_content}</pre>
-                </div>
-              </div>
+              <DiffView
+                before={e.before_content ?? ''}
+                after={e.after_content}
+                mode="word"
+                contextLines={4}
+              />
             </details>
             <div class="actions">
               <button class="btn primary sm" disabled={busyEdit === e.id} onclick={() => act(e, 'approve')}>
@@ -475,48 +509,10 @@
     cursor: pointer;
     color: var(--accent);
     width: fit-content;
+    margin-bottom: 6px;
   }
-  .diff-cols {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    margin-top: 8px;
-  }
-  .diff-col {
-    min-width: 0;
-  }
-  .diff-label {
-    font-size: 10.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 3px;
-    font-weight: 600;
-  }
-  .diff-label.add {
-    color: var(--status-working, #2d8);
-  }
-  .diff-label.del {
-    color: var(--status-exited, #c0392b);
-  }
-  .diff-pre {
-    margin: 0;
-    padding: 8px 10px;
-    font-family: var(--font-mono);
+  .diff :global(.diff-view) {
     font-size: 11px;
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 320px;
-    overflow: auto;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-  }
-  .diff-pre.before {
-    background: color-mix(in srgb, var(--status-exited, #c0392b) 8%, var(--surface-2));
-  }
-  .diff-pre.after {
-    background: color-mix(in srgb, var(--status-working, #2d8) 9%, var(--surface-2));
   }
 
   .run-head {
@@ -536,9 +532,4 @@
     color: var(--status-exited, #c0392b);
   }
 
-  @media (max-width: 640px) {
-    .diff-cols {
-      grid-template-columns: 1fr;
-    }
-  }
 </style>

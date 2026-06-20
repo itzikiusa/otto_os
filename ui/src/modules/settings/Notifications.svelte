@@ -1,7 +1,11 @@
 <script lang="ts">
   // Notification preferences: expiry warning threshold + native/session toggles.
-  // Bound to the shared notifications store; every change PUTs the full settings.
+  // Also exposes the `channels.notify_self_improvement` opt-in flag so the user
+  // can turn on Slack/Telegram self-improvement pings from one place (T6).
   import { notifications } from '../../lib/stores/notifications.svelte';
+  import { api } from '../../lib/api/client';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import type { NotificationSettings } from '../../lib/api/types';
 
   // Load once on mount if the store hasn't fetched yet.
@@ -17,6 +21,42 @@
     const n = Math.round(Number(e.currentTarget.value));
     if (!Number.isFinite(n)) return;
     save({ expiry_threshold_days: Math.min(30, Math.max(1, n)) });
+  }
+
+  // ---------------------------------------------------------------------------
+  // channels.notify_self_improvement — persisted in the daemon settings store.
+  // The backend `improve_notify` task reads it live from the global SettingsRepo.
+  // Root-only (matches GET/PUT /api/v1/settings permission gate).
+  // ---------------------------------------------------------------------------
+
+  const NOTIFY_KEY = 'channels.notify_self_improvement';
+  let notifyImprove = $state(false);
+  let notifyImproveLoading = $state(false);
+
+  $effect(() => {
+    if (auth.isRoot) void loadNotifyImprove();
+  });
+
+  async function loadNotifyImprove(): Promise<void> {
+    notifyImproveLoading = true;
+    try {
+      const all = await api.get<Record<string, unknown>>('/settings');
+      notifyImprove = all?.[NOTIFY_KEY] === true;
+    } catch {
+      // Not root or settings not reachable — stay false.
+    } finally {
+      notifyImproveLoading = false;
+    }
+  }
+
+  async function toggleNotifyImprove(checked: boolean): Promise<void> {
+    notifyImprove = checked;
+    try {
+      await api.put('/settings', { [NOTIFY_KEY]: checked });
+    } catch (e) {
+      notifyImprove = !checked; // revert
+      toasts.error('Could not save setting', e instanceof Error ? e.message : String(e));
+    }
   }
 </script>
 
@@ -76,6 +116,30 @@
       </span>
     </label>
   </div>
+
+  {#if auth.isRoot}
+    <div class="section-title">Channel notifications</div>
+    <div class="card pad">
+      <label class="opt">
+        <span class="opt-text">
+          <span class="opt-title">Push self-improvement events to Slack / Telegram</span>
+          <span class="opt-sub dim">
+            Posts a one-line summary when a run finishes or an approval is pending.
+            Requires a Slack or Telegram integration to be configured in Channels.
+          </span>
+        </span>
+        <span class="toggle">
+          <input
+            type="checkbox"
+            checked={notifyImprove}
+            disabled={notifyImproveLoading}
+            onchange={(e) => void toggleNotifyImprove(e.currentTarget.checked)}
+          />
+          <span class="toggle-track"></span>
+        </span>
+      </label>
+    </div>
+  {/if}
 </div>
 
 <style>

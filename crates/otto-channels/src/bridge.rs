@@ -473,7 +473,9 @@ impl Bridge {
                     /help     — show this message\n\
                     /sessions — list active agent sessions for this workspace\n\
                     /stop     — stop the session bound to this chat/thread\n\
-                    /new      — drop the current session mapping so the next message starts fresh";
+                    /new      — drop the current session mapping so the next message starts fresh\n\
+                    /restart  — restart the current session (equivalent to /new)\n\
+                    /who      — show which session this conversation is mapped to";
                 let _ = adapter.send(&msg.chat, msg.thread.as_deref(), help).await;
                 true
             }
@@ -552,6 +554,53 @@ impl Bridge {
                         "new session will start on your next message",
                     )
                     .await;
+                true
+            }
+            "/restart" => {
+                let key: ConvKey = (
+                    msg.workspace_id.clone(),
+                    msg.chat.clone(),
+                    msg.thread.clone(),
+                );
+                self.sessions.lock().await.remove(&key);
+                let _ = adapter
+                    .send(
+                        &msg.chat,
+                        msg.thread.as_deref(),
+                        "session restarted — next message starts a new session",
+                    )
+                    .await;
+                true
+            }
+            "/who" => {
+                let ws_id: Id = msg.workspace_id.clone();
+                let sessions = match self.manager.list_by_workspace(&ws_id).await {
+                    Ok(list) => list,
+                    Err(e) => {
+                        warn!("bridge /who: {e}");
+                        let _ = adapter
+                            .send(&msg.chat, msg.thread.as_deref(), "Error listing sessions.")
+                            .await;
+                        return true;
+                    }
+                };
+                let key: ConvKey = (
+                    msg.workspace_id.clone(),
+                    msg.chat.clone(),
+                    msg.thread.clone(),
+                );
+                let bound_id = self.sessions.lock().await.get(&key).cloned();
+                let reply = match bound_id {
+                    None => "No session is mapped to this conversation.".to_string(),
+                    Some(sid) => match sessions.iter().find(|s| s.id == sid) {
+                        Some(s) => {
+                            let title = if s.title.is_empty() { s.id.as_str() } else { s.title.as_str() };
+                            format!("This conversation is mapped to: {} — {:?}", title, s.status)
+                        }
+                        None => format!("Mapped to session {} (not found in listing)", sid.as_str()),
+                    },
+                };
+                let _ = adapter.send(&msg.chat, msg.thread.as_deref(), &reply).await;
                 true
             }
             _ => false,

@@ -14,8 +14,12 @@ use otto_core::domain::{Channel, Integration, WorkspaceRole};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id};
 use otto_state::{IntegrationsRepo, WorkspacesRepo};
+use serde::Serialize;
 
+use crate::adapter::Adapter;
 use crate::seed;
+use crate::slack::SlackAdapter;
+use crate::telegram::TelegramAdapter;
 
 /// Dependencies the channels router needs from the host application state.
 pub trait ChannelsCtx: Clone + Send + Sync + 'static {
@@ -71,9 +75,21 @@ pub fn router<S: ChannelsCtx>() -> Router<S> {
             put(upsert_integration::<S>).delete(delete_integration::<S>),
         )
         .route(
+            "/workspaces/{id}/integrations/{channel}/test",
+            post(test_integration::<S>),
+        )
+        .route(
             "/workspaces/{id}/integrations/seed-from-loom",
             post(seed_from_loom::<S>),
         )
+}
+
+/// Response body for a test-message call.
+#[derive(Serialize)]
+pub struct TestMessageResp {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +186,81 @@ async fn delete_integration<S: ChannelsCtx>(
 
     s.integrations().delete(&ws_id, channel).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/v1/workspaces/{id}/integrations/{channel}/test`
+///
+/// Sends "Otto is connected ✅" to the integration's configured default chat.
+/// Returns `{ ok: true }` on success or `{ ok: false, error: "…" }` on failure.
+/// Editor role required (same as upsert).
+async fn test_integration<S: ChannelsCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((ws_id, channel_str)): Path<(Id, String)>,
+) -> ApiResult<Json<TestMessageResp>> {
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    let channel = Channel::parse(&channel_str)
+        .ok_or_else(|| Error::Invalid(format!("unknown channel '{channel_str}'")))?;
+
+    let integ = s
+        .integrations()
+        .get(&ws_id, channel)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("{channel_str} integration")))?;
+
+    if integ.channel_id.trim().is_empty() {
+        return Ok(Json(TestMessageResp {
+            ok: false,
+            error: Some("No default chat ID configured — set one in the integration settings first.".into()),
+        }));
+    }
+
+    // Resolve the bot token from the keychain and build an adapter.
+    let adapter: Arc<dyn Adapter> = match channel {
+        Channel::Slack => {
+            let token = s
+                .secrets()
+                .get(&format!("chan-bot-{ws_id}-slack"))
+                .ok()
+                .flatten();
+            match token {
+                Some(t) if !t.is_empty() => Arc::new(SlackAdapter::new(t)),
+                _ => {
+                    return Ok(Json(TestMessageResp {
+                        ok: false,
+                        error: Some("Slack bot token not set or empty.".into()),
+                    }))
+                }
+            }
+        }
+        Channel::Telegram => {
+            let token = s
+                .secrets()
+                .get(&format!("chan-bot-{ws_id}-telegram"))
+                .ok()
+                .flatten();
+            match token {
+                Some(t) if !t.is_empty() => Arc::new(TelegramAdapter::new(t)),
+                _ => {
+                    return Ok(Json(TestMessageResp {
+                        ok: false,
+                        error: Some("Telegram bot token not set or empty.".into()),
+                    }))
+                }
+            }
+        }
+    };
+
+    let chat = integ.channel_id.trim();
+    match adapter.send(chat, None, "Otto is connected \u{2705}").await {
+        Ok(_) => Ok(Json(TestMessageResp { ok: true, error: None })),
+        Err(e) => Ok(Json(TestMessageResp {
+            ok: false,
+            error: Some(e.to_string()),
+        })),
+    }
 }
 
 async fn seed_from_loom<S: ChannelsCtx>(

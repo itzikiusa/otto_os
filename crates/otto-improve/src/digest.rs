@@ -69,6 +69,18 @@ pub fn digest_from_jsonl(session_id: &str, title: &str, body: &str) -> SessionDi
                 Some("text") => {
                     if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
                         push_capped(&mut text, role, t);
+                        if role == "user" {
+                            for word in t.split_whitespace() {
+                                if let Some(name) = word.strip_prefix('/') {
+                                    let name = name.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
+                                    if !name.is_empty() && !name.contains('/') && name.len() > 2 {
+                                        if !skills_used.iter().any(|s| s == name) {
+                                            skills_used.push(name.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Some("tool_use") => {
@@ -80,6 +92,22 @@ pub fn digest_from_jsonl(session_id: &str, title: &str, body: &str) -> SessionDi
                         {
                             if !skills_used.iter().any(|s| s == name) {
                                 skills_used.push(name.to_string());
+                            }
+                        }
+                    }
+                    if block.get("name").and_then(|n| n.as_str()) == Some("ToolSearch") {
+                        if let Some(query) = block
+                            .get("input")
+                            .and_then(|i| i.get("query"))
+                            .and_then(|s| s.as_str())
+                        {
+                            if let Some(rest) = query.strip_prefix("select:") {
+                                for part in rest.split(',') {
+                                    let name = part.trim();
+                                    if !name.is_empty() && !skills_used.iter().any(|s| s == name) {
+                                        skills_used.push(name.to_string());
+                                    }
+                                }
                             }
                         }
                     }

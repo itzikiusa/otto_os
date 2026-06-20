@@ -18,6 +18,7 @@
 
   let integrations: Integration[] = $state([]);
   let loading = $state(false);
+  let testBusy: Channel | null = $state(null); // which channel is mid-test
 
   // Agent CLIs offered in the per-channel picker (from /meta).
   const providers = $derived(auth.meta?.providers ?? ['claude', 'codex', 'shell']);
@@ -173,6 +174,30 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Send test message
+  // ---------------------------------------------------------------------------
+
+  async function sendTest(channel: Channel): Promise<void> {
+    if (!wsId) return;
+    testBusy = channel;
+    try {
+      const resp = await api.post<{ ok: boolean; error?: string | null }>(
+        `/workspaces/${wsId}/integrations/${channel}/test`,
+        {},
+      );
+      if (resp.ok) {
+        toasts.success('Test message sent', 'Otto is connected ✅ posted to the default chat.');
+      } else {
+        toasts.error('Test message failed', resp.error ?? 'Unknown error');
+      }
+    } catch (e) {
+      toasts.error('Test message failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      testBusy = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Status line helpers
   // ---------------------------------------------------------------------------
 
@@ -245,6 +270,15 @@
                 />
                 <span class="toggle-track"></span>
               </label>
+              <!-- Send test message to confirm the bot token + default chat work. -->
+              <button
+                class="btn sm"
+                title="Send 'Otto is connected ✅' to the default chat"
+                disabled={testBusy === channel || !intg.channel_id}
+                onclick={() => void sendTest(channel)}
+              >
+                {testBusy === channel ? 'Sending…' : 'Test'}
+              </button>
             {/if}
             <button class="btn sm" onclick={() => openEdit(channel)}>Edit</button>
             {#if intg?.has_bot_token}
