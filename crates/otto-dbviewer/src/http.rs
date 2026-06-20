@@ -216,6 +216,29 @@ async fn check_conn_role<S: DbViewerCtx>(
     }
 }
 
+/// Per-user ownership gate for the by-id saved-query / dashboard / widget
+/// handlers. The list views are owner-private (they filter to
+/// `created_by = caller` for non-root), so the by-id paths must enforce the same
+/// ownership axis — otherwise a same-workspace co-member who learns a resource id
+/// could read/mutate/delete another user's "private" item with just the
+/// workspace Viewer/Editor role checked above. Allowed: root, the owner, or a
+/// workspace **Admin** of the resource's workspace (the documented "sees all"
+/// tier — mirrors `session_owner_or_admin`).
+async fn require_owner_or_ws_admin<S: DbViewerCtx>(
+    ctx: &S,
+    user: &User,
+    created_by: &Id,
+    workspace_id: &Id,
+) -> Result<(), Error> {
+    if user.is_root || &user.id == created_by {
+        return Ok(());
+    }
+    ctx.roles()
+        .check(user, workspace_id, WorkspaceRole::Admin)
+        .await
+        .map_err(|_| Error::Forbidden("not the owner of this resource".into()))
+}
+
 // --- Connection-scoped handlers ---------------------------------------------
 
 async fn test<S: DbViewerCtx>(
@@ -405,11 +428,13 @@ async fn delete_saved<S: DbViewerCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(qid): Path<Id>,
 ) -> ApiResult<StatusCode> {
-    // Deletion requires editor on the workspace the query was saved in.
+    // Deletion requires editor on the workspace the query was saved in, AND
+    // ownership (owner / ws-Admin / root) — saved queries are owner-private.
     let saved = ctx.db().get_saved(&qid).await?;
     ctx.roles()
         .check(&user, &saved.workspace_id, WorkspaceRole::Editor)
         .await?;
+    require_owner_or_ws_admin(&ctx, &user, &saved.created_by, &saved.workspace_id).await?;
     ctx.db().delete_saved(&qid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -450,6 +475,7 @@ async fn get_dashboard<S: DbViewerCtx>(
     ctx.roles()
         .check(&user, &dash.workspace_id, WorkspaceRole::Viewer)
         .await?;
+    require_owner_or_ws_admin(&ctx, &user, &dash.created_by, &dash.workspace_id).await?;
     Ok(Json(dash).into_response())
 }
 
@@ -463,6 +489,7 @@ async fn update_dashboard<S: DbViewerCtx>(
     ctx.roles()
         .check(&user, &dash.workspace_id, WorkspaceRole::Editor)
         .await?;
+    require_owner_or_ws_admin(&ctx, &user, &dash.created_by, &dash.workspace_id).await?;
     let updated = ctx
         .db()
         .update_dashboard(
@@ -484,6 +511,7 @@ async fn delete_dashboard<S: DbViewerCtx>(
     ctx.roles()
         .check(&user, &dash.workspace_id, WorkspaceRole::Editor)
         .await?;
+    require_owner_or_ws_admin(&ctx, &user, &dash.created_by, &dash.workspace_id).await?;
     ctx.db().delete_dashboard(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -539,6 +567,7 @@ async fn update_widget<S: DbViewerCtx>(
     ctx.roles()
         .check(&user, &widget.workspace_id, WorkspaceRole::Editor)
         .await?;
+    require_owner_or_ws_admin(&ctx, &user, &widget.created_by, &widget.workspace_id).await?;
     let updated = ctx
         .db()
         .update_widget(
@@ -563,6 +592,7 @@ async fn delete_widget<S: DbViewerCtx>(
     ctx.roles()
         .check(&user, &widget.workspace_id, WorkspaceRole::Editor)
         .await?;
+    require_owner_or_ws_admin(&ctx, &user, &widget.created_by, &widget.workspace_id).await?;
     ctx.db().delete_widget(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -588,6 +618,9 @@ async fn run_widget<S: DbViewerCtx>(
     // global connections.
     let conn = ctx.db().get_connection(&widget.connection_id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    // Widgets are owner-private: only the owner / ws-Admin / root may execute a
+    // stored widget statement (don't let a co-member run another user's tile).
+    require_owner_or_ws_admin(&ctx, &user, &widget.created_by, &widget.workspace_id).await?;
     Ok(Json(ctx.db().run_widget(&id, &user.id).await?).into_response())
 }
 
@@ -606,7 +639,7 @@ mod tests {
     use otto_core::domain::{Connection, ConnectionKind, User, WorkspaceRole};
     use otto_core::{new_id, Error, Id, Result};
 
-    use super::check_conn_role;
+    use super::{check_conn_role, require_owner_or_ws_admin};
     use crate::service::DbViewerService;
     use std::sync::Arc;
 
@@ -743,5 +776,63 @@ mod tests {
         check_conn_role(&ctx, &user(true), &global, WorkspaceRole::Editor)
             .await
             .expect("root passes on global conn");
+    }
+
+    // -- Per-user ownership gate (by-id IDOR fix) ----------------------------
+    //
+    // The by-id saved-query / dashboard / widget handlers run
+    // `require_owner_or_ws_admin` after the workspace-role check, so a
+    // same-workspace co-member who learns a resource id can't read/mutate/run
+    // another user's owner-private item. We test the gate directly (the
+    // load-bearing check) with the recording `StubRoles`.
+
+    #[tokio::test]
+    async fn owner_passes_ownership_gate_without_role_check() {
+        // The owner passes for their OWN resource even as a bare Viewer; the
+        // gate short-circuits before consulting workspace roles.
+        let stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
+        let ctx = TestCtx { roles: stub.clone() };
+        let u = user(false);
+        let ws = new_id();
+        require_owner_or_ws_admin(&ctx, &u, &u.id, &ws)
+            .await
+            .expect("owner allowed");
+        assert_eq!(*stub.last_min.lock().unwrap(), None, "owner short-circuits");
+    }
+
+    #[tokio::test]
+    async fn non_owner_editor_is_denied_ownership_gate() {
+        // A same-workspace Editor who is NOT the owner is denied: the gate
+        // demands ws-Admin (the documented "sees all" tier), which Editor lacks.
+        let stub = Arc::new(StubRoles::new(WorkspaceRole::Editor));
+        let ctx = TestCtx { roles: stub.clone() };
+        let bob = user(false);
+        let alice_id = new_id(); // a different owner
+        let ws = new_id();
+        let err = require_owner_or_ws_admin(&ctx, &bob, &alice_id, &ws)
+            .await
+            .expect_err("non-owner editor must be denied");
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+        assert_eq!(*stub.last_min.lock().unwrap(), Some(WorkspaceRole::Admin));
+    }
+
+    #[tokio::test]
+    async fn ws_admin_and_root_pass_ownership_gate() {
+        // A workspace Admin passes for someone else's resource (sees-all tier).
+        let admin_stub = Arc::new(StubRoles::new(WorkspaceRole::Admin));
+        let admin_ctx = TestCtx { roles: admin_stub };
+        let alice_id = new_id();
+        let ws = new_id();
+        require_owner_or_ws_admin(&admin_ctx, &user(false), &alice_id, &ws)
+            .await
+            .expect("ws-admin allowed");
+
+        // Root passes without consulting roles at all.
+        let root_stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
+        let root_ctx = TestCtx { roles: root_stub.clone() };
+        require_owner_or_ws_admin(&root_ctx, &user(true), &alice_id, &ws)
+            .await
+            .expect("root allowed");
+        assert_eq!(*root_stub.last_min.lock().unwrap(), None, "root short-circuits");
     }
 }

@@ -2816,6 +2816,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "otto-core",
+ "otto-netguard",
  "otto-state",
  "rdkafka",
  "reqwest",
@@ -3011,6 +3012,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-netguard"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "tokio",
+]
+
+[[package]]
 name = "otto-orchestrator"
 version = "0.1.0"
 dependencies = [
@@ -3098,6 +3107,7 @@ dependencies = [
  "otto-improve",
  "otto-issues",
  "otto-memory",
+ "otto-netguard",
  "otto-orchestrator",
  "otto-product",
  "otto-pty",

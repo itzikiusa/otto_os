@@ -23,6 +23,7 @@ members = [
     "crates/otto-swarm",
     "crates/otto-memory",
     "crates/otto-brokers",
+    "crates/otto-netguard",
 ]
 
 [workspace.package]
@@ -52,6 +53,7 @@ otto-product = { path = "crates/otto-product" }
 otto-swarm = { path = "crates/otto-swarm" }
 otto-memory = { path = "crates/otto-memory" }
 otto-brokers = { path = "crates/otto-brokers" }
+otto-netguard = { path = "crates/otto-netguard" }
 
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }

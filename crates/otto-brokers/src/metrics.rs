@@ -244,8 +244,17 @@ impl ClusterMetricState {
 
 /// Scrape a Prometheus exposition endpoint, returning the raw text.
 pub async fn scrape(url: &str, skip_tls_verify: bool) -> Result<String> {
+    // SSRF guard (audit S1): the metrics URL is a user-supplied cluster-profile
+    // field. Resolve + classify the host before connecting, and re-validate every
+    // redirect hop, so it can't reach loopback / RFC1918 / link-local
+    // (169.254.169.254 cloud-metadata) / CGNAT addresses the loopback-bound
+    // daemon could otherwise be steered into.
+    otto_netguard::check_url(url)
+        .await
+        .map_err(|m| Error::Forbidden(format!("metrics endpoint blocked: {m}")))?;
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(skip_tls_verify)
+        .redirect(otto_netguard::redirect_policy())
         .timeout(Duration::from_secs(8))
         .build()
         .map_err(|e| Error::Internal(format!("metrics client: {e}")))?;

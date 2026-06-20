@@ -72,7 +72,12 @@ pub async fn append_trail(
     Json(req): Json<AppendTrailReq>,
 ) -> ApiResult<Json<TrailEvent>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    session_in_ws(&ctx, &wid, &sid).await?;
+    // Per-session trail is owner-private (same gate as `list_trail`): a workspace
+    // Editor who is NOT the session owner must not inject entries into another
+    // user's session activity. Without this, the read side is 403 but the write
+    // side would let a co-member tamper with a victim's trail.
+    let session = session_in_ws(&ctx, &wid, &sid).await?;
+    require_session_owner_or_admin(&ctx, &user, &session).await?;
     let source = req
         .source
         .as_deref()
@@ -134,7 +139,12 @@ pub async fn put_tasks(
     Json(req): Json<PutTasksReq>,
 ) -> ApiResult<Json<Vec<AgentTask>>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    session_in_ws(&ctx, &wid, &sid).await?;
+    // `put_tasks` REPLACES the whole task list. Owner-gate it (same as
+    // `list_tasks`): a non-owner workspace Editor must not wipe/overwrite another
+    // user's session task tracker. Provider sync uses the token-gated ingest path
+    // (`claude_ingest`/`codex_ingest`), which is unaffected by this check.
+    let session = session_in_ws(&ctx, &wid, &sid).await?;
+    require_session_owner_or_admin(&ctx, &user, &session).await?;
     let tasks: Vec<NewTask> = req
         .tasks
         .into_iter()

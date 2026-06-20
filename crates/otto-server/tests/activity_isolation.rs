@@ -274,21 +274,41 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
 /// production paths, using the given `ServerCtx`.
 fn activity_router(ctx: ServerCtx) -> Router {
     use axum::routing::get;
-    use otto_server::routes::activity::{list_tasks, list_trail, workspace_summary};
+    use otto_server::routes::activity::{
+        append_trail, list_tasks, list_trail, put_tasks, workspace_summary,
+    };
     Router::new()
         .route(
             "/workspaces/{wid}/sessions/{sid}/trail",
-            get(list_trail),
+            get(list_trail).post(append_trail),
         )
         .route(
             "/workspaces/{wid}/sessions/{sid}/tasks",
-            get(list_tasks),
+            get(list_tasks).put(put_tasks),
         )
         .route(
             "/workspaces/{wid}/activity/summary",
             get(workspace_summary),
         )
         .with_state(ctx)
+}
+
+/// Issue a request with a JSON body as `caller` and return the status code.
+async fn send_json_as(
+    app: &Router,
+    caller: &User,
+    method: Method,
+    uri: &str,
+    body: serde_json::Value,
+) -> StatusCode {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    req.extensions_mut().insert(AuthUser(caller.clone()));
+    app.clone().oneshot(req).await.unwrap().status()
 }
 
 /// Issue a GET as `caller` and return the status code.
@@ -517,4 +537,106 @@ async fn admin_and_root_see_full_summary() {
         2,
         "root must see all sessions in summary"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — write-path ownership (append_trail / put_tasks)
+//
+// The read handlers were owner-gated; these prove the WRITE handlers are too,
+// so a non-owner workspace Editor can't inject trail entries into, or
+// wipe/overwrite the task list of, another user's session.
+// ---------------------------------------------------------------------------
+
+/// A non-owner workspace Editor gets 403 on `POST .../trail` and `PUT .../tasks`.
+#[tokio::test]
+async fn non_owner_editor_forbidden_on_trail_and_task_writes() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_user(&pool, "bob", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+    set_member(&pool, "ws1", "bob", "editor").await;
+
+    let repo = SessionsRepo::new(pool.clone());
+    let sid = insert_session(&repo, "ws1", "alice").await; // alice owns it
+
+    let ctx = test_ctx(&pool).await;
+    let app = activity_router(ctx);
+    let bob = user("bob", false);
+
+    let trail_status = send_json_as(
+        &app,
+        &bob,
+        Method::POST,
+        &format!("/workspaces/ws1/sessions/{sid}/trail"),
+        serde_json::json!({ "summary": "injected by bob" }),
+    )
+    .await;
+    assert_eq!(
+        trail_status,
+        StatusCode::FORBIDDEN,
+        "bob (editor, non-owner) must get 403 appending to alice's trail, got {trail_status}"
+    );
+
+    let tasks_status = send_json_as(
+        &app,
+        &bob,
+        Method::PUT,
+        &format!("/workspaces/ws1/sessions/{sid}/tasks"),
+        serde_json::json!({ "tasks": [] }),
+    )
+    .await;
+    assert_eq!(
+        tasks_status,
+        StatusCode::FORBIDDEN,
+        "bob (editor, non-owner) must get 403 overwriting alice's tasks, got {tasks_status}"
+    );
+}
+
+/// The owner (and root) can write their own session's trail/tasks (not 403).
+#[tokio::test]
+async fn owner_and_root_can_write_trail_and_tasks() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+
+    let repo = SessionsRepo::new(pool.clone());
+    let sid = insert_session(&repo, "ws1", "alice").await; // alice owns it
+
+    let ctx = test_ctx(&pool).await;
+    let app = activity_router(ctx);
+
+    for (label, u) in [
+        ("owner alice", user("alice", false)),
+        ("root", user("root_usr", true)),
+    ] {
+        let trail_status = send_json_as(
+            &app,
+            &u,
+            Method::POST,
+            &format!("/workspaces/ws1/sessions/{sid}/trail"),
+            serde_json::json!({ "summary": "own note" }),
+        )
+        .await;
+        assert_ne!(
+            trail_status,
+            StatusCode::FORBIDDEN,
+            "{label} must not be forbidden appending to their own trail, got {trail_status}"
+        );
+
+        let tasks_status = send_json_as(
+            &app,
+            &u,
+            Method::PUT,
+            &format!("/workspaces/ws1/sessions/{sid}/tasks"),
+            serde_json::json!({ "tasks": [] }),
+        )
+        .await;
+        assert_ne!(
+            tasks_status,
+            StatusCode::FORBIDDEN,
+            "{label} must not be forbidden overwriting their own tasks, got {tasks_status}"
+        );
+    }
 }

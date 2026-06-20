@@ -23,6 +23,9 @@ impl SchemaRegistry {
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(skip_tls_verify)
+            // SSRF guard (audit S1): bound + re-validate redirect hops so the
+            // user-supplied registry URL can't 30x-bounce into the internal net.
+            .redirect(otto_netguard::redirect_policy())
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| Error::Internal(format!("schema registry client: {e}")))?;
@@ -43,16 +46,26 @@ impl SchemaRegistry {
         }
     }
 
+    /// SSRF pre-flight (audit S1): the registry base URL is a user-supplied
+    /// cluster-profile field. Resolve + classify the host before connecting so a
+    /// low-privileged caller can't steer the daemon at loopback / RFC1918 /
+    /// link-local (169.254.169.254) targets. Every request shares `self.base`'s
+    /// host, so guarding the base once per call covers the per-subject fan-out;
+    /// redirect hops are re-validated by the client's redirect policy.
+    async fn guard(&self, url: &str) -> Result<()> {
+        otto_netguard::check_url(url)
+            .await
+            .map_err(|m| Error::Forbidden(format!("schema registry blocked: {m}")))
+    }
+
     /// Fetch (and cache) the schema document for a registry schema id.
     pub async fn schema_by_id(&self, id: i32) -> Result<String> {
         if let Some(s) = self.cache.get(&id) {
             return Ok(s.clone());
         }
-        let resp = self
-            .get(format!("{}/schemas/ids/{id}", self.base))
-            .send()
-            .await
-            .map_err(up)?;
+        let url = format!("{}/schemas/ids/{id}", self.base);
+        self.guard(&url).await?;
+        let resp = self.get(url).send().await.map_err(up)?;
         if !resp.status().is_success() {
             return Err(Error::Upstream(format!(
                 "schema registry returned {} for id {id}",
@@ -70,11 +83,9 @@ impl SchemaRegistry {
 
     /// List subjects with their latest registered version.
     pub async fn subjects(&self) -> Result<Vec<SchemaSubject>> {
-        let resp = self
-            .get(format!("{}/subjects", self.base))
-            .send()
-            .await
-            .map_err(up)?;
+        let url = format!("{}/subjects", self.base);
+        self.guard(&url).await?;
+        let resp = self.get(url).send().await.map_err(up)?;
         if !resp.status().is_success() {
             return Err(Error::Upstream(format!(
                 "schema registry returned {}",

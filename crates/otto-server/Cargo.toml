@@ -14,6 +14,7 @@ embed-ui = ["dep:rust-embed", "dep:mime_guess"]
 otto-core.workspace = true
 otto-state.workspace = true
 otto-rbac.workspace = true
+otto-netguard.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tower-http.workspace = true
