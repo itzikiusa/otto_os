@@ -29,6 +29,14 @@ pub const SHARE_TOKEN_TTL_MAX_SECS: i64 = 24 * 60 * 60;
 /// Floor on a share token's lifetime (60s). A request below this is clamped up
 /// so a share is always usable for at least a moment after minting.
 pub const SHARE_TOKEN_TTL_MIN_SECS: i64 = 60;
+/// Hard ceiling on the email-OTP share **session window** (`max_expires_at`):
+/// 12 hours (mobile plan Task 7.2 / design addendum). A leaked link gated by an
+/// emailed code can at most grant a 12h window per verification; requests above
+/// this are clamped down.
+pub const SHARE_OTP_WINDOW_MAX_SECS: i64 = 12 * 60 * 60;
+/// Lifetime of a single emailed OTP (10 minutes). Short by design — the code is
+/// a second factor delivered out-of-band, single-use, and rate-limited.
+pub const SHARE_OTP_TTL_SECS: i64 = 600;
 /// Minimum age of `last_seen_at` before we touch the row again (throttles
 /// writes; for session tokens this also slides the expiry).
 const TOUCH_THROTTLE_SECS: i64 = 3600;
@@ -36,6 +44,23 @@ const TOUCH_THROTTLE_SECS: i64 = 3600;
 /// SHA-256 hex of a raw token string.
 pub fn token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Generate a uniformly-distributed 6-digit numeric OTP (`"000000"`..="999999")
+/// from `OsRng`. Rejection-samples to avoid the modulo bias a bare `% 1_000_000`
+/// would introduce, so every code is equally likely. The plaintext is returned
+/// to the caller exactly once (to email); only its SHA-256 is ever stored.
+pub fn generate_otp() -> String {
+    let mut rng = rand::rngs::OsRng;
+    // Largest multiple of 1_000_000 that fits in u32, used as the rejection
+    // bound so the sampled value maps onto [0, 1_000_000) without bias.
+    const BOUND: u32 = (u32::MAX / 1_000_000) * 1_000_000;
+    loop {
+        let n = rng.next_u32();
+        if n < BOUND {
+            return format!("{:06}", n % 1_000_000);
+        }
+    }
 }
 
 fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
@@ -97,6 +122,7 @@ impl AuthRepo {
         let row = sqlx::query(
             "SELECT a.token_hash, a.expires_at, a.last_seen_at, a.kind, a.acting_as_user_id,
                     a.session_scope, a.scope_role, a.revoked,
+                    a.recipient_email, a.verified_at, a.max_expires_at,
                     u.id, u.username, u.display_name, u.is_root, u.disabled, u.created_at
              FROM auth_sessions a JOIN users u ON u.id = a.user_id
              WHERE a.token_hash = ?",
@@ -225,12 +251,32 @@ impl AuthRepo {
             // escape hatch behind it. Clone the owner and force `is_root=false`.
             let mut share_user = real_user;
             share_user.is_root = false;
+            // Email-OTP gate (mobile plan Tasks 7.2/7.3). When the share was
+            // minted with a locked `recipient_email`, the guest must redeem an
+            // emailed OTP via `/share/verify` before the scope reaches anything.
+            // `otp_pending` is computed here and the two guards (feature-guard
+            // scope branch + the terminal-WS gate) deny everything while it is
+            // true (only `/share/verify`, Exempt, stays reachable). A plain share
+            // (no recipient email) is never OTP-pending → unchanged behaviour.
+            let recipient_email: Option<String> = row.get("recipient_email");
+            let otp_pending = if recipient_email.is_some() {
+                let verified_at: Option<i64> = row.get("verified_at");
+                let max_expires_at: Option<i64> = row.get("max_expires_at");
+                let now_secs = now.timestamp();
+                // Pending until verified, and re-pending once the verified window
+                // (`max_expires_at`, ≤12h) has elapsed. A missing window is
+                // treated as expired (fail closed).
+                verified_at.is_none() || max_expires_at.map(|m| m <= now_secs).unwrap_or(true)
+            } else {
+                false
+            };
             return Ok(AuthContext {
                 real_user: share_user.clone(),
                 effective_user: share_user,
                 scope: Some(SessionScope {
                     session_id: Id::from(session_id),
                     role,
+                    otp_pending,
                 }),
             });
         }
@@ -481,6 +527,163 @@ impl AuthRepo {
                 expires_at,
             },
         ))
+    }
+
+    /// Mint a scoped share-link token **gated by an emailed OTP** (mobile plan
+    /// Task 7.2 / design addendum "Email-OTP gate for share links").
+    ///
+    /// Like [`issue_share_token`] but additionally:
+    /// - generates a **6-digit OTP** from `OsRng` and stores only its SHA-256
+    ///   (`otp_hash`) — the plaintext is returned exactly once so the caller can
+    ///   email it (the DB never holds the raw code);
+    /// - locks the share to `recipient_email` (immutable; Task 7.4 extension only
+    ///   ever re-emails this address);
+    /// - sets `otp_expires_at = now + SHARE_OTP_TTL_SECS` (~10 min) and
+    ///   `max_expires_at = now + min(duration_secs, SHARE_OTP_WINDOW_MAX_SECS)`
+    ///   (≤12h) — the session window the guest gets once verified;
+    /// - leaves `verified_at = NULL` so the share is **OTP-pending** until the
+    ///   guest redeems the code via `verify_share_otp`.
+    ///
+    /// The scoped-token `expires_at` (the bearer-token TTL the base
+    /// [`authenticate`] checks) is set to the same window end so the token row
+    /// can never outlive its session window. Returns the RAW token, the RAW OTP
+    /// (caller emails it), and the [`ShareInfo`] metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn issue_share_otp_token(
+        &self,
+        owner_user_id: &Id,
+        session_id: &Id,
+        role: WorkspaceRole,
+        duration_secs: i64,
+        label: Option<String>,
+        recipient_email: &str,
+    ) -> Result<(String, String, ShareInfo)> {
+        // A share is Viewer or Editor only — never Admin (no escalation).
+        if role == WorkspaceRole::Admin {
+            return Err(Error::Forbidden(
+                "a share link cannot grant Admin role".into(),
+            ));
+        }
+        // Clamp the session window to (0, 12h]. A non-positive request is clamped
+        // up to the 60s floor so a freshly-minted share is always usable.
+        let window_secs = duration_secs.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_OTP_WINDOW_MAX_SECS);
+
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let token = hex::encode(buf);
+        let prefix: String = token.chars().take(12).collect();
+        let otp = generate_otp();
+        let id = new_id();
+        let now = Utc::now();
+        // The bearer-token TTL and the session window share the same end: the
+        // token may never outlive the window it grants.
+        let expires_at = now + Duration::seconds(window_secs);
+        let max_expires_at = expires_at.timestamp();
+        let otp_expires_at = (now + Duration::seconds(SHARE_OTP_TTL_SECS)).timestamp();
+        sqlx::query(
+            "INSERT INTO auth_sessions
+               (id, user_id, token_hash, created_at, expires_at, last_seen_at,
+                kind, label, token_prefix, session_scope, scope_role, revoked,
+                recipient_email, otp_hash, otp_expires_at, verified_at, max_expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'share', ?, ?, ?, ?, 0, ?, ?, ?, NULL, ?)",
+        )
+        .bind(&id)
+        .bind(owner_user_id)
+        .bind(token_hash(&token))
+        .bind(now.to_rfc3339())
+        .bind(expires_at.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(&label)
+        .bind(&prefix)
+        .bind(session_id)
+        .bind(role.as_str())
+        .bind(recipient_email)
+        .bind(token_hash(&otp))
+        .bind(otp_expires_at)
+        .bind(max_expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("issue share otp token: {e}")))?;
+        Ok((
+            token,
+            otp,
+            ShareInfo {
+                id,
+                session_id: session_id.clone(),
+                role,
+                token_prefix: prefix,
+                label,
+                created_at: now,
+                expires_at,
+            },
+        ))
+    }
+
+    /// Redeem an emailed OTP for a share token (mobile plan Task 7.3 /
+    /// `POST /api/v1/share/verify`). On success sets `verified_at = now` and
+    /// **clears `otp_hash`** so the same code can never be reused (single-use).
+    ///
+    /// Returns `Ok(true)` when the code matched a live, OTP-pending share and the
+    /// share is now verified; `Ok(false)` when the token isn't an OTP-gated share
+    /// or has no live code. Rejects (`Ok(false)`) when:
+    /// - the share has no `otp_hash` (already redeemed / never had one);
+    /// - the code is expired (`otp_expires_at <= now`);
+    /// - the hash does not match.
+    ///
+    /// The presented `token` is the auth (the caller must hold the share link);
+    /// the comparison is constant-shape (both sides SHA-256 hex). The caller is
+    /// responsible for IP rate-limiting (the share throttle) around this call.
+    pub async fn verify_share_otp(&self, token: &str, otp: &str) -> Result<bool> {
+        let hash = token_hash(token);
+        let row = sqlx::query(
+            "SELECT otp_hash, otp_expires_at, revoked, recipient_email
+             FROM auth_sessions
+             WHERE token_hash = ? AND kind = 'share'",
+        )
+        .bind(&hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("verify share otp lookup: {e}")))?;
+
+        let Some(row) = row else { return Ok(false) };
+        // A revoked share never verifies; an OTP-less share (plain or already
+        // redeemed) has nothing to match.
+        if row.get::<i64, _>("revoked") != 0 {
+            return Ok(false);
+        }
+        let recipient: Option<String> = row.get("recipient_email");
+        if recipient.is_none() {
+            return Ok(false); // not an OTP-gated share
+        }
+        let stored_hash: Option<String> = row.get("otp_hash");
+        let Some(stored_hash) = stored_hash else {
+            return Ok(false); // already redeemed (single-use) — no code to match
+        };
+        let otp_expires_at: Option<i64> = row.get("otp_expires_at");
+        let now = Utc::now().timestamp();
+        if otp_expires_at.map(|e| e <= now).unwrap_or(true) {
+            return Ok(false); // expired code
+        }
+        if token_hash(otp) != stored_hash {
+            return Ok(false); // wrong code
+        }
+
+        // Match: mark verified and CLEAR the code (single-use). Guard the UPDATE
+        // on `otp_hash` still being the matched value so two racing verifies
+        // can't both succeed on the same code.
+        let res = sqlx::query(
+            "UPDATE auth_sessions
+             SET verified_at = ?, otp_hash = NULL
+             WHERE token_hash = ? AND kind = 'share' AND otp_hash = ?",
+        )
+        .bind(now)
+        .bind(&hash)
+        .bind(&stored_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("verify share otp update: {e}")))?;
+
+        Ok(res.rows_affected() > 0)
     }
 
     /// List the **live** (non-revoked, non-expired) share tokens for one session,
@@ -1109,6 +1312,204 @@ mod tests {
         assert_eq!(listed[0].id, live.id);
         assert_eq!(listed[0].session_id, Id::from("S1"));
         assert_eq!(listed[0].label.as_deref(), Some("a"));
+    }
+
+    // ---- email-OTP share tokens (mobile plan Tasks 7.2/7.3) ---------------
+
+    /// `generate_otp` always yields a 6-digit numeric string (zero-padded).
+    #[test]
+    fn generate_otp_is_six_digits() {
+        for _ in 0..200 {
+            let otp = generate_otp();
+            assert_eq!(otp.len(), 6, "OTP must be 6 chars: {otp}");
+            assert!(otp.chars().all(|c| c.is_ascii_digit()), "OTP must be numeric: {otp}");
+        }
+    }
+
+    /// Minting an OTP share: returns a raw OTP, stores only its hash, and the
+    /// share authenticates as **OTP-pending** (reaches nothing until verified).
+    #[tokio::test]
+    async fn otp_share_is_pending_until_verified() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, otp, info) = repo
+            .issue_share_otp_token(
+                &owner,
+                &Id::from("S1"),
+                WorkspaceRole::Viewer,
+                3600,
+                None,
+                "guest@example.com",
+            )
+            .await
+            .unwrap();
+        assert_eq!(otp.len(), 6);
+        assert_eq!(info.session_id, Id::from("S1"));
+
+        // The raw OTP is never stored — only its hash is in otp_hash.
+        let stored: String =
+            sqlx::query("SELECT otp_hash FROM auth_sessions WHERE token_hash = ?")
+                .bind(token_hash(&raw))
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("otp_hash");
+        assert_eq!(stored, token_hash(&otp), "otp_hash must be sha256(otp)");
+        assert_ne!(stored, otp, "raw OTP must not be stored");
+
+        // It authenticates but is OTP-pending (gated).
+        let ctx = repo.authenticate(&raw).await.unwrap();
+        let scope = ctx.scope.expect("scoped");
+        assert!(scope.otp_pending, "an unverified OTP share must be pending");
+    }
+
+    /// Verify with the correct code clears the pending flag (single-use): the
+    /// same code cannot be redeemed twice.
+    #[tokio::test]
+    async fn otp_verify_succeeds_once_then_is_single_use() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, otp, _info) = repo
+            .issue_share_otp_token(
+                &owner,
+                &Id::from("S1"),
+                WorkspaceRole::Editor,
+                3600,
+                None,
+                "guest@example.com",
+            )
+            .await
+            .unwrap();
+
+        // Wrong code → false (and stays pending).
+        assert!(!repo.verify_share_otp(&raw, "000000").await.unwrap() || otp == "000000");
+        // Correct code → true, and the share becomes non-pending.
+        assert!(repo.verify_share_otp(&raw, &otp).await.unwrap());
+        let scope = repo.authenticate(&raw).await.unwrap().scope.unwrap();
+        assert!(!scope.otp_pending, "after verify the share is no longer pending");
+        assert_eq!(scope.role, WorkspaceRole::Editor);
+
+        // Single-use: the same code cannot be redeemed again.
+        assert!(
+            !repo.verify_share_otp(&raw, &otp).await.unwrap(),
+            "the OTP must be single-use"
+        );
+    }
+
+    /// An expired OTP cannot be redeemed (otp_expires_at in the past).
+    #[tokio::test]
+    async fn expired_otp_cannot_be_verified() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, otp, _info) = repo
+            .issue_share_otp_token(
+                &owner,
+                &Id::from("S1"),
+                WorkspaceRole::Viewer,
+                3600,
+                None,
+                "guest@example.com",
+            )
+            .await
+            .unwrap();
+
+        // Backdate the code's expiry into the past.
+        let past = (Utc::now() - Duration::minutes(1)).timestamp();
+        sqlx::query("UPDATE auth_sessions SET otp_expires_at = ? WHERE token_hash = ?")
+            .bind(past)
+            .bind(token_hash(&raw))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            !repo.verify_share_otp(&raw, &otp).await.unwrap(),
+            "an expired OTP must be rejected"
+        );
+        // And the share stays pending.
+        assert!(repo.authenticate(&raw).await.unwrap().scope.unwrap().otp_pending);
+    }
+
+    /// Once verified, the share re-pends after its `max_expires_at` window ends.
+    #[tokio::test]
+    async fn verified_otp_share_repends_after_window() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, otp, _info) = repo
+            .issue_share_otp_token(
+                &owner,
+                &Id::from("S1"),
+                WorkspaceRole::Viewer,
+                3600,
+                None,
+                "guest@example.com",
+            )
+            .await
+            .unwrap();
+        assert!(repo.verify_share_otp(&raw, &otp).await.unwrap());
+        assert!(!repo.authenticate(&raw).await.unwrap().scope.unwrap().otp_pending);
+
+        // Move the session window (and the bearer expiry, to keep the token
+        // alive for the test) — set max_expires_at to the past but keep
+        // expires_at in the future so authenticate still resolves the row.
+        let past = (Utc::now() - Duration::minutes(1)).timestamp();
+        sqlx::query("UPDATE auth_sessions SET max_expires_at = ? WHERE token_hash = ?")
+            .bind(past)
+            .bind(token_hash(&raw))
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            repo.authenticate(&raw).await.unwrap().scope.unwrap().otp_pending,
+            "after the window elapses the share must re-pend"
+        );
+    }
+
+    /// The OTP-share window clamps to ≤12h.
+    #[tokio::test]
+    async fn otp_share_window_clamps_to_12h() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (_raw, _otp, info) = repo
+            .issue_share_otp_token(
+                &owner,
+                &Id::from("S1"),
+                WorkspaceRole::Viewer,
+                100 * 60 * 60, // ask 100h
+                None,
+                "guest@example.com",
+            )
+            .await
+            .unwrap();
+        let window = (info.expires_at - info.created_at).num_seconds();
+        assert_eq!(window, SHARE_OTP_WINDOW_MAX_SECS, "window must clamp to 12h");
+    }
+
+    /// A plain share (no recipient email) is NEVER OTP-pending (backward compat).
+    #[tokio::test]
+    async fn plain_share_is_never_otp_pending() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+
+        let (raw, _info) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+        let scope = repo.authenticate(&raw).await.unwrap().scope.unwrap();
+        assert!(!scope.otp_pending, "a plain share must not be OTP-pending");
+        // And verify is a no-op on a non-OTP share.
+        assert!(!repo.verify_share_otp(&raw, "123456").await.unwrap());
     }
 
     /// `revoke_all_for_user` also clears the user's shares (lost-device kill

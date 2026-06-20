@@ -2203,10 +2203,34 @@ export interface ShareInfo {
 export interface CreateShareReq {
   /** 'viewer' (read-only) or 'editor' (read + input). Never 'admin'. */
   role: string;
-  /** Fixed TTL in seconds. Absent → 3600. Server clamps to [60, 86400]. */
+  /** Fixed TTL in seconds (plain share only). Absent → 3600. Clamped to [60, 86400]. */
   ttl_secs?: number;
   /** Human-friendly label (e.g. "for Alice"). Optional. */
   label?: string;
+  /** Email-OTP gate (mobile plan Task 7.2). When set, the recipient must redeem a
+   *  6-digit code emailed to THIS address (POST /share/verify) before attaching —
+   *  a leaked link alone is useless. The address is LOCKED for the share's life.
+   *  Requires a verified email sender; absent → a plain share with no OTP gate. */
+  recipient_email?: string;
+  /** Session window (seconds) for an OTP-gated share — how long the guest may stay
+   *  attached once verified. Clamped server-side to (0, 43200] (≤12h). Only
+   *  meaningful with `recipient_email`; absent → default 1h. */
+  duration_secs?: number;
+}
+
+/** `POST /api/v1/share/verify` — redeem an emailed OTP for a share token (mobile
+ *  plan Task 7.3). Public/Exempt: the `token` (the share link) is the auth. */
+export interface VerifyShareReq {
+  /** The raw share token (from the `#/s/<session>/<token>` link). */
+  token: string;
+  /** The 6-digit one-time code the recipient received by email. */
+  otp: string;
+}
+
+/** Response for `POST /api/v1/share/verify`. */
+export interface VerifyShareResp {
+  /** `true` once the code matched and the share is verified for attach. */
+  verified: boolean;
 }
 
 /** Response for `POST /api/v1/sessions/{id}/share`. The raw token is returned

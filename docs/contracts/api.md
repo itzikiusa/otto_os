@@ -245,7 +245,7 @@ still-attached viewer receives `{"type":"terminated"}` and the WS closes immedia
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?}` | `CreateShareResp {token, url, info: ShareInfo}` (token shown once) |
+| POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?, recipient_email?, duration_secs?}` | `CreateShareResp {token, url, info: ShareInfo}` (token shown once) |
 | GET /api/v1/sessions/{id}/shares | session owner / ws admin | — | `ListSharesResp {shares: ShareInfo[]}` (live, non-revoked) |
 | DELETE /api/v1/auth/shares/{share_id} | member (self-owned) | — | 204 (revokes + evicts; idempotent) |
 | POST /api/v1/auth/shares/revoke-all | member (self-owned) | — | 204 (revokes all caller's shares + evicts) |
@@ -281,6 +281,43 @@ configured address + verified flag and **never** the password.
 `EmailSenderResp` = `{gmail_address?, verified}` — `gmail_address` is omitted on
 `GET` when no sender is configured; `verified` is `true` once a real SMTP login
 with the app password succeeded.
+
+---
+
+## Email-OTP gate for share links (mobile plan Tasks 7.2/7.3)
+
+A share link's recipient must enter a one-time code (emailed out-of-band) before
+the scoped token reaches **anything** — so a leaked/forwarded link alone is
+useless. Layered on top of the scoped-token guard, role cap, and short TTL above.
+
+**Creating an OTP share.** `POST /api/v1/sessions/{id}/share` with a
+`recipient_email` mints an OTP-gated share: the owner picks the recipient address
+(LOCKED for the share's life) and a `duration_secs` session window
+(server-clamped to ≤ 43200s = 12h). Otto generates a **6-digit OTP** (`OsRng`),
+stores only its `sha256` (`otp_hash`, ~10-min expiry) plus `recipient_email` and
+`max_expires_at`, and **emails the code** to the recipient via the owner's
+verified email sender (above). Requires a verified sender — else `400`
+("set up a verified email sender first"). Omitting `recipient_email` mints a
+plain scoped share with no OTP gate (backward compatible). `duration_secs`
+governs the OTP-share window; `ttl_secs` governs a plain share.
+
+**Redeeming (guest).** While a share is OTP-pending the scope reaches NOTHING
+except `/share/verify`: the feature guard `403`s every protected route (even
+`GET` the session) and `/ws/term` refuses the upgrade (`403`).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/share/verify | **public** (the share token is the auth) | `VerifyShareReq {token, otp}` | `VerifyShareResp {verified: true}` on success |
+
+`POST /api/v1/share/verify` is **Exempt** (public) — the share `token` in the body
+is the auth. It is **IP rate-limited** (the share throttle; `429` with
+`Retry-After` when locked), checks `otp_hash == sha256(otp)` AND `otp_expires_at >
+now`, and on success sets `verified_at` and **clears `otp_hash`** (single-use — a
+fresh code requires a resend). A wrong / expired / reused code records a throttle
+failure and returns `401`. After verification the guest may attach (`/ws/term`)
+and `GET` the session until `max_expires_at` (≤12h); once the window elapses the
+share re-pends and must be re-verified (Task 7.4 extension re-emails the LOCKED
+original recipient only).
 
 ---
 

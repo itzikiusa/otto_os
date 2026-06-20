@@ -46,6 +46,11 @@ pub fn public_routes() -> Router<ServerCtx> {
         .route("/ingest/usage", post(usage::ingest))
         // Swarm agents post to the shared board via their per-session token.
         .route("/ingest/swarm/board", post(swarm_ingest::board_ingest))
+        // Email-OTP share gate (mobile plan Task 7.3): redeem an emailed code for
+        // a share token. PUBLIC by design — the share token in the body IS the
+        // auth, so this must be reachable BEFORE the (still OTP-pending) scoped
+        // token can attach. Rate-limited per peer IP inside the handler.
+        .route("/share/verify", post(share::verify_share))
 }
 
 /// Routes that require a bearer token (the auth middleware is layered on top

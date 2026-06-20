@@ -32,6 +32,16 @@ pub struct AuthUser(pub User);
 /// This is intentionally distinct from a workspace membership: the `role` here
 /// is the *ceiling* the share grants, independent of any role the synthetic
 /// guest user holds (it holds none).
+///
+/// `otp_pending` is the **email-OTP gate** (mobile plan Tasks 7.2/7.3): when the
+/// share was minted with a locked `recipient_email`, the guest must first redeem
+/// an emailed one-time code via `POST /api/v1/share/verify`. While
+/// `otp_pending == true` the scope reaches **nothing** — both the feature-guard
+/// scope branch and the terminal-WS gate deny everything (only `/share/verify`,
+/// which is Exempt, stays reachable). It is computed by [`TokenAuthenticator`]
+/// as `recipient_email.is_some() && (verified_at.is_none() || window_expired)`,
+/// so a plain share (no recipient email) always has `otp_pending == false` and
+/// behaves exactly as before the gate existed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionScope {
     /// The single session id this token may reach.
@@ -39,6 +49,11 @@ pub struct SessionScope {
     /// The capped role on that session: `Viewer` (read-only) or `Editor`
     /// (read + input). Never `Admin` — shares can never escalate.
     pub role: WorkspaceRole,
+    /// `true` iff this share is gated by an emailed OTP the guest has not yet
+    /// passed (or whose verified window has elapsed). While `true`, the scope
+    /// is confined to `/share/verify` and reaches nothing else (fail closed).
+    /// Always `false` for a plain (no-recipient-email) share.
+    pub otp_pending: bool,
 }
 
 /// The resolved identity of an authenticated request: the **real** token owner
@@ -341,12 +356,14 @@ mod tests {
             scope: Some(SessionScope {
                 session_id: Id::from("S1"),
                 role: WorkspaceRole::Viewer,
+                otp_pending: false,
             }),
         };
         assert!(ctx.is_scoped());
         let scope = ctx.scope.expect("scoped token must carry a SessionScope");
         assert_eq!(scope.session_id, Id::from("S1"));
         assert_eq!(scope.role, WorkspaceRole::Viewer);
+        assert!(!scope.otp_pending, "a plain share is not OTP-pending");
     }
 
     #[test]

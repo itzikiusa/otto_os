@@ -582,11 +582,13 @@ mod tests {
         let denied = ctx_with_scope(Some(otto_core::auth::SessionScope {
             session_id: "S1".into(),
             role: WorkspaceRole::Viewer,
+            otp_pending: false,
         }));
         assert!(scope_denied(&denied), "a viewer share must be denied /ws/events");
         let denied = ctx_with_scope(Some(otto_core::auth::SessionScope {
             session_id: "S1".into(),
             role: WorkspaceRole::Editor,
+            otp_pending: false,
         }));
         assert!(scope_denied(&denied), "an editor share must be denied /ws/events too");
     }

@@ -149,11 +149,46 @@ pub struct CreateShareReq {
     /// `"viewer"` (read-only) or `"editor"` (read + input). Never `"admin"`.
     pub role: String,
     /// Fixed TTL in seconds. Absent → 3600. Clamped to `[60, 86400]`.
+    /// Ignored when `recipient_email` is set (then `duration_secs` governs the
+    /// session window instead).
     #[serde(default)]
     pub ttl_secs: Option<i64>,
     /// Human-friendly label (e.g. "for Alice"). Optional.
     #[serde(default)]
     pub label: Option<String>,
+    /// Email-OTP gate (mobile plan Task 7.2). When set, the recipient must redeem
+    /// a 6-digit code emailed to THIS address (via `POST /api/v1/share/verify`)
+    /// before the share can attach — a leaked link alone is then useless. The
+    /// address is LOCKED for the share's lifetime (Task 7.4 extension re-emails
+    /// only this address). Requires the caller to have a verified email sender;
+    /// absent → a plain scoped share with no OTP gate (backward compatible).
+    #[serde(default)]
+    pub recipient_email: Option<String>,
+    /// Session window for an OTP-gated share, in seconds — how long the guest may
+    /// stay attached once verified. Clamped server-side to `(0, 43200]` (≤12h).
+    /// Only meaningful with `recipient_email`; absent → default 1h.
+    #[serde(default)]
+    pub duration_secs: Option<i64>,
+}
+
+/// `POST /api/v1/share/verify` — redeem an emailed OTP for a share token
+/// (mobile plan Task 7.3). Public/Exempt: the `token` (the share link) is the
+/// auth. On success the share's `verified_at` is set and the guest may attach
+/// (`/ws/term`) until the share's `max_expires_at` (≤12h). Single-use + IP
+/// rate-limited.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyShareReq {
+    /// The raw share token (from the `#/s/<session>/<token>` link).
+    pub token: String,
+    /// The 6-digit one-time code the recipient received by email.
+    pub otp: String,
+}
+
+/// Response for `POST /api/v1/share/verify`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyShareResp {
+    /// `true` once the code matched and the share is now verified for attach.
+    pub verified: bool,
 }
 
 /// Response for `POST /api/v1/sessions/{id}/share`. The raw token is returned

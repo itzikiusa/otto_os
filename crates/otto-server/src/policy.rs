@@ -110,6 +110,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/email-sender" {
         return Exempt;
     }
+    // Email-OTP share redemption (mobile plan Task 7.3). PUBLIC by design: the
+    // share token in the request body is the auth, so it must be reachable while
+    // the scoped token is still OTP-pending (the feature guard otherwise denies a
+    // pending share everything). It is mounted as a public route and never reaches
+    // this guard, but the coverage test still requires an explicit Exempt entry.
+    if p == "/share/verify" {
+        return Exempt;
+    }
     // FS-browse sandbox (cross-cutting; sandboxed in the handler).
     if matches!(p, "/fs/browse" | "/fs/read") {
         return Exempt;

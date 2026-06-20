@@ -86,6 +86,15 @@ where
     // at grants. If no `AuthContext` is present we behave exactly as before.
     if let Some(ctx) = req.extensions().get::<AuthContext>() {
         if let Some(scope) = ctx.scope.clone() {
+            // EMAIL-OTP GATE (mobile plan Task 7.3). A share locked to a recipient
+            // email is OTP-pending until the guest redeems the emailed code via
+            // `POST /api/v1/share/verify` (a public, Exempt route that never reaches
+            // this guard). While pending, the scope reaches **nothing** here —
+            // fail closed, deny every protected route (even GET the session). This
+            // is what makes a leaked link alone useless without the mailbox code.
+            if scope.otp_pending {
+                return forbidden("share requires email-OTP verification").into_response();
+            }
             // Concrete request path (with the real session-id segment), matched
             // against the `{id}`-templated route to extract & compare the id.
             let concrete = req.uri().path().to_string();
@@ -211,6 +220,7 @@ mod scope_tests {
         SessionScope {
             session_id: Id::from(session),
             role,
+            otp_pending: false,
         }
     }
 

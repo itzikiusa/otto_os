@@ -233,6 +233,21 @@ async fn ws_auth_gate<S: SessionsCtx>(
                     &Error::Forbidden("share token is scoped to a different session".into()),
                 );
             }
+            // EMAIL-OTP GATE (mobile plan Task 7.3). A share locked to a recipient
+            // email may NOT attach until the guest redeems the emailed OTP via
+            // `POST /api/v1/share/verify` — and once verified, only inside the
+            // ≤12h window. `otp_pending` captures both: it is `true` while the
+            // code is unredeemed AND once the `max_expires_at` window has elapsed,
+            // so this single check rejects an unverified OR an expired-window share
+            // before the WS upgrade. Fail closed (no socket for a leaked link).
+            if scope.otp_pending {
+                return problem(
+                    StatusCode::FORBIDDEN,
+                    &Error::Forbidden(
+                        "share requires email-OTP verification before attaching".into(),
+                    ),
+                );
+            }
             scope.role == WorkspaceRole::Editor
         }
         None => {
@@ -874,6 +889,56 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "a valid token from a clean IP must still pass through the global throttle"
+        );
+    }
+
+    // ---- Task 7.3: email-OTP gate before attach ---------------------------
+
+    /// An OTP-gated share that has NOT been verified is refused at the gate
+    /// (403, no upgrade) — the email-OTP second factor must be passed first.
+    /// After redeeming the OTP it passes the gate.
+    #[tokio::test]
+    async fn otp_pending_share_denied_until_verified() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let s1 = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+
+        // Mint an OTP-gated share (recipient locked). It is OTP-pending.
+        let repo = AuthRepo::new(pool.clone());
+        let (token, otp, _info) = repo
+            .issue_share_otp_token(
+                &"alice".into(),
+                &s1,
+                WorkspaceRole::Viewer,
+                3600,
+                None,
+                "guest@example.com",
+            )
+            .await
+            .expect("issue otp share");
+
+        // Pre-verify: the gate refuses the attach with 403 (no socket).
+        let resp = gate(&app, &s1, &token).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "an OTP-pending share must be denied at the WS gate"
+        );
+
+        // Redeem the code, then the gate lets the attach through.
+        assert!(repo.verify_share_otp(&token, &otp).await.unwrap());
+        let resp = gate(&app, &s1, &token).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "after OTP verification the share may attach"
+        );
+        assert_eq!(
+            resp.headers().get("x-can-input").unwrap(),
+            "0",
+            "a viewer OTP share is still read-only"
         );
     }
 
