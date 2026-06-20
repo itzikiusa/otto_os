@@ -10,6 +10,73 @@ import { swarm } from './stores/swarm.svelte';
 import { usage } from './api/usage.svelte';
 import { product } from './stores/product.svelte';
 
+// ---------------------------------------------------------------------------
+// improvement_updated — simple reactive counter so subscribed pages refresh.
+// ---------------------------------------------------------------------------
+
+/** Incremented each time an `improvement_updated` WS event arrives.
+ *  Self-Improvement page subscribes to this value instead of polling. */
+export class ImprovementUpdateBus {
+  /** Tick counter — consumers react to its change, not the value. */
+  tick: number = $state(0);
+  /** Kind of the most-recent update ("run_finished" | "approval_pending"). */
+  lastKind: string = $state('');
+  /** Id of the updated run/edit, if the server sent one. */
+  lastId: string | null = $state(null);
+
+  apply(kind: string, id?: string | null): void {
+    this.lastKind = kind;
+    this.lastId = id ?? null;
+    this.tick += 1;
+  }
+}
+
+export const improvementBus = new ImprovementUpdateBus();
+
+// ---------------------------------------------------------------------------
+// workflow_run_updated / skill_eval_updated — reactive buses for the Workflows
+// and Skill-Eval pages. Both pages subscribe to the relevant bus and trigger a
+// single GET when their run_id matches, replacing fixed-interval polling.
+// ---------------------------------------------------------------------------
+
+/** Incremented each time a `workflow_run_updated` WS event arrives.
+ *  WorkflowsPage subscribes and re-fetches the matching run immediately. */
+export class WorkflowRunBus {
+  tick: number = $state(0);
+  runId: string = $state('');
+  workspaceId: string = $state('');
+  status: string = $state('');
+  nodeId: string | null = $state(null);
+
+  apply(workspaceId: string, runId: string, status: string, nodeId?: string | null): void {
+    this.workspaceId = workspaceId;
+    this.runId = runId;
+    this.status = status;
+    this.nodeId = nodeId ?? null;
+    this.tick += 1;
+  }
+}
+
+export const workflowRunBus = new WorkflowRunBus();
+
+/** Incremented each time a `skill_eval_updated` WS event arrives.
+ *  Skill-Eval pages subscribe and stop polling once a terminal status lands. */
+export class SkillEvalBus {
+  tick: number = $state(0);
+  runId: string = $state('');
+  workspaceId: string = $state('');
+  status: string = $state('');
+
+  apply(workspaceId: string, runId: string, status: string): void {
+    this.workspaceId = workspaceId;
+    this.runId = runId;
+    this.status = status;
+    this.tick += 1;
+  }
+}
+
+export const skillEvalBus = new SkillEvalBus();
+
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
 class EventsClient {
@@ -78,6 +145,17 @@ class EventsClient {
         } else if (parsed.type === 'product_changed') {
           // Let product section tabs know a run completed (kills a poll cycle).
           product.applyEvent(parsed);
+        } else if (parsed.type === 'improvement_updated') {
+          // Let the Self-Improvement pane refresh without waiting for its poll.
+          improvementBus.apply(parsed.kind, parsed.id);
+        } else if (parsed.type === 'workflow_run_updated') {
+          // Workflow execution progress: node-start / node-finish / run complete.
+          // The Workflows page subscribes to workflowRunBus and re-fetches only
+          // the run whose id matches, replacing the 700ms interval poll.
+          workflowRunBus.apply(parsed.workspace_id, parsed.run_id, parsed.status, parsed.node_id);
+        } else if (parsed.type === 'skill_eval_updated') {
+          // Skill-Eval terminal notification (done/error/cancelled).
+          skillEvalBus.apply(parsed.workspace_id, parsed.run_id, parsed.status);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

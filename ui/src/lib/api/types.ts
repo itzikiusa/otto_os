@@ -310,7 +310,27 @@ export type OttoEvent =
       story_id: Id;
       section: string;
       status: string;
-    };
+    }
+  /** A self-improvement run finished or an approval became pending. Lets the
+   *  Self-Improvement settings pane refresh on the event instead of guessing.
+   *  `kind` is "run_finished" | "approval_pending".
+   *  A8 — Skills/Improve/Channels cluster. */
+  | { type: 'improvement_updated'; kind: string; id?: string | null }
+  /** A workflow run advanced: a node started, finished (or was served from
+   *  cache), or the run reached a terminal status. `node_id` is present when a
+   *  specific node changed; absent when the overall run changed (start/terminal).
+   *  A11 — Workflows cluster. Supplement for a capped 700ms poll fallback. */
+  | {
+      type: 'workflow_run_updated';
+      workspace_id: Id;
+      run_id: Id;
+      status: string;
+      node_id?: Id | null;
+    }
+  /** A skill-evaluation run reached a terminal state (done/error/cancelled).
+   *  Lets the Skill-Eval UI replace its 2s×600 fixed poll with event-driven
+   *  refresh. A11 — Workflows cluster. */
+  | { type: 'skill_eval_updated'; workspace_id: Id; run_id: Id; status: string };
 
 // ---------------------------------------------------------------------------
 // Notifications (notification center)

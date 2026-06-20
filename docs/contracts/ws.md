@@ -236,3 +236,73 @@ AI-run task (analysis, rewrite, test-case generation, plan generation).
   which fires per-section subscriber callbacks registered by each product tab (`AnalysisTab`,
   `PlanTab`, `RewriteTab`, `TestCasesTab`). Each tab's callback triggers a single poll to
   refresh its data immediately, supplementing the existing timed polling as a fallback.
+
+## Workflow run progress (A11)
+
+Workspace-scoped. Emitted by `crates/otto-server/src/workflow_engine.rs` at
+every node transition (start, finish/cached) and when the overall run reaches a
+terminal status. Lets the Workflows page switch from a 700ms poll loop to
+event-driven refresh; a capped fallback poll (backing off to 3s, max 300 ticks)
+is kept for cases where the WS connection is unavailable.
+
+```json
+{
+  "type": "workflow_run_updated",
+  "workspace_id": "<Id>",
+  "run_id": "<Id>",
+  "status": "running|success|error|canceled",
+  "node_id": "<node_id | null>"
+}
+```
+
+- `node_id` — the node whose state changed; `null` when the event reflects the
+  overall run status (run started / run terminal).
+- UI routing: `events.svelte.ts` dispatches to `workflowRunBus.apply()`.
+  `WorkflowsPage.svelte` subscribes to `workflowRunBus.tick` and re-fetches
+  `GET /workflow-runs/{id}` whenever a matching `run_id` event fires.
+- TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts`
+  as `{ type: 'workflow_run_updated'; workspace_id: Id; run_id: Id; status:
+  string; node_id?: Id | null }`.
+
+## Skill-eval completion (A11)
+
+Workspace-scoped. Emitted by `crates/otto-server/src/skill_eval.rs` at the end
+of every skill evaluation (done/error/cancelled). Lets the Skill-Eval UI drop
+its 2s×600 polling pattern and refresh on demand.
+
+```json
+{
+  "type": "skill_eval_updated",
+  "workspace_id": "<Id>",
+  "run_id": "<eval_id>",
+  "status": "done|error|cancelled"
+}
+```
+
+- `run_id` — the `skill_evals.id` that reached a terminal state.
+- UI routing: `events.svelte.ts` dispatches to `skillEvalBus.apply()`.
+- TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts`
+  as `{ type: 'skill_eval_updated'; workspace_id: Id; run_id: Id; status:
+  string }`.
+
+## Self-improvement update (A8)
+
+Global (everyone-scoped). Emitted by `crates/otto-improve/src/engine.rs` when a
+self-improvement run finishes or an approval becomes pending. Lets the
+Self-Improvement settings pane refresh on the event instead of guessing with a
+blind timer.
+
+```json
+{
+  "type": "improvement_updated",
+  "kind": "run_finished|approval_pending",
+  "id": "<run_or_approval_id | null>"
+}
+```
+
+- `kind` — `"run_finished"` after an `execute_run`/`evolve_session` completes,
+  `"approval_pending"` when a new edit awaits approval.
+- UI routing: `events.svelte.ts` dispatches to `improvementBus`; the
+  Self-Improvement pane refreshes on it and keeps a capped poll fallback.
+- TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts`
+  as `{ type: 'improvement_updated'; kind: string; id?: string | null }`.

@@ -608,6 +608,7 @@ configured Jira/Confluence account.
 | GET /workspaces/{id}/integrations | ws viewer | — | configured channel integrations |
 | PUT /workspaces/{id}/integrations/{channel} | ws editor | UpsertIntegrationReq | Integration |
 | DELETE /workspaces/{id}/integrations/{channel} | ws editor | — | 204 |
+| POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message to the channel |
 | POST /workspaces/{id}/integrations/seed-from-loom | ws editor | — | seed integrations from a Loom config |
 
 ## Self-improvement engine
