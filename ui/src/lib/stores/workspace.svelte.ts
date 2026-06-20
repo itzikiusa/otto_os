@@ -204,7 +204,14 @@ class WorkspaceStore {
     if (!this.currentId) return;
     this.sessionsLoading = true;
     try {
-      this.sessions = await api.get<Session[]>(`/workspaces/${this.currentId}/sessions`);
+      const all = await api.get<Session[]>(`/workspaces/${this.currentId}/sessions`);
+      // Insights runs spawn a throwaway global agent session (meta.source =
+      // 'insights') hosted on an arbitrary workspace just for the FK — it's a
+      // background scheduled job, not a user session, so keep it out of the
+      // Agents list (its report is viewable in the Insights module).
+      this.sessions = all.filter(
+        (s) => (s.meta as { source?: string } | null)?.source !== 'insights',
+      );
       for (const s of this.sessions) this.statusMap[s.id] = s.status;
       this.reconcileTabs();
     } finally {

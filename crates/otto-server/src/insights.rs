@@ -450,9 +450,13 @@ pub async fn run_insights(ctx: &ServerCtx, kind: Kind, offset: i64) -> otto_core
         } else {
             warn!(session = %sid, "insights: session TUI never became ready");
         }
-        // Best-effort: give the run a generous window, then leave the session
-        // openable (do NOT kill it — the user can inspect the terminal).
+        // Give the run a generous window to finish, then archive the throwaway
+        // session so it doesn't linger in the Agents list. Insights is a global
+        // scheduled job and its report artifacts are written to disk
+        // independently, so the session itself is disposable — mirrors the
+        // review-session cleanup (which archives when done).
         tokio::time::sleep(RUN_TIMEOUT).await;
+        let _ = manager.archive(&sid).await;
     });
 
     Ok(Some(session.id))
