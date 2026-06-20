@@ -637,3 +637,142 @@ citing the `file:line` it would change. **Nothing here is implemented — this i
 
 **Supersedes:** `docs/research/2026-06-20-otto-existing-feature-enhancement-roadmap.md` and the
 interim `docs/feature-enhancements-2026-06-20.md` (both folded into this document).
+
+---
+
+## 9. Implementation status (verified 2026-06-20)
+
+Most of this plan was implemented on branch **`feat/fe-enh`** (this worktree;
+28–33 commits beyond `main`@`19cf2398`, migrations **0049–0053**, **not merged**). The
+status below was **independently verified** by 6 read-only agents diffing the plan against
+the actual code, plus a clean re-run of the release gates.
+
+### 9.1 Release gates — independently GREEN (this worktree)
+| Gate | Result |
+|---|---|
+| `cargo build --workspace` | ✅ Finished |
+| `cargo test --workspace` | ✅ **858 passed / 0 failed** (78 bins) |
+| `cd ui && npm run check` | ✅ **516 files, 0 errors, 0 warnings** |
+
+> Note: the **primary** checkout (`/Users/itziklavon/otto_os`, `feat/kafka-ssh-tunnel`)
+> currently does **not** compile — `otto-brokers` has an in-progress
+> `BrokersService { group_denied }` change that's half-finished (unrelated WIP).
+
+### 9.2 Coverage tally (concrete enhancement bullets, ~107)
+| Cluster | ✅ Done | 🟡 Partial | ❌ Missing |
+|---|---|---|---|
+| Sessions/Terminal + Git/Review | 16 | 7 | 0 |
+| Product + Swarm | 24 | 0 | 1 |
+| Connections/DB + API Client | 11 | 5 | 2 |
+| Brokers + Usage/Insights | 21 | 3 | 0 |
+| Skills/Improve/Channels + Workflows | 16 | 3 | 1 (Vault) |
+| Settings/RBAC/Shell + Help | 8 | 1 | 0 |
+| **Total (approx.)** | **~88** | **~19** | **~5** |
+
+**Net:** "~87/107 done" holds for *fully* done; ~19 are partial (usually the UI half, or
+scope narrowed from "per engine" to one engine); ~5 genuinely missing.
+
+### 9.3 T1 polling→events — wiring status (the load-bearing theme)
+| Event | Emitted (prod) | Consumed (UI) | Verdict |
+|---|---|---|---|
+| `product_changed` | ✅ ×7 | ✅ all 4 tabs | **Live** |
+| `improvement_updated` | ✅ | ✅ | **Live** |
+| `workflow_run_updated` | ✅ ×10 | ✅ | **Live** |
+| `skill_eval_updated` | ✅ | ✅ | **Live** |
+| `usage_metrics_tick` | ✅ | ✅ | **Live** |
+| `insight_ready` | ✅ | ✅ | **Live** |
+| **`review_changed`** | ✅ ×8 | ❌ **no UI handler** | **DEAD** — review still polls |
+| **`budget_exceeded`** | ❌ **only in `#[cfg(test)]`** | toggle exists | **DEAD** — promises an undeliverable notification |
+
+### 9.4 Strategic themes (S1–S7) — mostly the next frontier
+| Theme | Status | What landed / what's missing |
+|---|---|---|
+| S1 Work-control surface | 🟡 Partial | needs-you state + filter + status dot done; **grouped work-queue, pane-header attribution (model/repo/branch/PR/cost), bulk resume/pause = unbuilt** |
+| S2 Verified review loop | 🟡 Partial | finding-identity DB schema (0049) + verdict/blocker_count exist; **UI keys findings by array index, no fingerprint/grouping → cross-run identity not surfaced** |
+| S3 Work-graph attribution | 🟡 Mostly unbuilt | swarm-id meta + swarm per-turn cost backfill done; **no repo/branch/pr/story/workflow/origin stamping on session meta or usage ingest; no cost drilldown** |
+| S4 Accepted-but-ignored controls | ⚪ Not addressed | Product `_model` etc. not audited this pass |
+| S5 Live agent tools (DB/API/Brokers MCP) | ❌ Unbuilt | only passive MCP-server config exists |
+| S6 Capability/health registry | 🟡 Thin | only a provider-outage banner (`serviceHealth.svelte.ts`); no cross-capability registry, one-click fixes, or support bundle |
+| S7 Cross-module palette/search | 🟡 Partial | indexes commands+workspaces+sessions+connections+help; **no entity indexing (stories/PRs/queries/topics/memories), action rows, or transcript search** |
+
+### 9.5 Notable gaps, dead paths & one latent bug
+- **`review_changed` emitted but never consumed** — `events.svelte.ts` has no branch; review refresh still relies on the timer. (T1 not realized for review.)
+- **`budget_exceeded` never emitted in production** — defined, scoped, routed, toggled, documented; only constructed in `#[cfg(test)]`. The toggle is a promise the daemon can't keep.
+- **`ci_status` hardcoded `None`** in all three git providers — only `draft`+`labels` landed; no green/red CI pill (merge-readiness incomplete).
+- **`DiffViewer` not truly virtualized** — hunk-line capping only; the shared `VirtualList` exists but isn't applied; `splitRows()` not memoized.
+- **Terminal grid size saved to meta but never restored** on spawn/restart (always 80×24).
+- **Server-side terminal ring-search backend complete but client never sends `Search`** (still local xterm addon).
+- **MySQL row-count estimate backend exists but UI never requests it / no "~"** → unreachable.
+- **DB result streaming / server-side sort+filter not done** (UI virtualization + server-side export-past-cap landed instead); per-statement timeout is **MySQL-only**; tunnel-cache reuse covers **test, not terminal**.
+- **Vault**: only a cosmetic token badge + Copy-JSON; none of the substantial enhancements.
+- **Latent panic:** `otto-improve/src/engine.rs:763,782` slices `content[..8000]` by **byte** index → panics on a multibyte boundary. **Must-fix.**
+
+---
+
+## 10. The next must-have wave (post-implementation)
+
+Two tiers: **10A** finishes partials that currently *defeat their own goal* (small, high
+value); **10B** is the strategic workflow-integration layer that's still mostly unbuilt —
+the genuine "more must-have features."
+
+### 10A — Finish-the-partials (must-have completions, mostly S/M)
+1. **Consume `review_changed`** in `events.svelte.ts` (+ a review bus) so review goes
+   event-driven like the other 5 — and **surface finding identity** (key by fingerprint,
+   group by file/severity) to realize S2.
+2. **Emit `budget_exceeded`** from the usage sampler when enforcement trips, and add a
+   **point-of-action budget check** before review/product/swarm/workflow runs (makes the
+   existing toggle + budgets real).
+3. **Populate `ci_status`** (GitHub check-runs / GitLab pipelines / Bitbucket statuses) +
+   a green/red/draft pill → completes the merge-readiness gate.
+4. **True `DiffViewer` virtualization** (apply the existing `VirtualList`) + memoize
+   `splitRows` + read the `too_large` flag for an "open on host / load anyway" guard.
+5. **Restore terminal grid size** from `meta` on spawn/restart (kills the 80×24 reflow).
+6. **Wire the remaining UI halves:** ring-search client frame; row-count "~" estimate
+   opt-in; per-session "evolve" which-skills-changed badge; connections "Recent" group;
+   audit-log quick presets + copy-JSON.
+7. **Close the residual perf gaps:** `by_kind_rollup` N+1 + 4th-query batching (usage);
+   bound the recruiter skill-list; per-statement timeout for ClickHouse/Mongo/Redis.
+8. **Fix the latent panic** (`engine.rs` byte-slice → char-boundary-safe truncation).
+
+### 10B — Strategic must-haves (the workflow-integration layer — mostly unbuilt)
+The highest-value *new* must-haves; they turn the modules into one workflow and are what
+competitors (Copilot/Cursor/Postman/DBeaver) are racing on.
+
+- **S5 — Live agent tools for DB / API / Brokers** *(Otto's differentiator; entirely
+  unbuilt).* Read-only DB MCP tool (row caps, timeout, env guardrails, write-prohibited by
+  default); API "send request/response/history to focused agent" + "generate tests";
+  Brokers "investigate lag/topic/schema" context packet — each showing the exact packet
+  before sending. **Prerequisite: a secret/PII redaction layer for context packets** (new,
+  must-have for safety).
+- **S6 — Capability & health registry + support-bundle export.** One shared registry
+  (provider-auth / Keychain / ClickHouse / issue-account / Slack-socket / Kafka-reach /
+  MCP-health) with per-module ready/degraded/missing-setup + one-click fixes; plus a
+  first-run health checklist (onboarding). Reduces support/debug friction across *every*
+  module.
+- **S7 — Cross-module search.** Index stories/versions/questions/learnings/PRs/commits/
+  branches/saved queries/API requests/workflows/swarm tasks/broker topics/schemas/Vault
+  memories; action rows (open / send-to-agent / attach / copy-context / run / reveal);
+  search activity trails + transcripts; "most likely next action."
+- **S3 — Work-graph attribution + cost drilldown.** Stamp `repo_id`/`branch`/`pr_number`/
+  `story_id`/`workflow_id`/`origin` on session meta **and** usage ingest (new ClickHouse
+  columns); "why did this cost so much?" drilldown. (Swarm-id + swarm cost backfill already
+  exist — extend the pattern.)
+- **S1 — Work-control surface.** The grouped work queue (Needs-attention / Working /
+  Review-ready / Waiting / Done / Suspended), full pane-header attribution
+  (model/repo/branch/PR/cost/last-output), and bulk "resume all suspended / pause noisy
+  group". (needs-you substrate already exists — build the queue on top.)
+- **Unified action audit + outcome capture.** Extend the existing `broker_write_audit` +
+  impersonation audit into **one** audit surface for every external/destructive action
+  (git push, PR post, channel send, DB write, settings/auth change); add per-session
+  "definition of done" + outcome capture feeding outcome-aware self-improvement.
+- **Vault grounded enhancements** *(coverage gap — no audit pass yet).* Force-directed
+  graph + filters; memory lifecycle (suggested/accepted/stale/contradicted); provenance
+  diff; forget/merge/split with undo; import `AGENTS.md`/`CLAUDE.md`/`.cursorrules` as
+  governed assets.
+- **Settings export/import + state backup/restore** (secrets excluded) — operational
+  safety net that doesn't exist today.
+
+**Sequencing:** 10A is a single cleanup sprint (small, finishes what's 80% there). 10B
+maps onto Sprints 3–5 in §6 (S3 → Sprint 3, S5 → Sprint 4, S7/S6/S1 → ongoing), with the
+**secret-redaction layer gating S5** and **`review_changed` consumption + `budget_exceeded`
+emitter** the two highest-ratio fixes to do first.
