@@ -19,6 +19,7 @@
   import Logs from './Logs.svelte';
   import LanguageServers from './LanguageServers.svelte';
   import TrustSafety from './TrustSafety.svelte';
+  import EmailSenderSetup from './EmailSenderSetup.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -36,6 +37,7 @@
     { id: 'insights', label: 'Insights' },
     { id: 'context-soul', label: 'Context & Soul' },
     { id: 'language-servers', label: 'Language Servers' },
+    { id: 'sharing', label: 'Sharing' },
     // skills + skill-eval + context-library: settings:admin covers these root-managed items.
     ...(auth.can('settings', 'admin')
       ? [
@@ -105,6 +107,8 @@
       <Users />
     {:else if page === 'sessions' && auth.can('users', 'admin')}
       <AdminSessions />
+    {:else if page === 'sharing'}
+      <EmailSenderSetup />
     {:else if page === 'daemon' && auth.can('settings', 'admin')}
       <Daemon />
     {:else if page === 'trust-safety' && auth.can('settings', 'admin')}

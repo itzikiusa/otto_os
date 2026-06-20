@@ -2,13 +2,16 @@
   // "Share this session" modal: mint a scoped share link (viewer or editor,
   // with a fixed TTL), display the URL + a QR code for phone hand-off, and
   // list/revoke existing active shares for the session.
+  // Task 7.5: adds recipient email + duration (≤12h) for OTP-gated shares and
+  // shows a hint when the owner has no verified email sender.
   import { onMount } from 'svelte';
   import QRCode from 'qrcode';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
-  import type { CreateShareReq, CreateShareResp, ShareInfo } from '../../lib/api/types';
+  import type { CreateShareReq, CreateShareResp, ShareInfo, EmailSenderResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
+  import { router } from '../../lib/router.svelte';
 
   interface Props {
     sessionId: string;
@@ -20,6 +23,14 @@
   let role = $state<'viewer' | 'editor'>('viewer');
   let ttlSecs = $state(3600);
   let label = $state('');
+  /** Recipient email for OTP-gated shares (Task 7.5). Empty = no OTP gate. */
+  let recipientEmail = $state('');
+  /** Duration in seconds for OTP-gated shares; capped at 43200 (12h). */
+  let durationSecs = $state(3600);
+
+  // ── email sender state (needed to warn when no verified sender exists) ────────
+  let emailSender = $state<EmailSenderResp | null>(null);
+  let emailSenderLoading = $state(true);
 
   // ── minted-link state (shown after POST) ────────────────────────────────────
   let mintedUrl = $state<string | null>(null);
@@ -35,10 +46,29 @@
   let revoking = $state<Record<string, boolean>>({});
   let revokingAll = $state(false);
 
-  // ── fetch existing shares on mount ──────────────────────────────────────────
+  // ── fetch existing shares + email sender status on mount ───────────────────
   onMount(() => {
     void loadShares();
+    void loadEmailSender();
   });
+
+  async function loadEmailSender(): Promise<void> {
+    emailSenderLoading = true;
+    try {
+      emailSender = await api.get<EmailSenderResp>('/email-sender');
+    } catch {
+      // Non-fatal: just hide the OTP hint.
+      emailSender = null;
+    } finally {
+      emailSenderLoading = false;
+    }
+  }
+
+  /** True when the owner has a working verified email sender. */
+  const hasSender = $derived(emailSender?.verified === true);
+
+  /** Derive whether the OTP branch is active (email field has content). */
+  const isOtpShare = $derived(recipientEmail.trim() !== '');
 
   async function loadShares(): Promise<void> {
     sharesLoading = true;
@@ -69,9 +99,13 @@
     mintedUrl = null;
     mintedToken = null;
     try {
+      const email = recipientEmail.trim();
       const body: CreateShareReq = {
         role,
-        ttl_secs: ttlSecs,
+        // Plain share: use ttlSecs; OTP share: duration_secs governs the window.
+        ...(email
+          ? { recipient_email: email, duration_secs: Math.min(durationSecs, 43200) }
+          : { ttl_secs: ttlSecs }),
         label: label.trim() || undefined,
       };
       const resp = await api.post<CreateShareResp>(
@@ -82,7 +116,12 @@
       mintedToken = resp.token;
       // Optimistically prepend the new share to the list.
       shares = [resp.info, ...shares];
-      toasts.success('Share link created', 'Copy the URL or scan the QR code.');
+      toasts.success(
+        'Share link created',
+        email
+          ? `A 6-digit code was emailed to ${email}. The recipient must enter it before attaching.`
+          : 'Copy the URL or scan the QR code.',
+      );
     } catch (e) {
       toasts.error('Could not create share link', e instanceof Error ? e.message : String(e));
     } finally {
@@ -156,11 +195,20 @@
     return `expires in ${m}m`;
   }
 
+  // Plain share TTL options (max 24h per base design).
   const TTL_OPTIONS = [
     { label: '1 hour', secs: 3600 },
     { label: '4 hours', secs: 14400 },
     { label: '12 hours', secs: 43200 },
     { label: '24 hours', secs: 86400 },
+  ];
+
+  // OTP-gated share duration options (hard max 12h per spec).
+  const DURATION_OPTIONS = [
+    { label: '30 minutes', secs: 1800 },
+    { label: '1 hour', secs: 3600 },
+    { label: '4 hours', secs: 14400 },
+    { label: '12 hours (max)', secs: 43200 },
   ];
 </script>
 
@@ -175,14 +223,62 @@
       </select>
     </div>
 
+    <!-- ── OTP gate: recipient email ────────────────────────────────────── -->
     <div class="sm-row">
-      <label class="sm-label" for="sm-ttl">Expires after</label>
-      <select id="sm-ttl" class="sm-select" bind:value={ttlSecs}>
-        {#each TTL_OPTIONS as opt (opt.secs)}
-          <option value={opt.secs}>{opt.label}</option>
-        {/each}
-      </select>
+      <label class="sm-label" for="sm-recipient">
+        Recipient email
+        <span class="sm-optional">(optional — adds OTP email gate)</span>
+      </label>
+      {#if !emailSenderLoading && !hasSender}
+        <div class="sm-sender-warn">
+          <Icon name="warn" size={12} />
+          No verified email sender.
+          <!-- svelte-ignore a11y_invalid_attribute -->
+          <a
+            href="#"
+            onclick={(e) => { e.preventDefault(); onclose(); router.go('settings/sharing'); }}
+          >
+            Set one up in Settings → Sharing
+          </a>
+          before creating OTP-gated links.
+        </div>
+      {/if}
+      <input
+        id="sm-recipient"
+        class="sm-input"
+        type="email"
+        placeholder="guest@example.com — leave blank for a plain link"
+        autocomplete="off"
+        bind:value={recipientEmail}
+        disabled={!hasSender && !emailSenderLoading}
+        title={!hasSender && !emailSenderLoading ? 'Set up a verified email sender first (Settings → Sharing)' : undefined}
+      />
     </div>
+
+    <!-- Duration (only meaningful for OTP shares) ─────────────────────── -->
+    {#if isOtpShare}
+      <div class="sm-row">
+        <label class="sm-label" for="sm-duration">Session window (max 12h)</label>
+        <select id="sm-duration" class="sm-select" bind:value={durationSecs}>
+          {#each DURATION_OPTIONS as opt (opt.secs)}
+            <option value={opt.secs}>{opt.label}</option>
+          {/each}
+        </select>
+        <span class="sm-note">
+          How long the guest may stay attached after entering the code.
+          Each extension re-starts this window.
+        </span>
+      </div>
+    {:else}
+      <div class="sm-row">
+        <label class="sm-label" for="sm-ttl">Link expires after</label>
+        <select id="sm-ttl" class="sm-select" bind:value={ttlSecs}>
+          {#each TTL_OPTIONS as opt (opt.secs)}
+            <option value={opt.secs}>{opt.label}</option>
+          {/each}
+        </select>
+      </div>
+    {/if}
 
     <div class="sm-row">
       <label class="sm-label" for="sm-label">Label (optional)</label>
@@ -195,6 +291,14 @@
         bind:value={label}
       />
     </div>
+
+    {#if isOtpShare && hasSender}
+      <p class="sm-otp-note">
+        <Icon name="mail" size={12} />
+        The recipient will be emailed a 6-digit code they must enter before the
+        terminal attaches. The code is locked to their address for the lifetime of the link.
+      </p>
+    {/if}
 
     <button class="btn primary sm-generate" disabled={generating} onclick={generate}>
       {generating ? 'Generating…' : 'Generate link'}
@@ -297,6 +401,43 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
+  }
+  .sm-optional {
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    font-style: italic;
+  }
+  .sm-sender-warn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11.5px;
+    color: #f59e0b;
+    padding: 4px 0;
+  }
+  .sm-sender-warn a {
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .sm-note {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+  .sm-otp-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
+    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    border-radius: var(--radius-s);
+    padding: 8px 10px;
+    margin: 0;
+    line-height: 1.5;
   }
   .sm-select,
   .sm-input {
