@@ -665,31 +665,63 @@ async fn run(cfg: Config) -> Result<(), String> {
 
 /// launchd starts agents with a bare PATH (`/usr/bin:/bin:...`), which hides
 /// user-installed CLIs (claude in ~/.local/bin, codex in ~/.bun/bin, homebrew
-/// git, ...). Prepend the usual tool directories so detection and PTY spawns
-/// see the same commands the user's shell does.
+/// git, language servers in ~/go/bin or a custom npm prefix, ...). Prepend the
+/// usual tool directories — plus the *discovered* npm-global and GOPATH bins —
+/// so detection and PTY spawns see the same commands the user's shell does.
 fn augment_path() {
     let home = std::env::var("HOME").unwrap_or_default();
-    let extra = [
+    prepend_path(&[
         format!("{home}/.local/bin"),
         format!("{home}/.bun/bin"),
         format!("{home}/.claude/local"),
         format!("{home}/.cargo/bin"),
         format!("{home}/bin"),
+        // Go binaries (gopls, etc.) install here by default.
+        format!("{home}/go/bin"),
         // Otto's own bin dir, where the usage feature installs `clickhouse`.
         format!("{home}/Library/Application Support/Otto/bin"),
         "/opt/homebrew/bin".to_string(),
         "/usr/local/bin".to_string(),
-    ];
+    ]);
+    // Discover the npm global-prefix bin and GOPATH bin (best-effort; npm/go are
+    // now resolvable via the prepends above). This catches servers installed to a
+    // custom prefix (e.g. `npm config set prefix ~/.hermes/node`) that the user
+    // never added to their own PATH.
+    if let Some(out) = probe_cmd("npm", &["prefix", "-g"]) {
+        let dir = format!("{}/bin", out.trim());
+        prepend_path(std::slice::from_ref(&dir));
+    }
+    if let Some(out) = probe_cmd("go", &["env", "GOPATH"]) {
+        let gopath = out.trim();
+        if !gopath.is_empty() {
+            let dir = format!("{gopath}/bin");
+            prepend_path(std::slice::from_ref(&dir));
+        }
+    }
+}
+
+/// Prepend `dirs` (those that exist and aren't already present) to `$PATH`.
+fn prepend_path(dirs: &[String]) {
     let current = std::env::var("PATH").unwrap_or_default();
-    let mut parts: Vec<String> = extra
-        .into_iter()
-        .filter(|p| !current.split(':').any(|c| c == p) && std::path::Path::new(p).is_dir())
+    let mut parts: Vec<String> = dirs
+        .iter()
+        .filter(|p| !current.split(':').any(|c| c == p.as_str()) && std::path::Path::new(p).is_dir())
+        .cloned()
         .collect();
     if parts.is_empty() {
         return;
     }
     parts.push(current);
     std::env::set_var("PATH", parts.join(":"));
+}
+
+/// Run `cmd args`, returning trimmed stdout on success (best-effort; `None` if
+/// the command is missing or fails). Used to discover tool install prefixes.
+fn probe_cmd(cmd: &str, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(cmd).args(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Build the rustls config for the 0.0.0.0 network listener from a PEM cert+key
