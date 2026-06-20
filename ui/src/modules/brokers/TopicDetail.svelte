@@ -11,6 +11,7 @@
     ConsumeResp,
     KafkaMessage,
     MessageHeader,
+    PartitionRange,
     ProduceReq,
     StartPosition,
     TopicDetail,
@@ -40,12 +41,20 @@
   let limit = $state(50);
   let decode = $state<ValueFormat>('auto');
   let keyFilter = $state('');
+  let keyFromBeginning = $state(false);
   let valueFilter = $state('');
   let consuming = $state(false);
   let result = $state<ConsumeResp | null>(null);
   let selected = $state<KafkaMessage | null>(null);
   let rawView = $state(false);
-  // Auto-refresh the peek on an interval (live-tail), with an off switch.
+
+  // ---- incremental live-tail state ----
+  // Tracks the max offset seen per partition so each poll only fetches new messages.
+  let tailOffsets = $state<Map<number, number>>(new Map());
+  // Capped ring buffer so the in-memory list does not grow unbounded.
+  const TAIL_CAP = 500;
+  // Auto-refresh on an interval (live-tail). The interval re-uses the offsets
+  // accumulated so far; toggling off clears them.
   let autoPoll = $state(false);
   const POLL_MS = 60_000;
 
@@ -81,17 +90,23 @@
     selected = null;
     tab = 'messages';
     autoPoll = false;
+    tailOffsets = new Map();
     loadDetail();
   });
 
-  // Auto-refresh the peek every minute while enabled. Only `autoPoll` is a
-  // dependency (untrack the consume call so editing the filters doesn't reset
-  // the timer); the immediate run gives instant feedback when toggled on.
+  // Incremental live-tail: on each tick, request only messages past the max
+  // offset seen per partition (forward consume). New messages are appended to
+  // the existing result; the ring buffer is capped at TAIL_CAP so memory is
+  // bounded. The first tick after enabling autoPoll does a normal peek to seed
+  // the offsets; subsequent ticks send `start: { type: 'offset', offset: … }`
+  // per partition (one call per partition that has a known cursor, falling back
+  // to a single all-partition call when no cursor is set yet).
   $effect(() => {
     if (!autoPoll) return;
-    untrack(() => void consume());
+    // Seed on enable.
+    untrack(() => void consumeWithTail(false));
     const timer = setInterval(() => {
-      if (!consuming) untrack(() => void consume());
+      if (!consuming) untrack(() => void consumeWithTail(true));
     }, POLL_MS);
     return () => clearInterval(timer);
   });
@@ -101,20 +116,122 @@
     return new Date(ms).toLocaleString();
   }
 
-  async function consume() {
-    let start: StartPosition;
-    if (startMode === 'beginning') start = { type: 'beginning' };
-    else if (startMode === 'offset') start = { type: 'offset', offset: Number(startOffset) };
-    else if (startMode === 'timestamp')
-      start = { type: 'timestamp', timestamp_ms: new Date(startTs).getTime() || Date.now() };
-    else start = { type: 'latest' };
+  /** Build a start position appropriate for a fresh (non-tail) peek. */
+  function buildStart(): StartPosition {
+    if (startMode === 'beginning') return { type: 'beginning' };
+    if (startMode === 'offset') return { type: 'offset', offset: Number(startOffset) };
+    if (startMode === 'timestamp')
+      return { type: 'timestamp', timestamp_ms: new Date(startTs).getTime() || Date.now() };
+    return { type: 'latest' };
+  }
 
+  /** Update tailOffsets from a batch of returned messages. */
+  function updateTailOffsets(msgs: KafkaMessage[]) {
+    for (const m of msgs) {
+      const prev = tailOffsets.get(m.partition) ?? -1;
+      if (m.offset > prev) tailOffsets.set(m.partition, m.offset);
+    }
+    // Trigger reactivity: reassign the map reference.
+    tailOffsets = new Map(tailOffsets);
+  }
+
+  /** Cap the messages ring at TAIL_CAP (drop oldest). */
+  function capRing(msgs: KafkaMessage[]): KafkaMessage[] {
+    return msgs.length > TAIL_CAP ? msgs.slice(msgs.length - TAIL_CAP) : msgs;
+  }
+
+  /**
+   * Consume messages.
+   *
+   * When `incremental` is true and tailOffsets has entries, issue per-partition
+   * requests from (maxOffset + 1) and append new messages instead of replacing.
+   * When tailOffsets is empty (first tick) or incremental is false, do a
+   * normal full peek and seed the offsets.
+   */
+  async function consumeWithTail(incremental: boolean) {
+    const hasCursors = tailOffsets.size > 0;
+
+    if (!incremental || !hasCursors) {
+      // Seed pass: normal peek, then seed offsets from what comes back.
+      await consume();
+      if (result) updateTailOffsets(result.messages);
+      return;
+    }
+
+    // Incremental pass: one request per partition with a known cursor.
+    // We ask for a small window (limit=50 per partition) starting just past
+    // the last seen offset. Responses are merged into the existing result.
+    consuming = true;
+    try {
+      const parts = partition !== '' ? [Number(partition)] : [...tailOffsets.keys()];
+      const newMsgs: KafkaMessage[] = [];
+      let mergedPartitions: PartitionRange[] = result?.partitions ?? [];
+
+      for (const p of parts) {
+        const cursor = tailOffsets.get(p);
+        if (cursor === undefined) continue;
+        const req: ConsumeReq = {
+          partition: p,
+          start: { type: 'offset', offset: cursor + 1 },
+          limit: 50,
+          decode,
+          // No filters on tail increments — they were applied on the seed.
+        };
+        try {
+          const r = await api.post<ConsumeResp>(
+            `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}/consume`,
+            req,
+          );
+          newMsgs.push(...r.messages);
+          // Merge watermark ranges: keep the freshest high for each partition.
+          mergedPartitions = mergePartitionRanges(mergedPartitions, r.partitions);
+        } catch {
+          // A single partition failing shouldn't abort the whole tail.
+        }
+      }
+
+      if (newMsgs.length > 0) {
+        updateTailOffsets(newMsgs);
+        const combined = capRing([...(result?.messages ?? []), ...newMsgs]);
+        result = {
+          messages: combined,
+          partitions: mergedPartitions,
+          truncated: result?.truncated ?? false,
+        };
+        toasts.info(`+${newMsgs.length} new message${newMsgs.length === 1 ? '' : 's'}`);
+      }
+    } finally {
+      consuming = false;
+    }
+  }
+
+  /** Merge two PartitionRange arrays, keeping the widest [low, high] per partition. */
+  function mergePartitionRanges(a: PartitionRange[], b: PartitionRange[]): PartitionRange[] {
+    const map = new Map<number, PartitionRange>();
+    for (const r of a) map.set(r.partition, { ...r });
+    for (const r of b) {
+      const existing = map.get(r.partition);
+      if (!existing) {
+        map.set(r.partition, { ...r });
+      } else {
+        map.set(r.partition, {
+          partition: r.partition,
+          low: Math.min(existing.low, r.low),
+          high: Math.max(existing.high, r.high),
+        });
+      }
+    }
+    return [...map.values()].sort((a, b) => a.partition - b.partition);
+  }
+
+  async function consume() {
     const req: ConsumeReq = {
       partition: partition === '' ? null : Number(partition),
-      start,
+      start: buildStart(),
       limit: Number(limit),
       decode,
       key_filter: keyFilter.trim() || null,
+      find_from_beginning: keyFilter.trim() ? keyFromBeginning : false,
       value_filter: valueFilter.trim() || null,
     };
     consuming = true;
@@ -124,12 +241,27 @@
         `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}/consume`,
         req,
       );
+      // Reset tail cursors: a manual peek replaces the view and reseeds offsets.
+      tailOffsets = new Map();
       if (result.messages.length === 0) toasts.info('No messages in the selected range');
     } catch (e) {
       toasts.error('Consume failed', String(e));
     } finally {
       consuming = false;
     }
+  }
+
+  /**
+   * Compute the 0–100% position of `offset` within a partition's [low, high]
+   * watermark range. Returns null when the watermark data is unavailable or the
+   * range is empty (high === low).
+   */
+  function offsetPct(msg: KafkaMessage, partitions: PartitionRange[]): number | null {
+    const range = partitions.find((r) => r.partition === msg.partition);
+    if (!range) return null;
+    const span = range.high - range.low;
+    if (span <= 0) return null;
+    return Math.min(100, Math.max(0, ((msg.offset - range.low) / span) * 100));
   }
 
   function addHeader() {
@@ -310,9 +442,17 @@
         <option value="hex">Hex</option>
         <option value="base64">Base64</option>
       </select>
+      <div class="filter-group">
+        <input class="grow" bind:value={keyFilter} placeholder="filter key…" title="Server-side key filter (case-insensitive substring)" />
+        {#if keyFilter.trim()}
+          <label class="chk-small" title="Scan from beginning to find older matching messages">
+            <input type="checkbox" bind:checked={keyFromBeginning} /> From start
+          </label>
+        {/if}
+      </div>
       <input class="grow" bind:value={valueFilter} placeholder="filter value…" />
-      <label class="auto" class:on={autoPoll} title="Re-peek every minute">
-        <input type="checkbox" bind:checked={autoPoll} /> Auto · 1m
+      <label class="auto" class:on={autoPoll} title="Append new messages every minute (incremental, capped at {TAIL_CAP})">
+        <input type="checkbox" bind:checked={autoPoll} /> Live · 1m
       </label>
       <button class="btn primary small" onclick={consume} disabled={consuming}>
         {consuming ? 'Reading…' : 'Peek'}
@@ -331,10 +471,11 @@
       <div class="msg-list">
         <table>
           <thead>
-            <tr><th>P</th><th>Offset</th><th>Key</th><th>Time</th><th>Size</th></tr>
+            <tr><th>P</th><th>Offset</th><th>Pos</th><th>Key</th><th>Time</th><th>Size</th></tr>
           </thead>
           <tbody>
             {#each result?.messages ?? [] as m (m.partition + '-' + m.offset)}
+              {@const pct = result ? offsetPct(m, result.partitions) : null}
               <tr
                 class:sel={selected === m}
                 onclick={() => {
@@ -344,6 +485,15 @@
               >
                 <td>{m.partition}</td>
                 <td class="mono">{m.offset}</td>
+                <td class="pos-cell">
+                  {#if pct !== null}
+                    <div class="pos-bar-wrap" title="offset {m.offset} — {pct.toFixed(1)}% through partition">
+                      <div class="pos-bar" style="width:{pct}%"></div>
+                    </div>
+                  {:else}
+                    <span class="muted">—</span>
+                  {/if}
+                </td>
                 <td class="key">{m.key?.text ?? '∅'}</td>
                 <td class="muted nowrap">{fmtTs(m.timestamp_ms)}</td>
                 <td class="muted">{m.size_bytes}</td>
@@ -357,6 +507,9 @@
         {#if result?.truncated}
           <p class="muted pad small">Showing first {result.messages.length} — increase the limit for more.</p>
         {/if}
+        {#if autoPoll && tailOffsets.size > 0}
+          <p class="muted pad small tail-note">Live tail active — appending new messages (cap {TAIL_CAP}).</p>
+        {/if}
       </div>
 
       <div class="msg-detail">
@@ -369,6 +522,14 @@
             {/if}
             {#if selected.headers.length > 0}
               <span class="badge muted-badge">{selected.headers.length} header{selected.headers.length === 1 ? '' : 's'}</span>
+            {/if}
+            {#if result}
+              {@const pct = offsetPct(selected, result.partitions)}
+              {#if pct !== null}
+                <span class="badge pos-badge" title="Offset position within partition watermarks">
+                  {pct.toFixed(1)}%
+                </span>
+              {/if}
             {/if}
             {#if selected.value?.raw_base64}
               <button class="btn tiny" onclick={() => (rawView = !rawView)}>
@@ -547,6 +708,26 @@
   .sm {
     width: 110px;
   }
+  /* key filter + "from start" checkbox grouped inline */
+  .filter-group {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 1;
+    min-width: 100px;
+  }
+  .filter-group input:not([type='checkbox']) {
+    flex: 1;
+  }
+  .chk-small {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    cursor: pointer;
+  }
   .auto {
     display: flex;
     align-items: center;
@@ -618,6 +799,35 @@
   }
   .nowrap {
     white-space: nowrap;
+  }
+  /* Offset-position bar cell */
+  .pos-cell {
+    width: 56px;
+    padding: 5px 8px;
+  }
+  .pos-bar-wrap {
+    width: 48px;
+    height: 6px;
+    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .pos-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    min-width: 2px;
+  }
+  /* Offset-position badge in the detail pane */
+  .pos-badge {
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    color: var(--text-dim);
+  }
+  .tail-note {
+    padding-top: 4px;
+    padding-bottom: 6px;
+    color: var(--accent);
+    opacity: 0.75;
   }
   .grid.grid,
   table.grid {

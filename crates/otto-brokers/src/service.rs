@@ -732,7 +732,8 @@ impl BrokersService {
                 .map_err(join)??
         };
 
-        let key_filter = req.key_filter.as_ref().map(|s| s.to_lowercase());
+        // key_filter is applied server-side in consume_raw (raw bytes, pre-decode)
+        // so we only post-filter on value here, which requires decoding first.
         let value_filter = req.value_filter.as_ref().map(|s| s.to_lowercase());
 
         let mut messages = Vec::with_capacity(raw.messages.len());
@@ -743,14 +744,6 @@ impl BrokersService {
             let value = self
                 .decode_kv(m.value.as_deref(), req.decode, &registry)
                 .await;
-            if let Some(f) = &key_filter {
-                if !key
-                    .as_ref()
-                    .is_some_and(|k| k.text.to_lowercase().contains(f))
-                {
-                    continue;
-                }
-            }
             if let Some(f) = &value_filter {
                 if !value
                     .as_ref()

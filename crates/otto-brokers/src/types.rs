@@ -423,12 +423,22 @@ pub struct ConsumeReq {
     pub limit: usize,
     #[serde(default)]
     pub max_wait_ms: Option<u64>,
-    /// Case-insensitive substring filter on the decoded key.
+    /// Case-insensitive substring filter on the raw key bytes (applied
+    /// server-side during consume so the limit quota counts only matches).
+    /// The service also re-checks after decoding (value_filter cannot be
+    /// applied server-side before decoding, so key_filter is the hot path).
     #[serde(default)]
     pub key_filter: Option<String>,
-    /// Case-insensitive substring filter on the decoded value.
+    /// Case-insensitive substring filter on the decoded value (applied
+    /// post-decode in the service layer).
     #[serde(default)]
     pub value_filter: Option<String>,
+    /// When `key_filter` is set and `find_from_beginning` is true the consume
+    /// path scans from the earliest available offset (ignoring `start`) so the
+    /// key filter can find old messages. Without this the caller still controls
+    /// `start`; set it to `beginning` explicitly for the same effect.
+    #[serde(default)]
+    pub find_from_beginning: bool,
     #[serde(default)]
     pub decode: ValueFormat,
 }

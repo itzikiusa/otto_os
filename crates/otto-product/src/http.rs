@@ -26,9 +26,10 @@ use serde::Deserialize;
 
 use crate::service::ProductService;
 use crate::types::{
-    NewDraftReq, NewLearningReq, NewNoteReq, NewQuestionReq, NewTranscriptReq, PostQuestionsReq,
-    PublishAsRfcReq, PublishAsStoryReq, PublishTestsReq, UpdateDraftReq, UpdateLearningReq,
-    UpdateNoteReq, UpdateQuestionReq, UpdateStoryReq, UpdateTestcaseReq,
+    BulkApproveTestcasesReq, NewDraftReq, NewLearningReq, NewNoteReq, NewQuestionReq,
+    NewTranscriptReq, PostQuestionsReq, PublishAsRfcReq, PublishAsStoryReq, PublishTestsReq,
+    ReorderTestcasesReq, UpdateDraftReq, UpdateLearningReq, UpdateNoteReq, UpdateQuestionReq,
+    UpdateStoryReq, UpdateTestcaseReq,
 };
 
 // ---------------------------------------------------------------------------
@@ -211,6 +212,16 @@ pub fn router<S: ProductCtx>() -> Router<S> {
         // (modules.rs) so it can trigger skill self-improvement. Registering it
         // here too would cause an axum duplicate-route panic at startup.
         .route("/product/testcase-runs/{rid}/publish", post(publish_tests::<S>))
+        // Bulk-approve a selected subset of draft test cases within a run.
+        .route(
+            "/product/testcase-runs/{rid}/testcases/bulk-approve",
+            post(bulk_approve_testcases::<S>),
+        )
+        // Persist a new display ordering for the run's cases.
+        .route(
+            "/product/testcase-runs/{rid}/testcases/reorder",
+            post(reorder_testcases::<S>),
+        )
         // Inject bundle
         .route("/product/stories/{sid}/inject", get(get_inject::<S>))
         // Learnings (flat item)
@@ -869,6 +880,51 @@ async fn publish_tests<S: ProductCtx>(
         )
         .await?;
     Ok(Json(serde_json::json!({ "url": url })).into_response())
+}
+
+/// `POST /product/testcase-runs/{rid}/testcases/bulk-approve` — approve a
+/// caller-selected subset of draft test cases in a run.  Already-approved or
+/// rejected cases are left unchanged.  Returns the number of rows flipped.
+async fn bulk_approve_testcases<S: ProductCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(RunId { rid }): Path<RunId>,
+    Json(req): Json<BulkApproveTestcasesReq>,
+) -> ApiResult<Response> {
+    // Resolve workspace via run → story, then role-check.
+    let run = ctx.product_repo().get_testcase_run(&rid).await?;
+    let story = ctx.product_repo().get_story(&run.story_id).await?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    let count = ctx
+        .product_repo()
+        .bulk_approve_testcases(&rid, &req.ids)
+        .await?;
+    Ok(Json(serde_json::json!({ "approved": count })).into_response())
+}
+
+/// `POST /product/testcase-runs/{rid}/testcases/reorder` — persist a new
+/// display ordering for the run's test cases.  The request body supplies the
+/// full ordered list of ids; each id receives an `order_idx` equal to its
+/// zero-based position.  Ids not included are left at their current index.
+async fn reorder_testcases<S: ProductCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(RunId { rid }): Path<RunId>,
+    Json(req): Json<ReorderTestcasesReq>,
+) -> ApiResult<Response> {
+    let run = ctx.product_repo().get_testcase_run(&rid).await?;
+    let story = ctx.product_repo().get_story(&run.story_id).await?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    ctx.product_repo()
+        .reorder_testcases(&rid, &req.ordered_ids)
+        .await?;
+    // Return the updated list so the UI can reflect the persisted order.
+    let cases = ctx.product_repo().list_testcases(&rid).await?;
+    Ok(Json(cases).into_response())
 }
 
 // ---------------------------------------------------------------------------

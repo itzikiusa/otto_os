@@ -1444,6 +1444,69 @@ impl ProductRepo {
         Ok(())
     }
 
+    /// Bulk-approve a set of testcase ids that belong to a single run.
+    /// Only transitions `draft` rows; already-approved/rejected rows are
+    /// untouched.  Returns the count of rows flipped.
+    pub async fn bulk_approve_testcases(&self, run: &Id, ids: &[Id]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let now = fmt(Utc::now());
+        let mut total: u64 = 0;
+        // SQLite has no array binding; issue per-id updates in a transaction.
+        let mut tx = self.pool.begin().await.map_err(dberr("bulk approve begin"))?;
+        for id in ids {
+            let r = sqlx::query(
+                "UPDATE product_testcases SET status = 'approved', updated_at = ?
+                 WHERE id = ? AND run_id = ? AND status = 'draft'",
+            )
+            .bind(&now)
+            .bind(id)
+            .bind(run)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("bulk approve testcase"))?;
+            total += r.rows_affected();
+        }
+        tx.commit().await.map_err(dberr("bulk approve commit"))?;
+        Ok(total)
+    }
+
+    /// Reorder testcases within a run by assigning each id the `order_idx`
+    /// corresponding to its position in `ordered_ids` (0-based).  Ids not
+    /// present in the slice are left untouched.  All provided ids must belong
+    /// to `run` — the UPDATE WHERE clause enforces this silently (unknown ids
+    /// simply update 0 rows).
+    pub async fn reorder_testcases(&self, run: &Id, ordered_ids: &[Id]) -> Result<()> {
+        if ordered_ids.is_empty() {
+            return Ok(());
+        }
+        let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("reorder testcases begin"))?;
+        for (idx, id) in ordered_ids.iter().enumerate() {
+            sqlx::query(
+                "UPDATE product_testcases
+                 SET order_idx = ?, updated_at = ?
+                 WHERE id = ? AND run_id = ?",
+            )
+            .bind(idx as i64)
+            .bind(&now)
+            .bind(id)
+            .bind(run)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("reorder testcase row"))?;
+        }
+        tx.commit()
+            .await
+            .map_err(dberr("reorder testcases commit"))?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Learnings
     // -----------------------------------------------------------------------

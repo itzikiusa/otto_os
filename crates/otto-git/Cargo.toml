@@ -18,6 +18,8 @@ tracing.workspace = true
 tempfile.workspace = true
 futures-util.workspace = true
 urlencoding = "2.1"
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 sqlx.workspace = true

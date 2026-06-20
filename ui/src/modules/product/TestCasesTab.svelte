@@ -1,7 +1,8 @@
 <script lang="ts">
   // Test Cases tab — generate test cases, view them grouped by category, allow
-  // per-case approve/request-changes/edit, approve a run (triggers skill
-  // learning), and publish to Confluence.
+  // per-case approve/request-changes/edit, bulk-select + bulk-approve, drag-to-
+  // reorder (persists order_idx), approve a run (triggers skill learning), and
+  // publish to Confluence.
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type {
@@ -22,17 +23,108 @@
     edge: 'Edge Cases',
   };
 
-  // Priority ordering for display within category.
+  // Priority ordering for display within category (used as tiebreaker when
+  // within a category group but no explicit order_idx reorder has been applied).
   const PRIORITY_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 };
 
   // ── Local UI state ──────────────────────────────────────────────────────────
   let provider = $state<string>('claude');
   let generating = $state(false);
   let approvingRun = $state(false);
+  let bulkApproving = $state(false);
   let publishingRun = $state(false);
   let showPublishForm = $state(false);
   let publishSpaceKey = $state('');
   let publishParentId = $state('');
+
+  // ── Bulk-select state ────────────────────────────────────────────────────────
+  // Set of testcase ids that are currently checked.
+  let selected = $state<Set<string>>(new Set());
+
+  function toggleSelect(id: string): void {
+    const next = new Set(selected);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    selected = next;
+  }
+
+  function selectAll(): void {
+    selected = new Set(activeCases.map((c) => c.id));
+  }
+
+  function clearSelection(): void {
+    selected = new Set();
+  }
+
+  // ── Drag-to-reorder state ────────────────────────────────────────────────────
+  // Flat ordered list (mirrors activeCases but can be locally rearranged before
+  // persisting).  Populated/reset whenever activeCases changes.
+  let orderedIds = $state<string[]>([]);
+
+  // Populate orderedIds from activeCases whenever the active run changes.
+  // We keep a separate reactive list so local drags don't fight with store
+  // refreshes until the user drops.
+  $effect(() => {
+    orderedIds = activeCases.map((c) => c.id);
+  });
+
+  let dragSrcId = $state<string | null>(null);
+  let dragOverId = $state<string | null>(null);
+  let savingOrder = $state(false);
+
+  function onDragStart(id: string): void {
+    dragSrcId = id;
+  }
+
+  function onDragOver(id: string, e: DragEvent): void {
+    e.preventDefault();
+    dragOverId = id;
+  }
+
+  function onDragLeave(): void {
+    dragOverId = null;
+  }
+
+  function onDrop(targetId: string): void {
+    if (!dragSrcId || dragSrcId === targetId) {
+      dragSrcId = null;
+      dragOverId = null;
+      return;
+    }
+    // Reorder: move dragSrcId to be just before targetId.
+    const next = orderedIds.filter((id) => id !== dragSrcId);
+    const idx = next.indexOf(targetId);
+    if (idx === -1) {
+      next.push(dragSrcId);
+    } else {
+      next.splice(idx, 0, dragSrcId);
+    }
+    orderedIds = next;
+    dragSrcId = null;
+    dragOverId = null;
+    // Persist immediately after drop.
+    void persistOrder();
+  }
+
+  function onDragEnd(): void {
+    dragSrcId = null;
+    dragOverId = null;
+  }
+
+  async function persistOrder(): Promise<void> {
+    if (!activeRun || savingOrder) return;
+    savingOrder = true;
+    try {
+      await product.reorderTestcases(activeRun.id, orderedIds);
+    } catch (e) {
+      toasts.error('Could not save order', product.errMsg(e));
+    } finally {
+      savingOrder = false;
+    }
+  }
 
   // Which test-case run we're viewing (most recent by default).
   let activeRunId = $state<string | null>(null);
@@ -99,6 +191,8 @@
     activeRunId = null;
     caseActions = {};
     showPublishForm = false;
+    selected = new Set();
+    orderedIds = [];
     clearPoll();
     if (product.selectedId) {
       void product.loadTestcases().then(() => {
@@ -129,7 +223,30 @@
   const activeRun = $derived<ProductTestcaseRun | null>(activeRunDetail?.run ?? null);
   const activeCases = $derived<ProductTestcase[]>(activeRunDetail?.cases ?? []);
 
-  // Cases grouped by category, sorted by priority within each group.
+  // Cases in the locally-applied display order (reflects drag-and-drop before
+  // the next store reload, which will bring the persisted order_idx back).
+  const orderedCases = $derived.by(() => {
+    const byId = new Map(activeCases.map((c) => [c.id, c]));
+    // orderedIds may be stale (set from a previous activeCases snapshot); fall
+    // back to any cases not present in orderedIds appended at the end.
+    const seen = new Set<string>();
+    const result: ProductTestcase[] = [];
+    for (const id of orderedIds) {
+      const tc = byId.get(id);
+      if (tc) {
+        result.push(tc);
+        seen.add(id);
+      }
+    }
+    // Append cases that arrived after the local orderedIds was set.
+    for (const c of activeCases) {
+      if (!seen.has(c.id)) result.push(c);
+    }
+    return result;
+  });
+
+  // Cases grouped by category, ordered by the local drag-reordered list (then
+  // priority as tiebreaker for cases not yet reordered by the user).
   const groupedCases = $derived.by(() => {
     const result: Record<Category, ProductTestcase[]> = {
       happy: [],
@@ -137,7 +254,7 @@
       error: [],
       edge: [],
     };
-    for (const c of activeCases) {
+    for (const c of orderedCases) {
       const cat = c.category as Category;
       if (cat in result) {
         result[cat].push(c);
@@ -146,13 +263,24 @@
         result.edge.push(c);
       }
     }
-    // Sort each group by priority then order_idx.
+    // Within each category the drag-order is already respected by orderedCases;
+    // use priority as a secondary sort only among cases that share the same
+    // effective order_idx (i.e. newly inserted rows not yet reordered).
     for (const cat of CATEGORIES) {
       result[cat].sort((a, b) => {
+        const oa = orderedIds.indexOf(a.id);
+        const ob = orderedIds.indexOf(b.id);
+        if (oa !== ob) {
+          // Both present — use the local orderedIds position.
+          if (oa !== -1 && ob !== -1) return oa - ob;
+          // One missing (new row) → push it after the known ones.
+          if (oa === -1) return 1;
+          if (ob === -1) return -1;
+        }
+        // Fallback: priority.
         const pa = PRIORITY_ORDER[a.priority] ?? 99;
         const pb = PRIORITY_ORDER[b.priority] ?? 99;
-        if (pa !== pb) return pa - pb;
-        return a.order_idx - b.order_idx;
+        return pa - pb;
       });
     }
     return result;
@@ -227,6 +355,23 @@
     } catch (e) {
       toasts.error('Could not approve', product.errMsg(e));
       setAction(tc.id, { busy: false });
+    }
+  }
+
+  // ── Bulk approve selected cases ───────────────────────────────────────────
+  async function bulkApproveSelected(): Promise<void> {
+    if (!activeRun || selected.size === 0 || bulkApproving) return;
+    bulkApproving = true;
+    try {
+      const result = await product.bulkApproveTestcases(activeRun.id, [...selected]);
+      clearSelection();
+      toasts.success(
+        `${result.approved} case${result.approved !== 1 ? 's' : ''} approved`,
+      );
+    } catch (e) {
+      toasts.error('Bulk approve failed', product.errMsg(e));
+    } finally {
+      bulkApproving = false;
     }
   }
 
@@ -532,6 +677,45 @@
         {/if}
       </section>
 
+      <!-- ── Bulk-select toolbar ──────────────────────────────────────────────── -->
+      {#if activeCases.length > 0}
+        <div class="bulk-toolbar">
+          <label class="bulk-check-all">
+            <input
+              type="checkbox"
+              checked={selected.size === activeCases.length && activeCases.length > 0}
+              indeterminate={selected.size > 0 && selected.size < activeCases.length}
+              onchange={() => (selected.size === activeCases.length ? clearSelection() : selectAll())}
+            />
+            <span class="field-label">
+              {selected.size > 0 ? `${selected.size} selected` : 'Select all'}
+            </span>
+          </label>
+
+          {#if selected.size > 0}
+            <button
+              class="action-btn primary"
+              onclick={bulkApproveSelected}
+              disabled={bulkApproving}
+              title="Approve all selected draft cases"
+            >
+              {bulkApproving ? 'Approving…' : `Approve ${selected.size}`}
+            </button>
+            <button
+              class="action-btn"
+              onclick={clearSelection}
+              disabled={bulkApproving}
+            >
+              Clear
+            </button>
+          {/if}
+
+          {#if savingOrder}
+            <span class="field-label save-indicator">Saving order…</span>
+          {/if}
+        </div>
+      {/if}
+
       <!-- ── Cases grouped by category ──────────────────────────────────────── -->
       {#each CATEGORIES as cat (cat)}
         {@const cases = groupedCases[cat]}
@@ -542,15 +726,37 @@
               <span class="cat-count">{cases.length}</span>
             </div>
 
-            <div class="cases-list">
+            <div class="cases-list" role="list">
               {#each cases as tc (tc.id)}
                 {@const action = getAction(tc.id)}
                 {@const steps = parseSteps(tc.steps_json)}
 
-                <div class="case-card card" class:case-approved={tc.status === 'approved'}>
+                <div
+                  class="case-card card"
+                  class:case-approved={tc.status === 'approved'}
+                  class:case-selected={selected.has(tc.id)}
+                  class:drag-over={dragOverId === tc.id}
+                  role="listitem"
+                  draggable="true"
+                  ondragstart={() => onDragStart(tc.id)}
+                  ondragover={(e) => onDragOver(tc.id, e)}
+                  ondragleave={onDragLeave}
+                  ondrop={() => onDrop(tc.id)}
+                  ondragend={onDragEnd}
+                >
                   <!-- Case header -->
                   <div class="case-header">
                     <div class="case-title-row">
+                      <!-- Drag handle + checkbox (always visible) -->
+                      <span class="drag-handle" title="Drag to reorder">&#8942;&#8942;</span>
+                      <input
+                        type="checkbox"
+                        class="case-checkbox"
+                        checked={selected.has(tc.id)}
+                        onchange={() => toggleSelect(tc.id)}
+                        onclick={(e) => e.stopPropagation()}
+                        aria-label="Select {tc.title}"
+                      />
                       <span class="case-title">{tc.title}</span>
                       <span class="priority-badge {priorityClass(tc.priority)}">{tc.priority}</span>
                       <span class="pill {statusClass(tc.status)}">{statusLabel(tc.status)}</span>
@@ -1028,15 +1234,74 @@
     gap: 8px;
   }
 
+  /* ── Bulk-select toolbar ─────────────────────────────────────────────── */
+  .bulk-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-raised, var(--surface));
+  }
+  .bulk-check-all {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .save-indicator {
+    font-style: italic;
+    opacity: 0.7;
+  }
+
   /* ── Case card ───────────────────────────────────────────────── */
   .case-card {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    cursor: default;
+  }
+  .case-card[draggable='true'] {
+    cursor: grab;
   }
   .case-card.case-approved {
     border-color: color-mix(in srgb, var(--status-working) 30%, var(--border));
     background: color-mix(in srgb, var(--status-working) 4%, var(--surface-raised, var(--surface)));
+  }
+  .case-card.case-selected {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent) 5%, var(--surface-raised, var(--surface)));
+  }
+  .case-card.drag-over {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+
+  /* ── Drag handle + checkbox ──────────────────────────────────────────── */
+  .drag-handle {
+    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--text-dim);
+    opacity: 0.45;
+    letter-spacing: -3px;
+    cursor: grab;
+    padding-right: 2px;
+    user-select: none;
+    transition: opacity 90ms;
+  }
+  .case-card:hover .drag-handle {
+    opacity: 0.8;
+  }
+  .case-checkbox {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent);
+    cursor: pointer;
   }
 
   .case-header {

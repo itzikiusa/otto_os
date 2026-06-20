@@ -63,7 +63,16 @@
   // (the server's ensure_live resumes the session on re-attach).
   let reconnectAttempts = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // closedByUs = true while we intentionally close the WS — suppresses the
+  // auto-reconnect that sock.onclose would otherwise trigger. Set to true
+  // both on component teardown AND on a deliberate session-switch close, then
+  // cleared again inside connect() so a normal reconnect after a blip still works.
   let closedByUs = false;
+  // Set to true by Effect 1 once the initial WS connect is delegated to
+  // the first-fit callback. Effect 2 (session-switch) skips its first run
+  // until this is true, because Effect 1's RAF/fit chain handles the initial
+  // connect; Effect 2 only needs to act on subsequent sessionId changes.
+  let termDidInit = false;
 
   function scheduleReconnect(): void {
     if (closedByUs || exitCode !== null || reconnectTimer) return;
@@ -425,6 +434,11 @@
     };
   }
 
+  // ── Effect 1: one-time xterm + WebGL init (re-runs only when RTL mode toggles)
+  // This effect owns the Terminal object, addons, event handlers, ResizeObserver,
+  // and the initial WS connection. It does NOT watch `sessionId` — that is handled
+  // by Effect 2 below so session switches reconnect without rebuilding the GPU
+  // canvas.
   $effect(() => {
     // Tracked read: toggling the experimental RTL mode re-runs this effect so the
     // terminal is rebuilt with the correct renderer (WebGL vs DOM — see below).
@@ -540,7 +554,12 @@
       sendResize();
       if (!didFirstFit) {
         didFirstFit = true;
-        connect();
+        // Initial connect uses the current sessionId prop (read untracked so this
+        // effect doesn't re-run when sessionId changes; Effect 2 owns that).
+        // Set termDidInit first so Effect 2 knows initial setup is underway and
+        // won't race by calling connect() again for the same sessionId.
+        termDidInit = true;
+        untrack(connect);
       }
     };
     // Debounce: a single layout change fires the observer many times; coalesce
@@ -567,6 +586,7 @@
         reconnectTimer = null;
       }
       closedByUs = true;
+      termDidInit = false;
       textarea?.removeEventListener('focus', onFocus);
       textarea?.removeEventListener('blur', onBlur);
       onBlur();
@@ -575,6 +595,50 @@
       term?.dispose();
       term = null;
     };
+  });
+
+  // ── Effect 2: reactive session-switch — retarget the WS when sessionId changes
+  // Runs after Effect 1 (Svelte 5 effects run in declaration order). On the very
+  // first run `termDidInit` is still false (Effect 1's first-fit RAF hasn't fired
+  // yet) so we bail early — Effect 1's initial `untrack(connect)` handles the
+  // first connection. On subsequent runs (real session switches) we:
+  //   1. Stop auto-reconnect and cancel any pending timer.
+  //   2. Close the old socket synchronously (closedByUs suppresses the auto-reconnect
+  //      in sock.onclose that the close event would otherwise trigger).
+  //   3. Reset per-session overlay state (exitCode, disconnected flags, injN counter).
+  //   4. Clear the xterm scrollback so old session output doesn't bleed through.
+  //   5. Open a fresh WS for the new sessionId and request scrollback.
+  $effect(() => {
+    const _id = sessionId; // tracked: re-runs when sessionId changes
+    // termDidInit is set by Effect 1 once the first fit fires; until then the xterm
+    // canvas isn't ready and Effect 1's initial untrack(connect) handles the first WS.
+    if (!termDidInit || !term) return;
+    // 1. Cancel any pending reconnect timer — it belongs to the old session.
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    // 2. Close the old socket cleanly. Mark closedByUs BEFORE calling close() so
+    //    the synchronous onclose callback (which scheduleReconnect reads) does not
+    //    kick off a reconnect to the old session.
+    closedByUs = true;
+    sock?.close();
+    sock = null;
+    // 3. Reset per-session state.
+    connected = false;
+    disconnected = false;
+    reconnecting = false;
+    exitCode = null;
+    reconnectAttempts = 0;
+    lastInjN = 0;
+    // 4. Clear the xterm viewport and scrollback so old session output is gone
+    //    before the new scrollback arrives. term.reset() resets the terminal state
+    //    (cursor, attrs, etc.) and clears scrollback while keeping the DOM/WebGL
+    //    context intact — no GPU teardown occurs.
+    term.reset();
+    // 5. Connect to the new session. connect() clears closedByUs at its top so
+    //    natural reconnect-on-drop works normally for the new session.
+    connect();
   });
 
   // Recover immediately (skip backoff) when the network or app window comes

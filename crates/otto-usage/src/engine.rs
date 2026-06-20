@@ -416,21 +416,109 @@ impl UsageEngine {
 
     /// Full dashboard payload for the window. `otto_only` excludes externally
     /// recorded (non-Otto) sessions.
+    ///
+    /// The three ClickHouse queries (provider, daily, session) are sent as a
+    /// single `clickhouse local` process via [`ClickHouse::query_batch`] —
+    /// one spawn, one lock acquisition, one table scan per query — then the
+    /// result sets are split client-side on sentinel rows. Output values are
+    /// identical to the previous three-process path (each query is unchanged;
+    /// only how they're dispatched differs).
     pub async fn summary(&self, days: u32, otto_only: bool) -> Result<UsageSummary> {
-        let providers = self.provider_usage(days, otto_only).await.unwrap_or_default();
-        let daily = self.daily_usage(days, otto_only).await.unwrap_or_default();
-        let sessions = self
-            .session_usage(days, SESSION_LIMIT, otto_only)
-            .await
-            .unwrap_or_default();
+        let Some(ch) = self.ch() else {
+            return Ok(UsageSummary {
+                days,
+                by_kind: Vec::new(),
+                ..Default::default()
+            });
+        };
 
-        let total_events = providers.iter().map(|p| p.events).sum();
-        let total_input_tokens = providers.iter().map(|p| p.input_tokens).sum();
-        let total_output_tokens = providers.iter().map(|p| p.output_tokens).sum();
-        let total_cache_read_tokens = providers.iter().map(|p| p.cache_read_tokens).sum();
-        let total_cache_write_tokens = providers.iter().map(|p| p.cache_write_tokens).sum();
-        let total_tokens = providers.iter().map(|p| p.total_tokens).sum();
-        let total_cost_usd = providers.iter().map(|p| p.cost_usd).sum();
+        let ws = ws_filter(otto_only);
+        let since = since(days);
+        let limit = SESSION_LIMIT.max(1);
+
+        let q_provider = format!(
+            "SELECT provider,
+                    count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                    round(sum(cost_usd), 6) AS cost_usd
+             FROM usage_events
+             WHERE event_date >= today() - {since} {ws}
+             GROUP BY provider
+             ORDER BY total_tokens DESC, events DESC"
+        );
+        let q_daily = format!(
+            "SELECT toString(event_date) AS day,
+                    count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                    round(sum(cost_usd), 6) AS cost_usd
+             FROM usage_events
+             WHERE event_date >= today() - {since} {ws}
+             GROUP BY event_date
+             ORDER BY event_date"
+        );
+        let q_sessions = format!(
+            "SELECT session_id,
+                    any(workspace_id) AS workspace_id,
+                    any(provider) AS provider,
+                    any(model) AS model,
+                    count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                    round(sum(cost_usd), 6) AS cost_usd,
+                    toString(max(ts)) AS last_active
+             FROM usage_events
+             WHERE event_date >= today() - {since} {ws}
+             GROUP BY session_id
+             ORDER BY total_tokens DESC, events DESC
+             LIMIT {limit}"
+        );
+
+        // Single process: one spawn, one lock, three result sets.
+        let mut batches = ch
+            .query_batch(&[q_provider, q_daily, q_sessions])
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("usage: summary batch failed: {e}");
+                vec![Vec::new(), Vec::new(), Vec::new()]
+            });
+
+        // Deserialize each result set into its typed Vec (same decoding as `rows()`).
+        fn decode<T: serde::de::DeserializeOwned>(
+            raw: Vec<serde_json::Value>,
+        ) -> Vec<T> {
+            raw.into_iter()
+                .filter_map(|v| match serde_json::from_value(v) {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        tracing::warn!("usage: decode summary row: {e}");
+                        None
+                    }
+                })
+                .collect()
+        }
+
+        let sessions: Vec<SessionUsage> = decode(batches.pop().unwrap_or_default());
+        let daily: Vec<DailyUsage> = decode(batches.pop().unwrap_or_default());
+        let providers: Vec<ProviderUsage> = decode(batches.pop().unwrap_or_default());
+
+        let total_events: u64 = providers.iter().map(|p| p.events).sum();
+        let total_input_tokens: u64 = providers.iter().map(|p| p.input_tokens).sum();
+        let total_output_tokens: u64 = providers.iter().map(|p| p.output_tokens).sum();
+        let total_cache_read_tokens: u64 = providers.iter().map(|p| p.cache_read_tokens).sum();
+        let total_cache_write_tokens: u64 = providers.iter().map(|p| p.cache_write_tokens).sum();
+        let total_tokens: u64 = providers.iter().map(|p| p.total_tokens).sum();
+        let total_cost_usd: f64 = providers.iter().map(|p| p.cost_usd).sum();
 
         Ok(UsageSummary {
             days,

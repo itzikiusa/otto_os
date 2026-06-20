@@ -437,6 +437,22 @@ class ProductStore {
     await this.loadTestcases();
   }
 
+  async bulkApproveTestcases(rid: string, ids: string[]): Promise<{ approved: number }> {
+    const result = await api.post<{ approved: number }>(
+      `/product/testcase-runs/${rid}/testcases/bulk-approve`,
+      { ids },
+    );
+    await this.loadTestcases();
+    return result;
+  }
+
+  async reorderTestcases(rid: string, orderedIds: string[]): Promise<void> {
+    await api.post(`/product/testcase-runs/${rid}/testcases/reorder`, {
+      ordered_ids: orderedIds,
+    });
+    await this.loadTestcases();
+  }
+
   async approveRun(rid: string): Promise<void> {
     await api.post(`/product/testcase-runs/${rid}/approve`);
     await this.loadTestcases();

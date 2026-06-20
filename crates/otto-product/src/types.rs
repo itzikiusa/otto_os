@@ -138,6 +138,21 @@ pub struct PublishTestsReq {
     pub parent_id: Option<String>,
 }
 
+/// `POST /product/testcase-runs/{rid}/testcases/reorder` — persist a new
+/// display ordering for the run's cases.  The full ordered list of ids must be
+/// provided; any id not in `ordered_ids` keeps its current `order_idx`.
+#[derive(Debug, Deserialize)]
+pub struct ReorderTestcasesReq {
+    pub ordered_ids: Vec<otto_core::Id>,
+}
+
+/// `POST /product/testcase-runs/{rid}/testcases/bulk-approve` — approve a
+/// selected subset of draft test cases without approving the whole run.
+#[derive(Debug, Deserialize)]
+pub struct BulkApproveTestcasesReq {
+    pub ids: Vec<otto_core::Id>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct AnalyzeReq {
     #[serde(default)]

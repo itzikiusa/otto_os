@@ -33,6 +33,9 @@ use std::time::{Duration, Instant};
 const META_TIMEOUT: Duration = Duration::from_secs(15);
 const WATERMARK_TIMEOUT: Duration = Duration::from_secs(8);
 const GROUP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum raw messages scanned when a key_filter is active (prevents infinite
+/// loops on sparse matches; the caller's `limit` still caps *matching* results).
+const MAX_SCAN_WITH_FILTER: usize = 50_000;
 /// Parallelism for the cluster-wide watermark scan (throughput total). librdkafka
 /// is thread-safe, so we fan the per-partition ListOffsets queries across worker
 /// threads — a few hundred partitions over a slow/tunnelled link complete in a
@@ -419,13 +422,22 @@ impl KafkaClient {
             _ => HashMap::new(),
         };
 
+        // When find_from_beginning is requested alongside a key_filter, scan from
+        // the earliest offset so the filter can match older messages regardless of
+        // the caller's `start` position.
+        let effective_start = if req.find_from_beginning && req.key_filter.is_some() {
+            StartPosition::Beginning
+        } else {
+            req.start
+        };
+
         // Build the assignment with per-partition start offsets.
         let mut tpl = TopicPartitionList::new();
         let mut expected = 0i64;
         for &p in &parts {
             let low = low_of[&p];
             let high = high_of[&p];
-            let start = match req.start {
+            let start = match effective_start {
                 StartPosition::Beginning => low,
                 StartPosition::Latest => (high - limit as i64).max(low),
                 StartPosition::Offset { offset } => offset.clamp(low, high),
@@ -446,14 +458,48 @@ impl KafkaClient {
             });
         }
 
+        // Pre-compile the key filter to lowercase once (raw bytes are interpreted
+        // as UTF-8 best-effort; non-UTF-8 keys never match the filter).
+        let key_filter_lower: Option<String> =
+            req.key_filter.as_ref().map(|f| f.to_lowercase());
+
+        // When a key filter is active the want quota counts only matching messages
+        // so we may scan more than `limit` raw messages from the broker. Use a
+        // large enough inner cap so we don't spin forever on sparse matches.
+        let raw_cap = if key_filter_lower.is_some() {
+            expected.min(MAX_SCAN_WITH_FILTER as i64) as usize
+        } else {
+            (limit as i64).min(expected) as usize
+        };
         let want = (limit as i64).min(expected) as usize;
         let deadline = Instant::now() + Duration::from_millis(req.max_wait_ms.unwrap_or(5000));
         let mut done: HashSet<i32> = HashSet::new();
-        while messages.len() < want && Instant::now() < deadline && done.len() < parts.len() {
+        let mut scanned = 0usize;
+        while messages.len() < want
+            && scanned < raw_cap
+            && Instant::now() < deadline
+            && done.len() < parts.len()
+        {
             match consumer.poll(Duration::from_millis(250)) {
                 Some(Ok(m)) => {
                     let part = m.partition();
                     let offset = m.offset();
+                    scanned += 1;
+
+                    // Server-side key filter: evaluate against raw bytes before
+                    // paying the cost of allocation / pushing to results.
+                    if let Some(ref filter) = key_filter_lower {
+                        let matches = m.key().is_some_and(|k| {
+                            String::from_utf8_lossy(k).to_lowercase().contains(filter.as_str())
+                        });
+                        if !matches {
+                            if offset + 1 >= high_of.get(&part).copied().unwrap_or(i64::MAX) {
+                                done.insert(part);
+                            }
+                            continue;
+                        }
+                    }
+
                     let mut headers = Vec::new();
                     if let Some(hs) = m.headers() {
                         for i in 0..hs.count() {

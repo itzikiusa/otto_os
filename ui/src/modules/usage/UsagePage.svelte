@@ -8,6 +8,7 @@
   import { usage } from '../../lib/api/usage.svelte';
   import type { UsageBudgetConfig } from '../../lib/api/usage.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
 
   // Navigate to a session from the top-sessions table (click-through drill-down).
   function openSession(sessionId: string): void {
@@ -137,10 +138,49 @@
     return `${mon} ${parseInt(m[3], 10)}, ${m[4]}`;
   }
 
-  // ── Daily bar chart geometry ──────────────────────────────────────────────
-  const dailyMax = $derived(
-    Math.max(1, ...(usage.summary?.daily ?? []).map((d) => d.total_tokens)),
-  );
+  // ── Daily cost SVG chart ──────────────────────────────────────────────────
+  // The chart is hand-rolled SVG (no dependencies). It renders cost on the
+  // y-axis (labeled ticks), days on the x-axis (thinned for 30d/90d), gridlines
+  // at each y-tick, and a per-point tooltip via <title> (shown on hover by the
+  // browser). Works at 7d/30d/90d windows.
+
+  // Chart viewport (inner drawing area, inside the axis labels).
+  const SVG_W = 500;
+  const SVG_H = 110;
+  const AXIS_L = 52;  // left margin for y-axis labels
+  const AXIS_B = 22;  // bottom margin for x-axis labels
+
+  const dailyCosts = $derived((usage.summary?.daily ?? []).map((d) => d.cost_usd));
+  const dailyMaxCost = $derived(Math.max(...dailyCosts, 0.001));
+  const dailyDays = $derived(usage.summary?.daily ?? []);
+
+  // Y-axis: 4 ticks from 0 to ceiling. Round the top tick to a "nice" value.
+  const yTicks = $derived.by(() => {
+    const top = dailyMaxCost;
+    const raw = top / 3;
+    // Pick a magnitude step that gives readable labels.
+    const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+    const nice = Math.ceil(raw / mag) * mag;
+    return [0, nice, nice * 2, nice * 3];
+  });
+
+  function svgY(cost: number): number {
+    const plotH = SVG_H - AXIS_B;
+    const max = yTicks[yTicks.length - 1] || 1;
+    return plotH - (cost / max) * plotH;
+  }
+  function svgX(i: number, total: number): number {
+    if (total <= 1) return AXIS_L;
+    const plotW = SVG_W - AXIS_L;
+    return AXIS_L + (i / (total - 1)) * plotW;
+  }
+
+  // X-axis: thin labels so they don't overlap (max ~8 visible).
+  function showXLabel(i: number, total: number): boolean {
+    if (total <= 8) return true;
+    const step = Math.ceil(total / 8);
+    return i % step === 0 || i === total - 1;
+  }
 
   // ── Metric sparkline path builder ─────────────────────────────────────────
   function sparkPath(values: number[], max: number, w: number, h: number): string {
@@ -418,10 +458,12 @@
           {/if}
         </div>
 
-        <!-- Daily tokens -->
+        <!-- Daily cost (SVG chart with y-axis labels, gridlines, x-axis ticks,
+             and per-point hover tooltip via <title>).
+             Uses the same stacked-token colour scheme as the bar chart. -->
         <div class="panel card">
           <div class="panel-head">
-            <h3>Daily tokens</h3>
+            <h3>Daily cost</h3>
             {#if usage.summary && usage.summary.daily.length > 0}
               <button class="link-btn" onclick={() => usage.exportDailyCsv()} title="Download as CSV">
                 <Icon name="download" size={11} /> CSV
@@ -429,18 +471,71 @@
             {/if}
           </div>
           {#if usage.summary && usage.summary.daily.length > 0}
-            <div class="daily">
-              {#each usage.summary.daily as d (d.day)}
-                <div class="daily-col" title="{d.day}: {breakdownTitle(d)} · {fmtCost(d.cost_usd)}">
-                  <div class="daily-bar" style="height: {Math.max(2, (d.total_tokens / dailyMax) * 100)}%">
-                    {#each tokenSegs(d) as s (s.label)}
-                      {#if s.pct > 0}<div class="daily-seg" style="height: {s.pct}%; background: {s.color}"></div>{/if}
-                    {/each}
-                  </div>
-                  <span class="daily-label">{shortDay(d.day)}</span>
-                </div>
+            {@const days = dailyDays}
+            {@const n = days.length}
+            <svg
+              class="daily-svg"
+              viewBox="0 0 {SVG_W} {SVG_H}"
+              aria-label="Daily cost chart"
+              role="img"
+            >
+              <!-- Gridlines + y-axis labels -->
+              {#each yTicks as tick (tick)}
+                {@const y = svgY(tick)}
+                <line class="grid-line" x1={AXIS_L} y1={y} x2={SVG_W} y2={y} />
+                <text class="axis-label y-label" x={AXIS_L - 4} y={y + 4} text-anchor="end">
+                  {fmtCost(tick)}
+                </text>
               {/each}
-            </div>
+
+              <!-- Stacked area bars (one per day): a thin rect per token category -->
+              {#each days as d, i (d.day)}
+                {@const x = svgX(i, n)}
+                {@const barW = n > 1 ? Math.max(2, (SVG_W - AXIS_L) / n * 0.7) : 20}
+                {@const barH = (d.cost_usd / (yTicks[yTicks.length - 1] || 1)) * (SVG_H - AXIS_B)}
+                {@const barY = SVG_H - AXIS_B - barH}
+                {@const segs = tokenSegs(d)}
+                <title>{d.day}: {breakdownTitle(d)} · {fmtCost(d.cost_usd)}</title>
+                <!-- invisible hit target for tooltip -->
+                <rect
+                  class="bar-hit"
+                  x={x - barW / 2}
+                  y={0}
+                  width={barW}
+                  height={SVG_H - AXIS_B}
+                >
+                  <title>{d.day} · {fmtCost(d.cost_usd)} · {breakdownTitle(d)}</title>
+                </rect>
+                <!-- stacked colour segments (bottom = input, then cache-write, cache-read, output) -->
+                {#each segs as s, si (s.label)}
+                  {#if s.pct > 0}
+                    {@const segH = (s.v / Math.max(1, d.total_tokens)) * barH}
+                    {@const segOffset = segs.slice(0, si).reduce((acc, prev) => acc + (prev.v / Math.max(1, d.total_tokens)) * barH, 0)}
+                    <rect
+                      x={x - barW / 2}
+                      y={barY + segOffset}
+                      width={barW}
+                      height={segH}
+                      fill={s.color}
+                      rx="1"
+                    />
+                  {/if}
+                {/each}
+
+                <!-- x-axis label (thinned) -->
+                {#if showXLabel(i, n)}
+                  <text
+                    class="axis-label x-label"
+                    x={x}
+                    y={SVG_H - 4}
+                    text-anchor="middle"
+                  >{shortDay(d.day)}</text>
+                {/if}
+              {/each}
+
+              <!-- x-axis baseline -->
+              <line class="axis-line" x1={AXIS_L} y1={SVG_H - AXIS_B} x2={SVG_W} y2={SVG_H - AXIS_B} />
+            </svg>
           {:else}
             <p class="dim small">No daily data in this window.</p>
           {/if}
@@ -651,7 +746,10 @@
         {/if}
       </div>
 
-      <!-- Sessions table -->
+      <!-- Sessions leaderboard — rows are virtualized so raising SESSION_LIMIT
+           (currently 50) stays DOM-bounded. The header stays fixed above the
+           virtual list; rows use a CSS-grid div layout that mirrors the old
+           table columns (same visual output, same column widths). -->
       <div class="panel card">
         <div class="panel-head">
           <h3>Top sessions</h3>
@@ -662,64 +760,68 @@
           {/if}
         </div>
         {#if usage.summary && usage.summary.sessions.length > 0}
-          <div class="tbl-scroll">
-            <table class="tbl">
-              <thead>
-                <tr>
-                  <th>Session</th>
-                  <th>Workspace</th>
-                  <th>Provider / Model</th>
-                  <th class="num">Events</th>
-                  <th class="num">Tokens</th>
-                  <th class="num">Cost</th>
-                  <th>Last active</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each usage.summary.sessions as s (s.session_id)}
-                  {@const isOttoSession = s.kind != null || s.title != null}
-                  <tr
-                    class:sess-clickable={isOttoSession}
-                    onclick={isOttoSession ? () => openSession(s.session_id) : undefined}
-                    title={isOttoSession ? 'Open this session' : undefined}
-                  >
-                    <td title={s.session_id}>
-                      <div class="sess-top">
-                        <span class="mono">{s.session_id.slice(0, 12)}</span>
-                        {#if s.kind}<span class="kind-badge kind-{s.kind}">{s.kind}</span>{/if}
-                      </div>
-                      {#if s.title}<div class="sess-title ellip" title={s.title}>{s.title}</div>{/if}
-                    </td>
-                    <td class="dim ellip">{s.workspace_name ?? '—'}</td>
-                    <td>
-                      <div class="model-cell">
-                        <span>{s.provider}</span>
-                        {#if s.model}
-                          <span class="model-name dim" title={s.model}>{s.model.slice(0, 22)}</span>
-                        {/if}
-                      </div>
-                    </td>
-                    <td class="num">{fmtNum(s.events)}</td>
-                    <td class="num">
-                      <div class="sess-tok">
-                        <span>{fmtNum(s.total_tokens)}</span>
-                        <div class="seg-bar mini" title={breakdownTitle(s)}>
-                          {#each tokenSegs(s) as seg (seg.label)}
-                            {#if seg.pct > 0}<div style="width: {seg.pct}%; background: {seg.color}"></div>{/if}
-                          {/each}
-                        </div>
-                      </div>
-                    </td>
-                    <td class="num" title={s.fallback_priced ? 'Estimated — model not in the rate table; priced at the Opus tier' : undefined}>
-                      {fmtCost(s.cost_usd)}
-                      {#if s.fallback_priced}<span class="est-tag">est.</span>{/if}
-                    </td>
-                    <td class="dim">{fmtLastActive(s.last_active)}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
+          <!-- Column header row (fixed, not virtualized) -->
+          <div class="sess-head">
+            <span>Session</span>
+            <span>Workspace</span>
+            <span>Provider / Model</span>
+            <span class="num">Events</span>
+            <span class="num">Tokens</span>
+            <span class="num">Cost</span>
+            <span>Last active</span>
           </div>
+          <!-- Virtualized body: each row is ~46px (id+title or id-only ~38px,
+               plus 8px border; use 46 for a safe estimate that covers titled rows). -->
+          <VirtualList items={usage.summary.sessions} estimateHeight={46} class="sess-vlist">
+            {#snippet row(s)}
+              {@const isOttoSession = s.kind != null || s.title != null}
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <div
+                class="sess-row"
+                class:sess-clickable={isOttoSession}
+                role={isOttoSession ? 'button' : undefined}
+                tabindex={isOttoSession ? 0 : undefined}
+                title={isOttoSession ? 'Open this session' : undefined}
+                onclick={isOttoSession ? () => openSession(s.session_id) : undefined}
+                onkeydown={isOttoSession
+                  ? (e) => (e.key === 'Enter' || e.key === ' ') && openSession(s.session_id)
+                  : undefined}
+              >
+                <div title={s.session_id}>
+                  <div class="sess-top">
+                    <span class="mono">{s.session_id.slice(0, 12)}</span>
+                    {#if s.kind}<span class="kind-badge kind-{s.kind}">{s.kind}</span>{/if}
+                  </div>
+                  {#if s.title}<div class="sess-title ellip" title={s.title}>{s.title}</div>{/if}
+                </div>
+                <div class="dim ellip">{s.workspace_name ?? '—'}</div>
+                <div>
+                  <div class="model-cell">
+                    <span>{s.provider}</span>
+                    {#if s.model}
+                      <span class="model-name dim" title={s.model}>{s.model.slice(0, 22)}</span>
+                    {/if}
+                  </div>
+                </div>
+                <div class="num">{fmtNum(s.events)}</div>
+                <div class="num">
+                  <div class="sess-tok">
+                    <span>{fmtNum(s.total_tokens)}</span>
+                    <div class="seg-bar mini" title={breakdownTitle(s)}>
+                      {#each tokenSegs(s) as seg (seg.label)}
+                        {#if seg.pct > 0}<div style="width: {seg.pct}%; background: {seg.color}"></div>{/if}
+                      {/each}
+                    </div>
+                  </div>
+                </div>
+                <div class="num" title={s.fallback_priced ? 'Estimated — model not in the rate table; priced at the Opus tier' : undefined}>
+                  {fmtCost(s.cost_usd)}
+                  {#if s.fallback_priced}<span class="est-tag">est.</span>{/if}
+                </div>
+                <div class="dim">{fmtLastActive(s.last_active)}</div>
+              </div>
+            {/snippet}
+          </VirtualList>
         {:else}
           <p class="dim small">No sessions recorded yet.</p>
         {/if}
@@ -1071,41 +1173,39 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .daily {
-    display: flex;
-    align-items: flex-end;
-    gap: 3px;
-    height: 130px;
-  }
-  .daily-col {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: flex-end;
-    height: 100%;
-    gap: 4px;
-  }
-  .daily-bar {
+  /* Daily cost SVG chart --------------------------------------------------- */
+  .daily-svg {
     width: 100%;
-    max-width: 22px;
-    border-radius: 3px 3px 0 0;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column-reverse;
-    transition: height 200ms ease-out;
+    height: 120px;
+    display: block;
+    overflow: visible;
   }
-  .daily-seg {
-    width: 100%;
-    flex-shrink: 0;
+  .grid-line {
+    stroke: var(--border);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
   }
-  .daily-label {
-    font-size: 9px;
-    color: var(--text-dim);
-    white-space: nowrap;
-    transform: rotate(-45deg);
-    transform-origin: center;
+  .axis-line {
+    stroke: var(--border);
+    stroke-width: 1;
+  }
+  .axis-label {
+    fill: var(--text-dim);
+    font-size: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .y-label {
+    dominant-baseline: middle;
+  }
+  .x-label {
+    dominant-baseline: auto;
+  }
+  .bar-hit {
+    fill: transparent;
+    cursor: crosshair;
+  }
+  .bar-hit:hover {
+    fill: color-mix(in srgb, var(--accent) 8%, transparent);
   }
 
   .metrics {
@@ -1138,31 +1238,44 @@
     stroke: #10b981;
   }
 
-  .tbl-scroll {
-    width: 100%;
-    overflow-x: auto;
-  }
-  .tbl {
-    width: 100%;
-    border-collapse: collapse;
+  /* Sessions leaderboard: fixed column header + VirtualList rows ----------- */
+  /* 7-column CSS grid: session · workspace · provider/model · events · tokens · cost · last active */
+  .sess-head,
+  .sess-row {
+    display: grid;
+    grid-template-columns: minmax(130px, 2fr) minmax(80px, 1fr) minmax(100px, 1.5fr) 56px 90px 64px minmax(90px, 1fr);
+    align-items: center;
+    gap: 0;
     font-size: 12px;
   }
-  .tbl th {
-    text-align: left;
+  .sess-head {
+    border-bottom: 1px solid var(--border);
     color: var(--text-dim);
     font-weight: 500;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--border);
+    padding: 5px 0;
   }
-  .tbl th.num,
-  .tbl td.num {
+  .sess-head > span,
+  .sess-row > div {
+    padding: 5px 8px;
+  }
+  .sess-row {
+    border-bottom: 1px solid var(--surface-2);
+    color: var(--text);
+    transition: background 120ms ease-out;
+  }
+  .sess-row:last-child {
+    border-bottom: none;
+  }
+  .sess-head .num {
+    text-align: right;
+  }
+  .sess-row .num {
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
-  .tbl td {
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--surface-2);
-    color: var(--text);
+  /* VirtualList container: max-height so it stays bounded. */
+  :global(.sess-vlist) {
+    max-height: 460px;
   }
   /* Session Tokens cell: total over a compact composition mini-bar. */
   .sess-tok {
@@ -1567,9 +1680,17 @@
     .cfg-grid {
       grid-template-columns: 1fr;
     }
-    /* Sessions table: scrolls horizontally within its container */
-    .tbl {
-      min-width: 520px;
+    /* Sessions: collapse workspace + last-active columns; keep session/tokens/cost readable. */
+    .sess-head,
+    .sess-row {
+      grid-template-columns: minmax(100px, 2fr) minmax(80px, 1.5fr) 56px 72px 56px;
+    }
+    /* Hide workspace + last-active columns on narrow screens. */
+    .sess-head > span:nth-child(2),
+    .sess-head > span:nth-child(7),
+    .sess-row > div:nth-child(2),
+    .sess-row > div:nth-child(7) {
+      display: none;
     }
     /* Metrics: stack vertically */
     .metrics {
@@ -1591,12 +1712,13 @@
     vertical-align: middle;
   }
 
-  /* Clickable session row: hover highlight + pointer cursor. */
+  /* Clickable session row: hover highlight + pointer cursor. The hover applies
+     to the whole div row (not individual <td> cells, since we use divs now). */
   .sess-clickable {
     cursor: pointer;
     transition: background 120ms ease-out;
   }
-  .sess-clickable:hover td {
+  .sess-clickable:hover {
     background: color-mix(in srgb, var(--accent) 6%, transparent);
   }
 

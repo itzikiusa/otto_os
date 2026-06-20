@@ -12,12 +12,12 @@ use otto_core::api::{
     UpsertConnectionReq, UpsertSectionReq,
 };
 use otto_core::auth::{AuthUser, RoleChecker};
-use otto_core::domain::{Connection, ConnectionSection, Session, User, WorkspaceRole};
+use otto_core::domain::{Connection, ConnectionKind, ConnectionSection, Session, User, WorkspaceRole};
 use otto_core::{Error, Id};
 use otto_state::SqlitePool;
 use serde::Deserialize;
 
-use crate::service::{ConnectionsService, Spawner};
+use crate::service::{ConnectionsService, DbTester, Spawner};
 
 /// Server-side context required by the connections routes.
 pub trait ConnectionsCtx: Clone + Send + Sync + 'static {
@@ -26,6 +26,13 @@ pub trait ConnectionsCtx: Clone + Send + Sync + 'static {
     fn spawner(&self) -> &Arc<dyn Spawner>;
     /// SQLite pool used to read daemon settings (e.g. `connections.owner_private`).
     fn pool(&self) -> SqlitePool;
+    /// Optional hook to route DB-kind test probes through the DB Explorer's
+    /// warm-tunnel pool (reuses a cached `ssh -L` forward). Returns `None` in
+    /// unit-test contexts or any setup that doesn't have a `DbViewerService`
+    /// wired in; the fallback is the CLI subprocess path.
+    fn db_tester(&self) -> Option<Arc<dyn DbTester>> {
+        None
+    }
 }
 
 /// Returns `true` when the `connections.owner_private` setting is explicitly
@@ -240,6 +247,13 @@ async fn open_connection<S: ConnectionsCtx>(
 }
 
 /// #30 POST /connections/{id}/test — editor
+///
+/// For DB-kind connections (MySQL, Redis, MongoDB, ClickHouse) the probe is
+/// routed through the DB Explorer's driver path when a [`DbTester`] is wired
+/// in. The driver path reuses the warm SSH tunnel cache (cached `ssh -L` local
+/// forward) rather than spawning a fresh `ssh -J` child per probe, so a second
+/// `test` on an already-open connection skips the SSH handshake entirely.
+/// SSH and Custom connections always fall back to the CLI subprocess path.
 async fn test_connection<S: ConnectionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -249,6 +263,20 @@ async fn test_connection<S: ConnectionsCtx>(
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
     if owner_private_enabled(&ctx).await {
         require_conn_owner_or_root(&user, &conn)?;
+    }
+    // DB-kind connections can reuse the warm SSH tunnel cache via the driver
+    // path. SSH and Custom kinds have no driver backing and use the CLI path.
+    let is_db_kind = matches!(
+        conn.kind,
+        ConnectionKind::Mysql
+            | ConnectionKind::Redis
+            | ConnectionKind::Mongodb
+            | ConnectionKind::Clickhouse
+    );
+    if is_db_kind {
+        if let Some(tester) = ctx.db_tester() {
+            return Ok(Json(tester.test_db_connection(&id).await?));
+        }
     }
     Ok(Json(ctx.connections().test(&conn).await?))
 }

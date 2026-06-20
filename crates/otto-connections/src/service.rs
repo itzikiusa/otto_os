@@ -19,6 +19,26 @@ use crate::builders::{build_command, validate_params};
 /// Test-connect timeout.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Optional hook that lets the server layer route a connection's test probe
+/// through the DB Explorer's warm-tunnel path (which reuses a cached `ssh -L`
+/// forward) instead of spawning a fresh `ssh -J` child each time.
+///
+/// Implemented at integration time on top of `otto_dbviewer::DbViewerService`
+/// (kept as a trait here so `otto-connections` does not depend on
+/// `otto-dbviewer`). `ConnectionsCtx::db_tester` defaults to `None`; the
+/// server wires in a concrete implementation so DB-kind probes reuse the warm
+/// tunnel pool.
+pub trait DbTester: Send + Sync {
+    /// Run a connectivity probe on the named connection, returning the same
+    /// [`TestConnectionResp`] shape the `connections().test()` path returns
+    /// (minus `warn_argv`, which is `false` for driver-backed probes — no
+    /// CLI secret exposure).
+    fn test_db_connection<'a>(
+        &'a self,
+        id: &'a Id,
+    ) -> otto_core::auth::BoxFuture<'a, Result<TestConnectionResp>>;
+}
+
 /// Spawns a connection session. Implemented at integration time on top of
 /// `otto_sessions::SessionManager` (kept as a trait so otto-connections does
 /// not depend on otto-sessions).

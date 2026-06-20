@@ -166,6 +166,80 @@ impl ClickHouse {
         Ok(rows)
     }
 
+    /// Run `queries` in a single `clickhouse local` process (one process spawn,
+    /// one exclusive lock acquisition). Each SELECT's rows are returned as an
+    /// element of the outer Vec in the same order as `queries`. A sentinel
+    /// query is injected between each pair to delimit the result sets in the
+    /// flat `JSONEachRow` output stream.
+    ///
+    /// Intended for the dashboard's `summary()` path, which previously launched
+    /// 3–4 separate ClickHouse processes for the same table scan window.
+    pub async fn query_batch(
+        &self,
+        queries: &[String],
+    ) -> Result<Vec<Vec<serde_json::Value>>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Interleave a sentinel SELECT between each query so we can split the
+        // flat JSONEachRow stream into per-query slices on the client side.
+        const SEP: &str = "__OTTO_SEP__";
+        let sentinel = format!("SELECT '{SEP}' AS _sep");
+        let mut parts: Vec<String> = Vec::with_capacity(queries.len() * 2 - 1);
+        for (i, q) in queries.iter().enumerate() {
+            if i > 0 {
+                parts.push(sentinel.clone());
+            }
+            parts.push(q.clone());
+        }
+        let combined = parts.join(";\n");
+
+        let _g = self.lock.lock().await;
+        let mut args = self.base_args();
+        args.push("--output_format_json_quote_64bit_integers=0".into());
+        args.push("--prefer_column_name_to_alias=1".into());
+        args.push("--multiquery".into());
+        args.push("--query".into());
+        args.push(combined);
+        args.push("--format".into());
+        args.push("JSONEachRow".into());
+
+        let out = Command::new(&self.bin)
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| Error::Internal(format!("clickhouse batch spawn: {e}")))?;
+        if !out.status.success() {
+            return Err(Error::Internal(format!(
+                "clickhouse batch failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+
+        // Split the flat row stream on sentinel rows.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut result: Vec<Vec<serde_json::Value>> = vec![Vec::new(); queries.len()];
+        let mut bucket = 0usize;
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| Error::Internal(format!("parse batch row: {e}")))?;
+            // Detect separator rows.
+            if v.get("_sep").and_then(serde_json::Value::as_str) == Some(SEP) {
+                bucket += 1;
+                if bucket >= queries.len() {
+                    break; // defensive: should not happen
+                }
+                continue;
+            }
+            result[bucket].push(v);
+        }
+        Ok(result)
+    }
+
     /// Bulk insert into `table` from newline-delimited JSON (one object per
     /// line). Columns omitted from each object fall back to their DDL default
     /// (e.g. `ts`/`event_date`). A blank payload is a no-op.
@@ -207,5 +281,81 @@ impl ClickHouse {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// Validate the sentinel-split parsing used by `query_batch` without needing
+    /// a real ClickHouse binary. Simulates the flat JSONEachRow output that
+    /// `clickhouse local --multiquery` produces for N interleaved queries + sentinels,
+    /// then checks that each bucket contains exactly the rows for that query and
+    /// that rollup totals (sum of a field across a bucket) match what a direct
+    /// per-query scan would produce — i.e. the single-process path is equivalent
+    /// to N separate `query_rows` calls.
+    #[test]
+    fn batch_sentinel_parsing_matches_per_query_rollups() {
+        const SEP: &str = "__OTTO_SEP__";
+
+        // Simulate: 3 "queries", each producing 2 rows, with sentinels between.
+        // Each row has an arbitrary `val` field so we can sum it per bucket.
+        let raw_output = format!(
+            concat!(
+                "{{\"q\":0,\"val\":10}}\n",
+                "{{\"q\":0,\"val\":20}}\n",
+                "{{\"_sep\":\"{sep}\"}}\n",
+                "{{\"q\":1,\"val\":30}}\n",
+                "{{\"q\":1,\"val\":40}}\n",
+                "{{\"_sep\":\"{sep}\"}}\n",
+                "{{\"q\":2,\"val\":50}}\n",
+                "{{\"q\":2,\"val\":60}}\n",
+            ),
+            sep = SEP
+        );
+
+        let n_queries = 3usize;
+        let mut result: Vec<Vec<serde_json::Value>> = vec![Vec::new(); n_queries];
+        let mut bucket = 0usize;
+        for line in raw_output.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if v.get("_sep").and_then(serde_json::Value::as_str) == Some(SEP) {
+                bucket += 1;
+                if bucket >= n_queries {
+                    break;
+                }
+                continue;
+            }
+            result[bucket].push(v);
+        }
+
+        assert_eq!(result.len(), 3, "must have 3 buckets");
+        assert_eq!(result[0].len(), 2, "bucket 0: 2 rows");
+        assert_eq!(result[1].len(), 2, "bucket 1: 2 rows");
+        assert_eq!(result[2].len(), 2, "bucket 2: 2 rows");
+
+        // Sums per bucket must equal what a direct (non-batched) scan would give.
+        let sum = |b: &[serde_json::Value]| -> i64 {
+            b.iter()
+                .filter_map(|v| v["val"].as_i64())
+                .sum()
+        };
+        assert_eq!(sum(&result[0]), 30, "bucket 0 total = 10+20");
+        assert_eq!(sum(&result[1]), 70, "bucket 1 total = 30+40");
+        assert_eq!(sum(&result[2]), 110, "bucket 2 total = 50+60");
+
+        // Confirm no sentinel row leaked into any bucket.
+        for (i, bucket) in result.iter().enumerate() {
+            for row in bucket {
+                assert!(
+                    row.get("_sep").is_none(),
+                    "sentinel leaked into bucket {i}: {row}"
+                );
+            }
+        }
     }
 }

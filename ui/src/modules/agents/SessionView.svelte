@@ -371,9 +371,7 @@
     {/if}
   </header>
   <div class="pane-term">
-    {#key sessionId}
-      <Terminal {sessionId} {readOnly} {resumable} onstatus={onTermStatus} />
-    {/key}
+    <Terminal {sessionId} {readOnly} {resumable} onstatus={onTermStatus} />
   </div>
 </section>
 

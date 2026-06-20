@@ -644,16 +644,26 @@ fn parse_page(site_base: &str, body: &serde_json::Value) -> Result<ConfluencePag
 
 /// Convert Confluence storage-format XHTML to plain Markdown.
 ///
-/// Handles: `<h1>`–`<h3>`, `<p>`, `<ul>`/`<ol>`/`<li>`, `<a href>`, `<code>`,
-/// `<pre>`, `<strong>`, `<em>`.  Unknown/unsupported tags are stripped (their
-/// text content is kept).  HTML entities `&amp;`, `&lt;`, `&gt;`, `&quot;`,
-/// `&apos;`, `&#39;` are decoded.
+/// Handles:
+/// - Block structure: `<h1>`–`<h6>`, `<p>`, `<br>`, `<pre>`, `<blockquote>`
+/// - Inline: `<strong>`/`<b>`, `<em>`/`<i>`, `<code>`, `<a href>`
+/// - Lists: `<ul>`/`<ol>`/`<li>` (nested)
+/// - **Tables**: `<table>`/`<tr>`/`<th>`/`<td>` → GFM pipe-table
+/// - **Confluence macros** (`<ac:structured-macro>`):
+///   - `code` → fenced code block with optional language hint
+///   - `info` / `note` / `warning` / `tip` → blockquote with prefix label
+///   - `status` → inline `[STATUS]` badge
+/// - **Images**: `<ac:image>` / `<ri:attachment>` → `![filename](filename)`
+///
+/// Unknown/unsupported tags are stripped (their text content is kept).
+/// HTML entities `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`, `&#39;`,
+/// `&nbsp;` are decoded.  Unknown `ac:*` / `ri:*` tags degrade silently.
 pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     let mut out = String::new();
     let mut pos = 0;
     let input = storage_xhtml;
 
-    // State for list handling.
+    // ── List state ─────────────────────────────────────────────────────────
     #[derive(Clone, Copy, PartialEq)]
     enum ListKind {
         Ul,
@@ -661,11 +671,20 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     }
     let mut list_stack: Vec<ListKind> = Vec::new();
     let mut ol_counters: Vec<usize> = Vec::new();
+
+    // ── Inline-code state ──────────────────────────────────────────────────
     let mut in_pre = false;
     let mut in_code = false;
-    let mut pending_newline = false; // emit a newline before next block content
+    let mut pending_newline = false;
 
-    // Helper closure is not easily expressible here, so we use a small function.
+    // ── Table state ────────────────────────────────────────────────────────
+    // We parse each table completely with a look-ahead before emitting GFM.
+    // `in_table` prevents the character-by-character path from seeing table
+    // content; the table look-ahead handles it and advances `pos` past `</table>`.
+    // We do NOT track cell-by-cell state in the main loop.
+
+    // ── Helper functions ───────────────────────────────────────────────────
+
     fn decode_entities(s: &str) -> String {
         s.replace("&amp;", "&")
             .replace("&lt;", "<")
@@ -687,8 +706,276 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
         };
     }
 
+    // ── Table look-ahead converter ─────────────────────────────────────────
+    // Called when we encounter `<table` at position `start_pos`; it finds the
+    // matching `</table>` and returns (gfm_string, bytes_consumed).
+    fn convert_table(input: &str, start_pos: usize) -> (String, usize) {
+        let src = &input[start_pos..];
+        // Locate </table>
+        let end_offset = src.to_ascii_lowercase().find("</table>").unwrap_or(src.len());
+        let table_src = &src[..end_offset + "</table>".len()];
+        let consumed = end_offset + "</table>".len();
+
+        // Extract rows: split on <tr / </tr> boundaries.
+        // Very lightweight: find each <tr...>...</tr> segment.
+        let src_lc = table_src.to_ascii_lowercase();
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut search_from = 0usize;
+        while let Some(tr_start) = src_lc[search_from..].find("<tr") {
+            let tr_start = search_from + tr_start;
+            // Skip to end of opening <tr...> tag.
+            let tr_open_end = src_lc[tr_start..].find('>').map(|i| tr_start + i + 1).unwrap_or(tr_start + 3);
+            let after_tr = tr_open_end;
+            // Find </tr>.
+            let tr_end = src_lc[after_tr..].find("</tr>").map(|i| after_tr + i).unwrap_or(src_lc.len());
+            let row_src = &table_src[after_tr..tr_end];
+            let row_src_lc = row_src.to_ascii_lowercase();
+
+            // Extract cells: <th> or <td>.
+            let mut cells: Vec<String> = Vec::new();
+            let mut cell_pos = 0usize;
+            while cell_pos < row_src.len() {
+                if let Some(cell_start_rel) = row_src_lc[cell_pos..].find("<td").or_else(|| {
+                    row_src_lc[cell_pos..]
+                        .find("<th")
+                        .map(|i| {
+                            // Use whichever is earlier if both present.
+                            let td = row_src_lc[cell_pos..].find("<td").unwrap_or(usize::MAX);
+                            if i <= td { i } else { td }
+                        })
+                }) {
+                    let cell_start = cell_pos + cell_start_rel;
+                    let tag_end = row_src_lc[cell_start..].find('>').map(|i| cell_start + i + 1).unwrap_or(cell_start + 3);
+                    // Determine closing tag.
+                    let is_th = row_src_lc[cell_start..].starts_with("<th");
+                    let close_tag = if is_th { "</th>" } else { "</td>" };
+                    let close_start = row_src_lc[tag_end..].find(close_tag).map(|i| tag_end + i).unwrap_or(row_src.len());
+                    let cell_content = &row_src[tag_end..close_start];
+                    // Recursively convert cell content (may have inline markup).
+                    let cell_md = strip_tags(cell_content);
+                    let cell_md = decode_entities(&cell_md).replace('|', "\\|").replace('\n', " ").trim().to_string();
+                    cells.push(cell_md);
+                    cell_pos = close_start + close_tag.len();
+                } else {
+                    break;
+                }
+            }
+
+            if !cells.is_empty() {
+                rows.push(cells);
+            }
+            search_from = tr_end + "</tr>".len();
+        }
+
+        if rows.is_empty() {
+            return (String::new(), consumed);
+        }
+
+        let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        let mut gfm = String::new();
+        let header = &rows[0];
+        // Header row.
+        gfm.push('|');
+        for i in 0..col_count {
+            let cell = header.get(i).map(String::as_str).unwrap_or("");
+            gfm.push_str(&format!(" {} |", cell));
+        }
+        gfm.push('\n');
+        // Separator.
+        gfm.push('|');
+        for _ in 0..col_count {
+            gfm.push_str(" --- |");
+        }
+        gfm.push('\n');
+        // Data rows.
+        for row in rows.iter().skip(1) {
+            gfm.push('|');
+            for i in 0..col_count {
+                let cell = row.get(i).map(String::as_str).unwrap_or("");
+                gfm.push_str(&format!(" {} |", cell));
+            }
+            gfm.push('\n');
+        }
+
+        (gfm, consumed)
+    }
+
+    // ── ac:structured-macro look-ahead handler ─────────────────────────────
+    // Called when we see `<ac:structured-macro` at `start_pos`.  Finds the
+    // matching `</ac:structured-macro>`, extracts the `ac:name` attribute and
+    // any `<ac:plain-text-body>` / `<ac:rich-text-body>` / `<ac:parameter>`
+    // children, and returns (md_string, bytes_consumed).
+    fn convert_ac_macro(input: &str, start_pos: usize) -> (String, usize) {
+        let src = &input[start_pos..];
+        let src_lc = src.to_ascii_lowercase();
+
+        // Find the closing tag.
+        let close = "</ac:structured-macro>";
+        let close_lc = close.to_ascii_lowercase();
+        let end_offset = src_lc.find(&close_lc).unwrap_or(src.len());
+        let consumed = end_offset + close.len();
+        let macro_src = &src[..end_offset];
+
+        // Extract ac:name from opening tag.
+        let name = extract_attr(macro_src, "ac:name").unwrap_or_default();
+        let name_lc = name.to_ascii_lowercase();
+
+        // Extract <ac:plain-text-body> content (the typical body for code macros).
+        fn extract_body_tag<'a>(src: &'a str, tag: &str) -> Option<&'a str> {
+            let src_lc = src.to_ascii_lowercase();
+            let open = format!("<{}", tag);
+            let close = format!("</{}>", tag);
+            let start = src_lc.find(&open)?;
+            let open_end = src_lc[start..].find('>')? + start + 1;
+            let end = src_lc[open_end..].find(&close)? + open_end;
+            Some(&src[open_end..end])
+        }
+
+        // Extract a parameter by name: <ac:parameter ac:name="X">value</ac:parameter>
+        fn extract_param(macro_src: &str, param_name: &str) -> Option<String> {
+            // Find <ac:parameter ac:name="X"> by scanning manually.
+            let src_lc = macro_src.to_ascii_lowercase();
+            let needle = "ac:parameter";
+            let mut search = 0;
+            while let Some(rel) = src_lc[search..].find(needle) {
+                let tag_start = search + rel;
+                // Back up to the `<`.
+                let lt = src_lc[..tag_start].rfind('<').unwrap_or(0);
+                let tag_end = src_lc[tag_start..].find('>').map(|i| tag_start + i + 1).unwrap_or(tag_start + 1);
+                let tag_inner = &macro_src[lt + 1..tag_end - 1];
+                let actual_name = extract_attr(tag_inner, "ac:name").unwrap_or_default();
+                if actual_name.to_ascii_lowercase() == param_name {
+                    // Find the closing </ac:parameter>.
+                    let close = "</ac:parameter>";
+                    let close_lc = close.to_ascii_lowercase();
+                    if let Some(close_rel) = src_lc[tag_end..].find(&close_lc) {
+                        return Some(macro_src[tag_end..tag_end + close_rel].to_string());
+                    }
+                }
+                search = tag_end;
+            }
+            None
+        }
+
+        let md = match name_lc.as_str() {
+            // ── Code macro → fenced code block ────────────────────────────
+            "code" => {
+                let lang = extract_param(macro_src, "language").unwrap_or_default();
+                let body = extract_body_tag(macro_src, "ac:plain-text-body")
+                    .or_else(|| extract_body_tag(macro_src, "ac:rich-text-body"))
+                    .unwrap_or("");
+                format!("\n```{}\n{}\n```\n", lang, body.trim())
+            }
+            // ── Panel macros (info / note / warning / tip) → blockquote ──
+            "info" | "note" | "warning" | "tip" => {
+                let prefix = match name_lc.as_str() {
+                    "info" => "ℹ INFO",
+                    "note" => "NOTE",
+                    "warning" => "WARNING",
+                    "tip" => "TIP",
+                    _ => "",
+                };
+                let body = extract_body_tag(macro_src, "ac:rich-text-body")
+                    .or_else(|| extract_body_tag(macro_src, "ac:plain-text-body"))
+                    .unwrap_or("");
+                let body_md = storage_to_markdown(body);
+                // Prefix every line with `> `.
+                let quoted: String = body_md
+                    .lines()
+                    .map(|l| format!("> {}", l))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("\n> **{}**\n{}\n", prefix, quoted)
+            }
+            // ── Status macro → inline badge ────────────────────────────────
+            "status" => {
+                let label = extract_param(macro_src, "title").unwrap_or_else(|| name.clone());
+                format!("[{}]", label.to_uppercase())
+            }
+            // ── Unknown macro → strip silently ────────────────────────────
+            _ => String::new(),
+        };
+
+        (md, consumed)
+    }
+
+    // ── ac:image look-ahead handler ────────────────────────────────────────
+    // Handles both self-closing `<ac:image ... />` and
+    // `<ac:image ...><ri:attachment .../></ac:image>` patterns.
+    fn convert_ac_image(input: &str, start_pos: usize) -> (String, usize) {
+        let src = &input[start_pos..];
+        let src_lc = src.to_ascii_lowercase();
+
+        // Find the end: either `/>` (self-closing) or `</ac:image>`.
+        let self_close = src_lc.find("/>").unwrap_or(usize::MAX);
+        let close_tag = src_lc.find("</ac:image>").unwrap_or(usize::MAX);
+        let (end_offset, consumed) = if self_close <= close_tag {
+            (self_close + 2, self_close + 2)
+        } else {
+            let ct_len = "</ac:image>".len();
+            (close_tag + ct_len, close_tag + ct_len)
+        };
+
+        let macro_src = &src[..end_offset];
+
+        // Try to extract filename from <ri:attachment ri:filename="..."/>.
+        let filename = {
+            let m_lc = macro_src.to_ascii_lowercase();
+            if let Some(att_start) = m_lc.find("<ri:attachment") {
+                let tag_end = m_lc[att_start..].find('>').map(|i| att_start + i + 1).unwrap_or(att_start + 1);
+                let tag_inner = &macro_src[att_start + 1..tag_end.saturating_sub(1)];
+                extract_attr(tag_inner, "ri:filename")
+            } else {
+                None
+            }
+        };
+
+        let alt = filename.as_deref().unwrap_or("image");
+        let src_attr = filename.as_deref().unwrap_or("image");
+        let md = format!("![{}]({})", alt, src_attr);
+        (md, consumed)
+    }
+
+    // ── Main parsing loop ──────────────────────────────────────────────────
     while pos < input.len() {
         if input[pos..].starts_with('<') {
+            // Peek at the tag to decide if we need special look-ahead handling
+            // before doing the standard single-tag parse.
+
+            // ── Table look-ahead ──────────────────────────────────────────
+            if input[pos..].len() >= 6
+                && input[pos..pos + 6].to_ascii_lowercase().starts_with("<table")
+            {
+                push_block_sep!();
+                let (gfm, consumed) = convert_table(input, pos);
+                out.push_str(&gfm);
+                pos += consumed;
+                pending_newline = true;
+                continue;
+            }
+
+            // ── ac:structured-macro look-ahead ────────────────────────────
+            if input[pos..]
+                .to_ascii_lowercase()
+                .starts_with("<ac:structured-macro")
+            {
+                push_block_sep!();
+                let (md, consumed) = convert_ac_macro(input, pos);
+                out.push_str(&md);
+                pos += consumed;
+                pending_newline = true;
+                continue;
+            }
+
+            // ── ac:image look-ahead ────────────────────────────────────────
+            if input[pos..].to_ascii_lowercase().starts_with("<ac:image") {
+                let (md, consumed) = convert_ac_image(input, pos);
+                out.push_str(&md);
+                pos += consumed;
+                continue;
+            }
+
+            // ── Standard single-tag path ───────────────────────────────────
             // Find the end of the tag.
             let tag_end = match input[pos..].find('>') {
                 Some(i) => pos + i + 1,
@@ -778,6 +1065,15 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                 "em" | "i" => {
                     out.push('*');
                 }
+                "blockquote" => {
+                    // Simple blockquote: insert `> ` prefix on open.
+                    if !is_close {
+                        push_block_sep!();
+                        out.push_str("> ");
+                    } else if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
                 "ul" => {
                     if !is_close {
                         list_stack.push(ListKind::Ul);
@@ -822,44 +1118,29 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                         out.push('\n');
                     }
                 }
-                "a"
-                    if !is_close => {
-                        // Extract href attribute.
-                        let href = extract_attr(inner, "href").unwrap_or_default();
-                        // We'll buffer the text between <a> and </a> — but that
-                        // requires look-ahead. Instead, use a simpler approach:
-                        // emit `[` now, and `](href)` on close, storing href.
-                        // We encode href into a sentinel we can recover.
-                        // For simplicity, push the opening bracket and a placeholder.
-                        out.push('[');
-                        // Store href for closing tag: push it into a side-channel.
-                        // We'll use a small Vec to track pending links.
-                        // Since macros can't capture locals easily, handle via the tag attrs
-                        // approach: re-scan for href on the opening tag only.
-                        // We need a stack; use a thread-local or an inline approach.
-                        // The simplest workable solution: scan forward for `</a>` in the
-                        // remaining input, grab the text, emit [text](href), advance pos.
-                        let rest = &input[pos..];
-                        if let Some(close_a) = rest.find("</a>") {
-                            let link_text_raw = &rest[..close_a];
-                            // The link text may itself contain tags (e.g. <strong>); strip them.
-                            let link_text = strip_tags(link_text_raw);
-                            let link_text = decode_entities(&link_text);
-                            // Replace the `[` we already pushed.
-                            out.pop(); // remove the `[` we just pushed
-                            if href.is_empty() {
-                                out.push_str(&link_text);
-                            } else {
-                                out.push_str(&format!("[{}]({})", link_text, href));
-                            }
-                            // Advance past the inner content AND the </a> tag.
-                            pos += close_a + "</a>".len();
+                "a" if !is_close => {
+                    // Extract href attribute.
+                    let href = extract_attr(inner, "href").unwrap_or_default();
+                    // Look-ahead: find closing </a>, grab text, emit [text](href).
+                    let rest = &input[pos..];
+                    if let Some(close_a) = rest.find("</a>") {
+                        let link_text_raw = &rest[..close_a];
+                        let link_text = strip_tags(link_text_raw);
+                        let link_text = decode_entities(&link_text);
+                        if href.is_empty() {
+                            out.push_str(&link_text);
                         } else {
-                            // No closing </a> found; leave the `[` and move on.
+                            out.push_str(&format!("[{}]({})", link_text, href));
                         }
+                        pos += close_a + "</a>".len();
                     }
-                    // Closing </a> is handled by the look-ahead above.
-                // ac:* structured macros and other Confluence-specific tags → skip silently.
+                    // No closing </a>: skip silently.
+                }
+                // ac:* and ri:* tags not caught by the look-ahead paths above:
+                // strip silently (unknown Confluence markup).
+                // <tbody> / <thead> / <tfoot> / <tr> / <td> / <th>: these are
+                // consumed by the table look-ahead and should never appear here.
+                // Strip them as a no-op if they somehow arrive.
                 _ => {}
             }
             let _ = (is_self_close, in_code, pending_newline); // suppress unused warnings
@@ -878,7 +1159,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
         }
     }
 
-    // Trim leading/trailing whitespace but preserve internal structure.
+    // Trim trailing whitespace but preserve internal structure.
     let result = out.trim_end_matches('\n').to_string();
     // Collapse more-than-2 consecutive newlines to exactly 2.
     collapse_excess_newlines(&result)
@@ -1375,5 +1656,118 @@ mod tests {
     fn test_cql_trims_whitespace_from_query() {
         let cql = build_page_cql(None, "  onboard  ");
         assert!(cql.contains("title ~ \"onboard\""), "should trim query; got: {cql:?}");
+    }
+
+    // ── storage_to_markdown fidelity: table → GFM pipe-table ────────────────
+
+    #[test]
+    fn test_storage_to_markdown_table_basic() {
+        let storage = r#"
+<table>
+  <tr><th>Name</th><th>Age</th></tr>
+  <tr><td>Alice</td><td>30</td></tr>
+  <tr><td>Bob</td><td>25</td></tr>
+</table>"#;
+        let md = storage_to_markdown(storage);
+
+        // Header row.
+        assert!(md.contains("| Name |"), "header Name; got: {md:?}");
+        assert!(md.contains("| Age |"), "header Age; got: {md:?}");
+        // Separator.
+        assert!(md.contains("| --- |"), "separator; got: {md:?}");
+        // Data rows.
+        assert!(md.contains("| Alice |"), "Alice row; got: {md:?}");
+        assert!(md.contains("| Bob |"), "Bob row; got: {md:?}");
+        assert!(md.contains("| 30 |"), "30 cell; got: {md:?}");
+        assert!(md.contains("| 25 |"), "25 cell; got: {md:?}");
+    }
+
+    #[test]
+    fn test_storage_to_markdown_table_pipe_escaped() {
+        // Pipe characters inside a cell must be escaped so the GFM is valid.
+        let storage = "<table><tr><th>A</th></tr><tr><td>a | b</td></tr></table>";
+        let md = storage_to_markdown(storage);
+        // The pipe inside the cell should be escaped.
+        assert!(md.contains("a \\| b"), "escaped pipe; got: {md:?}");
+    }
+
+    // ── storage_to_markdown fidelity: ac:structured-macro code block ─────────
+
+    #[test]
+    fn test_storage_to_markdown_code_macro() {
+        let storage = r#"<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">rust</ac:parameter>
+  <ac:plain-text-body>fn hello() {}</ac:plain-text-body>
+</ac:structured-macro>"#;
+        let md = storage_to_markdown(storage);
+
+        // Should be a fenced code block.
+        assert!(md.contains("```rust"), "rust fence; got: {md:?}");
+        assert!(md.contains("fn hello()"), "code body; got: {md:?}");
+        assert!(md.contains("```"), "closing fence; got: {md:?}");
+    }
+
+    #[test]
+    fn test_storage_to_markdown_code_macro_no_language() {
+        // When no language parameter is given the fence should still be valid.
+        let storage = r#"<ac:structured-macro ac:name="code">
+  <ac:plain-text-body>SELECT 1;</ac:plain-text-body>
+</ac:structured-macro>"#;
+        let md = storage_to_markdown(storage);
+        assert!(md.contains("```\n"), "fence without lang; got: {md:?}");
+        assert!(md.contains("SELECT 1;"), "SQL body; got: {md:?}");
+    }
+
+    #[test]
+    fn test_storage_to_markdown_info_panel() {
+        let storage = r#"<ac:structured-macro ac:name="info">
+  <ac:rich-text-body><p>This is informational text.</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = storage_to_markdown(storage);
+        // Should be rendered as a blockquote with a label.
+        assert!(md.contains("> **"), "blockquote with bold label; got: {md:?}");
+        assert!(md.contains("INFO"), "INFO label; got: {md:?}");
+        assert!(md.contains("informational text"), "body content; got: {md:?}");
+    }
+
+    #[test]
+    fn test_storage_to_markdown_warning_panel() {
+        let storage = r#"<ac:structured-macro ac:name="warning">
+  <ac:rich-text-body><p>Do not proceed.</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = storage_to_markdown(storage);
+        assert!(md.contains("WARNING"), "WARNING label; got: {md:?}");
+        assert!(md.contains("Do not proceed"), "body; got: {md:?}");
+    }
+
+    #[test]
+    fn test_storage_to_markdown_unknown_macro_is_silent() {
+        // An unrecognised macro should not produce error output, just be dropped.
+        let storage = r#"<p>Before</p><ac:structured-macro ac:name="fancy-widget">
+  <ac:rich-text-body>hidden</ac:rich-text-body>
+</ac:structured-macro><p>After</p>"#;
+        let md = storage_to_markdown(storage);
+        assert!(md.contains("Before"), "before text; got: {md:?}");
+        assert!(md.contains("After"), "after text; got: {md:?}");
+        // The body of an unknown macro is silently dropped.
+        assert!(!md.contains("hidden"), "unknown macro body must be dropped; got: {md:?}");
+    }
+
+    // ── storage_to_markdown fidelity: ac:image → Markdown image link ──────────
+
+    #[test]
+    fn test_storage_to_markdown_image_with_attachment() {
+        let storage = r#"<ac:image><ri:attachment ri:filename="diagram.png"/></ac:image>"#;
+        let md = storage_to_markdown(storage);
+        assert!(md.contains("![diagram.png](diagram.png)"), "image link; got: {md:?}");
+    }
+
+    #[test]
+    fn test_storage_to_markdown_image_self_closing() {
+        // Some macros render as self-closing without a nested ri:attachment.
+        let storage = r#"<ac:image ri:filename="chart.svg"/>"#;
+        let md = storage_to_markdown(storage);
+        // Even without the nested tag the output should be a Markdown image.
+        assert!(md.contains("!["), "image syntax; got: {md:?}");
     }
 }
