@@ -119,7 +119,12 @@ Notes:
   if the repo has no provider/account → 400 `invalid`.
 - `/orchestrate` never executes; it only returns a plan. Execution is the separate call #24.
 - Settings keys used in v1: `network_listener` `{enabled:bool, port:u16}`, `providers`
-  (provider registry overrides), `default_provider` (string).
+  (provider registry overrides), `default_provider` (string), `cli_auto_update`
+  `{enabled:bool, time_of_day:"HH:MM", use_utc:bool, reload_sessions:bool}` (daily
+  auto-update of the agent CLIs; default `{true,"03:00",true,true}` = 03:00 UTC) and
+  the daemon-written cursor `cli_auto_update_last_run` (RFC3339). The scheduler
+  catches up a missed window on next boot and, when `reload_sessions`, restarts open
+  agent sessions onto the new binary (resume-aware).
 
 ## Agent Swarm (#59–#86)
 

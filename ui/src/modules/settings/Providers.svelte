@@ -16,6 +16,20 @@
     update_command?: string | null;
   }
 
+  interface CliAutoUpdate {
+    enabled: boolean;
+    time_of_day: string; // "HH:MM"
+    use_utc: boolean;
+    reload_sessions: boolean;
+  }
+
+  const AUTO_UPDATE_DEFAULTS: CliAutoUpdate = {
+    enabled: true,
+    time_of_day: '03:00',
+    use_utc: true,
+    reload_sessions: true,
+  };
+
   // Built-in providers with their default update commands (None for shell).
   const BUILTINS: { name: string; updateCmd: string | null }[] = [
     { name: 'claude', updateCmd: 'claude update' },
@@ -30,6 +44,11 @@
   let custom: Record<string, ProviderDef> = $state({});
   let allSettings: Record<string, unknown> = $state({});
   let defaultProvider = $state('');
+
+  // Daily CLI auto-update config (settings key `cli_auto_update`).
+  let autoUpdate: CliAutoUpdate = $state({ ...AUTO_UPDATE_DEFAULTS });
+  let lastRun: string | null = $state(null);
+  let savingAuto = $state(false);
 
   // Providers offered in the default-agent picker: the live registry from
   // /meta (built-ins + custom overrides), falling back to the built-in names.
@@ -65,6 +84,11 @@
         allSettings = await api.get<Record<string, unknown>>('/settings');
         custom = (allSettings['providers'] as Record<string, ProviderDef> | undefined) ?? {};
         defaultProvider = (allSettings['default_provider'] as string | undefined) ?? '';
+        autoUpdate = {
+          ...AUTO_UPDATE_DEFAULTS,
+          ...((allSettings['cli_auto_update'] as Partial<CliAutoUpdate> | undefined) ?? {}),
+        };
+        lastRun = (allSettings['cli_auto_update_last_run'] as string | undefined) ?? null;
       } catch {
         toasts.error('Could not load provider settings');
       } finally {
@@ -134,6 +158,29 @@
     }
   }
 
+  async function saveAutoUpdate(): Promise<void> {
+    if (!/^\d{1,2}:\d{2}$/.test(autoUpdate.time_of_day)) {
+      toasts.error('Invalid time', 'Use HH:MM, e.g. 03:00');
+      return;
+    }
+    savingAuto = true;
+    try {
+      allSettings = await api.put<Record<string, unknown>>('/settings', {
+        ...allSettings,
+        cli_auto_update: { ...autoUpdate },
+      });
+      autoUpdate = {
+        ...AUTO_UPDATE_DEFAULTS,
+        ...((allSettings['cli_auto_update'] as Partial<CliAutoUpdate> | undefined) ?? {}),
+      };
+      toasts.success('Auto-update saved', autoUpdate.enabled ? 'Scheduler is on' : 'Scheduler is off');
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      savingAuto = false;
+    }
+  }
+
   async function save(): Promise<void> {
     const n = name.trim();
     if (n === '' || cmd.trim() === '') {
@@ -186,6 +233,42 @@
   {#if loading}
     <Skeleton rows={4} />
   {:else}
+    <div class="section">
+      <div class="label">Automatic updates</div>
+      <label class="toggle-row">
+        <input type="checkbox" bind:checked={autoUpdate.enabled} />
+        <span>Update all CLIs automatically, every day</span>
+      </label>
+      {#if autoUpdate.enabled}
+        <div class="row wrap">
+          <label class="inline">
+            <span>At</span>
+            <input class="time" type="time" bind:value={autoUpdate.time_of_day} />
+          </label>
+          <select class="select tz" bind:value={autoUpdate.use_utc}>
+            <option value={true}>UTC</option>
+            <option value={false}>Local time</option>
+          </select>
+          <label class="toggle-row">
+            <input type="checkbox" bind:checked={autoUpdate.reload_sessions} />
+            <span>Reload open sessions onto the new version</span>
+          </label>
+        </div>
+      {/if}
+      <p class="dim sm">
+        Runs each CLI's update command on a schedule, so you don't have to. Default
+        <strong>03:00 UTC</strong> — when new versions are typically published. A missed
+        window (machine asleep/off) runs at the next opportunity. Reloaded sessions
+        resume their conversation on the new binary.
+        {#if lastRun}<br />Last run: {new Date(lastRun).toLocaleString()}.{/if}
+      </p>
+      <div class="row">
+        <button class="btn primary" onclick={saveAutoUpdate} disabled={savingAuto}>
+          {savingAuto ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+
     <div class="section">
       <div class="label">Default agent</div>
       <div class="row">
@@ -351,6 +434,33 @@
   }
   .row.between {
     justify-content: space-between;
+  }
+  .row.wrap {
+    flex-wrap: wrap;
+  }
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+  }
+  .inline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+  .time {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    padding: 5px 8px;
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .select.tz {
+    min-width: 120px;
   }
   .row.end {
     justify-content: flex-end;

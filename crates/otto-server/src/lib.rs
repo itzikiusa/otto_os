@@ -6,6 +6,7 @@
 pub mod agent_run;
 pub mod api_helpers;
 pub mod auth;
+pub mod cli_update;
 pub mod error;
 pub mod feature_guard;
 pub mod insights;

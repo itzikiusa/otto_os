@@ -501,6 +501,13 @@ async fn run(cfg: Config) -> Result<(), String> {
         otto_server::insights::InsightsScheduler::new(ctx.clone()).start();
     tracing::info!("insights scheduler started");
 
+    // Daily CLI auto-update: updates the agent CLIs (claude/codex/…) at a
+    // user-configurable local time (default 07:00, opt-out via settings) and
+    // force-reloads open agent sessions onto the new binary (resume-aware).
+    // Catch-up on a missed window via a last-run cursor, like insights.
+    let _cli_update_handle = otto_server::cli_update::CliUpdateScheduler::new(ctx.clone()).start();
+    tracing::info!("cli auto-update scheduler started");
+
     // --- Agent Swarm: reconcile stale runs, then scheduler + restore coords ---
     // A swarm run's background task dies with the process. A row left
     // queued/running/waiting would permanently consume the parallel cap and
