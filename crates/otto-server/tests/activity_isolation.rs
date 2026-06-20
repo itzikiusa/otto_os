@@ -243,6 +243,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         events,
         authenticator: Arc::new(otto_rbac::RbacAuthenticator::new(pool.clone())),
         roles,
+        auth_cache: otto_rbac::AuthCache::new(),
         version: "test".into(),
         data_dir: PathBuf::from("/tmp/otto-test"),
         manager,

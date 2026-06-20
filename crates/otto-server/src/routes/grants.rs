@@ -73,7 +73,12 @@ pub trait GrantsCtx: Clone + Send + Sync + 'static {
 
 impl GrantsCtx for ServerCtx {
     fn grants_repo(&self) -> GrantsRepo {
-        GrantsRepo::new(self.pool.clone())
+        // Carry the shared auth cache as the invalidator so `set_grants` flushes
+        // that user's cached auth contexts immediately (no stale-grant window).
+        GrantsRepo::new_with_invalidator(
+            self.pool.clone(),
+            std::sync::Arc::new(self.auth_cache.clone()),
+        )
     }
     fn audit_repo(&self) -> AuditRepo {
         AuditRepo::new(self.pool.clone())

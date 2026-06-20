@@ -3,19 +3,56 @@
 //! Default-deny: no row ⇒ `Capability::None`. Root users bypass the table and
 //! always receive `Capability::Admin` (matches the `WorkspacesRepo::role_of`
 //! pattern for root bypass).
+//!
+//! # Cache invalidation
+//!
+//! When an [`otto_core::auth::GrantsInvalidator`] is attached (typically the
+//! `AuthCache` from `otto-rbac`), [`GrantsRepo::set_grants`] calls
+//! `invalidate_user` after committing new grants so cached auth contexts for
+//! that user are flushed immediately. Use [`GrantsRepo::new_with_invalidator`]
+//! at the call site that wires in the cache; plain [`GrantsRepo::new`] installs
+//! a no-op invalidator and keeps the existing behaviour.
 
+use std::sync::Arc;
+
+use otto_core::auth::GrantsInvalidator;
 use otto_core::domain::{Capability, Feature, User};
 use otto_core::{Error, Result};
 use sqlx::SqlitePool;
 
+/// No-op [`GrantsInvalidator`] used when no cache is wired in.
+struct NoopInvalidator;
+
+impl GrantsInvalidator for NoopInvalidator {
+    fn invalidate_user(&self, _user_id: &str) {}
+}
+
 #[derive(Clone)]
 pub struct GrantsRepo {
     pool: SqlitePool,
+    /// Called in `set_grants` after committing. The default is a no-op.
+    invalidator: Arc<dyn GrantsInvalidator>,
 }
 
 impl GrantsRepo {
+    /// Construct with a no-op invalidator (no auth cache). All callers that do
+    /// not opt in to caching should use this constructor; behaviour is identical
+    /// to the previous single-constructor API.
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            invalidator: Arc::new(NoopInvalidator),
+        }
+    }
+
+    /// Construct with an explicit [`GrantsInvalidator`]. Pass the `AuthCache`
+    /// from `otto-rbac` here so grant changes immediately flush the affected
+    /// user's cached auth context.
+    pub fn new_with_invalidator(pool: SqlitePool, inv: Arc<dyn GrantsInvalidator>) -> Self {
+        Self {
+            pool,
+            invalidator: inv,
+        }
     }
 
     /// Return the effective capability of `user` for `feature`.
@@ -74,6 +111,15 @@ impl GrantsRepo {
     ///
     /// Deletes existing rows and inserts `grants` in a single transaction.
     /// Passing an empty slice effectively revokes all grants.
+    ///
+    /// After a successful commit, calls [`GrantsInvalidator::invalidate_user`]
+    /// so any auth-lookup cache evicts stale entries for this user. The
+    /// invalidation happens after the commit to ensure DB consistency: if the
+    /// commit fails, the cache is not touched (stale entries harmlessly re-read
+    /// the unchanged DB). There is a small window between the commit and the
+    /// evict where the cache serves old grants; it is bounded by
+    /// `AUTH_CACHE_TTL` (10 s) in the worst case of a racing eviction failure,
+    /// which is acceptable for a grant-change path (admin-only, infrequent).
     pub async fn set_grants(&self, user_id: &str, grants: &[(Feature, Capability)]) -> Result<()> {
         let mut tx = self
             .pool
@@ -106,6 +152,11 @@ impl GrantsRepo {
         tx.commit()
             .await
             .map_err(|e| Error::Internal(format!("commit tx: {e}")))?;
+
+        // Evict after commit: the new grants are now durable. Any auth context
+        // cached for this user may carry stale capability information; flush it.
+        self.invalidator.invalidate_user(user_id);
+
         Ok(())
     }
 }

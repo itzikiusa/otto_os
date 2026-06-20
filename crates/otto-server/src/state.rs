@@ -27,6 +27,10 @@ pub struct ServerCtx {
     pub events: broadcast::Sender<Event>,
     pub authenticator: Arc<dyn TokenAuthenticator>,
     pub roles: Arc<dyn RoleChecker>,
+    /// Shared short-TTL auth-lookup cache (login/api tokens only; share +
+    /// impersonation tokens are never cached). Wired into `authenticator`; the
+    /// grants route uses it as a `GrantsInvalidator` to flush on `set_grants`.
+    pub auth_cache: otto_rbac::AuthCache,
     /// Daemon version reported by `/meta` (the ottod CARGO_PKG_VERSION).
     pub version: String,
     /// The daemon data directory (library, swarm worktrees/scratch, …).

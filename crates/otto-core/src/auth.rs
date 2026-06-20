@@ -108,6 +108,16 @@ pub trait RoleChecker: Send + Sync {
     ) -> BoxFuture<'a, Result<()>>;
 }
 
+/// Called by [`otto_state::GrantsRepo::set_grants`] after writing new grants so
+/// any auth-lookup cache can evict stale entries for `user_id`.
+///
+/// The no-op implementation is used wherever no cache is wired in (tests,
+/// components that opt out). The real implementation is `AuthCache` in
+/// `otto-rbac`.
+pub trait GrantsInvalidator: Send + Sync {
+    fn invalidate_user(&self, user_id: &str);
+}
+
 /// True iff `user` may access `session`: root, the session's creator, or a
 /// workspace **Admin** of the session's workspace.
 ///

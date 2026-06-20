@@ -235,12 +235,20 @@ async fn run(cfg: Config) -> Result<(), String> {
         _ => memory,
     };
 
+    // One shared auth-lookup cache: the authenticator fills it, the grants route
+    // (via ServerCtx.auth_cache) evicts from it on set_grants. Clones share the
+    // same backing map (Arc-backed).
+    let auth_cache = otto_rbac::AuthCache::new();
     let ctx = ServerCtx {
         pool: pool.clone(),
         secrets: secrets.clone(),
         events: events.clone(),
-        authenticator: Arc::new(RbacAuthenticator::new(pool.clone())),
+        authenticator: Arc::new(RbacAuthenticator::new_with_cache(
+            pool.clone(),
+            auth_cache.clone(),
+        )),
         roles: Arc::new(RbacRoleChecker::new(pool.clone())),
+        auth_cache: auth_cache.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: cfg.data_dir.clone(),
         manager: Arc::clone(&manager),

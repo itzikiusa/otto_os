@@ -3,6 +3,25 @@
 //! Tokens are 32 random bytes hex-encoded (64 chars); only the SHA-256 hex of
 //! the token is stored. Expiry is sliding: 30 days from last_seen, refreshed
 //! at most once per hour to throttle writes.
+//!
+//! # Auth-lookup cache
+//!
+//! `AuthRepo` optionally holds an [`AuthCache`] to short-circuit the three
+//! SQLite hits per request (token row + user join, optional target user for
+//! impersonation, grant lookup). The cache is guarded by strict invariants:
+//!
+//! - **`kind='share'` and `kind='impersonation'` tokens are NEVER cached.**
+//!   They are explicitly revocable mid-session and the cost of a missed
+//!   invalidation (stale access after revoke) outweighs any latency benefit.
+//!   Every authenticated request for these kinds always hits the DB.
+//! - Every revocation path evicts the affected entry **before** returning:
+//!   `revoke`, `revoke_api_token`, and `revoke_all_for_user` all call
+//!   `cache.evict(hash)` / `cache.evict_user(uid)` synchronously, so there is
+//!   no window where a revoked token is served from cache.
+//! - Grant changes invalidate the user's cached context via
+//!   [`GrantsInvalidator::invalidate_user`], implemented by `AuthCache`.
+//! - The cache is disabled entirely (all paths hit the DB) when
+//!   [`AUTH_CACHE_ENABLED`] is `false`.
 
 use chrono::{DateTime, Duration, Utc};
 use otto_core::api::{ApiTokenInfo, ShareInfo};
@@ -12,6 +31,8 @@ use otto_core::{new_id, Error, Id, Result};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
+
+use crate::cache::AuthCache;
 
 /// Sliding expiry window for interactive (`kind='session'`) login tokens.
 const TOKEN_TTL_DAYS: i64 = 30;
@@ -70,14 +91,35 @@ fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
 }
 
 /// Repository for `auth_sessions`.
+///
+/// Holds an optional short-TTL [`AuthCache`] to avoid redundant SQLite reads on
+/// hot paths. Construct with [`AuthRepo::new`] (no cache) or
+/// [`AuthRepo::with_cache`] (cache enabled). The `RbacAuthenticator` wired into
+/// the server always uses the cached variant; direct repo construction in tests
+/// uses the uncached form so tests prove DB-level correctness without touching
+/// the cache layer.
 #[derive(Clone)]
 pub struct AuthRepo {
     pool: SqlitePool,
+    /// `None` = caching disabled for this instance (all paths hit the DB).
+    cache: Option<AuthCache>,
 }
 
 impl AuthRepo {
+    /// Construct without a cache (every authenticate call hits the DB). Used in
+    /// unit tests and any context where caching is not desired.
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self { pool, cache: None }
+    }
+
+    /// Construct with an attached [`AuthCache`]. The cache is shared via
+    /// `Arc`-interior cloning, so `AuthRepo::clone()` and the `GrantsInvalidator`
+    /// impl point at the same backing map.
+    pub fn with_cache(pool: SqlitePool, cache: AuthCache) -> Self {
+        Self {
+            pool,
+            cache: Some(cache),
+        }
     }
 
     /// Issue a new token for `user_id` and return the RAW token (the only
@@ -114,8 +156,26 @@ impl AuthRepo {
     ///   `effective_user` is the impersonation target (`acting_as_user_id`).
     ///   The row is rejected (Unauthorized) if it has expired or if **either**
     ///   the admin or the target user is disabled (the target must exist).
+    ///
+    /// # Caching
+    ///
+    /// When an [`AuthCache`] is attached, a cache hit for a `login`/`api` token
+    /// returns the stored [`AuthContext`] without touching the DB. `share` and
+    /// `impersonation` tokens are NEVER served from cache — they always hit the
+    /// DB. On a DB miss (or for non-cacheable kinds) the result is inserted into
+    /// the cache (for `login`/`api` only) before returning.
     pub async fn authenticate(&self, token: &str) -> Result<AuthContext> {
         let hash = token_hash(token);
+
+        // Cache fast-path: only populated for login/api tokens (never for share
+        // or impersonation). A hit means: the token was valid at insert-time,
+        // TTL has not elapsed, and evict() has not been called for this hash
+        // (which revoke paths do synchronously before returning). Safe to serve.
+        if let Some(cache) = &self.cache {
+            if let Some(ctx) = cache.get(&hash) {
+                return Ok(ctx);
+            }
+        }
         // Resolve the row's own fields (kind/expiry/target) plus the REAL user
         // (the token owner) in one shot. The target user (impersonation only) is
         // loaded separately below to keep the common path a single join.
@@ -281,22 +341,39 @@ impl AuthRepo {
             });
         }
 
-        // Normal token: the real (token owner) and effective (acted-as) user are
-        // the same, and it reaches the whole authorized surface (no scope).
-        Ok(AuthContext {
+        // Normal token (kind='session'/'api'): the real (token owner) and
+        // effective (acted-as) user are the same, and it reaches the whole
+        // authorized surface (no scope). These are the ONLY kinds we cache.
+        let ctx = AuthContext {
             real_user: real_user.clone(),
             effective_user: real_user,
             scope: None,
-        })
+        };
+
+        // Populate the cache so the next request for this token avoids the DB.
+        // We use the `user_id` column read from the join above (the `id` field
+        // of `real_user`, which is always the token-owner row's `user_id`).
+        if let Some(cache) = &self.cache {
+            cache.insert(hash, ctx.real_user.id.clone(), ctx.clone());
+        }
+
+        Ok(ctx)
     }
 
     /// Revoke (delete) the auth session matching `token`. Idempotent.
+    ///
+    /// Evicts the token from the auth cache **before** returning so no window
+    /// exists where a revoked token could be served from cache.
     pub async fn revoke(&self, token: &str) -> Result<()> {
+        let hash = token_hash(token);
         sqlx::query("DELETE FROM auth_sessions WHERE token_hash = ?")
-            .bind(token_hash(token))
+            .bind(&hash)
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke token: {e}")))?;
+        if let Some(cache) = &self.cache {
+            cache.evict(&hash);
+        }
         Ok(())
     }
 
@@ -307,12 +384,18 @@ impl AuthRepo {
     /// token (every `kind`) is invalidated in one shot. The blanket `DELETE`
     /// removes share rows too, which is strictly stronger than flipping their
     /// `revoked` flag. Returns the number of sessions deleted.
+    ///
+    /// Evicts all of `user_id`'s cached auth entries immediately, closing any
+    /// window between the DB `DELETE` and future cache lookups.
     pub async fn revoke_all_for_user(&self, user_id: &Id) -> Result<u64> {
         let res = sqlx::query("DELETE FROM auth_sessions WHERE user_id = ?")
             .bind(user_id)
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke all for user: {e}")))?;
+        if let Some(cache) = &self.cache {
+            cache.evict_user(user_id);
+        }
         Ok(res.rows_affected())
     }
 
@@ -443,7 +526,28 @@ impl AuthRepo {
 
     /// Revoke one of `user_id`'s API tokens by id. Returns whether a row was
     /// deleted (false = not found / not owned / not an API token).
+    ///
+    /// When a cache is attached, fetches the `token_hash` first (one extra read)
+    /// so the cache entry can be evicted by hash. The read is scoped by `user_id`
+    /// and `kind='api'` so it cannot accidentally reveal another user's hash.
     pub async fn revoke_api_token(&self, user_id: &Id, id: &Id) -> Result<bool> {
+        // Pre-fetch the hash for cache eviction. This is a single indexed lookup
+        // and only runs when the cache is present; it is a no-op read otherwise.
+        let cached_hash: Option<String> = if self.cache.is_some() {
+            let row = sqlx::query(
+                "SELECT token_hash FROM auth_sessions
+                 WHERE id = ? AND user_id = ? AND kind = 'api'",
+            )
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("revoke api token lookup: {e}")))?;
+            row.map(|r| r.get::<String, _>("token_hash"))
+        } else {
+            None
+        };
+
         let res = sqlx::query(
             "DELETE FROM auth_sessions WHERE id = ? AND user_id = ? AND kind = 'api'",
         )
@@ -452,6 +556,12 @@ impl AuthRepo {
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("revoke api token: {e}")))?;
+
+        if res.rows_affected() > 0 {
+            if let (Some(cache), Some(h)) = (&self.cache, cached_hash) {
+                cache.evict(&h);
+            }
+        }
         Ok(res.rows_affected() > 0)
     }
 
@@ -1629,5 +1739,213 @@ mod tests {
                 "revoke_all_for_user must invalidate the share too"
             );
         }
+    }
+
+    // ---- auth-lookup cache correctness tests --------------------------------
+    //
+    // These tests construct `AuthRepo::with_cache` and prove the three required
+    // invariants:
+    //
+    //   (a) A revoked login/api token is rejected IMMEDIATELY after revocation —
+    //       the cache is evicted, not served stale.
+    //   (b) share/impersonation tokens are NEVER cached — revoke takes effect
+    //       the moment the DB row is gone, with zero cache window.
+    //   (c) Repeated requests within the TTL avoid an unnecessary DB round-trip
+    //       (the cache is actually populated on first auth and hit on subsequent
+    //       requests within the TTL).
+
+    use crate::cache::AuthCache;
+
+    /// Helper: cached repo + shared cache for inspection.
+    fn cached_repo(pool: SqlitePool) -> (AuthRepo, AuthCache) {
+        let cache = AuthCache::new();
+        let repo = AuthRepo::with_cache(pool, cache.clone());
+        (repo, cache)
+    }
+
+    /// (a) A revoked **login** token is rejected immediately: `revoke` evicts the
+    /// hash from the cache before returning, so a second `authenticate` does not
+    /// see the now-invalid stale entry.
+    #[tokio::test]
+    async fn cached_revoked_login_token_rejected_immediately() {
+        let pool = mem_pool().await;
+        let (repo, _cache) = cached_repo(pool.clone());
+        let uid = seed_user(&pool, "alice_cache").await;
+
+        let token = repo.issue(&uid).await.unwrap();
+
+        // First authenticate: DB hit → cache populated.
+        assert!(
+            repo.authenticate(&token).await.is_ok(),
+            "fresh login token must authenticate"
+        );
+
+        // Revoke: DB delete + cache eviction.
+        repo.revoke(&token).await.unwrap();
+
+        // Second authenticate: the cache entry was evicted; DB row is gone.
+        // Must fail — NOT be served from stale cache.
+        assert!(
+            matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
+            "revoked login token must be rejected even with cache present"
+        );
+    }
+
+    /// (a) A revoked **API** token is rejected immediately after `revoke_api_token`.
+    #[tokio::test]
+    async fn cached_revoked_api_token_rejected_immediately() {
+        let pool = mem_pool().await;
+        let (repo, _cache) = cached_repo(pool.clone());
+        let uid = seed_user(&pool, "bob_cache").await;
+
+        let (token, info) = repo.issue_api_token(&uid, Some("ci")).await.unwrap();
+
+        // Prime the cache.
+        assert!(repo.authenticate(&token).await.is_ok());
+
+        // Revoke by id (the normal PAT revocation path).
+        assert!(repo.revoke_api_token(&uid, &info.id).await.unwrap());
+
+        // Must not be served from cache.
+        assert!(
+            matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
+            "revoked API token must be rejected even with cache present"
+        );
+    }
+
+    /// (a) `revoke_all_for_user` evicts ALL cached entries for that user;
+    /// a bystander's token is unaffected.
+    #[tokio::test]
+    async fn cached_revoke_all_for_user_evicts_user_tokens() {
+        let pool = mem_pool().await;
+        let (repo, _cache) = cached_repo(pool.clone());
+        let victim = seed_user(&pool, "victim_cache").await;
+        let bystander = seed_user(&pool, "bystander_cache").await;
+
+        let sess = repo.issue(&victim).await.unwrap();
+        let (api, _) = repo.issue_api_token(&victim, None).await.unwrap();
+        let bystander_tok = repo.issue(&bystander).await.unwrap();
+
+        // Prime all three into the cache.
+        for t in [&sess, &api, &bystander_tok] {
+            assert!(repo.authenticate(t).await.is_ok());
+        }
+
+        // Revoke all for victim (DB + cache eviction).
+        repo.revoke_all_for_user(&victim).await.unwrap();
+
+        // Victim's tokens must now fail.
+        for t in [&sess, &api] {
+            assert!(
+                matches!(repo.authenticate(t).await, Err(Error::Unauthorized)),
+                "victim's token must be rejected after revoke_all_for_user"
+            );
+        }
+        // Bystander is unaffected.
+        assert!(
+            repo.authenticate(&bystander_tok).await.is_ok(),
+            "bystander token must still work after victim's revoke_all"
+        );
+    }
+
+    /// (b) **share** tokens are NEVER inserted into the cache. A share revoke
+    /// (`revoke_share`) takes effect instantly even with a cache-bearing repo.
+    #[tokio::test]
+    async fn share_token_is_never_cached_revoke_is_instant() {
+        let pool = mem_pool().await;
+        let (repo, cache) = cached_repo(pool.clone());
+        let owner = seed_user(&pool, "owner_cache").await;
+
+        let (raw, info) = repo
+            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .await
+            .unwrap();
+
+        // Authenticate the share to confirm it works.
+        assert!(repo.authenticate(&raw).await.is_ok());
+
+        // The cache must NOT contain the share token's hash.
+        let h = token_hash(&raw);
+        assert!(
+            cache.get(&h).is_none(),
+            "share token must never be present in the auth cache"
+        );
+
+        // Revoke the share (flips revoked=1 in DB).
+        repo.revoke_share(&owner, &info.id).await.unwrap();
+
+        // Must be reflected immediately (no cache window for share tokens).
+        assert!(
+            matches!(repo.authenticate(&raw).await, Err(Error::Unauthorized)),
+            "revoked share token must be rejected immediately (no cache window)"
+        );
+    }
+
+    /// (b) **impersonation** tokens are NEVER inserted into the cache. Revoking
+    /// (via `revoke`) takes effect instantly.
+    #[tokio::test]
+    async fn impersonation_token_is_never_cached_revoke_is_instant() {
+        let pool = mem_pool().await;
+        let (repo, cache) = cached_repo(pool.clone());
+        let admin = seed_user(&pool, "admin_cache").await;
+        let target = seed_user(&pool, "target_cache").await;
+
+        let token = repo
+            .issue_impersonation_token(&admin, &target, Duration::minutes(30))
+            .await
+            .unwrap();
+
+        // Authenticate once — must succeed.
+        assert!(repo.authenticate(&token).await.is_ok());
+
+        // The cache must NOT contain the impersonation token's hash.
+        let h = token_hash(&token);
+        assert!(
+            cache.get(&h).is_none(),
+            "impersonation token must never be present in the auth cache"
+        );
+
+        // Revoke — must take immediate effect (no cache buffering).
+        repo.revoke(&token).await.unwrap();
+        assert!(
+            matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
+            "revoked impersonation token must be rejected immediately"
+        );
+    }
+
+    /// (c) Repeated requests for the same valid login token within the TTL are
+    /// served from cache — the cache entry is populated on the first DB hit and
+    /// present for subsequent requests within the TTL.
+    #[tokio::test]
+    async fn cached_login_token_served_from_cache_on_repeat() {
+        let pool = mem_pool().await;
+        let (repo, cache) = cached_repo(pool.clone());
+        let uid = seed_user(&pool, "alice_repeat").await;
+
+        let token = repo.issue(&uid).await.unwrap();
+        let h = token_hash(&token);
+
+        // Before the first authenticate: cache is empty for this hash.
+        assert!(
+            cache.get(&h).is_none(),
+            "cache must be empty before first authenticate"
+        );
+
+        // First request → DB hit → inserts into cache.
+        let ctx1 = repo.authenticate(&token).await.unwrap();
+        assert_eq!(ctx1.effective_user.id, uid);
+
+        // Cache is now populated.
+        assert!(
+            cache.get(&h).is_some(),
+            "cache must be populated after first successful authenticate"
+        );
+
+        // Second request → cache hit (result must be consistent).
+        let ctx2 = repo.authenticate(&token).await.unwrap();
+        assert_eq!(
+            ctx2.effective_user.id, uid,
+            "cached result must match the original DB result"
+        );
     }
 }
