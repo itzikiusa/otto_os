@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api } from '../../lib/api/client';
+  import { api, ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { BrokerCluster, GroupDetail, GroupOffset, GroupSummary } from '../../lib/api/types';
@@ -13,6 +13,10 @@
 
   let groups = $state<GroupSummary[]>([]);
   let loading = $state(true);
+  // True when the broker's ACLs deny consumer-group access (probed once, cached
+  // server-side). We show a clear banner instead of erroring, and skip re-probes.
+  let accessDenied = $state(false);
+  let accessMsg = $state('');
   let selected = $state<string | null>(null);
   let detail = $state<GroupDetail | null>(null);
   let detailLoading = $state(false);
@@ -30,10 +34,23 @@
     selected = null;
     detail = null;
     loading = true;
+    accessDenied = false;
     api
       .get<GroupSummary[]>(`/brokers/clusters/${cluster.id}/groups`)
-      .then((g) => (groups = g))
-      .catch((e) => toasts.error('Failed to load groups', String(e)))
+      .then((g) => {
+        groups = g;
+        accessDenied = false;
+      })
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 403 && /consumer-group access/i.test(e.message)) {
+          // Broker ACLs deny group access — show the banner, don't toast/retry.
+          accessDenied = true;
+          accessMsg = e.message;
+          groups = [];
+        } else {
+          toasts.error('Failed to load groups', String(e));
+        }
+      })
       .finally(() => (loading = false));
   });
 
@@ -127,6 +144,16 @@
   <div class="list">
     {#if loading}
       <p class="muted pad">Loading…</p>
+    {:else if accessDenied}
+      <div class="acl-denied pad">
+        <p class="acl-title">Consumer-group access not granted</p>
+        <p class="muted">{accessMsg}</p>
+        <p class="muted">
+          Lag and connected consumers need <code>DescribeGroup</code> permission on the broker.
+          Otto probed once and won't keep retrying (so it stops hitting the broker with denied
+          requests); grant the ACL and re-test the cluster, and this tab will populate.
+        </p>
+      </div>
     {:else if groups.length === 0}
       <p class="muted pad">No consumer groups.</p>
     {:else}
@@ -433,6 +460,26 @@
   }
   .pad {
     padding: 12px;
+  }
+  .acl-denied {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 8px;
+    border: 1px solid color-mix(in srgb, var(--status-degraded, #e3b341) 45%, var(--border));
+    border-left: 3px solid var(--status-degraded, #e3b341);
+    border-radius: var(--radius-s, 4px);
+    background: color-mix(in srgb, var(--status-degraded, #e3b341) 8%, transparent);
+  }
+  .acl-title {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .acl-denied code {
+    font-family: var(--mono, monospace);
+    background: var(--surface-2);
+    padding: 0 4px;
+    border-radius: 3px;
   }
   .btn.danger {
     color: var(--status-exited, #ff5f57);

@@ -155,6 +155,44 @@
     return s.message_count.toLocaleString();
   }
 
+  // Per-topic production rate (msg/s), derived server-side from the high-watermark
+  // delta between consecutive `topics/stats` polls. `—` until a second sample
+  // lands (or when the count is unavailable).
+  function rateText(name: string): string {
+    const s = stats[name];
+    if (s == null || s === 'err' || s.msg_per_sec == null) return '—';
+    const r = s.msg_per_sec;
+    if (r < 0.05) return '0';
+    if (r < 10) return `${r.toFixed(1)}/s`;
+    return `${Math.round(r).toLocaleString()}/s`;
+  }
+
+  // Periodically re-fetch the visible topics' stats so the msg/s rate refreshes
+  // (the backend needs two samples to compute it). One batch call per tick.
+  async function refreshRates() {
+    if (loading || selected) return;
+    const names = visible.map((t) => t.name).filter((n) => {
+      const v = stats[n];
+      return v != null && v !== 'err';
+    });
+    if (names.length === 0) return;
+    try {
+      const result = await api.post<Record<string, TopicStats>>(
+        `/brokers/clusters/${cluster.id}/topics/stats`,
+        { names },
+      );
+      stats = { ...stats, ...result };
+    } catch {
+      // Transient — keep the last values; the next tick retries.
+    }
+  }
+
+  $effect(() => {
+    void cluster.id;
+    const h = setInterval(() => void refreshRates(), 5000);
+    return () => clearInterval(h);
+  });
+
   // True when any visible topic's stats failed — show the retry button.
   const hasStatErrors = $derived(visible.some((t) => stats[t.name] === 'err'));
 
@@ -243,6 +281,7 @@
               <th class="num">Partitions</th>
               <th class="num">RF</th>
               <th class="num">Count</th>
+              <th class="num" title="Production rate (messages/second), from the high-watermark delta between polls">Msg/s</th>
               <th class="num">Size</th>
             </tr>
           </thead>
@@ -257,6 +296,7 @@
                   class:err-cell={stats[t.name] === 'err'}
                   title={stats[t.name] === 'err' ? 'Count unavailable — click "Retry counts" to try again' : undefined}
                 >{countText(t.name)}</td>
+                <td class="num" title="Production rate (msg/s) — high-watermark delta between polls">{rateText(t.name)}</td>
                 <td class="num muted" title="On-disk size isn't exposed by this Kafka client">—</td>
               </tr>
             {/each}

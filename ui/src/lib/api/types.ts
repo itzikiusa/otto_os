@@ -2608,6 +2608,9 @@ export interface UpsertClusterReq {
 export interface TopicStats {
   message_count: number;
   cleanup_policy: string | null;
+  /** Approx production rate (msg/s) from the high-watermark delta between two
+   *  consecutive `topics/stats` calls; null on the first sample or a count error. */
+  msg_per_sec?: number | null;
 }
 
 /** Request body for POST /brokers/clusters/{id}/topics/stats (batch). */

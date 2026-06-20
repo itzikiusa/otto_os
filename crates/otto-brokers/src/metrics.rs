@@ -130,6 +130,9 @@ pub struct ClusterMetricState {
     cached_watermark: Option<(i64, i64)>,
     /// instance → (ts_ms, summed cpu-seconds counter) from the previous scrape.
     last_cpu: HashMap<String, (i64, f64)>,
+    /// topic → (ts_ms, high-watermark message count) from the previous
+    /// `topics/stats` call, used to derive a per-topic msg/s production rate.
+    topic_watermarks: HashMap<String, (i64, i64)>,
 }
 
 impl ClusterMetricState {
@@ -150,6 +153,35 @@ impl ClusterMetricState {
     /// Return the cached total without fetching.
     pub fn cached_total(&self) -> Option<i64> {
         self.cached_watermark.map(|(_, t)| t)
+    }
+
+    /// Record the current high-watermark `count` for topic `name` and return its
+    /// production rate (msg/s) vs the previous sample, if one exists. Returns
+    /// `None` on the first sample (baseline established), on a count error
+    /// (`count < 0`), or when called again within 500 ms (too soon to measure —
+    /// the baseline is kept). The rate is clamped to ≥ 0 since high watermarks
+    /// are monotonic (a decrease means the topic was recreated, not negative
+    /// throughput).
+    pub fn topic_rate(&mut self, name: &str, count: i64) -> Option<f64> {
+        if count < 0 {
+            return None;
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        match self.topic_watermarks.get(name).copied() {
+            Some((prev_ts, prev_count)) if now - prev_ts >= 500 => {
+                let dt = (now - prev_ts) as f64 / 1000.0;
+                let rate = ((count - prev_count).max(0) as f64 / dt).max(0.0);
+                self.topic_watermarks.insert(name.to_string(), (now, count));
+                Some(rate)
+            }
+            // Too soon since the last sample — keep the baseline, no rate yet.
+            Some(_) => None,
+            // First sample for this topic — establish the baseline.
+            None => {
+                self.topic_watermarks.insert(name.to_string(), (now, count));
+                None
+            }
+        }
     }
 }
 

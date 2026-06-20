@@ -40,6 +40,12 @@ pub struct BrokersService {
     /// Per-cluster SSH tunnel + Kafka proxy (only for clusters with `ssh`).
     tunnels: DashMap<Id, Arc<BrokerTunnel>>,
     samplers: DashMap<Id, Mutex<ClusterMetricState>>,
+    /// Per-cluster negative cache: present once a consumer-group operation has
+    /// been refused by the broker's ACLs (`GroupAuthorizationFailed`). While
+    /// present we short-circuit group ops instead of re-hitting the broker (no
+    /// repeated auth errors); cleared on cluster edit/delete so a re-grant or
+    /// credential change re-probes.
+    group_denied: DashMap<Id, ()>,
     audit: Option<BrokerAuditRepo>,
 }
 
@@ -67,8 +73,32 @@ impl BrokersService {
             pool: DashMap::new(),
             tunnels: DashMap::new(),
             samplers: DashMap::new(),
+            group_denied: DashMap::new(),
             audit,
         }
+    }
+
+    /// Whether the broker has refused consumer-group access for this cluster
+    /// (cached). The UI reads this to gate the Consumer Groups tab without
+    /// triggering another denied probe.
+    pub fn group_access_denied(&self, id: &Id) -> bool {
+        self.group_denied.contains_key(id)
+    }
+
+    /// Record/clear the group-access verdict from a group-op result, returning
+    /// the result unchanged. A `Forbidden` from a group op is the ACL denial
+    /// (only `kafka::group_err` produces it); a success clears any stale denial.
+    fn note_group_result<T>(&self, id: &Id, res: Result<T>) -> Result<T> {
+        match &res {
+            Err(Error::Forbidden(_)) => {
+                self.group_denied.insert(id.clone(), ());
+            }
+            Ok(_) => {
+                self.group_denied.remove(id);
+            }
+            Err(_) => {}
+        }
+        res
     }
 
     /// Persist an audit row for a broker write (best-effort; no-op without an
@@ -296,6 +326,8 @@ impl BrokersService {
         self.pool.remove(id);
         // Dropping the tunnel tears down the ssh child + local listeners.
         self.tunnels.remove(id);
+        // Re-probe group access after a credential/config change.
+        self.group_denied.remove(id);
     }
 
     // ---- connection pool --------------------------------------------------
@@ -508,9 +540,18 @@ impl BrokersService {
                     .find(|c| c.name == "cleanup.policy")
                     .and_then(|c| c.value)
             });
+        let msg_per_sec = {
+            let sampler = self
+                .samplers
+                .entry(id.clone())
+                .or_insert_with(|| Mutex::new(ClusterMetricState::default()));
+            let mut state = sampler.lock().unwrap_or_else(|p| p.into_inner());
+            state.topic_rate(topic, count)
+        };
         Ok(TopicStats {
             message_count: count,
             cleanup_policy,
+            msg_per_sec,
         })
     }
 
@@ -559,6 +600,23 @@ impl BrokersService {
             .map_err(join)?
         };
 
+        // Derive per-topic msg/s from the previous sample. Done in one sync pass
+        // (no await) so we never hold the state lock across the config fetch.
+        let rates: std::collections::HashMap<String, Option<f64>> = {
+            let sampler = self
+                .samplers
+                .entry(id.clone())
+                .or_insert_with(|| Mutex::new(ClusterMetricState::default()));
+            let mut state = sampler.lock().unwrap_or_else(|p| p.into_inner());
+            names
+                .iter()
+                .map(|name| {
+                    let c = counts.get(name).copied().unwrap_or(-1);
+                    (name.clone(), state.topic_rate(name, c))
+                })
+                .collect()
+        };
+
         // Fetch cleanup policies (best-effort; fail silently per topic).
         let mut out = std::collections::HashMap::with_capacity(names.len());
         for name in &names {
@@ -583,6 +641,7 @@ impl BrokersService {
                 TopicStats {
                     message_count: count,
                     cleanup_policy,
+                    msg_per_sec: rates.get(name).copied().flatten(),
                 },
             );
         }
@@ -629,18 +688,26 @@ impl BrokersService {
     }
 
     pub async fn list_groups(&self, id: &Id) -> Result<Vec<GroupSummary>> {
+        if self.group_denied.contains_key(id) {
+            return Err(Error::Forbidden(crate::kafka::GROUP_ACL_DENIED.to_string()));
+        }
         let (client, _) = self.client_for(id).await?;
-        tokio::task::spawn_blocking(move || client.list_groups())
+        let res = tokio::task::spawn_blocking(move || client.list_groups())
             .await
-            .map_err(join)?
+            .map_err(join)?;
+        self.note_group_result(id, res)
     }
 
     pub async fn describe_group(&self, id: &Id, group: &str) -> Result<GroupDetail> {
+        if self.group_denied.contains_key(id) {
+            return Err(Error::Forbidden(crate::kafka::GROUP_ACL_DENIED.to_string()));
+        }
         let (client, _) = self.client_for(id).await?;
         let g = group.to_string();
-        tokio::task::spawn_blocking(move || client.describe_group(&g))
+        let res = tokio::task::spawn_blocking(move || client.describe_group(&g))
             .await
-            .map_err(join)?
+            .map_err(join)?;
+        self.note_group_result(id, res)
     }
 
     /// Reset consumer-group committed offsets. The group's current committed
@@ -654,6 +721,9 @@ impl BrokersService {
         group: &str,
         req: &crate::types::GroupResetReq,
     ) -> Result<GroupDetail> {
+        if self.group_denied.contains_key(id) {
+            return Err(Error::Forbidden(crate::kafka::GROUP_ACL_DENIED.to_string()));
+        }
         let (client, _) = self.client_for(id).await?;
         let g = group.to_string();
         let mode = req.mode.clone();

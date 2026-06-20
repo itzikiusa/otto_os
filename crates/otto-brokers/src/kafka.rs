@@ -46,6 +46,29 @@ fn kerr(e: KafkaError) -> Error {
     Error::Upstream(format!("kafka: {e}"))
 }
 
+/// Returned as `Error::Forbidden` when the broker's ACLs deny this principal
+/// consumer-group access. The service negative-caches on it (so it stops
+/// probing) and the UI shows a "grant DescribeGroup" banner instead of an error.
+pub const GROUP_ACL_DENIED: &str = "consumer-group access denied by the broker's ACLs — grant DescribeGroup to view consumer lag and connected consumers";
+
+/// True when a librdkafka error is a consumer-group authorization denial. The
+/// `Result` of `fetch_group_list` carries this code when `FindCoordinator` is
+/// refused, so we can map it to a clear, cacheable `Forbidden` rather than a
+/// generic upstream error.
+fn group_auth_denied(e: &KafkaError) -> bool {
+    e.rdkafka_error_code() == Some(RDKafkaErrorCode::GroupAuthorizationFailed)
+}
+
+/// Map a group-listing error: a group-authorization denial → a distinguishable
+/// `Forbidden`, anything else → the generic upstream mapping.
+fn group_err(e: KafkaError) -> Error {
+    if group_auth_denied(&e) {
+        Error::Forbidden(GROUP_ACL_DENIED.to_string())
+    } else {
+        kerr(e)
+    }
+}
+
 /// True for internal/system topics (hidden by default, like Conduktor).
 pub fn is_internal(name: &str) -> bool {
     name.starts_with("__") || name == "_schemas" || name.starts_with("_redpanda")
@@ -583,7 +606,7 @@ impl KafkaClient {
         let list = self
             .consumer
             .fetch_group_list(None, GROUP_TIMEOUT)
-            .map_err(kerr)?;
+            .map_err(group_err)?;
         let mut out: Vec<GroupSummary> = list
             .groups()
             .iter()
@@ -602,7 +625,7 @@ impl KafkaClient {
         let list = self
             .consumer
             .fetch_group_list(Some(group), GROUP_TIMEOUT)
-            .map_err(kerr)?;
+            .map_err(group_err)?;
         let info = list
             .groups()
             .iter()

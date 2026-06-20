@@ -305,6 +305,10 @@ pub struct TopicSummary {
 pub struct TopicStats {
     pub message_count: i64,
     pub cleanup_policy: Option<String>,
+    /// Approximate production rate (messages/second) for this topic, derived
+    /// from the high-watermark delta between two consecutive `topics/stats`
+    /// calls. `None` on the first call (no prior sample) or on a count error.
+    pub msg_per_sec: Option<f64>,
 }
 
 /// Request body for the batch stats endpoint `POST /topics/stats`.
