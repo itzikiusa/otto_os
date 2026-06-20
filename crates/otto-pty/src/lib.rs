@@ -206,6 +206,12 @@ impl PtyHandle {
         lock_unpoisoned(&self.ring).tail(lines)
     }
 
+    /// Search the scrollback ring for `query` (plain substring, case-insensitive).
+    /// Returns up to `limit` `(line_index, plain_text)` pairs in buffer order.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<(usize, String)> {
+        lock_unpoisoned(&self.ring).search(query, limit)
+    }
+
     /// A coherent snapshot of the CURRENT screen as escape sequences. Writing
     /// it to a fresh xterm reproduces exactly what a user attached now would
     /// see — including a full-screen TUI's input box — in one frame, with no

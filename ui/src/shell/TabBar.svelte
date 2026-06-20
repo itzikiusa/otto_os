@@ -60,6 +60,44 @@
     const next = draft.trim();
     if (next && next !== title(id)) await ws.renameSession(id, next);
   }
+
+  // ── Drag-to-reorder tabs ─────────────────────────────────────────────────
+  // HTML5 drag: tracks which tab is being dragged (dragId) and which position
+  // the tab is being dragged over (dragOverId). On drop we reorder and persist.
+  let dragId: string | null = $state(null);
+  let dragOverId: string | null = $state(null);
+
+  function onDragStart(e: DragEvent, id: string): void {
+    dragId = id;
+    e.dataTransfer?.setData('text/plain', id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+
+  function onDragOver(e: DragEvent, id: string): void {
+    // Only accept drags from our own tabs.
+    if (!dragId || id === dragId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    dragOverId = id;
+  }
+
+  function onDragLeave(id: string): void {
+    if (dragOverId === id) dragOverId = null;
+  }
+
+  function onDrop(e: DragEvent, id: string): void {
+    e.preventDefault();
+    if (!dragId || id === dragId) return;
+    const targetIdx = ws.openTabs.indexOf(id);
+    ws.reorderTab(dragId, targetIdx);
+    dragId = null;
+    dragOverId = null;
+  }
+
+  function onDragEnd(): void {
+    dragId = null;
+    dragOverId = null;
+  }
 </script>
 
 <div
@@ -75,12 +113,19 @@
         class:active={ws.activeSessionId === id}
         class:resumable={isResumable(id)}
         class:needs-you={needsYou(id)}
+        class:drag-over={dragOverId === id}
+        draggable={id !== DB_PANE_ID}
         role="tab"
         tabindex="0"
         aria-selected={ws.activeSessionId === id}
         onclick={() => activate(id)}
         onkeydown={(e) => e.key === 'Enter' && activate(id)}
         ondblclick={() => startRename(id)}
+        ondragstart={(e) => onDragStart(e, id)}
+        ondragover={(e) => onDragOver(e, id)}
+        ondragleave={() => onDragLeave(id)}
+        ondrop={(e) => onDrop(e, id)}
+        ondragend={onDragEnd}
         onauxclick={(e) => {
           if (e.button === 1) {
             e.preventDefault();
@@ -239,6 +284,10 @@
   }
   .tab.resumable:not(.active):hover {
     opacity: 1;
+  }
+  /* Drop target while dragging a tab over it — faint left border beacon. */
+  .tab.drag-over {
+    border-left: 2px solid var(--accent);
   }
   /* "Needs you" — blocked on operator input. Amber accents stand out from the
      calmer active/idle styling without being alarming. */

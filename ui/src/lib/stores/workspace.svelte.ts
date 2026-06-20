@@ -371,6 +371,17 @@ class WorkspaceStore {
     this.focusedPane = Math.min(this.focusedPane, Math.max(0, this.panes.length - 1));
   }
 
+  /** Move tab `id` to `targetIndex` in `openTabs` and persist the order. */
+  reorderTab(id: Id, targetIndex: number): void {
+    const from = this.openTabs.indexOf(id);
+    if (from < 0 || from === targetIndex) return;
+    const tabs = [...this.openTabs];
+    tabs.splice(from, 1);
+    tabs.splice(Math.max(0, Math.min(targetIndex, tabs.length)), 0, id);
+    this.openTabs = tabs;
+    this.persistTabs();
+  }
+
   closeActiveTab(): void {
     if (this.activeSessionId) this.closeTab(this.activeSessionId);
   }

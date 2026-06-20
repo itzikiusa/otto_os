@@ -11,7 +11,14 @@
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { now } from '../../lib/stores/now.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
+
+  // Default idle-suspend grace period (5 minutes) used for the "suspends in N"
+  // countdown hint. Reflects the backend's SUSPEND_GRACE constant; the backend
+  // may override it via the `idle_suspend_grace_secs` setting, but a frontend
+  // approximation is fine here — the hint is informational, not authoritative.
+  const SUSPEND_GRACE_MS = 5 * 60 * 1000;
 
   interface Props {
     sessionId: string;
@@ -28,6 +35,26 @@
 
   const session = $derived(ws.sessions.find((s) => s.id === sessionId) ?? null);
   const status = $derived(ws.statusMap[sessionId] ?? session?.status ?? 'idle');
+
+  // "X min idle / suspends in N" countdown hint for idle agent sessions.
+  // `session.last_active_at` is updated whenever the status changes — so when
+  // the session transitions to `idle` it stamps the moment. We use this as a
+  // proxy for last-output time and count down to the backend's suspend window.
+  const idleHint = $derived.by(() => {
+    if (status !== 'idle') return null;
+    if (!session?.kind || session.kind !== 'agent') return null;
+    if (session.meta?.keep_alive === true) return null; // pinned — won't be suspended
+    const _tick = now(); // reactive dependency: re-computes every second
+    const idleMs = Date.now() - Date.parse(session.last_active_at);
+    if (idleMs < 0) return null;
+    const resumesInMs = SUSPEND_GRACE_MS - idleMs;
+    const idleMin = Math.floor(idleMs / 60_000);
+    const idleSec = Math.floor((idleMs % 60_000) / 1000);
+    const idleLabel = idleMin > 0 ? `${idleMin}m idle` : `${idleSec}s idle`;
+    if (resumesInMs <= 0) return `${idleLabel} · suspending…`;
+    const inMin = Math.ceil(resumesInMs / 60_000);
+    return `${idleLabel} · suspends in ${inMin}m`;
+  });
   const readOnly = $derived(ws.myRole === 'viewer');
 
   // Live per-session activity roll-up (current in-progress task + done/total),
@@ -157,6 +184,18 @@
     }
   }
 
+  const keepAlive = $derived(session?.meta?.keep_alive === true);
+
+  async function toggleKeepAlive(): Promise<void> {
+    menuOpen = false;
+    try {
+      await ws.updateSessionMeta(sessionId, { keep_alive: !keepAlive });
+      toasts.info(keepAlive ? 'Keep-alive disabled' : 'Keep-alive enabled', keepAlive ? 'Session may auto-suspend.' : 'Session will not be auto-suspended.');
+    } catch (e) {
+      toasts.error('Keep-alive failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function archive(): Promise<void> {
     menuOpen = false;
     try {
@@ -214,7 +253,7 @@
   }}
 >
   <header class="pane-head">
-    <StatusDot {status} />
+    <StatusDot {status} {needsYou} />
     {#if renaming}
       <!-- svelte-ignore a11y_autofocus -->
       <input
@@ -279,6 +318,9 @@
     {#if handoverPending}
       <span class="handover-pending" title="Preparing the handover brief…">⏳ handover…</span>
     {/if}
+    {#if idleHint}
+      <span class="idle-hint" title="Session is idle. Auto-suspend frees its RAM while keeping it resumable.">{idleHint}</span>
+    {/if}
     {#if session?.cwd}<span class="pane-cwd mono" title={session.cwd}>{session.cwd}</span>{/if}
     <span class="grow"></span>
     {#if showZoom}
@@ -313,6 +355,11 @@
               <button role="menuitem" onclick={detachIssue}>Detach issue</button>
             {/if}
             <button role="menuitem" onclick={openAttachProductStory}>Attach product story…</button>
+            {#if isAgent}
+              <button role="menuitem" onclick={toggleKeepAlive} title={keepAlive ? 'Disable keep-alive so the session may auto-suspend when idle' : 'Prevent this session from auto-suspending when idle'}>
+                {keepAlive ? 'Unpin (allow auto-suspend)' : 'Pin (keep alive)'}
+              </button>
+            {/if}
             <button role="menuitem" onclick={archive}>Archive</button>
             <button role="menuitem" class="danger" onclick={del}>Delete</button>
           </div>
@@ -503,6 +550,18 @@
     padding: 1px 7px;
     border-radius: 99px;
     white-space: nowrap;
+  }
+  /* "X min idle / suspends in N" — faint countdown for idle agent panes. Sits
+     between the title area and the cwd; truncates rather than wrapping. */
+  .idle-hint {
+    flex-shrink: 1;
+    min-width: 0;
+    font-size: 10px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0.75;
   }
   .pane-cwd {
     font-size: 10.5px;

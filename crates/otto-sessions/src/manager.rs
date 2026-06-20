@@ -149,6 +149,10 @@ pub struct SessionManager {
     /// evicts it). A `broadcast` channel is used so every attached viewer is
     /// dropped, not just one — mirrors how `live`/`attached` are keyed by id.
     evict: Arc<DashMap<Id, broadcast::Sender<()>>>,
+    /// Optional settings store used to read the configurable idle-suspend grace
+    /// period (`idle_suspend_grace_secs`). Falls back to [`SUSPEND_GRACE`] when
+    /// absent or when the key is not set.
+    settings: Option<otto_state::SettingsRepo>,
 }
 
 impl SessionManager {
@@ -174,6 +178,7 @@ impl SessionManager {
             ingest_tokens: Arc::new(DashMap::new()),
             activity: None,
             evict: Arc::new(DashMap::new()),
+            settings: None,
         }
     }
 
@@ -181,6 +186,14 @@ impl SessionManager {
     /// session trail. Builder-style; without it the recording calls are no-ops.
     pub fn with_activity_repo(mut self, activity: ActivityRepo) -> Self {
         self.activity = Some(activity);
+        self
+    }
+
+    /// Attach the settings store so the idle-suspend grace period and other
+    /// runtime-configurable parameters can be read at sweep time. Builder-style;
+    /// without it all parameters fall back to their compiled-in defaults.
+    pub fn with_settings_repo(mut self, settings: otto_state::SettingsRepo) -> Self {
+        self.settings = Some(settings);
         self
     }
 
@@ -263,6 +276,44 @@ impl SessionManager {
             TrailLevel::Info,
             summary,
         );
+    }
+
+    /// Record an auto-approved prompt-guard action on the session activity trail.
+    /// Called by [`crate::prompt_guard::PromptGuard`] after injecting approval
+    /// keys. Best-effort; no-op when the activity store is absent.
+    pub fn record_approval_trail(&self, session_id: &Id, provider: &str) {
+        let summary = format!("Auto-approved trust/permission prompt for {provider}");
+        let repo = self.repo.clone();
+        let sid = session_id.clone();
+        let activity = self.activity.clone();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let Ok(session) = repo.get(&sid).await else {
+                return;
+            };
+            let Some(activity) = activity else {
+                return;
+            };
+            let new = NewTrail {
+                session_id: sid.clone(),
+                workspace_id: session.workspace_id.clone(),
+                source: TrailSource::Otto,
+                kind: TrailKind::Session,
+                level: TrailLevel::Info,
+                summary,
+                detail: None,
+            };
+            match activity.append_trail(new).await {
+                Ok(event) => {
+                    let _ = events.send(Event::TrailAppended {
+                        workspace_id: session.workspace_id,
+                        session_id: sid,
+                        event,
+                    });
+                }
+                Err(e) => tracing::warn!("prompt-guard record trail: {e}"),
+            }
+        });
     }
 
     /// Submit a message to a live session as if a human typed it and pressed
@@ -673,7 +724,23 @@ impl SessionManager {
         let handle = self
             .live_handle(id)
             .ok_or_else(|| Error::Conflict("session is not live".into()))?;
-        handle.resize(cols, rows)
+        handle.resize(cols, rows)?;
+        // Persist the last known grid size so resume/reconnect can restore it
+        // (prevents reflow flash on reconnect). Best-effort — no await.
+        let repo = self.repo.clone();
+        let sid = id.clone();
+        tokio::spawn(async move {
+            if let Ok(session) = repo.get(&sid).await {
+                let mut base = match session.meta {
+                    serde_json::Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                base.insert("pty_cols".to_string(), serde_json::Value::from(cols));
+                base.insert("pty_rows".to_string(), serde_json::Value::from(rows));
+                let _ = repo.set_meta(&sid, &serde_json::Value::Object(base)).await;
+            }
+        });
+        Ok(())
     }
 
     /// Rename a session.
@@ -772,6 +839,20 @@ impl SessionManager {
     /// Resilient: a failure on one session is logged and skipped; the loop
     /// never panics or aborts.
     pub async fn suspend_idle_unattached(&self) -> usize {
+        // Read the configurable grace period from settings; fall back to the
+        // compiled-in default when not set or when the key is absent.
+        let grace = if let Some(ref sr) = self.settings {
+            match sr.get("idle_suspend_grace_secs").await {
+                Ok(Some(v)) => v
+                    .as_u64()
+                    .map(Duration::from_secs)
+                    .unwrap_or(SUSPEND_GRACE),
+                _ => SUSPEND_GRACE,
+            }
+        } else {
+            SUSPEND_GRACE
+        };
+
         // Snapshot live ids first (don't hold DashMap refs across awaits).
         let candidates: Vec<(Id, std::time::Instant)> = self
             .live
@@ -782,7 +863,7 @@ impl SessionManager {
         let mut suspended = 0;
         for (id, last_output) in candidates {
             // Idle: no PTY output for the full grace window.
-            if last_output.elapsed() < SUSPEND_GRACE {
+            if last_output.elapsed() < grace {
                 continue;
             }
             // Unattached: nobody is watching the terminal right now.
@@ -796,6 +877,15 @@ impl SessionManager {
                     continue;
                 }
             };
+            // Per-session keep-alive: never auto-suspend sessions pinned by the user.
+            if session
+                .meta
+                .get("keep_alive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
             // Only resumable agent sessions — never lose work for a provider
             // that can't be resumed (codex/agy/shell).
             let resumable = session.kind == SessionKind::Agent

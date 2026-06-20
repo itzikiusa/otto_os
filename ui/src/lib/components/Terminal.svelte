@@ -11,7 +11,7 @@
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
-  import type { SessionStatus } from '../api/types';
+  import type { SessionStatus, WsSearchResultFrame } from '../api/types';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
@@ -39,8 +39,11 @@
      *  Default = undefined → falls back to today's wsUrl() behaviour. */
     shareToken?: string;
     onstatus?: (status: SessionStatus) => void;
+    /** Called when the server returns a ring-buffer search result frame.
+     *  The parent can surface results in a search-result panel. */
+    onsearchresult?: (frame: WsSearchResultFrame) => void;
   }
-  let { sessionId, readOnly = false, resumable = false, forceDark = false, shareToken, onstatus }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, forceDark = false, shareToken, onstatus, onsearchresult }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -166,11 +169,14 @@
       connected = true;
       reconnecting = false;
       reconnectAttempts = 0;
-      // Sync the PTY to our size first, then request the current-screen
-      // snapshot (the server reproduces the live screen in one coherent frame
-      // — input box included — so there's no replay flicker or clipped TUI).
+      // Sync the PTY to our size first, then request a history-inclusive
+      // snapshot. Ask for as many lines as xterm is configured to retain
+      // (scrollback option, default 10 000) so reconnect never silently loses
+      // scrollback that the server ring still holds. Clamped server-side to
+      // the actual retained history depth, so this is safe to over-request.
       sendResize(true);
-      sendJson({ type: 'scrollback', lines: 2000 });
+      const want = term?.options.scrollback ?? 10_000;
+      sendJson({ type: 'scrollback', lines: want });
     };
 
     sock.onmessage = (ev: MessageEvent) => {
@@ -193,6 +199,11 @@
             break;
           case 'error':
             term?.write(`\r\n\x1b[31m[otto] ${msg.code}: ${msg.message ?? ''}\x1b[0m\r\n`);
+            break;
+          case 'search_result':
+            // Server-side ring-buffer search result — pass to parent for display.
+            // No UI panel yet; parent may wire onsearchresult to surface matches.
+            onsearchresult?.(msg as WsSearchResultFrame);
             break;
         }
       } catch {
@@ -489,6 +500,16 @@
       if (readOnly) return;
       sendJson({ type: 'input', data: textToBase64(data) });
     });
+
+    // Copy-on-select: when enabled, immediately copy any new selection to the
+    // clipboard so the user doesn't have to press ⌘C. Implemented via the
+    // selection-change event (no xterm built-in; works across all renderers).
+    term.onSelectionChange(() => {
+      if (!ui.termCopyOnSelect) return;
+      if (!term || !term.hasSelection()) return;
+      const text = term.getSelection();
+      if (text) navigator.clipboard.writeText(text).catch(() => {/* clipboard denied */});
+    });
     term.onBinary((data) => {
       if (readOnly) return;
       // raw binary path (e.g. some IME flows) — bytes are latin1 in a string
@@ -637,6 +658,37 @@
         <button class="icon-btn" onclick={() => findNext(true)} title="Previous (⇧↵)">↑</button>
         <button class="icon-btn" onclick={() => findNext(false)} title="Next (↵)">↓</button>
         <button class="icon-btn" onclick={closeFind} title="Close (esc)">✕</button>
+      </div>
+    {/if}
+
+    <!-- Desktop terminal toolbar: font zoom + copy-on-select toggle. Visible on
+         desktop when ui.termToolbar is on; phone controls live in phone-controls
+         below (unchanged). The toolbar sits flush bottom-left so it doesn't
+         overlap the find-bar (top-right) or the overlay badges (also top-right). -->
+    {#if !viewport.isPhone && ui.termToolbar}
+      <div class="desk-toolbar" role="toolbar" aria-label="Terminal controls">
+        <button
+          class="tb-btn"
+          onclick={() => ui.termZoomOut()}
+          title="Zoom out (Ctrl+−)"
+          aria-label="Zoom out"
+        >−</button>
+        <span class="tb-size" title="Terminal font size">{ui.termFontSize}px</span>
+        <button
+          class="tb-btn"
+          onclick={() => ui.termZoomIn()}
+          title="Zoom in (Ctrl+=)"
+          aria-label="Zoom in"
+        >+</button>
+        <span class="tb-sep" aria-hidden="true"></span>
+        <button
+          class="tb-btn"
+          class:tb-active={ui.termCopyOnSelect}
+          onclick={() => ui.setTermCopyOnSelect(!ui.termCopyOnSelect)}
+          title={ui.termCopyOnSelect ? 'Copy-on-select: on — click to disable' : 'Copy-on-select: off — click to enable'}
+          aria-pressed={ui.termCopyOnSelect}
+          aria-label="Copy on select"
+        >copy</button>
       </div>
     {/if}
 
@@ -909,5 +961,64 @@
     background: var(--accent, #0066cc);
     color: #fff;
     border-color: var(--accent, #0066cc);
+  }
+
+  /* ── Desktop terminal toolbar (font zoom + copy-on-select) ─────────────
+     Sits bottom-left, well away from the find-bar (top-right) and overlay
+     badges. Only shown on desktop when ui.termToolbar is on. */
+  .desk-toolbar {
+    position: absolute;
+    bottom: 6px;
+    left: 8px;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 4px;
+    background: color-mix(in srgb, var(--surface) 80%, transparent);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    opacity: 0.7;
+    transition: opacity 150ms ease-out;
+  }
+  .desk-toolbar:hover {
+    opacity: 1;
+  }
+  .tb-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 18px;
+    min-width: 18px;
+    padding: 0 4px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 100ms ease-out, color 100ms ease-out;
+  }
+  .tb-btn:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .tb-btn.tb-active {
+    color: var(--accent);
+  }
+  .tb-size {
+    font-size: 10px;
+    color: var(--text-dim);
+    min-width: 28px;
+    text-align: center;
+    user-select: none;
+  }
+  .tb-sep {
+    width: 1px;
+    height: 12px;
+    background: var(--border);
+    margin: 0 2px;
   }
 </style>

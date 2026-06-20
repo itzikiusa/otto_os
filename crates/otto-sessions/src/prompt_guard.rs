@@ -186,11 +186,14 @@ impl OutputScanner for PromptGuard {
         let provider = provider.to_string();
         tokio::spawn(async move {
             match manager.input(&id, keys).await {
-                Ok(()) => tracing::info!(
-                    session = %id,
-                    provider = %provider,
-                    "prompt-guard: auto-approved a trust/permission prompt"
-                ),
+                Ok(()) => {
+                    tracing::info!(
+                        session = %id,
+                        provider = %provider,
+                        "prompt-guard: auto-approved a trust/permission prompt"
+                    );
+                    manager.record_approval_trail(&id, &provider);
+                }
                 Err(e) => tracing::warn!(
                     session = %id,
                     provider = %provider,

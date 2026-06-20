@@ -70,7 +70,19 @@ enum ClientFrame {
     Scrollback {
         lines: usize,
     },
+    // Server-side search: grep the ring-buffer scrollback for `query` (plain
+    // substring, case-insensitive). The server replies with a JSON
+    // `{"type":"search_result","query":"…","matches":[…]}` frame containing
+    // up to `MAX_SEARCH_RESULTS` matching line objects. This keeps results
+    // across WS reconnects (the ring survives), unlike the xterm SearchAddon
+    // which only searches the emulator's current viewport.
+    Search {
+        query: String,
+    },
 }
+
+/// Maximum number of matches returned per `Search` request.
+const MAX_SEARCH_RESULTS: usize = 200;
 
 /// Default scrollback depth used for the initial on-attach snapshot when the
 /// client has not yet asked for a specific amount. Capped well under the
@@ -414,11 +426,30 @@ async fn serve_terminal<S: SessionsCtx>(
 
     loop {
         tokio::select! {
-            // Live PTY output → binary frames.
+            // Live PTY output → binary frames. Coalesce rapid bursts into one
+            // frame by draining any immediately-available chunks with try_recv.
             chunk = next_output(&mut out_rx) => {
                 match chunk {
-                    Ok(bytes) => {
-                        if socket.send(Message::Binary(bytes)).await.is_err() {
+                    Ok(first) => {
+                        // Attempt a non-blocking drain to merge back-to-back
+                        // chunks into one WS frame. Lagged errors are harmless
+                        // (data is still in the ring buffer).
+                        let mut buf = first.to_vec();
+                        if let Some(rx) = out_rx.as_mut() {
+                            loop {
+                                match rx.try_recv() {
+                                    Ok(more) => {
+                                        buf.extend_from_slice(&more);
+                                        // Cap at ~64 KiB to bound latency.
+                                        if buf.len() >= 64 * 1024 {
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                        if socket.send(Message::Binary(Bytes::from(buf))).await.is_err() {
                             return;
                         }
                     }
@@ -503,6 +534,43 @@ async fn serve_terminal<S: SessionsCtx>(
                             B64.encode(&data)
                         );
                         // Sent inline, i.e. before any subsequent live bytes.
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    ClientFrame::Search { query } => {
+                        // Server-side search: grep the ring buffer (survives WS
+                        // reconnects, unlike the xterm SearchAddon which only
+                        // sees the current emulator viewport). Skip empty queries
+                        // to avoid spamming the socket with all-lines results.
+                        if query.trim().is_empty() {
+                            continue;
+                        }
+                        let matches = handle
+                            .as_ref()
+                            .map(|h| h.search(&query, MAX_SEARCH_RESULTS))
+                            .unwrap_or_default();
+                        // Serialize as `{"type":"search_result","query":"…","matches":[{"line":N,"text":"…"},…]}`
+                        let matches_json = matches
+                            .into_iter()
+                            .map(|(line, text)| {
+                                // Escape text as a JSON string (no serde import in this
+                                // hot path; use a small manual serializer).
+                                let escaped = text
+                                    .replace('\\', "\\\\")
+                                    .replace('"', "\\\"")
+                                    .replace('\n', "\\n")
+                                    .replace('\r', "\\r");
+                                format!(r#"{{"line":{line},"text":"{escaped}"}}"#)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let query_escaped = query
+                            .replace('\\', "\\\\")
+                            .replace('"', "\\\"");
+                        let frame = format!(
+                            r#"{{"type":"search_result","query":"{query_escaped}","matches":[{matches_json}]}}"#
+                        );
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
                         }

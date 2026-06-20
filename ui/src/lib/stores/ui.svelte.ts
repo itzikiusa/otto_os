@@ -36,6 +36,8 @@ const LS = {
   termFont: 'otto_term_font',
   termFontFamily: 'otto_term_font_family',
   rtlBidi: 'otto_term_rtl_bidi',
+  termCopyOnSelect: 'otto_term_copy_on_select',
+  termToolbar: 'otto_term_toolbar',
   dbDock: 'otto_db_dock',
   dbDockWidth: 'otto_db_dock_width',
 };
@@ -135,6 +137,10 @@ class UiStore {
   /** experimental: reorder RTL (Hebrew) runs right-to-left via the browser's
    *  bidi engine. Forces xterm's DOM renderer (no WebGL) — may distort TUIs. */
   rtlBidi = $state(lsGet(LS.rtlBidi) === '1');
+  /** Copy-to-clipboard automatically on text selection in the terminal. */
+  termCopyOnSelect = $state(lsGet(LS.termCopyOnSelect) === '1');
+  /** Show the desktop terminal toolbar (font zoom + copy-on-select). */
+  termToolbar = $state(lsGet(LS.termToolbar) !== '0'); // default on
 
   /** Resolved CSS font-family stack for the terminal, per the current choice. */
   get termFontStack(): string {
@@ -254,6 +260,16 @@ class UiStore {
   setRtlBidi(on: boolean): void {
     this.rtlBidi = on;
     lsSet(LS.rtlBidi, on ? '1' : '0');
+  }
+
+  setTermCopyOnSelect(on: boolean): void {
+    this.termCopyOnSelect = on;
+    lsSet(LS.termCopyOnSelect, on ? '1' : '0');
+  }
+
+  setTermToolbar(on: boolean): void {
+    this.termToolbar = on;
+    lsSet(LS.termToolbar, on ? '1' : '0');
   }
 
   /** Apply data-theme/data-scheme attrs and accent override on <html>. */
