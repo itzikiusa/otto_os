@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -41,6 +42,9 @@
   let result = $state<ConsumeResp | null>(null);
   let selected = $state<KafkaMessage | null>(null);
   let rawView = $state(false);
+  // Auto-refresh the peek on an interval (live-tail), with an off switch.
+  let autoPoll = $state(false);
+  const POLL_MS = 60_000;
 
   // ---- produce state ----
   let pKey = $state('');
@@ -68,7 +72,20 @@
     result = null;
     selected = null;
     tab = 'messages';
+    autoPoll = false;
     loadDetail();
+  });
+
+  // Auto-refresh the peek every minute while enabled. Only `autoPoll` is a
+  // dependency (untrack the consume call so editing the filters doesn't reset
+  // the timer); the immediate run gives instant feedback when toggled on.
+  $effect(() => {
+    if (!autoPoll) return;
+    untrack(() => void consume());
+    const timer = setInterval(() => {
+      if (!consuming) untrack(() => void consume());
+    }, POLL_MS);
+    return () => clearInterval(timer);
   });
 
   function fmtTs(ms: number | null): string {
@@ -224,6 +241,9 @@
         <option value="base64">Base64</option>
       </select>
       <input class="grow" bind:value={valueFilter} placeholder="filter value…" />
+      <label class="auto" class:on={autoPoll} title="Re-peek every minute">
+        <input type="checkbox" bind:checked={autoPoll} /> Auto · 1m
+      </label>
       <button class="btn primary small" onclick={consume} disabled={consuming}>
         {consuming ? 'Reading…' : 'Peek'}
       </button>
@@ -417,6 +437,18 @@
   }
   .sm {
     width: 110px;
+  }
+  .auto {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .auto.on {
+    color: var(--accent);
   }
   .grow {
     flex: 1;
