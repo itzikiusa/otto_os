@@ -33,11 +33,11 @@ use std::time::{Duration, Instant};
 const META_TIMEOUT: Duration = Duration::from_secs(15);
 const WATERMARK_TIMEOUT: Duration = Duration::from_secs(8);
 const GROUP_TIMEOUT: Duration = Duration::from_secs(15);
-/// Bulk watermark scans (throughput total) are best-effort: a short per-call
-/// timeout and an overall budget keep the metrics endpoint responsive on large
-/// or slow (tunnelled) clusters.
-const BULK_WATERMARK_TIMEOUT: Duration = Duration::from_millis(1500);
-const BULK_BUDGET: Duration = Duration::from_secs(3);
+/// Parallelism for the cluster-wide watermark scan (throughput total). librdkafka
+/// is thread-safe, so we fan the per-partition ListOffsets queries across worker
+/// threads — a few hundred partitions over a slow/tunnelled link complete in a
+/// couple of round-trip batches instead of one-by-one (minutes).
+const WATERMARK_WORKERS: usize = 16;
 
 fn kerr(e: KafkaError) -> Error {
     Error::Upstream(format!("kafka: {e}"))
@@ -224,34 +224,45 @@ impl KafkaClient {
     }
 
     /// Total message count across all non-internal partitions (drives the
-    /// throughput sampler). One metadata pass + a watermark call per partition,
-    /// but bounded by a wall-clock budget with a short per-call timeout so a
-    /// large cluster (or a slow/tunnelled link) can't make the metrics endpoint
-    /// hang for minutes — it returns a best-effort partial instead.
+    /// throughput sampler). One metadata pass, then the per-partition watermark
+    /// queries are fanned across worker threads (sharing the thread-safe
+    /// consumer) so a large or slow/tunnelled cluster completes in a couple of
+    /// parallel batches rather than hundreds of sequential round-trips.
     pub fn total_messages(&self) -> Result<i64> {
+        use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
         let md = self
             .consumer
             .fetch_metadata(None, META_TIMEOUT)
             .map_err(kerr)?;
-        let deadline = Instant::now() + BULK_BUDGET;
-        let mut total = 0i64;
-        'outer: for t in md.topics() {
-            if is_internal(t.name()) {
-                continue;
-            }
-            for p in t.partitions() {
-                if Instant::now() >= deadline {
-                    break 'outer; // best-effort: stop scanning, return what we have
-                }
-                if let Ok((low, high)) =
-                    self.consumer
-                        .fetch_watermarks(t.name(), p.id(), BULK_WATERMARK_TIMEOUT)
-                {
-                    total += (high - low).max(0);
-                }
-            }
+        let targets: Vec<(&str, i32)> = md
+            .topics()
+            .iter()
+            .filter(|t| !is_internal(t.name()))
+            .flat_map(|t| t.partitions().iter().map(move |p| (t.name(), p.id())))
+            .collect();
+        if targets.is_empty() {
+            return Ok(0);
         }
-        Ok(total)
+        let total = AtomicI64::new(0);
+        let next = AtomicUsize::new(0);
+        let workers = WATERMARK_WORKERS.min(targets.len());
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(topic, partition)) = targets.get(i) else {
+                        break;
+                    };
+                    if let Ok((low, high)) =
+                        self.consumer
+                            .fetch_watermarks(topic, partition, WATERMARK_TIMEOUT)
+                    {
+                        total.fetch_add((high - low).max(0), Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        Ok(total.load(Ordering::Relaxed))
     }
 
     /// Cheap message count for a single topic (sum of `high-low` watermarks
