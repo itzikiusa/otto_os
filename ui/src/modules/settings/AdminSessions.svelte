@@ -3,6 +3,7 @@
   import { api } from '../../lib/api/client';
   import type { AdminSessionRow, AdminSessionsResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
 
   let sessions: AdminSessionRow[] = $state([]);
@@ -26,7 +27,10 @@
   }
 
   async function terminate(id: string, title: string): Promise<void> {
-    const confirmed = window.confirm(`Terminate session "${title}"? This will kill the PTY and disconnect all viewers.`);
+    const confirmed = await confirmer.ask(
+      `Terminate session "${title}"? This will kill the PTY and disconnect all viewers.`,
+      { title: 'Terminate Session', confirmLabel: 'Terminate', danger: true },
+    );
     if (!confirmed) return;
 
     terminating = new Set([...terminating, id]);

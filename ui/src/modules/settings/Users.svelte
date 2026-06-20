@@ -6,6 +6,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { copyAsJson } from '../../lib/components/exporters';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
 
@@ -16,6 +18,33 @@
   let newDisplay = $state('');
   let newPassword = $state('');
   let busy = $state(false);
+
+  /** Filter text for the user list. */
+  let userFilter = $state('');
+
+  const filteredUsers = $derived.by(() => {
+    const q = userFilter.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.display_name.toLowerCase().includes(q),
+    );
+  });
+
+  async function copyUsername(u: User): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(`@${u.username}`);
+      toasts.success('Copied', `@${u.username}`);
+    } catch {
+      toasts.error('Copy failed', 'Could not write to clipboard.');
+    }
+  }
+
+  async function copyUserJson(u: User): Promise<void> {
+    await copyAsJson(u);
+    toasts.success('Copied', 'User JSON copied to clipboard.');
+  }
 
   // role matrix
   const roleOptions: (WorkspaceRole | 'none')[] = ['none', 'viewer', 'editor', 'admin'];
@@ -135,6 +164,11 @@
   let impersonatingId: string | null = $state(null);
 
   async function doImpersonate(u: User): Promise<void> {
+    const ok = await confirmer.ask(
+      `Act as "${u.display_name}" (@${u.username})? You will see their sessions and data until you stop impersonating.`,
+      { title: 'Impersonate User', confirmLabel: 'Impersonate', danger: false },
+    );
+    if (!ok) return;
     impersonatingId = u.id;
     try {
       await auth.impersonate(u.id);
@@ -208,8 +242,20 @@
   {#if loading}
     <Skeleton rows={3} height={40} />
   {:else}
+    <div class="user-filter-row">
+      <input
+        class="input"
+        type="search"
+        placeholder="Filter users…"
+        bind:value={userFilter}
+        style="max-width: 260px"
+      />
+      <span class="dim" style="font-size: 11.5px">
+        {filteredUsers.length} of {users.length}
+      </span>
+    </div>
     <div class="card user-table">
-      {#each users as u (u.id)}
+      {#each filteredUsers as u (u.id)}
         <div class="user-row" class:disabled={u.disabled}>
           <span class="avatar">{u.display_name.slice(0, 1).toUpperCase()}</span>
           <div class="grow">
@@ -220,6 +266,18 @@
             </div>
             <div class="u-sub">@{u.username}</div>
           </div>
+          <button
+            class="btn small icon-only"
+            title="Copy @username"
+            onclick={() => copyUsername(u)}
+            aria-label="Copy username"
+          >@</button>
+          <button
+            class="btn small icon-only"
+            title="Copy as JSON"
+            onclick={() => copyUserJson(u)}
+            aria-label="Copy as JSON"
+          >{'{}'}</button>
           {#if !u.is_root}
             <button class="btn small {u.disabled ? '' : 'danger'}" onclick={() => toggleDisabled(u)}>
               {u.disabled ? 'Enable' : 'Disable'}
@@ -355,9 +413,22 @@
 {/if}
 
 <style>
+  .user-filter-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
   .user-table {
-    max-width: 560px;
+    max-width: 600px;
     overflow: hidden;
+  }
+
+  .icon-only {
+    font-size: 11px;
+    font-family: monospace;
+    padding: 0 7px;
   }
   .user-row {
     display: flex;

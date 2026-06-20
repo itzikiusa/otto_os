@@ -59,8 +59,40 @@
   import { api } from '../lib/api/client';
   import type { Connection, Session } from '../lib/api/types';
   import { toasts } from '../lib/toast.svelte';
+  import { now } from '../lib/stores/now.svelte';
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
+
+  // ---- impersonation countdown ---
+  // The admin token is saved in localStorage with a timestamp so we can show a
+  // 30-minute countdown from when the impersonation started. If no timestamp is
+  // stored we treat the start as "now" (conservative: 30 min from this load).
+  const IMP_START_KEY = 'otto_imp_start_ms';
+  const IMP_DURATION_MS = 30 * 60 * 1000;
+
+  $effect(() => {
+    if (auth.isImpersonating && !localStorage.getItem(IMP_START_KEY)) {
+      localStorage.setItem(IMP_START_KEY, String(Date.now()));
+    }
+    if (!auth.isImpersonating) {
+      localStorage.removeItem(IMP_START_KEY);
+    }
+  });
+
+  const impSecsLeft = $derived.by(() => {
+    if (!auth.isImpersonating) return 0;
+    void now(); // reactive tick
+    const startMs = parseInt(localStorage.getItem(IMP_START_KEY) ?? '0', 10) || Date.now();
+    const elapsed = Date.now() - startMs;
+    return Math.max(0, Math.ceil((IMP_DURATION_MS - elapsed) / 1000));
+  });
+
+  function fmtImpCountdown(s: number): string {
+    if (s <= 0) return '0:00';
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${m}:${sec.toString().padStart(2, '0')}`;
+  }
 
   // ---- route → store sync (one-way; avoids route↔store loop) ----
   // When the URL is `#/agents/<sessionId>` (set by navigateToSession or Back/Forward),
@@ -331,6 +363,7 @@
       { id: 'core.go-usage', title: 'Go to Usage & Metrics', group: 'Navigate', keywords: 'module usage cost tokens clickhouse metrics cpu ram billing analytics', run: () => router.go('usage') },
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
       { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
+      { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
       { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
       { id: 'core.go-insights', title: 'Go to Insights', group: 'Navigate', keywords: 'insights reports daily weekly monthly summary analytics activity', run: () => router.go('insights') },
       { id: 'core.go-swarm', title: 'Go to Swarm', group: 'Navigate', keywords: 'swarm agents team org orchestrator kanban board company', run: () => router.go('swarm') },
@@ -454,9 +487,17 @@
   {#if auth.isImpersonating}
     <div class="provider-banner impersonation-banner" role="alert">
       <span>
-        Viewing as <strong>{auth.me?.username ?? '…'}</strong>
+        Acting as <strong>{auth.me?.username ?? '…'}</strong>
+        <span class="imp-real"> (you are <strong>{auth.realUser?.username ?? '…'}</strong>)</span>
       </span>
       <span class="grow"></span>
+      {#if impSecsLeft > 0}
+        <span class="imp-countdown" class:imp-urgent={impSecsLeft < 120}>
+          {fmtImpCountdown(impSecsLeft)} remaining
+        </span>
+      {:else}
+        <span class="imp-countdown imp-urgent">Session may have expired</span>
+      {/if}
       <button
         class="pb-dismiss"
         onclick={() => {
@@ -464,7 +505,7 @@
             toasts.error('Could not exit impersonation', e instanceof Error ? e.message : String(e));
           });
         }}
-      >Exit</button>
+      >Stop impersonating</button>
     </div>
   {/if}
   {#if serviceHealth.visible}
@@ -787,10 +828,25 @@
     background: color-mix(in srgb, var(--text) 10%, transparent);
   }
   /* Impersonation banner — blue tint to visually differentiate from the
-     amber provider-health banner; Exit button is non-destructive styling. */
+     amber provider-health banner; Stop button is non-destructive styling. */
   .impersonation-banner {
     background: color-mix(in srgb, #3b82f6 18%, var(--surface));
     border-bottom-color: color-mix(in srgb, #3b82f6 45%, transparent);
+  }
+  .imp-real {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    margin-left: 4px;
+  }
+  .imp-countdown {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+  .imp-countdown.imp-urgent {
+    color: #ef4444;
+    font-weight: 600;
   }
   /* Always-visible notification bell, anchored to the top-right of the main
      column so it's reachable from every module (the tab bar only renders on

@@ -16,6 +16,44 @@
   import { toasts } from '../lib/toast.svelte';
   import Icon from '../lib/components/Icon.svelte';
 
+  // ---- frecency tracking ----
+  // Persist command-usage counts + last-used timestamps in localStorage so
+  // frequently- and recently-used commands float to the top of the palette.
+  // Shape: { [commandId]: { count: number; lastUsed: number } }
+  const FRECENCY_KEY = 'otto_palette_frecency';
+
+  interface FrecencyEntry { count: number; lastUsed: number; }
+  type FrecencyMap = Record<string, FrecencyEntry>;
+
+  function loadFrecency(): FrecencyMap {
+    try {
+      return JSON.parse(localStorage.getItem(FRECENCY_KEY) ?? '{}') as FrecencyMap;
+    } catch {
+      return {};
+    }
+  }
+
+  function saveFrecency(m: FrecencyMap): void {
+    try { localStorage.setItem(FRECENCY_KEY, JSON.stringify(m)); } catch { /* quota */ }
+  }
+
+  function recordUsage(id: string): void {
+    const m = loadFrecency();
+    const prev = m[id] ?? { count: 0, lastUsed: 0 };
+    m[id] = { count: prev.count + 1, lastUsed: Date.now() };
+    saveFrecency(m);
+  }
+
+  /** Blend frecency into a base fuzzy score. Returns a boost in [0, 20]. */
+  function frecencyBoost(id: string, frecency: FrecencyMap): number {
+    const e = frecency[id];
+    if (!e) return 0;
+    const countBoost = Math.min(e.count * 1.5, 12);          // up to 12
+    const ageMs = Date.now() - e.lastUsed;
+    const recencyBoost = Math.max(0, 8 - ageMs / (1000 * 60 * 60 * 24)); // decay over 8d
+    return countBoost + recencyBoost;
+  }
+
   let mode: 'commands' | 'english' = $state('commands');
   let query = $state('');
   let englishText = $state('');
@@ -30,13 +68,20 @@
 
   const filtered: { cmd: Command; score: number }[] = $derived.by(() => {
     const cmds = registry.all;
+    const frecency = loadFrecency();
     if (query.trim() === '') {
-      return cmds.slice(0, 14).map((cmd) => ({ cmd, score: 0 }));
+      // No query: show top 14 sorted by frecency boost (most-used first).
+      return cmds
+        .map((cmd) => ({ cmd, score: frecencyBoost(cmd.id, frecency) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 14);
     }
     return cmds
       .map((cmd) => {
         const m = fuzzyMatch(query, `${cmd.title} ${cmd.keywords ?? ''} ${cmd.group ?? ''}`);
-        return m ? { cmd, score: m.score } : null;
+        if (!m) return null;
+        const score = m.score + frecencyBoost(cmd.id, frecency);
+        return { cmd, score };
       })
       .filter((x): x is { cmd: Command; score: number } => x !== null)
       .sort((a, b) => b.score - a.score)
@@ -105,6 +150,9 @@
   }
 
   async function run(cmd: Command): Promise<void> {
+    // Record this invocation before closing so loadFrecency() in the next open
+    // already sees the updated entry.
+    recordUsage(cmd.id);
     close();
     try {
       await cmd.run();
