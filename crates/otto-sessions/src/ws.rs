@@ -436,16 +436,11 @@ async fn serve_terminal<S: SessionsCtx>(
                         // (data is still in the ring buffer).
                         let mut buf = first.to_vec();
                         if let Some(rx) = out_rx.as_mut() {
-                            loop {
-                                match rx.try_recv() {
-                                    Ok(more) => {
-                                        buf.extend_from_slice(&more);
-                                        // Cap at ~64 KiB to bound latency.
-                                        if buf.len() >= 64 * 1024 {
-                                            break;
-                                        }
-                                    }
-                                    Err(_) => break,
+                            while let Ok(more) = rx.try_recv() {
+                                buf.extend_from_slice(&more);
+                                // Cap at ~64 KiB to bound latency.
+                                if buf.len() >= 64 * 1024 {
+                                    break;
                                 }
                             }
                         }

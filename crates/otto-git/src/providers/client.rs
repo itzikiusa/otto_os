@@ -183,7 +183,7 @@ pub fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
     for part in link.split(',') {
         let part = part.trim();
         if part.contains(r#"rel="next""#) {
-            let url = part.splitn(2, ';').next()?.trim().trim_start_matches('<').trim_end_matches('>');
+            let url = part.split(';').next()?.trim().trim_start_matches('<').trim_end_matches('>');
             return Some(url.to_string());
         }
     }

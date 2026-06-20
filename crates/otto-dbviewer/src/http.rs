@@ -412,7 +412,7 @@ async fn export_query<S: DbViewerCtx>(
             out.push_str(&header_row.join(","));
             out.push('\n');
             for row in &result.rows {
-                let fields: Vec<String> = row.iter().map(|v| csv_value(v)).collect();
+                let fields: Vec<String> = row.iter().map(csv_value).collect();
                 out.push_str(&fields.join(","));
                 out.push('\n');
             }

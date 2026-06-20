@@ -94,6 +94,8 @@ fn make_conn(id: &Id, created_by: &Id) -> Connection {
         read_only: false,
         created_by: created_by.clone(),
         created_at: Utc::now(),
+        last_opened_at: None,
+        pinned: false,
     }
 }
 

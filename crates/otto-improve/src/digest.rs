@@ -73,10 +73,12 @@ pub fn digest_from_jsonl(session_id: &str, title: &str, body: &str) -> SessionDi
                             for word in t.split_whitespace() {
                                 if let Some(name) = word.strip_prefix('/') {
                                     let name = name.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
-                                    if !name.is_empty() && !name.contains('/') && name.len() > 2 {
-                                        if !skills_used.iter().any(|s| s == name) {
-                                            skills_used.push(name.to_string());
-                                        }
+                                    if !name.is_empty()
+                                        && !name.contains('/')
+                                        && name.len() > 2
+                                        && !skills_used.iter().any(|s| s == name)
+                                    {
+                                        skills_used.push(name.to_string());
                                     }
                                 }
                             }

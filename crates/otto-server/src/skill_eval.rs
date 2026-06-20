@@ -1948,6 +1948,28 @@ async fn retry_validation(
     pending.note = "retrying…".into();
     let _ = ctx.skill_evals_store.set_iter_agent_at(&iter_id, index, &pending).await;
 
+    // Pre-compute git diff for the retry case as well.
+    let retry_diff: Option<String> = {
+        let wt = worktree.clone();
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .args(["diff", "HEAD"])
+                .current_dir(&wt)
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        String::from_utf8(o.stdout).ok()
+                    } else {
+                        None
+                    }
+                })
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+
     let ctx_bg = ctx.clone();
     let iter_id_bg = iter_id.clone();
     let eval_id_bg = eval_id.clone();
@@ -1962,7 +1984,8 @@ async fn retry_validation(
         let mut any_ok = false;
         for pass in 0..passes {
             let out_path = output_path(&eval_id_bg, iter_num, &format!("val{index}-retry{pass}"));
-            let prompt = build_validation_prompt(&base.validation, &criteria, &out_path);
+            let prompt =
+                build_validation_prompt(&base.validation, &criteria, &out_path, retry_diff.as_deref());
             let outcome = run_agent_capture(
                 &ctx_bg.manager,
                 &ws,

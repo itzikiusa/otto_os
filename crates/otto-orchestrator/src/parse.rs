@@ -159,6 +159,8 @@ mod tests {
                 read_only: false,
                 created_by: "U1".into(),
                 created_at: Utc::now(),
+                last_opened_at: None,
+                pinned: false,
             }],
             cwd: "/tmp".into(),
             default_provider: "claude".into(),
