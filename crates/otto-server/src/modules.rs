@@ -61,6 +61,43 @@ impl otto_connections::ConnectionsCtx for ServerCtx {
     fn pool(&self) -> otto_state::SqlitePool {
         self.pool.clone()
     }
+    fn db_tester(&self) -> Option<Arc<dyn otto_connections::DbTester>> {
+        Some(Arc::new(DbViewerTester {
+            db: Arc::clone(&self.db_explorer),
+        }))
+    }
+}
+
+/// Bridges `DbTester` (from `otto-connections`) to `DbViewerService::test`,
+/// so `POST /connections/{id}/test` on a DB-kind connection reuses the warm
+/// SSH tunnel cache (`ssh -L` local forward cached per connection id) instead
+/// of spawning a fresh `ssh -J` child per probe.
+struct DbViewerTester {
+    db: Arc<otto_dbviewer::DbViewerService>,
+}
+
+impl otto_connections::DbTester for DbViewerTester {
+    fn test_db_connection<'a>(
+        &'a self,
+        id: &'a Id,
+    ) -> BoxFuture<'a, Result<otto_core::api::TestConnectionResp>> {
+        Box::pin(async move {
+            let r = self.db.test(id).await?;
+            Ok(otto_core::api::TestConnectionResp {
+                ok: r.ok,
+                latency_ms: r.latency_ms,
+                // Include the server version in the message when the probe
+                // succeeds (the CLI path's message is just "ok" with no detail).
+                message: if r.ok {
+                    r.server_version.map(|v| format!("ok — {v}")).unwrap_or(r.message)
+                } else {
+                    r.message
+                },
+                // Driver-backed probes never pass a secret through argv.
+                warn_argv: false,
+            })
+        })
+    }
 }
 
 impl otto_dbviewer::DbViewerCtx for ServerCtx {

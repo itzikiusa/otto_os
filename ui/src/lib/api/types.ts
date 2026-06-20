@@ -330,7 +330,22 @@ export type OttoEvent =
   /** A skill-evaluation run reached a terminal state (done/error/cancelled).
    *  Lets the Skill-Eval UI replace its 2s×600 fixed poll with event-driven
    *  refresh. A11 — Workflows cluster. */
-  | { type: 'skill_eval_updated'; workspace_id: Id; run_id: Id; status: string };
+  | { type: 'skill_eval_updated'; workspace_id: Id; run_id: Id; status: string }
+  /** An insights report became available for a cadence period.
+   *  `period` is a human label ("daily 2026-06-20", "weekly 2026-W25").
+   *  B8 — Skills/Improve/Channels. */
+  | { type: 'insight_ready'; period: string; session_id?: Id | null }
+  /** A usage budget cap was crossed (or recovered).
+   *  Only emitted when `enforce = true`. `direction` is "exceeded"|"recovered".
+   *  B8 — Skills/Improve/Channels. */
+  | {
+      type: 'budget_exceeded';
+      workspace_id: Id;
+      provider: string;
+      spend_usd: number;
+      cap_usd: number;
+      direction: string;
+    };
 
 // ---------------------------------------------------------------------------
 // Notifications (notification center)
@@ -2697,7 +2712,13 @@ export interface ConsumeReq {
   start?: StartPosition;
   limit?: number;
   max_wait_ms?: number | null;
+  /** Applied server-side during consume (raw bytes). Limits the result to
+   * messages whose key contains this substring (case-insensitive). */
   key_filter?: string | null;
+  /** When true and key_filter is set, scan from the earliest offset so older
+   * matching messages are found regardless of the `start` position. */
+  find_from_beginning?: boolean;
+  /** Applied post-decode in the service layer. */
   value_filter?: string | null;
   decode?: ValueFormat;
 }

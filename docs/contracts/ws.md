@@ -306,3 +306,47 @@ blind timer.
   Self-Improvement pane refreshes on it and keeps a capped poll fallback.
 - TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts`
   as `{ type: 'improvement_updated'; kind: string; id?: string | null }`.
+
+---
+
+### `insight_ready`
+
+```json
+{
+  "type": "insight_ready",
+  "period": "daily 2026-06-20",
+  "session_id": "<session_id | null>"
+}
+```
+
+- Emitted by `otto-server/src/insights.rs` after a scheduled insights run
+  completes (conditioned on `period_done()` returning `true`).
+- `period` — human-readable label combining the kind (`daily|weekly|monthly`)
+  and the run's start date.
+- `session_id` — the originating session, or `null` for a background scheduler run.
+- Scope: `Everyone` (all connected clients receive this).
+- `channels.notify_insight_ready` setting (default off) routes this to
+  Slack / Telegram via `otto-channels/improve_notify.rs`.
+- TypeScript type: `{ type: 'insight_ready'; period: string; session_id?: Id | null }`.
+
+---
+
+### `budget_exceeded`
+
+```json
+{
+  "type": "budget_exceeded",
+  "workspace_id": "<workspace_id>",
+  "provider": "anthropic",
+  "spend_usd": 42.50,
+  "cap_usd": 40.00,
+  "direction": "exceeded"
+}
+```
+
+- Emitted when a spend cap is crossed (budget enforcement must be enabled).
+- `direction` — currently `"exceeded"`; reserved for future `"recovered"` direction.
+- Scope: `Everyone` (no per-workspace delivery filter — all admins should see it).
+- `channels.notify_budget_exceeded` setting (default off) routes this to
+  Slack / Telegram via `otto-channels/improve_notify.rs`.
+- TypeScript type: `{ type: 'budget_exceeded'; workspace_id: Id; provider: string; spend_usd: number; cap_usd: number; direction: string }`.

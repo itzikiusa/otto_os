@@ -549,6 +549,8 @@ the row. AI-producing actions (analyze/rewrite/generate/plan) live under
 | PATCH /product/testcases/{tid} | ws editor | UpdateTestcaseReq | Testcase |
 | POST /product/testcase-runs/{rid}/approve | ws editor | — | approve a run (triggers skill self-improvement) |
 | POST /product/testcase-runs/{rid}/publish | ws editor | — | publish approved test cases |
+| POST /product/testcase-runs/{rid}/testcases/bulk-approve | ws editor | `{ids: string[]}` | `{approved: number}` — bulk-approve selected draft cases |
+| POST /product/testcase-runs/{rid}/testcases/reorder | ws editor | `{ordered_ids: string[]}` | `Testcase[]` — persist new display order |
 | GET /product/stories/{sid}/transcripts | ws viewer | — | `Transcript[]` |
 | POST /product/stories/{sid}/transcripts | ws editor | CreateTranscriptReq | Transcript |
 | DELETE /product/transcripts/{trid} | ws editor | — | 204 |
@@ -627,6 +629,7 @@ config/mutations = `ws editor` (config write = `ws admin`).
 | POST /improvement/edits/{eid}/approve | ws editor | — | apply a pending edit |
 | POST /improvement/edits/{eid}/reject | ws editor | — | reject a pending edit |
 | POST /improvement/edits/{eid}/rollback | ws editor | — | roll back an applied edit |
+| POST /sessions/{id}/evolve | ws SelfImprovement:editor | — | trigger a manual per-session live-evolve pass; returns `{ run_id }` |
 
 ## Skill evaluations
 
