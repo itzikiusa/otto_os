@@ -198,6 +198,65 @@ impl WorkflowsRepo {
         rows.iter().map(row_to_run).collect()
     }
 
+    // --- node output cache ------------------------------------------------
+
+    /// Look up a cached node output by the composite natural key.
+    /// Returns the stored JSON value when present; `None` on a miss.
+    pub async fn get_cached_output(
+        &self,
+        workflow_id: &Id,
+        node_id: &str,
+        params_hash: &str,
+        input_hash: &str,
+    ) -> Option<serde_json::Value> {
+        let row = sqlx::query(
+            "SELECT output_json FROM workflow_node_cache
+             WHERE workflow_id = ? AND node_id = ? AND params_hash = ? AND input_hash = ?",
+        )
+        .bind(workflow_id)
+        .bind(node_id)
+        .bind(params_hash)
+        .bind(input_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()??;
+        let json_str: String = row.get("output_json");
+        serde_json::from_str(&json_str).ok()
+    }
+
+    /// Upsert (insert-or-replace) a node output into the cache.
+    pub async fn set_cached_output(
+        &self,
+        workflow_id: &Id,
+        node_id: &str,
+        params_hash: &str,
+        input_hash: &str,
+        output: &serde_json::Value,
+    ) -> Result<()> {
+        let id = new_id();
+        let now = fmt(Utc::now());
+        let output_json =
+            serde_json::to_string(output).map_err(|e| Error::Internal(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO workflow_node_cache
+                 (id, workflow_id, node_id, params_hash, input_hash, output_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(workflow_id, node_id, params_hash, input_hash)
+             DO UPDATE SET output_json = excluded.output_json",
+        )
+        .bind(&id)
+        .bind(workflow_id)
+        .bind(node_id)
+        .bind(params_hash)
+        .bind(input_hash)
+        .bind(&output_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set node cache"))?;
+        Ok(())
+    }
+
     /// Persist run progress: status, the per-node states, optional error, and
     /// (when terminal) the finished timestamp.
     pub async fn update_run(

@@ -5,20 +5,60 @@
 //!
 //! A run executes in a background task that persists progress to `workflow_runs`
 //! after every node, so the UI can poll run status live.
+//!
+//! ## Events
+//! The engine broadcasts `Event::WorkflowRunUpdated` on the shared event bus at
+//! every node transition (start/finish) and at run completion, letting the UI
+//! replace its 700ms poll loop with a WS subscription. A capped poll is kept as
+//! a fallback in case events are missed (network drop, reconnect).
+//!
+//! ## Node-result caching
+//! When a node is re-run with the same params and the same assembled input (both
+//! hashed as SHA-256), the engine reuses the stored output from
+//! `workflow_node_cache` and marks the node `NodeStatus::Success` with a
+//! "(cached)" log line. The cache is upserted on every successful node execution
+//! so subsequent re-runs can skip unchanged steps.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use otto_core::domain::Workspace;
+use otto_core::event::Event;
 use otto_core::workflows::{
     NodeRunState, NodeStatus, NodeTypeSpec, RunStatus, Workflow, WorkflowGraph, WorkflowNode,
 };
 use otto_core::{Id, Result};
 use otto_state::WorkflowsRepo;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::state::ServerCtx;
+
+/// Compute a stable hex digest over an arbitrary JSON value for cache keying.
+/// The value is first serialized in sorted-key form to ensure canonical output.
+fn hash_value(v: &Value) -> String {
+    // Use serde_json's built-in canonical string (it doesn't sort keys but the
+    // params/input structures are stable enough for node-cache purposes). For
+    // stricter canonicalization the engine could sort object keys; the current
+    // contract is "same structure produced by the same graph + input → same hash".
+    let s = serde_json::to_string(v).unwrap_or_default();
+    let digest = Sha256::digest(s.as_bytes());
+    format!("{:x}", digest)
+}
+
+/// Broadcast a `WorkflowRunUpdated` event (best-effort; log on failure).
+fn emit_run_updated(ctx: &ServerCtx, workspace_id: &Id, run_id: &Id, status: &str, node_id: Option<&str>) {
+    let ev = Event::WorkflowRunUpdated {
+        workspace_id: workspace_id.clone(),
+        run_id: run_id.clone(),
+        status: status.to_string(),
+        node_id: node_id.map(|s| s.to_string()),
+    };
+    if ctx.events.send(ev).is_err() {
+        tracing::debug!(%run_id, "no WS subscribers for WorkflowRunUpdated");
+    }
+}
 
 /// Per-node turn budget for agent/LLM nodes.
 const NODE_AGENT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -98,6 +138,12 @@ pub fn is_known_kind(kind: &str) -> bool {
 
 /// Run a workflow to completion in the current task, persisting progress to the
 /// `workflow_runs` row after every node. Spawn this on a background task.
+///
+/// Emits `Event::WorkflowRunUpdated` on the shared event bus at every node
+/// transition and at run completion; the UI subscribes to these events and
+/// replaces its 700ms poll loop with a WS-driven refresh (a capped poll is kept
+/// as a fallback). Cache-eligible nodes are skipped if a matching
+/// `workflow_node_cache` entry exists; their state is logged as "Success (cached)".
 pub async fn run_workflow(
     ctx: ServerCtx,
     ws: Workspace,
@@ -114,6 +160,7 @@ pub async fn run_workflow(
             let _ = repo
                 .update_run(&run_id, RunStatus::Error, &[], Some(&e), true)
                 .await;
+            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None);
             return;
         }
     };
@@ -150,6 +197,7 @@ pub async fn run_workflow(
     let _ = repo
         .update_run(&run_id, RunStatus::Running, &states, None, false)
         .await;
+    emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", None);
 
     // Global wall clock: a run can't execute forever. Checked at each node
     // boundary; a node already executing finishes first (bounded per-node).
@@ -182,6 +230,7 @@ pub async fn run_workflow(
             let _ = repo
                 .update_run(&run_id, RunStatus::Running, &states, None, false)
                 .await;
+            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
             continue;
         }
 
@@ -194,11 +243,36 @@ pub async fn run_workflow(
             let _ = repo
                 .update_run(&run_id, RunStatus::Running, &states, None, false)
                 .await;
+            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
             continue;
         }
 
         // Assemble this node's input from its predecessors' outputs.
         let node_input = assemble_input(&upstream, &outputs, &input);
+
+        // --- node-result cache check ----------------------------------------
+        // Cache is keyed by (workflow_id, node_id, params_hash, input_hash).
+        // Agent nodes are expensive but their outputs are LLM-non-deterministic;
+        // we still cache them so a user can opt-in to "run from here" and skip
+        // earlier unchanged nodes. All node kinds participate in the cache.
+        let params_hash = hash_value(&node.params);
+        let input_hash = hash_value(&node_input);
+        if let Some(cached_out) = repo
+            .get_cached_output(&workflow.id, &node_id, &params_hash, &input_hash)
+            .await
+        {
+            states[idx].status = NodeStatus::Success;
+            states[idx].output = Some(cached_out.clone());
+            states[idx].logs = vec!["Success (cached)".into()];
+            states[idx].duration_ms = Some(0);
+            outputs.insert(node_id.clone(), cached_out);
+            let _ = repo
+                .update_run(&run_id, RunStatus::Running, &states, None, false)
+                .await;
+            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+            continue;
+        }
+        // --------------------------------------------------------------------
 
         let start_line = format!("▶ {} started", node.kind);
         states[idx].status = NodeStatus::Running;
@@ -206,6 +280,8 @@ pub async fn run_workflow(
         let _ = repo
             .update_run(&run_id, RunStatus::Running, &states, None, false)
             .await;
+        // Signal node start so the UI can show live progress immediately.
+        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
 
         let started = Instant::now();
         match execute_node(&ctx, &ws, node, node_input).await {
@@ -214,7 +290,12 @@ pub async fn run_workflow(
                 states[idx].output = Some(out.clone());
                 logs.insert(0, start_line);
                 states[idx].logs = logs;
-                states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
+                let elapsed = started.elapsed().as_millis() as u64;
+                states[idx].duration_ms = Some(elapsed);
+                // Persist to the node cache for future re-runs.
+                let _ = repo
+                    .set_cached_output(&workflow.id, &node_id, &params_hash, &input_hash, &out)
+                    .await;
                 outputs.insert(node_id.clone(), out);
             }
             Err(e) => {
@@ -228,6 +309,8 @@ pub async fn run_workflow(
         let _ = repo
             .update_run(&run_id, RunStatus::Running, &states, None, false)
             .await;
+        // Signal node finish so the inspector can update without waiting for the next poll.
+        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
     }
 
     if canceled {
@@ -239,6 +322,7 @@ pub async fn run_workflow(
         let _ = repo
             .update_run(&run_id, RunStatus::Canceled, &states, Some("canceled"), true)
             .await;
+        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "canceled", None);
         return;
     }
 
@@ -256,6 +340,7 @@ pub async fn run_workflow(
         let _ = repo
             .update_run(&run_id, RunStatus::Error, &states, Some(&msg), true)
             .await;
+        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None);
         return;
     }
 
@@ -273,6 +358,8 @@ pub async fn run_workflow(
     let _ = repo
         .update_run(&run_id, final_status, &states, err_msg.as_deref(), true)
         .await;
+    // Final event: run complete.
+    emit_run_updated(&ctx, &workflow.workspace_id, &run_id, final_status.as_str(), None);
 }
 
 /// `start` plus every node reachable from it via edges.

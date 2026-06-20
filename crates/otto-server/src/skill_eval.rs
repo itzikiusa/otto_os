@@ -28,6 +28,7 @@ use otto_core::domain::{
     EvalFinding, EvalValidationState, NoticeKind, NoticeSeverity, SessionKind, SkillEval,
     SkillEvalStatus, User, Workspace, WorkspaceRole,
 };
+use otto_core::event::Event;
 use otto_core::{Error, Id, Result};
 use otto_sessions::SessionManager;
 use otto_state::{NewNotice, SkillEvalsRepo};
@@ -901,6 +902,20 @@ async fn run_skill_eval(
         _ => tracing::warn!(eval = %eval_id, "skill evaluation error: {:?}", error),
     }
     notify_complete(&ctx, &eval_id, &req.source.reference, status).await;
+    // Broadcast a workspace-scoped event so the Skill-Eval UI can switch from
+    // fixed-interval polling to event-driven refresh.
+    let ev = Event::SkillEvalUpdated {
+        workspace_id: ws.id.clone(),
+        run_id: eval_id.clone(),
+        status: match status {
+            SkillEvalStatus::Done => "done".to_string(),
+            SkillEvalStatus::Cancelled => "cancelled".to_string(),
+            _ => "error".to_string(),
+        },
+    };
+    if ctx.events.send(ev).is_err() {
+        tracing::debug!(%eval_id, "no WS subscribers for SkillEvalUpdated");
+    }
 }
 
 /// Post a notification when a run finishes (done/error/cancelled).
@@ -1097,6 +1112,33 @@ async fn run_skill_eval_core(
         ctx.skill_evals_store
             .set_iter_status(&iter_id, "validating", "running validation agents")
             .await?;
+
+        // Pre-compute `git diff HEAD` once after the impl agent finishes so
+        // every validator gets the same snapshot injected into its prompt
+        // instead of each spawning a separate `git diff` call. Best-effort:
+        // if the diff can't be produced the validators fall back to running
+        // `git diff` themselves (via the prompt instruction).
+        let precomputed_diff: Option<String> = {
+            let dest_c = dest_str.clone();
+            tokio::task::spawn_blocking(move || {
+                std::process::Command::new("git")
+                    .args(["diff", "HEAD"])
+                    .current_dir(&dest_c)
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        if o.status.success() {
+                            String::from_utf8(o.stdout).ok()
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+
         let mut set = tokio::task::JoinSet::new();
         for (index, run) in val_runs.into_iter().enumerate() {
             let manager = Arc::clone(&ctx.manager);
@@ -1108,6 +1150,7 @@ async fn run_skill_eval_core(
             let iter_id_c = iter_id.clone();
             let base = seeded[index].clone();
             let cancel_c = Arc::clone(cancel);
+            let diff_c = precomputed_diff.clone();
             set.spawn(async move {
                 // Run the validation `passes` times and average — reduces grader
                 // noise. Findings are unioned (deduped, highest severity wins).
@@ -1120,7 +1163,12 @@ async fn run_skill_eval_core(
                         break;
                     }
                     let out_path = output_path(&eval_id_c, iter, &format!("val{index}-p{pass}"));
-                    let prompt = build_validation_prompt(&run.validation, &run.criteria, &out_path);
+                    let prompt = build_validation_prompt(
+                        &run.validation,
+                        &run.criteria,
+                        &out_path,
+                        diff_c.as_deref(),
+                    );
                     let outcome = run_agent_capture(
                         &manager,
                         &ws_c,
@@ -1340,15 +1388,40 @@ fn build_impl_prompt(skill_name: &str, skill_body: &str, task: &str, out: &Path)
     )
 }
 
-fn build_validation_prompt(validation: &str, criteria: &str, out: &Path) -> String {
+/// Build a validation agent prompt. When `diff_context` is `Some(diff)`, the
+/// pre-computed `git diff` is injected directly so each validator does not need
+/// to re-run `git diff` itself (saves one shell call per validator per pass).
+/// The diff is capped at 6 000 chars to keep the prompt bounded.
+fn build_validation_prompt(
+    validation: &str,
+    criteria: &str,
+    out: &Path,
+    diff_context: Option<&str>,
+) -> String {
+    const DIFF_CAP: usize = 6_000;
+    let diff_section = match diff_context {
+        Some(d) if !d.trim().is_empty() => {
+            let capped: String = d.chars().take(DIFF_CAP).collect();
+            let truncation_note = if d.chars().count() > DIFF_CAP {
+                "\n[… diff truncated …]"
+            } else {
+                ""
+            };
+            format!(
+                "\nPre-computed diff (use this rather than re-running `git diff`):\n\
+                 ```\n{capped}{truncation_note}\n```\n"
+            )
+        }
+        _ => "\nInspect the implemented code (use `git diff` / `git status` and read the changed files).".to_string(),
+    };
     format!(
         "VALIDATION — STRICTLY READ-ONLY. You are checking a freshly-implemented change in this \
          worktree against one quality dimension. You MUST NOT edit, create, or delete any file \
          except the findings file described below, and MUST NOT run commands that mutate the repo.\n\n\
          Dimension: {validation}\n\
-         What to check (and how to judge it):\n{criteria}\n\n\
-         Inspect the implemented code (use `git diff` / `git status` and read the changed files) \
-         and report problems for THIS dimension only. For each problem, give the concrete fix you \
+         What to check (and how to judge it):\n{criteria}\n\
+         {diff_section}\n\
+         Report problems for THIS dimension only. For each problem, give the concrete fix you \
          would suggest.\n\n\
          Output ONLY a JSON array (no prose, no markdown fence) written to this absolute file path, \
          overwriting any existing content:\n\n{}\n\n\

@@ -7,6 +7,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
+  import { workflowRunBus } from '../../lib/events.svelte';
   import type {
     Workflow,
     WorkflowGraph,
@@ -156,18 +157,49 @@
     dirty = true;
   }
 
+  // Max number of poll intervals before we stop even if no terminal event
+  // arrives. With 700ms intervals this allows ~3.5 minutes of capped polling.
+  const POLL_MAX = 300;
+
   async function execRun(body: Record<string, unknown>): Promise<void> {
     if (!current || running) return;
     if (dirty) await save();
     running = true;
     run = null;
+    const workflowId = current.id;
     try {
-      let r = await api.post<WorkflowRun>(`/workflows/${current.id}/run`, body);
+      let r = await api.post<WorkflowRun>(`/workflows/${workflowId}/run`, body);
       run = r;
-      while (r.status === 'pending' || r.status === 'running') {
-        await new Promise((res) => setTimeout(res, 700));
-        r = await api.get<WorkflowRun>(`/workflow-runs/${r.id}`);
+      const runId = r.id;
+      let pollCount = 0;
+      let nextPollMs = 700;
+
+      // Event-driven refresh: workflowRunBus.tick increments each time the
+      // server emits WorkflowRunUpdated for any run. We re-fetch when our
+      // run_id is the active one. A capped 700ms fallback poll keeps the UI
+      // live when the WS connection is unavailable.
+      while ((r.status === 'pending' || r.status === 'running') && pollCount < POLL_MAX) {
+        // Wait for whichever comes first: a WS event tick or the poll timer.
+        const snapshot = workflowRunBus.tick;
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, nextPollMs);
+          // Check for a new event tick in a tight loop (rAF-free; negligible CPU).
+          const iv = setInterval(() => {
+            if (workflowRunBus.tick !== snapshot && workflowRunBus.runId === runId) {
+              clearInterval(iv);
+              clearTimeout(timer);
+              resolve();
+            }
+          }, 50);
+          // Ensure the interval is always cleared when the timer fires.
+          setTimeout(() => clearInterval(iv), nextPollMs + 10);
+        });
+        r = await api.get<WorkflowRun>(`/workflow-runs/${runId}`);
         run = r;
+        pollCount += 1;
+        // Back off the fallback poll slightly after the first few ticks to
+        // reduce load when WS events are driving the refresh. Cap at 3s.
+        nextPollMs = Math.min(nextPollMs + 100, 3000);
       }
       if (r.status === 'success') toasts.success('Run complete');
       else if (r.status === 'canceled') toasts.info('Run stopped');
@@ -212,18 +244,48 @@
     return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
   }
 
-  function onParam(field: string, value: string): void {
+  function onParam(field: string, value: unknown): void {
     if (!selectedNode) return;
     const params = { ...((selectedNode.params as Record<string, unknown>) ?? {}) };
-    params[field] = value;
+    if (value === '' || value === null || value === undefined) {
+      delete params[field];
+    } else {
+      params[field] = value;
+    }
     selectedNode.params = params;
     graph = graph;
     dirty = true;
   }
 
-  function promptParam(): string {
+  function paramStr(field: string): string {
     const p = selectedNode?.params as Record<string, unknown> | undefined;
-    return typeof p?.prompt === 'string' ? p.prompt : '';
+    const v = p?.[field];
+    return typeof v === 'string' ? v : v != null ? String(v) : '';
+  }
+
+  function paramNum(field: string, def: number): number {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    const v = p?.[field];
+    return typeof v === 'number' ? v : typeof v === 'string' && v !== '' ? Number(v) : def;
+  }
+
+  function paramJson(field: string): string {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    const v = p?.[field];
+    if (v == null) return '';
+    return typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+  }
+
+  function onParamJson(field: string, raw: string): void {
+    if (!selectedNode) return;
+    try {
+      const parsed = JSON.parse(raw);
+      onParam(field, parsed);
+    } catch {
+      // Keep invalid JSON as a string so the user can see what they typed
+      // without losing the edit; the engine will reject it on run.
+      onParam(field, raw);
+    }
   }
 </script>
 
@@ -379,9 +441,98 @@
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream">▶ From here</button>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, true)} title="Run only this node">Only this</button>
             </div>
+            <!-- Per-kind param forms. Each kind exposes only its meaningful
+                 params; unrecognised kinds fall through to a raw JSON editor. -->
             {#if selectedNode.kind === 'agent_prompt'}
               <label for="np-prompt">Prompt</label>
-              <textarea id="np-prompt" rows="3" value={promptParam()} oninput={(e) => onParam('prompt', e.currentTarget.value)}></textarea>
+              <textarea
+                id="np-prompt"
+                rows="4"
+                value={paramStr('prompt')}
+                oninput={(e) => onParam('prompt', e.currentTarget.value)}
+              ></textarea>
+              <label for="np-model">Model (optional)</label>
+              <input
+                id="np-model"
+                type="text"
+                placeholder="e.g. claude-opus-4-8 (default)"
+                value={paramStr('model')}
+                oninput={(e) => onParam('model', e.currentTarget.value)}
+              />
+            {:else if selectedNode.kind === 'http_request'}
+              <label for="np-method">Method</label>
+              <select
+                id="np-method"
+                value={paramStr('method') || 'GET'}
+                onchange={(e) => onParam('method', e.currentTarget.value)}
+              >
+                {#each ['GET','POST','PUT','PATCH','DELETE','HEAD'] as m (m)}
+                  <option value={m}>{m}</option>
+                {/each}
+              </select>
+              <label for="np-url">URL</label>
+              <input
+                id="np-url"
+                type="url"
+                placeholder="https://example.com/api"
+                value={paramStr('url')}
+                oninput={(e) => onParam('url', e.currentTarget.value)}
+              />
+              <label for="np-body">Body (JSON, optional)</label>
+              <textarea
+                id="np-body"
+                rows="3"
+                placeholder="&#123;&#125;"
+                value={paramJson('body')}
+                oninput={(e) => onParamJson('body', e.currentTarget.value)}
+              ></textarea>
+            {:else if selectedNode.kind === 'delay'}
+              <label for="np-ms">Wait (ms)</label>
+              <input
+                id="np-ms"
+                type="number"
+                min="0"
+                max="10000"
+                step="100"
+                value={paramNum('ms', 0)}
+                oninput={(e) => onParam('ms', Number(e.currentTarget.value))}
+              />
+            {:else if selectedNode.kind === 'transform'}
+              <label for="np-json">Merge JSON (object)</label>
+              <textarea
+                id="np-json"
+                rows="4"
+                placeholder="&#123;&#125;"
+                value={paramJson('json')}
+                oninput={(e) => onParamJson('json', e.currentTarget.value)}
+              ></textarea>
+            {:else if selectedNode.kind === 'game_engine'}
+              <label for="np-game">Game type</label>
+              <select
+                id="np-game"
+                value={paramStr('game') || 'slots'}
+                onchange={(e) => onParam('game', e.currentTarget.value)}
+              >
+                <option value="slots">Slots (5×3)</option>
+                <option value="crash">Crash (Aviator-style)</option>
+                <option value="scratch">Scratch card</option>
+              </select>
+            {:else if selectedNode.kind !== 'manual_trigger' && selectedNode.kind !== 'log' && selectedNode.kind !== 'verifier'}
+              <!-- Fallback raw-JSON editor for unrecognised or future node kinds -->
+              <label for="np-raw">Params (JSON)</label>
+              <textarea
+                id="np-raw"
+                rows="5"
+                placeholder="&#123;&#125;"
+                value={selectedNode.params != null ? JSON.stringify(selectedNode.params, null, 2) : ''}
+                oninput={(e) => {
+                  try {
+                    selectedNode.params = JSON.parse(e.currentTarget.value);
+                    graph = graph;
+                    dirty = true;
+                  } catch { /* keep typing */ }
+                }}
+              ></textarea>
             {/if}
             {#if selectedRun?.error}
               <div class="err">{selectedRun.error}</div>
@@ -671,6 +822,39 @@
     font-size: 11px;
     font-weight: 600;
     color: var(--text-dim);
+  }
+  .inspector input[type='text'],
+  .inspector input[type='url'],
+  .inspector input[type='number'] {
+    width: 100%;
+    font: inherit;
+    font-size: 12.5px;
+    padding: 6px 9px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .inspector input[type='text']:focus,
+  .inspector input[type='url']:focus,
+  .inspector input[type='number']:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .inspector select {
+    width: 100%;
+    font: inherit;
+    font-size: 12.5px;
+    padding: 6px 9px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .inspector select:focus {
+    outline: none;
+    border-color: var(--accent);
   }
   .err {
     color: var(--status-exited);
