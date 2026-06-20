@@ -148,7 +148,7 @@
         cwd: ws.current?.root_path ?? null,
         meta: { source: 'onboarding' },
       });
-      router.go('agents');
+      // createSession → addSession → navigateToSession handles the route.
       // Seed the starter prompt once the PTY has had a moment to spawn the CLI.
       // Best-effort: a failed seed still leaves a usable, opened session.
       setTimeout(() => {

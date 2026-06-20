@@ -20,8 +20,8 @@
   let draft = $state('');
 
   function activate(id: string): void {
-    ws.openSession(id);
-    if (router.module !== 'agents') router.go('agents');
+    // Navigate via the route so Back/Forward walk session history.
+    ws.navigateToSession(id);
   }
 
   function title(id: string): string {

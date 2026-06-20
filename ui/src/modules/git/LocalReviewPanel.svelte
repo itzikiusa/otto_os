@@ -241,8 +241,7 @@
         provider,
         comment_ids: checkedIds,
       });
-      ws.addSession(session);
-      router.go('agents');
+      ws.addSession(session); // navigates to the new session via addSession → navigateToSession
       toasts.success(`Handed ${checkedIds.length} finding${checkedIds.length === 1 ? '' : 's'} to ${provider}`);
     } catch (e) {
       toasts.error('Handoff failed', e instanceof Error ? e.message : String(e));

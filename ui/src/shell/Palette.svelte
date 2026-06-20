@@ -257,7 +257,10 @@
       // (not left running in the background). Multiple → tile them all.
       const created = ws.sessions.filter((s) => !before.has(s.id) && !s.archived);
       if (created.length > 1) ws.setViewMode('tiled');
-      for (const s of created) ws.openSession(s.id);
+      // Open all sessions in the store; navigate the route to the last one so
+      // Back/Forward can return to it. Store-only openSession for all but last.
+      for (const s of created.slice(0, -1)) ws.openSession(s.id);
+      if (created.length > 0) ws.navigateToSession(created[created.length - 1].id);
       close();
       englishText = '';
       plan = null;

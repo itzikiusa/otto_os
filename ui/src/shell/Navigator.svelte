@@ -83,8 +83,7 @@
   }
 
   function openSession(id: string): void {
-    ws.openSession(id);
-    router.go('agents');
+    ws.navigateToSession(id);
   }
 
   function startRename(id: string, current: string): void {

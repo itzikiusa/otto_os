@@ -1,6 +1,7 @@
 // Workspaces + sessions + tab/split state for the shell and Agent Mode.
 
 import { api } from '../api/client';
+import { router } from '../router.svelte';
 import type {
   AttachedIssue,
   CreateSessionReq,
@@ -216,7 +217,14 @@ class WorkspaceStore {
     }
   }
 
-  /** Open (or focus) a session tab. */
+  /** Update tab + pane bookkeeping to make `id` the focused session.
+   *
+   * This is the **pure store mutation** — it does NOT navigate the router.
+   * Call it when you already know the route reflects the session (e.g. from
+   * a route→store sync `$effect` in App.svelte, or internal store housekeeping).
+   * To navigate AND open a session from a user action, call
+   * {@link navigateToSession} instead.
+   */
   openSession(id: Id): void {
     // Opening a session counts as attending to it — drop any "needs you" flag.
     this.clearNeedsYou(id);
@@ -231,6 +239,20 @@ class WorkspaceStore {
       this.panes[this.focusedPane] = id;
       this.panes = [...this.panes];
     }
+  }
+
+  /** Navigate to a session via the router (route = `#/agents/<id>`).
+   *
+   * This is the **user-facing navigation action**: it pushes a history entry so
+   * browser/in-app Back/Forward walk session history. The route change triggers
+   * App.svelte's route→store `$effect`, which calls {@link openSession} to
+   * update tabs/panes — no double-push, no loop.
+   *
+   * All external callers (Navigator, TabBar, palette, notifications, …) should
+   * use this instead of the old `ws.openSession(id) + router.go('agents')` pair.
+   */
+  navigateToSession(id: Id): void {
+    router.go(`agents/${id}`);
   }
 
   /**
@@ -262,13 +284,13 @@ class WorkspaceStore {
     return agents.length ? agents[agents.length - 1].id : null;
   }
 
-  /** Add a freshly created session object and open it. */
+  /** Add a freshly created session object and navigate to it. */
   addSession(s: Session): void {
     if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
-    if (s.workspace_id === this.currentId) this.openSession(s.id);
+    if (s.workspace_id === this.currentId) this.navigateToSession(s.id);
   }
 
   /**
@@ -329,13 +351,13 @@ class WorkspaceStore {
     const cur = this.activeSessionId;
     const idx = cur ? this.openTabs.indexOf(cur) : -1;
     const next = this.openTabs[(idx + dir + this.openTabs.length) % this.openTabs.length];
-    this.openSession(next);
+    this.navigateToSession(next);
   }
 
   /** Focus the Nth open session tab (1-based, matching the tab-bar order). */
   focusSessionByIndex(n: number): void {
     const target = this.openTabs[n - 1];
-    if (target) this.openSession(target);
+    if (target) this.navigateToSession(target);
   }
 
   split(axis: SplitAxis): void {

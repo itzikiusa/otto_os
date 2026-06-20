@@ -214,7 +214,7 @@
           },
         },
       });
-      router.go('agents');
+      // createSession → addSession → navigateToSession handles routing.
     } catch (e) {
       toasts.error('Could not open session', e instanceof Error ? e.message : String(e));
     } finally {

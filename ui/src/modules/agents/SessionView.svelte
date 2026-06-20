@@ -273,7 +273,7 @@
         class="handover-crumb"
         title="Open the session this was handed over from"
         onmousedown={(e) => e.stopPropagation()}
-        onclick={() => ws.openSession(handoverFromId)}
+        onclick={() => ws.navigateToSession(handoverFromId)}
       >↰ {handoverFrom?.title ?? 'source'}</button>
     {/if}
     {#if handoverPending}

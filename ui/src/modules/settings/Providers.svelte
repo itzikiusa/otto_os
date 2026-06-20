@@ -6,7 +6,6 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { router } from '../../lib/router.svelte';
   import type { Session } from '../../lib/api/types';
   import Skeleton from '../../lib/components/Skeleton.svelte';
 
@@ -51,8 +50,7 @@
     updating = true;
     try {
       const session = await api.post<Session>(`/workspaces/${wsId}/providers/update`, {});
-      ws.addSession(session);
-      router.go('agents');
+      ws.addSession(session); // navigates to the update session
       toasts.info('Updating CLIs…', 'Watch the Update CLIs session for progress');
     } catch (e) {
       toasts.error('Update failed', e instanceof Error ? e.message : String(e));

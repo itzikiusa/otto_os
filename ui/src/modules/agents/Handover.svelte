@@ -7,7 +7,6 @@
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
   import type {
@@ -119,9 +118,8 @@
         archive_source: archiveSource,
       };
       const session = await api.post<Session>(`/sessions/${sessionId}/handover`, req);
-      ws.addSession(session); // adds (if new) + opens the target pane
+      ws.addSession(session); // adds (if new) + navigates to the target session
       onclose();
-      router.go('agents');
       const where = mode === 'new' ? `new ${provider} agent` : (session.title ?? 'the agent');
       toasts.success(
         'Handover started',

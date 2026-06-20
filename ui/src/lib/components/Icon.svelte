@@ -22,6 +22,7 @@
     x: 'M4 4l8 8M12 4l-8 8',
     search: 'M7 2.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9Zm3.4 7.9 3.1 3.1',
     chevronDown: 'M4 6l4 4 4-4',
+    chevronLeft: 'M10 4l-4 4 4 4',
     chevronRight: 'M6 4l4 4-4 4',
     dot: 'M8 6.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z',
     check: 'M3 8.5l3.2 3L13 4.5',

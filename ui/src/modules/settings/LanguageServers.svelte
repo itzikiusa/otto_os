@@ -3,7 +3,6 @@
   // install missing servers via a spawned shell session.
   import { api } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { LspCapabilities, LspServerStatus } from '../../lib/api/types';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -44,8 +43,7 @@
     installing = new Set([...installing, lang]);
     try {
       const session = await api.post<Session>(`/workspaces/${wsId}/lsp/install`, { langs: [lang] });
-      ws.addSession(session);
-      router.go('agents');
+      ws.addSession(session); // navigates to the install session
       toasts.info('Installing…', 'Watch the terminal session for progress.');
     } catch (e) {
       toasts.error('Install failed', e instanceof Error ? e.message : String(e));
@@ -59,8 +57,7 @@
     installingAll = true;
     try {
       const session = await api.post<Session>(`/workspaces/${wsId}/lsp/install`, {});
-      ws.addSession(session);
-      router.go('agents');
+      ws.addSession(session); // navigates to the install session
       toasts.info('Installing all missing…', 'Watch the terminal session for progress.');
     } catch (e) {
       toasts.error('Install failed', e instanceof Error ? e.message : String(e));

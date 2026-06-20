@@ -11,6 +11,7 @@
   import RightPanel from './RightPanel.svelte';
   import BottomNav from './BottomNav.svelte';
   import Drawer from './Drawer.svelte';
+  import NavButtons from './NavButtons.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
@@ -57,6 +58,23 @@
   import { toasts } from '../lib/toast.svelte';
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
+
+  // ---- route → store sync (one-way; avoids route↔store loop) ----
+  // When the URL is `#/agents/<sessionId>` (set by navigateToSession or Back/Forward),
+  // apply the session id into the workspace store's pane/tab state. This is
+  // intentionally ONE-WAY: the store mutation (openSession) does NOT re-navigate,
+  // so there is no loop. The router's own `navigating` flag guards against
+  // recursive hash changes during back/forward.
+  $effect(() => {
+    const sessionId = router.parts[1];
+    if (router.module === 'agents' && sessionId) {
+      // Only update if the store doesn't already reflect this session — avoids
+      // a spurious pane shuffle when the store and route are already in sync.
+      if (ws.activeSessionId !== sessionId) {
+        ws.openSession(sessionId);
+      }
+    }
+  });
 
   // ---- `?` shortcuts cheat-sheet + focused-session action modals ----
   let shortcutsOpen = $state(false);
@@ -258,7 +276,6 @@
     try {
       const session = await api.post<Session>(`/workspaces/${wsId}/providers/update`, {});
       ws.addSession(session);
-      router.go('agents');
       toasts.info('Updating CLIs…', 'Watch the Update CLIs session for progress');
     } catch (e) {
       toasts.error('Update CLIs failed', e instanceof Error ? e.message : String(e));
@@ -356,8 +373,7 @@
         group: 'Sessions',
         keywords: s.provider,
         run: () => {
-          ws.openSession(s.id);
-          router.go('agents');
+          ws.navigateToSession(s.id);
         },
       })),
     );
@@ -384,7 +400,6 @@
             run: async () => {
               const session = await api.post<Session>(`/connections/${c.id}/open`, {});
               ws.addSession(session);
-              router.go('agents');
               toasts.success('Connection opened', c.name);
             },
           })),
@@ -516,6 +531,9 @@
         <Icon name="sidebar" size={18} />
       </button>
     {/if}
+    <!-- Back/Forward: visible whenever there is history to walk. Placed left of
+         the title so the thumb can reach them comfortably on phone + tablet. -->
+    <NavButtons />
     <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleName}</span>
     <span class="grow"></span>
     {#if moduleName === 'agents' && ws.activeSession !== null}

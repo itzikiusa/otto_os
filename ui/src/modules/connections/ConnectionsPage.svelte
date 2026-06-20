@@ -282,9 +282,8 @@
       } else {
         // Switch to the target workspace so its new session is visible.
         await ws.select(wsId);
-        ws.openSession(session.id);
+        ws.navigateToSession(session.id);
       }
-      router.go('agents');
       const wsName = ws.workspaces.find((w) => w.id === wsId)?.name;
       toasts.success('Connection opened', wsName ? `${c.name} → ${wsName}` : c.name);
     } catch (e) {

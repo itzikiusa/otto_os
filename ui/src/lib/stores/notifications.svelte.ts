@@ -8,7 +8,6 @@ import { api } from '../api/client';
 import type { Notice, NoticeAction, NotificationSettings } from '../api/types';
 import { toasts } from '../toast.svelte';
 import { openExternal } from '../external';
-import { router } from '../router.svelte';
 import { ws } from './workspace.svelte';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -181,8 +180,7 @@ class NotificationStore {
           toasts.warn('Session unavailable', 'It may have been closed or belongs to another workspace.');
           return;
         }
-        ws.openSession(action.session_id);
-        router.go('agents');
+        ws.navigateToSession(action.session_id);
         break;
       }
       case 'reauth':

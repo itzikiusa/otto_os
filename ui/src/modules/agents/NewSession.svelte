@@ -4,7 +4,6 @@
   import ContextPreview from './ContextPreview.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
 
   interface Props {
@@ -92,8 +91,9 @@
         cwd: cwd.trim() === '' ? null : cwd.trim(),
         meta: Object.keys(meta).length > 0 ? meta : null,
       });
+      // createSession → addSession → navigateToSession already routes to the
+      // new session; no extra router.go() needed.
       onclose();
-      router.go('agents');
     } catch (e) {
       toasts.error('Could not create session', e instanceof Error ? e.message : String(e));
     } finally {
