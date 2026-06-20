@@ -4,6 +4,7 @@
 // event, routed from events.svelte.ts). Warn/error notices optionally raise a
 // native OS notification via the Tauri notification plugin.
 
+import { untrack } from 'svelte';
 import { api } from '../api/client';
 import type { Notice, NoticeAction, NotificationSettings } from '../api/types';
 import { toasts } from '../toast.svelte';
@@ -32,7 +33,14 @@ class NotificationStore {
 
   /** Load notices + settings from the daemon. Safe to call more than once. */
   async load(): Promise<void> {
-    if (this.loading) return;
+    // Read the re-entrancy guard UNtracked: callers like NotificationBell wrap
+    // this in a bare `$effect(() => void notifications.load())` intending a
+    // load-once-on-mount. Reading `this.loading` inside that effect's tracking
+    // scope would subscribe the effect to it, and the `finally { this.loading =
+    // false }` below would then re-trigger the effect after every fetch — an
+    // infinite `GET /notifications` loop that pegs the webview + daemon. untrack
+    // keeps the overlap guard working without leaking it as a dependency.
+    if (untrack(() => this.loading)) return;
     this.loading = true;
     try {
       const [notices, settings] = await Promise.all([

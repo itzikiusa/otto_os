@@ -178,6 +178,15 @@ impl otto_product::ProductCtx for ServerCtx {
     }
 }
 
+impl otto_memory::MemoryCtx for ServerCtx {
+    fn memory(&self) -> &Arc<otto_memory::MemoryService> {
+        &self.memory
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+}
+
 impl otto_swarm::SwarmCtx for ServerCtx {
     fn swarm(&self) -> &Arc<otto_swarm::SwarmService> {
         &self.swarm
@@ -3008,6 +3017,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_connections::api_router::<ServerCtx>(),
         otto_dbviewer::api_router::<ServerCtx>(),
         otto_product::router::<ServerCtx>(),
+        otto_memory::router::<ServerCtx>(),
         otto_git::router::<ServerCtx>(),
         otto_issues::router::<ServerCtx>(),
         otto_channels::router::<ServerCtx>(),

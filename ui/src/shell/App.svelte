@@ -43,6 +43,7 @@
   import ProductPage from '../modules/product/ProductPage.svelte';
   import InsightsPage from '../modules/insights/InsightsPage.svelte';
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
+  import VaultPage from '../modules/vault/VaultPage.svelte';
   import { router } from '../lib/router.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
@@ -507,6 +508,8 @@
       <InsightsPage />
     {:else if moduleName === 'swarm'}
       <SwarmPage />
+    {:else if moduleName === 'vault'}
+      <VaultPage />
     {:else}
       <AgentsPage />
     {/if}

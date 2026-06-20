@@ -999,3 +999,35 @@ Notes:
   its full path is `/api/v1/app/kill-sessions` and it requires a bearer token.
 - Several AI-producing routes (analyze/rewrite/generate/plan/review) return `202 Accepted`
   and stream progress over `/ws/events`; poll the corresponding GET for the latest state.
+
+## Memory layer (workspace-scoped knowledge store)
+
+A workspace-scoped store of distilled knowledge (`item`) and raw evidence (`chunk`) with
+keyword + vector hybrid recall. Reads require `ws viewer`, mutations `ws editor`. `Memory`,
+`NewMemory`, `MemoryPatch`, `MemoryQuery`, `MemoryHit`, `RecallBrief`, `MemoryLink`,
+`GraphData` are mirrored in `ui/src/lib/api/types.ts`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{ws}/memories | ws viewer | query: `collection?,kind?,story_id?,tag?,include_inactive?,limit?` | `Memory[]` |
+| POST /workspaces/{ws}/memories | ws editor | `NewMemory` | `Memory` (exact-dup save is a NOOP returning the existing row) |
+| GET /workspaces/{ws}/memories/{id} | ws viewer | — | `Memory` |
+| PATCH /workspaces/{ws}/memories/{id} | ws editor | `MemoryPatch` | `Memory` |
+| DELETE /workspaces/{ws}/memories/{id} | ws editor | — | 204 (soft-delete: `active=false`) |
+| GET /workspaces/{ws}/memories/{id}/links | ws viewer | — | `MemoryLink[]` |
+| POST /workspaces/{ws}/memory/search | ws viewer | `MemoryQuery` | `MemoryHit[]` (hybrid keyword⊕vector, RRF-fused, re-ranked) |
+| POST /workspaces/{ws}/memory/recall | ws viewer | `{story_id, focus?, token_budget?}` | `RecallBrief` (token-budgeted background brief) |
+| GET /workspaces/{ws}/memory/graph | ws viewer | query: `collection?` | `GraphData{nodes,edges}` (for the vault graph view) |
+| POST /workspaces/{ws}/memory/ingest-text | ws editor | `{collection?, path, content}` | `{chunks}` (chunk text into a collection) |
+| POST /workspaces/{ws}/memory/import-graph | ws editor | `{collection?, graph:{nodes,edges}}` | `ImportStats{nodes,edges}` (graphify graph.json) |
+| GET /workspaces/{ws}/memory/entities/{id}/graph | ws viewer | — | `{links, neighbors}` (entity neighborhood) |
+| POST /workspaces/{ws}/product/stories/{sid}/memory/ingest | ws editor | — | `{ingested}` (extract a story's artifacts into memory) |
+
+Notes:
+- `MemoryQuery.mode` ∈ `{hybrid (default), semantic, keyword}`; `k` defaults to 20.
+- `visibility` ∈ `{shared (default — all workspace members), private (creator-only)}`.
+- Sharing across machines: set `OTTO_MEMORY_REMOTE_URL`/`OTTO_MEMORY_REMOTE_TOKEN`
+  to point an instance at a shared host, or sync an `OTTO_MEMORY_VAULT_DIR` vault
+  folder (git) and re-index. A shared SQLite *file* over a network is unsupported.
+- Vectors are embedded on write; the default embedder is a deterministic local stub
+  (real local/remote embedders swap in behind the `Embedder` trait, feature-gated).

@@ -362,6 +362,17 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Product, if get { View } else { Edit });
     }
 
+    // ---- Memory (knowledge vault: memories / graph / recall / ingest) ---------
+    // The memory layer has no dedicated Feature key; it is workspace knowledge
+    // produced and consumed by the Product workflows (the per-story ingest route
+    // is mounted under `/product/…` and already covered above). We gate the
+    // standalone memory API on Product: read=View, mutate=Edit. Root bypasses.
+    if p.starts_with("/workspaces/{ws}/memories")
+        || p.starts_with("/workspaces/{ws}/memory/")
+    {
+        return Require(Product, if get { View } else { Edit });
+    }
+
     // ---- Swarm ----------------------------------------------------------------
     // §3.2: view swarms/board/runs=View; create/edit/run/start/pause/abort/
     // recruit/plan=Edit.

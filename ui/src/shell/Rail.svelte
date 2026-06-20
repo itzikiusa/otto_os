@@ -7,7 +7,9 @@
   import { auth } from '../lib/stores/auth.svelte';
 
   // Each entry carries the feature name used by auth.can(); all are gated at
-  // 'view'. Root always passes (can() returns true for root).
+  // 'view'. Root always passes (can() returns true for root). The memory-layer
+  // "Vault" module predates RBAC and has no feature key, so it is appended
+  // unconditionally (visible to any authenticated member) rather than filtered.
   const ALL_MODULES = [
     { id: 'agents',     icon: 'terminal', label: 'Agents',           feature: 'agents'      as const },
     { id: 'swarm',      icon: 'grid',     label: 'Swarm',            feature: 'swarm'       as const },
@@ -21,8 +23,20 @@
     { id: 'insights',   icon: 'gauge',    label: 'Insights',         feature: 'insights'    as const },
     { id: 'usage',      icon: 'chart',    label: 'Usage',            feature: 'usage'       as const },
   ];
-  // Filter to only the modules the current user has at least view on.
-  const modules = $derived(ALL_MODULES.filter(m => auth.can(m.feature, 'view')));
+  // Filter to only the modules the current user has at least view on, then
+  // splice in the un-gated "Vault" (memory) module after Product (or at the end
+  // when Product itself is not visible) so it is always reachable.
+  const modules = $derived.by(() => {
+    const gated = ALL_MODULES.filter(m => auth.can(m.feature, 'view')).map(m => ({
+      id: m.id,
+      icon: m.icon,
+      label: m.label,
+    }));
+    const vault = { id: 'vault', icon: 'note', label: 'Vault' };
+    const i = gated.findIndex(m => m.id === 'product');
+    if (i === -1) return [...gated, vault];
+    return [...gated.slice(0, i + 1), vault, ...gated.slice(i + 1)];
+  });
 </script>
 
 <nav class="rail sidebar-material" aria-label="Modules">
