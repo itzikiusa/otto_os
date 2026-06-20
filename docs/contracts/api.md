@@ -1073,6 +1073,7 @@ responses. The Schema Registry + metrics endpoints ride the same SOCKS tunnel. O
 | GET /brokers/clusters/{id}/topics | ws viewer | — | `TopicSummary[]` |
 | POST /brokers/clusters/{id}/topics | ws editor | `CreateTopicReq` | `TopicSummary` (201; 409 if exists) |
 | GET /brokers/clusters/{id}/topics/{topic} | ws viewer | — | `TopicDetail` |
+| GET /brokers/clusters/{id}/topics/{topic}/stats | ws viewer | — | `TopicStats` (lazy `message_count` + `cleanup_policy`; the topic list is metadata-only for speed) |
 | DELETE /brokers/clusters/{id}/topics/{topic}?confirm=B | ws editor | — | 204 |
 | GET /brokers/clusters/{id}/topics/{topic}/configs | ws viewer | — | `TopicConfigEntry[]` |
 | PUT /brokers/clusters/{id}/topics/{topic}/configs | ws editor | `AlterConfigsReq` | `TopicConfigEntry[]` (merges over existing dynamic overrides) |

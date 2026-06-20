@@ -252,6 +252,14 @@ pub struct TopicSummary {
     pub internal: bool,
 }
 
+/// Lazily-loaded per-topic stats for the topics table (the list itself is a
+/// single metadata pass; these are fetched per topic in the background).
+#[derive(Debug, Clone, Serialize)]
+pub struct TopicStats {
+    pub message_count: i64,
+    pub cleanup_policy: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TopicDetail {
     pub name: String,

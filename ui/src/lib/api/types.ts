@@ -2480,6 +2480,12 @@ export interface UpsertClusterReq {
   read_only?: boolean | null;
 }
 
+/** Lazily-loaded per-topic stats (message count + cleanup policy). */
+export interface TopicStats {
+  message_count: number;
+  cleanup_policy: string | null;
+}
+
 export interface TestClusterResp {
   ok: boolean;
   latency_ms: number;

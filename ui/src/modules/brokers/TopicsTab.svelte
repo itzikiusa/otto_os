@@ -3,17 +3,29 @@
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import TopicDetail from './TopicDetail.svelte';
-  import type { BrokerCluster, CreateTopicReq, TopicSummary } from '../../lib/api/types';
+  import type {
+    BrokerCluster,
+    CreateTopicReq,
+    TopicStats,
+    TopicSummary,
+  } from '../../lib/api/types';
 
   interface Props {
     cluster: BrokerCluster;
   }
   let { cluster }: Props = $props();
 
+  const PAGE_SIZE = 20;
+  const STATS_CONCURRENCY = 4;
+
   let topics = $state<TopicSummary[]>([]);
+  // Lazily-filled per-topic stats (count + cleanup policy), keyed by name.
+  let stats = $state<Record<string, TopicStats>>({});
   let loading = $state(true);
   let query = $state('');
   let showInternal = $state(false);
+  let cleanupFilter = $state('');
+  let page = $state(1);
   let selected = $state<string | null>(null);
 
   let creating = $state(false);
@@ -27,11 +39,20 @@
     topics
       .filter((t) => showInternal || !t.internal)
       .filter((t) => t.name.toLowerCase().includes(query.toLowerCase()))
+      .filter((t) => !cleanupFilter || stats[t.name]?.cleanup_policy === cleanupFilter)
       .sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  const pageCount = $derived(Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)));
+  const pageStart = $derived((Math.min(page, pageCount) - 1) * PAGE_SIZE);
+  const visible = $derived(filtered.slice(pageStart, pageStart + PAGE_SIZE));
+  // Cleanup-policy values discovered so far (for the filter dropdown).
+  const cleanupOptions = $derived(
+    [...new Set(Object.values(stats).map((s) => s.cleanup_policy).filter(Boolean))] as string[],
   );
 
   function load() {
     loading = true;
+    stats = {};
     api
       .get<TopicSummary[]>(`/brokers/clusters/${cluster.id}/topics`)
       .then((t) => {
@@ -42,11 +63,59 @@
       .finally(() => (loading = false));
   }
 
+  // Background-fill stats for the topics currently on screen (cached; bounded
+  // concurrency so a slow/tunnelled cluster stays responsive).
+  let statsToken = 0;
+  async function fillStats(names: string[]) {
+    const pending = names.filter((n) => stats[n] === undefined);
+    if (pending.length === 0) return;
+    const token = ++statsToken;
+    // Mark as in-flight (null) so we don't refetch.
+    stats = { ...stats, ...Object.fromEntries(pending.map((n) => [n, null as unknown as TopicStats])) };
+    const queue = [...pending];
+    const worker = async () => {
+      while (queue.length) {
+        const name = queue.shift()!;
+        try {
+          const s = await api.get<TopicStats>(
+            `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(name)}/stats`,
+          );
+          if (token === statsToken) stats = { ...stats, [name]: s };
+        } catch {
+          // leave as in-flight/null; count shows "—"
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: STATS_CONCURRENCY }, worker));
+  }
+
   $effect(() => {
     void cluster.id;
     selected = null;
+    page = 1;
     load();
   });
+
+  // Lazily load stats for the visible page (and refetch as you paginate/filter).
+  $effect(() => {
+    if (loading || selected) return;
+    void fillStats(visible.map((t) => t.name));
+  });
+
+  // Reset to page 1 when the filters change.
+  $effect(() => {
+    void query;
+    void showInternal;
+    void cleanupFilter;
+    page = 1;
+  });
+
+  function countText(name: string): string {
+    const s = stats[name];
+    if (s === undefined) return '';
+    if (s === null) return '…';
+    return s.message_count.toLocaleString();
+  }
 
   async function createTopic() {
     if (!newName.trim()) return;
@@ -69,95 +138,185 @@
   }
 </script>
 
-<div class="topics">
-  <div class="list">
-    <div class="list-head">
+{#if selected}
+  <div class="detail-wrap">
+    <button class="crumb" onclick={() => (selected = null)}>
+      <Icon name="chevronLeft" size={13} /> Topics
+      <span class="sep">/</span>
+      <span class="cur">{selected}</span>
+    </button>
+    {#key selected}
+      <TopicDetail
+        {cluster}
+        topic={selected}
+        ondeleted={() => {
+          selected = null;
+          load();
+        }}
+      />
+    {/key}
+  </div>
+{:else}
+  <div class="topics">
+    <div class="toolbar">
       <input class="search" bind:value={query} placeholder="Search topics…" />
+      <label class="chk"><input type="checkbox" bind:checked={showInternal} /> Show internal</label>
+      {#if cleanupOptions.length}
+        <select bind:value={cleanupFilter} title="Cleanup policy">
+          <option value="">Any cleanup policy</option>
+          {#each cleanupOptions as p (p)}<option value={p}>{p}</option>{/each}
+        </select>
+      {/if}
+      <span class="spacer"></span>
+      <span class="count">{filtered.length} topic{filtered.length === 1 ? '' : 's'}</span>
       <button class="btn small" onclick={() => (creating = !creating)} title="New topic">
-        <Icon name="plus" size={13} />
+        <Icon name="plus" size={13} /> New
       </button>
     </div>
+
     {#if creating}
       <div class="create">
         <input bind:value={newName} placeholder="topic name" />
-        <div class="cr-row">
-          <label>Parts <input type="number" min="1" bind:value={newParts} /></label>
-          <label>RF <input type="number" min="1" bind:value={newRf} /></label>
-          <button class="btn primary small" onclick={createTopic}>Create</button>
-        </div>
+        <label>Parts <input type="number" min="1" bind:value={newParts} /></label>
+        <label>RF <input type="number" min="1" bind:value={newRf} /></label>
+        <button class="btn primary small" onclick={createTopic}>Create</button>
+        <button class="btn small" onclick={() => (creating = false)}>Cancel</button>
       </div>
     {/if}
-    <label class="internal-toggle">
-      <input type="checkbox" bind:checked={showInternal} /> show internal
-    </label>
-    <div class="rows">
+
+    <div class="grid-wrap">
       {#if loading}
         <p class="muted pad">Loading…</p>
+      {:else if filtered.length === 0}
+        <p class="muted pad">No topics.</p>
       {:else}
-        {#each filtered as t (t.name)}
-          <button class="trow" class:sel={selected === t.name} onclick={() => (selected = t.name)}>
-            <span class="tn" class:internal={t.internal}>{t.name}</span>
-            <span class="meta">{t.partitions}p · {t.message_count < 0 ? '—' : t.message_count.toLocaleString()}</span>
-          </button>
-        {/each}
-        {#if filtered.length === 0}<p class="muted pad">No topics.</p>{/if}
+        <table class="grid">
+          <thead>
+            <tr>
+              <th class="tname">Topic</th>
+              <th class="num">Partitions</th>
+              <th class="num">RF</th>
+              <th class="num">Count</th>
+              <th class="num">Size</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each visible as t (t.name)}
+              <tr onclick={() => (selected = t.name)}>
+                <td class="tname" class:internal={t.internal}>{t.name}</td>
+                <td class="num">{t.partitions}</td>
+                <td class="num">{t.replication_factor}</td>
+                <td class="num">{countText(t.name)}</td>
+                <td class="num muted" title="On-disk size isn't exposed by this Kafka client">—</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       {/if}
     </div>
-  </div>
 
-  <div class="detail">
-    {#if selected}
-      {#key selected}
-        <TopicDetail
-          {cluster}
-          topic={selected}
-          ondeleted={() => {
-            selected = null;
-            load();
-          }}
-        />
-      {/key}
-    {:else}
-      <div class="empty">
-        <Icon name="box" size={26} />
-        <p>Select a topic to browse messages, partitions, configs and produce.</p>
+    {#if !loading && pageCount > 1}
+      <div class="pager">
+        <span class="muted"
+          >{pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filtered.length)} of {filtered.length}</span
+        >
+        <button class="btn tiny" disabled={page <= 1} onclick={() => (page = Math.max(1, page - 1))}>
+          <Icon name="chevronLeft" size={12} />
+        </button>
+        <span class="muted">{Math.min(page, pageCount)} / {pageCount}</span>
+        <button
+          class="btn tiny"
+          disabled={page >= pageCount}
+          onclick={() => (page = Math.min(pageCount, page + 1))}
+        >
+          <Icon name="chevronRight" size={12} />
+        </button>
       </div>
     {/if}
   </div>
-</div>
+{/if}
 
 <style>
   .topics {
     display: flex;
+    flex-direction: column;
     height: 100%;
     min-height: 0;
   }
-  .list {
-    width: 280px;
-    border-right: 1px solid var(--border);
+  .detail-wrap {
     display: flex;
     flex-direction: column;
+    height: 100%;
     min-height: 0;
   }
-  .list-head {
+  .crumb {
     display: flex;
-    gap: 6px;
-    padding: 10px;
+    align-items: center;
+    gap: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 12.5px;
+    border-bottom: 1px solid var(--border);
+  }
+  .crumb:hover {
+    color: var(--text);
+  }
+  .crumb .sep {
+    opacity: 0.5;
+  }
+  .crumb .cur {
+    color: var(--text);
+    font-family: var(--font-mono);
+  }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
   }
   .search {
-    flex: 1;
-    padding: 6px 8px;
+    width: 240px;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12.5px;
+  }
+  .chk {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .toolbar select {
+    padding: 5px 7px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
     font-size: 12px;
   }
+  .spacer {
+    flex: 1;
+  }
+  .count {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
   .create {
-    padding: 0 10px 8px;
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
   }
   .create input {
     padding: 6px 8px;
@@ -167,82 +326,81 @@
     color: var(--text);
     font-size: 12px;
   }
-  .cr-row {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-  }
-  .cr-row label {
+  .create label {
     font-size: 11px;
     color: var(--text-dim);
     display: flex;
     gap: 4px;
     align-items: center;
   }
-  .cr-row input {
-    width: 48px;
+  .create label input {
+    width: 52px;
   }
-  .internal-toggle {
-    font-size: 11px;
-    color: var(--text-dim);
-    padding: 0 10px 8px;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-  .rows {
+  .grid-wrap {
     flex: 1;
     overflow: auto;
+    min-height: 0;
   }
-  .trow {
+  table.grid {
     width: 100%;
-    text-align: left;
-    border: none;
-    background: transparent;
-    padding: 7px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    cursor: pointer;
-    border-left: 2px solid transparent;
-  }
-  .trow:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
-  }
-  .trow.sel {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    border-left-color: var(--accent);
-  }
-  .tn {
-    font-family: var(--font-mono);
+    border-collapse: collapse;
     font-size: 12.5px;
+  }
+  table.grid th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--text-dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 8px 14px;
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  table.grid th.num {
+    text-align: right;
+    width: 110px;
+  }
+  table.grid td {
+    padding: 7px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.grid td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.grid td.tname {
+    font-family: var(--font-mono);
     color: var(--text);
     word-break: break-all;
   }
-  .tn.internal {
+  table.grid td.tname.internal {
     color: var(--text-dim);
   }
-  .meta {
-    font-size: 11px;
-    color: var(--text-dim);
+  table.grid tbody tr {
+    cursor: pointer;
   }
-  .detail {
-    flex: 1;
-    min-width: 0;
+  table.grid tbody tr:hover {
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
-  .empty {
-    height: 100%;
+  .pager {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    justify-content: center;
     gap: 10px;
-    color: var(--text-dim);
+    justify-content: flex-end;
+    padding: 8px 14px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
   }
   .muted {
     color: var(--text-dim);
   }
   .pad {
-    padding: 12px;
+    padding: 14px;
+  }
+  .btn.tiny {
+    padding: 3px 7px;
   }
 </style>

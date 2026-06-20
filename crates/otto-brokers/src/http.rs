@@ -81,6 +81,10 @@ pub fn api_router<S: BrokersCtx>() -> Router<S> {
             get(topic_detail::<S>).delete(delete_topic::<S>),
         )
         .route(
+            "/brokers/clusters/{id}/topics/{topic}/stats",
+            get(topic_stats::<S>),
+        )
+        .route(
             "/brokers/clusters/{id}/topics/{topic}/configs",
             get(get_configs::<S>).put(put_configs::<S>),
         )
@@ -267,6 +271,15 @@ async fn topic_detail<S: BrokersCtx>(
 ) -> ApiResult<Response> {
     authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     Ok(Json(ctx.brokers().topic_detail(&id, &topic).await?).into_response())
+}
+
+async fn topic_stats<S: BrokersCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, topic)): Path<(Id, String)>,
+) -> ApiResult<Response> {
+    authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(ctx.brokers().topic_stats(&id, &topic).await?).into_response())
 }
 
 async fn delete_topic<S: BrokersCtx>(

@@ -411,6 +411,34 @@ impl BrokersService {
         })
     }
 
+    /// Lazily-loaded stats for one topic (message count + cleanup policy). The
+    /// topic list is metadata-only; the UI calls this per row in the background.
+    pub async fn topic_stats(&self, id: &Id, topic: &str) -> Result<TopicStats> {
+        let (client, _) = self.client_for(id).await?;
+        let count = {
+            let client = client.clone();
+            let t = topic.to_string();
+            tokio::task::spawn_blocking(move || client.topic_message_count(&t))
+                .await
+                .map_err(join)??
+        };
+        // Cleanup policy comes from topic config; some clusters/users can't read
+        // configs (e.g. MSK without DESCRIBE_CONFIGS) — degrade gracefully.
+        let cleanup_policy = client
+            .topic_configs(topic)
+            .await
+            .ok()
+            .and_then(|cfgs| {
+                cfgs.into_iter()
+                    .find(|c| c.name == "cleanup.policy")
+                    .and_then(|c| c.value)
+            });
+        Ok(TopicStats {
+            message_count: count,
+            cleanup_policy,
+        })
+    }
+
     pub async fn topic_configs(&self, id: &Id, topic: &str) -> Result<Vec<TopicConfigEntry>> {
         let (client, _) = self.client_for(id).await?;
         client.topic_configs(topic).await

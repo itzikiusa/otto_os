@@ -254,6 +254,30 @@ impl KafkaClient {
         Ok(total)
     }
 
+    /// Cheap message count for a single topic (sum of `high-low` watermarks
+    /// across its partitions) — drives the lazily-filled "Count" column.
+    pub fn topic_message_count(&self, topic: &str) -> Result<i64> {
+        let md = self
+            .consumer
+            .fetch_metadata(Some(topic), META_TIMEOUT)
+            .map_err(kerr)?;
+        let mt = md
+            .topics()
+            .iter()
+            .find(|t| t.name() == topic)
+            .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+        let mut total = 0i64;
+        for p in mt.partitions() {
+            if let Ok((low, high)) =
+                self.consumer
+                    .fetch_watermarks(topic, p.id(), WATERMARK_TIMEOUT)
+            {
+                total += (high - low).max(0);
+            }
+        }
+        Ok(total)
+    }
+
     /// Partitions + watermarks for a topic (the async `topic_configs` is fetched
     /// separately and merged by the service).
     pub fn topic_partitions(&self, topic: &str) -> Result<(Vec<PartitionInfo>, i64)> {
