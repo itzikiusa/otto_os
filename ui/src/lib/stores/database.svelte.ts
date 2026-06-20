@@ -271,6 +271,12 @@ export interface QueryTab {
   error: string | null;
   /** Quick-filter chips that own the statement's WHERE clause. */
   filters: FilterCond[];
+  /**
+   * Optional per-tab statement timeout in milliseconds. When set, passed to the
+   * server which forwards it to the driver (MySQL: MAX_EXECUTION_TIME hint).
+   * 0 or null = no limit.
+   */
+  timeout_ms: number | null;
 }
 
 let nextTabId = 1;
@@ -283,6 +289,7 @@ function blankTab(statement = ''): QueryTab {
     running: false,
     error: null,
     filters: [],
+    timeout_ms: null,
   };
 }
 
@@ -1022,6 +1029,9 @@ class DatabaseStore {
       // Scope to the active database (so unqualified tables resolve) unless an
       // explicit node was passed.
       const scopeNode = node ?? (this.activeDb || null);
+      // Per-tab timeout (opt-in; null / 0 = no limit).
+      const tabTimeoutMs = this.tab?.timeout_ms ?? null;
+
       const post = (confirmWrite: boolean): Promise<QueryResult> =>
         api.post<QueryResult>(
           `${this.connBase(id)}/query`,
@@ -1033,6 +1043,8 @@ class DatabaseStore {
             // Per-run id so the cancel endpoint can issue engine-native
             // cancellation (KILL QUERY / etc.) for this in-flight query.
             query_id: queryId,
+            // Driver-enforced timeout (engine-native, e.g. MySQL MAX_EXECUTION_TIME).
+            ...(tabTimeoutMs && tabTimeoutMs > 0 ? { timeout_ms: tabTimeoutMs } : {}),
           },
           controller.signal,
         );

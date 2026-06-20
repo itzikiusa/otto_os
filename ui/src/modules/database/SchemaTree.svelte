@@ -9,6 +9,11 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { DbNodeKind, SchemaNode } from '../../lib/api/types';
 
+  // Top-level schema search / filter. Only filters the root nodes (databases,
+  // schemas, keyspaces, collections). When non-empty, child matches are shown
+  // by recursively checking cached subtrees.
+  let schemaFilter = $state('');
+
   // Node kinds that, when clicked, open the Structure view (vs. just expanding).
   const OBJECT_KINDS = new Set<DbNodeKind>(['table', 'view', 'collection', 'key']);
 
@@ -74,6 +79,26 @@
 
   // Pretty number for the "Select Rows (Limit N)" label.
   const fmtNum = (n: number): string => n.toLocaleString();
+
+  /**
+   * Return true when a node or any of its cached descendants match the filter.
+   * Only inspects already-expanded subtrees; nodes whose children haven't been
+   * loaded yet are always included (we don't fetch on behalf of the filter).
+   */
+  function nodeMatchesFilter(node: SchemaNode, q: string): boolean {
+    if (node.label.toLowerCase().includes(q)) return true;
+    const kids = database.childrenOf(node.id);
+    if (kids) {
+      return kids.some((k) => nodeMatchesFilter(k, q));
+    }
+    return false;
+  }
+
+  const filteredRoot = $derived.by(() => {
+    const q = schemaFilter.trim().toLowerCase();
+    if (!q) return database.schemaRoot;
+    return database.schemaRoot.filter((n) => nodeMatchesFilter(n, q));
+  });
 
   function showMenu(e: MouseEvent, node: SchemaNode): void {
     const isObject = OBJECT_KINDS.has(node.kind);
@@ -183,6 +208,24 @@
 </script>
 
 <div class="schema-tree">
+  {#if !database.schemaLoading && database.schemaRoot.length > 0}
+    <div class="tree-search">
+      <Icon name="search" size={11} />
+      <input
+        class="tree-search-input"
+        type="text"
+        bind:value={schemaFilter}
+        placeholder="Filter schema…"
+        spellcheck="false"
+        aria-label="Filter schema tree"
+      />
+      {#if schemaFilter}
+        <button class="tree-search-clear" onclick={() => (schemaFilter = '')} aria-label="Clear filter">
+          <Icon name="x" size={10} />
+        </button>
+      {/if}
+    </div>
+  {/if}
   {#if database.schemaLoading}
     <div class="tree-loading">
       <Icon name="refresh" size={13} />
@@ -190,8 +233,10 @@
     </div>
   {:else if database.schemaRoot.length === 0}
     <div class="tree-empty">No objects. Test the connection or refresh.</div>
+  {:else if filteredRoot.length === 0}
+    <div class="tree-empty">No match for "{schemaFilter}".</div>
   {:else}
-    {#each database.schemaRoot as node (node.id)}
+    {#each filteredRoot as node (node.id)}
       {@render treeNode(node, 0)}
     {/each}
   {/if}
@@ -363,5 +408,40 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* Schema-tree filter bar */
+  .tree-search {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 6px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .tree-search-input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 11.5px;
+    outline: none;
+    min-width: 0;
+  }
+  .tree-search-input::placeholder {
+    color: var(--text-dim);
+  }
+  .tree-search-clear {
+    display: grid;
+    place-items: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  .tree-search-clear:hover {
+    color: var(--text);
   }
 </style>

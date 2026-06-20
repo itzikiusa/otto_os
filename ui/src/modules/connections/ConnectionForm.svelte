@@ -229,6 +229,73 @@
     return p;
   }
 
+  // ── DSN / URI paste import ──────────────────────────────────────────────────
+  // Parses a standard connection URI (mysql://, redis://, mongodb://, etc.) and
+  // fills the form fields in-place. Unrecognized schemes are ignored with a toast.
+  function parseDsn(raw: string): void {
+    const s = raw.trim();
+    if (!s) return;
+
+    let url: URL;
+    try {
+      url = new URL(s);
+    } catch {
+      toasts.error('Invalid URI', 'Could not parse as a connection URL');
+      return;
+    }
+
+    const scheme = url.protocol.replace(':', '').toLowerCase();
+    const kindMap: Record<string, ConnectionKind> = {
+      mysql: 'mysql',
+      'mysql+tcp': 'mysql',
+      redis: 'redis',
+      rediss: 'redis',
+      mongodb: 'mongodb',
+      'mongodb+srv': 'mongodb',
+      clickhouse: 'clickhouse',
+      'clickhouse+https': 'clickhouse',
+      'clickhouse+http': 'clickhouse',
+      ssh: 'ssh',
+    };
+    const mapped = kindMap[scheme];
+    if (!mapped) {
+      toasts.error('Unknown scheme', `Unrecognized URI scheme: ${scheme}`);
+      return;
+    }
+
+    setKind(mapped);
+
+    if (mapped === 'mongodb') {
+      // For Mongo keep the whole URI as conn_string.
+      fConnString = s;
+    } else {
+      if (url.hostname) fHost = url.hostname;
+      if (url.port)     fPort = url.port;
+      if (url.username) fUser = decodeURIComponent(url.username);
+      if (url.password) secret = decodeURIComponent(url.password);
+      // The first path segment is the database/db-index.
+      const dbPart = url.pathname.replace(/^\//, '').split('/')[0];
+      if (dbPart) fDb = decodeURIComponent(dbPart);
+    }
+
+    // Auto-fill name from host+db if the name field is still empty.
+    if (!name && url.hostname) {
+      const dbPart = url.pathname.replace(/^\//, '').split('/')[0];
+      name = dbPart ? `${url.hostname}/${dbPart}` : url.hostname;
+    }
+
+    toasts.success('URI parsed', `${mapped} — fields populated`);
+  }
+
+  let showDsnInput = $state(false);
+  let dsnValue = $state('');
+
+  function commitDsn(): void {
+    parseDsn(dsnValue);
+    dsnValue = '';
+    showDsnInput = false;
+  }
+
   async function save(): Promise<void> {
     if (busy) return;
     busy = true;
@@ -257,6 +324,32 @@
 </script>
 
 <Modal title={existing ? `Edit ${existing.name}` : 'New Connection'} width={500} {onclose}>
+  <!-- DSN / URI paste import -->
+  {#if !existing}
+    {#if showDsnInput}
+      <div class="field dsn-row">
+        <input
+          class="input mono"
+          bind:value={dsnValue}
+          placeholder="mysql://user:pass@host:3306/db"
+          spellcheck="false"
+          onkeydown={(e) => {
+            if (e.key === 'Enter') commitDsn();
+            else if (e.key === 'Escape') { showDsnInput = false; dsnValue = ''; }
+          }}
+        />
+        <button class="btn small primary" onclick={commitDsn}>Import</button>
+        <button class="btn small" onclick={() => { showDsnInput = false; dsnValue = ''; }}>Cancel</button>
+      </div>
+    {:else}
+      <div class="dsn-hint">
+        <button class="btn small ghost dsn-btn" onclick={() => (showDsnInput = true)}>
+          Paste connection URI&hellip;
+        </button>
+      </div>
+    {/if}
+  {/if}
+
   <!-- Name -->
   <div class="field">
     <label for="cf-name">Name</label>
@@ -757,6 +850,24 @@
     min-width: 0;
   }
   .section-new .input {
+    flex: 1;
+    min-width: 0;
+  }
+  /* DSN / URI paste import */
+  .dsn-hint {
+    margin-bottom: 6px;
+  }
+  .dsn-btn {
+    color: var(--text-dim);
+    font-size: 11.5px;
+  }
+  .dsn-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .dsn-row .input {
     flex: 1;
     min-width: 0;
   }

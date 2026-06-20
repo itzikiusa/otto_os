@@ -310,6 +310,8 @@ pub fn validate_params(kind: ConnectionKind, params: &Value, has_secret: bool) -
         read_only: false,
         created_by: String::new(),
         created_at: chrono::Utc::now(),
+        last_opened_at: None,
+        pinned: false,
     };
     let secret = has_secret.then_some("x");
     build_command(&conn, secret).map(|_| ())

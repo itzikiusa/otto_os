@@ -334,6 +334,17 @@
     }
   }
 
+  async function togglePin(c: Connection): Promise<void> {
+    try {
+      const updated = await api.patch<Connection>(`/connections/${c.id}/pin`, {
+        pinned: !c.pinned,
+      });
+      conns = conns.map((x) => (x.id === c.id ? updated : x));
+    } catch (e) {
+      toasts.error('Pin failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   function onSaved(saved: Connection): void {
     const idx = conns.findIndex((x) => x.id === saved.id);
     conns = idx >= 0 ? conns.map((x) => (x.id === saved.id ? saved : x)) : [...conns, saved];
@@ -481,7 +492,15 @@
     title={c.first_command ? `${c.name} · ▸ ${c.first_command} — double-click to open` : `${c.name} — double-click to open`}
   >
     <span class="conn-dot"><Icon name={kindIcons[c.kind]} size={13} /></span>
+    {#if c.pinned}<span class="pin-glyph" title="Pinned"><Icon name="pin" size={11} /></span>{/if}
     <span class="conn-name ellipsis">{c.name}</span>
+    {#if c.environment === 'prod'}
+      <span class="env-chip prod" title="Production — writes require typed confirmation">PROD</span>
+    {:else if c.read_only}
+      <span class="env-chip ro" title="Read-only — writes refused">RO</span>
+    {:else if c.environment === 'staging'}
+      <span class="env-chip stg" title="Staging">STG</span>
+    {/if}
     <span class="conn-desc mono ellipsis">{describe(c)}</span>
     <span class="grow"></span>
     {#if c.kind === 'clickhouse'}
@@ -543,6 +562,13 @@
       }}
     >
       <Icon name="edit" size={13} />
+    </button>
+    <button
+      class="icon-btn"
+      title={c.pinned ? 'Unpin' : 'Pin to top'}
+      onclick={() => togglePin(c)}
+    >
+      <Icon name="pin" size={13} />
     </button>
     <button class="icon-btn" title="Delete" onclick={() => remove(c)}>
       <Icon name="trash" size={13} />
@@ -752,5 +778,36 @@
     background: transparent;
     padding: 0;
     cursor: default;
+  }
+  /* Recency / pin indicators */
+  .pin-glyph {
+    display: inline-flex;
+    align-items: center;
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+  /* Environment badges */
+  .env-chip {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    background: var(--surface-2);
+    color: var(--text-dim);
+  }
+  .env-chip.prod {
+    background: color-mix(in srgb, var(--status-exited) 20%, transparent);
+    color: var(--status-exited);
+  }
+  .env-chip.ro {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+  }
+  .env-chip.stg {
+    background: color-mix(in srgb, orange 15%, transparent);
+    color: orange;
   }
 </style>

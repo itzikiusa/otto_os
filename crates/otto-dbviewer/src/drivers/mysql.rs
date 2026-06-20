@@ -241,8 +241,48 @@ impl Driver for MysqlDriver {
         detail.primary_key = primary_key;
         detail.indexes = indexes;
         detail.foreign_keys = foreign_keys;
-        // detail.row_count stays None — no estimated counts (see above).
+        // detail.row_count stays None — no estimated counts by default.
+        // See `object_detail_with_opts` for the opt-in InnoDB estimate.
         detail.ddl = ddl;
+        Ok(detail)
+    }
+
+    /// Opt-in: populate `row_count` from `information_schema.tables.table_rows`
+    /// (an InnoDB page-statistics estimate — may be off by ±30% or more on large
+    /// tables, but is zero-cost compared with `COUNT(*)`). Only fills the count for
+    /// BASE TABLEs; views and non-InnoDB tables return None.
+    async fn object_detail_with_opts(
+        &self,
+        cfg: &ResolvedConfig,
+        path: &NodePath,
+        approx_row_count: bool,
+    ) -> Result<ObjectDetail> {
+        let mut detail = self.object_detail(cfg, path).await?;
+        if !approx_row_count || detail.kind != NodeKind::Table {
+            return Ok(detail);
+        }
+        let db = match path.get("db") {
+            Some(d) => d.to_string(),
+            None => return Ok(detail),
+        };
+        let table = match path.get("table") {
+            Some(t) => t.to_string(),
+            None => return Ok(detail),
+        };
+        let pool = self.pool(cfg).await?;
+        // `table_rows` is i64 in InnoDB statistics; treat negative/NULL as absent.
+        let est: Option<i64> = sqlx::query_scalar(
+            "SELECT table_rows FROM information_schema.tables \
+             WHERE table_schema = ? AND table_name = ? AND table_type = 'BASE TABLE'",
+        )
+        .bind(&db)
+        .bind(&table)
+        .fetch_optional(&pool)
+        .await
+        .unwrap_or(None);
+        if let Some(n) = est.filter(|&n| n >= 0) {
+            detail.row_count = Some(n);
+        }
         Ok(detail)
     }
 
@@ -271,6 +311,20 @@ impl Driver for MysqlDriver {
 
         let result = if is_read_statement(statement) {
             let limited = types::inject_row_limit(statement, max_rows.saturating_add(1));
+            // Inject MySQL's MAX_EXECUTION_TIME(ms) optimizer hint when a per-statement
+            // timeout is requested. The hint goes right after the SELECT keyword so it
+            // is valid even after LIMIT injection. Non-SELECT reads (e.g. SHOW, EXPLAIN)
+            // are passed through unchanged — MySQL only honours the hint on SELECTs.
+            let limited = if let Some(ms) = req.timeout_ms.filter(|&t| t > 0) {
+                if limited.trim_start().to_uppercase().starts_with("SELECT") {
+                    // "SELECT /*+ MAX_EXECUTION_TIME(N) */ ..."
+                    limited.replacen("SELECT", &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"), 1)
+                } else {
+                    limited
+                }
+            } else {
+                limited
+            };
             run_read(&pool, &limited, max_rows, active_db, token).await
         } else {
             run_write(&pool, statement, active_db, token).await

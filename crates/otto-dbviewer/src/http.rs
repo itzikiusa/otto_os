@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
@@ -71,6 +71,11 @@ struct PathReq {
     /// Optional prefix filter for lazy children (Redis keyspace key filtering).
     #[serde(default)]
     filter: Option<String>,
+    /// When `true`, the response includes an `approx_row_count` from
+    /// `information_schema.table_rows` (InnoDB estimate — may be wildly off;
+    /// opt-in because it adds a second query on every `object_detail` call).
+    #[serde(default)]
+    approx_row_count: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +168,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/object", post(object_detail::<S>))
         .route("/connections/{id}/db/schema-graph", post(schema_graph::<S>))
         .route("/connections/{id}/db/query", post(run_query::<S>))
+        .route("/connections/{id}/db/export", post(export_query::<S>))
         .route("/connections/{id}/db/cancel", post(cancel_query::<S>))
         .route("/connections/{id}/db/completion", post(completion::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
@@ -290,7 +296,7 @@ async fn object_detail<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().object_detail(&id, &req.path).await?).into_response())
+    Ok(Json(ctx.db().object_detail(&id, &req.path, req.approx_row_count).await?).into_response())
 }
 
 /// Read-only relationship graph (ERD) for a schema: tables + columns + FK edges.
@@ -351,6 +357,119 @@ async fn cancel_query<S: DbViewerCtx>(
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
     ctx.db().cancel(&id, &req.query_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for the server-side export endpoint.
+#[derive(Debug, Deserialize)]
+struct ExportReq {
+    statement: String,
+    /// `csv` (default) or `json`.
+    #[serde(default)]
+    format: ExportFormat,
+    /// Optional node context (active database) — same semantics as `QueryRequest.node`.
+    #[serde(default)]
+    node: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ExportFormat {
+    #[default]
+    Csv,
+    Json,
+}
+
+/// Export a query result as CSV or NDJSON without the row cap applied to the
+/// interactive query endpoint. Returns a file attachment so the browser downloads
+/// it directly. Gated at `Editor` — same as `run_query` — because this executes
+/// a statement against the live database.
+async fn export_query<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<ExportReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+
+    // Run without a row cap — the user opted in to a full export.
+    let query_req = QueryRequest {
+        statement: req.statement,
+        max_rows: None,
+        node: req.node,
+        ..QueryRequest::default()
+    };
+    let result = ctx.db().run(&id, &user.id, &query_req).await?;
+
+    match req.format {
+        ExportFormat::Csv => {
+            // Minimal CSV: RFC 4180 — double-quote fields that contain commas,
+            // quotes, or newlines. Values are rendered as their JSON scalar form
+            // (strings unquoted for readability; nulls as empty cells).
+            let mut out = String::new();
+            // Header row
+            let header_row: Vec<String> = result.columns.iter().map(|c| csv_field(&c.name)).collect();
+            out.push_str(&header_row.join(","));
+            out.push('\n');
+            for row in &result.rows {
+                let fields: Vec<String> = row.iter().map(|v| csv_value(v)).collect();
+                out.push_str(&fields.join(","));
+                out.push('\n');
+            }
+            Ok((
+                [
+                    (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                    (header::CONTENT_DISPOSITION, "attachment; filename=\"export.csv\""),
+                ],
+                out,
+            )
+                .into_response())
+        }
+        ExportFormat::Json => {
+            // JSON array of objects [{col: val, …}].
+            let col_names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+            let objects: Vec<serde_json::Map<String, Value>> = result
+                .rows
+                .into_iter()
+                .map(|row| {
+                    col_names
+                        .iter()
+                        .zip(row)
+                        .map(|(&k, v)| (k.to_string(), v))
+                        .collect()
+                })
+                .collect();
+            let body = serde_json::to_string(&objects).unwrap_or_default();
+            Ok((
+                [
+                    (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                    (header::CONTENT_DISPOSITION, "attachment; filename=\"export.json\""),
+                ],
+                body,
+            )
+                .into_response())
+        }
+    }
+}
+
+/// Escape a string for a CSV field (RFC 4180).
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Render a JSON `Value` as a CSV cell (null → empty; strings unquoted when safe).
+fn csv_value(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => csv_field(s),
+        other => csv_field(&other.to_string()),
+    }
 }
 
 async fn completion<S: DbViewerCtx>(

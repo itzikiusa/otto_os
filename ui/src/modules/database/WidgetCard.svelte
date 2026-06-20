@@ -30,13 +30,20 @@
 
   // Initial run + auto-refresh. The interval is recreated whenever the widget id
   // or refresh cadence changes, and cleared on unmount (Svelte $effect cleanup).
+  //
+  // Each card's interval is jittered by up to ±15 % of the refresh period so that
+  // a dashboard with 20 tiles doesn't issue 20 parallel queries in the same
+  // scheduler tick. The jitter is re-sampled on every interval reset (id/secs
+  // change), which spreads the load without requiring server-side coordination.
   $effect(() => {
     const id = widget.id;
     const secs = refreshSecs ?? 0;
     void id; // track id so a swapped widget re-runs
     void run();
     if (secs > 0) {
-      const handle = setInterval(() => void run(), secs * 1000);
+      const jitterMs = (Math.random() * 0.3 - 0.15) * secs * 1000; // ±15%
+      const intervalMs = Math.max(secs * 1000 + jitterMs, 5000); // floor 5s
+      const handle = setInterval(() => void run(), intervalMs);
       return () => clearInterval(handle);
     }
   });

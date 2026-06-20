@@ -28,6 +28,15 @@ pub struct NewConnection {
 }
 
 fn row_to_connection(r: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
+    // `last_opened_at` and `pinned` were added in migration 0050; they may
+    // return a `ColumnNotFound` error on a DB that hasn't migrated yet (test-
+    // container or older schema). We tolerate that by falling back to the default.
+    let last_opened_at = r
+        .try_get::<Option<String>, _>("last_opened_at")
+        .ok()
+        .flatten()
+        .and_then(|s| ts(&s).ok());
+    let pinned = r.try_get::<i64, _>("pinned").unwrap_or(0) != 0;
     Ok(Connection {
         id: r.get("id"),
         workspace_id: r.get("workspace_id"),
@@ -43,6 +52,8 @@ fn row_to_connection(r: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
         read_only: r.get::<i64, _>("read_only") != 0,
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
+        last_opened_at,
+        pinned,
     })
 }
 
@@ -88,15 +99,43 @@ impl ConnectionsRepo {
     }
 
     /// Connections visible to a workspace: its own plus global (NULL workspace).
+    ///
+    /// Ordering: pinned first (pinned DESC), then most-recently-opened (NULL
+    /// last), then alphabetical as a tiebreaker — so "never opened" connections
+    /// sit below recently-used ones, and pinned ones always float to the top.
     pub async fn list_visible(&self, ws: &Id) -> Result<Vec<Connection>> {
         let rows = sqlx::query(
-            "SELECT * FROM connections WHERE workspace_id = ? OR workspace_id IS NULL ORDER BY name",
+            "SELECT * FROM connections \
+             WHERE workspace_id = ? OR workspace_id IS NULL \
+             ORDER BY pinned DESC, last_opened_at DESC NULLS LAST, name",
         )
         .bind(ws)
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("connections"))?;
         rows.iter().map(row_to_connection).collect()
+    }
+
+    /// Record that a connection was opened right now (best-effort; ignores
+    /// errors so a missing column on a not-yet-migrated DB doesn't break opens).
+    pub async fn stamp_opened(&self, id: &Id) {
+        let now = fmt(Utc::now());
+        let _ = sqlx::query("UPDATE connections SET last_opened_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await;
+    }
+
+    /// Toggle the `pinned` flag for a connection.
+    pub async fn set_pinned(&self, id: &Id, pinned: bool) -> Result<Connection> {
+        sqlx::query("UPDATE connections SET pinned = ? WHERE id = ?")
+            .bind(i64::from(pinned))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("pin connection"))?;
+        self.get(id).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -184,7 +223,8 @@ impl ConnectionsRepo {
     pub async fn list_visible_for(&self, ws: &Id, caller_id: &Id) -> Result<Vec<Connection>> {
         let rows = sqlx::query(
             "SELECT * FROM connections \
-             WHERE (workspace_id = ? OR workspace_id IS NULL) AND created_by = ? ORDER BY name",
+             WHERE (workspace_id = ? OR workspace_id IS NULL) AND created_by = ? \
+             ORDER BY pinned DESC, last_opened_at DESC NULLS LAST, name",
         )
         .bind(ws)
         .bind(caller_id)

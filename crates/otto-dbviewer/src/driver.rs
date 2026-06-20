@@ -37,6 +37,21 @@ pub trait Driver: Send + Sync {
     /// Full structure of a selected object (columns, keys, indexes, DDL).
     async fn object_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail>;
 
+    /// Like `object_detail` but when `approx_row_count` is `true`, the result's
+    /// `row_count` is filled from an engine-native estimate (e.g. MySQL
+    /// `information_schema.table_rows`). Default: calls `object_detail` and
+    /// ignores the flag, so drivers that don't have cheap estimates just inherit
+    /// this.
+    async fn object_detail_with_opts(
+        &self,
+        cfg: &ResolvedConfig,
+        path: &NodePath,
+        approx_row_count: bool,
+    ) -> Result<ObjectDetail> {
+        let _ = approx_row_count;
+        self.object_detail(cfg, path).await
+    }
+
     /// Execute a query / command and return a tabular result.
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult>;
 

@@ -231,6 +231,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // Reads: capabilities / schema / history (GET). Schema browse via POST
         // (schema/children, object, schema-graph) is still a read. Mutating SQL,
         // DDL, query execution, cancel, completion, explain-with-agent = Edit.
+        // Export (`db/export`) executes a full-result query — Edit tier.
         let read = get
             || p.ends_with("/db/schema/children")
             || p.ends_with("/db/object")
@@ -257,6 +258,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Connections, if get { View } else { Edit });
     }
     if p == "/connections/{id}/open" || p == "/connections/{id}/test" {
+        return Require(Connections, Edit);
+    }
+    if p == "/connections/{id}/pin" {
+        // Toggle pin/recency-order — Edit tier (personal preference, not admin).
         return Require(Connections, Edit);
     }
     if p == "/connections" {

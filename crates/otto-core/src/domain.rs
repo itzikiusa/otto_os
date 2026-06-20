@@ -260,6 +260,14 @@ pub struct Connection {
     pub read_only: bool,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
+    /// Last time this connection was opened (via DB Explorer or "Open as
+    /// terminal"). Absent when never opened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_opened_at: Option<DateTime<Utc>>,
+    /// When true the connection is surfaced in a "Pinned" group above "Recent"
+    /// regardless of recency. Defaults to false.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl Connection {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
     MoveSectionReq, Problem, ReorderSectionsReq, SectionScopeQuery, TestConnectionResp,
@@ -91,6 +91,12 @@ pub struct OpenConnectionReq {
     pub workspace_id: Option<Id>,
 }
 
+/// Body of `PATCH /connections/{id}/pin`.
+#[derive(Debug, Deserialize)]
+pub struct PinConnectionReq {
+    pub pinned: bool,
+}
+
 /// REST routes; the server nests this under `/api/v1` and supplies the state.
 pub fn api_router<S: ConnectionsCtx>() -> Router<S> {
     Router::new()
@@ -104,6 +110,7 @@ pub fn api_router<S: ConnectionsCtx>() -> Router<S> {
         )
         .route("/connections/{id}/open", post(open_connection::<S>))
         .route("/connections/{id}/test", post(test_connection::<S>))
+        .route("/connections/{id}/pin", patch(pin_connection::<S>))
         .route(
             "/workspaces/{id}/connection-sections",
             get(list_sections::<S>).post(create_section::<S>),
@@ -244,6 +251,18 @@ async fn test_connection<S: ConnectionsCtx>(
         require_conn_owner_or_root(&user, &conn)?;
     }
     Ok(Json(ctx.connections().test(&conn).await?))
+}
+
+/// PATCH /connections/{id}/pin — editor (global: root); toggle the pinned flag.
+async fn pin_connection<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<PinConnectionReq>,
+) -> ApiResult<Json<Connection>> {
+    let conn = ctx.connections().get(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    Ok(Json(ctx.connections().set_pinned(&id, req.pinned).await?))
 }
 
 // --- Connection sections ----------------------------------------------------

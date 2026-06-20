@@ -7,6 +7,7 @@
   import TableDesigner from './TableDesigner.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import type { DbForeignKey, SchemaNode } from '../../lib/api/types';
 
   const detail = $derived(database.objectDetail);
   let ddlOpen = $state(false);
@@ -40,6 +41,38 @@
       `Explain the structure of ${detail.name} and how it is used.`,
       `Explain ${detail.name}`,
     );
+  }
+
+  // ── FK navigation ──────────────────────────────────────────────────────────
+  // Clicking a foreign key row navigates to the referenced table. The current
+  // object's node path is used to derive the schema prefix (db:foo/), then the
+  // ref_table replaces the table segment. Falls back to a bare name when the
+  // current path lacks a db segment (unusual but not fatal).
+  function navigateToFkTable(fk: DbForeignKey): void {
+    const currentPath = database.selectedObjectPath;
+    if (!currentPath) return;
+
+    // Reconstruct the target path from the FK's schema + table.
+    // Path format: "db:{db}/table:{table}" for MySQL, or "schema:{s}/table:{t}".
+    const segs = currentPath.split('/');
+    const dbSeg = segs.find((s) => s.startsWith('db:') || s.startsWith('schema:'));
+    const targetDb = fk.ref_schema ?? (dbSeg ? dbSeg.split(':')[1] : null);
+
+    let targetPath: string;
+    if (dbSeg && targetDb) {
+      const prefix = dbSeg.startsWith('db:') ? 'db' : 'schema';
+      targetPath = `${prefix}:${targetDb}/table:${fk.ref_table}`;
+    } else {
+      targetPath = `table:${fk.ref_table}`;
+    }
+
+    const node: SchemaNode = {
+      id: targetPath,
+      label: fk.ref_table,
+      kind: 'table',
+      has_children: false,
+    };
+    void database.openObject(node);
   }
 
   // ── Index builder (per-engine) ──────────────────────────────────────────────
@@ -235,7 +268,11 @@
               <span class="fk-map mono">
                 ({fk.columns.join(', ')})
                 <Icon name="arrowDown" size={10} />
-                {fk.ref_schema ? `${fk.ref_schema}.` : ''}{fk.ref_table}({fk.ref_columns.join(', ')})
+                <button
+                  class="fk-ref-btn mono"
+                  title="Open {fk.ref_schema ? `${fk.ref_schema}.` : ''}{fk.ref_table}"
+                  onclick={() => navigateToFkTable(fk)}
+                >{fk.ref_schema ? `${fk.ref_schema}.` : ''}{fk.ref_table}</button>({fk.ref_columns.join(', ')})
               </span>
             </li>
           {/each}
@@ -604,5 +641,21 @@
   }
   .grow {
     flex: 1;
+  }
+  /* Clickable FK reference table — looks like a link but respects the mono row. */
+  .fk-ref-btn {
+    border: none;
+    background: transparent;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    font-size: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .fk-ref-btn:hover {
+    text-decoration-color: var(--accent);
   }
 </style>

@@ -321,6 +321,21 @@
         {/each}
       </select>
     </label>
+    <label class="qe-timeout" title="Per-statement timeout (ms) — 0 or blank = no limit; MySQL only">
+      <span>Timeout</span>
+      <input
+        class="input qe-timeout-input"
+        type="number"
+        min="0"
+        step="1000"
+        placeholder="ms"
+        value={tab.timeout_ms ?? ''}
+        oninput={(e) => {
+          const v = Number((e.currentTarget as HTMLInputElement).value);
+          database.tab.timeout_ms = v > 0 ? v : null;
+        }}
+      />
+    </label>
     <span class="qe-lang mono">{database.queryLanguage}</span>
   </div>
 
@@ -535,7 +550,8 @@
     background: var(--surface-2);
   }
   .qe-limit,
-  .qe-db {
+  .qe-db,
+  .qe-timeout {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -549,6 +565,12 @@
     font-size: 11px;
     width: auto;
     max-width: 160px;
+  }
+  .qe-timeout-input {
+    height: 24px;
+    padding: 0 4px;
+    font-size: 11px;
+    width: 72px;
   }
   .save-bar {
     display: flex;

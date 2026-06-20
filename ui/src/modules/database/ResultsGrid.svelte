@@ -13,6 +13,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { QueryResult } from '../../lib/api/types';
+  import { api } from '../../lib/api/client';
+  import { downloadText } from '../../lib/components/exporters';
 
   interface Props {
     result: QueryResult | null;
@@ -957,6 +959,28 @@
     download(toJson(), 'result.json', 'application/json');
   }
 
+  // Server-side full export: runs the statement again without a row cap.
+  // The server returns the file with `Content-Disposition: attachment` so the
+  // browser auto-downloads. We proxy it through `api.post` to carry the auth
+  // header, then trigger a download from the returned text.
+  let exporting = $state(false);
+
+  async function exportFullCsv(): Promise<void> {
+    if (!connectionId || !statement || exporting) return;
+    exporting = true;
+    try {
+      const text = await api.post<string>(
+        `/connections/${connectionId}/db/export`,
+        { statement, format: 'csv', node: database.activeDb ?? undefined },
+      );
+      downloadText(typeof text === 'string' ? text : JSON.stringify(text), 'export.csv', 'text/csv');
+    } catch (e) {
+      toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      exporting = false;
+    }
+  }
+
   // Paste the query + result rows into the running agent's input (bracketed
   // paste, not auto-submitted) so it can act on the real DB state.
   function sendToRunningAgent(): void {
@@ -1064,6 +1088,14 @@
         <button class="tb-btn" onclick={copyTsv} title="Copy as TSV{exportScope}"><Icon name="file" size={11} />Copy</button>
         <button class="tb-btn" onclick={exportCsv} title="Export CSV{exportScope}"><Icon name="arrowDown" size={11} />CSV</button>
         <button class="tb-btn" onclick={exportJson} title="Export JSON{exportScope}"><Icon name="arrowDown" size={11} />JSON</button>
+        {#if connectionId && statement && result?.truncated}
+          <button
+            class="tb-btn"
+            disabled={exporting}
+            onclick={() => void exportFullCsv()}
+            title="Server-side full export — re-runs the query without the row cap"
+          ><Icon name={exporting ? 'refresh' : 'fetch'} size={11} />{exporting ? 'Exporting…' : 'Full Export'}</button>
+        {/if}
       </div>
     {/if}
 

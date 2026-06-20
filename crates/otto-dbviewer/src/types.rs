@@ -447,6 +447,11 @@ pub struct QueryRequest {
     /// issue engine-native cancellation (`KILL QUERY`, etc.). Opaque to drivers.
     #[serde(default)]
     pub query_id: Option<String>,
+    /// Optional per-statement wall-clock timeout in milliseconds. When set, the
+    /// driver applies it engine-natively (MySQL: `MAX_EXECUTION_TIME(ms)` hint on
+    /// SELECTs; other engines: context deadline). 0 means no limit (same as absent).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// An engine-native handle the driver captured for an executing query, so the

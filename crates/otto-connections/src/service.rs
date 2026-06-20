@@ -243,6 +243,7 @@ impl ConnectionsService {
     }
 
     /// Open a connection as a terminal session in `ws_id` via the spawner.
+    /// Stamps `last_opened_at` on the profile for recency ordering.
     pub async fn open(
         &self,
         conn: &Connection,
@@ -253,7 +254,7 @@ impl ConnectionsService {
     ) -> Result<Session> {
         let secret = self.fetch_secret(conn)?;
         let (spec, _warn_argv) = build_command(conn, secret.as_deref())?;
-        spawner
+        let session = spawner
             .spawn_connection(
                 ws_id,
                 user_id,
@@ -262,7 +263,15 @@ impl ConnectionsService {
                 conn.first_command.clone(),
                 title,
             )
-            .await
+            .await?;
+        // Best-effort recency stamp — ignored if the column doesn't exist yet.
+        self.repo.stamp_opened(&conn.id).await;
+        Ok(session)
+    }
+
+    /// Toggle the pinned status for a connection.
+    pub async fn set_pinned(&self, id: &Id, pinned: bool) -> Result<Connection> {
+        self.repo.set_pinned(id, pinned).await
     }
 
     /// Headless test-connect: run the command with a kind-specific probe,

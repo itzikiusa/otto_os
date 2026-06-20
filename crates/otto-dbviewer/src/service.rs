@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::stream::{self, StreamExt as _};
+
 use otto_core::domain::Connection;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
@@ -283,10 +285,19 @@ impl DbViewerService {
         r.driver.schema_children(&r.config, &node, filter).await
     }
 
-    pub async fn object_detail(&self, conn_id: &Id, path: &str) -> Result<ObjectDetail> {
+    /// Return the full detail for a schema object. When `approx_row_count` is
+    /// true, the driver is asked to fill `ObjectDetail::row_count` from an
+    /// engine-native estimate (e.g. MySQL `information_schema.table_rows`).
+    /// The flag is opt-in because it adds an extra query per call.
+    pub async fn object_detail(
+        &self,
+        conn_id: &Id,
+        path: &str,
+        approx_row_count: bool,
+    ) -> Result<ObjectDetail> {
         let r = self.resolve(conn_id).await?;
         let node = NodePath::parse(path);
-        r.driver.object_detail(&r.config, &node).await
+        r.driver.object_detail_with_opts(&r.config, &node, approx_row_count).await
     }
 
     /// Production / read-only guardrail. When a connection is `Prod` or
@@ -348,8 +359,8 @@ impl DbViewerService {
         max_tables: usize,
     ) -> Result<SchemaGraph> {
         let r = self.resolve(conn_id).await?;
-        let driver = &r.driver;
-        let cfg = &r.config;
+        let driver = Arc::clone(&r.driver);
+        let cfg = r.config.clone();
         let relationships = driver.capabilities().joins;
 
         // Redis has no `db:`-rooted tree (its root is `kdb:<n>` keyspaces), so
@@ -357,7 +368,7 @@ impl DbViewerService {
         // no relationships. Return an empty graph instead of failing the diagram.
         // Mongo (also `relationships = false`) DOES use `db:` nodes, so it keeps
         // walking the tree and yields collection cards with no edges.
-        if r.config.engine == Engine::Redis {
+        if cfg.engine == Engine::Redis {
             return Ok(SchemaGraph {
                 schema: schema.to_string(),
                 tables: Vec::new(),
@@ -374,11 +385,11 @@ impl DbViewerService {
         let db_path = NodePath::parse(&format!("db:{schema}"));
         let mut object_nodes: Vec<SchemaNode> = Vec::new();
         let mut total_seen = 0usize;
-        for node in driver.schema_children(cfg, &db_path, None).await? {
+        for node in driver.schema_children(&cfg, &db_path, None).await? {
             match node.kind {
                 NodeKind::Folder => {
                     let child = NodePath::parse(&node.id);
-                    for inner in driver.schema_children(cfg, &child, None).await? {
+                    for inner in driver.schema_children(&cfg, &child, None).await? {
                         total_seen += 1;
                         if object_nodes.len() < max_tables {
                             object_nodes.push(inner);
@@ -396,16 +407,37 @@ impl DbViewerService {
         }
         let truncated = total_seen > object_nodes.len();
 
-        // Fetch each object's detail and project it onto the graph shape. A
-        // single object that fails to introspect is skipped rather than failing
-        // the whole diagram (a dropped/locked table shouldn't blank the canvas).
-        let mut tables: Vec<GraphTable> = Vec::with_capacity(object_nodes.len());
+        // Fetch each object's detail in parallel (capped at 8 concurrent
+        // in-flight round-trips) and project it onto the graph shape. A single
+        // object that fails to introspect is skipped rather than failing the
+        // whole diagram (a dropped/locked table shouldn't blank the canvas).
+        //
+        // Over an SSH tunnel each `object_detail` is one full RTT; running them
+        // sequentially on a schema with 60 tables is 60 serial RTTs. At
+        // concurrency-8 that shrinks to ~8 parallel waves → ~8× faster for
+        // large schemas while staying well below typical MySQL `max_connections`.
+        const GRAPH_CONCURRENCY: usize = 8;
+        let schema_str = schema.to_string();
+        let detail_results: Vec<(SchemaNode, Option<ObjectDetail>)> = stream::iter(object_nodes)
+            .map(|node| {
+                let driver = Arc::clone(&driver);
+                let cfg = cfg.clone();
+                async move {
+                    let path = NodePath::parse(&node.id);
+                    let detail = driver.object_detail(&cfg, &path).await.ok();
+                    (node, detail)
+                }
+            })
+            .buffer_unordered(GRAPH_CONCURRENCY)
+            .collect()
+            .await;
+
+        let mut tables: Vec<GraphTable> = Vec::with_capacity(detail_results.len());
         let mut edges: Vec<GraphEdge> = Vec::new();
-        for node in object_nodes {
-            let path = NodePath::parse(&node.id);
-            let detail = match driver.object_detail(cfg, &path).await {
-                Ok(d) => d,
-                Err(_) => continue,
+        for (node, maybe_detail) in detail_results {
+            let detail = match maybe_detail {
+                Some(d) => d,
+                None => continue,
             };
             let pk: std::collections::HashSet<&str> =
                 detail.primary_key.iter().map(String::as_str).collect();
@@ -433,7 +465,7 @@ impl DbViewerService {
                     from_columns: fk.columns.clone(),
                     // Default a missing ref schema to this object's schema (a
                     // self-schema reference); the UI matches on schema.name.
-                    to_schema: fk.ref_schema.clone().unwrap_or_else(|| schema.to_string()),
+                    to_schema: fk.ref_schema.clone().unwrap_or_else(|| schema_str.clone()),
                     to_table: fk.ref_table.clone(),
                     to_columns: fk.ref_columns.clone(),
                 });
@@ -441,7 +473,7 @@ impl DbViewerService {
 
             tables.push(GraphTable {
                 id: node.id,
-                schema: schema.to_string(),
+                schema: schema_str.clone(),
                 name: detail.name,
                 kind: detail.kind,
                 columns,
