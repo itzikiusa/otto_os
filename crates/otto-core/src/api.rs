@@ -917,6 +917,18 @@ pub struct FileDiff {
     pub old_path: Option<String>,
     pub is_binary: bool,
     pub hunks: Vec<Hunk>,
+    /// True when the file diff was capped server-side due to size.
+    #[serde(default)]
+    pub too_large: Option<bool>,
+    /// Number of added lines (populated by the diff parser).
+    #[serde(default)]
+    pub added: Option<u32>,
+    /// Number of deleted lines (populated by the diff parser).
+    #[serde(default)]
+    pub deleted: Option<u32>,
+    /// Detected language hint (e.g. "rust", "typescript").
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// `GET /repos/{id}/diff?target=worktree|staged|commit:<sha>|range:<a>..<b>`
@@ -1067,6 +1079,15 @@ pub struct PrSummary {
     pub target_branch: String,
     pub updated_at: DateTime<Utc>,
     pub url: String,
+    /// True if this is a draft PR.
+    #[serde(default)]
+    pub draft: Option<bool>,
+    /// Simplified CI/check status: "passing" | "failing" | "pending" | "unknown".
+    #[serde(default)]
+    pub ci_status: Option<String>,
+    /// Labels on the PR (empty when provider doesn't expose them).
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1246,6 +1267,12 @@ pub struct ReviewConfig {
     /// built-in ones. Persisted with the config; not used by the runner.
     #[serde(default)]
     pub custom_presets: Vec<ReviewAgentCfg>,
+    /// Maximum total attempts per agent (initial + retries). `None` → default 3.
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
+    /// Per-agent timeout in seconds. When set, overrides the diff-size heuristic.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------

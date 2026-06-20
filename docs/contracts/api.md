@@ -38,6 +38,7 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 25 | GET /api/v1/workspaces/{id}/connections | ws viewer | — | `Connection[]` (includes global ones; secret never present) |
 | 26 | POST /api/v1/workspaces/{id}/connections | ws editor | UpsertConnectionReq | Connection |
 | 27 | PATCH /api/v1/connections/{id} | ws editor (global: root) | UpsertConnectionReq (PATCH semantics: absent secret = keep; absent `environment`/`read_only` = **preserve** the stored value — never reset to dev/false, so a partial PATCH can't disable the write-guard) | Connection |
+| 27a | PATCH /api/v1/connections/{id}/pin | ws editor (global: root) | `{pinned: bool}` | Toggle pinned/frecency flag; returns updated Connection |
 | 28 | DELETE /api/v1/connections/{id} | ws editor (global: root) | — | 204 (deletes Keychain secret too) |
 | 29 | POST /api/v1/connections/{id}/open | ws editor | `{"title":null}` optional | Session |
 | 30 | POST /api/v1/connections/{id}/test | ws editor | — | TestConnectionResp |
@@ -438,6 +439,7 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/completion | ws viewer | `{text,cursor}` | SQL completion suggestions |
 | GET /connections/{id}/db/history | ws viewer | — | recent query history |
 | POST /connections/{id}/db/explain-with-agent | ws editor | `{sql}` | AI explanation of a query (spawns an agent) |
+| POST /connections/{id}/db/export | ws editor | `{sql, params?, max_rows?}` | Stream full query results as CSV/JSON past the UI row cap |
 
 `RunQueryReq` may include an optional client-generated `query_id` (string). When
 present, the server registers the in-flight query under it; `POST …/db/cancel`
@@ -957,6 +959,27 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 |---|---|---|---|
 | GET /settings/pr-review | root | — | ReviewConfig |
 | PUT /settings/pr-review | root | ReviewConfig | config |
+
+**`ReviewConfig` DTO additions (A2 — additive, optional):**
+- `max_attempts?: number | null` — max total agent attempts per run (default 3); overrides the compiled-in constant.
+- `timeout_secs?: number | null` — per-agent timeout in seconds; overrides the diff-size heuristic when set.
+
+**`Review` DTO additions (A2 — additive, optional):**
+- `verdict?: "approved" | "changes_requested" | "needs_review" | null`
+- `blocker_count?: number | null` — count of bug-severity draft comments (merge-readiness gate).
+- `summary_md?: string | null` — short markdown summary of findings.
+
+**`FileDiff` DTO additions (A2 — additive, optional):**
+- `too_large?: boolean | null` — true when the file diff was capped server-side (cap = 200 KB rendered text).
+- `added?: number | null` / `deleted?: number | null` — line counts for merge-readiness display.
+- `language?: string | null` — detected language hint for syntax highlighting.
+
+**`PrSummary` DTO additions (A2 — additive, optional):**
+- `draft?: boolean | null` — true for draft PRs (GitHub only currently).
+- `ci_status?: string | null` — simplified CI status: `"passing" | "failing" | "pending" | "unknown"`.
+- `labels?: string[]` — PR label names.
+
+**`review_findings` table (migration 0049):** fingerprinted persistent finding identity across runs; `review_merge_readiness` view aggregates blocker counts per (repo_id, pr_number). No new HTTP routes — queried internally by the summarizer and surfaced via the `Review` DTO fields above.
 
 ## Swarm lifecycle (explicit paths for #84)
 

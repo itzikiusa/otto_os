@@ -290,7 +290,27 @@ export type OttoEvent =
   /** Emitted after each metrics-sampler tick so the dashboard can refresh
    *  sparklines in near-real-time. `ts` is the sample timestamp (UTC ISO-8601).
    *  A9 — Usage/Insights cluster. */
-  | { type: 'usage_metrics_tick'; ts: string };
+  | { type: 'usage_metrics_tick'; ts: string }
+  /** A PR review run changed status (started, agent-done, finished, error).
+   *  A2 — Git/Review cluster. Supplement for visibility-gated poll fallback. */
+  | {
+      type: 'review_changed';
+      workspace_id: Id;
+      session_id?: Id | null;
+      review_id: Id;
+      status: string;
+    }
+  /** A product story AI run (analysis/rewrite/plan/testcases) completed or
+   *  changed. `section` ∈ "analysis" | "rewrite" | "plan" | "testcases".
+   *  `status` mirrors run status ("done" | "error" | "partial").
+   *  A3 — Product cluster. */
+  | {
+      type: 'product_changed';
+      workspace_id: Id;
+      story_id: Id;
+      section: string;
+      status: string;
+    };
 
 // ---------------------------------------------------------------------------
 // Notifications (notification center)
@@ -829,6 +849,10 @@ export interface FileDiff {
   old_path: string | null;
   is_binary: boolean;
   hunks: Hunk[];
+  too_large?: boolean | null;
+  added?: number | null;
+  deleted?: number | null;
+  language?: string | null;
 }
 
 export interface DiffResp {
@@ -910,6 +934,9 @@ export interface PrSummary {
   target_branch: string;
   updated_at: string;
   url: string;
+  draft?: boolean | null;
+  ci_status?: string | null;
+  labels?: string[];
 }
 
 export interface PrComment {
@@ -1056,6 +1083,9 @@ export interface Review {
   comments: ReviewComment[];
   agents: ReviewAgentState[];
   created_at: string;
+  verdict?: string | null;
+  blocker_count?: number | null;
+  summary_md?: string | null;
 }
 
 export interface ReviewAgentCfg {
@@ -1074,6 +1104,17 @@ export interface ReviewConfig {
   agents: ReviewAgentCfg[];
   summarizer: ReviewAgentCfg;
   custom_presets?: ReviewAgentCfg[];
+  /** Max total attempts per agent (initial + retries). Default 3. */
+  max_attempts?: number | null;
+  /** Per-agent timeout in seconds; overrides diff-size heuristic. */
+  timeout_secs?: number | null;
+}
+
+export interface MergeReadiness {
+  unresolved_blocker_count: number;
+  unresolved_total: number;
+  resolved_count: number;
+  last_updated: string | null;
 }
 
 export interface StartReviewReq {
