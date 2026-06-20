@@ -849,6 +849,7 @@ check. Both routes are mapped to `Require(Users, Admin)` in the policy table.
 |---|---|---|---|
 | GET /admin/sessions | Users:Admin or root | — | `AdminSessionsResp {sessions: AdminSessionRow[]}` |
 | POST /admin/sessions/{id}/terminate | Users:Admin or root | — | `204 No Content` (kills the PTY → `exited`, forcibly evicts attached `/ws/term` viewers; audited) |
+| POST /admin/sessions/{id}/remove | Users:Admin or root | — | `204 No Content` (kills the PTY + **deletes** the session row & history, emits `SessionRemoved`; prunes exited/background sessions from the list; audited as `session.removed`) |
 
 - `AdminSessionRow` = `{id, owner_id, owner_username, workspace_id, kind, provider, title, status, live: bool, viewers: number}`.
 - Each row is a persisted session enriched with live state from the in-memory

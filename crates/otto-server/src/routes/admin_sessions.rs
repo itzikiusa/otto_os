@@ -172,3 +172,40 @@ pub async fn terminate<C: AdminSessionsCtx>(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// `POST /api/v1/admin/sessions/{id}/remove`
+///
+/// Evict attached viewers, kill the PTY, and DELETE the session row (+ history),
+/// emitting `SessionRemoved`. Unlike `terminate` (which keeps the row so the
+/// overview still shows it), this clears the session from the list entirely —
+/// for pruning the exited/background sessions (insights, analysis, …) that would
+/// otherwise accumulate without bound. Requires `Users:Admin` (feature guard) or
+/// root. Returns `204`.
+pub async fn remove<C: AdminSessionsCtx>(
+    Path(id): Path<Id>,
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<StatusCode> {
+    let manager = ctx.manager();
+    let session = manager.get(&id).await?;
+    let owner_id = session.created_by.clone();
+    let workspace_id = session.workspace_id.clone();
+
+    // Drop any attached /ws/term viewers, then delete the row + kill the PTY.
+    manager.evict(&id);
+    manager.remove(&id).await?;
+
+    ctx.audit_entry(NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: "session.removed".into(),
+        target: Some(id.clone()),
+        detail: Some(serde_json::json!({
+            "owner_id": owner_id,
+            "workspace_id": workspace_id,
+        })),
+        ip: None,
+    })
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}

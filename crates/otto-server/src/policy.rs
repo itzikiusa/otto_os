@@ -611,6 +611,10 @@ mod tests {
             pol(Method::POST, "/api/v1/admin/sessions/{id}/terminate"),
             Require(Users, Admin)
         );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/admin/sessions/{id}/remove"),
+            Require(Users, Admin)
+        );
     }
 
     #[test]

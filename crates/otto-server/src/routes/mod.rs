@@ -117,6 +117,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/admin/sessions/{id}/terminate",
             post(admin_sessions::terminate::<ServerCtx>),
         )
+        .route(
+            "/admin/sessions/{id}/remove",
+            post(admin_sessions::remove::<ServerCtx>),
+        )
         // --- Admin impersonation (act-as, audited; RBAC Task 5.2) ---------
         // Gated Users:Admin/root via policy.rs; the handlers enforce the
         // anti-escalation guardrails (never up/sideways, no nesting, no self).

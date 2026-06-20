@@ -760,12 +760,26 @@ fn blocking_read_candidate_skills(
         }
         if let Ok(path) = resolve_target(root, ImprovementTarget::Skill, name, Some(library_root)) {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                let content = if content.len() > 8000 { content[..8000].to_string() } else { content };
+                let content = if content.len() > 8000 { cap_bytes(&content, 8000).to_string() } else { content };
                 out.push((name.clone(), content));
             }
         }
     }
     out
+}
+
+/// Truncate `s` to at most `max` bytes, backing up to a UTF-8 char boundary so
+/// it never panics on multibyte content (a raw `s[..max]` panics when `max`
+/// falls inside a multibyte character).
+fn cap_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Blocking impl of `read_memory` (called from `spawn_blocking`).
@@ -779,7 +793,7 @@ fn blocking_read_memory(root: &str) -> Vec<(String, String)> {
                 if let (Some(name), Ok(content)) =
                     (path.file_name().and_then(|n| n.to_str()), std::fs::read_to_string(&path))
                 {
-                    let content = if content.len() > 8000 { content[..8000].to_string() } else { content };
+                    let content = if content.len() > 8000 { cap_bytes(&content, 8000).to_string() } else { content };
                     out.push((name.to_string(), content));
                 }
             }
