@@ -42,8 +42,23 @@ class SftpStore {
   /** connection id → state. */
   private states: Record<string, SftpState> = $state({});
 
-  /** Get (lazily create) the state record for a connection. */
+  /** Pure read of a connection's browse state — safe to call inside a `$derived`
+   *  or template. Returns a transient blank record if the browse session hasn't
+   *  been created yet; call `list()` (from an effect/handler) to create and
+   *  populate the real one.
+   *
+   *  NOTE: this MUST NOT mutate `this.states`. It used to lazily create the
+   *  record here, but `SftpBrowser` reads it via `$derived(sftp.state(id))`, and
+   *  mutating `$state` inside a derived throws `state_unsafe_mutation` in Svelte
+   *  5 — which silently aborted the browser's render ("Browse files" did
+   *  nothing). Creation now lives in `ensure()`. */
   state(connId: string): SftpState {
+    return this.states[connId] ?? blankState();
+  }
+
+  /** Get-or-create the persistent, mutable state record for a connection. Only
+   *  call from effects/handlers (never inside a `$derived`/template). */
+  private ensure(connId: string): SftpState {
     if (!this.states[connId]) {
       this.states = { ...this.states, [connId]: blankState() };
     }
@@ -60,7 +75,7 @@ class SftpStore {
 
   /** List a remote path (empty/undefined → the server resolves pwd). */
   async list(connId: string, path?: string): Promise<void> {
-    const s = this.state(connId);
+    const s = this.ensure(connId);
     s.loading = true;
     s.error = '';
     try {

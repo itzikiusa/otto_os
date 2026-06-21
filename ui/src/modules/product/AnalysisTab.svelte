@@ -145,6 +145,12 @@
     historyLoaded = false;
     collapsed = {};
     clearPoll();
+    // Eagerly prime the run-history list so the History <select> is already
+    // populated the first time it's opened. A native <select> paints its option
+    // list at open time, so the old lazy `onfocus` fetch resolved too late — the
+    // first open showed an empty list and the runs only appeared on the second
+    // open. historyLoaded was just reset above, so this won't early-return.
+    void loadHistory();
   });
 
   // ── Helpers ───────────────────────────────────────────────────────────────────

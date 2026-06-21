@@ -18,6 +18,20 @@ use tracing::{debug, error, info, warn};
 use crate::adapter::{Adapter, Inbound};
 use crate::bridge::Bridge;
 
+/// Strip a secret-bearing URL out of an error/log string. Slack's external-upload
+/// URL and the Socket Mode WSS URL carry single-use tickets in their query
+/// string; reqwest/tungstenite `Error` Display can include the full URL, so scrub
+/// it (and its raw query, in case the error re-serialized the URL) before logging.
+fn redact_url(s: impl std::fmt::Display, url: &str) -> String {
+    let mut out = s.to_string().replace(url, "<redacted-url>");
+    if let Some((_, query)) = url.split_once('?') {
+        if !query.is_empty() {
+            out = out.replace(query, "<redacted>");
+        }
+    }
+    out
+}
+
 const CANCEL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Cap on the dedup set size; cleared when exceeded to avoid unbounded growth.
 const DEDUP_CAP: usize = 2000;
@@ -242,8 +256,10 @@ impl SlackAdapter {
             .post(upload_url)
             .body(bytes.to_vec())
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(|e| anyhow::anyhow!("slack upload PUT: {}", redact_url(e, upload_url)))?
+            .error_for_status()
+            .map_err(|e| anyhow::anyhow!("slack upload PUT: {}", redact_url(e, upload_url)))?;
         Ok(())
     }
 
@@ -328,7 +344,10 @@ pub async fn run(
         let ws_stream = match tokio_tungstenite::connect_async(&wss_url).await {
             Ok((stream, _)) => stream,
             Err(e) => {
-                error!("slack: websocket connect failed: {e}");
+                error!(
+                    "slack: websocket connect failed: {}",
+                    redact_url(&e, &wss_url)
+                );
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;

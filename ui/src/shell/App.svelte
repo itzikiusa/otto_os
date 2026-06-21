@@ -65,6 +65,13 @@
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
 
+  // The right activity panel (Git/Files/Notes/Activity/Info/Browser/API) is only
+  // meaningful for coding-agent sessions. Connection terminals (SSH / DB / custom,
+  // kind === 'connection') are opened from the Connections page but run in the
+  // Agents view; they don't need the panel — so gate it on the focused session
+  // actually being an agent session.
+  const showRightPanel = $derived(moduleName === 'agents' && ws.activeSession?.kind === 'agent');
+
   // Load the runtime plugin list once authenticated (drives the sidebar). Reads
   // auth.phase only; the write to plugins.list isn't read here, so no loop.
   $effect(() => {
@@ -599,7 +606,7 @@
          every Agents layout — tabbed, split, AND tiled — so per-session activity
          stays visible in multi-session views (it tracks `ws.activeSession`, the
          focused pane/tile), not just when a single session is on screen. -->
-    {#if moduleName === 'agents' && ws.activeSession !== null}
+    {#if showRightPanel}
       <RightPanel />
     {/if}
   </div>
@@ -628,7 +635,7 @@
     <NavButtons />
     <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleName}</span>
     <span class="grow"></span>
-    {#if moduleName === 'agents' && ws.activeSession !== null}
+    {#if showRightPanel}
       <button
         class="mtop-btn"
         class:active={ui.rightOpen}
@@ -684,7 +691,7 @@
 
 <!-- RightPanel as a RIGHT drawer on phone + tablet (ui.rightOpen). Only
      meaningful in the Agents layout with a focused session. -->
-{#if moduleName === 'agents' && ws.activeSession !== null}
+{#if showRightPanel}
   <Drawer bind:open={ui.rightOpen} side="right" label="Activity" width="min(92vw, 360px)">
     <RightPanel forceOpen />
   </Drawer>

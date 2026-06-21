@@ -6,11 +6,14 @@
   import { api } from '../../lib/api/client';
   import { plugins, type PluginRecord } from '../../lib/stores/plugins.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import FolderPicker from '../../lib/components/FolderPicker.svelte';
 
   let list = $state<PluginRecord[]>([]);
   let source = $state('');
   let busy = $state(false);
   let error = $state<string | null>(null);
+  // Local-folder picker for the plugin source (daemon-host filesystem).
+  let pickerOpen = $state(false);
 
   async function load(attempt = 0) {
     error = null;
@@ -89,6 +92,9 @@
       bind:value={source}
       onkeydown={(e) => e.key === 'Enter' && install()}
     />
+    <button class="btn" onclick={() => (pickerOpen = true)} title="Browse for a local plugin folder on this machine">
+      <Icon name="folder" size={13} /> Browse…
+    </button>
     <button class="btn primary" onclick={install} disabled={busy || !source.trim()}>Install</button>
   </div>
 
@@ -125,6 +131,18 @@
     </table>
   {/if}
 </div>
+
+{#if pickerOpen}
+  <FolderPicker
+    title="Choose a local plugin folder"
+    start="~/otto-plugins"
+    onpick={(p) => {
+      source = p;
+      pickerOpen = false;
+    }}
+    onclose={() => (pickerOpen = false)}
+  />
+{/if}
 
 <style>
   .page {

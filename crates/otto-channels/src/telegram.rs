@@ -120,6 +120,33 @@ impl TelegramAdapter {
     fn api_url(&self, method: &str) -> String {
         format!("{API_BASE}/bot{}/{method}", self.token)
     }
+
+    /// Convert a reqwest error into an anyhow error with the bot token scrubbed.
+    /// reqwest's Display embeds the request URL, which contains `bot<token>` — a
+    /// bare `?` would propagate that secret into any error log downstream
+    /// (e.g. `mirror.rs` logs failed sends).
+    fn scrub(&self, e: reqwest::Error) -> anyhow::Error {
+        anyhow::anyhow!(redact_token(e, &self.token))
+    }
+
+    /// POST a JSON body to a Bot API method and decode the envelope, scrubbing
+    /// the token from any transport/decode error so it never reaches logs.
+    async fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<TgResponse<T>> {
+        let resp = self
+            .http
+            .post(self.api_url(method))
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| self.scrub(e))?
+            .error_for_status()
+            .map_err(|e| self.scrub(e))?;
+        resp.json::<TgResponse<T>>().await.map_err(|e| self.scrub(e))
+    }
 }
 
 #[async_trait::async_trait]
@@ -132,15 +159,7 @@ impl Adapter for TelegramAdapter {
         if let Some(t) = thread {
             body["reply_to_message_id"] = serde_json::json!(t.parse::<i64>().unwrap_or(0));
         }
-        let resp = self
-            .http
-            .post(self.api_url("sendMessage"))
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let tg: TgResponse<TgMessage> = resp.json().await?;
+        let tg: TgResponse<TgMessage> = self.post_json("sendMessage", &body).await?;
         if !tg.ok {
             return Err(anyhow::anyhow!(
                 "Telegram sendMessage failed: {}",
@@ -173,14 +192,7 @@ impl Adapter for TelegramAdapter {
         if let Some(t) = thread {
             body["reply_to_message_id"] = serde_json::json!(t.parse::<i64>().unwrap_or(0));
         }
-        let resp = self
-            .http
-            .post(self.api_url("sendMessage"))
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
-        let tg: TgResponse<TgMessage> = resp.json().await?;
+        let tg: TgResponse<TgMessage> = self.post_json("sendMessage", &body).await?;
         if !tg.ok {
             // Parse error from Markdown mode → fall back to plain text.
             let desc = tg.description.unwrap_or_default();
@@ -202,15 +214,7 @@ impl Adapter for TelegramAdapter {
             "message_id": message_id.parse::<i64>().unwrap_or(0),
             "text": text,
         });
-        let resp = self
-            .http
-            .post(self.api_url("editMessageText"))
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let tg: TgResponse<serde_json::Value> = resp.json().await?;
+        let tg: TgResponse<serde_json::Value> = self.post_json("editMessageText", &body).await?;
         if !tg.ok {
             return Err(anyhow::anyhow!(
                 "Telegram editMessageText failed: {}",
@@ -257,10 +261,12 @@ impl Adapter for TelegramAdapter {
             .post(self.api_url("sendDocument"))
             .multipart(form)
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(|e| self.scrub(e))?
+            .error_for_status()
+            .map_err(|e| self.scrub(e))?;
 
-        let tg: TgResponse<serde_json::Value> = resp.json().await?;
+        let tg: TgResponse<serde_json::Value> = resp.json().await.map_err(|e| self.scrub(e))?;
         if !tg.ok {
             return Err(anyhow::anyhow!(
                 "Telegram sendDocument failed: {}",
@@ -276,15 +282,7 @@ impl Adapter for TelegramAdapter {
             "chat_id": chat,
             "action": "typing",
         });
-        let resp = self
-            .http
-            .post(self.api_url("sendChatAction"))
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let tg: TgResponse<bool> = resp.json().await?;
+        let tg: TgResponse<bool> = self.post_json("sendChatAction", &body).await?;
         if !tg.ok {
             return Err(anyhow::anyhow!(
                 "Telegram sendChatAction failed: {}",
@@ -292,6 +290,18 @@ impl Adapter for TelegramAdapter {
             ));
         }
         Ok(())
+    }
+}
+
+/// Replace the bot token with a placeholder so it never lands in logs. reqwest's
+/// error Display embeds the request URL, which contains `bot<token>`; this scrubs
+/// the secret out of any string bound for a log or a propagated error.
+fn redact_token(s: impl std::fmt::Display, token: &str) -> String {
+    let s = s.to_string();
+    if token.is_empty() {
+        s
+    } else {
+        s.replace(token, "<redacted>")
     }
 }
 
@@ -325,7 +335,7 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
         let resp = match http.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
-                error!("telegram getUpdates: {e}");
+                error!("telegram getUpdates: {}", redact_token(&e, &token));
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue;
@@ -335,7 +345,7 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
         let tg: TgResponse<Vec<TgUpdate>> = match resp.json().await {
             Ok(v) => v,
             Err(e) => {
-                error!("telegram getUpdates parse: {e}");
+                error!("telegram getUpdates parse: {}", redact_token(&e, &token));
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue;

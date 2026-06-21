@@ -47,6 +47,25 @@
   // Which connection's "open in workspace…" menu is showing (null = none).
   let openMenuFor: string | null = $state(null);
 
+  // Free-text search across all connections. When non-empty the page shows a
+  // flat result list (by name / host-user / kind / section) instead of the tree.
+  let search = $state('');
+  const searchResults = $derived.by(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return [];
+    const secName = (id: string | null): string =>
+      id ? (sections.find((s) => s.id === id)?.name ?? '') : '';
+    return conns
+      .filter(
+        (c) =>
+          c.name.toLowerCase().includes(q) ||
+          describe(c).toLowerCase().includes(q) ||
+          c.kind.toLowerCase().includes(q) ||
+          secName(c.section_id).toLowerCase().includes(q),
+      )
+      .sort(sortByName);
+  });
+
   const kindIcons: Record<ConnectionKind, string> = {
     ssh: 'key',
     mysql: 'db',
@@ -411,6 +430,39 @@
       }}
     />
   {:else}
+    <!-- Search across all connections (flat results when active). -->
+    <div class="conn-search">
+      <Icon name="search" size={13} />
+      <input
+        class="conn-search-input"
+        type="text"
+        placeholder="Search connections — name, host, type, or section…"
+        aria-label="Search connections"
+        bind:value={search}
+      />
+      {#if search.trim()}
+        <button class="conn-search-clear" onclick={() => (search = '')} aria-label="Clear search" title="Clear">
+          <Icon name="x" size={12} />
+        </button>
+      {/if}
+    </div>
+
+    {#if search.trim()}
+      <div class="tree">
+        <div class="section-head plain">
+          <span class="caret-spacer"></span>
+          <span class="section-name grow">Results</span>
+          <span class="count">{searchResults.length}</span>
+        </div>
+        {#if searchResults.length === 0}
+          <div class="search-empty">No connections match “{search.trim()}”.</div>
+        {:else}
+          {#each searchResults as c (c.id)}
+            {@render connRow(c, 1)}
+          {/each}
+        {/if}
+      </div>
+    {:else}
     <div class="tree">
       <!-- Recent: pinned first, then most-recently-opened, capped at 6. Only
            shown when there is at least one pinned or previously-opened connection. -->
@@ -451,6 +503,7 @@
         {@render connRow(c, 1)}
       {/each}
     </div>
+    {/if}
   {/if}
 </div>
 
@@ -637,6 +690,52 @@
 {/if}
 
 <style>
+  .conn-search {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 10px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-raised, var(--surface));
+    color: var(--text-dim);
+  }
+  .conn-search:focus-within {
+    border-color: var(--accent);
+  }
+  .conn-search-input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+  }
+  .conn-search-input::placeholder {
+    color: var(--text-dim);
+  }
+  .conn-search-clear {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 2px;
+    border-radius: 3px;
+  }
+  .conn-search-clear:hover {
+    color: var(--text);
+  }
+  .search-empty {
+    padding: 16px 4px;
+    font-size: 13px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
   .tree {
     display: flex;
     flex-direction: column;

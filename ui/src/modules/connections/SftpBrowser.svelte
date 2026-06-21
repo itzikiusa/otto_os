@@ -27,9 +27,22 @@
   // Text-viewer modal state.
   let viewing: { name: string; text: string; truncated: boolean } | null = $state(null);
 
+  // Search box — filters the current directory's listing by name (case-insensitive).
+  let query = $state('');
+  const shownEntries = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    return q ? view.entries.filter((e) => e.name.toLowerCase().includes(q)) : view.entries;
+  });
+
   // Initial load: resolve the remote home/working dir then list it.
   $effect(() => {
     if (!view.loaded && !view.loading) void sftp.list(conn.id);
+  });
+
+  // Reset the filter whenever we navigate to a different directory.
+  $effect(() => {
+    view.cwd;
+    query = '';
   });
 
   function isTextLike(e: SftpEntry): boolean {
@@ -189,6 +202,13 @@
         <Icon name="arrowUp" size={12} /> Upload
       </button>
       <span class="grow"></span>
+      <input
+        class="sftp-search"
+        type="text"
+        placeholder="Filter this folder…"
+        aria-label="Filter files in this directory"
+        bind:value={query}
+      />
     </div>
 
     <!-- Breadcrumb -->
@@ -207,6 +227,8 @@
         <div class="err pad">{view.error}</div>
       {:else if view.entries.length === 0}
         <div class="dim pad">Empty directory.</div>
+      {:else if shownEntries.length === 0}
+        <div class="dim pad">No files match “{query.trim()}”.</div>
       {:else}
         <div class="head row">
           <span class="cell name">Name</span>
@@ -215,7 +237,7 @@
           <span class="cell perms mono">Perms</span>
           <span class="cell actions"></span>
         </div>
-        {#each view.entries as e (e.name)}
+        {#each shownEntries as e (e.name)}
           <div class="row">
             <button
               class="cell name nav"
@@ -323,6 +345,22 @@
   }
   .grow {
     flex: 1;
+  }
+  .sftp-search {
+    width: 180px;
+    background: var(--surface-2, var(--surface));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    color: var(--text);
+    font-size: 12px;
+    padding: 4px 8px;
+  }
+  .sftp-search:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .sftp-search::placeholder {
+    color: var(--text-dim);
   }
   .crumbs {
     display: flex;

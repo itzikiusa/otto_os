@@ -19,6 +19,45 @@ use crate::builders::{build_command, validate_params};
 /// Test-connect timeout.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Strip `user:password@` userinfo from a single URL-like token.
+fn strip_userinfo_token(tok: &str) -> String {
+    if let Some(scheme_end) = tok.find("://") {
+        let after = scheme_end + 3;
+        let rest = &tok[after..];
+        let auth_end = rest.find('/').unwrap_or(rest.len());
+        let authority = &rest[..auth_end];
+        if let Some(at) = authority.rfind('@') {
+            return format!("{}{}{}", &tok[..after], &authority[at + 1..], &rest[auth_end..]);
+        }
+    }
+    tok.to_string()
+}
+
+/// Best-effort redaction of credentials a DB client might echo into its stderr,
+/// so `test()` can surface a detailed, useful error WITHOUT leaking the password:
+/// scrubs `scheme://user:pass@host` userinfo and `--password <x>` / `-p <x>` /
+/// `--password=<x>` argv. Everything else (the actual error text) is preserved.
+fn redact_secrets(s: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut redact_next = false;
+    for tok in s.split_whitespace() {
+        if redact_next {
+            out.push("<redacted>".into());
+            redact_next = false;
+            continue;
+        }
+        if tok == "--password" || tok == "-p" {
+            out.push(tok.into());
+            redact_next = true;
+        } else if tok.starts_with("--password=") {
+            out.push("--password=<redacted>".into());
+        } else {
+            out.push(strip_userinfo_token(tok));
+        }
+    }
+    out.join(" ")
+}
+
 /// Optional hook that lets the server layer route a connection's test probe
 /// through the DB Explorer's warm-tunnel path (which reuses a cached `ssh -L`
 /// forward) instead of spawning a fresh `ssh -J` child each time.
@@ -362,7 +401,9 @@ impl ConnectionsService {
                     let message = if first_line.is_empty() {
                         format!("exited with {}", output.status)
                     } else {
-                        first_line
+                        // Keep the real driver error, but scrub any password a
+                        // client might echo (mongo `user:pass@`, `--password x`).
+                        redact_secrets(&first_line)
                     };
                     Ok(TestConnectionResp {
                         ok: false,

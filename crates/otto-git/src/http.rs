@@ -600,14 +600,17 @@ async fn clone_into_workspace<S: GitCtx>(
     let task_url = url.to_string();
     let task_name = name.clone();
     tokio::spawn(async move {
+        // Display URL only — strip any user:pass@ a caller may have embedded so
+        // it isn't echoed into the notice/log (the real URL still drives clone).
+        let display_url = crate::local::strip_url_userinfo(&task_url);
         notice(
             &task_state,
             "info",
             "Clone started",
-            &format!("Cloning {task_name} from {task_url}"),
+            &format!("Cloning {task_name} from {display_url}"),
         );
         let result = crate::local::clone_repo(&task_url, &dest, token.as_deref(), |line| {
-            tracing::debug!(repo = %task_name, "clone: {line}");
+            tracing::debug!(repo = %task_name, "clone: {}", crate::local::strip_url_userinfo(&line));
         })
         .await;
         match result {

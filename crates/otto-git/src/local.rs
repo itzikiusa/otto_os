@@ -544,12 +544,13 @@ impl LocalGit {
         };
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
         let combine = |stdout: &str, stderr: &str| {
-            let mut c = String::from(stdout.trim_end());
-            if !stderr.trim().is_empty() {
+            let mut c = strip_noise(stdout);
+            let err = strip_noise(stderr);
+            if !err.is_empty() {
                 if !c.is_empty() {
                     c.push('\n');
                 }
-                c.push_str(stderr.trim_end());
+                c.push_str(&err);
             }
             c
         };
@@ -586,14 +587,15 @@ impl LocalGit {
         };
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
         let (stdout, stderr) = self.run_env(args, &envs).await?;
-        // git writes progress/summary to stderr; surface both.
-        let mut combined = String::new();
-        combined.push_str(stdout.trim_end());
-        if !stderr.trim().is_empty() {
+        // git writes progress/summary to stderr; surface both (minus benign
+        // SSH noise like the post-quantum warning).
+        let mut combined = strip_noise(&stdout);
+        let err = strip_noise(&stderr);
+        if !err.is_empty() {
             if !combined.is_empty() {
                 combined.push('\n');
             }
-            combined.push_str(stderr.trim_end());
+            combined.push_str(&err);
         }
         Ok(combined)
     }
@@ -956,16 +958,75 @@ impl LocalGit {
     }
 }
 
+/// stderr lines that SSH/git emit as benign chatter — never the reason a command
+/// failed. We skip these when choosing the message to surface so the real git
+/// error (rejected push, auth failure, …) isn't masked. Newer OpenSSH (9.x/10.x)
+/// prints the post-quantum warning to stderr on every non-PQ connection and it
+/// does NOT affect the exit status — yet it sorts first, so the old "first
+/// non-empty line" logic reported it as the failure.
+/// Remove any `user:password@` userinfo from a URL so a credentialed remote a
+/// user may have pasted isn't echoed into notices/logs. Best-effort string op;
+/// returns non-URL strings unchanged. The real (credentialed) URL is still used
+/// for the actual git operation — this is only for display.
+pub fn strip_url_userinfo(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let after = scheme_end + 3;
+    let rest = &url[after..];
+    let path_start = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..path_start];
+    match authority.rfind('@') {
+        Some(at) => format!("{}{}{}", &url[..after], &authority[at + 1..], &rest[path_start..]),
+        None => url.to_string(),
+    }
+}
+
+fn is_noise_line(l: &str) -> bool {
+    let t = l.trim();
+    t.is_empty()
+        || t.contains("post-quantum key exchange")
+        || t.starts_with("Warning: Permanently added")
+}
+
+/// Drop benign SSH/git noise lines from combined command output (used for the
+/// success path so a successful push/pull doesn't surface the post-quantum
+/// warning).
+fn strip_noise(s: &str) -> String {
+    s.lines()
+        .filter(|l| !is_noise_line(l))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
+}
+
 fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
-    let first = stderr
+    // Among the meaningful (non-noise) lines, prefer one that actually names the
+    // failure — git scatters the real reason ("! [remote rejected] …", "error:
+    // failed to push …") after benign chatter like "To <url>".
+    let meaningful: Vec<&str> = stderr
         .lines()
-        .find(|l| !l.trim().is_empty())
-        .or_else(|| stdout.lines().find(|l| !l.trim().is_empty()))
+        .chain(stdout.lines())
+        .map(str::trim)
+        .filter(|&l| !is_noise_line(l))
+        .collect();
+    let pick = meaningful
+        .iter()
+        .copied()
+        .find(|l| {
+            let lc = l.to_ascii_lowercase();
+            lc.contains("rejected")
+                || lc.starts_with("error:")
+                || lc.starts_with("fatal:")
+                || lc.starts_with("remote:")
+        })
+        .or_else(|| meaningful.first().copied())
         .unwrap_or("git failed with no output");
     Error::Upstream(format!(
         "git exited {}: {}",
         code.map_or_else(|| "?".to_string(), |c| c.to_string()),
-        first.trim()
+        pick
     ))
 }
 
