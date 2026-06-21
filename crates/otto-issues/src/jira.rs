@@ -291,6 +291,13 @@ impl JiraClient {
         start_at: u32,
     ) -> Result<Vec<IssueSummary>> {
         let jql = build_jql(q, project);
+        self.search_jql(&jql, start_at).await
+    }
+
+    /// Run a raw, caller-built JQL query (e.g. `project = X AND issuetype = Story
+    /// AND assignee = "..."`) and return brief issue summaries. Used by analytics
+    /// plugins that need precise JQL control beyond `search`'s text/key builder.
+    pub async fn search_jql(&self, jql: &str, start_at: u32) -> Result<Vec<IssueSummary>> {
         let fields = "summary,status,issuetype";
         let max_results = "25";
         let start_at_s = start_at.to_string();
@@ -303,7 +310,7 @@ impl JiraClient {
             .header("Authorization", &self.auth_header)
             .header("Accept", "application/json")
             .query(&[
-                ("jql", jql.as_str()),
+                ("jql", jql),
                 ("maxResults", max_results),
                 ("startAt", start_at_s.as_str()),
                 ("fields", fields),
@@ -322,7 +329,7 @@ impl JiraClient {
                 .header("Authorization", &self.auth_header)
                 .header("Accept", "application/json")
                 .query(&[
-                    ("jql", jql.as_str()),
+                    ("jql", jql),
                     ("maxResults", max_results),
                     ("startAt", start_at_s.as_str()),
                     ("fields", fields),

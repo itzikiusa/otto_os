@@ -1,0 +1,10 @@
+{
+  "slug": "dora-metrics",
+  "name": "DORA Metrics",
+  "icon": "gauge",
+  "version": "0.1.0",
+  "description": "DORA delivery metrics from git tags + branch merges (deploy = *deployed* tag; hotfix/release/feature -> develop), with agent bottleneck analysis. Rust sidecar (compiles on first enable via `cargo run`).",
+  "exec": ["cargo", "run", "--release", "--quiet"],
+  "ui": "ui",
+  "health": "/health"
+}

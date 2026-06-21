@@ -51,6 +51,10 @@ pub fn public_routes() -> Router<ServerCtx> {
         .route("/ingest/usage", post(usage::ingest))
         // Swarm agents post to the shared board via their per-session token.
         .route("/ingest/swarm/board", post(swarm_ingest::board_ingest))
+        // Runtime-plugin host API: sidecars call back here with their own
+        // OTTO_PLUGIN_TOKEN (validated in each handler) — NOT a user bearer, so it
+        // lives in public_routes (outside the user auth chokepoint), like /ingest/*.
+        .merge(crate::plugins::host_routes())
         // Email-OTP share gate (mobile plan Task 7.3): redeem an emailed code for
         // a share token. PUBLIC by design — the share token in the body IS the
         // auth, so this must be reachable BEFORE the (still OTP-pending) scoped
@@ -117,6 +121,13 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/users/{id}/grants",
             get(grants::get_grants::<ServerCtx>).put(grants::put_grants::<ServerCtx>),
+        )
+        // Custom-plugin grants (string-keyed by slug). Covered by the `/users/`
+        // prefix rule in policy.rs (Users:Admin); handlers additionally require root.
+        .route(
+            "/users/{id}/plugin-grants",
+            get(grants::get_plugin_grants::<ServerCtx>)
+                .put(grants::put_plugin_grants::<ServerCtx>),
         )
         // Caller's effective capability map (any authed user; Exempt in policy).
         .route("/auth/capabilities", get(grants::capabilities::<ServerCtx>))

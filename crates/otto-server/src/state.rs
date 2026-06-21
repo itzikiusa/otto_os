@@ -36,6 +36,8 @@ pub struct ServerCtx {
     pub version: String,
     /// The daemon data directory (library, swarm worktrees/scratch, …).
     pub data_dir: std::path::PathBuf,
+    /// Runtime custom-plugin supervisor (spawns/proxies sidecar processes).
+    pub plugins: Arc<crate::plugins::PluginManager>,
     // -- module handles (wired by ottod at boot) ---------------------------
     pub manager: Arc<SessionManager>,
     pub workspaces: WorkspacesRepo,

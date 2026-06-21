@@ -884,10 +884,47 @@ user may call it.
 |---|---|---|---|
 | GET /users/{id}/grants | Users:Admin or root | — | `UserGrantsResp {grants: GrantEntry[]}` |
 | PUT /users/{id}/grants | Users:Admin or root | `UserGrantsReq {grants: GrantEntry[]}` | `UserGrantsResp` (atomically replaces all grants; audited) |
-| GET /auth/capabilities | member (any authed user) | — | `CapabilitiesResp {capabilities: {feature: capability}}` |
+| GET /users/{id}/plugin-grants | root | — | `UserGrantsResp` (plugin grants; `GrantEntry.feature` = plugin slug) |
+| PUT /users/{id}/plugin-grants | root | `UserGrantsReq` (`feature` = plugin slug) | `UserGrantsResp` (atomically replaces all plugin grants; audited) |
+| GET /auth/capabilities | member (any authed user) | — | `CapabilitiesResp {capabilities: {feature-or-slug: capability}}` |
 
 - `GrantEntry` = `{feature: string, capability: string}` using snake_case strings
   (e.g. `{feature:"database", capability:"view"}`).
+- **Custom plugins** reuse `GrantEntry` with `feature` set to the plugin **slug** on the
+  `/users/{id}/plugin-grants` endpoints (string-keyed RBAC axis, parallel to the closed
+  `Feature` enum). `/auth/capabilities` additionally returns each installed plugin's
+  `slug → capability` so the UI can gate the plugin's nav entry. See the Custom Plugins
+  section and `docs/plugins/AUTHORING.md`.
+
+## Custom Plugins (runtime, out-of-process)
+
+Plugins are external sidecar processes installed at runtime under `~/otto-plugins`
+(no app rebuild). Otto supervises them and reverse-proxies their HTTP. Design:
+`docs/superpowers/specs/2026-06-21-runtime-plugins-design.md`; authoring:
+`docs/plugins/AUTHORING.md`.
+
+| Method & path | Auth | Notes |
+|---|---|---|
+| GET `/plugins` | member | Enabled plugins `[{slug,name,icon,has_ui}]` for the sidebar; UI filters by grant. Exempt in policy. |
+| ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | plugin `<slug>` grant (GET=view, else=edit); root bypass | Reverse-proxied to the sidecar. Gated by the dedicated plugin branch in the feature guard. |
+| GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
+| GET `/plugin-admin` | root | Installed-plugin list (full records, no token). |
+| POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). |
+| POST `/plugin-admin/{slug}/enable` · POST `/plugin-admin/{slug}/disable` | root | Spawn / stop the sidecar. |
+| DELETE `/plugin-admin/{slug}` | root | Stop + unregister (plugin files are kept). |
+
+**Host API** (sidecar-token auth: `Authorization: Bearer $OTTO_PLUGIN_TOKEN`; in
+`public_routes`, validated per handler — not user auth):
+
+| Method & path | Returns |
+|---|---|
+| GET `/plugin-host/repos` | `[{id,name,path,remote_url}]` |
+| GET `/plugin-host/jira/accounts` | `[{id,label,base_url,email}]` |
+| GET `/plugin-host/jira/credentials?account=<id>` | `{base_url,email,token}` |
+| POST `/plugin-host/agents/run` | `{prompt,cwd?,model?}` → `{text}` (claude) |
+
+A sidecar is spawned with env: `OTTO_PLUGIN_SLUG`, `OTTO_PLUGIN_PORT` (it must bind
+this), `OTTO_PLUGIN_TOKEN`, `OTTO_HOST_API`, `OTTO_PLUGIN_DATA_DIR`.
 - `Capability` ladder: `none` < `view` < `edit` < `admin`.  `Capability::None` is the
   absence of a grant row — never stored; the read returns `"none"` for ungrated features.
 - Root ⇒ `capabilities` returns `admin` for all 18 features regardless of stored rows.

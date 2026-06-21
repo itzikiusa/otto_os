@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Team Performance</title>
+    <style>
+      :root {
+        --bg: #14161a;
+        --text: #e6e6e6;
+        --text-dim: #9aa0a6;
+        --accent: #3e63dd;
+        --border: #2a2d33;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 13px/1.5 -apple-system, system-ui, sans-serif;
+        color: var(--text);
+        background: var(--bg);
+        padding: 16px 20px;
+      }
+      h1 { font-size: 18px; margin: 0 0 12px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+      select, input, button {
+        padding: 6px 10px; font-size: 13px; color: var(--text);
+        background: transparent; border: 1px solid var(--border); border-radius: 6px;
+      }
+      button { cursor: pointer; }
+      button.primary { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+      button:disabled { opacity: .5; cursor: default; }
+      .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 10px; margin: 12px 0; }
+      .tile { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+      .tile .l { font-size: 11px; color: var(--text-dim); }
+      .tile .v { font-size: 22px; font-weight: 700; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+      th { color: var(--text-dim); font-weight: 600; }
+      .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--text-dim) 18%, transparent); }
+      .badge.ok { background: color-mix(in srgb, #30a46c 24%, transparent); color: #4cc38a; }
+      .badge.bad { background: color-mix(in srgb, #e5484d 24%, transparent); color: #f0787c; }
+      .err { color: #e5484d; padding: 8px 0; }
+      .dim { color: var(--text-dim); }
+      a { color: var(--accent); }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>Team Performance</h1>
+    <div class="row">
+      <select id="account"></select>
+      <input id="project" placeholder="Project key (e.g. PROJ)" />
+      <input id="assignee" placeholder="Assignee (accountId or name)" />
+      <button class="primary" id="run">Scorecard</button>
+      <button id="coach">AI coach</button>
+    </div>
+    <div class="row">
+      <label>Improvement target
+        <input id="target" type="number" min="0" max="0.9" step="0.05" style="width:80px" />
+      </label>
+      <span class="dim">a comparable next task should take that much less time</span>
+      <button id="saveTarget">Save</button>
+    </div>
+    <div id="err" class="err"></div>
+    <div id="out"></div>
+
+    <script>
+      let API = '';
+      let TOKEN = '';
+
+      function applyTheme(theme) {
+        if (!theme) return;
+        for (const [k, v] of Object.entries(theme)) if (v) document.documentElement.style.setProperty(k, v);
+      }
+      async function api(path, opts) {
+        const r = await fetch(API + path, {
+          ...opts,
+          headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json', ...(opts && opts.headers) },
+        });
+        if (!r.ok) throw new Error((await r.text()) || r.status);
+        return r.status === 204 ? null : r.json();
+      }
+      const $ = (id) => document.getElementById(id);
+      const err = (m) => ($('err').textContent = m || '');
+      const fmtD = (d) => (d == null ? '—' : d.toFixed(1) + 'd');
+
+      window.addEventListener('message', async (ev) => {
+        const m = ev.data;
+        if (!m || m.type !== 'otto:init') return;
+        API = m.apiBase;
+        TOKEN = m.token || '';
+        applyTheme(m.theme);
+        await boot();
+      });
+
+      async function boot() {
+        try {
+          const accts = await api('/accounts');
+          $('account').innerHTML = accts.map((a) => `<option value="${a.id}">${a.label}</option>`).join('');
+          const cfg = await api('/config');
+          $('target').value = cfg.target;
+        } catch (e) { err('Load failed: ' + e.message); }
+      }
+
+      $('saveTarget').onclick = async () => {
+        try { const c = await api('/config', { method: 'PUT', body: JSON.stringify({ target: parseFloat($('target').value) }) }); $('target').value = c.target; }
+        catch (e) { err(e.message); }
+      };
+      $('run').onclick = run;
+      $('coach').onclick = coach;
+
+      async function run() {
+        err('');
+        const a = $('account').value, p = $('project').value, as = $('assignee').value;
+        if (!a || !p || !as) return err('Pick an account, project and assignee.');
+        $('out').innerHTML = '<p class="dim">Loading…</p>';
+        try {
+          const c = await api(`/scorecard?account=${encodeURIComponent(a)}&project=${encodeURIComponent(p)}&assignee=${encodeURIComponent(as)}`);
+          render(c);
+        } catch (e) { $('out').innerHTML = ''; err(e.message); }
+      }
+
+      async function coach() {
+        err('');
+        const a = $('account').value, p = $('project').value, as = $('assignee').value;
+        if (!a || !p || !as) return err('Pick an account, project and assignee.');
+        try {
+          const r = await api('/analyze', { method: 'POST', body: JSON.stringify({ account: a, project: p, assignee: as }) });
+          $('out').insertAdjacentHTML('afterbegin', `<div class="tile"><div class="l">AI coach</div><pre>${esc(r.summary)}</pre></div>`);
+        } catch (e) { err(e.message); }
+      }
+
+      function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+      function render(c) {
+        const rows = c.stories.map((s) => `
+          <tr>
+            <td><a href="${s.url}" target="_blank" rel="noreferrer">${s.key}</a></td>
+            <td>${esc(s.status)}</td>
+            <td>${s.estimate_days != null ? s.estimate_days + 'd' : '—'}</td>
+            <td>${fmtD(s.suggested_days)}</td>
+            <td>${fmtD(s.actual_days)}</td>
+            <td>${s.met === true ? '<span class="badge ok">met</span>' : s.met === false ? '<span class="badge bad">missed</span>' : '<span class="badge">—</span>'}</td>
+            <td class="dim">${esc(s.summary)}</td>
+          </tr>`).join('');
+        $('out').innerHTML = `
+          <div class="tiles">
+            <div class="tile"><div class="l">Completed</div><div class="v">${c.completed}</div></div>
+            <div class="tile"><div class="l">Met target</div><div class="v">${c.met_count}</div></div>
+            <div class="tile"><div class="l">Missed</div><div class="v">${c.missed_count}</div></div>
+            <div class="tile"><div class="l">Concurrent overlaps</div><div class="v">${c.concurrent.length}</div></div>
+          </div>
+          ${c.concurrent.length ? `<p class="dim">Multiple tasks at once: ${c.concurrent.map((x) => x.join('↔')).join(', ')}</p>` : ''}
+          <table><thead><tr><th>Key</th><th>Status</th><th>Est</th><th>Suggested</th><th>Actual</th><th>Met</th><th>Summary</th></tr></thead><tbody>${rows}</tbody></table>`;
+      }
+    </script>
+  </body>
+</html>

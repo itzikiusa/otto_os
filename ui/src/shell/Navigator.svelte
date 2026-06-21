@@ -7,6 +7,7 @@
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
+  import { plugins } from '../lib/stores/plugins.svelte';
   import { activity } from '../lib/stores/activity.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import type { Session, SessionStatus } from '../lib/api/types';
@@ -396,6 +397,20 @@
           <span class="grow">Usage</span>
         </button>
       {/if}
+
+      <!-- Runtime custom plugins (RBAC-gated by slug), routing to #/plugin/<slug>. -->
+      {#each plugins.list as p (p.slug)}
+        {#if auth.canPlugin(p.slug, 'view')}
+          <button
+            class="nav-item"
+            class:active={router.module === 'plugin' && router.parts[1] === p.slug}
+            onclick={() => router.go(`plugin/${p.slug}`)}
+          >
+            <Icon name={p.icon} size={14} />
+            <span class="grow">{p.name}</span>
+          </button>
+        {/if}
+      {/each}
 
       {#if ws.archivedSessions.length > 0}
         <button class="nav-item subtle" onclick={() => (archivedOpen = !archivedOpen)}>

@@ -48,6 +48,19 @@ class AuthStore {
     return capIndex(granted) >= capIndex(required);
   }
 
+  /**
+   * Custom-plugin variant of {@link can}: returns true when the current user has
+   * at least `required` on the plugin `key` (the plugin slug). Root always passes.
+   * Plugin capabilities are returned by `/auth/capabilities` keyed by slug
+   * (string-keyed RBAC axis, parallel to the closed `Feature` enum).
+   */
+  canPlugin(key: string, required: Capability): boolean {
+    if (!this.me) return false;
+    if (this.me.is_root) return true;
+    const granted = this.capabilities[key] ?? 'none';
+    return capIndex(granted) >= capIndex(required);
+  }
+
   /** Re-fetch /meta without touching the boot phase (e.g. after provider changes). */
   async refreshMeta(): Promise<void> {
     try {

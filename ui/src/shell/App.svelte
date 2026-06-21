@@ -45,6 +45,8 @@
   import InsightsPage from '../modules/insights/InsightsPage.svelte';
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
   import VaultPage from '../modules/vault/VaultPage.svelte';
+  import PluginFrame from '../modules/plugins/PluginFrame.svelte';
+  import { plugins } from '../lib/stores/plugins.svelte';
   import { router } from '../lib/router.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
@@ -62,6 +64,14 @@
   import { now } from '../lib/stores/now.svelte';
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
+
+  // Load the runtime plugin list once authenticated (drives the sidebar). Reads
+  // auth.phase only; the write to plugins.list isn't read here, so no loop.
+  $effect(() => {
+    if (auth.phase === 'ready') {
+      plugins.load();
+    }
+  });
 
   // ---- impersonation countdown ---
   // The admin token is saved in localStorage with a timestamp so we can show a
@@ -555,6 +565,14 @@
       <SwarmPage />
     {:else if moduleName === 'vault'}
       <VaultPage />
+    {:else if moduleName === 'plugin'}
+      {#if router.parts[1]}
+        {#key router.parts[1]}
+          <PluginFrame slug={router.parts[1]} />
+        {/key}
+      {:else}
+        <AgentsPage />
+      {/if}
     {:else}
       <AgentsPage />
     {/if}

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DORA Metrics</title>
+    <style>
+      :root { --bg:#14161a; --text:#e6e6e6; --text-dim:#9aa0a6; --accent:#3e63dd; --border:#2a2d33; }
+      * { box-sizing: border-box; }
+      body { margin:0; font:13px/1.5 -apple-system,system-ui,sans-serif; color:var(--text); background:var(--bg); padding:16px 20px; }
+      h1 { font-size:18px; margin:0 0 12px; }
+      .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+      select, button { padding:6px 10px; font-size:13px; color:var(--text); background:transparent; border:1px solid var(--border); border-radius:6px; }
+      button { cursor:pointer; }
+      button.primary { background:color-mix(in srgb, var(--accent) 22%, transparent); color:var(--accent); border-color:color-mix(in srgb, var(--accent) 45%, transparent); }
+      button:disabled { opacity:.5; cursor:default; }
+      .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; margin:12px 0; }
+      .tile { border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+      .tile .l { font-size:12px; color:var(--text-dim); }
+      .tile .v { font-size:24px; font-weight:700; }
+      .tile .v small { font-size:13px; font-weight:500; color:var(--text-dim); }
+      .card { border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+      .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); margin:0 0 8px; }
+      ul { list-style:none; margin:0; padding:0; }
+      li { padding:3px 0; display:flex; gap:6px; align-items:center; }
+      .dot { width:8px; height:8px; border-radius:50%; flex:none; }
+      .deploy{background:#30a46c} .feature{background:#3e63dd} .release{background:#f5a623} .hotfix{background:#e5484d}
+      .err { color:#e5484d; padding:8px 0; }
+      .dim { color:var(--text-dim); }
+      pre { white-space:pre-wrap; margin:0; }
+      code { font-size:11px; }
+    </style>
+  </head>
+  <body>
+    <h1>DORA Metrics</h1>
+    <div class="row">
+      <select id="repo"></select>
+      <select id="days"><option value="14">14 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="180">180 days</option></select>
+      <button class="primary" id="run">Refresh</button>
+      <button id="analyze">Analyze bottlenecks</button>
+    </div>
+    <div id="err" class="err"></div>
+    <div id="out"></div>
+
+    <script>
+      let API = '', TOKEN = '';
+      const $ = (id) => document.getElementById(id);
+      function applyTheme(t){ if(!t)return; for(const[k,v]of Object.entries(t)) if(v) document.documentElement.style.setProperty(k,v); }
+      async function api(p,opts){ const r=await fetch(API+p,{...opts,headers:{Authorization:'Bearer '+TOKEN,'Content-Type':'application/json',...(opts&&opts.headers)}}); if(!r.ok) throw new Error(await r.text()||r.status); return r.json(); }
+      const err=(m)=>$('err').textContent=m||'';
+      const fmtH=(h)=> h==null?'—': h<48? h.toFixed(1)+'h' : (h/24).toFixed(1)+'d';
+      const fmtDate=(ts)=> new Date(ts*1000).toISOString().slice(0,10);
+      const esc=(s)=>String(s).replace(/[&<>]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+      window.addEventListener('message', async (ev)=>{ const m=ev.data; if(!m||m.type!=='otto:init')return; API=m.apiBase; TOKEN=m.token||''; applyTheme(m.theme); await boot(); });
+
+      async function boot(){ try { const repos=await api('/repos'); $('repo').innerHTML=repos.map(r=>`<option value="${r.id}">${esc(r.name)}</option>`).join(''); if(repos.length) run(); else $('out').innerHTML='<p class="dim">No git repos registered. Add one in Git first.</p>'; } catch(e){ err(e.message); } }
+
+      $('run').onclick=run; $('analyze').onclick=analyze;
+
+      async function run(){ err(''); const repo=$('repo').value, days=$('days').value; if(!repo)return; $('out').innerHTML='<p class="dim">Loading…</p>'; try { render(await api(`/metrics?repo=${encodeURIComponent(repo)}&days=${days}`)); } catch(e){ $('out').innerHTML=''; err(e.message); } }
+      async function analyze(){ err(''); const repo=$('repo').value, days=$('days').value; if(!repo)return; try { const r=await api('/analyze',{method:'POST',body:JSON.stringify({repo,days:parseInt(days)})}); $('out').insertAdjacentHTML('afterbegin',`<div class="card"><h2>Bottleneck analysis</h2><pre>${esc(r.summary)}</pre></div>`); } catch(e){ err(e.message); } }
+
+      function render(m){
+        const deploys=(m.deployments||[]).slice().reverse().map(d=>`<li><span class="dot deploy"></span>${fmtDate(d.ts)} · <code>${esc(d.tag)}</code></li>`).join('')||'<li class="dim">No *deployed* tags in window.</li>';
+        const merges=(m.recent_merges||[]).map(x=>`<li><span class="dot ${x.kind}"></span>${fmtDate(x.ts)} · ${x.kind} ${esc(x.subject)}</li>`).join('')||'<li class="dim">No classified merges.</li>';
+        $('out').innerHTML=`
+          <div class="tiles">
+            <div class="tile"><div class="l">Deployment frequency</div><div class="v">${m.deployment_frequency_per_week.toFixed(2)}<small>/week</small></div></div>
+            <div class="tile"><div class="l">Lead time for changes</div><div class="v">${fmtH(m.lead_time_hours)}</div></div>
+            <div class="tile"><div class="l">Change-failure rate</div><div class="v">${(m.change_failure_rate*100).toFixed(0)}%</div></div>
+            <div class="tile"><div class="l">Deployments (${m.window_days}d)</div><div class="v">${(m.deployments||[]).length}</div></div>
+          </div>
+          <div class="card"><h2>Process timing</h2><ul><li>Feature → release&nbsp; <b>${fmtH(m.avg_feature_to_release_hours)}</b></li><li>Release → deploy&nbsp; <b>${fmtH(m.avg_release_to_deploy_hours)}</b></li></ul></div>
+          <div class="card"><h2>Merges into develop</h2><ul><li><span class="dot feature"></span>feature ${m.counts.feature}</li><li><span class="dot release"></span>release ${m.counts.release}</li><li><span class="dot hotfix"></span>hotfix ${m.counts.hotfix}</li></ul></div>
+          <div class="card"><h2>Deployments</h2><ul>${deploys}</ul></div>
+          <div class="card"><h2>Recent merges</h2><ul>${merges}</ul></div>`;
+      }
+    </script>
+  </body>
+</html>

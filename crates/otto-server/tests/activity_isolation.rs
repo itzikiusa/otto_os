@@ -246,6 +246,12 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         auth_cache: otto_rbac::AuthCache::new(),
         version: "test".into(),
         data_dir: PathBuf::from("/tmp/otto-test"),
+        plugins: Arc::new(otto_server::plugins::PluginManager::new(
+            otto_state::PluginsRepo::new(pool.clone()),
+            PathBuf::from("/tmp/otto-test-plugins"),
+            PathBuf::from("/tmp/otto-test"),
+            "http://127.0.0.1:7700/api/v1/plugin-host".into(),
+        )),
         manager,
         workspaces: WorkspacesRepo::new(pool.clone()),
         connections,

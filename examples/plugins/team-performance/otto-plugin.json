@@ -1,0 +1,10 @@
+{
+  "slug": "team-performance",
+  "name": "Team Performance",
+  "icon": "gauge",
+  "version": "0.1.0",
+  "description": "Per-assignee Jira-story throughput vs. git delivery (done = last merge to develop), with an AI-era estimation-improvement tracker. Node sidecar — runs with zero npm install.",
+  "exec": ["node", "server.js"],
+  "ui": "ui",
+  "health": "/health"
+}

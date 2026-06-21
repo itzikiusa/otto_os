@@ -148,6 +148,25 @@ impl LocalGit {
 
     // -- queries ------------------------------------------------------------
 
+    /// True iff `commit` is an ancestor of (already merged into) `branch`.
+    ///
+    /// Used to detect merge-to-`develop` completion. `git merge-base
+    /// --is-ancestor` exits 0 (ancestor), 1 (not an ancestor), or another code
+    /// (error, e.g. an unknown ref) — distinguished here so a bad ref surfaces as
+    /// an error rather than a silent `false`.
+    pub async fn is_ancestor_of(&self, commit: &str, branch: &str) -> Result<bool> {
+        let (ok, _out, stderr, code) = self
+            .run_raw(&["merge-base", "--is-ancestor", commit, branch], &[])
+            .await?;
+        match (ok, code) {
+            (true, _) => Ok(true),
+            (false, Some(1)) => Ok(false),
+            (false, _) => Err(Error::Internal(format!(
+                "merge-base --is-ancestor {commit} {branch}: {stderr}"
+            ))),
+        }
+    }
+
     pub async fn status(&self) -> Result<RepoStatusResp> {
         let out = self.run(&["status", "--porcelain=v2", "--branch"]).await?;
         Ok(crate::parse::parse_status(&out))

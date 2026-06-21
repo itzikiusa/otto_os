@@ -26,6 +26,9 @@ members = [
     "crates/otto-netguard",
     "crates/otto-ssh",
 ]
+# Custom plugins are out-of-process sidecars installed at RUNTIME under
+# ~/otto-plugins (not workspace members, not compiled into the app). See
+# docs/superpowers/specs/2026-06-21-runtime-plugins-design.md.
 
 [workspace.package]
 version = "0.1.0"

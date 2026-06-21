@@ -28,7 +28,7 @@ use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use otto_core::auth::{AuthContext, AuthUser, SessionScope};
-use otto_core::domain::WorkspaceRole;
+use otto_core::domain::{Capability, WorkspaceRole};
 use otto_core::Error;
 use otto_state::GrantsRepo;
 
@@ -104,6 +104,44 @@ where
                 forbidden("share token is scoped to a single session").into_response()
             };
         }
+    }
+
+    // PLUGIN BRANCH (runtime custom plugins). Requests to `/api/v1/plugins/<slug>/…`
+    // (reverse-proxied to the sidecar) are gated by a string-keyed permission axis
+    // keyed on the plugin **slug**. `GET` ⇒ `View`, any other method ⇒ `Edit`; root
+    // bypasses. This sits AFTER the scope branch (a share token never reaches a
+    // plugin) and BEFORE `policy_for` (whose default arm would `Deny` these). The
+    // proxy route template is `/api/v1/plugins/{slug}/{*rest}`, so the literal slug
+    // is read from the CONCRETE request path (which, inside the nest, may or may not
+    // still carry the `/api/v1` prefix — handle both).
+    if template.starts_with("/api/v1/plugins/") {
+        let Some(AuthUser(user)) = req.extensions().get::<AuthUser>().cloned() else {
+            return ApiError(Error::Unauthorized).into_response();
+        };
+        if user.is_root {
+            return next.run(req).await;
+        }
+        let path = req.uri().path().to_string();
+        let slug = path
+            .strip_prefix("/api/v1/plugins/")
+            .or_else(|| path.strip_prefix("/plugins/"))
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or("");
+        if slug.is_empty() {
+            return forbidden("malformed plugin route").into_response();
+        }
+        let needed = if method == Method::GET {
+            Capability::View
+        } else {
+            Capability::Edit
+        };
+        return match state.grants().capability_of_plugin(&user, slug).await {
+            Ok(have) if have >= needed => next.run(req).await,
+            Ok(_) => {
+                forbidden(&format!("requires plugin {slug}:{}", needed.as_str())).into_response()
+            }
+            Err(e) => ApiError(e).into_response(),
+        };
     }
 
     match policy_for(&method, &template) {

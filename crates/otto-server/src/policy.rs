@@ -87,6 +87,19 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/ingest/") {
         return Exempt;
     }
+    // Runtime custom plugins. The host API (`/plugin-host/*`) is sidecar-token
+    // authed (like `/ingest/*`); the enabled-plugins list (`/plugins`) is a
+    // self-scoped read any authed user may make for their sidebar. The reverse-
+    // proxy routes (`/plugins/{slug}/…`) are NOT here — they are feature-gated by
+    // the dedicated plugin branch in `feature_guard` before this table is reached
+    // (and excluded from the policy-coverage test for that reason).
+    if p.starts_with("/plugin-host/") || p == "/plugins" {
+        return Exempt;
+    }
+    // Plugin management (install / enable / disable / remove) — admin only.
+    if p == "/plugin-admin" || p.starts_with("/plugin-admin/") {
+        return Require(Users, Admin);
+    }
     // Auth / personal-access-token self-management + identity. Any authed user
     // manages their own session and tokens; never feature-gated.
     // `/auth/capabilities` is self-scoped (returns the caller's own grants) —

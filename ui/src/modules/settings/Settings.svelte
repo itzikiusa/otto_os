@@ -3,6 +3,7 @@
   import Appearance from './Appearance.svelte';
   import AdminSessions from './AdminSessions.svelte';
   import Daemon from './Daemon.svelte';
+  import PluginsSettings from './PluginsSettings.svelte';
   import Providers from './Providers.svelte';
   import Users from './Users.svelte';
   import GitAccounts from '../git/GitAccounts.svelte';
@@ -57,6 +58,7 @@
           { id: 'context-library', label: 'Context Library' },
           { id: 'providers', label: 'Providers' },
           { id: 'daemon', label: 'Daemon' },
+          { id: 'plugins', label: 'Plugins' },
           { id: 'trust-safety', label: 'Trust & Safety' },
           { id: 'logs', label: 'Logs' },
           { id: 'backup', label: 'Backup & Restore' },
@@ -130,6 +132,8 @@
       <PersonalAccessTokens />
     {:else if page === 'daemon' && auth.can('settings', 'admin')}
       <Daemon />
+    {:else if page === 'plugins' && auth.can('settings', 'admin')}
+      <PluginsSettings />
     {:else if page === 'trust-safety' && auth.can('settings', 'admin')}
       <TrustSafety />
     {:else if page === 'logs' && auth.can('settings', 'admin')}

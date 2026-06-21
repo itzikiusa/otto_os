@@ -5,6 +5,7 @@
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
+  import { plugins } from '../lib/stores/plugins.svelte';
 
   // Each entry carries the feature name used by auth.can(); all are gated at
   // 'view'. Root always passes (can() returns true for root). The memory-layer
@@ -40,8 +41,24 @@
     const brokers = { id: 'brokers', icon: 'box', label: 'Message Brokers' };
     const bi = out.findIndex(m => m.id === 'database');
     out = bi === -1 ? [...out, brokers] : [...out.slice(0, bi + 1), brokers, ...out.slice(bi + 1)];
+    // Runtime custom plugins (RBAC-gated by slug) append after the built-ins,
+    // each routing to `#/plugin/<slug>`.
+    for (const p of plugins.list) {
+      if (auth.canPlugin(p.slug, 'view')) {
+        out.push({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name });
+      }
+    }
     return out;
   });
+
+  // Active when the route matches the entry id. Plugin entries use a `plugin/<slug>`
+  // id while `router.module` is just `plugin`, so compare the slug for those.
+  function isActive(id: string): boolean {
+    if (id.startsWith('plugin/')) {
+      return router.module === 'plugin' && `plugin/${router.parts[1] ?? ''}` === id;
+    }
+    return router.module === id;
+  }
 </script>
 
 <nav class="rail sidebar-material" aria-label="Modules">
@@ -58,7 +75,7 @@
     {#each modules as m (m.id)}
       <button
         class="rail-btn"
-        class:active={router.module === m.id}
+        class:active={isActive(m.id)}
         onclick={() => router.go(m.id)}
         title={m.label}
         aria-label={m.label}

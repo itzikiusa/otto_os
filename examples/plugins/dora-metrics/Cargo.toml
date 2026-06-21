@@ -1,0 +1,20 @@
+# Empty [workspace] table → this crate is its own standalone workspace, NOT part
+# of the Otto workspace it physically lives under (examples/). It builds/runs on
+# its own via the plugin manifest `exec`.
+[workspace]
+
+[package]
+name = "dora-metrics"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone — NOT part of the Otto workspace. Otto runs this sidecar via the
+# manifest `exec` (`cargo run --release`). Deps are kept light (no TLS — the host
+# API is loopback http) so first-enable compile is quick.
+
+[dependencies]
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["json"] }

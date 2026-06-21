@@ -25,6 +25,7 @@ pub mod mcp_audit;
 pub mod mcp_servers;
 pub mod memory;
 pub mod notifications;
+pub mod plugins;
 pub mod review_findings;
 pub mod reviews;
 pub mod saved_views;
@@ -69,6 +70,7 @@ pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
+pub use plugins::{NewPlugin, PluginRecord, PluginsRepo};
 pub use review_findings::{
     compute_fingerprint, FindingState, NewFinding, ReviewFindingRow, ReviewFindingsRepo,
 };

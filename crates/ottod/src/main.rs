@@ -271,6 +271,24 @@ async fn run(cfg: Config) -> Result<(), String> {
     // (via ServerCtx.auth_cache) evicts from it on set_grants. Clones share the
     // same backing map (Arc-backed).
     let auth_cache = otto_rbac::AuthCache::new();
+
+    // Runtime custom-plugin supervisor. Plugins live under $OTTO_PLUGINS_HOME (or
+    // ~/otto-plugins); enabled ones are spawned below as sidecar processes Otto
+    // reverse-proxies. The sidecars call back to the scoped host API at this base.
+    let plugins_home = std::env::var_os("OTTO_PLUGINS_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| cfg.data_dir.clone())
+                .join("otto-plugins")
+        });
+    let plugins = std::sync::Arc::new(otto_server::plugins::PluginManager::new(
+        otto_state::PluginsRepo::new(pool.clone()),
+        plugins_home,
+        cfg.data_dir.clone(),
+        format!("http://127.0.0.1:{}/api/v1/plugin-host", cfg.port),
+    ));
+
     let ctx = ServerCtx {
         pool: pool.clone(),
         secrets: secrets.clone(),
@@ -283,6 +301,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         auth_cache: auth_cache.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: cfg.data_dir.clone(),
+        plugins: plugins.clone(),
         manager: Arc::clone(&manager),
         workspaces: workspaces.clone(),
         connections,
@@ -309,6 +328,10 @@ async fn run(cfg: Config) -> Result<(), String> {
         swarm_coords: otto_server::swarm_runtime::new_registry(),
         swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
     };
+
+    // Spawn enabled runtime plugins (sidecar processes Otto supervises + proxies).
+    // Best-effort: per-plugin spawn failures are logged inside, never fatal.
+    ctx.plugins.start_enabled().await;
 
     // Restore sessions from the previous daemon run: resumable agent
     // sessions respawn, everything else becomes reconnectable.

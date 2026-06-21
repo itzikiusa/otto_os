@@ -22,7 +22,7 @@ use otto_core::auth::AuthUser;
 use otto_core::domain::{Capability, Feature, User};
 use otto_server::feature_guard::feature_guard;
 use otto_server::routes::grants::{capabilities, get_grants, put_grants, GrantsCtx};
-use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry, SqlitePool, UsersRepo};
+use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry, PluginsRepo, SqlitePool, UsersRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt; // for `oneshot`
@@ -51,6 +51,9 @@ impl GrantsCtx for TestGrantCtx {
     }
     fn users_repo(&self) -> UsersRepo {
         UsersRepo::new(self.pool.clone())
+    }
+    fn plugins_repo(&self) -> PluginsRepo {
+        PluginsRepo::new(self.pool.clone())
     }
     async fn audit_entry(&self, entry: NewAuditEntry) {
         let action = entry.action.clone();
@@ -327,13 +330,14 @@ async fn capabilities_root_gets_all_admin() {
     assert_eq!(st, StatusCode::OK, "capabilities call failed: {body}");
 
     let caps = body["capabilities"].as_object().expect("capabilities object");
-    // All 18 features present.
-    assert_eq!(
-        caps.len(),
-        18,
-        "root capabilities should cover all 18 features; got: {body}"
+    // At least the 18 built-in features are present. Installed custom plugins add
+    // their own slug-keyed capabilities too (string-keyed RBAC axis), so the map
+    // may be larger than 18 — assert a lower bound, not an exact count.
+    assert!(
+        caps.len() >= 18,
+        "root capabilities should cover at least the 18 built-in features; got: {body}"
     );
-    // Every value is "admin".
+    // Every value is "admin" (including any plugin slugs — root is admin everywhere).
     for (feat, cap_val) in caps {
         assert_eq!(
             cap_val.as_str(),

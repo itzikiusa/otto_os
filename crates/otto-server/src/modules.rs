@@ -3439,12 +3439,19 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::mission::mission_routes(),
         crate::routes::search::search_routes(),
         crate::routes::backup::backup_routes(),
+        // Runtime custom plugins: management + scoped host-API + reverse-proxy to
+        // sidecar processes. (Asset/iframe routes are root-mounted; see root vec.)
+        crate::plugins::api_routes(),
     ];
     let root = vec![
         otto_sessions::ws_router(ctx.authenticator.clone(), ctx.clone()),
         crate::lsp::ws_router(ctx.authenticator.clone(), ctx.clone()),
         crate::routes::api_stream::ws_router(ctx.authenticator.clone()),
         browser_proxy_router(ctx.authenticator.clone()),
+        // Runtime-plugin iframe assets: /plugins/{slug}/ui/* served as public
+        // static files (root-mounted, outside /api/v1; the iframe's API calls are
+        // the gated part). Listed last so it doesn't shadow other root routes.
+        crate::plugins::asset_router(ctx.clone()),
     ];
     (api, root)
 }

@@ -27,7 +27,7 @@ use axum::Json;
 use otto_core::api::{CapabilitiesResp, GrantEntry, UserGrantsReq, UserGrantsResp};
 use otto_core::domain::{Capability, Feature};
 use otto_core::{Error, Id, Result as OttoResult};
-use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry, UsersRepo};
+use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry, PluginsRepo, UsersRepo};
 use std::collections::HashMap;
 
 use crate::auth::{require_root, CurrentUser};
@@ -67,6 +67,8 @@ pub trait GrantsCtx: Clone + Send + Sync + 'static {
     fn grants_repo(&self) -> GrantsRepo;
     fn audit_repo(&self) -> AuditRepo;
     fn users_repo(&self) -> UsersRepo;
+    /// Installed runtime plugins (for surfacing their slugs in capabilities).
+    fn plugins_repo(&self) -> PluginsRepo;
     /// Write a best-effort audit entry (failure is logged, not propagated).
     fn audit_entry(&self, entry: NewAuditEntry) -> impl std::future::Future<Output = ()> + Send;
 }
@@ -85,6 +87,9 @@ impl GrantsCtx for ServerCtx {
     }
     fn users_repo(&self) -> UsersRepo {
         UsersRepo::new(self.pool.clone())
+    }
+    fn plugins_repo(&self) -> PluginsRepo {
+        PluginsRepo::new(self.pool.clone())
     }
     async fn audit_entry(&self, entry: NewAuditEntry) {
         self.audit(entry).await;
@@ -207,5 +212,99 @@ pub async fn capabilities<C: GrantsCtx>(
         caps.insert(feature.as_str().to_string(), cap.as_str().to_string());
     }
 
+    // Custom plugins: the closed `ALL_FEATURES` loop can't surface them, so add
+    // each installed runtime plugin's slug-keyed capability explicitly (the DTO is
+    // a String→String map, so arbitrary slug keys are fine). The UI's `canPlugin`
+    // reads these. Plugin count is small ⇒ a handful of extra point lookups.
+    for slug in ctx.plugins_repo().list_slugs().await? {
+        let cap = repo.capability_of_plugin(&user, &slug).await?;
+        caps.insert(slug, cap.as_str().to_string());
+    }
+
     Ok(Json(CapabilitiesResp { capabilities: caps }))
+}
+
+// ---------------------------------------------------------------------------
+// Custom-plugin grants (string-keyed by plugin slug) — a distinct code path from
+// the feature-grant handlers above: `Feature::parse` rejects slugs, so these
+// validate the slug against the installed manifests instead. Reuses the
+// `GrantEntry`/`UserGrantsReq`/`UserGrantsResp` DTOs with `feature` = the slug.
+// ---------------------------------------------------------------------------
+
+/// Parse `&[GrantEntry]` (where `feature` is a plugin slug) into `(slug, Capability)`,
+/// rejecting any slug that is not an installed plugin and any bad capability.
+fn parse_plugin_grant_entries(entries: &[GrantEntry]) -> OttoResult<Vec<(String, Capability)>> {
+    // The `feature` field carries the plugin slug. We accept any slug (granting
+    // before a plugin is installed is harmless — the row is simply unused), and
+    // only validate the capability.
+    entries
+        .iter()
+        .map(|e| {
+            let capability = Capability::parse(&e.capability).ok_or_else(|| {
+                Error::Invalid(format!("unknown capability '{}'", e.capability))
+            })?;
+            Ok((e.feature.clone(), capability))
+        })
+        .collect()
+}
+
+/// Encode `&[(slug, Capability)]` as `Vec<GrantEntry>`.
+fn encode_plugin_grants(pairs: &[(String, Capability)]) -> Vec<GrantEntry> {
+    pairs
+        .iter()
+        .map(|(slug, c)| GrantEntry {
+            feature: slug.clone(),
+            capability: c.as_str().to_string(),
+        })
+        .collect()
+}
+
+/// `GET /api/v1/users/{id}/plugin-grants` — list a user's plugin grants.
+/// Requires root (mirrors `get_grants`; `/users/` prefix is `Users:Admin`-gated).
+pub async fn get_plugin_grants<C: GrantsCtx>(
+    Path(id): Path<Id>,
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<UserGrantsResp>> {
+    require_root(&user)?;
+    ctx.users_repo().get(&id).await?;
+    let pairs = ctx.grants_repo().plugin_grants_for(&id).await?;
+    Ok(Json(UserGrantsResp {
+        grants: encode_plugin_grants(&pairs),
+    }))
+}
+
+/// `PUT /api/v1/users/{id}/plugin-grants` — atomically replace a user's plugin
+/// grants. Writes a `"plugin_grant.changed"` audit entry. Requires root.
+pub async fn put_plugin_grants<C: GrantsCtx>(
+    Path(id): Path<Id>,
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<UserGrantsReq>,
+) -> ApiResult<Json<UserGrantsResp>> {
+    require_root(&user)?;
+    ctx.users_repo().get(&id).await?;
+
+    let repo = ctx.grants_repo();
+    let old = repo.plugin_grants_for(&id).await?;
+    let new_pairs = parse_plugin_grant_entries(&req.grants)?;
+    repo.set_plugin_grants(&id, &new_pairs).await?;
+
+    let old_encoded = encode_plugin_grants(&old);
+    let new_encoded = encode_plugin_grants(&new_pairs);
+    ctx.audit_entry(NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: "plugin_grant.changed".into(),
+        target: Some(id.clone()),
+        detail: Some(serde_json::json!({
+            "old": old_encoded,
+            "new": new_encoded,
+        })),
+        ip: None,
+    })
+    .await;
+
+    Ok(Json(UserGrantsResp {
+        grants: new_encoded,
+    }))
 }

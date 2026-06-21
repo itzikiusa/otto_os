@@ -132,7 +132,11 @@ fn registered_routes(root: &Path) -> BTreeSet<String> {
 /// route-inventory test also skips `tests/` directories, so test-stub routes
 /// are never included in the source set.
 fn is_policy_exempt_by_design(path: &str) -> bool {
-    path.starts_with("/ws/") || path == "/browser/proxy"
+    // `/ws/*` and `/browser/proxy` self-authenticate via `?token=`. The runtime
+    // plugin reverse-proxy + iframe-asset routes (`/plugins/{slug}/…`) are
+    // feature-gated by the dedicated plugin branch in `feature_guard` BEFORE
+    // `policy_for` is consulted, so they intentionally have no policy-table entry.
+    path.starts_with("/ws/") || path == "/browser/proxy" || path.starts_with("/plugins/")
 }
 
 #[test]

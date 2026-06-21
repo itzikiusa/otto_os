@@ -159,6 +159,104 @@ impl GrantsRepo {
 
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Custom-plugin grants — the string-keyed (by plugin slug) RBAC axis,
+    // parallel to the closed `Feature` enum. Backed by `plugin_feature_grants`
+    // (migration 0061). Same default-deny + root-bypass semantics as above.
+    // -----------------------------------------------------------------------
+
+    /// Return the effective capability of `user` for plugin `slug`.
+    ///
+    /// Root ⇒ `Admin`. Otherwise the row's capability or `Capability::None`.
+    pub async fn capability_of_plugin(&self, user: &User, slug: &str) -> Result<Capability> {
+        if user.is_root {
+            return Ok(Capability::Admin);
+        }
+        let row = sqlx::query(
+            "SELECT capability FROM plugin_feature_grants WHERE user_id = ? AND plugin_key = ?",
+        )
+        .bind(&user.id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("capability_of_plugin: {e}")))?;
+
+        match row {
+            None => Ok(Capability::None),
+            Some(r) => {
+                use sqlx::Row;
+                let s: String = r.get("capability");
+                Capability::parse(&s)
+                    .ok_or_else(|| Error::Internal(format!("bad capability value '{s}'")))
+            }
+        }
+    }
+
+    /// Return all plugin grants for `user_id` as `(slug, Capability)` pairs.
+    pub async fn plugin_grants_for(&self, user_id: &str) -> Result<Vec<(String, Capability)>> {
+        use sqlx::Row;
+        let rows = sqlx::query(
+            "SELECT plugin_key, capability FROM plugin_feature_grants WHERE user_id = ? ORDER BY plugin_key",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("plugin_grants_for: {e}")))?;
+
+        rows.iter()
+            .map(|r| {
+                let slug: String = r.get("plugin_key");
+                let cs: String = r.get("capability");
+                let cap = Capability::parse(&cs)
+                    .ok_or_else(|| Error::Internal(format!("bad capability value '{cs}'")))?;
+                Ok((slug, cap))
+            })
+            .collect()
+    }
+
+    /// Atomically replace all plugin grants for `user_id` (skips `None`).
+    /// Flushes the user's auth cache after commit, like [`Self::set_grants`].
+    pub async fn set_plugin_grants(
+        &self,
+        user_id: &str,
+        grants: &[(String, Capability)],
+    ) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Error::Internal(format!("begin tx: {e}")))?;
+
+        sqlx::query("DELETE FROM plugin_feature_grants WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::Internal(format!("delete plugin grants: {e}")))?;
+
+        for (slug, cap) in grants {
+            if *cap == Capability::None {
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO plugin_feature_grants (user_id, plugin_key, capability) VALUES (?, ?, ?)",
+            )
+            .bind(user_id)
+            .bind(slug)
+            .bind(cap.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::Internal(format!("insert plugin grant: {e}")))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| Error::Internal(format!("commit tx: {e}")))?;
+
+        self.invalidator.invalidate_user(user_id);
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

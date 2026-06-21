@@ -83,6 +83,9 @@ impl GrantsCtx for TestCtx {
     fn users_repo(&self) -> UsersRepo {
         UsersRepo::new(self.pool.clone())
     }
+    fn plugins_repo(&self) -> otto_state::PluginsRepo {
+        otto_state::PluginsRepo::new(self.pool.clone())
+    }
     async fn audit_entry(&self, entry: NewAuditEntry) {
         let action = entry.action.clone();
         if let Err(e) = AuditRepo::new(self.pool.clone()).insert(entry).await {
