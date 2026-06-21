@@ -1301,4 +1301,26 @@
       flex-wrap: wrap;
     }
   }
+
+  /* ───────────────── Tablet (641–1024px) ─────────────────
+     The tablet keeps the desktop side-by-side layout (280px sidebar + main),
+     but the narrowed main column can't fit the dense tab/status row on one
+     line, so the engine chip + Test button get pushed past the
+     (.content overflow:hidden) edge and become unreachable — even though the
+     page itself never scrolls sideways. Let the tab row wrap and break the
+     status onto its own line (the same treatment the phone layout uses), WITHOUT
+     collapsing the columns. */
+  @media (min-width: 641px) and (max-width: 1024px) {
+    .main-tabs {
+      flex-wrap: wrap;
+      row-gap: 4px;
+    }
+    .main-tabs .grow {
+      flex-basis: 100%;
+      height: 0;
+    }
+    .conn-status {
+      flex-wrap: wrap;
+    }
+  }
 </style>

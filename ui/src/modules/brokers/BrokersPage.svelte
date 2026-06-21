@@ -777,6 +777,13 @@
     gap: 2px;
     padding: 6px 14px 0;
     border-bottom: 1px solid var(--border);
+    /* The six tabs can be wider than the content pane on narrow desktop-layout
+       widths (e.g. tablet portrait 834px, phone landscape). Scroll the strip
+       horizontally inside itself rather than letting the last tabs jut off the
+       right edge where they become unreachable. */
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
   }
   .tabs button {
     border: none;
@@ -786,6 +793,8 @@
     cursor: pointer;
     font-size: 13px;
     border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    flex: none;
   }
   .tabs button.on {
     color: var(--text);
@@ -857,6 +866,18 @@
     cursor: pointer;
     align-items: center;
     flex: none;
+  }
+
+  /* Short viewports (phones in landscape, ~430px tall) keep the desktop
+     two-column layout (they're >640px wide) but the cluster header + tab strips
+     leave the tab body very little room. Let the tab body scroll so panels with
+     a guaranteed min-height (e.g. the topics grid) stay fully reachable instead
+     of being clipped behind the sticky chrome. */
+  @media (max-height: 600px) {
+    .tab-body {
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
   }
 
   @media (max-width: 640px) {

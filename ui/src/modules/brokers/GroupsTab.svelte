@@ -613,4 +613,31 @@
     padding: 5px 10px;
     margin: 0;
   }
+
+  /* Phone (≤640px): the 300px fixed group list + detail can't sit side-by-side
+     on a ~375–430px viewport. Stack them, cap the list height so the detail
+     stays reachable, and let the reset bar wrap. */
+  @media (max-width: 640px) {
+    .groups {
+      flex-direction: column;
+    }
+    .list {
+      width: 100%;
+      max-height: 35vh;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .detail {
+      min-height: 200px;
+    }
+    .reset-bar select,
+    .reset-bar input {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .sm-input,
+    .sm-input.wide {
+      width: auto;
+    }
+  }
 </style>

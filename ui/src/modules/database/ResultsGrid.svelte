@@ -2570,6 +2570,24 @@
      The results toolbar (search + view-segment + Copy/CSV/JSON/Agent) is dense
      — let it wrap rather than run off the edge, and make sure the grid itself
      fills its bounded block and scrolls in BOTH directions on touch. */
+  /* Tablet (641–1024px): the narrowed results column can't fit the toolbar
+     (Copy/CSV/JSON/Download/→Agent) on one line, so it overflows and gets
+     clipped by the (overflow:hidden) ancestor. Wrap it and let the search take
+     the first row — same as the phone layout, but WITHOUT the phone-only grid
+     height overrides. */
+  @media (min-width: 641px) and (max-width: 1024px) {
+    .grid-toolbar {
+      flex-wrap: wrap;
+      row-gap: 6px;
+    }
+    .grid-toolbar .grow {
+      display: none;
+    }
+    .gt-search {
+      flex: 1 1 100%;
+    }
+  }
+
   @media (max-width: 640px) {
     .grid-toolbar {
       flex-wrap: wrap;

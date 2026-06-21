@@ -704,6 +704,23 @@
   .qe-acc-head {
     display: none;
   }
+  /* Tablet (641–1024px): the side-by-side DB layout narrows the editor column,
+     so wrap the dense toolbar (Run/Save/Explain/Ask-AI + Limit/Timeout/Mask)
+     onto multiple rows instead of letting it overflow and get clipped — the same
+     wrap the phone layout uses, but WITHOUT forcing the compact editor height. */
+  @media (min-width: 641px) and (max-width: 1024px) {
+    .qe-toolbar {
+      flex-wrap: wrap;
+      gap: 6px;
+      row-gap: 6px;
+    }
+    .qe-toolbar .grow {
+      flex-basis: 100%;
+      height: 0;
+      flex: 0 0 100%;
+    }
+  }
+
   @media (max-width: 640px) {
     .query-editor {
       height: auto;

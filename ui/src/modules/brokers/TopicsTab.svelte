@@ -367,6 +367,10 @@
     gap: 10px;
     padding: 10px 12px;
     border-bottom: 1px solid var(--border);
+    /* Wrap at every width: with many topics the count + cleanup-policy select +
+       New button can exceed even a tablet-portrait content pane (834px), pushing
+       the last controls off the right edge where they're unreachable. */
+    flex-wrap: wrap;
   }
   .search {
     width: 240px;
@@ -496,5 +500,64 @@
   }
   .btn.tiny {
     padding: 3px 7px;
+  }
+
+  /* Phone (≤640px): the toolbar/create rows wrap so nothing juts off the right
+     edge, and the search input goes full-width. Without this the single flex row
+     (search + checkbox + count + buttons) overflows a ~375–430px viewport. */
+  @media (max-width: 640px) {
+    .toolbar,
+    .create {
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .search {
+      width: 100%;
+      flex: 1 1 100%;
+      min-width: 0;
+    }
+    .spacer {
+      display: none;
+    }
+    .toolbar select {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .create input,
+    .create label {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    /* On short phones the cluster-header chrome + tab strip + wrapped toolbar can
+       starve the table of vertical room, collapsing it to an unusable sliver.
+       Let the topics/detail containers grow past the viewport (the tab-body
+       scrolls on phones) and guarantee the grid a real, scrollable height so rows
+       are always reachable. */
+    .topics,
+    .detail-wrap {
+      height: auto;
+      min-height: 100%;
+    }
+    .grid-wrap {
+      min-height: 220px;
+    }
+  }
+
+  /* Short viewports (e.g. phones in landscape ~430px tall, which use the desktop
+     two-column layout because they're >640px wide): the header + tab strips +
+     toolbar eat the vertical budget, leaving the topics grid a sliver whose rows
+     end up behind the sticky toolbar / status bar and become unclickable. Let the
+     detail/topics containers grow past the viewport (the brokers tab-body scrolls
+     on short viewports) and give the grid a guaranteed height so rows stay
+     reachable. */
+  @media (max-height: 600px) {
+    .topics,
+    .detail-wrap {
+      height: auto;
+      min-height: 100%;
+    }
+    .grid-wrap {
+      min-height: 200px;
+    }
   }
 </style>

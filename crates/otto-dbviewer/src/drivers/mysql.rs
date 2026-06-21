@@ -17,7 +17,7 @@ use base64::Engine as _;
 use otto_core::Result;
 use serde_json::Value;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode};
-use sqlx::{Column as _, Row, TypeInfo};
+use sqlx::{Column as _, Executor as _, Row, TypeInfo};
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
@@ -456,8 +456,7 @@ impl Driver for MysqlDriver {
         let pool = self.pool(cfg).await?;
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
         if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
-            sqlx::query(&format!("USE `{}`", esc_ident(db)))
-                .execute(&mut *conn)
+            (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
                 .await
                 .map_err(types::upstream)?;
         }
@@ -882,10 +881,9 @@ async fn run_read(
     // can't be server-cancelled.
     capture_conn_id(&mut conn, token).await;
     if let Some(db) = active_db {
-        sqlx::query(&format!("USE `{}`", esc_ident(db)))
-            .execute(&mut *conn)
-            .await
-            .map_err(types::upstream)?;
+        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
+                .await
+                .map_err(types::upstream)?;
     }
     let rows = sqlx::query(statement)
         .fetch_all(&mut *conn)
@@ -931,10 +929,9 @@ async fn run_write(
     let mut conn = pool.acquire().await.map_err(types::upstream)?;
     capture_conn_id(&mut conn, token).await;
     if let Some(db) = active_db {
-        sqlx::query(&format!("USE `{}`", esc_ident(db)))
-            .execute(&mut *conn)
-            .await
-            .map_err(types::upstream)?;
+        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
+                .await
+                .map_err(types::upstream)?;
     }
     let res = sqlx::query(statement)
         .execute(&mut *conn)
@@ -1008,6 +1005,24 @@ fn float_to_json(v: Option<f64>) -> Value {
 /// input, but we still double any backticks defensively).
 fn esc_ident(ident: &str) -> String {
     ident.replace('`', "``")
+}
+
+/// Select the active database on a pooled connection before running a query.
+///
+/// MUST use the simple/TEXT query protocol (`sqlx::raw_sql`), NOT the prepared-
+/// statement protocol (`sqlx::query`): MySQL rejects `USE` (and a handful of
+/// other commands) when sent as a prepared statement, with
+/// `1295 (HY000): This command is not supported in the prepared statement
+/// protocol yet`. The text protocol runs it as a plain command, which is the
+/// only way `USE` works. This is why the active-DB scoping is built as a raw
+/// (text-protocol) statement; see [`use_db_sql`] for the SQL it runs.
+///
+/// Returns the `USE` statement for `db`, escaped. Callers run it via
+/// `sqlx::raw_sql(..)` (the simple/text protocol) inline — a shared async helper
+/// taking the connection trips the `Executor`-HRTB / `async_trait` Send bound,
+/// so we keep the one-liner at each call site and only share the SQL.
+fn use_db_sql(db: &str) -> String {
+    format!("USE `{}`", esc_ident(db))
 }
 
 /// Read an integer column that MySQL may return as a signed/unsigned int or a

@@ -183,4 +183,22 @@
   .pad {
     padding: 12px;
   }
+
+  /* Phone (≤640px): the 300px fixed subject list + viewer can't sit side-by-side
+     on a ~375–430px viewport. Stack them and cap the list height so the schema
+     viewer stays reachable. */
+  @media (max-width: 640px) {
+    .schema {
+      flex-direction: column;
+    }
+    .list {
+      width: 100%;
+      max-height: 35vh;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .view {
+      min-height: 200px;
+    }
+  }
 </style>

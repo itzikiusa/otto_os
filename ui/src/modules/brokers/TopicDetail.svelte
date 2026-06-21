@@ -719,6 +719,11 @@
     gap: 2px;
     padding: 6px 12px 0;
     border-bottom: 1px solid var(--border);
+    /* Scroll the four subtabs horizontally rather than letting the last one
+       (Produce) jut off the right edge on the narrowest phones (~320px). */
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
   }
   .subtabs button {
     border: none;
@@ -728,6 +733,8 @@
     border-radius: var(--radius-s) var(--radius-s) 0 0;
     cursor: pointer;
     font-size: 13px;
+    white-space: nowrap;
+    flex: none;
   }
   .subtabs button.on {
     color: var(--text);
@@ -1064,5 +1071,71 @@
   .btn.tiny {
     padding: 2px 8px;
     font-size: 11px;
+  }
+
+  /* Phone (≤640px): the message list + detail are side-by-side on desktop, which
+     can't fit a ~375–430px viewport (detail has a 320px min-width). Stack them
+     vertically, drop the min-width, and give each a real scrollable height so
+     neither collapses to a sliver on short screens. The consume-bar already
+     wraps; widen its controls so they don't jut off the edge. */
+  @media (max-width: 640px) {
+    /* Let the detail grow past the viewport so the produce form / message rows
+       scroll into view (the brokers tab-body scrolls on phones) instead of being
+       compressed behind the sticky header + bottom nav. */
+    .td {
+      height: auto;
+      min-height: 100%;
+    }
+    .msg-layout {
+      flex-direction: column;
+      flex: none;
+    }
+    .msg-list {
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+      min-height: 200px;
+      flex: 1 1 auto;
+    }
+    .msg-detail {
+      width: 100%;
+      min-width: 0;
+      max-height: 50vh;
+    }
+    .consume-bar select,
+    .consume-bar .sm {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .key {
+      max-width: 120px;
+    }
+    .cfg-set {
+      flex-wrap: wrap;
+    }
+  }
+
+  /* Short viewports (phones in landscape): the message layout stays side-by-side
+     (wide enough), but the panes get a guaranteed height so the message list
+     doesn't shrink to a sliver whose rows fall behind the sticky chrome. The
+     detail container is allowed to grow past the viewport (the brokers tab-body
+     scrolls on short viewports) so the produce form / message rows scroll into
+     view rather than being compressed behind the header + status bar. */
+  @media (max-height: 600px) {
+    .td {
+      height: auto;
+      min-height: 100%;
+    }
+    .msg-layout {
+      flex: none;
+    }
+    .msg-list {
+      min-height: 180px;
+    }
+    .msg-detail {
+      min-height: 180px;
+    }
+    .produce {
+      overflow: visible;
+    }
   }
 </style>

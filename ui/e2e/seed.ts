@@ -414,6 +414,87 @@ export async function seedRedis(
   }
 }
 
+/**
+ * Register a connection against the seeded Docker dev DB stack
+ * (`dev/dbviewer/docker-compose.yml`) and verify it's reachable.
+ *
+ * Engines + endpoints (all loopback, non-standard ports so they never clash
+ * with the user's own local DBs):
+ *   - mysql      127.0.0.1:13306  otto/ottopw   db `shopdb`
+ *   - redis      127.0.0.1:16379  (auth ottoredis) db 0
+ *   - mongodb    127.0.0.1:17017  otto/ottopw   db `shopdb` (authSource admin)
+ *   - clickhouse 127.0.0.1:18123  otto/ottopw   db `analytics`
+ *
+ * Creates the profile as `environment: 'dev'`, `read_only: false` so the sweep
+ * can exercise writes (INSERT/UPDATE), then calls `/db/.../test` via the
+ * connection `/test` endpoint. Returns the connection id, or `null` when the
+ * engine isn't reachable (stack not up) so specs can `test.skip` cleanly
+ * instead of failing the whole run.
+ */
+export async function seedDockerConnection(
+  ctx: APIRequestContext,
+  base: string,
+  workspaceId: string,
+  kind: 'mysql' | 'redis' | 'mongodb' | 'clickhouse',
+): Promise<string | null> {
+  const specs: Record<
+    string,
+    { name: string; params: Record<string, unknown>; secret: string | null }
+  > = {
+    mysql: {
+      name: 'e2e-mysql',
+      params: { host: '127.0.0.1', port: 13306, user: 'otto', db: 'shopdb' },
+      secret: 'ottopw',
+    },
+    redis: {
+      name: 'e2e-redis-docker',
+      params: { host: '127.0.0.1', port: 16379, db: 0 },
+      secret: 'ottoredis',
+    },
+    mongodb: {
+      name: 'e2e-mongodb',
+      params: {
+        host: '127.0.0.1',
+        port: 17017,
+        user: 'otto',
+        db: 'shopdb',
+        auth_source: 'admin',
+      },
+      secret: 'ottopw',
+    },
+    clickhouse: {
+      name: 'e2e-clickhouse',
+      params: { host: '127.0.0.1', port: 18123, user: 'otto', db: 'analytics' },
+      secret: 'ottopw',
+    },
+  };
+  const s = specs[kind];
+  let connId: string;
+  try {
+    const conn = await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/connections`, {
+      name: s.name,
+      kind,
+      params: s.params,
+      secret: s.secret,
+      environment: 'dev',
+      read_only: false,
+    });
+    connId = conn.id as string;
+  } catch {
+    return null;
+  }
+  // Confirm the engine is actually reachable before any spec depends on it.
+  try {
+    const r = await ctx.post(`${base}/api/v1/connections/${connId}/test`, { data: {} });
+    if (!r.ok()) return null;
+    const body = (await r.json()) as { ok?: boolean };
+    if (body.ok === false) return null;
+  } catch {
+    return null;
+  }
+  return connId;
+}
+
 export function writeSeed(obj: Record<string, unknown>): void {
   writeFileSync(join(process.cwd(), 'e2e', '.auth', 'seed.json'), JSON.stringify(obj, null, 2));
 }
