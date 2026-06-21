@@ -339,6 +339,14 @@
     next.add(hunkKey(filePath, hunkIdx));
     expandedHunks = next;
   }
+
+  // When the comment composer gains focus the soft keyboard can cover it; pull it
+  // into view so the textarea + actions stay visible while typing on a phone.
+  function composerFocus(e: FocusEvent): void {
+    const el = e.currentTarget as HTMLElement | null;
+    if (!el) return;
+    requestAnimationFrame(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -366,7 +374,10 @@
           title={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
-          <Icon name={navCollapsed ? 'chevronRight' : 'chevronLeft'} size={12} />
+          <!-- Physical chevron mirrored in RTL (the rail sits on the start side). -->
+          <span class="nav-collapse-ico">
+            <Icon name={navCollapsed ? 'chevronRight' : 'chevronLeft'} size={12} />
+          </span>
         </button>
       </div>
 
@@ -480,9 +491,11 @@
           class="dfile-head"
           onclick={() => (collapsed = { ...collapsed, [file.path]: !collapsed[file.path] })}
         >
-          <Icon name={collapsed[file.path] ? 'chevronRight' : 'chevronDown'} size={11} />
+          <span class="dfile-chevron">
+            <Icon name={collapsed[file.path] ? 'chevronRight' : 'chevronDown'} size={11} />
+          </span>
           <span class="dfile-path mono">
-            {#if file.old_path}{file.old_path} → {/if}{file.path}
+            {#if file.old_path}{file.old_path}<span class="rename-arrow"> → </span>{/if}{file.path}
           </span>
           <span class="grow"></span>
           {#if prMode && cCount > 0}
@@ -574,6 +587,7 @@
                                   class="input"
                                   rows="2"
                                   bind:value={composerText}
+                                  onfocus={composerFocus}
                                   placeholder="Comment on line {composer.line}…"
                                 ></textarea>
                                 <div class="composer-actions">
@@ -678,6 +692,7 @@
                                   class="input"
                                   rows="2"
                                   bind:value={composerText}
+                                  onfocus={composerFocus}
                                   placeholder="Comment on line {composer.line}…"
                                 ></textarea>
                                 <div class="composer-actions">
@@ -763,7 +778,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 8px 6px 10px;
+    padding: 8px 10px 6px;
     border-bottom: 1px solid var(--border);
     gap: 6px;
     flex-shrink: 0;
@@ -792,7 +807,7 @@
     flex-shrink: 0;
   }
   .nav-collapse-btn:hover {
-    background: var(--hover);
+    background: var(--surface-2);
     color: var(--text);
   }
   .nav-search-wrap {
@@ -825,7 +840,8 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    padding: 4px 8px 4px 6px;
+    padding: 4px 8px;
+    padding-inline-start: 6px;
     cursor: pointer;
     font-size: 11px;
     color: var(--text);
@@ -834,7 +850,7 @@
     min-width: 0;
   }
   .nav-file:hover {
-    background: var(--hover);
+    background: var(--surface-2);
   }
   .nav-file.nav-file-viewed {
     opacity: 0.45;
@@ -961,6 +977,21 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Direction-aware glyphs: mirror the physical chevrons + the rename arrow in
+     RTL so the sidebar collapse, file collapse and "from → to" rename all read
+     in the reading direction (mirrors GraphView's df-chevron / df-rename-arrow). */
+  .nav-collapse-ico,
+  .dfile-chevron,
+  .rename-arrow {
+    display: inline-flex;
+  }
+  :global([dir='rtl']) .nav-collapse-ico,
+  :global([dir='rtl']) .dfile-chevron,
+  :global([dir='rtl']) .rename-arrow {
+    /* chevronDown is horizontally symmetric so flipping it is a no-op; the
+       collapsed chevronRight and the rename arrow flip to point start-ward. */
+    transform: scaleX(-1);
+  }
   .dfile-binary {
     padding: 14px;
     font-size: 12px;
@@ -988,6 +1019,9 @@
   .hunk-header {
     position: sticky;
     top: 0;
+    /* Sit above the scrolling code rows so a wrapped line never shows through
+       the sticky header (the accent-mixed background is opaque). */
+    z-index: 2;
     padding: 3px 12px;
     font-size: 10.5px;
     color: var(--accent);
@@ -1093,6 +1127,7 @@
     .diff {
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
       min-width: 0;
       max-width: 100%;
     }
@@ -1157,6 +1192,33 @@
        forces unified — but stays aligned for safety.) */
     .vrow { grid-template-columns: 30px 30px 13px 1fr; }
     .vrow .code { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+
+    /* ── Touch targets (no hover on touch → affordances must be persistent). ── */
+    /* "Mark as viewed" checkbox: 12px is below the touch minimum. */
+    .nav-viewed-cb input[type='checkbox'] { width: 18px; height: 18px; }
+    /* Sidebar collapse button. */
+    .nav-collapse-btn { min-width: 36px; min-height: 36px; justify-content: center; }
+    /* "Show N more lines" / "Load all" hunk-cap button. */
+    .hunk-cap-btn { font-size: 12.5px; min-height: 32px; padding: 6px 12px; }
+    /* Comment composer Cancel/Comment buttons. */
+    .composer-actions .btn { min-height: 36px; padding: 6px 14px; }
+    /* PR inline-comment affordance: widen the gutter tap zone and surface a
+       persistent "+" hint (the desktop hover hint is invisible on touch). */
+    .gut.commentable {
+      position: relative;
+      min-width: 34px;
+      width: 34px;
+    }
+    .gut.commentable::after {
+      content: '+';
+      position: absolute;
+      inset-inline-start: 2px;
+      top: 1px;
+      font-size: 11px;
+      line-height: 1;
+      color: color-mix(in srgb, var(--accent) 55%, transparent);
+      pointer-events: none;
+    }
   }
 
   /* Hunk line cap: "Show N more lines" affordance */
@@ -1181,7 +1243,10 @@
      user scrolls inside it. The vrow divs mirror the .dtable tr layout using
      a fixed-column grid (gutter+gutter+sign+code) so lines align correctly. */
   :global(.vlist-hunk) {
-    max-height: 400px;
+    /* Cap to the smaller of 400px / 60vh so on a short phone the virtualised
+       hunk doesn't eat the whole screen; contain its scroll chaining. */
+    max-height: min(400px, 60vh);
+    overscroll-behavior: contain;
     border-top: 1px solid var(--border);
     font-size: 11.5px;
     line-height: 1.55;

@@ -233,7 +233,7 @@
     <div class="field">
       <label for="ga-provider">Provider</label>
       {#if isEdit}
-        <div class="input" style="background: var(--surface-2, #1e1e1e); cursor: default; opacity: 0.7;">
+        <div class="input" style="background: var(--surface-2); cursor: default; opacity: 0.7;">
           {provider}
         </div>
         <span class="hint">Provider cannot be changed after creation.</span>
@@ -351,7 +351,7 @@
     color: var(--text-dim);
   }
   .expiry.expired {
-    color: #d9534f;
+    color: var(--status-exited);
     font-weight: 600;
   }
 
@@ -389,6 +389,9 @@
     .segmented > button {
       flex: 1;
       height: 32px;
+      /* Keep each provider label (github / bitbucket / gitlab) on one line —
+         at 320px they would otherwise wrap and clip against the 32px height. */
+      white-space: nowrap;
     }
   }
 </style>

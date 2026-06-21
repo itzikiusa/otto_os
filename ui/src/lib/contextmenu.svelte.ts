@@ -15,12 +15,22 @@ class ContextMenuStore {
   y = $state(0);
   items: MenuItem[] = $state([]);
 
-  show(e: MouseEvent, items: MenuItem[]): void {
+  show(e: MouseEvent | KeyboardEvent, items: MenuItem[]): void {
     e.preventDefault();
     e.stopPropagation();
     this.items = items;
-    this.x = e.clientX;
-    this.y = e.clientY;
+    if ('clientX' in e) {
+      // Pointer / contextmenu: open at the cursor.
+      this.x = e.clientX;
+      this.y = e.clientY;
+    } else {
+      // Keyboard activation (Enter/Space on a focused row): anchor the menu to
+      // the focused element so it's positioned sensibly without a cursor.
+      const el = e.currentTarget as HTMLElement | null;
+      const r = el?.getBoundingClientRect();
+      this.x = r ? r.left : 0;
+      this.y = r ? r.bottom : 0;
+    }
     this.open = true;
   }
 

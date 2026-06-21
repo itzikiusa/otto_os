@@ -516,7 +516,7 @@
   .err {
     padding: 14px;
     font-size: 12px;
-    color: var(--danger, #e5534b);
+    color: var(--status-exited);
   }
   .repo-grid {
     display: grid;
@@ -545,6 +545,11 @@
     gap: 7px;
     font-size: 13.5px;
     font-weight: 600;
+    /* Long repo names clip with an ellipsis instead of widening the card. */
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .repo-path {
     font-size: 11px;
@@ -565,7 +570,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px 10px 14px;
+    padding: 6px 10px 10px;
+    padding-inline-start: 14px;
   }
 
   /* ── Mobile + tablet (≤1024px): tighten the landing hub so the repo cards +
@@ -603,6 +609,9 @@
     .segmented > button {
       flex: 1;
       height: 32px;
+      /* Keep each mode label on one line — at 320px the longer labels would
+         otherwise wrap to two rows and clip against the fixed 32px height. */
+      white-space: nowrap;
     }
     .path-row {
       flex-wrap: wrap;

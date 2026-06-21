@@ -342,6 +342,10 @@
     color: var(--text);
     box-shadow: inset 2px 0 0 0 var(--accent);
   }
+  /* Mirror the active rail to the reading-start edge in RTL. */
+  :global([dir='rtl']) .file-row.active {
+    box-shadow: inset -2px 0 0 0 var(--accent);
+  }
   .file-row.is-resolved .file-status {
     color: var(--accent);
   }
@@ -355,8 +359,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    direction: rtl;
-    text-align: left;
+    /* Logical alignment — don't hard-set direction:rtl (it bidi-reorders the
+       path and breaks the RTL layout); the row title shows the full path on
+       hover/tap anyway. */
+    text-align: start;
     font-size: 11.5px;
   }
   .file-detail {
@@ -449,6 +455,7 @@
       flex-direction: column;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
     }
     .mobile .mob-sec-head {
       display: flex;
@@ -457,6 +464,7 @@
       width: 100%;
       flex: 0 0 auto;
       max-height: 32vh;
+      overscroll-behavior: contain;
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
     }

@@ -89,7 +89,7 @@
             <div class="pr-meta">
               <span class="chip {stateColors[pr.state] ?? ''}">{pr.state}</span>
               <span class="dim">{pr.author}</span>
-              <span class="mono dim">{pr.source_branch} → {pr.target_branch}</span>
+              <span class="mono dim">{pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}</span>
               <span class="grow"></span>
               <span class="dim">updated {fmtDate(pr.updated_at)}</span>
             </div>
@@ -160,6 +160,13 @@
     gap: 10px;
     margin-top: 5px;
     font-size: 11.5px;
+  }
+  /* source→target separator mirrors in place under RTL. */
+  .dir-arrow {
+    display: inline-block;
+  }
+  :global([dir='rtl']) .dir-arrow {
+    transform: scaleX(-1);
   }
 
   /* ── Mobile + tablet (≤1024px): legible PR cards whose meta wraps instead of

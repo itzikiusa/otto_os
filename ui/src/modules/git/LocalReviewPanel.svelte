@@ -503,7 +503,7 @@
     white-space: nowrap;
   }
   .lrp-select {
-    background: var(--input-bg, var(--surface-raised));
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     color: var(--text);
@@ -613,8 +613,8 @@
     color: var(--accent);
   }
   .lrp-status-done {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 15%, transparent);
-    color: var(--status-idle, #3a8c3a);
+    background: color-mix(in srgb, var(--status-working) 15%, transparent);
+    color: var(--status-working);
   }
   .lrp-status-error {
     background: color-mix(in srgb, var(--status-exited) 15%, transparent);
@@ -632,6 +632,8 @@
   }
   .lrp-error-msg {
     flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
     font-size: 12.5px;
   }
 
@@ -667,7 +669,7 @@
     user-select: none;
   }
   .lrp-comment:hover {
-    background: var(--surface-hover, var(--surface-raised));
+    background: var(--surface-2);
   }
   .lrp-chk {
     margin-top: 2px;
@@ -690,6 +692,7 @@
     font-size: 12.5px;
     line-height: 1.55;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .lrp-loc {
     font-size: 11px;
@@ -725,8 +728,8 @@
     color: var(--accent);
   }
   .sev-warn {
-    background: color-mix(in srgb, var(--status-idle, #e6a817) 15%, transparent);
-    color: var(--status-idle, #c8920a);
+    background: color-mix(in srgb, var(--status-warn) 15%, transparent);
+    color: var(--status-warn);
   }
   .sev-bug {
     background: color-mix(in srgb, var(--status-exited) 15%, transparent);
@@ -779,7 +782,7 @@
     flex-wrap: wrap;
   }
   .lrp-history-run-header:hover {
-    background: var(--surface-hover, var(--surface-raised));
+    background: var(--surface-2);
   }
   .lrp-history-run-body {
     padding: 4px 8px 8px;
@@ -801,6 +804,14 @@
   @media (max-width: 1024px) {
     .lrp-select { min-width: 0; flex: 1 1 160px; max-width: 100%; }
     .lrp-handoff-bar { flex-wrap: wrap; }
+    /* Touch targets across the panel's action rows — incl. the Select all/None
+       findings-header buttons (a real tablet/landscape concern, not phone-only). */
+    .lrp-toolbar .btn,
+    .lrp-findings-header .btn,
+    .lrp-handoff-bar .btn { min-height: 36px; }
+    /* The "Past reviews" disclosure is a zero-padding text button — give it real
+       tap height without changing its desktop look. */
+    .lrp-history-toggle { padding: 6px 0; min-height: 36px; }
   }
   @media (max-width: 640px) {
     .lrp-cfg-note { margin-inline-start: 0; flex-basis: 100%; }

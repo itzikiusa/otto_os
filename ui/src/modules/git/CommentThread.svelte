@@ -139,6 +139,18 @@
       box-sizing: border-box;
     }
     .cmt-actions { max-width: 100%; }
+    /* Markdown body can hold long unbroken tokens (URLs, paths) or wide images;
+       break them and cap image width so a comment never pushes the page wider
+       than the viewport. (Code blocks already side-scroll in their own box via
+       the global .md-body pre rule.) */
+    .cmt-body {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .cmt-body :global(img) {
+      max-width: 100%;
+      height: auto;
+    }
   }
   @media (max-width: 640px) {
     .cmt-body { margin-inline-start: 0; }

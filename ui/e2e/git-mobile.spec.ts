@@ -537,3 +537,61 @@ test('conflict: conflicted-files strip is a collapsible accordion', async ({ pag
   await expect(page.locator('.resolver .files-panel.mob-collapsed')).toHaveCount(1);
   await expectFitsWidth(page);
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// SMALLEST PHONE (320px) — every core git view must still fit, with no
+// off-screen cutoff, at the narrowest mainstream width.
+// ────────────────────────────────────────────────────────────────────────────
+
+const SMALL = { width: 320, height: 568 };
+
+test('320px: every core view fits with no horizontal overflow', async ({ page }) => {
+  await page.setViewportSize(SMALL);
+
+  // Graph + commit list.
+  await openGraph(page);
+  await expectFitsWidth(page);
+
+  // Changes (dirty tree → real rows).
+  await page.goto(`/#/git/${dirtyRepoId}/changes`);
+  await expect(page.locator('.changes.mobile')).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.changes .cs-name').first()).toBeVisible({ timeout: 15_000 });
+  await expectFitsWidth(page);
+
+  // History list.
+  await page.goto(`/#/git/${repoId}/history`);
+  await expect(page.locator('.history .commit').first()).toBeVisible({ timeout: 20_000 });
+  await expectFitsWidth(page);
+
+  // Pull-request list.
+  await page.goto(`/#/git/${repoId}/prs`);
+  await expect(page.locator('.prlist')).toBeVisible({ timeout: 25_000 });
+  await expectFitsWidth(page);
+
+  // Local review panel.
+  await page.goto(`/#/git/${repoId}/review`);
+  await expect(page.locator('.lrp')).toBeVisible({ timeout: 25_000 });
+  await expectFitsWidth(page);
+});
+
+test('320px: commit diff code is reachable + conflict resolver fits', async ({ page }) => {
+  await page.setViewportSize(SMALL);
+
+  // Commit diff: long lines wrap, code reachable.
+  await openGraph(page);
+  await page.locator('.graph-row').nth(1).click();
+  await expect(
+    page.locator('.detail-panel.mob-visible, .detail-panel.detail-visible'),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.detail-diff .df-block').first()).toBeVisible({ timeout: 15_000 });
+  await expectFitsWidth(page);
+  await expectDiffCodeReachable(page);
+
+  // Conflict resolver still stacks + fits at 320.
+  await openResolver(page);
+  await expect(page.locator('.resolver.mobile')).toBeVisible();
+  await expect(page.locator('.resolver .stack-sides').first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.resolver .split-table')).toHaveCount(0);
+  await expectFitsWidth(page);
+  await expectConflictCodeReachable(page);
+});

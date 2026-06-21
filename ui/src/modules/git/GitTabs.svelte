@@ -174,7 +174,8 @@
     align-items: center;
     gap: 6px;
     max-width: 230px;
-    padding: 6px 8px 6px 10px;
+    padding: 6px 8px;
+    padding-inline-start: 10px;
     border: 1px solid transparent;
     border-bottom: none;
     border-radius: var(--radius-s) var(--radius-s) 0 0;
@@ -206,10 +207,13 @@
   }
   /* Uncommitted changes present → amber dot (a quiet "dirty" beacon). */
   .git-tab-dot.dirty {
-    background: #febc2e;
+    background: var(--status-warn);
     opacity: 1;
   }
   .git-tab-name {
+    /* min-width:0 lets this flex item shrink so the ellipsis actually engages
+       (flex default min-width:auto would otherwise refuse to clip the name). */
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     font-weight: 500;
@@ -277,9 +281,16 @@
       font-size: 13px;
       flex-shrink: 0;
     }
+    /* ≥40px touch hit area for the close ✕ — its onclick already
+       stopPropagation()s, so tapping it never also activates the tab. */
     .git-tab-close {
       font-size: 18px;
-      padding: 4px 6px;
+      padding: 0;
+      min-width: 40px;
+      min-height: 40px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     /* Keep the new-repo affordance glued to the end of the scroller so it never
        disappears off-screen behind a long row of tabs. */

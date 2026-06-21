@@ -165,6 +165,14 @@
     await load(repoId, number);
   }
 
+  // On a phone the on-screen keyboard can cover the comment box (it's at the
+  // bottom of the Summary tab). Scroll it into view once focus lands; deferred so
+  // it runs after the keyboard starts animating up.
+  function scrollIntoViewOnFocus(e: FocusEvent): void {
+    const el = e.currentTarget as HTMLElement;
+    setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 250);
+  }
+
   async function addGeneralComment(): Promise<void> {
     if (newComment.trim() === '') return;
     busy = 'comment';
@@ -229,7 +237,7 @@
   {:else if pr}
     <header class="prd-head">
       <button class="btn ghost small" onclick={() => router.go(`git/${repoId}/prs`)}>
-        ← Pull Requests
+        <span class="back-arrow" aria-hidden="true">←</span> Pull Requests
       </button>
       <span class="grow"></span>
       <button class="btn small" disabled={busy !== ''} onclick={openAsSession}>
@@ -250,7 +258,7 @@
       <div class="prd-meta">
         <span class="chip {pr.state === 'open' ? 'ok' : pr.state === 'merged' ? 'accent' : 'bad'}">{pr.state}</span>
         <span class="dim">{pr.author}</span>
-        <span class="mono dim">{pr.source_branch} → {pr.target_branch}</span>
+        <span class="mono dim">{pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}</span>
         {#if pr.mergeable === false}<span class="chip bad">conflicts</span>{/if}
         {#if pr.approved_by.length > 0}
           <span class="chip ok" title={pr.approved_by.join(', ')}>
@@ -415,7 +423,7 @@
         {/each}
 
         <div class="new-comment card">
-          <textarea class="input" rows="3" bind:value={newComment} placeholder="Leave a comment…"></textarea>
+          <textarea class="input" rows="3" bind:value={newComment} placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
           <div class="row" style="justify-content: flex-end; margin-top: 8px">
             <button
               class="btn primary small"
@@ -485,6 +493,7 @@
   .prd {
     height: 100%;
     overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 12px 18px 48px;
   }
   .prd-head {
@@ -586,12 +595,19 @@
     flex: none;
     border-radius: 50%;
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     font-size: 11px;
     font-weight: 600;
+  }
+  /* A long reviewer name truncates instead of pushing the APPROVED chip off. */
+  .reviewer-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .reviewer-img {
     width: 22px;
@@ -639,12 +655,12 @@
 
   /* Request Changes inline panel */
   .btn.warn {
-    background: var(--warn, #92400e);
-    color: var(--warn-fg, #fef3c7);
-    border-color: transparent;
+    background: var(--status-warn-soft);
+    color: var(--status-warn);
+    border-color: color-mix(in srgb, var(--status-warn) 45%, transparent);
   }
   .btn.warn:hover:not(:disabled) {
-    filter: brightness(1.15);
+    background: color-mix(in srgb, var(--status-warn) 24%, transparent);
   }
   .prd-request-changes {
     padding: 12px 16px;
@@ -682,11 +698,25 @@
   }
   .commit-author {
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
     font-size: 11.5px;
   }
   .commit-date {
     white-space: nowrap;
     font-size: 11.5px;
+  }
+
+  /* Direction-aware arrows: the back chevron and the source→target separator
+     mirror in place under RTL so they point with the reading direction. */
+  .back-arrow,
+  .dir-arrow {
+    display: inline-block;
+  }
+  :global([dir='rtl']) .back-arrow,
+  :global([dir='rtl']) .dir-arrow {
+    transform: scaleX(-1);
   }
 
   /* ── Mobile + tablet (≤1024px): wrap dense rows, scroll the tab strip, legible

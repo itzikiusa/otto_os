@@ -181,31 +181,32 @@
     color: var(--accent);
   }
   .rp-status-done {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 15%, transparent);
-    color: var(--status-idle, #3a8c3a);
+    background: color-mix(in srgb, var(--status-working) 15%, transparent);
+    color: var(--status-working);
   }
   .rp-status-error {
     background: color-mix(in srgb, var(--status-exited) 15%, transparent);
     color: var(--status-exited);
   }
   .rp-status-waiting {
-    background: color-mix(in srgb, #e0a000 20%, transparent);
-    color: #b07d00;
+    background: var(--status-warn-soft);
+    color: var(--status-warn);
   }
 
   .rp-agent-waiting {
     margin: 6px 0 0;
     font-size: 11.5px;
     line-height: 1.45;
-    color: #b07d00;
+    color: var(--status-warn);
   }
   .rp-term {
-    height: 360px;
+    height: min(360px, 65vh);
     margin: 8px 0 2px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: hidden;
-    background: #1b1b1b;
+    overscroll-behavior: contain;
+    background: var(--term-bg);
   }
   .rp-agent-findings {
     list-style: none;
@@ -249,8 +250,8 @@
     color: var(--accent);
   }
   .sev-warn {
-    background: color-mix(in srgb, var(--status-idle, #e6a817) 15%, transparent);
-    color: var(--status-idle, #c8920a);
+    background: color-mix(in srgb, var(--status-warn) 15%, transparent);
+    color: var(--status-warn);
   }
   .sev-bug {
     background: color-mix(in srgb, var(--status-exited) 15%, transparent);
@@ -284,8 +285,8 @@
     letter-spacing: 0.03em;
     flex-shrink: 0;
   }
-  .rp-state-fixing    { background: color-mix(in srgb, #e0a000 15%, transparent); color: #b07d00; }
-  .rp-state-resolved  { background: color-mix(in srgb, #22c55e 12%, transparent); color: #15803d; }
+  .rp-state-fixing    { background: color-mix(in srgb, var(--status-warn) 15%, transparent); color: var(--status-warn); }
+  .rp-state-resolved  { background: color-mix(in srgb, var(--status-working) 12%, transparent); color: var(--status-working); }
   .rp-state-regressed { background: color-mix(in srgb, var(--status-exited) 12%, transparent); color: var(--status-exited); }
   .rp-state-declined  { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
 
@@ -310,6 +311,6 @@
   @media (max-width: 640px) {
     .rp-agent-top .btn { min-height: 38px; }
     .rp-loc { max-width: 100%; }
-    .rp-term { height: 280px; }
+    .rp-term { height: min(280px, 60vh); }
   }
 </style>

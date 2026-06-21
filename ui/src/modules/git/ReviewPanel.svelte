@@ -1145,14 +1145,14 @@
     flex-wrap: wrap;
   }
   .rp-merge-ok {
-    background: color-mix(in srgb, #22c55e 12%, transparent);
-    border: 1px solid color-mix(in srgb, #22c55e 40%, var(--border));
-    color: #15803d;
+    background: color-mix(in srgb, var(--status-working) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-working) 40%, var(--border));
+    color: var(--status-working);
   }
   .rp-merge-blocked {
-    background: color-mix(in srgb, #ef4444 10%, transparent);
-    border: 1px solid color-mix(in srgb, #ef4444 35%, var(--border));
-    color: #b91c1c;
+    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-exited) 35%, var(--border));
+    color: var(--status-exited);
   }
   .rp-verdict {
     margin-inline-start: auto;
@@ -1183,10 +1183,10 @@
     padding: 2px 7px;
   }
   /* CI status pill colours */
-  .rp-ci-success { background: color-mix(in srgb, #22c55e 12%, transparent); color: #15803d; }
+  .rp-ci-success { background: color-mix(in srgb, var(--status-working) 12%, transparent); color: var(--status-working); }
   .rp-ci-failure { background: color-mix(in srgb, var(--status-exited) 12%, transparent); color: var(--status-exited); }
-  .rp-ci-pending { background: color-mix(in srgb, #e0a000 12%, transparent); color: #b07d00; }
-  .rp-ci-none    { background: var(--surface-raised); color: var(--text-dim); }
+  .rp-ci-pending { background: color-mix(in srgb, var(--status-warn) 12%, transparent); color: var(--status-warn); }
+  .rp-ci-none    { background: var(--surface-2); color: var(--text-dim); }
 
   /* Pre-check banner: missing / outdated review skills */
   .rp-precheck {
@@ -1195,15 +1195,15 @@
     gap: 8px;
     padding: 7px 10px;
     margin: 0 0 10px;
-    border: 1px solid color-mix(in srgb, #e0a000 35%, var(--border));
-    background: color-mix(in srgb, #e0a000 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-warn) 35%, var(--border));
+    background: color-mix(in srgb, var(--status-warn) 10%, transparent);
     border-radius: var(--radius-s, 4px);
     font-size: 11.5px;
     line-height: 1.4;
     flex-wrap: wrap;
   }
   .rp-precheck-icon {
-    color: #b07d00;
+    color: var(--status-warn);
     flex-shrink: 0;
   }
   .rp-precheck-msg {
@@ -1337,16 +1337,16 @@
     color: var(--accent);
   }
   .rp-status-done {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 15%, transparent);
-    color: var(--status-idle, #3a8c3a);
+    background: color-mix(in srgb, var(--status-working) 15%, transparent);
+    color: var(--status-working);
   }
   .rp-status-error {
     background: color-mix(in srgb, var(--status-exited) 15%, transparent);
     color: var(--status-exited);
   }
   .rp-status-waiting {
-    background: color-mix(in srgb, #e0a000 20%, transparent);
-    color: #b07d00;
+    background: var(--status-warn-soft);
+    color: var(--status-warn);
   }
 
   /* Per-agent: "waiting for input" callout + expandable findings */
@@ -1354,15 +1354,16 @@
     margin: 6px 0 0;
     font-size: 11.5px;
     line-height: 1.45;
-    color: #b07d00;
+    color: var(--status-warn);
   }
   .rp-term {
-    height: 360px;
+    height: min(360px, 65vh);
     margin: 8px 0 2px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: hidden;
-    background: #1b1b1b;
+    overscroll-behavior: contain;
+    background: var(--term-bg);
   }
   .rp-agent-findings {
     list-style: none;
@@ -1395,6 +1396,8 @@
   }
   .rp-error-msg {
     flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
     font-size: 12.5px;
   }
 
@@ -1471,8 +1474,8 @@
     color: var(--accent);
   }
   .sev-warn {
-    background: color-mix(in srgb, var(--status-idle, #e6a817) 15%, transparent);
-    color: var(--status-idle, #c8920a);
+    background: color-mix(in srgb, var(--status-warn) 15%, transparent);
+    color: var(--status-warn);
   }
   .sev-bug {
     background: color-mix(in srgb, var(--status-exited) 15%, transparent);
@@ -1512,7 +1515,7 @@
     white-space: pre;
   }
   .rp-diff-add {
-    background: color-mix(in srgb, #3a8c3a 12%, transparent);
+    background: color-mix(in srgb, var(--status-working) 12%, transparent);
     color: var(--text);
   }
   .rp-diff-del {
@@ -1599,7 +1602,7 @@
   .cfg-select,
   .cfg-textarea {
     width: 100%;
-    background: var(--input-bg, var(--surface-raised));
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     color: var(--text);
@@ -1667,7 +1670,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    background: var(--surface-raised);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 20px;
     padding: 3px 8px 3px 10px;
@@ -1735,7 +1738,7 @@
   }
   .rp-context-input {
     width: 100%;
-    background: var(--input-bg, var(--surface-raised));
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     color: var(--text);
@@ -1772,6 +1775,23 @@
     .rp-running-header .btn,
     .rp-comment-head .btn { min-height: 32px; }
     .rp-loc { max-width: 100%; }
+    /* Tiny ✕ icon buttons (dismiss / remove-Jira / preset add+delete) are ~12px
+       on desktop — far below a tappable size; grow them to a real touch target
+       without changing their glyph. */
+    .rp-precheck-dismiss,
+    .rp-jira-remove,
+    .cfg-preset-action {
+      min-width: 36px;
+      min-height: 36px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* The "Past reviews" disclosure is a zero-padding text button — give it real
+       tap height. */
+    .rp-history-toggle { padding: 6px 0; min-height: 36px; }
+    /* 16px input text prevents iOS Safari from auto-zooming on focus. */
+    .rp-context-input { font-size: 16px; }
   }
   @media (max-width: 640px) {
     .rp-header .btn,
@@ -1833,7 +1853,7 @@
     flex-wrap: wrap;
   }
   .rp-history-run-header:hover {
-    background: var(--surface-hover, var(--surface-raised));
+    background: var(--surface-2);
   }
   .rp-history-run-body {
     padding: 4px 8px 8px;

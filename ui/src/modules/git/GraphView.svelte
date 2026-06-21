@@ -506,7 +506,7 @@
   }
 
   // ── Tag context menu ────────────────────────────────────────────────────────
-  function tagMenu(e: MouseEvent, t: RefTag): void {
+  function tagMenu(e: MouseEvent | KeyboardEvent, t: RefTag): void {
     const items: MenuItem[] = [
       {
         label: 'Check out tag (detached)',
@@ -995,7 +995,11 @@
               role="button"
               tabindex="0"
               title={t.name}
+              onclick={(e) => tagMenu(e, t)}
               oncontextmenu={(e) => tagMenu(e, t)}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') tagMenu(e, t);
+              }}
             >
               <Icon name="tag" size={10} />
               <span class="mono ref-name">{t.name}</span>
@@ -1224,11 +1228,9 @@
                   onclick={() => toggleFileCollapse(file.path)}
                   title={file.path}
                 >
-                  <span class="df-chevron dim">
-                    {isCollapsed ? '▶' : '▼'}
-                  </span>
+                  <span class="df-chevron dim" class:collapsed={isCollapsed} aria-hidden="true"></span>
                   <span class="mono df-path">
-                    {#if file.old_path}{file.old_path} → {/if}{file.path}
+                    {#if file.old_path}<span class="df-rename-from">{file.old_path}</span><span class="df-rename-arrow"> → </span>{/if}{file.path}
                   </span>
                   <span class="grow"></span>
                   <span class="ds-add">+{stats.add}</span>
@@ -1320,7 +1322,8 @@
     gap: 7px;
     width: 100%;
     height: 24px;
-    padding: 0 10px 0 22px;
+    padding-block: 0;
+    padding-inline: 22px 10px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -1378,7 +1381,7 @@
     height: 14px;
     border-radius: 50%;
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast);
   }
   .ref-ab {
     display: inline-flex;
@@ -1445,15 +1448,23 @@
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     box-shadow: inset 2px 0 0 0 var(--accent);
   }
+  /* Mirror the inline-start accent rail to the right edge under RTL. */
+  :global([dir='rtl']) .graph-row-selected,
+  :global([dir='rtl']) .graph-row-selected:hover {
+    box-shadow: inset -2px 0 0 0 var(--accent);
+  }
   .graph-row-selected .ci-subject {
     color: var(--accent);
     font-weight: 600;
   }
-  /* The HEAD commit ("you are here") — a left accent rail + faint wash so the
+  /* The HEAD commit ("you are here") — a leading accent rail + faint wash so the
      checked-out tip is obvious at a glance, even when not selected. */
   .graph-row-head:not(.graph-row-selected) {
     background: color-mix(in srgb, var(--accent) 7%, transparent);
     box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+  :global([dir='rtl']) .graph-row-head:not(.graph-row-selected) {
+    box-shadow: inset -2px 0 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
   }
   .gutter {
     display: block;
@@ -1510,23 +1521,23 @@
   /* Remote-tracking branch — distinct teal/cyan so it never reads as local. */
   .ref-chip.kind-remote {
     background: color-mix(in srgb, #56b6c2 18%, transparent);
-    color: #2a8d99;
+    color: var(--accent);
   }
-  /* Tag — gold. */
+  /* Tag — amber. */
   .ref-chip.kind-tag {
-    background: color-mix(in srgb, #e5c07b 22%, transparent);
-    color: #b8860b;
+    background: var(--status-warn-soft);
+    color: var(--status-warn);
   }
   /* Detached HEAD — muted warning. */
   .ref-chip.kind-detached {
-    background: color-mix(in srgb, #e06c75 18%, transparent);
-    color: #c0392b;
+    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
+    color: var(--status-exited);
   }
   /* The checked-out branch — the most prominent chip (filled accent). */
   .ref-chip.kind-head,
   .ref-chip.current-chip {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast);
     border-color: color-mix(in srgb, var(--accent) 60%, #000);
   }
   .chip-ab {
@@ -1534,7 +1545,7 @@
     gap: 2px;
     margin-inline-start: 2px;
     padding-inline-start: 3px;
-    border-inline-start: 1px solid color-mix(in srgb, #fff 45%, transparent);
+    border-inline-start: 1px solid color-mix(in srgb, var(--accent-contrast) 45%, transparent);
     font-variant-numeric: tabular-nums;
   }
   /* "You are here" pip on the HEAD row. */
@@ -1546,7 +1557,7 @@
     height: 13px;
     border-radius: 50%;
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast);
   }
   .ab-ahead {
     color: var(--status-working, #98c379);
@@ -1558,7 +1569,7 @@
   .current-chip .ab-behind,
   .kind-head .ab-ahead,
   .kind-head .ab-behind {
-    color: #fff;
+    color: var(--accent-contrast);
   }
   .ci-meta {
     display: flex;
@@ -1660,9 +1671,14 @@
   .detail-author {
     color: var(--text-dim);
     font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
   .detail-dot {
     font-size: 10px;
+    flex-shrink: 0;
   }
   .detail-date {
     font-size: 11px;
@@ -1742,6 +1758,24 @@
   .df-chevron {
     font-size: 8px;
     flex-shrink: 0;
+  }
+  /* Open glyph points down; collapsed points in the reading direction (right in
+     LTR, left in RTL) via the dir-aware override below. */
+  .df-chevron::before {
+    content: '▼';
+  }
+  .df-chevron.collapsed::before {
+    content: '▶';
+  }
+  :global([dir='rtl']) .df-chevron.collapsed::before {
+    content: '◀';
+  }
+  /* Rename separator: a logical arrow that flips with reading direction so a
+     "from → to" rename reads correctly in RTL too. */
+  :global([dir='rtl']) .df-rename-arrow {
+    /* Mirror the glyph in place rather than swapping characters. */
+    display: inline-block;
+    transform: scaleX(-1);
   }
   .df-path {
     font-size: 11px;
@@ -1902,6 +1936,7 @@
       flex: 0 0 auto;
       max-height: 38vh;
       overflow-y: auto;
+      overscroll-behavior: contain;
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
     }
@@ -1914,6 +1949,7 @@
       min-height: 180px;
       overflow-y: auto;
       overflow-x: auto;
+      overscroll-behavior: contain;
       border-inline-end: none;
     }
     /* Diff/detail pane: the prominent section once a commit is open. */
@@ -1947,6 +1983,26 @@
     .mobile .ci-author { font-size: 12px; max-width: 110px; }
     .mobile .ci-date { font-size: 12px; }
     .mobile .ref-chip { font-size: 11px; max-width: 130px; }
+    /* On a narrow phone, let the inline commit-row chips give way to the subject
+       rather than squeezing it to zero: they shrink (each keeps a legible floor)
+       and the subject keeps at least ~40% of the row. */
+    .mobile .ci-top .ref-chip {
+      flex-shrink: 1;
+      min-width: 2.5em;
+      max-width: 42vw;
+    }
+    .mobile .ci-subject { flex-basis: 40%; }
+
+    /* Close (✕) for the open commit detail — bump to a ≥40px touch target. */
+    .mobile .detail-close {
+      min-width: 40px;
+      min-height: 40px;
+      font-size: 18px;
+      padding: 8px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
 
     /* Refs rows: bigger tap targets + legible text. */
     .mobile .ref-row { height: 36px; font-size: 14px; }
@@ -1954,7 +2010,7 @@
     .mobile .ref-header { font-size: 12px; padding: 8px 12px; }
 
     /* Diff: bump the tiny code + gutter text so it's legible on a phone. */
-    .mobile .detail-diff { -webkit-overflow-scrolling: touch; }
+    .mobile .detail-diff { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
     .mobile .diff-summary-bar { font-size: 13px; padding: 9px 12px; }
     .mobile .diff-summary-bar .dim { font-size: 13px !important; }
     .mobile .ds-add,

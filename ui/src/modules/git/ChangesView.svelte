@@ -236,6 +236,17 @@
     if (isMobile && !(e.metaKey || e.ctrlKey || e.shiftKey)) secFilesOpen = false;
   }
 
+  // On phones the soft keyboard slides up over the bottom of the page and can
+  // hide the Commit button. When the message box gains focus, pull the whole
+  // composer into view so the button stays reachable above the keyboard.
+  function scrollComposerIntoView(e: FocusEvent): void {
+    if (!isMobile) return;
+    const composer = (e.currentTarget as HTMLElement).closest('.composer');
+    requestAnimationFrame(() =>
+      composer?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }),
+    );
+  }
+
   async function commit(): Promise<void> {
     if (committing) return;
     committing = true;
@@ -342,6 +353,7 @@
           bind:value={message}
           placeholder="Commit message"
           spellcheck="false"
+          onfocus={scrollComposerIntoView}
         ></textarea>
         <button
           class="btn small ghost draft-btn"
@@ -469,8 +481,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    direction: rtl;
-    text-align: left;
+    text-align: start;
   }
   .cs-discard {
     flex-shrink: 0;
@@ -489,8 +500,8 @@
     opacity: 1;
   }
   .cs-discard:hover {
-    color: var(--danger, #e5534b);
-    background: color-mix(in srgb, var(--danger, #e5534b) 12%, transparent);
+    color: var(--status-exited);
+    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
   }
   .kind {
     width: 15px;
@@ -503,8 +514,8 @@
     flex-shrink: 0;
   }
   .k-modified {
-    background: color-mix(in srgb, #febc2e 25%, transparent);
-    color: #b8860b;
+    background: var(--status-warn-soft);
+    color: var(--status-warn);
   }
   .k-added,
   .k-untracked {
@@ -606,7 +617,7 @@
 
   /* ── Mobile + tablet (≤1024px): stack files+composer over the diff ── */
   @media (max-width: 1024px) {
-    .changes.mobile { flex-direction: column; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .changes.mobile { flex-direction: column; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
     .mobile .mob-sec-head { display: flex; }
     .mobile .changes-side {
       width: 100%;
@@ -615,14 +626,17 @@
       border-bottom: 1px solid var(--border);
     }
     /* The file list scrolls within a capped height; the composer stays visible
-       below it. When collapsed, only the list hides — head + composer remain. */
-    .mobile .cs-list { max-height: 40vh; }
+       below it. When collapsed, only the list hides — head + composer remain.
+       Cap at min(40vh, 260px) so on a short landscape screen the list doesn't
+       eat the whole height and squeeze the composer/diff off-screen. */
+    .mobile .cs-list { max-height: min(40vh, 260px); overscroll-behavior: contain; }
     .mobile .changes-side.mob-files-collapsed .cs-list { display: none; }
     .mobile .changes-diff {
       min-width: 0;
       width: 100%;
       flex: 1 1 auto;
       min-height: 45vh;
+      overscroll-behavior: contain;
     }
     /* Bigger touch targets + legible text. */
     .mobile .cs-head { font-size: 13px; gap: 6px; flex-wrap: wrap; }

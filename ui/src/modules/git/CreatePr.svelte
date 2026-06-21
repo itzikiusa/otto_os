@@ -160,6 +160,15 @@
      never forces the modal wider than the viewport. */
   .branch-row .field { min-width: 0; }
   .branch-row select.input { width: 100%; min-width: 0; }
+  .branch-arrow { display: inline-block; }
+  /* Desktop only: the source→target arrow mirrors in place under RTL. On mobile
+     the arrow becomes a downward separator (rotate 90deg, below) — already
+     direction-neutral — so the flip must not fight that. */
+  @media (min-width: 1025px) {
+    :global([dir='rtl']) .branch-arrow {
+      transform: scaleX(-1);
+    }
+  }
   .draft-row {
     display: flex;
     align-items: center;

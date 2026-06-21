@@ -238,13 +238,16 @@
 
   /* ── Mobile + tablet (≤1024px): stack commit list over the diff, each collapsible ── */
   @media (max-width: 1024px) {
-    .history.mobile { flex-direction: column; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .history.mobile { flex-direction: column; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
     .mobile .mob-sec-head { display: flex; }
+    /* Cap the commit list at min(45vh, 320px) so on a short landscape screen it
+       doesn't swallow the height and clip the "Load more" pill / the diff. */
     .mobile .hist-side {
       width: 100%;
       flex: 0 0 auto;
-      max-height: 45vh;
+      max-height: min(45vh, 320px);
       overflow-y: auto;
+      overscroll-behavior: contain;
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
     }
@@ -253,6 +256,7 @@
       width: 100%;
       flex: 1 1 auto;
       min-height: 50vh;
+      overscroll-behavior: contain;
     }
     .mobile .mob-collapsed,
     .mobile .hist-diff.mob-hidden { display: none !important; }

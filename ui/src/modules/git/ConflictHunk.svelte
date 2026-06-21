@@ -270,7 +270,7 @@
   }
   .seg button.active {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast);
     font-weight: 600;
   }
 
@@ -309,7 +309,7 @@
     background: color-mix(in srgb, var(--status-working) 9%, transparent);
   }
   .half.theirs {
-    background: color-mix(in srgb, #5B8BF5 11%, transparent);
+    background: color-mix(in srgb, var(--accent) 11%, transparent);
   }
   .half.void {
     background: color-mix(in srgb, var(--text-dim) 6%, transparent);
@@ -368,7 +368,10 @@
   }
   .base-code {
     margin: 0;
-    padding: 4px 10px 6px 24px;
+    padding: 4px 10px 6px;
+    /* Logical indent so the base block stays indented from the reading edge
+       under the BASE toggle in RTL too. */
+    padding-inline-start: 24px;
     font-size: 11.5px;
     line-height: 1.55;
     color: var(--text-dim);
@@ -386,7 +389,7 @@
     background: color-mix(in srgb, var(--status-working) 9%, transparent);
   }
   .stack-side.theirs {
-    background: color-mix(in srgb, #5b8bf5 11%, transparent);
+    background: color-mix(in srgb, var(--accent) 11%, transparent);
     border-top: 1px solid var(--border);
   }
   .stack-side.dim-side {
@@ -403,7 +406,7 @@
     color: color-mix(in srgb, var(--status-working) 75%, var(--text));
   }
   .stack-label.theirs-label {
-    color: color-mix(in srgb, #5b8bf5 80%, var(--text));
+    color: color-mix(in srgb, var(--accent) 80%, var(--text));
   }
   .stack-code {
     margin: 0;
@@ -444,6 +447,21 @@
       padding: 8px 6px;
       min-height: 40px;
       white-space: nowrap;
+    }
+    /* Merge-base toggle: real touch target on a phone. */
+    .base-toggle {
+      min-height: 36px;
+      font-size: 11px;
+    }
+  }
+
+  /* Smallest phones (≤360px): let the segmented labels wrap rather than clip so
+     "Use ours/Use theirs" stay readable when four buttons share the row. */
+  @media (max-width: 360px) {
+    .seg button {
+      white-space: normal;
+      line-height: 1.15;
+      padding: 6px 4px;
     }
   }
 </style>

@@ -16,6 +16,10 @@
   --status-working: #28c840;
   --status-idle: #98989f;
   --status-exited: #ff5f57;
+  /* Amber "warning/attention" status (ahead-behind, dirty, pending, warn
+     severity). Single value like the others — readable on both schemes. */
+  --status-warn: #e0a000;
+  --status-warn-soft: rgba(224, 160, 0, 0.16);
 }
 
 /* ---------- Native theme (default) ---------- */

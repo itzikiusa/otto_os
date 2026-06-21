@@ -219,7 +219,7 @@
     font-weight: 700;
   }
   .ab.up { color: var(--status-working); }
-  .ab.down { color: #febc2e; }
+  .ab.down { color: var(--status-warn); }
   .divider {
     display: inline-block;
     width: 1px;
@@ -302,6 +302,10 @@
     .branch-input {
       height: 34px;
       font-size: 14px;
+    }
+    /* Comfortable tap targets for the popover's Create / ✕ buttons. */
+    .branch-form .btn.small {
+      min-height: 34px;
     }
   }
 </style>

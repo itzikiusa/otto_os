@@ -144,7 +144,7 @@
 <div class="repoview">
   <header class="rv-head">
     {#if !embedded}
-      <button class="btn ghost small" onclick={() => router.go('git')}>← Repos</button>
+      <button class="btn ghost small" onclick={() => router.go('git')}><span class="rv-back-arrow" aria-hidden="true">←</span> Repos</button>
     {/if}
     <button
       class="rv-name rv-switch"
@@ -336,28 +336,28 @@
   }
   .conflict-tab {
     margin-inline-start: auto;
-    color: #b8860b;
+    color: var(--status-warn);
     gap: 5px;
   }
   .conflict-tab:hover {
-    color: #b8860b;
+    color: var(--status-warn);
   }
   .conflict-tab.active {
-    color: #b8860b;
-    border-bottom-color: #febc2e;
+    color: var(--status-warn);
+    border-bottom-color: var(--status-warn);
   }
   .conflict-count {
-    background: color-mix(in srgb, #febc2e 24%, transparent);
-    color: #b8860b;
+    background: var(--status-warn-soft);
+    color: var(--status-warn);
   }
   .merge-banner {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 7px 14px;
-    background: color-mix(in srgb, #febc2e 12%, transparent);
+    background: var(--status-warn-soft);
     border-bottom: 1px solid var(--border);
-    color: #b8860b;
+    color: var(--status-warn);
     font-size: 12px;
   }
   .merge-banner .mono {
@@ -372,9 +372,19 @@
     min-height: 0;
     overflow: hidden;
   }
+  /* The back arrow is a literal "←"; mirror it under RTL so it points the
+     direction "back" actually goes (→) instead of always pointing left. */
+  .rv-back-arrow {
+    display: inline-block;
+  }
+  :global([dir='rtl']) .rv-back-arrow {
+    transform: scaleX(-1);
+  }
   .rv-tab-scroll {
     height: 100%;
     overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
     padding: 0 14px;
     box-sizing: border-box;
   }

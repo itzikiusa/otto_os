@@ -147,7 +147,7 @@
     color: var(--status-working);
   }
   .ab.down {
-    color: #febc2e;
+    color: var(--status-warn);
   }
   .dd {
     position: absolute;
@@ -191,6 +191,13 @@
   .dd-item.create {
     color: var(--accent);
   }
+  /* Long branch names ellipsize instead of widening the row / dropdown. */
+  .dd-item .grow {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .dd-up {
     font-size: 10px;
   }
@@ -218,7 +225,7 @@
     .dd {
       width: min(280px, calc(100vw - 24px));
     }
-    .dd-item { height: 34px; font-size: 13px; }
-    .dd-filter { height: 34px; font-size: 14px; }
+    .dd-item { height: 40px; font-size: 13px; }
+    .dd-filter { height: 40px; font-size: 14px; }
   }
 </style>
