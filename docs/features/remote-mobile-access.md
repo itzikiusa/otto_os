@@ -496,6 +496,10 @@ Types:
 
 ## 12. Related docs
 
+- [`./mobile-usage.md`](./mobile-usage.md) — task-oriented guide to *driving* Otto
+  on a phone/iPad once it's reachable (UI, touch terminal, per-device view).
+- [`./session-sharing.md`](./session-sharing.md) — task-oriented walkthrough of
+  minting, OTP-gating, and revoking a share for a single session.
 - [`./rbac-multiuser-sharing.md`](./rbac-multiuser-sharing.md) — per-user RBAC,
   per-session isolation, impersonation; the auth model share tokens build on.
 - [`./rtl-and-responsive.md`](./rtl-and-responsive.md) — the responsive shell,

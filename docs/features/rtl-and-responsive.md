@@ -551,6 +551,8 @@ violation across the WCAG 2.0/2.1 A/AA tag set, on every page, on every profile.
 
 ## 9. Related docs
 
+- [`./mobile-usage.md`](./mobile-usage.md) — the task-oriented "use Otto on a
+  phone/iPad" guide that builds on this responsive-shell reference.
 - [`./connections-ssh-sftp.md`](./connections-ssh-sftp.md) — SSH/SFTP/DB
   connection terminals that also run in the responsive Agents view.
 - [`./agent-swarm.md`](./agent-swarm.md) — multi-agent sessions surfaced in the
