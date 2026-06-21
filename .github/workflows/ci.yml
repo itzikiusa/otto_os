@@ -11,6 +11,12 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: every job here only reads the checked-out tree (build, lint,
+# type-check, test). Pin the GITHUB_TOKEN to read-only contents at the top level
+# so no job can mutate the repo, and so the default broad token scope is dropped.
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
   group: ci-${{ github.ref }}

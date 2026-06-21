@@ -261,7 +261,10 @@ const server = http.createServer(async (req, res) => {
     }
     send(res, 404, { error: 'not found' });
   } catch (e) {
-    send(res, 500, { error: String(e && e.message ? e.message : e) });
+    // Log the real error server-side; never leak its message/stack to the
+    // client — that's information exposure (CodeQL js/stack-trace-exposure).
+    console.error('request failed:', e);
+    send(res, 500, { error: 'internal error' });
   }
 });
 
