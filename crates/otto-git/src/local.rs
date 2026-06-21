@@ -579,6 +579,100 @@ impl LocalGit {
         Ok(combined)
     }
 
+    // -- graph context-menu ops (commit / branch / tag) ---------------------
+
+    /// Cherry-pick a single commit onto the current branch. A conflicting pick
+    /// exits non-zero → `Err` with git's stderr (the caller surfaces it; the
+    /// graph UI does NOT auto-open the conflict resolver).
+    pub async fn cherry_pick(&self, sha: &str) -> Result<()> {
+        self.run(&["cherry-pick", sha]).await?;
+        Ok(())
+    }
+
+    /// Revert a single commit, committing the inverse with `--no-edit`. A
+    /// conflicting revert exits non-zero → `Err` with git's stderr.
+    pub async fn revert(&self, sha: &str) -> Result<()> {
+        self.run(&["revert", "--no-edit", sha]).await?;
+        Ok(())
+    }
+
+    /// Create a branch `name`, optionally based at `start_point` (a commit/branch
+    /// /tag; HEAD when None). `checkout=true` switches to it (`checkout -b`),
+    /// otherwise it's created in place (`git branch`).
+    pub async fn create_branch(
+        &self,
+        name: &str,
+        start_point: Option<&str>,
+        checkout: bool,
+    ) -> Result<()> {
+        let mut args: Vec<&str> = if checkout {
+            vec!["checkout", "-b", name]
+        } else {
+            vec!["branch", name]
+        };
+        if let Some(sp) = start_point.filter(|s| !s.is_empty()) {
+            args.push(sp);
+        }
+        self.run(&args).await?;
+        Ok(())
+    }
+
+    /// Delete a local branch. `force=true` → `-D` (drops unmerged work), else
+    /// `-d` (refuses to delete an unmerged branch).
+    pub async fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
+        self.run(&["branch", if force { "-D" } else { "-d" }, name])
+            .await?;
+        Ok(())
+    }
+
+    /// Delete branch `name` on `origin` (`git push origin --delete <name>`).
+    /// Returns the combined push output.
+    pub async fn delete_remote_branch(&self, name: &str, token: Option<String>) -> Result<String> {
+        self.run_remote(&["push", "origin", "--delete", name], token)
+            .await
+    }
+
+    /// Rename local branch `from` → `to` (`git branch -m`).
+    pub async fn rename_branch(&self, from: &str, to: &str) -> Result<()> {
+        self.run(&["branch", "-m", from, to]).await?;
+        Ok(())
+    }
+
+    /// Create a tag at `sha`: annotated (`-a … -m <msg>`) when `message` is
+    /// present, lightweight otherwise.
+    pub async fn create_tag(&self, name: &str, sha: &str, message: Option<&str>) -> Result<()> {
+        match message.filter(|m| !m.is_empty()) {
+            Some(msg) => {
+                self.run(&["tag", "-a", name, "-m", msg, sha]).await?;
+            }
+            None => {
+                self.run(&["tag", name, sha]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Push a single tag to `origin` (`git push origin refs/tags/<name>`).
+    /// Returns the combined push output.
+    pub async fn push_tag(&self, name: &str, token: Option<String>) -> Result<String> {
+        let refspec = format!("refs/tags/{name}");
+        self.run_remote(&["push", "origin", &refspec], token).await
+    }
+
+    /// Delete a local tag (`git tag -d <name>`).
+    pub async fn delete_tag(&self, name: &str) -> Result<()> {
+        self.run(&["tag", "-d", name]).await?;
+        Ok(())
+    }
+
+    /// Delete a tag on `origin` (`git push origin --delete refs/tags/<name>`).
+    /// Returns the combined push output.
+    pub async fn delete_remote_tag(&self, name: &str, token: Option<String>) -> Result<String> {
+        let refspec = format!("refs/tags/{name}");
+        self.run_remote(&["push", "origin", "--delete", &refspec], token)
+            .await
+    }
+
     pub async fn stash_save(&self) -> Result<String> {
         let (out, _) = self.run_env(&["stash", "push"], &[]).await?;
         Ok(out.trim().to_string())
@@ -1269,6 +1363,68 @@ mod tests {
         assert!(git.worktree_exists(&wt_str).await);
         // An unrelated path is not a worktree.
         assert!(!git.worktree_exists("/tmp/definitely-not-a-worktree-xyz").await);
+    }
+
+    /// Local-only graph context-menu ops: branch create/rename/delete, tag
+    /// create (lightweight + annotated) / delete, cherry-pick and revert. Remote
+    /// ops (`delete_remote_*`, `push_tag`) need a remote and are exercised via
+    /// the live verification, not here.
+    #[tokio::test]
+    async fn graph_context_ops_local() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+
+        // Commit the pending fixture changes so HEAD is clean for picks/reverts.
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "baseline"]);
+        let head = git.log(1, 0, false).await.unwrap()[0].sha.clone();
+
+        // create_branch in place (no checkout) from a start_point.
+        git.create_branch("feat/a", Some(&head), false).await.unwrap();
+        assert_eq!(git.current_branch().await.unwrap(), "main");
+        assert!(git.refs().await.unwrap().local.iter().any(|b| b.name == "feat/a"));
+
+        // create_branch + checkout from HEAD.
+        git.create_branch("feat/b", None, true).await.unwrap();
+        assert_eq!(git.current_branch().await.unwrap(), "feat/b");
+
+        // rename it, then go back to main.
+        git.rename_branch("feat/b", "feat/b2").await.unwrap();
+        assert_eq!(git.current_branch().await.unwrap(), "feat/b2");
+        git.checkout("main", false).await.unwrap();
+
+        // delete branches (force for the unmerged renamed one).
+        git.delete_branch("feat/a", false).await.unwrap();
+        git.delete_branch("feat/b2", true).await.unwrap();
+        let locals = git.refs().await.unwrap().local;
+        assert!(!locals.iter().any(|b| b.name == "feat/a" || b.name == "feat/b2"));
+
+        // lightweight + annotated tags, then list + delete.
+        git.create_tag("v1", &head, None).await.unwrap();
+        git.create_tag("v2", &head, Some("release two")).await.unwrap();
+        let tags = git.refs().await.unwrap().tags;
+        assert!(tags.iter().any(|t| t.name == "v1"));
+        assert!(tags.iter().any(|t| t.name == "v2"));
+        git.delete_tag("v1").await.unwrap();
+        assert!(!git.refs().await.unwrap().tags.iter().any(|t| t.name == "v1"));
+
+        // cherry-pick: make a commit on a side branch, pick it onto main.
+        git.create_branch("side", Some(&head), true).await.unwrap();
+        write(&dir, "picked.txt", "from side\n");
+        git.stage(&["picked.txt".into()]).await.unwrap();
+        let side_sha = git.commit("side change", false).await.unwrap();
+        git.checkout("main", false).await.unwrap();
+        git.cherry_pick(&side_sha).await.unwrap();
+        assert!(dir.join("picked.txt").exists());
+        assert_eq!(git.log(1, 0, false).await.unwrap()[0].subject, "side change");
+
+        // revert the cherry-picked commit → file removed again.
+        let picked = git.log(1, 0, false).await.unwrap()[0].sha.clone();
+        git.revert(&picked).await.unwrap();
+        assert!(!dir.join("picked.txt").exists());
+
+        // a bad cherry-pick ref surfaces as an Upstream error.
+        assert!(git.cherry_pick("deadbeefdeadbeef").await.is_err());
     }
 
     #[test]

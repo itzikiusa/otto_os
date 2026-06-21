@@ -75,6 +75,15 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/push", post(repo_push::<S>))
         .route("/repos/{id}/pull", post(repo_pull::<S>))
         .route("/repos/{id}/checkout", post(repo_checkout::<S>))
+        // graph context-menu ops (commit / branch / tag)
+        .route("/repos/{id}/cherry-pick", post(repo_cherry_pick::<S>))
+        .route("/repos/{id}/revert", post(repo_revert::<S>))
+        .route("/repos/{id}/branch", post(repo_branch_create::<S>))
+        .route("/repos/{id}/branch/rename", post(repo_branch_rename::<S>))
+        .route("/repos/{id}/branch/delete", post(repo_branch_delete::<S>))
+        .route("/repos/{id}/tag", post(repo_tag_create::<S>))
+        .route("/repos/{id}/tag/push", post(repo_tag_push::<S>))
+        .route("/repos/{id}/tag/delete", post(repo_tag_delete::<S>))
         .route("/repos/{id}/api-collections/pull", post(repo_collections_pull::<S>))
         .route("/repos/{id}/api-collections/push", post(repo_collections_push::<S>))
         .route("/repos/{id}/stash", post(repo_stash::<S>))
@@ -924,6 +933,238 @@ async fn repo_checkout<S: GitCtx>(
 ) -> ApiResult<Json<RepoStatusResp>> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.checkout(&req.branch, req.create).await?;
+    Ok(Json(git.status().await?))
+}
+
+// ---------------------------------------------------------------------------
+// Graph context-menu ops (commit / branch / tag). All Editor; each returns the
+// FRESH RepoStatusResp (via git.status()) so the UI refreshes ahead/behind +
+// graph after the op. Remote ops resolve `optional_token` first (None for ssh).
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CherryPickReq {
+    sha: String,
+}
+
+async fn repo_cherry_pick<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<CherryPickReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    if req.sha.trim().is_empty() {
+        return Err(Error::Invalid("sha must not be empty".into()).into());
+    }
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.cherry_pick(req.sha.trim()).await?;
+    Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct RevertReq {
+    sha: String,
+}
+
+async fn repo_revert<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<RevertReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    if req.sha.trim().is_empty() {
+        return Err(Error::Invalid("sha must not be empty".into()).into());
+    }
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.revert(req.sha.trim()).await?;
+    Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct CreateBranchReq {
+    name: String,
+    #[serde(default)]
+    start_point: Option<String>,
+    #[serde(default)]
+    checkout: Option<bool>,
+}
+
+async fn repo_branch_create<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<CreateBranchReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    if req.name.trim().is_empty() {
+        return Err(Error::Invalid("branch name must not be empty".into()).into());
+    }
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.create_branch(
+        req.name.trim(),
+        req.start_point.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        req.checkout.unwrap_or(false),
+    )
+    .await?;
+    Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct RenameBranchReq {
+    from: String,
+    to: String,
+}
+
+async fn repo_branch_rename<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<RenameBranchReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    if req.from.trim().is_empty() || req.to.trim().is_empty() {
+        return Err(Error::Invalid("from/to must not be empty".into()).into());
+    }
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.rename_branch(req.from.trim(), req.to.trim()).await?;
+    Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct DeleteBranchReq {
+    name: String,
+    /// Also delete `origin/<name>` (and acquire the account token for the push).
+    #[serde(default)]
+    remote: Option<bool>,
+    /// Delete the LOCAL branch. Defaults to true; the remote-ref-row "Delete
+    /// origin/<name>" sends `local:false` so only the origin copy is removed.
+    #[serde(default)]
+    local: Option<bool>,
+    /// `-D` (drop unmerged) instead of `-d`. The UI confirms first.
+    #[serde(default)]
+    force: Option<bool>,
+}
+
+async fn repo_branch_delete<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<DeleteBranchReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("branch name must not be empty".into()).into());
+    }
+    let want_local = req.local.unwrap_or(true);
+    let want_remote = req.remote.unwrap_or(false);
+    if !want_local && !want_remote {
+        return Err(Error::Invalid("nothing to delete (set local and/or remote)".into()).into());
+    }
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    if want_local {
+        // Never delete the checked-out branch — git refuses, and a half-done
+        // local+remote delete is worse. Reject up front with a clear message.
+        if git.current_branch().await? == name {
+            return Err(Error::Invalid(format!(
+                "cannot delete the checked-out branch '{name}'; switch branches first"
+            ))
+            .into());
+        }
+        git.delete_branch(name, req.force.unwrap_or(true)).await?;
+    }
+    if want_remote {
+        let token = optional_token(&s, &user, &repo).await?;
+        git.delete_remote_branch(name, token).await?;
+    }
+    Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct CreateTagReq {
+    name: String,
+    sha: String,
+    /// Annotated tag message; lightweight tag when absent/empty.
+    #[serde(default)]
+    message: Option<String>,
+    /// Push the new tag to origin after creating it.
+    #[serde(default)]
+    push: Option<bool>,
+}
+
+async fn repo_tag_create<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<CreateTagReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("tag name must not be empty".into()).into());
+    }
+    if req.sha.trim().is_empty() {
+        return Err(Error::Invalid("tag sha must not be empty".into()).into());
+    }
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.create_tag(
+        name,
+        req.sha.trim(),
+        req.message.as_deref().map(str::trim).filter(|m| !m.is_empty()),
+    )
+    .await?;
+    if req.push.unwrap_or(false) {
+        let token = optional_token(&s, &user, &repo).await?;
+        git.push_tag(name, token).await?;
+    }
+    Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct PushTagReq {
+    name: String,
+}
+
+async fn repo_tag_push<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<PushTagReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("tag name must not be empty".into()).into());
+    }
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let token = optional_token(&s, &user, &repo).await?;
+    git.push_tag(name, token).await?;
+    Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct DeleteTagReq {
+    name: String,
+    /// Also delete the tag on origin (acquires the account token).
+    #[serde(default)]
+    remote: Option<bool>,
+}
+
+async fn repo_tag_delete<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<DeleteTagReq>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("tag name must not be empty".into()).into());
+    }
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.delete_tag(name).await?;
+    if req.remote.unwrap_or(false) {
+        let token = optional_token(&s, &user, &repo).await?;
+        git.delete_remote_tag(name, token).await?;
+    }
     Ok(Json(git.status().await?))
 }
 

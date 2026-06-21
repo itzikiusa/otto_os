@@ -1,8 +1,10 @@
 <script lang="ts">
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { api } from '../../lib/api/client';
-  import type { CommitInfo, RefsResp, RefBranch, RepoStatusResp, DiffResp, FileDiff, DiffLine } from '../../lib/api/types';
+  import type { CommitInfo, RefsResp, RefBranch, RefTag, RepoStatusResp, DiffResp, FileDiff, DiffLine } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
@@ -111,6 +113,307 @@
       .catch(() => (commits = []))
       .finally(() => (commitsLoading = false));
   });
+
+  // ── Context-menu helpers ────────────────────────────────────────────────────
+  /** Copy `text` to the clipboard and toast success/failure with `label`. */
+  async function clip(text: string, label: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      toasts.success('Copied', label);
+    } catch (e) {
+      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** After a mutating graph op: propagate the returned status (if any) to the
+   *  parent and re-query refs + log so the graph reflects the change. */
+  async function refreshAfter(status?: RepoStatusResp): Promise<void> {
+    if (status) onstatus(status);
+    await Promise.all([
+      api.get<RefsResp>(`/repos/${repoId}/refs`).then((r) => (refs = r)).catch(() => {}),
+      api
+        .get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=200`)
+        .then((c) => (commits = c))
+        .catch(() => {}),
+    ]);
+  }
+
+  /** Run a mutating POST that returns RepoStatusResp, then refresh + toast.
+   *  Errors are surfaced via toast and swallowed (the graph is left untouched). */
+  async function mutate(
+    path: string,
+    body: unknown,
+    okTitle: string,
+    okDetail?: string,
+  ): Promise<void> {
+    try {
+      const s = await api.post<RepoStatusResp>(`/repos/${repoId}${path}`, body);
+      await refreshAfter(s);
+      toasts.success(okTitle, okDetail);
+    } catch (e) {
+      toasts.error(`${okTitle} failed`, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // ── Commit context menu ─────────────────────────────────────────────────────
+  function commitMenu(e: MouseEvent, c: CommitInfo): void {
+    const items: MenuItem[] = [
+      {
+        label: 'Check out commit (detached)',
+        icon: 'branch',
+        action: () => void checkout(c.sha, false),
+      },
+      { label: 'Cherry-pick commit', icon: 'note', action: () => void cherryPick(c) },
+      { separator: true },
+      { label: 'Create branch here…', icon: 'branch', action: () => void createBranchAt(c.sha) },
+      { label: 'Create tag here…', icon: 'tag', action: () => void createTagAt(c.sha, false) },
+      {
+        label: 'Create annotated tag here…',
+        icon: 'tag',
+        action: () => void createTagAt(c.sha, true),
+      },
+      { separator: true },
+      { label: 'Revert commit', icon: 'refresh', danger: true, action: () => void revertCommit(c) },
+      { separator: true },
+      { label: 'Copy commit SHA', icon: 'note', action: () => void clip(c.sha, c.sha) },
+      { label: 'Copy short SHA', icon: 'note', action: () => void clip(c.short_sha, c.short_sha) },
+      {
+        label: 'Copy commit message',
+        icon: 'note',
+        action: () => void clip(c.subject, c.subject),
+      },
+    ];
+    ctxMenu.show(e, items);
+  }
+
+  async function cherryPick(c: CommitInfo): Promise<void> {
+    await mutate('/cherry-pick', { sha: c.sha }, 'Cherry-picked', c.short_sha);
+  }
+
+  async function revertCommit(c: CommitInfo): Promise<void> {
+    const ok = await confirmer.ask(
+      `Revert commit ${c.short_sha} — "${c.subject}"? This creates a new commit undoing its changes.`,
+      { title: 'Revert commit', confirmLabel: 'Revert', danger: true },
+    );
+    if (!ok) return;
+    await mutate('/revert', { sha: c.sha }, 'Reverted', c.short_sha);
+  }
+
+  async function createBranchAt(startPoint: string): Promise<void> {
+    const name = await confirmer.promptText('New branch name', {
+      title: 'Create branch',
+      confirmLabel: 'Create',
+      placeholder: 'feature/my-branch',
+    });
+    if (!name) return;
+    await mutate(
+      '/branch',
+      { name, start_point: startPoint, checkout: true },
+      'Branch created',
+      name,
+    );
+  }
+
+  async function createTagAt(sha: string, annotated: boolean): Promise<void> {
+    const name = await confirmer.promptText('Tag name', {
+      title: annotated ? 'Create annotated tag' : 'Create tag',
+      confirmLabel: 'Create',
+      placeholder: 'v1.0.0',
+    });
+    if (!name) return;
+    let message: string | null = null;
+    if (annotated) {
+      message = await confirmer.promptText('Tag message', {
+        title: 'Annotated tag message',
+        confirmLabel: 'Create',
+        placeholder: 'Release notes…',
+      });
+      if (!message) return;
+    }
+    // Ask whether to push the new tag straight to origin.
+    const push = await confirmer.ask(`Push tag "${name}" to origin?`, {
+      title: 'Push tag',
+      confirmLabel: 'Push',
+      danger: false,
+    });
+    await mutate(
+      '/tag',
+      annotated ? { name, sha, message, push } : { name, sha, push },
+      'Tag created',
+      name,
+    );
+  }
+
+  // ── Branch context menu (local + remote ref rows) ───────────────────────────
+  function branchMenu(e: MouseEvent, b: RefBranch): void {
+    const { remoteNames, currentBranch } = refKnowledge;
+    const items: MenuItem[] = [];
+
+    if (b.remote) {
+      // Remote ref row: checkout as a local tracking branch; delete on origin.
+      const localName = b.name.replace(/^[^/]+\//, '');
+      items.push({ label: 'Checkout', icon: 'branch', action: () => checkoutRemote(b) });
+      items.push({ separator: true });
+      items.push({
+        label: 'Create branch from here…',
+        icon: 'branch',
+        action: () => void createBranchFrom(b.name),
+      });
+      items.push({ separator: true });
+      items.push({
+        label: `Delete ${b.name}`,
+        icon: 'trash',
+        danger: true,
+        action: () => void deleteRemoteBranch(localName),
+      });
+      items.push({ separator: true });
+      items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(localName, localName) });
+    } else {
+      const isCurrent = b.name === currentBranch;
+      items.push({
+        label: 'Checkout',
+        icon: 'branch',
+        disabled: isCurrent,
+        action: () => !isCurrent && checkout(b.name, false),
+      });
+      items.push({ separator: true });
+      items.push({
+        label: 'Create branch from here…',
+        icon: 'branch',
+        action: () => void createBranchFrom(b.name),
+      });
+      items.push({ label: 'Rename…', icon: 'edit', action: () => void renameBranch(b.name) });
+      // A matching remote branch (origin/<name>) → offer remote deletes too.
+      const hasRemote = remoteNames.has(`origin/${b.name}`);
+      // Never offer Delete on the checked-out branch (git refuses).
+      if (!isCurrent) {
+        items.push({ separator: true });
+        items.push({
+          label: `Delete ${b.name}`,
+          icon: 'trash',
+          danger: true,
+          action: () => void deleteLocalBranch(b.name, false),
+        });
+        if (hasRemote) {
+          items.push({
+            label: `Delete origin/${b.name}`,
+            icon: 'trash',
+            danger: true,
+            action: () => void deleteRemoteBranch(b.name),
+          });
+          items.push({
+            label: 'Delete local + remote',
+            icon: 'trash',
+            danger: true,
+            action: () => void deleteLocalBranch(b.name, true),
+          });
+        }
+      }
+      items.push({ separator: true });
+      items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(b.name, b.name) });
+      if (b.upstream) {
+        items.push({
+          label: 'Copy upstream name',
+          icon: 'note',
+          action: () => void clip(b.upstream!, b.upstream!),
+        });
+      }
+    }
+    ctxMenu.show(e, items);
+  }
+
+  async function createBranchFrom(ref: string): Promise<void> {
+    const name = await confirmer.promptText(`New branch from ${ref}`, {
+      title: 'Create branch',
+      confirmLabel: 'Create',
+      placeholder: 'feature/my-branch',
+    });
+    if (!name) return;
+    await mutate('/branch', { name, start_point: ref, checkout: true }, 'Branch created', name);
+  }
+
+  async function renameBranch(from: string): Promise<void> {
+    const to = await confirmer.promptText(`Rename branch "${from}" to`, {
+      title: 'Rename branch',
+      confirmLabel: 'Rename',
+      initial: from,
+    });
+    if (!to || to === from) return;
+    await mutate('/branch/rename', { from, to }, 'Branch renamed', `${from} → ${to}`);
+  }
+
+  async function deleteLocalBranch(name: string, alsoRemote: boolean): Promise<void> {
+    const ok = await confirmer.ask(
+      alsoRemote
+        ? `Delete branch "${name}" locally AND on origin? This cannot be undone.`
+        : `Delete local branch "${name}"?`,
+      { title: 'Delete branch', confirmLabel: 'Delete', danger: true },
+    );
+    if (!ok) return;
+    await mutate(
+      '/branch/delete',
+      { name, remote: alsoRemote },
+      alsoRemote ? 'Branch deleted (local + remote)' : 'Branch deleted',
+      name,
+    );
+  }
+
+  async function deleteRemoteBranch(name: string): Promise<void> {
+    const ok = await confirmer.ask(`Delete branch "${name}" on origin? This cannot be undone.`, {
+      title: 'Delete remote branch',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    // Remote-only: leave any local branch of the same name intact.
+    await mutate(
+      '/branch/delete',
+      { name, remote: true, local: false, force: true },
+      'Remote branch deleted',
+      `origin/${name}`,
+    );
+  }
+
+  // ── Tag context menu ────────────────────────────────────────────────────────
+  function tagMenu(e: MouseEvent, t: RefTag): void {
+    const items: MenuItem[] = [
+      {
+        label: 'Check out tag (detached)',
+        icon: 'branch',
+        action: () => void checkout(t.name, false),
+      },
+      { separator: true },
+      { label: 'Push tag to origin', icon: 'send', action: () => void pushTag(t.name) },
+      {
+        label: 'Delete tag',
+        icon: 'trash',
+        danger: true,
+        action: () => void deleteTag(t.name, false),
+      },
+      {
+        label: 'Delete tag on origin',
+        icon: 'trash',
+        danger: true,
+        action: () => void deleteTag(t.name, true),
+      },
+      { separator: true },
+      { label: 'Copy tag name', icon: 'note', action: () => void clip(t.name, t.name) },
+    ];
+    ctxMenu.show(e, items);
+  }
+
+  async function pushTag(name: string): Promise<void> {
+    await mutate('/tag/push', { name }, 'Tag pushed', name);
+  }
+
+  async function deleteTag(name: string, remote: boolean): Promise<void> {
+    const ok = await confirmer.ask(
+      remote ? `Delete tag "${name}" on origin?` : `Delete local tag "${name}"?`,
+      { title: 'Delete tag', confirmLabel: 'Delete', danger: true },
+    );
+    if (!ok) return;
+    await mutate('/tag/delete', { name, remote }, remote ? 'Tag deleted on origin' : 'Tag deleted', name);
+  }
 
   async function checkout(branch: string, create: boolean): Promise<void> {
     checkoutBusy = branch;
@@ -427,6 +730,7 @@
               ondrop={(e) => onTargetDrop(e, b.name)}
               disabled={checkoutBusy !== ''}
               onclick={() => !b.is_current && checkout(b.name, false)}
+              oncontextmenu={(e) => branchMenu(e, b)}
               title={dragSource && isValidDropTarget(b.name)
                 ? `Merge ${dragSourceName()} → ${b.name}`
                 : b.name}
@@ -470,6 +774,7 @@
               ondragend={onRefDragEnd}
               disabled={checkoutBusy !== ''}
               onclick={() => checkoutRemote(b)}
+              oncontextmenu={(e) => branchMenu(e, b)}
               title="Drag onto a local branch to merge, or click to checkout as a local tracking branch"
             >
               <Icon name="dot" size={10} />
@@ -492,7 +797,13 @@
         </button>
         {#if tagsOpen}
           {#each refs.tags as t (t.name)}
-            <div class="ref-row tag" title={t.name}>
+            <div
+              class="ref-row tag"
+              role="button"
+              tabindex="0"
+              title={t.name}
+              oncontextmenu={(e) => tagMenu(e, t)}
+            >
               <Icon name="tag" size={10} />
               <span class="mono ref-name">{t.name}</span>
             </div>
@@ -524,6 +835,7 @@
             class:graph-row-selected={isSelected}
             class:graph-row-head={isHead}
             onclick={() => selectCommit(row.commit)}
+            oncontextmenu={(e) => commitMenu(e, row.commit)}
             title={isHead ? `${row.commit.subject} — you are here (HEAD)` : row.commit.subject}
             aria-pressed={isSelected}
           >

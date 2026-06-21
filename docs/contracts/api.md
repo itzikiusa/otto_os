@@ -535,6 +535,14 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | POST /repos/{id}/merge/commit | ws editor | — | `{sha}` |
 | GET /repos/{id}/conflict | ws viewer | — | conflict listing |
 | POST /repos/{id}/conflict/resolve | ws editor | ResolveConflictReq | RepoStatusResp |
+| POST /repos/{id}/cherry-pick | ws editor | `{sha}` | RepoStatusResp (cherry-pick the commit onto the current branch; conflict → 502 with git stderr) |
+| POST /repos/{id}/revert | ws editor | `{sha}` | RepoStatusResp (revert the commit with `--no-edit`; conflict → 502 with git stderr) |
+| POST /repos/{id}/branch | ws editor | `{name, start_point?, checkout?}` | RepoStatusResp (create a branch, optionally from `start_point` and checking it out) |
+| POST /repos/{id}/branch/rename | ws editor | `{from, to}` | RepoStatusResp (rename a local branch) |
+| POST /repos/{id}/branch/delete | ws editor | `{name, remote?, local?, force?}` | RepoStatusResp (delete the local branch (`local` default true); `remote:true` also deletes `origin/<name>`; `local:false` = remote-only; never the checked-out branch — 400) |
+| POST /repos/{id}/tag | ws editor | `{name, sha, message?, push?}` | RepoStatusResp (create a tag at `sha`; annotated when `message`; pushes the new tag when `push:true`) |
+| POST /repos/{id}/tag/push | ws editor | `{name}` | RepoStatusResp (push an existing tag to origin) |
+| POST /repos/{id}/tag/delete | ws editor | `{name, remote?}` | RepoStatusResp (delete the local tag; `remote:true` also deletes it on origin) |
 | GET /repos/{id}/prs/{number}/commits | ws viewer | — | `CommitInfo[]` (PR commits) |
 | POST /repos/{id}/prs/{number}/request-changes | ws editor | — | 204 (request changes review) |
 | POST /repos/{id}/api-collections/pull | ws editor | — | pull API-client collections committed in the repo |
