@@ -93,7 +93,7 @@ pub async fn search(
     let mut all: Vec<Scored> = Vec::new();
 
     // --- 1. Product stories -----------------------------------------------
-    if let Ok(stories) = ctx.product_repo.list_stories(&ws_id).await {
+    if let Ok(stories) = ctx.product_repo.list_stories().await {
         for s in stories
             .into_iter()
             .filter(|s| matches_title_or_sub(&s.title, &s.source_key, &q))

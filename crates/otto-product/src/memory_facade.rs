@@ -35,7 +35,7 @@ impl ProductMemory {
                 items.push(m);
             }
         }
-        for l in repo.list_learnings(ws, true).await? {
+        for l in repo.list_learnings(true).await? {
             items.push(extract::from_learning(&l));
         }
         // Latest analysis with a non-empty summary.

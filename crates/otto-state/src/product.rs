@@ -562,14 +562,14 @@ impl ProductRepo {
         row_to_story(&row)
     }
 
-    pub async fn list_stories(&self, ws: &Id) -> Result<Vec<ProductStory>> {
-        let rows = sqlx::query(
-            "SELECT * FROM product_stories WHERE workspace_id = ? ORDER BY created_at DESC",
-        )
-        .bind(ws)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list stories"))?;
+    /// All stories, newest first. Product is a global library (like connections
+    /// and brokers): stories are not scoped to a workspace — `workspace_id` is
+    /// retained only as the creating workspace for provenance, never as a filter.
+    pub async fn list_stories(&self) -> Result<Vec<ProductStory>> {
+        let rows = sqlx::query("SELECT * FROM product_stories ORDER BY created_at DESC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list stories"))?;
         rows.iter().map(row_to_story).collect()
     }
 
@@ -1537,28 +1537,22 @@ impl ProductRepo {
         self.get_learning(&id).await
     }
 
-    pub async fn list_learnings(
-        &self,
-        ws: &Id,
-        active_only: bool,
-    ) -> Result<Vec<ProductLearning>> {
+    /// All learnings, newest first (optionally only active ones). Global like
+    /// `list_stories` — `workspace_id` is provenance only, never a filter, so the
+    /// learnings knowledge base is shared across every workspace.
+    pub async fn list_learnings(&self, active_only: bool) -> Result<Vec<ProductLearning>> {
         let rows = if active_only {
             sqlx::query(
-                "SELECT * FROM product_learnings
-                 WHERE workspace_id = ? AND active = 1 ORDER BY created_at DESC",
+                "SELECT * FROM product_learnings WHERE active = 1 ORDER BY created_at DESC",
             )
-            .bind(ws)
             .fetch_all(&self.pool)
             .await
             .map_err(dberr("list learnings active"))?
         } else {
-            sqlx::query(
-                "SELECT * FROM product_learnings WHERE workspace_id = ? ORDER BY created_at DESC",
-            )
-            .bind(ws)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("list learnings"))?
+            sqlx::query("SELECT * FROM product_learnings ORDER BY created_at DESC")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list learnings"))?
         };
         rows.iter().map(row_to_learning).collect()
     }
@@ -1790,7 +1784,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_stories_filters_by_workspace() {
+    async fn list_stories_is_global_across_workspaces() {
+        // Product is a global library: stories from every workspace are listed
+        // together regardless of the caller's current workspace.
         let pool = mem_pool().await;
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
@@ -1801,10 +1797,8 @@ mod tests {
         repo.create_story(new_story_input(&ws1, &user)).await.unwrap();
         repo.create_story(new_story_input(&ws2, &user)).await.unwrap();
 
-        let list1 = repo.list_stories(&ws1).await.unwrap();
-        let list2 = repo.list_stories(&ws2).await.unwrap();
-        assert_eq!(list1.len(), 2);
-        assert_eq!(list2.len(), 1);
+        let all = repo.list_stories().await.unwrap();
+        assert_eq!(all.len(), 3);
     }
 
     // -----------------------------------------------------------------------
@@ -2005,8 +1999,8 @@ mod tests {
         .await
         .unwrap();
 
-        let active = repo.list_learnings(&ws, true).await.unwrap();
-        let all = repo.list_learnings(&ws, false).await.unwrap();
+        let active = repo.list_learnings(true).await.unwrap();
+        let all = repo.list_learnings(false).await.unwrap();
 
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, l1.id);

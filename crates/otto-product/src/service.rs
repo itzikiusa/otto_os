@@ -938,10 +938,7 @@ impl ProductService {
         }
 
         // --- Section 5: Relevant Learnings ---
-        let learnings = self
-            .repo
-            .list_learnings(&story.workspace_id, true)
-            .await?;
+        let learnings = self.repo.list_learnings(true).await?;
         if !learnings.is_empty() {
             let patterns: Vec<_> = learnings.iter().filter(|l| l.kind == "pattern").collect();
             let avoids: Vec<_> = learnings.iter().filter(|l| l.kind == "avoid").collect();
@@ -1201,11 +1198,7 @@ impl ProductService {
         }
 
         // --- Active learnings ---
-        let learnings = self
-            .repo
-            .list_learnings(&story.workspace_id, true)
-            .await
-            .unwrap_or_default();
+        let learnings = self.repo.list_learnings(true).await.unwrap_or_default();
         if !learnings.is_empty() {
             doc.push_str("## Learnings\n\n");
             for l in &learnings {

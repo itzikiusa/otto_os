@@ -296,7 +296,8 @@ async fn list_stories<S: ProductCtx>(
     Path(WsPath { ws }): Path<WsPath>,
 ) -> ApiResult<Response> {
     ctx.roles().check(&user, &ws, WorkspaceRole::Viewer).await?;
-    let stories = ctx.product_repo().list_stories(&ws).await?;
+    // Product is a global library — list every story regardless of workspace.
+    let stories = ctx.product_repo().list_stories().await?;
     Ok(Json(stories).into_response())
 }
 
@@ -712,7 +713,8 @@ async fn list_learnings<S: ProductCtx>(
 ) -> ApiResult<Response> {
     ctx.roles().check(&user, &ws, WorkspaceRole::Viewer).await?;
     let active_only = q.active.unwrap_or(false);
-    let learnings = ctx.product_repo().list_learnings(&ws, active_only).await?;
+    // Global learnings knowledge base — shared across every workspace.
+    let learnings = ctx.product_repo().list_learnings(active_only).await?;
     Ok(Json(learnings).into_response())
 }
 
