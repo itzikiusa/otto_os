@@ -160,7 +160,7 @@
     {#if repo.provider}<span class="chip">{repo.provider}</span>{/if}
     <span class="grow"></span>
     {#if status}
-      <GitToolbar repoId={repo.id} {status} onstatus={setStatus} />
+      <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => graphKey++} />
     {:else}
       <div class="toolbar-skeleton"></div>
     {/if}

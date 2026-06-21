@@ -9,8 +9,12 @@
     repoId: string;
     status: RepoStatusResp;
     onstatus: (s: RepoStatusResp) => void;
+    /** Called after an op that may have MOVED refs/history (fetch/pull/push/
+     *  branch) so the parent can re-mount the graph — otherwise the commit graph
+     *  shows stale data until the repo tab is reopened. */
+    onrefresh?: () => void;
   }
-  let { repoId, status, onstatus }: Props = $props();
+  let { repoId, status, onstatus, onrefresh }: Props = $props();
 
   let busy = $state('');
   // Branch creation inline input state
@@ -26,6 +30,7 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/fetch`);
       onstatus(s);
+      onrefresh?.();
       toasts.success('Fetched', `origin`);
     } catch (e) {
       toasts.error('Fetch failed', e instanceof Error ? e.message : String(e));
@@ -39,6 +44,7 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/pull`);
       onstatus(s);
+      onrefresh?.();
       toasts.success('Pulled');
     } catch (e) {
       toasts.error('Pull failed', e instanceof Error ? e.message : String(e));
@@ -52,6 +58,7 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/push`, {});
       onstatus(s);
+      onrefresh?.();
       toasts.success('Pushed');
     } catch (e) {
       toasts.error('Push failed', e instanceof Error ? e.message : String(e));
@@ -67,6 +74,7 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/checkout`, { branch: name, create: true });
       onstatus(s);
+      onrefresh?.();
       toasts.success('Branch created', name);
       branchOpen = false;
       branchName = '';
