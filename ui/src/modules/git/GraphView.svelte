@@ -7,6 +7,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import CreatePr from './CreatePr.svelte';
 
   interface Props {
     repoId: string;
@@ -155,8 +156,57 @@
     }
   }
 
+  // ── Create-PR sheet (opened from branch / commit menus with a pre-filled
+  //    source). Reuses CreatePr.svelte; `initialSource` defaults the dropdown. ──
+  let createPrOpen = $state(false);
+  let createPrSource = $state<string | undefined>(undefined);
+
+  function openCreatePr(source: string): void {
+    createPrSource = source;
+    createPrOpen = true;
+  }
+
+  // ── GitFlow: start a feature/release/hotfix branch off a commit or branch tip.
+  //    Reuses the same /branch endpoint (checkout:true) as the plain create. ──
+  /** Normalize a user-typed flow name: trim, drop a leading flow prefix if they
+   *  typed it, and collapse internal whitespace to dashes. '' → skip. */
+  function normalizeFlowName(raw: string): string {
+    return raw
+      .trim()
+      .replace(/^(feature|release|hotfix)\//i, '')
+      .replace(/\s+/g, '-');
+  }
+
+  async function startFlowBranch(
+    flow: 'feature' | 'release' | 'hotfix',
+    startPoint: string,
+  ): Promise<void> {
+    const label = flow[0].toUpperCase() + flow.slice(1);
+    const raw = await confirmer.promptText(`New ${flow} branch name`, {
+      title: `Start ${flow}`,
+      confirmLabel: 'Start',
+      placeholder: 'short-name',
+    });
+    if (raw === null) return;
+    const norm = normalizeFlowName(raw);
+    if (norm === '') return;
+    const name = `${flow}/${norm}`;
+    await mutate('/branch', { name, start_point: startPoint, checkout: true }, `${label} branch created`, name);
+  }
+
+  /** Menu items for the "GitFlow" section, parameterised by start point
+   *  (a commit sha or a branch tip name). Shared by commit + branch menus. */
+  function gitFlowItems(startPoint: string): MenuItem[] {
+    return [
+      { label: 'Start feature branch…', icon: 'branch', action: () => void startFlowBranch('feature', startPoint) },
+      { label: 'Start release branch…', icon: 'branch', action: () => void startFlowBranch('release', startPoint) },
+      { label: 'Start hotfix branch…', icon: 'branch', action: () => void startFlowBranch('hotfix', startPoint) },
+    ];
+  }
+
   // ── Commit context menu ─────────────────────────────────────────────────────
   function commitMenu(e: MouseEvent, c: CommitInfo): void {
+    const { currentBranch } = refKnowledge;
     const items: MenuItem[] = [
       {
         label: 'Check out commit (detached)',
@@ -172,6 +222,22 @@
         icon: 'tag',
         action: () => void createTagAt(c.sha, true),
       },
+    ];
+    // Open a PR from the checked-out branch (the "from a commit while on a
+    // branch" case) — only meaningful when a branch is checked out.
+    if (currentBranch) {
+      items.push({ separator: true });
+      items.push({
+        label: `Create PR from ${currentBranch}…`,
+        icon: 'send',
+        action: () => openCreatePr(currentBranch),
+      });
+    }
+    // GitFlow section — start a flow branch off this exact commit.
+    items.push({ separator: true });
+    items.push({ label: 'GitFlow', disabled: true });
+    items.push(...gitFlowItems(c.sha));
+    items.push(
       { separator: true },
       { label: 'Revert commit', icon: 'refresh', danger: true, action: () => void revertCommit(c) },
       { separator: true },
@@ -182,7 +248,7 @@
         icon: 'note',
         action: () => void clip(c.subject, c.subject),
       },
-    ];
+    );
     ctxMenu.show(e, items);
   }
 
@@ -244,6 +310,19 @@
     );
   }
 
+  /** Local branches OTHER than `selfMerge` (the menu subject's merge name),
+   *  as "Merge into <t>" items routing through the existing merge+conflict flow
+   *  via `onmergerequest(<source merge name>, t)`. Empty if nothing to merge into. */
+  function mergeIntoItems(selfMerge: string): MenuItem[] {
+    const targets = (refs?.local ?? []).map((b) => b.name).filter((t) => t !== selfMerge);
+    if (!onmergerequest || targets.length === 0) return [];
+    return targets.map((t) => ({
+      label: `Merge into ${t}`,
+      icon: 'branch',
+      action: () => onmergerequest?.(selfMerge, t),
+    }));
+  }
+
   // ── Branch context menu (local + remote ref rows) ───────────────────────────
   function branchMenu(e: MouseEvent, b: RefBranch): void {
     const { remoteNames, currentBranch } = refKnowledge;
@@ -259,6 +338,17 @@
         icon: 'branch',
         action: () => void createBranchFrom(b.name),
       });
+      // Merge into … — remote refs merge by their short local name (drag logic).
+      const mergeInto = mergeIntoItems(localName);
+      if (mergeInto.length > 0) {
+        items.push({ separator: true });
+        items.push({ label: `Merge ${localName} into`, disabled: true });
+        items.push(...mergeInto);
+      }
+      // GitFlow — start a flow branch off the remote tip.
+      items.push({ separator: true });
+      items.push({ label: 'GitFlow', disabled: true });
+      items.push(...gitFlowItems(b.name));
       items.push({ separator: true });
       items.push({
         label: `Delete ${b.name}`,
@@ -283,6 +373,24 @@
         action: () => void createBranchFrom(b.name),
       });
       items.push({ label: 'Rename…', icon: 'edit', action: () => void renameBranch(b.name) });
+      // Open a PR sourced from this branch.
+      items.push({ separator: true });
+      items.push({
+        label: `Create pull request from ${b.name}…`,
+        icon: 'send',
+        action: () => openCreatePr(b.name),
+      });
+      // Merge into … — pick any OTHER local branch as the destination.
+      const mergeInto = mergeIntoItems(b.name);
+      if (mergeInto.length > 0) {
+        items.push({ separator: true });
+        items.push({ label: `Merge ${b.name} into`, disabled: true });
+        items.push(...mergeInto);
+      }
+      // GitFlow — start a flow branch off this branch tip.
+      items.push({ separator: true });
+      items.push({ label: 'GitFlow', disabled: true });
+      items.push(...gitFlowItems(b.name));
       // A matching remote branch (origin/<name>) → offer remote deletes too.
       const hasRemote = remoteNames.has(`origin/${b.name}`);
       // Never offer Delete on the checked-out branch (git refuses).
@@ -493,21 +601,39 @@
     fromCol: number;
     toCol: number;
     color: string;
-    kind: 'vert' | 'merge-in' | 'branch-out';
+    // vert      = straight continuation in a lane
+    // merge-in  = this node's extra parent heading down into another lane
+    // converge  = a duplicate-awaiting lane from above folding into this node
+    kind: 'vert' | 'merge-in' | 'branch-out' | 'converge';
   }
 
   const LANE_W = 14; // pixels per lane column
   const NODE_R = 4;  // node radius
 
-  const laneRows = $derived.by((): LaneRow[] => {
-    if (commits.length === 0) return [];
+  // Hard cap on lane count. Past this we stop opening brand-new lanes for extra
+  // (merge) parents and route them to the node's own column, so a pathological
+  // `--all` fan-out degrades gracefully instead of exploding sideways.
+  const MAX_LANES = 24;
 
-    // lanes[i] = sha of the commit expected next in lane i (null = free)
+  // The graph: rows + the widest lane count reached (drives the gutter width so
+  // it reflects the real fan-out, not just node columns). Computed in one pass.
+  const graph = $derived.by((): { rows: LaneRow[]; widest: number } => {
+    if (commits.length === 0) {
+      return { rows: [], widest: 1 };
+    }
+
+    // lanes[i] = sha of the commit expected next in lane i (null = free).
+    // laneColors[i] = palette index for lane i — kept index-aligned with lanes[]
+    // through every push / pop / null so colors never drift off their lane.
     const lanes: (string | null)[] = [];
-    // laneColor[i] = color index for lane i
     const laneColors: number[] = [];
 
     let colorIdx = 0;
+    let widest = 1;
+
+    function laneColorAt(i: number): string {
+      return PALETTE[(laneColors[i] ?? 0) % PALETTE.length];
+    }
 
     function allocateLane(sha: string | null): number {
       // prefer reusing a free slot
@@ -530,16 +656,29 @@
       if (col === -1) {
         col = allocateLane(commit.sha);
       }
-      const color = PALETTE[laneColors[col] % PALETTE.length];
+      const color = laneColorAt(col);
 
       // Build line segments for BEFORE this node (connecting to previous)
       const lines: LaneLine[] = [];
+
+      // Collapse duplicate-awaiting lanes: more than one lane can await the SAME
+      // parent sha (shared history / repeated merges in `--all`). `indexOf` only
+      // resolved the first; the rest used to run parallel forever and pile up
+      // into a "wall" of dangling verticals. Converge them onto `col` and free
+      // the lane so the gutter can shrink back.
+      for (let i = 0; i < lanes.length; i++) {
+        if (i === col) continue;
+        if (lanes[i] === commit.sha) {
+          lines.push({ fromCol: i, toCol: col, color: laneColorAt(i), kind: 'converge' });
+          lanes[i] = null;
+        }
+      }
 
       // Vertical continuations for all active lanes (before node)
       for (let i = 0; i < lanes.length; i++) {
         if (i === col) continue;
         if (lanes[i] !== null) {
-          lines.push({ fromCol: i, toCol: i, color: PALETTE[laneColors[i] % PALETTE.length], kind: 'vert' });
+          lines.push({ fromCol: i, toCol: i, color: laneColorAt(i), kind: 'vert' });
         }
       }
 
@@ -557,30 +696,42 @@
         if (existingLane !== -1) {
           // already tracked — draw merge-in line
           lines.push({ fromCol: col, toCol: existingLane, color, kind: 'merge-in' });
+        } else if (lanes.length >= MAX_LANES && lanes.indexOf(null) === -1) {
+          // Safety cap: no free lane and we're at the ceiling — don't open a new
+          // lane for this merge parent (it goes untracked); just draw a stub
+          // converging on the node's own column so the merge is still visible.
+          // Degrades gracefully instead of widening the gutter without bound.
+          lines.push({ fromCol: col, toCol: col, color, kind: 'merge-in' });
         } else {
           const newLane = allocateLane(parent);
-          lines.push({ fromCol: col, toCol: newLane, color: PALETTE[laneColors[newLane] % PALETTE.length], kind: 'merge-in' });
+          lines.push({ fromCol: col, toCol: newLane, color: laneColorAt(newLane), kind: 'merge-in' });
         }
       }
 
-      // If current lane had a different sha expected before, that's a branch-out
-      // (handled by allocateLane above; no extra drawing needed for simple cases)
+      // Trim trailing free lanes so the gutter shrinks back as branches close
+      // (keeps laneColors index-aligned by popping its tail in lockstep).
+      while (lanes.length && lanes[lanes.length - 1] === null) {
+        lanes.pop();
+        laneColors.pop();
+      }
+
+      if (lanes.length > widest) widest = lanes.length;
 
       rows.push({ commit, col, lines, color });
     }
 
-    return rows;
+    return { rows, widest };
   });
 
-  // Number of lanes actually in use across the whole graph. All rows share one
-  // gutter width so the lane dots line up vertically; we size it to the real
-  // lane count (plus a half-lane of breathing room for the node radius) instead
-  // of a large fixed area, and cap it so a wide fan-out can't blow out the layout.
+  const laneRows = $derived(graph.rows);
+
+  // Gutter width shared by every row so lane dots line up vertically. Sized to
+  // the widest lane count actually reached (plus a half-lane for the node
+  // radius), and capped so a wide fan-out can't blow out the layout.
   const MAX_GUTTER_W = 200;
   const gutterWidth = $derived.by(() => {
-    if (laneRows.length === 0) return LANE_W;
-    const laneCount = Math.max(...laneRows.map((r) => r.col + 1));
-    return Math.min(laneCount * LANE_W + LANE_W / 2, MAX_GUTTER_W);
+    if (graph.rows.length === 0) return LANE_W;
+    return Math.min(graph.widest * LANE_W + LANE_W / 2, MAX_GUTTER_W);
   });
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -852,8 +1003,16 @@
                 {@const x2 = line.toCol * LANE_W + LANE_W / 2}
                 {#if line.kind === 'vert'}
                   <line x1={x1} y1={0} x2={x1} y2={totalH} stroke={line.color} stroke-width="1.5" />
+                {:else if line.kind === 'converge'}
+                  <!-- converge: a lane from above (fromCol) folding into this node -->
+                  <path
+                    d="M{x1},0 Q{x1},{cy - 10} {cx},{cy}"
+                    stroke={line.color}
+                    stroke-width="1.5"
+                    fill="none"
+                  />
                 {:else}
-                  <!-- merge-in: curved path from node to target column -->
+                  <!-- merge-in: curved path from node down to target column -->
                   <path
                     d="M{cx},{cy} Q{cx},{cy + 10} {x2},{totalH}"
                     stroke={line.color}
@@ -911,6 +1070,19 @@
       </div>
     {/if}
   </div>
+
+  <!-- Create-PR sheet, opened from a branch/commit context menu. -->
+  {#if createPrOpen}
+    <CreatePr
+      {repoId}
+      initialSource={createPrSource}
+      onclose={() => (createPrOpen = false)}
+      oncreated={() => {
+        createPrOpen = false;
+        void refreshAfter();
+      }}
+    />
+  {/if}
 
   <!-- ── RIGHT: commit detail + diff ─────────────────────────────────────── -->
   <div class="detail-panel" class:detail-visible={selectedSha !== null}>

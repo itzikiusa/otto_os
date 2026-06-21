@@ -6,7 +6,7 @@
   // When `files` is true, files are shown and can be picked directly (for
   // identity-file selection etc.); directories still navigate on click.
   import { api } from '../api/client';
-  import type { FsBrowse } from '../api/types';
+  import type { FsBrowse, FsEntry } from '../api/types';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
 
@@ -26,10 +26,27 @@
   let view: FsBrowse | null = $state(null);
   let loading = $state(true);
   let error = $state('');
+  // Type-to-filter the current listing; "Show hidden" reveals dotfiles
+  // (default off — dotfiles are hidden so the listing isn't cluttered).
+  let filter = $state('');
+  let showHidden = $state(false);
+
+  // The entries actually rendered: dotfiles hidden unless `showHidden`, and
+  // name-filtered (case-insensitive) by the filter box. The `..` up row is
+  // rendered separately and always shown.
+  const shown = $derived.by((): FsEntry[] => {
+    const entries: FsEntry[] = view?.entries ?? [];
+    const q = filter.trim().toLowerCase();
+    return entries.filter((e) => {
+      if (!showHidden && e.name.startsWith('.')) return false;
+      return q === '' || e.name.toLowerCase().includes(q);
+    });
+  });
 
   async function load(path: string): Promise<void> {
     loading = true;
     error = '';
+    filter = ''; // reset the filter on navigate so the new listing isn't pre-filtered
     try {
       let q = path ? `?path=${encodeURIComponent(path)}` : '';
       if (files) {
@@ -53,6 +70,15 @@
     <div class="crumb mono">{view.path}</div>
   {/if}
 
+  <div class="pick-tools">
+    <!-- svelte-ignore a11y_autofocus -->
+    <input class="input filter-input" placeholder="Filter…" bind:value={filter} autofocus />
+    <label class="hidden-toggle" title="Show dotfiles (names starting with .)">
+      <input type="checkbox" bind:checked={showHidden} />
+      Show hidden
+    </label>
+  </div>
+
   <div class="browser">
     {#if loading}
       <div class="dim pad">Loading…</div>
@@ -66,7 +92,7 @@
           <span class="dim">up</span>
         </button>
       {/if}
-      {#each view.entries as e (e.path)}
+      {#each shown as e (e.path)}
         {#if e.is_dir}
           <div class="row-wrap">
             <button class="row" onclick={() => load(e.path)}>
@@ -89,8 +115,14 @@
           </div>
         {/if}
       {/each}
-      {#if view.entries.length === 0}
-        <div class="dim pad">{files ? 'No items here.' : 'No subfolders here.'}</div>
+      {#if shown.length === 0}
+        <div class="dim pad">
+          {#if view.entries.length === 0}
+            {files ? 'No items here.' : 'No subfolders here.'}
+          {:else}
+            No matches.
+          {/if}
+        </div>
       {/if}
     {/if}
   </div>
@@ -116,6 +148,29 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .pick-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .filter-input {
+    flex: 1;
+    min-width: 0;
+  }
+  .hidden-toggle {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .hidden-toggle input {
+    cursor: pointer;
   }
   .browser {
     height: 320px;

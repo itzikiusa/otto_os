@@ -10,10 +10,13 @@
 
   interface Props {
     repoId: string;
+    /** When set, default the Source branch to this (e.g. opened from a branch /
+     *  commit context menu). Still editable; target auto-picks a different one. */
+    initialSource?: string;
     onclose: () => void;
     oncreated: (pr: PrSummary) => void;
   }
-  let { repoId, onclose, oncreated }: Props = $props();
+  let { repoId, initialSource, onclose, oncreated }: Props = $props();
 
   let branches: BranchInfo[] = $state([]);
   let source = $state('');
@@ -30,7 +33,12 @@
       .get<BranchInfo[]>(`/repos/${repoId}/branches`)
       .then((b) => {
         branches = b;
-        if (source === '') source = b.find((x) => x.is_current)?.name ?? b[0]?.name ?? '';
+        if (source === '')
+          source =
+            (initialSource && b.some((x) => x.name === initialSource) ? initialSource : '') ||
+            b.find((x) => x.is_current)?.name ||
+            b[0]?.name ||
+            '';
         if (target === '') {
           target =
             b.find((x) => x.name === 'develop' || x.name === 'main' || x.name === 'master')?.name ??
