@@ -107,6 +107,23 @@ const TAIL_CAP: usize = 1024;
 /// keys if the prompt redraws while the CLI processes the first acceptance).
 const DEBOUNCE: Duration = Duration::from_secs(5);
 
+/// Trim `buf` in place to at most `cap` bytes, keeping the most-recent content and
+/// NEVER splitting a UTF-8 code point. The tail holds lowercased PTY output, which
+/// routinely contains multi-byte glyphs (Powerline prompt separators U+E0B0 ``,
+/// emoji, box-drawing, CJK), so a naive `buf[buf.len() - cap..]` byte slice can
+/// land mid-char and panic the scan worker. Advance the cut to the next char
+/// boundary instead — we keep ≤ `cap` bytes, still well over the longest needle.
+fn trim_tail(buf: &mut String, cap: usize) {
+    if buf.len() <= cap {
+        return;
+    }
+    let mut cut = buf.len() - cap;
+    while cut < buf.len() && !buf.is_char_boundary(cut) {
+        cut += 1;
+    }
+    buf.replace_range(..cut, "");
+}
+
 /// Runtime guard that auto-accepts known trust/approval prompts. Wire it into
 /// the `SessionManager` (see [`crate::CompositeScanner`]) and call
 /// [`PromptGuard::set_manager`] once the manager `Arc` exists.
@@ -161,10 +178,7 @@ impl OutputScanner for PromptGuard {
             let mut tails = lock(&self.tails);
             let buf = tails.entry(session_id.clone()).or_default();
             buf.push_str(&String::from_utf8_lossy(chunk).to_lowercase());
-            if buf.len() > TAIL_CAP {
-                let cut = buf.len() - TAIL_CAP;
-                *buf = buf[cut..].to_string();
-            }
+            trim_tail(buf, TAIL_CAP);
             buf.clone()
         };
 
@@ -301,5 +315,31 @@ mod tests {
         ]);
         c.on_output(&"s1".to_string(), "claude", b"hi");
         assert_eq!(n.load(Ordering::SeqCst), 2);
+    }
+
+    /// Regression: a tail full of multi-byte glyphs must not panic when trimmed.
+    /// The Powerline separator U+E0B0 is 3 bytes, so the byte cut point lands
+    /// inside a code point — the old `buf[len-cap..]` slice panicked here.
+    #[test]
+    fn trim_tail_handles_multibyte_glyphs() {
+        let glyph = '\u{e0b0}';
+        let mut s: String = std::iter::repeat_n(glyph, TAIL_CAP).collect(); // 3×cap bytes
+        trim_tail(&mut s, TAIL_CAP); // must not panic on a mid-char byte index
+        assert!(s.len() <= TAIL_CAP);
+        assert!(s.chars().all(|c| c == glyph), "no split/garbled code points");
+    }
+
+    /// A multi-byte trust dialog drives the full scanner path without panicking
+    /// and still matches once the prompt text arrives.
+    #[test]
+    fn on_output_survives_multibyte_output() {
+        let guard = PromptGuard::new();
+        let id = "s1".to_string();
+        // 2 KB of Powerline glyphs (over TAIL_CAP) → forces a mid-char trim.
+        let glyphs: String = std::iter::repeat_n('\u{e0b0}', 700).collect();
+        guard.on_output(&id, "claude", glyphs.as_bytes()); // must not panic
+        // The real prompt then arrives; with no manager wired the guard simply
+        // returns, but it must process the tail without panicking.
+        guard.on_output(&id, "claude", b"\n  Do you trust the files in this folder?\n  1. Yes, proceed\n");
     }
 }

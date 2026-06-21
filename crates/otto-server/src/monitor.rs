@@ -667,6 +667,23 @@ impl AuthScanner {
 /// Max retained tail bytes per session (covers the longest needle + slack).
 const TAIL_CAP: usize = 256;
 
+/// Trim `buf` in place to at most `cap` bytes, keeping the most-recent content and
+/// NEVER splitting a UTF-8 code point. Terminal output routinely contains
+/// multi-byte glyphs (e.g. the Powerline prompt separator U+E0B0 ``), so a naive
+/// `buf[buf.len() - cap..]` byte slice can land mid-char and panic the worker
+/// thread. We advance the cut forward to the next char boundary instead — keeping
+/// ≤ `cap` bytes, which still comfortably covers the longest needle.
+fn trim_tail(buf: &mut String, cap: usize) {
+    if buf.len() <= cap {
+        return;
+    }
+    let mut cut = buf.len() - cap;
+    while cut < buf.len() && !buf.is_char_boundary(cut) {
+        cut += 1;
+    }
+    buf.replace_range(..cut, "");
+}
+
 impl OutputScanner for AuthScanner {
     fn on_output(&self, session_id: &Id, provider: &str, chunk: &[u8]) {
         // Already flagged this session → nothing to do.
@@ -689,10 +706,7 @@ impl OutputScanner for AuthScanner {
             };
             let buf = tails.entry(session_id.clone()).or_default();
             buf.push_str(&text);
-            if buf.len() > TAIL_CAP {
-                let cut = buf.len() - TAIL_CAP;
-                *buf = buf[cut..].to_string();
-            }
+            trim_tail(buf, TAIL_CAP);
             buf.clone()
         };
 
@@ -817,6 +831,44 @@ async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
             direction,
             "budget crossing — BudgetExceeded emitted"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_tail;
+
+    /// Regression: the rolling tail must never panic when the cut point lands
+    /// inside a multi-byte glyph. The Powerline separator U+E0B0 (`\u{e0b0}`) is
+    /// 3 bytes, so a buffer of them has cut points that are NOT char boundaries.
+    #[test]
+    fn trim_tail_handles_multibyte_glyphs() {
+        let glyph = '\u{e0b0}';
+        let mut s = String::new();
+        for _ in 0..200 {
+            s.push(glyph); // 600 bytes — well over the cap
+        }
+        trim_tail(&mut s, 256); // must not panic on a mid-char byte index
+        assert!(s.len() <= 256, "tail trimmed to within the cap");
+        assert!(s.chars().all(|c| c == glyph), "no split/garbled code points");
+    }
+
+    #[test]
+    fn trim_tail_is_a_noop_below_cap() {
+        let mut s = "needs reauthentication".to_string();
+        trim_tail(&mut s, 256);
+        assert_eq!(s, "needs reauthentication");
+    }
+
+    #[test]
+    fn trim_tail_keeps_the_most_recent_bytes() {
+        // 1000 ASCII bytes; trimming must retain the *newest* tail (a needle that
+        // just arrived must survive), not the oldest.
+        let mut s: String = (0..1000).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+        let want_tail: String = s.chars().rev().take(50).collect::<Vec<_>>().into_iter().rev().collect();
+        trim_tail(&mut s, 256);
+        assert!(s.len() <= 256);
+        assert!(s.ends_with(&want_tail), "kept the most recent content");
     }
 }
 
