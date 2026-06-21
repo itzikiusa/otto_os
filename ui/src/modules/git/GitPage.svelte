@@ -5,6 +5,7 @@
   // flow + EmptyState. Open repos persist across restarts (global localStorage,
   // via the git store). PR detail (#/git/:id/pr/:n) is still routed; a plain
   // #/git/:id/:tab deep-link opens that repo as a tab.
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { GitAccount, Repo, RemoteRepoSummary } from '../../lib/api/types';
@@ -86,9 +87,17 @@
   });
 
   // PrDetail's "back to PRs" routes to #/git/:id/prs; honour that as a tab open.
+  // CRITICAL: `openRepoTab` WRITES subTab/activeRepoId/openRepoIds (fresh refs via
+  // spread) AND reads them — and this effect tracks those reads — so calling it
+  // bare here is a read→write→re-run INFINITE LOOP that froze the whole app on the
+  // back-from-PR navigation. `untrack` the mutation so the effect only re-runs when
+  // the route (its real deps, read above the untrack) changes.
   $effect(() => {
-    if (routeRepoId && !isPr && routeTab && git.allRepos.some((r) => r.id === routeRepoId)) {
-      git.openRepoTab(routeRepoId, routeTab);
+    const rid = routeRepoId;
+    const tab = routeTab;
+    const known = rid != null && git.allRepos.some((r) => r.id === rid);
+    if (rid && !isPr && tab && known) {
+      untrack(() => git.openRepoTab(rid, tab));
     }
   });
 
