@@ -152,7 +152,7 @@
   .dd {
     position: absolute;
     top: 30px;
-    left: 0;
+    inset-inline-start: 0;
     width: 280px;
     padding: 8px;
     box-shadow: var(--shadow);
@@ -179,7 +179,7 @@
     font-size: 12px;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .dd-item:hover:not(:disabled) {
     background: var(--surface-2);

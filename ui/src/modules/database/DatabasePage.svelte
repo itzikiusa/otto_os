@@ -13,6 +13,7 @@
   import ConnectionForm from '../connections/ConnectionForm.svelte';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -24,6 +25,14 @@
   const DB_KINDS: ConnectionKind[] = ['mysql', 'redis', 'mongodb', 'clickhouse'];
   let connFormOpen = $state(false);
   let editingConn = $state<Connection | null>(null);
+
+  // ── Phone accordion ────────────────────────────────────────────────────────
+  // On a phone the whole page scrolls and each major section (Connections /
+  // Schema) is a collapsible, independently-scrolling block — tap a header to
+  // expand/minimise so the user keeps only what they need on screen. These
+  // flags are inert on desktop/tablet (the headers only render when isPhone).
+  let connOpen = $state(true);
+  let schemaOpen = $state(true);
 
   // Dock this connection as a pane in the Agents split (beside an agent), with
   // the full DB Explorer. Right-clicked from a connection tab or sidebar row.
@@ -324,8 +333,16 @@
 <div class="db-page">
   <aside class="db-side">
     <!-- Connection picker + management -->
-    <div class="conn-head">
-      <span class="conn-head-title">Connections</span>
+    <div class="conn-head" class:acc-head={viewport.isPhone}>
+      {#if viewport.isPhone}
+        <button class="acc-toggle" onclick={() => (connOpen = !connOpen)} aria-expanded={connOpen}>
+          <Icon name={connOpen ? 'chevronDown' : 'chevronRight'} size={14} />
+          <span class="conn-head-title">Connections</span>
+          {#if database.connections.length > 0}<span class="acc-count">{database.connections.length}</span>{/if}
+        </button>
+      {:else}
+        <span class="conn-head-title">Connections</span>
+      {/if}
       <div class="head-btns">
         <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section">
           <Icon name="folder" size={13} />
@@ -335,7 +352,7 @@
         </button>
       </div>
     </div>
-    <div class="conn-list">
+    <div class="conn-list" class:acc-collapsed={viewport.isPhone && !connOpen}>
       {#if database.connections.length === 0 && sections.length === 0}
         <div class="conn-empty">
           No database connections.
@@ -377,18 +394,32 @@
     </div>
 
     {#if database.selectedConnId}
+      {#if viewport.isPhone}
+        <!-- Phone: a tappable accordion header gates the whole schema panel. -->
+        <div class="conn-head acc-head">
+          <button class="acc-toggle" onclick={() => (schemaOpen = !schemaOpen)} aria-expanded={schemaOpen}>
+            <Icon name={schemaOpen ? 'chevronDown' : 'chevronRight'} size={14} />
+            <span class="conn-head-title">Schema &amp; saved</span>
+          </button>
+          {#if schemaOpen && database.sideTab === 'schema'}
+            <div class="head-btns">
+              <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={13} /></button>
+            </div>
+          {/if}
+        </div>
+      {/if}
       <!-- Schema / Saved / History switch -->
-      <div class="side-switch" role="tablist">
+      <div class="side-switch" class:acc-collapsed={viewport.isPhone && !schemaOpen} role="tablist">
         <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => (database.sideTab = 'schema')}>Schema</button>
         <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => (database.sideTab = 'saved')}>Saved</button>
         <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => (database.sideTab = 'history')}>History</button>
-        {#if database.sideTab === 'schema'}
+        {#if database.sideTab === 'schema' && !viewport.isPhone}
           <span class="grow"></span>
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
         {/if}
       </div>
 
-      <div class="side-body">
+      <div class="side-body" class:acc-collapsed={viewport.isPhone && !schemaOpen}>
         {#if database.sideTab === 'schema'}
           <SchemaTree />
         {:else if database.sideTab === 'saved'}
@@ -609,7 +640,7 @@
   .db-side {
     width: 280px;
     flex-shrink: 0;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -649,7 +680,7 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .conn-item:hover {
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
@@ -761,7 +792,7 @@
     gap: 1px;
     flex-shrink: 0;
     opacity: 0;
-    padding-right: 2px;
+    padding-inline-end: 2px;
   }
   .conn-row:hover .conn-actions {
     opacity: 1;
@@ -834,7 +865,7 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     color: var(--text);
-    text-align: left;
+    text-align: start;
     padding: 0 6px;
   }
   .saved-row {
@@ -898,11 +929,11 @@
   }
   /* Production connection → a persistent red rail down the main area. */
   .db-main.danger-rail {
-    border-left: 3px solid var(--status-exited);
+    border-inline-start: 3px solid var(--status-exited);
   }
   /* Read-only (non-prod) connection → a softer amber rail. */
   .db-main.guard-rail {
-    border-left: 3px solid var(--status-working);
+    border-inline-start: 3px solid var(--status-working);
   }
   /* Guardrail banner above the main tabs. */
   .guard-banner {
@@ -1038,7 +1069,7 @@
     place-items: center;
     width: 17px;
     height: 17px;
-    margin-left: 5px;
+    margin-inline-start: 5px;
     border: none;
     border-radius: 3px;
     background: transparent;
@@ -1122,16 +1153,152 @@
     white-space: nowrap;
   }
 
+  /* ───────────────── Phone (≤640px) ─────────────────
+     The desktop layout packs the connection tree + schema + query tabs +
+     toolbar + editor + results into ONE fixed viewport height — on a phone
+     that crushes everything to unreadable, unscrollable slivers and the
+     RESULTS fall off the bottom unreachable. On a phone we instead let the
+     whole page scroll as a normal vertical document: stack the sidebar over
+     the main area, give each section an intrinsic (readable) height, and turn
+     the results grid into its own bounded, internally-scrolling block so a
+     query's rows are always reachable. */
   @media (max-width: 640px) {
+    /* The page itself becomes the scroll container (its parent .content is
+       overflow:hidden and fixed-height — we can't change that from here). */
     .db-page {
       flex-direction: column;
+      height: 100%;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
+    /* Sidebar: full-width band on top, no longer fighting for height — the
+       connection list and schema each get their own bounded scroll. */
     .db-side {
       width: 100%;
-      border-right: none;
+      flex: 0 0 auto;
+      border-inline-end: none;
       border-bottom: 1px solid var(--border);
-      max-height: 40vh;
+    }
+    /* Each section's body scrolls INDEPENDENTLY when expanded (own max-height +
+       overflow) so the user scrolls within the panel they care about. */
+    .conn-list {
+      max-height: 34vh;
       overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .side-body {
+      flex: 0 0 auto;
+      max-height: 34vh;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    /* ── Collapsible accordion headers (phone-only) ── */
+    .acc-head {
+      padding: 4px 8px;
+      min-height: 44px;
+      border-top: 1px solid var(--border);
+    }
+    .acc-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      min-width: 0;
+      border: none;
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 8px 2px;
+      text-align: start;
+    }
+    .acc-toggle .conn-head-title {
+      font-size: 12.5px;
+    }
+    .acc-count {
+      font-size: 11px;
+      color: var(--text-dim);
+      background: var(--surface-2);
+      border-radius: 999px;
+      padding: 1px 8px;
+      font-variant-numeric: tabular-nums;
+    }
+    /* A collapsed section's body is removed from flow entirely. */
+    .acc-collapsed {
+      display: none !important;
+    }
+    /* Larger, legible text for the connection rows + tiny meta on phones. */
+    .conn-name {
+      font-size: 15px;
+    }
+    .conn-item {
+      height: 40px;
+    }
+    .conn-head-title {
+      font-size: 12px;
+    }
+    .conn-empty,
+    .list-empty {
+      font-size: 13.5px;
+    }
+    .hist-stmt {
+      font-size: 13px;
+    }
+    .hist-meta,
+    .count {
+      font-size: 12px;
+    }
+    .saved-open {
+      font-size: 14px;
+      height: 36px;
+    }
+    .hist-row {
+      height: 40px;
+    }
+    /* Main area: let it grow to its natural height so it stacks under the
+       sidebar and the page scrolls — instead of being a clipped flex:1 box. */
+    .db-main {
+      flex: 0 0 auto;
+      min-height: 0;
+    }
+    .main-body {
+      flex: 0 0 auto;
+      padding: 10px 12px 16px;
+    }
+    /* Bigger tap targets + readable text for the tab strips. */
+    .conn-tabs {
+      height: 40px;
+    }
+    /* Let the tab row wrap so the engine chip + Test button drop to their own
+       line on the narrowest phones instead of jutting past the edge. */
+    .main-tabs {
+      padding: 8px 12px 0;
+      flex-wrap: wrap;
+      row-gap: 4px;
+    }
+    /* The flexible spacer would push conn-status onto an overflowing line —
+       make it a full-width break so the status wraps cleanly below the tabs. */
+    .main-tabs .grow {
+      flex-basis: 100%;
+      height: 0;
+    }
+    .conn-status {
+      padding-bottom: 8px;
+    }
+    .mt {
+      height: 36px;
+      font-size: 13.5px;
+      padding: 0 12px;
+    }
+    .conn-name {
+      font-size: 14px;
+    }
+    .ss {
+      height: 30px;
+      font-size: 13px;
+    }
+    /* The status row (engine chip + Test) can wrap rather than overflow. */
+    .conn-status {
+      flex-wrap: wrap;
     }
   }
 </style>

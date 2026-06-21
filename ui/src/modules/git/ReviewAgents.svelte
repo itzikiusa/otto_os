@@ -265,7 +265,7 @@
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
     vertical-align: middle;
-    margin-right: 3px;
+    margin-inline-end: 3px;
   }
   @keyframes spin {
     to { transform: rotate(360deg); }

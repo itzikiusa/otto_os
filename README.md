@@ -82,9 +82,11 @@ bridges so an agent can work a ticket from a chat thread.
   Admin), per-session isolation, an admin overview + audited impersonation, and
   **session sharing** via scoped, expiring, revocable links gated by an
   email-OTP access code. Optional **remote/mobile access** (Cloudflare tunnel +
-  installable PWA + responsive, touch-friendly shell) keeps the daemon
-  loopback-only by default. See `docs/MULTI-USER-RBAC.md` and
-  `docs/remote-access-runbook.md`.
+  installable PWA) keeps the daemon loopback-only by default. The shell is fully
+  **responsive (phone + iPad, portrait & landscape)** with collapsible,
+  independently-scrollable sections, **light/dark + RTL**, and an opt-in
+  **per-device session view** (show only sessions started on this device). See
+  `docs/MULTI-USER-RBAC.md` and `docs/remote-access-runbook.md`.
 - **Self-improvement** — an optional, gated engine that reflects on recent
   sessions and proposes edits to the workspace's skills/memory (tiered autonomy:
   safe edits auto-apply, risky ones queue for approval). Can run on multiple
@@ -204,8 +206,18 @@ Useful checks:
 
 ```bash
 cargo build && cargo test          # Rust
-cd ui && npm run check              # svelte-check + tsc
+cd ui && npm run check              # svelte-check + tsc (+ the e2e tsconfig)
+cd ui && npm run test:e2e          # Playwright mobile/tablet E2E
 ```
+
+The **E2E suite** (`ui/e2e/`, Playwright) spins up an **isolated throwaway daemon**
+(temp data dir + port — it never touches your real sessions/DBs), serves the live
+UI via Vite, and drives every page across five device profiles (iPhone & iPad,
+**portrait + landscape**, plus a small phone). It asserts real behaviour — pages
+fit the width and scroll, sections collapse, and core flows work (DB query →
+results, Git commit → diff, terminal output/input) — and runs the same checks in
+**light/dark** and **RTL**. The mobile shell is collapsible-section based and
+touch-readable; see `docs/superpowers/specs/` for the design notes.
 
 ## Configuration & secrets
 
@@ -230,9 +242,10 @@ docs/contracts/ API + WebSocket contracts (source of truth for the TS types)
 
 ## Contributing
 
-Issues and PRs welcome. Please run `cargo test` and `cd ui && npm run check`
-before opening a PR. The Rust API in `docs/contracts/` is authoritative — keep
-the TypeScript types in `ui/src/lib/api/types.ts` in lockstep.
+Issues and PRs welcome. Please run `cargo test`, `cd ui && npm run check`, and
+(for UI changes) `cd ui && npm run test:e2e` before opening a PR. The Rust API in
+`docs/contracts/` is authoritative — keep the TypeScript types in
+`ui/src/lib/api/types.ts` in lockstep.
 
 ## License
 

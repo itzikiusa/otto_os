@@ -60,6 +60,9 @@
     aria-modal="true"
     aria-label={label}
   >
+    <!-- Always-visible close affordance: tapping the thin backdrop sliver left by
+         a wide drawer is hard on a phone, so give an explicit ✕. -->
+    <button class="drawer-close" onclick={close} aria-label="Close {label}" title="Close">✕</button>
     {@render children()}
   </div>
 {/if}
@@ -82,6 +85,28 @@
     background: var(--bg);
     box-shadow: var(--shadow);
     overflow: hidden;
+  }
+  /* Floating close button pinned to the panel's top corner, above content. */
+  .drawer-close {
+    position: absolute;
+    top: 8px;
+    inset-inline-end: 8px;
+    z-index: 2;
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+  }
+  .drawer-close:hover {
+    background: var(--surface-2);
   }
   .drawer.left {
     left: 0;

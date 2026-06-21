@@ -628,8 +628,8 @@
 
   .impl,
   .improve {
-    border-left: 2px solid var(--border);
-    padding-left: 10px;
+    border-inline-start: 2px solid var(--border);
+    padding-inline-start: 10px;
     display: flex;
     flex-direction: column;
     gap: 5px;
@@ -732,7 +732,7 @@
     text-transform: uppercase;
     padding: 1px 5px;
     border-radius: 3px;
-    margin-right: 5px;
+    margin-inline-end: 5px;
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);
     color: var(--status-exited);
     vertical-align: middle;

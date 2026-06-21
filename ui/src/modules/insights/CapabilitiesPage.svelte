@@ -221,7 +221,7 @@
   .cap-list { display: flex; flex-direction: column; gap: 8px; }
 
   .cap-card { border-radius: 8px; overflow: hidden; }
-  .cap-card.has-issues { border-left: 3px solid var(--color-warn, #f59e0b); }
+  .cap-card.has-issues { border-inline-start: 3px solid var(--color-warn, #f59e0b); }
 
   .cap-head {
     display: flex;

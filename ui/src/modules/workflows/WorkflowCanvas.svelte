@@ -385,7 +385,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    margin-left: auto;
+    margin-inline-start: auto;
     flex-shrink: 0;
   }
   .dot.running {
@@ -430,7 +430,7 @@
   }
   .hud {
     position: absolute;
-    right: 12px;
+    inset-inline-end: 12px;
     bottom: 12px;
     display: flex;
     align-items: center;

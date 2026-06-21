@@ -254,7 +254,7 @@
   .db-pane-close {
     position: absolute;
     top: 6px;
-    right: 8px;
+    inset-inline-end: 8px;
     z-index: 25;
     width: 20px;
     height: 20px;
@@ -280,8 +280,8 @@
     cursor: col-resize;
   }
   .gutter.row {
-    left: 8px;
-    right: 8px;
+    inset-inline-start: 8px;
+    inset-inline-end: 8px;
     height: 8px;
     cursor: row-resize;
   }

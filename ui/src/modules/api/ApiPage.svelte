@@ -62,7 +62,11 @@
   </aside>
 
   <div class="api-main">
-    <div class="req-tabs" role="tablist">
+    <div class="req-tabs">
+      <!-- tablist must contain only role="tab" children (ARIA
+           aria-required-children); display:contents keeps the flex row identical
+           while excluding the "new request" button. -->
+      <div class="req-tablist" role="tablist">
       {#each apiClient.tabs as t, i (i)}
         <div class="req-tab" class:active={apiClient.activeTab === i} role="tab" tabindex="0" aria-selected={apiClient.activeTab === i} onclick={() => apiClient.switchTab(i)} onkeydown={(e) => { if (e.key === 'Enter') apiClient.switchTab(i); }}>
           <span class="req-tab-method {(t.method || 'GET').toLowerCase()}">{t.method}</span>
@@ -70,6 +74,7 @@
           <button class="req-tab-close" title="Close tab" aria-label="Close tab" onclick={(e) => { e.stopPropagation(); apiClient.closeTab(i); }}>×</button>
         </div>
       {/each}
+      </div>
       <button class="req-tab-new" title="New request (⌘T)" aria-label="New request tab" onclick={() => apiClient.newDraft()}>+</button>
     </div>
     <div class="builder-pane">
@@ -90,7 +95,7 @@
   .api-side {
     width: 280px;
     flex-shrink: 0;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -154,6 +159,10 @@
     border-bottom: 1px solid var(--border);
     overflow-x: auto;
     flex-shrink: 0;
+  }
+  /* Layout-neutral wrapper grouping tabs under role="tablist". */
+  .req-tablist {
+    display: contents;
   }
   .req-tab {
     display: flex;
@@ -232,7 +241,7 @@
     .api-side {
       width: 100%;
       min-width: 0;
-      border-right: none;
+      border-inline-end: none;
       border-bottom: 1px solid var(--border);
       max-height: 35vh;
       overflow-y: auto;
@@ -248,8 +257,8 @@
     }
     .builder-pane,
     .resp-pane {
-      padding-left: 8px;
-      padding-right: 8px;
+      padding-inline-start: 8px;
+      padding-inline-end: 8px;
       min-width: 0;
       overflow-x: hidden;
     }

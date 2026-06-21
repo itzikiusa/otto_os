@@ -594,7 +594,7 @@
   .menu {
     position: absolute;
     top: 22px;
-    right: 0;
+    inset-inline-end: 0;
     z-index: 30;
     min-width: 130px;
     background: var(--surface);
@@ -606,7 +606,7 @@
     flex-direction: column;
   }
   .menu button {
-    text-align: left;
+    text-align: start;
     background: transparent;
     border: none;
     color: var(--text);

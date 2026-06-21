@@ -311,7 +311,7 @@
     align-items: center;
     gap: 4px;
     height: 25px;
-    padding-right: 4px;
+    padding-inline-end: 4px;
     border-radius: var(--radius-s);
     min-width: 0;
   }
@@ -379,7 +379,7 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     height: 100%;
     padding: 0;
   }
@@ -443,5 +443,26 @@
   }
   .tree-search-clear:hover {
     color: var(--text);
+  }
+
+  /* Phone: larger node rows + readable labels (the desktop sizes are too small
+     to tap/read on a device). */
+  @media (max-width: 640px) {
+    .node {
+      height: 36px;
+    }
+    .nl-text {
+      font-size: 14px;
+    }
+    .nl-detail {
+      font-size: 12px;
+    }
+    .tree-loading,
+    .tree-empty {
+      font-size: 13.5px;
+    }
+    .tree-search-input {
+      font-size: 14px;
+    }
   }
 </style>

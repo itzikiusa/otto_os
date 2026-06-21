@@ -251,7 +251,7 @@
     font-size: 11.5px;
     padding: 6px 10px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .add-top-btn:hover {
     color: var(--text);
@@ -327,7 +327,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     font-size: 11.5px;
   }
   .session-row:hover {

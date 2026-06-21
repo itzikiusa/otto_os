@@ -223,11 +223,11 @@
     font-size: 11px;
     padding: 3px 9px;
     cursor: pointer;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     transition: background 100ms, color 100ms;
   }
   .seg button:last-child {
-    border-right: none;
+    border-inline-end: none;
   }
   .seg button:hover {
     background: var(--surface);
@@ -247,7 +247,7 @@
     table-layout: fixed;
   }
   .side-head {
-    text-align: left;
+    text-align: start;
     font-size: 9.5px;
     font-weight: 700;
     letter-spacing: 0.06em;
@@ -257,7 +257,7 @@
     border-bottom: 1px solid var(--border);
   }
   .side-head.ours {
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
   }
   .code {
     padding: 0 10px;
@@ -270,7 +270,7 @@
     width: 50%;
   }
   .half.ours {
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     background: color-mix(in srgb, var(--status-working) 9%, transparent);
   }
   .half.theirs {
@@ -317,7 +317,7 @@
     color: var(--text-dim);
     font-size: 9.5px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .base-toggle:hover {
     color: var(--text);

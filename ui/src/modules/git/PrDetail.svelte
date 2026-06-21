@@ -554,7 +554,7 @@
   .edit-btn {
     position: absolute;
     top: 8px;
-    right: 8px;
+    inset-inline-end: 8px;
     opacity: 0;
     transition: opacity 130ms ease-out;
   }
@@ -687,5 +687,47 @@
   .commit-date {
     white-space: nowrap;
     font-size: 11.5px;
+  }
+
+  /* ── Mobile + tablet (≤1024px): wrap dense rows, scroll the tab strip, legible
+     text. 1024 so iPad portrait (834) + real-phone landscape (932) also wrap. ── */
+  @media (max-width: 1024px) {
+    .prd { padding: 12px 12px 48px; }
+    /* Header actions wrap instead of overflowing. */
+    .prd-head { flex-wrap: wrap; gap: 6px; }
+    .prd-title { font-size: 18px; }
+    .prd-meta { flex-wrap: wrap; gap: 8px; font-size: 13px; }
+
+    /* Tab strip scrolls horizontally; bigger touch targets. */
+    .prd-tabs {
+      overflow-x: auto;
+      scrollbar-width: none;
+      flex-wrap: nowrap;
+    }
+    .prd-tabs::-webkit-scrollbar { display: none; }
+    .tab-btn {
+      font-size: 14px;
+      padding: 10px 14px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    /* Action bar wraps so every button stays reachable. */
+    .prd-actions { flex-wrap: wrap; gap: 8px; }
+    .prd-actions .grow { display: none; }
+    .merge-group { flex: 1; }
+
+    /* Commit rows: drop the rigid 4-col grid for a wrapping two-line layout. */
+    .commit-row {
+      grid-template-columns: auto 1fr;
+      gap: 4px 10px;
+      font-size: 13px;
+    }
+    .commit-subject { grid-column: 1 / -1; white-space: normal; }
+    .commit-sha { font-size: 12px; }
+    .commit-author, .commit-date { font-size: 12px; }
+
+    .prd-comments { max-width: 100%; }
+    .md-body { font-size: 14px; }
   }
 </style>

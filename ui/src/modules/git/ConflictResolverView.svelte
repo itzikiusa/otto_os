@@ -254,7 +254,7 @@
   .files-panel {
     width: 240px;
     flex-shrink: 0;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     overflow-y: auto;
     padding: 6px 0;
   }
@@ -280,7 +280,7 @@
     color: var(--text-dim);
     font-size: 12px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: background 100ms, color 100ms;
   }
   .file-row:hover {

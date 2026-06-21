@@ -610,7 +610,7 @@
     text-transform: none;
     letter-spacing: 0;
     color: var(--text-dim);
-    margin-left: 4px;
+    margin-inline-start: 4px;
   }
   .cfg-hint {
     font-size: 11px;
@@ -722,7 +722,7 @@
     background: var(--accent);
     transition: width 160ms;
   }
-  .ph-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .ph-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-inline-start: auto; }
   .saving { font-size: 11.5px; color: var(--text-dim); font-style: italic; }
   .saved-tick { font-size: 11.5px; color: var(--status-idle, #3a8c3a); font-weight: 600; }
 
@@ -838,7 +838,7 @@
   .raw { padding: 14px 16px; }
   .md-body { font-size: 13px; line-height: 1.6; color: var(--text); }
   .md-body :global(h3) { font-size: 1.05em; font-weight: 700; margin: 1em 0 0.4em; }
-  .md-body :global(ul) { padding-left: 1.4em; margin: 0 0 0.6em; }
+  .md-body :global(ul) { padding-inline-start: 1.4em; margin: 0 0 0.6em; }
   .md-body :global(li) { margin-bottom: 0.2em; }
   .md-body :global(code) {
     font-family: var(--font-mono, monospace);

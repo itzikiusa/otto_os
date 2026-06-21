@@ -248,10 +248,10 @@
     flex-shrink: 0;
   }
   .tabbar.tauri-pad {
-    padding-left: 78px;
+    padding-inline-start: 78px;
   }
   .tabbar.bell-gutter {
-    padding-right: 42px;
+    padding-inline-end: 42px;
   }
   .tabs {
     display: flex;
@@ -300,7 +300,7 @@
   }
   /* Drop target while dragging a tab over it — faint left border beacon. */
   .tab.drag-over {
-    border-left: 2px solid var(--accent);
+    border-inline-start: 2px solid var(--accent);
   }
   /* "Needs you" — blocked on operator input. Amber accents stand out from the
      calmer active/idle styling without being alarming. */

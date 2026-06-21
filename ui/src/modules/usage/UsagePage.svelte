@@ -1063,6 +1063,7 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+    min-height: 0;
   }
   .card {
     background: var(--surface);
@@ -1172,14 +1173,14 @@
     color: var(--text-dim);
   }
   .bd-val {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-variant-numeric: tabular-nums;
     font-weight: 600;
     color: var(--text);
   }
   .bd-pct {
     min-width: 32px;
-    text-align: right;
+    text-align: end;
     font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
@@ -1250,12 +1251,12 @@
     flex-shrink: 0;
   }
   .bar-val {
-    text-align: right;
+    text-align: end;
     font-variant-numeric: tabular-nums;
     color: var(--text);
   }
   .bar-cost {
-    text-align: right;
+    text-align: end;
     font-variant-numeric: tabular-nums;
   }
 
@@ -1353,10 +1354,10 @@
     border-bottom: none;
   }
   .sess-head .num {
-    text-align: right;
+    text-align: end;
   }
   .sess-row .num {
-    text-align: right;
+    text-align: end;
     font-variant-numeric: tabular-nums;
   }
   /* VirtualList container: max-height so it stays bounded. */
@@ -1532,7 +1533,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    text-align: left;
+    text-align: start;
     border-top: 1px solid var(--surface-2);
     padding-top: 14px;
   }
@@ -1593,7 +1594,7 @@
   .budget-val {
     font-size: 11.5px;
     color: var(--text-dim);
-    text-align: right;
+    text-align: end;
     white-space: nowrap;
   }
   .budget-row.warn .bar-fill {
@@ -1605,12 +1606,12 @@
   .warn-tag {
     color: var(--warn, #d08a18);
     font-weight: 600;
-    margin-left: 4px;
+    margin-inline-start: 4px;
   }
   .over-tag {
     color: var(--danger, #c0392b);
     font-weight: 600;
-    margin-left: 4px;
+    margin-inline-start: 4px;
     text-transform: uppercase;
   }
   /* Live WS budget-exceeded banner — shown at the top of the Usage page. */
@@ -1706,7 +1707,7 @@
     color: var(--text);
     font-size: 12px;
     padding: 4px 6px;
-    text-align: right;
+    text-align: end;
   }
   .editor-actions {
     display: flex;
@@ -1742,7 +1743,7 @@
     .bar-row .bar-val {
       grid-column: 2;
       grid-row: 1;
-      text-align: right;
+      text-align: end;
     }
     .bar-row .bar-track {
       grid-column: 1 / 3;
@@ -1764,7 +1765,7 @@
     .feat-row .bar-val {
       grid-column: 2;
       grid-row: 1;
-      text-align: right;
+      text-align: end;
     }
     .feat-row .bar-track {
       grid-column: 1 / 3;
@@ -1786,7 +1787,7 @@
     .budget-row .budget-val {
       grid-column: 2;
       grid-row: 1;
-      text-align: right;
+      text-align: end;
       white-space: normal;
       font-size: 11px;
     }
@@ -1824,7 +1825,7 @@
     letter-spacing: 0.04em;
     padding: 1px 4px;
     border-radius: 3px;
-    margin-left: 4px;
+    margin-inline-start: 4px;
     background: color-mix(in srgb, #f59e0b 22%, transparent);
     color: #b45309;
     vertical-align: middle;

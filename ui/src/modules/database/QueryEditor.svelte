@@ -9,6 +9,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { database, ROW_LIMIT_ALL, type QueryTab } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import type { DbCompletionKind } from '../../lib/api/types';
 
   const tab = $derived(database.tab);
@@ -192,6 +193,15 @@
   }
 
   const canEdit = $derived(ws.myRole !== 'viewer');
+
+  // ── Phone accordion ────────────────────────────────────────────────────────
+  // On a phone the editor and the results are each collapsible, independently
+  // scrolling blocks (tap a header to expand/minimise). Default: editor open,
+  // results auto-open once a query has produced something. Inert on desktop —
+  // the headers only render when isPhone.
+  let editorOpen = $state(true);
+  let resultsOpen = $state(true);
+  const hasResult = $derived(!!tab.result || !!tab.error);
 </script>
 
 <div class="query-editor">
@@ -371,7 +381,13 @@
     </div>
   {/if}
 
-  <div class="qe-edit" style="height: {editorH}px">
+  {#if viewport.isPhone}
+    <button class="qe-acc-head" onclick={() => (editorOpen = !editorOpen)} aria-expanded={editorOpen}>
+      <Icon name={editorOpen ? 'chevronDown' : 'chevronRight'} size={14} />
+      <span class="qe-acc-title">Editor</span>
+    </button>
+  {/if}
+  <div class="qe-edit" class:qe-collapsed={viewport.isPhone && !editorOpen} style="height: {editorH}px">
     <CodeEditor
       path={editorPath}
       content={tab.statement}
@@ -396,7 +412,15 @@
     onpointerdown={startResize}
   ><span class="qe-grip"></span></div>
 
-  <div class="qe-results">
+  {#if viewport.isPhone}
+    <button class="qe-acc-head" onclick={() => (resultsOpen = !resultsOpen)} aria-expanded={resultsOpen}>
+      <Icon name={resultsOpen ? 'chevronDown' : 'chevronRight'} size={14} />
+      <span class="qe-acc-title">Results</span>
+      {#if hasResult && tab.result}<span class="qe-acc-count">{tab.result.stats.row_count} rows</span>{/if}
+      {#if tab.error}<span class="qe-acc-count err">error</span>{/if}
+    </button>
+  {/if}
+  <div class="qe-results" class:qe-collapsed={viewport.isPhone && !resultsOpen}>
     <ResultsGrid
       result={tab.result}
       error={tab.error}
@@ -667,5 +691,116 @@
   }
   .grow {
     flex: 1;
+  }
+
+  /* ───────────────── Phone (≤640px) ─────────────────
+     On desktop this is a fixed-height flex column (editor + flex:1 results)
+     living inside the page's clipped viewport. On a phone that height chain
+     is broken upstream (DatabasePage lets the page scroll) so here we make the
+     editor a modest fixed height, let the dense toolbar WRAP instead of
+     overflowing off-screen, and give the results their own bounded,
+     internally-scrolling block so a query's rows are always reachable. */
+  /* Phone accordion headers for the Editor / Results blocks. */
+  .qe-acc-head {
+    display: none;
+  }
+  @media (max-width: 640px) {
+    .query-editor {
+      height: auto;
+      min-height: 0;
+    }
+    /* Editor: ignore the persisted desktop drag-height — keep it compact so the
+       results sit just below it (the inline style sets height, so override it). */
+    .qe-edit {
+      height: 200px !important;
+    }
+    /* Dense toolbar → wrap onto multiple rows so nothing runs off the edge. */
+    .qe-toolbar {
+      flex-wrap: wrap;
+      gap: 6px;
+      row-gap: 6px;
+    }
+    /* The flexible spacer would force the controls onto a wider line — collapse
+       it on mobile so the controls pack tightly and wrap naturally. */
+    .qe-toolbar .grow {
+      flex-basis: 100%;
+      height: 0;
+      flex: 0 0 100%;
+    }
+    /* Bigger tap targets / readable controls. */
+    .qe-limit select,
+    .qe-db select,
+    .qe-timeout-input,
+    .qe-mask {
+      height: 32px;
+      font-size: 12.5px;
+    }
+    .qe-limit,
+    .qe-db,
+    .qe-timeout {
+      font-size: 12.5px;
+    }
+    .qe-tab {
+      height: 32px;
+      font-size: 13px;
+      max-width: 60vw;
+    }
+    /* Collapsible Editor / Results accordion headers. */
+    .qe-acc-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      min-height: 44px;
+      padding: 8px 4px;
+      border: none;
+      border-top: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+      text-align: start;
+    }
+    .qe-acc-title {
+      font-size: 12.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .qe-acc-count {
+      font-size: 11.5px;
+      color: var(--text-dim);
+      background: var(--surface-2);
+      border-radius: 999px;
+      padding: 1px 8px;
+      font-variant-numeric: tabular-nums;
+    }
+    .qe-acc-count.err {
+      color: var(--status-exited);
+      background: color-mix(in srgb, var(--status-exited) 16%, transparent);
+    }
+    /* A collapsed block is removed from flow. */
+    .qe-collapsed {
+      display: none !important;
+    }
+    /* The drag splitter has no role on touch (we resize via the editor's fixed
+       height + accordion) — hide it. */
+    .qe-splitter {
+      display: none;
+    }
+    /* Results: own bounded, internally-scrolling block — always reachable. A
+       small result fits naturally; a large one caps at ~70vh and the grid
+       scrolls inside it (its child .grid-scroll is overflow:auto) so the page
+       doesn't grow unbounded. */
+    .qe-results {
+      flex: 0 0 auto;
+      min-height: 340px;
+      max-height: 70vh;
+    }
+    .qe-tabs {
+      scrollbar-width: none;
+    }
+    .qe-tabs::-webkit-scrollbar {
+      display: none;
+    }
   }
 </style>

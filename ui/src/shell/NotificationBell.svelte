@@ -166,7 +166,7 @@
   .badge {
     position: absolute;
     top: -1px;
-    right: -1px;
+    inset-inline-end: -1px;
     min-width: 15px;
     height: 15px;
     padding: 0 3px;
@@ -189,7 +189,7 @@
   .panel {
     position: absolute;
     top: calc(100% + 6px);
-    right: 0;
+    inset-inline-end: 0;
     z-index: 9999;
     width: 340px;
     max-height: 70vh;
@@ -270,7 +270,7 @@
     gap: 8px;
     padding: 10px 10px 10px 12px;
     border-bottom: 1px solid var(--border);
-    border-left: 2px solid transparent;
+    border-inline-start: 2px solid transparent;
     position: relative;
   }
   .notice:last-child {
@@ -286,10 +286,10 @@
     background: color-mix(in srgb, var(--status-exited) 9%, transparent);
   }
   .notice.sev-warn {
-    border-left-color: #febc2e;
+    border-inline-start-color: #febc2e;
   }
   .notice.sev-error {
-    border-left-color: var(--status-exited);
+    border-inline-start-color: var(--status-exited);
   }
 
   .sev-dot {

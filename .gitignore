@@ -46,3 +46,5 @@ docs/superpowers/
 # Prebuilt daemon binary bundled by the packaging step (built artifact)
 apps/desktop/src-tauri/binaries/
 **/__pycache__/
+mobile-proof/
+apps/desktop/src-tauri/binaries/ottod-*-apple-darwin

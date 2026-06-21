@@ -215,7 +215,7 @@
   .se-side {
     width: 280px;
     flex-shrink: 0;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -248,7 +248,7 @@
     font-size: 12px;
   }
   .se-item {
-    text-align: left;
+    text-align: start;
     border: 1px solid transparent;
     background: transparent;
     border-radius: var(--radius-m, 8px);

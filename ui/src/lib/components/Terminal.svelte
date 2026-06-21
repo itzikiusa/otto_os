@@ -47,6 +47,17 @@
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
+  // Effective terminal font size. On phone we apply a comfortable readability
+  // floor (PHONE_MIN_FONT): a 13px monospace grid is legible on a desktop
+  // monitor but cramped on a high-DPI handset held at arm's length, which is a
+  // big part of why the mobile terminal felt unusable. The user's zoom still
+  // wins when they zoom LARGER — we only raise the floor, never cap. Desktop is
+  // unchanged (the floor never applies), so `ui.termFontSize` passes through 1:1.
+  const PHONE_MIN_FONT = 15;
+  const effFontSize = $derived(
+    viewport.isPhone ? Math.max(ui.termFontSize, PHONE_MIN_FONT) : ui.termFontSize,
+  );
+
   let container: HTMLDivElement;
   let term: Terminal | null = null;
   let fit: FitAddon | null = null;
@@ -184,6 +195,12 @@
     if (!viewport.isPhone || e.pointerType === 'mouse') return;
     // Only handle single-finger primary pointer
     if (!e.isPrimary) return;
+    // Focus the terminal on tap. iOS/Android only raise the soft keyboard when
+    // .focus() runs synchronously inside a user-gesture handler — so a tap on the
+    // canvas must focus here (we preventDefault below, which would otherwise stop
+    // xterm's own focus). Without this, the phone keyboard never appears and the
+    // user can't type. readOnly viewers stay unfocused (no input anyway).
+    if (!readOnly) term?.focus();
     touchScrolling = true;
     touchScrollStartY = e.clientY;
     touchScrollAccum = 0;
@@ -529,7 +546,7 @@
     const rtl = ui.rtlBidi;
     term = new Terminal({
       fontFamily: untrack(() => ui.termFontStack),
-      fontSize: untrack(() => ui.termFontSize),
+      fontSize: untrack(() => effFontSize),
       cursorBlink: true,
       allowProposedApi: true,
       // Keep fallback-font glyphs (e.g. Hebrew from Cousine) inside their grid
@@ -544,18 +561,40 @@
     term.loadAddon(fit);
     term.loadAddon(search);
     term.open(container);
-    // Experimental RTL: skip the WebGL renderer. WebGL/canvas draws cells in raw
-    // logical order with no bidi (Hebrew comes out reversed). xterm's DOM
-    // renderer instead emits per-run spans that the `.rtl-bidi` CSS rules re-flow
-    // into a single bidi paragraph per line, so the browser applies the full
-    // Unicode Bidi Algorithm — Hebrew reads right-to-left with English embedded
-    // LTR. (Trade-off: no GPU renderer, and the grid no longer aligns to exact
-    // columns — fine for prose, imperfect for TUI tables/boxes.)
-    if (!rtl) {
+    // ── Renderer selection: WebGL (GPU) on desktop, DOM everywhere it's risky ──
+    // xterm draws to a WebGL canvas when WebglAddon is loaded; with no addon it
+    // falls back to its DOM renderer (per-cell <span>s in `.xterm-rows`). The DOM
+    // renderer is slower but ROBUST — it can't "go black" the way a WebGL canvas
+    // can when the context is unavailable or silently lost.
+    //
+    // We skip WebGL when:
+    //   • RTL bidi mode is on — the DOM renderer is required for the `.rtl-bidi`
+    //     reflow (WebGL draws cells in raw logical order with no bidi).
+    //   • on phone — mobile WKWebView/Safari WebGL is the main culprit behind the
+    //     "terminal is a black void" report: a real device frequently fails to
+    //     create the GL context or loses it right after first paint, and the old
+    //     try/catch only caught a *synchronous* failure — an async context loss
+    //     left a permanently black canvas with no fallback. The DOM renderer has
+    //     no GPU dependency, so output is always visible and typing always works.
+    //     (Phone terminals are small + low-throughput, so DOM perf is a non-issue.)
+    const useWebgl = !rtl && !viewport.isPhone;
+    if (useWebgl) {
       try {
-        term.loadAddon(new WebglAddon());
+        const webgl = new WebglAddon();
+        // If the GPU context is lost AFTER load (common on laptops waking from
+        // sleep, GPU resets, and some mobile browsers), dispose the addon so
+        // xterm reverts to its DOM renderer instead of showing a black canvas.
+        // This is xterm's own recommended recovery path for WebGL context loss.
+        webgl.onContextLoss(() => {
+          try {
+            webgl.dispose(); // → xterm falls back to the DOM renderer (stays visible)
+          } catch {
+            /* already disposed */
+          }
+        });
+        term.loadAddon(webgl);
       } catch {
-        // WebGL unavailable — xterm falls back to its default renderer
+        // WebGL unavailable at load time — xterm falls back to its DOM renderer.
       }
     }
 
@@ -748,9 +787,10 @@
     };
   });
 
-  // react to terminal font-size zoom
+  // react to terminal font-size zoom (uses the phone-floored effective size so
+  // the readability floor stays applied across zoom/orientation changes too)
   $effect(() => {
-    const size = ui.termFontSize;
+    const size = effFontSize;
     if (term && term.options.fontSize !== size) {
       term.options.fontSize = size;
       if (safeFit()) sendResize();
@@ -1028,7 +1068,7 @@
   .find-bar {
     position: absolute;
     top: 8px;
-    right: 16px;
+    inset-inline-end: 16px;
     z-index: 5;
     display: flex;
     align-items: center;
@@ -1089,7 +1129,7 @@
   .find-result-line {
     color: var(--text-dim);
     min-width: 36px;
-    text-align: right;
+    text-align: end;
     flex-shrink: 0;
     font-size: 10px;
   }
@@ -1111,7 +1151,7 @@
   .term-overlay {
     position: absolute;
     top: 6px;
-    right: 8px;
+    inset-inline-end: 8px;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -1153,7 +1193,7 @@
   .ro-chip {
     position: absolute;
     top: 8px;
-    right: 8px;
+    inset-inline-end: 8px;
     z-index: 4;
     font-size: 10px;
     letter-spacing: 0.04em;
@@ -1167,12 +1207,16 @@
   }
 
   /* ── Task 5.1 + 5.3: phone-only floating controls (keyboard toggle + zoom) ──
-     Positioned bottom-left so it doesn't collide with the overlay badges
-     (which sit top-right). Only rendered when viewport.isPhone. */
+     Positioned bottom-RIGHT: terminal output (and the live prompt/cursor where
+     you type) is left-aligned, so the right edge is almost always empty — this
+     keeps the floating buttons from covering the input line. The overlay badges
+     sit top-right, so bottom-right doesn't collide with them either. A solid-ish
+     backdrop + blur keeps the glyphs legible on the rare line that reaches the
+     edge. Only rendered when viewport.isPhone. */
   .phone-controls {
     position: absolute;
     bottom: 8px;
-    left: 8px;
+    inset-inline-end: 8px;
     z-index: 7;
     display: flex;
     flex-direction: row;
@@ -1215,7 +1259,7 @@
   .desk-toolbar {
     position: absolute;
     bottom: 6px;
-    left: 8px;
+    inset-inline-start: 8px;
     z-index: 5;
     display: flex;
     align-items: center;

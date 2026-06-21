@@ -1154,7 +1154,7 @@
     color: #b91c1c;
   }
   .rp-verdict {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-weight: 400;
     font-size: 11px;
     opacity: 0.8;
@@ -1235,7 +1235,7 @@
   .rp-cfg-btn {
     position: absolute;
     top: 0;
-    right: 0;
+    inset-inline-end: 0;
     font-size: 11px;
   }
 
@@ -1268,7 +1268,7 @@
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
     vertical-align: middle;
-    margin-right: 3px;
+    margin-inline-end: 3px;
   }
   @keyframes spin {
     to { transform: rotate(360deg); }
@@ -1283,6 +1283,11 @@
   }
   .rp-agent {
     padding: 8px 12px;
+  }
+  /* Mobile (≤640px): stack the agent cards instead of letting them overflow. */
+  @media (max-width: 640px) {
+    .rp-agents { flex-direction: column; }
+    .rp-agent { min-width: 0; width: 100%; }
   }
   .rp-agent-top {
     display: flex;
@@ -1525,8 +1530,8 @@
   .rp-diff-linenum {
     width: 32px;
     flex-shrink: 0;
-    text-align: right;
-    padding-right: 8px;
+    text-align: end;
+    padding-inline-end: 8px;
     opacity: 0.45;
     user-select: none;
   }
@@ -1758,7 +1763,7 @@
     border: none;
     cursor: pointer;
     padding: 8px 12px;
-    text-align: left;
+    text-align: start;
     flex-wrap: wrap;
   }
   .rp-history-run-header:hover {

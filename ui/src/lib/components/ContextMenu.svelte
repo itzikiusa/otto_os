@@ -119,7 +119,7 @@
     color: var(--text);
     font-size: 12.5px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: background 80ms ease-out;
   }
 

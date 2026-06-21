@@ -581,26 +581,34 @@
     }}
     title={c.first_command ? `${c.name} · ▸ ${c.first_command} — double-click to open` : `${c.name} — double-click to open`}
   >
-    <span class="conn-dot"><Icon name={kindIcons[c.kind]} size={13} /></span>
-    {#if c.pinned}<span class="pin-glyph" title="Pinned"><Icon name="pin" size={11} /></span>{/if}
-    <span class="conn-name ellipsis">{c.name}</span>
-    {#if c.environment === 'prod'}
-      <span class="env-chip prod" title="Production — writes require typed confirmation">PROD</span>
-    {:else if c.read_only}
-      <span class="env-chip ro" title="Read-only — writes refused">RO</span>
-    {:else if c.environment === 'staging'}
-      <span class="env-chip stg" title="Staging">STG</span>
-    {/if}
-    <span class="conn-desc mono ellipsis">{describe(c)}</span>
-    <span class="grow"></span>
-    {#if c.kind === 'clickhouse'}
-      <span class="chip warn" title="password passes via argv on the host">argv</span>
-    {/if}
-    {#if r}
-      <span class="chip {r.ok ? 'ok' : 'bad'}" title={r.message}>
-        {r.ok ? `ok · ${r.latency_ms}ms` : 'failed'}
-      </span>
-    {/if}
+    <!-- Identity line. `display:contents` on desktop → the row stays one flat
+         flex line; on phone (≤640px) this becomes the first row above the
+         actions strip so the name/host/badges read clearly. -->
+    <div class="conn-main">
+      <span class="conn-dot"><Icon name={kindIcons[c.kind]} size={13} /></span>
+      {#if c.pinned}<span class="pin-glyph" title="Pinned"><Icon name="pin" size={11} /></span>{/if}
+      <span class="conn-name ellipsis">{c.name}</span>
+      {#if c.environment === 'prod'}
+        <span class="env-chip prod" title="Production — writes require typed confirmation">PROD</span>
+      {:else if c.read_only}
+        <span class="env-chip ro" title="Read-only — writes refused">RO</span>
+      {:else if c.environment === 'staging'}
+        <span class="env-chip stg" title="Staging">STG</span>
+      {/if}
+      <span class="conn-desc mono ellipsis">{describe(c)}</span>
+      <span class="grow"></span>
+      {#if c.kind === 'clickhouse'}
+        <span class="chip warn" title="password passes via argv on the host">argv</span>
+      {/if}
+      {#if r}
+        <span class="chip {r.ok ? 'ok' : 'bad'}" title={r.message}>
+          {r.ok ? `ok · ${r.latency_ms}ms` : 'failed'}
+        </span>
+      {/if}
+    </div>
+    <!-- Actions strip. `display:contents` on desktop (no visual change); on phone
+         it becomes its own wrapping row so every action stays reachable. -->
+    <div class="conn-actions">
     <!-- Open as a session attached to a workspace; the caret picks which one. -->
     <div class="open-split">
       <button class="btn small primary open-main" disabled={opening[c.id]} onclick={() => open(c)}>
@@ -673,6 +681,7 @@
     <button class="icon-btn" title="Delete" onclick={() => remove(c)}>
       <Icon name="trash" size={13} />
     </button>
+    </div>
   </div>
 {/snippet}
 
@@ -804,6 +813,13 @@
     border-radius: var(--radius-s);
     transition: background 120ms ease-out;
   }
+  /* On desktop the identity line + actions strip are layout-transparent, so the
+     row renders as one flat flex line exactly as before. They only take effect
+     in the phone media query below. */
+  .conn-main,
+  .conn-actions {
+    display: contents;
+  }
   .conn-row:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
@@ -871,12 +887,12 @@
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
     padding: 0 5px;
-    margin-left: 1px;
+    margin-inline-start: 1px;
   }
   .open-menu {
     position: absolute;
     top: calc(100% + 4px);
-    right: 0;
+    inset-inline-end: 0;
     z-index: 50;
     min-width: 180px;
     max-height: 280px;
@@ -908,13 +924,13 @@
     cursor: pointer;
     border-radius: var(--radius-s);
     font-size: 12.5px;
-    text-align: left;
+    text-align: start;
   }
   .open-menu-item:hover {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .open-menu-item .cur {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-size: 9.5px;
     text-transform: uppercase;
     letter-spacing: 0.03em;
@@ -959,5 +975,119 @@
   .env-chip.stg {
     background: color-mix(in srgb, orange 15%, transparent);
     color: orange;
+  }
+
+  /* ───────────────── Phone (≤640px) ─────────────────
+     The desktop row crams the name + host + status chips + SEVEN action controls
+     (Open ▾, split, Test, SFTP, Edit, Pin, Delete) onto one fixed-height flex
+     line. On a phone that overflows the viewport horizontally — the actions run
+     off the right edge, unreachable, and the whole document scrolls sideways.
+     On a phone we stack each connection into a card: an identity line (icon +
+     name + badges + host) over a wrapping action strip, so every control is
+     reachable and the page only scrolls vertically. The header buttons wrap to
+     full width, and the section-head icon controls grow to tap size. Desktop
+     (≥641px) is untouched — the wrappers stay `display:contents`. */
+  @media (max-width: 640px) {
+    /* Header: title block over full-width action buttons (no side overflow). */
+    .page-header {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .header-actions {
+      width: 100%;
+    }
+    .header-actions :global(.btn) {
+      flex: 1;
+      min-height: 38px;
+    }
+
+    /* Bump the page sub-line & search to a comfortably readable size. */
+    .conn-search-input {
+      font-size: 14px;
+    }
+
+    /* Each connection becomes a two-tier card. */
+    .conn-row {
+      height: auto;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      padding: 10px 10px;
+      /* Override the inline depth padding-left so nested rows don't shove the
+         card off the right edge on a narrow phone. */
+      padding-left: 10px !important;
+      border: 1px solid var(--border);
+      margin: 2px 0;
+    }
+    .conn-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    /* The name can shrink/ellipsize so badges + host stay on the line. */
+    .conn-name {
+      font-size: 15px;
+      max-width: none;
+      flex: 0 1 auto;
+      min-width: 0;
+    }
+    .conn-desc {
+      font-size: 12px;
+    }
+    /* Actions: a horizontally-scrollable strip so all seven controls are always
+       reachable without wrapping into an unpredictable number of rows. */
+    .conn-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 2px;
+      scrollbar-width: none;
+    }
+    .conn-actions::-webkit-scrollbar {
+      display: none;
+    }
+    /* Tap-sized controls. The split "Open" stays grouped; everything else gets
+       a comfortable hit area and never shrinks below its label. */
+    .conn-actions :global(.btn),
+    .conn-actions :global(.icon-btn) {
+      min-height: 38px;
+      flex-shrink: 0;
+    }
+    .conn-actions :global(.btn.small) {
+      font-size: 13px;
+      padding: 0 12px;
+    }
+    .conn-actions :global(.icon-btn) {
+      min-width: 38px;
+      display: grid;
+      place-items: center;
+    }
+    .open-main {
+      padding-inline: 14px;
+    }
+
+    /* Section / group headers: larger caret + tap-sized inline icon buttons,
+       and let them wrap rather than push off-screen. */
+    .section-head {
+      height: auto;
+      min-height: 40px;
+      flex-wrap: wrap;
+      padding-right: 4px;
+    }
+    .section-name {
+      font-size: 12px;
+    }
+    .section-head :global(.icon-btn) {
+      min-width: 34px;
+      min-height: 34px;
+      display: grid;
+      place-items: center;
+    }
+    .count {
+      font-size: 12px;
+    }
   }
 </style>

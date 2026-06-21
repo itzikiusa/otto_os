@@ -8,6 +8,7 @@ import type {
   Id,
   MergeBranchReq,
   MergeConflictStatus,
+  MergePreview,
   MergeResult,
   PrSummary,
   Repo,
@@ -272,6 +273,11 @@ class GitStore {
   /** Merge `req.source` into `req.target`. Conflicts are a normal 200 result. */
   mergeBranch(repoId: Id, req: MergeBranchReq): Promise<MergeResult> {
     return api.post<MergeResult>(`/repos/${repoId}/merge`, req);
+  }
+
+  /** Dry-run a merge of `source` into `target` (no working-tree mutation). */
+  mergePreview(repoId: Id, source: string, target: string): Promise<MergePreview> {
+    return api.post<MergePreview>(`/repos/${repoId}/merge/preview`, { source, target });
   }
 
   /** Current merge state (whether a merge is in progress + conflicted files). */

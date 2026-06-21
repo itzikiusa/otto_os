@@ -775,10 +775,11 @@
   .side {
     width: 270px;
     flex-shrink: 0;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     background: var(--surface);
+    min-height: 0;
   }
   .gen {
     padding: 12px;
@@ -828,7 +829,7 @@
     border: none;
     border-radius: var(--radius-s);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .tpl:hover {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -860,6 +861,7 @@
   .list {
     flex: 1;
     overflow-y: auto;
+    min-height: 0;
     padding: 8px;
   }
   .list-h {
@@ -889,7 +891,7 @@
     border: none;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .row-name {
     font-size: 12.5px;
@@ -951,7 +953,7 @@
   .palette {
     position: absolute;
     top: 30px;
-    right: 0;
+    inset-inline-end: 0;
     z-index: 40;
     width: 230px;
     max-height: 320px;
@@ -972,7 +974,7 @@
     border: none;
     border-radius: var(--radius-s);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     color: var(--text);
   }
   .pal-item:hover {
@@ -1108,7 +1110,7 @@
     letter-spacing: 0.04em;
     color: var(--text-dim);
     flex-shrink: 0;
-    padding-right: 4px;
+    padding-inline-end: 4px;
   }
   .tl-step {
     display: inline-flex;
@@ -1171,7 +1173,7 @@
   }
   .run-status {
     flex: 1;
-    text-align: left;
+    text-align: start;
     font-size: 12px;
     text-transform: capitalize;
   }
@@ -1224,7 +1226,7 @@
     width: 11px;
     height: 11px;
     border: 2px solid currentColor;
-    border-right-color: transparent;
+    border-inline-end-color: transparent;
     border-radius: 50%;
     display: inline-block;
     animation: rot 0.7s linear infinite;

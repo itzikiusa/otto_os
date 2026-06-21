@@ -22,9 +22,24 @@ const app = mount(App, {
 });
 
 // Register the PWA service worker (no-op in dev if sw.js isn't served).
+// When a NEW service worker takes control (after a deploy), reload once so the
+// fresh app shell is shown immediately — otherwise a cached SW can keep serving
+// a stale build until the user manually clears site data.
 if ('serviceWorker' in navigator) {
+  let reloadingForSw = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloadingForSw) return;
+    reloadingForSw = true;
+    window.location.reload();
+  });
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker
+      .register('/sw.js')
+      .then((reg) => {
+        // Proactively check for an updated SW on each load.
+        void reg.update().catch(() => {});
+      })
+      .catch(() => {});
   });
 }
 

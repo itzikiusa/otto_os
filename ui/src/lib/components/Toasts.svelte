@@ -18,7 +18,7 @@
 <style>
   .toasts {
     position: fixed;
-    right: 16px;
+    inset-inline-end: 16px;
     bottom: 38px;
     z-index: 300;
     display: flex;
@@ -42,7 +42,7 @@
     align-self: stretch;
     width: 3px;
     border-radius: 2px;
-    margin-left: 0;
+    margin-inline-start: 0;
     background: var(--accent);
   }
   .toast.success .toast-stripe {

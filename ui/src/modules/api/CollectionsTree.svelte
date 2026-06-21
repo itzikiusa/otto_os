@@ -337,7 +337,7 @@
     align-items: center;
     gap: 5px;
     height: 28px;
-    padding-right: 4px;
+    padding-inline-end: 4px;
     border-radius: var(--radius-s);
   }
   .col-head:hover {
@@ -382,7 +382,7 @@
     align-items: center;
     gap: 4px;
     height: 26px;
-    padding-right: 6px;
+    padding-inline-end: 6px;
     border-radius: var(--radius-s);
   }
   .req-row:hover {
@@ -400,7 +400,7 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     height: 100%;
   }
   .rm {

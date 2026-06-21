@@ -210,7 +210,7 @@
   }
   th,
   td {
-    text-align: left;
+    text-align: start;
     padding: 8px;
     border-bottom: 1px solid var(--border);
     vertical-align: top;

@@ -110,7 +110,7 @@
     max-width: 260px;
   }
   .slc-view {
-    margin-left: auto;
+    margin-inline-start: auto;
     flex: none;
   }
   .slc-loading {

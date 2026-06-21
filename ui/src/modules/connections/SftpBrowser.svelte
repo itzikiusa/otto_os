@@ -435,7 +435,7 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     padding: 1px 0;
     font: inherit;
   }

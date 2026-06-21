@@ -51,7 +51,7 @@
     align-items: center;
     gap: 5px;
     height: 24px;
-    padding-right: 6px;
+    padding-inline-end: 6px;
     color: var(--text-dim);
   }
   .kf-input {

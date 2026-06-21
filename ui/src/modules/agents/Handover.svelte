@@ -370,7 +370,7 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition:
       border-color 130ms ease-out,
       background 130ms ease-out;
@@ -431,7 +431,7 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .agent-row:hover {
     background: color-mix(in srgb, var(--surface-2) 70%, var(--surface));

@@ -1072,6 +1072,33 @@ pub struct MergeBranchReq {
     pub target: String,
     #[serde(default = "default_local_merge_strategy")]
     pub strategy: LocalMergeStrategy,
+    /// When true and the working tree is dirty, auto-stash before the merge and
+    /// pop the stash afterwards (stash → merge → pop). When false, a dirty tree
+    /// is refused. Default false.
+    #[serde(default)]
+    pub auto_stash: bool,
+}
+
+/// `POST /repos/{id}/merge/preview` — dry-run a merge of `source` into `target`
+/// using `git merge-tree` (writes only to the object DB; the working tree and
+/// index are NOT touched). Lets the UI warn about conflicts BEFORE starting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergePreviewReq {
+    pub source: String,
+    pub target: String,
+}
+
+/// Result of a merge dry-run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergePreview {
+    /// True if merging would produce conflicts.
+    pub conflicts: bool,
+    /// Files that would conflict (best-effort; from `merge-tree --name-only`).
+    #[serde(default)]
+    pub conflicted_files: Vec<String>,
+    /// True if the merge would be a no-op (source already in target).
+    #[serde(default)]
+    pub up_to_date: bool,
 }
 
 /// Outcome of a local merge or merge-completion. Conflicts are a NORMAL 200
@@ -1087,6 +1114,10 @@ pub struct MergeResult {
     pub conflicted_files: Vec<String>,
     /// Fresh repo status after the operation.
     pub repo_status: RepoStatusResp,
+    /// Optional human-readable note (e.g. auto-stash outcome) for the UI to
+    /// surface as a toast. None for the common case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// `GET /repos/{id}/merge/status`

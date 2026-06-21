@@ -404,7 +404,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    text-align: left;
+    text-align: start;
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);

@@ -242,7 +242,7 @@
     min-width: 0;
     min-height: 0;
     width: 100%;
-    text-align: left;
+    text-align: start;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: hidden;

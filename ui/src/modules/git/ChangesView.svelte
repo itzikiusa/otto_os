@@ -217,6 +217,25 @@
     }
   }
 
+  // ── Mobile (phone) accordion ──────────────────────────────────────────────
+  // Stack the file list + composer over the diff as collapsible, independently-
+  // scrollable sections. Selecting a file collapses the list so the diff gets
+  // the screen; the composer is reachable from its own section header.
+  let isMobile = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 1024px)');
+    const sync = () => (isMobile = mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
+  let secFilesOpen = $state(true);
+
+  function selectFileMobile(c: FileChange, e: MouseEvent): void {
+    selectFile(c, e);
+    if (isMobile && !(e.metaKey || e.ctrlKey || e.shiftKey)) secFilesOpen = false;
+  }
+
   async function commit(): Promise<void> {
     if (committing) return;
     committing = true;
@@ -240,8 +259,21 @@
   }
 </script>
 
-<div class="changes">
-  <div class="changes-side">
+<div class="changes" class:mobile={isMobile}>
+  {#if isMobile}
+    <button
+      class="mob-sec-head"
+      onclick={() => (secFilesOpen = !secFilesOpen)}
+      aria-expanded={secFilesOpen}
+    >
+      <Icon name={secFilesOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+      <Icon name="file" size={13} />
+      <span>Changed files</span>
+      <span class="grow"></span>
+      <span class="mob-sec-count">{status.changes.length}</span>
+    </button>
+  {/if}
+  <div class="changes-side" class:mob-files-collapsed={isMobile && !secFilesOpen}>
     <div class="cs-head">
       <span class="dim">{status.changes.length} changed · {stagedCount} staged</span>
       <span class="grow"></span>
@@ -284,7 +316,7 @@
             onchange={() => toggleStage(c)}
             title={c.staged ? 'Unstage' : 'Stage'}
           />
-          <button class="cs-name" onclick={(e) => selectFile(c, e)} title={c.path}>
+          <button class="cs-name" onclick={(e) => selectFileMobile(c, e)} title={c.path}>
             <span class="kind k-{c.kind}">{kindBadge[c.kind]}</span>
             <span class="mono cs-path">{c.path}</span>
           </button>
@@ -343,6 +375,18 @@
     </div>
   </div>
 
+  {#if isMobile}
+    <button
+      class="mob-sec-head mob-diff-head"
+      onclick={() => (secFilesOpen = true)}
+      aria-expanded="true"
+    >
+      <Icon name="file" size={13} />
+      <span class="mob-diff-title">{selectedPath === null ? 'All changes' : selectedPath.split('/').pop()}</span>
+      <span class="grow"></span>
+      <span class="mob-back">↑ Files</span>
+    </button>
+  {/if}
   <div class="changes-diff">
     {#if diffLoading && !diff}
       <Skeleton rows={6} height={28} />
@@ -365,7 +409,7 @@
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
   }
   .cs-head {
     display: flex;
@@ -389,7 +433,7 @@
     padding: 0 6px;
     border: none;
     background: transparent;
-    text-align: left;
+    text-align: start;
     cursor: pointer;
   }
   .cs-file.selected {
@@ -418,7 +462,7 @@
     background: transparent;
     cursor: pointer;
     color: var(--text);
-    text-align: left;
+    text-align: start;
   }
   .cs-path {
     font-size: 11.5px;
@@ -491,12 +535,12 @@
   }
   .msg-box textarea {
     width: 100%;
-    padding-right: 78px;
+    padding-inline-end: 78px;
   }
   .draft-btn {
     position: absolute;
     top: 6px;
-    right: 6px;
+    inset-inline-end: 6px;
   }
   .spinner-xs {
     display: inline-block;
@@ -507,7 +551,7 @@
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
     vertical-align: middle;
-    margin-right: 4px;
+    margin-inline-end: 4px;
   }
   @keyframes spin {
     to {
@@ -519,5 +563,74 @@
     min-width: 0;
     overflow-y: auto;
     padding: 12px 14px;
+  }
+
+  /* ── Mobile accordion section headers ── */
+  .mob-sec-head {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 11px 14px;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: start;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mob-sec-head:active { background: color-mix(in srgb, var(--accent) 10%, var(--surface-2)); }
+  .mob-sec-count {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text-dim);
+  }
+  .mob-diff-head { background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
+  .mob-diff-title {
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .mob-back { font-size: 12px; color: var(--text-dim); flex-shrink: 0; }
+
+  /* ── Mobile + tablet (≤1024px): stack files+composer over the diff ── */
+  @media (max-width: 1024px) {
+    .changes.mobile { flex-direction: column; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .mobile .mob-sec-head { display: flex; }
+    .mobile .changes-side {
+      width: 100%;
+      flex: 0 0 auto;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+    /* The file list scrolls within a capped height; the composer stays visible
+       below it. When collapsed, only the list hides — head + composer remain. */
+    .mobile .cs-list { max-height: 40vh; }
+    .mobile .changes-side.mob-files-collapsed .cs-list { display: none; }
+    .mobile .changes-diff {
+      min-width: 0;
+      width: 100%;
+      flex: 1 1 auto;
+      min-height: 45vh;
+    }
+    /* Bigger touch targets + legible text. */
+    .mobile .cs-head { font-size: 13px; gap: 6px; flex-wrap: wrap; }
+    .mobile .cs-name { height: 34px; }
+    .mobile .cs-path { font-size: 13px; }
+    .mobile .cs-file input[type='checkbox'] { width: 17px; height: 17px; }
+    .mobile .composer textarea { font-size: 14px; }
+    /* Discard button always visible on touch (no hover). */
+    .mobile .cs-discard { opacity: 1; }
   }
 </style>

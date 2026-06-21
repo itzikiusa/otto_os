@@ -78,6 +78,23 @@
   let viewportH = $state(0);
   const virtualize = $derived(!mini);
 
+  // Track the scroll viewport height with a ResizeObserver rather than a plain
+  // `bind:clientHeight`. On mobile the flex height chain isn't settled at first
+  // paint, so the bind reads 0 → virtualization computes a tiny/empty window and
+  // the grid looks blank. The observer fires again once layout distributes the
+  // height (and on every later resize/orientation change), so `viewportH` — and
+  // the `endIdx` $derived that reads it — recalculates and rows render.
+  $effect(() => {
+    const el = scrollEl;
+    if (!el) return;
+    viewportH = el.clientHeight;
+    const ro = new ResizeObserver(() => {
+      viewportH = el.clientHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
   // ── Search / filter ─────────────────────────────────────────────────────────
   let search = $state('');
   const searchLc = $derived(search.trim().toLowerCase());
@@ -1301,7 +1318,7 @@
         {/each}
       </div>
     {:else}
-    <div class="grid-scroll" bind:this={scrollEl} bind:clientHeight={viewportH} onscroll={onScroll}>
+    <div class="grid-scroll" bind:this={scrollEl} onscroll={onScroll}>
       <table class="grid mono" class:expanded={expandJson} style="--last:{result.columns.length}; --row-h:{ROW_H}px">
         <thead>
           <tr>
@@ -1810,7 +1827,7 @@
     font-size: 10.5px;
     color: var(--text-dim);
     font-style: italic;
-    margin-left: auto;
+    margin-inline-start: auto;
   }
   .gt-search {
     display: inline-flex;
@@ -1882,14 +1899,14 @@
     height: 22px;
     padding: 0 9px;
     border: none;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);
     font-size: 11.5px;
     cursor: pointer;
   }
   .vs:last-child {
-    border-right: none;
+    border-inline-end: none;
   }
   .vs.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -2003,11 +2020,11 @@
     position: sticky;
     top: 0;
     z-index: 2;
-    text-align: left;
+    text-align: start;
     padding: 5px 10px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     font-size: 11px;
     white-space: nowrap;
     vertical-align: bottom;
@@ -2032,7 +2049,7 @@
     background: transparent;
     color: inherit;
     font: inherit;
-    text-align: left;
+    text-align: start;
     cursor: pointer;
   }
   .th-sort:hover {
@@ -2113,7 +2130,7 @@
   .grid td {
     padding: 4px 10px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-    border-right: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    border-inline-end: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     font-size: 11.5px;
     white-space: nowrap;
     overflow: hidden;
@@ -2154,10 +2171,10 @@
   }
   .rownum {
     color: var(--text-dim);
-    text-align: right;
+    text-align: end;
     font-size: 10.5px;
     position: sticky;
-    left: 0;
+    inset-inline-start: 0;
     background: var(--surface-2);
     z-index: 1;
     width: 4ch;
@@ -2175,7 +2192,7 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    right: 0;
+    inset-inline-end: 0;
     width: 2.2ch;
     display: none;
     align-items: center;
@@ -2196,8 +2213,8 @@
   .rownum:has(.sel-box) {
     width: 6ch;
     max-width: 6ch;
-    text-align: left;
-    padding-left: 5px;
+    text-align: start;
+    padding-inline-start: 5px;
   }
   .sel-box {
     width: 12px;
@@ -2278,7 +2295,7 @@
   .cell-expand {
     position: absolute;
     top: 1px;
-    right: 1px;
+    inset-inline-end: 1px;
     display: none;
     align-items: center;
     justify-content: center;
@@ -2547,5 +2564,52 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* ───────────────── Phone (≤640px) ─────────────────
+     The results toolbar (search + view-segment + Copy/CSV/JSON/Agent) is dense
+     — let it wrap rather than run off the edge, and make sure the grid itself
+     fills its bounded block and scrolls in BOTH directions on touch. */
+  @media (max-width: 640px) {
+    .grid-toolbar {
+      flex-wrap: wrap;
+      row-gap: 6px;
+    }
+    .grid-toolbar .grow {
+      display: none;
+    }
+    .gt-search {
+      flex: 1 1 100%;
+    }
+    /* The grid block must have a definite height so the table scrolls inside it
+       (its parent .qe-results gives it min-height on mobile). */
+    .grid-wrap {
+      height: 100%;
+      min-height: 320px;
+    }
+    .grid-scroll {
+      -webkit-overflow-scrolling: touch;
+    }
+    /* Bump tiny grid text up a notch for phone legibility. Row height is fixed
+       (virtualization) so we keep cell font modest; headers can grow freely. */
+    .grid thead th {
+      font-size: 12.5px;
+    }
+    .grid td {
+      font-size: 12.5px;
+    }
+    .gt-search-input {
+      font-size: 13px;
+    }
+    .grid-empty,
+    .grid-error {
+      font-size: 13.5px;
+    }
+    /* Vertical / JSON views are the comfiest on a narrow phone — bump them too. */
+    .alt-json,
+    .vk,
+    .vv {
+      font-size: 13px;
+    }
   }
 </style>

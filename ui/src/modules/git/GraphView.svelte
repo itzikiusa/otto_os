@@ -72,6 +72,29 @@
     if (source && onmergerequest) onmergerequest(source, localName);
   }
 
+  // ── Mobile (phone) layout ─────────────────────────────────────────────────
+  // On a phone the 3-pane desktop layout (refs | graph | diff) can't fit, so we
+  // stack the panes as COLLAPSIBLE accordion sections, each independently
+  // scrollable. Tracked via matchMedia so the same component serves both layouts
+  // without duplicating markup. The breakpoint is 1024px so it catches phone
+  // portrait + landscape AND the tablet range (iPad portrait 834, real-phone
+  // landscape 932) — the desktop 3-pane (refs | graph | diff) can't fit there
+  // without the diff getting clipped off-screen, so those widths get the stacked
+  // accordion + wrapping-diff layout. Desktop (≥1025) keeps the 3-pane view.
+  let isMobile = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 1024px)');
+    const sync = () => (isMobile = mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
+
+  // Which mobile sections are expanded. The refs (branches) tree starts collapsed
+  // — the commit graph is what users want first — and the diff opens on select.
+  let secRefsOpen = $state(false);
+  let secCommitsOpen = $state(true);
+
   // ── Refs ──────────────────────────────────────────────────────────────────
   let refs: RefsResp | null = $state(null);
   let refsLoading = $state(true);
@@ -555,6 +578,8 @@
     diffResp = null;
     diffLoading = true;
     fileCollapsed = {};
+    // On a phone, collapse the commit list so the diff section gets the room.
+    if (isMobile) secCommitsOpen = false;
     try {
       const resp = await api.get<DiffResp>(
         `/repos/${repoId}/diff?target=${encodeURIComponent('commit:' + commit.sha)}`
@@ -581,6 +606,8 @@
     diffResp = null;
     diffLoading = false;
     fileCollapsed = {};
+    // Re-open the commit list when the diff closes (mobile accordion).
+    if (isMobile) secCommitsOpen = true;
   }
 
   // ── Lane / graph algorithm ────────────────────────────────────────────────
@@ -852,9 +879,24 @@
   });
 </script>
 
-<div class="graphview">
+<div class="graphview" class:mobile={isMobile}>
   <!-- ── LEFT: refs tree ───────────────────────────────────────────────────── -->
-  <aside class="refs-panel">
+  {#if isMobile}
+    <!-- Mobile accordion header for the branches/refs tree. -->
+    <button
+      class="mob-sec-head"
+      class:open={secRefsOpen}
+      onclick={() => (secRefsOpen = !secRefsOpen)}
+      aria-expanded={secRefsOpen}
+    >
+      <Icon name={secRefsOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+      <Icon name="branch" size={13} />
+      <span>Branches &amp; Tags</span>
+      <span class="grow"></span>
+      {#if refs}<span class="mob-sec-count">{refs.local.length + refs.remote.length + refs.tags.length}</span>{/if}
+    </button>
+  {/if}
+  <aside class="refs-panel" class:mob-collapsed={isMobile && !secRefsOpen}>
     {#if refsLoading}
       <div style="padding: 10px"><Skeleton rows={6} height={22} /></div>
     {:else if refs}
@@ -967,7 +1009,25 @@
   </aside>
 
   <!-- ── MIDDLE: commit graph ─────────────────────────────────────────────── -->
-  <div class="graph-panel" class:panel-shrunk={selectedSha !== null}>
+  {#if isMobile}
+    <button
+      class="mob-sec-head"
+      class:open={secCommitsOpen}
+      onclick={() => (secCommitsOpen = !secCommitsOpen)}
+      aria-expanded={secCommitsOpen}
+    >
+      <Icon name={secCommitsOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+      <Icon name="commit" size={13} />
+      <span>Commits</span>
+      <span class="grow"></span>
+      {#if !commitsLoading}<span class="mob-sec-count">{commits.length}</span>{/if}
+    </button>
+  {/if}
+  <div
+    class="graph-panel"
+    class:panel-shrunk={selectedSha !== null && !isMobile}
+    class:mob-collapsed={isMobile && !secCommitsOpen}
+  >
     {#if commitsLoading}
       <div style="padding: 10px"><Skeleton rows={12} height={28} /></div>
     {:else if commits.length === 0}
@@ -1085,7 +1145,24 @@
   {/if}
 
   <!-- ── RIGHT: commit detail + diff ─────────────────────────────────────── -->
-  <div class="detail-panel" class:detail-visible={selectedSha !== null}>
+  {#if isMobile && selectedSha !== null}
+    <!-- Mobile: a sticky section header for the open commit's diff, with a tap
+         target to close it (re-opening the commit list). -->
+    <button class="mob-sec-head mob-diff-head" onclick={clearSelection} aria-expanded="true">
+      <Icon name="chevronDown" size={13} />
+      <Icon name="file" size={13} />
+      <span class="mob-diff-title mono">{selectedCommit?.short_sha ?? 'Diff'}</span>
+      <span class="grow"></span>
+      {#if diffResp}<span class="mob-sec-count">{diffResp.files.length} file{diffResp.files.length === 1 ? '' : 's'}</span>{/if}
+      <span class="mob-close">✕</span>
+    </button>
+  {/if}
+  <div
+    class="detail-panel"
+    class:detail-visible={selectedSha !== null && !isMobile}
+    class:mob-visible={isMobile && selectedSha !== null}
+    class:mob-hidden={isMobile && selectedSha === null}
+  >
     {#if selectedSha === null}
       <div class="detail-empty">
         <span class="detail-empty-label">COMMIT</span>
@@ -1202,7 +1279,7 @@
     width: 220px;
     flex-shrink: 0;
     overflow-y: auto;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     padding: 6px 0;
   }
   .ref-section {
@@ -1222,14 +1299,14 @@
     letter-spacing: 0.04em;
     cursor: pointer;
     text-transform: uppercase;
-    text-align: left;
+    text-align: start;
     transition: color 110ms ease-out;
   }
   .ref-header:hover {
     color: var(--text);
   }
   .ref-count {
-    margin-left: auto;
+    margin-inline-start: auto;
     background: var(--surface-2);
     border-radius: 999px;
     font-size: 9.5px;
@@ -1249,7 +1326,7 @@
     color: var(--text-dim);
     font-size: 12px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     overflow: hidden;
     transition: background 100ms ease-out, color 100ms ease-out;
   }
@@ -1338,24 +1415,24 @@
     flex: 0 0 380px;
     width: auto;
     min-width: 280px;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
   }
   .graph-list {
     display: flex;
     flex-direction: column;
-    min-width: min-content;
+    min-width: 0;
   }
   .graph-row {
     display: flex;
     align-items: center;
     width: 100%;
     height: 28px;
-    padding-right: 12px;
+    padding-inline-end: 12px;
     border: none;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
     background: transparent;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: background 100ms ease-out;
   }
   .graph-row:hover {
@@ -1455,9 +1532,9 @@
   .chip-ab {
     display: inline-flex;
     gap: 2px;
-    margin-left: 2px;
-    padding-left: 3px;
-    border-left: 1px solid color-mix(in srgb, #fff 45%, transparent);
+    margin-inline-start: 2px;
+    padding-inline-start: 3px;
+    border-inline-start: 1px solid color-mix(in srgb, #fff 45%, transparent);
     font-variant-numeric: tabular-nums;
   }
   /* "You are here" pip on the HEAD row. */
@@ -1513,7 +1590,7 @@
     display: flex;
     flex-direction: column;
     transition: width 180ms ease-out;
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
     background: var(--surface);
   }
   .detail-panel.detail-visible {
@@ -1600,7 +1677,7 @@
     line-height: 1;
     padding: 2px 4px;
     border-radius: var(--radius-s, 3px);
-    margin-left: auto;
+    margin-inline-start: auto;
     transition: color 100ms, background 100ms;
   }
   .detail-close:hover {
@@ -1656,7 +1733,7 @@
     cursor: pointer;
     font-size: 11px;
     color: var(--text);
-    text-align: left;
+    text-align: start;
     transition: background 80ms;
   }
   .df-head:hover {
@@ -1703,14 +1780,14 @@
   .dl-gut {
     width: 34px;
     min-width: 34px;
-    text-align: right;
+    text-align: end;
     padding: 0 5px 0 3px;
     color: var(--text-dim);
     font-family: var(--font-mono);
     font-size: 9.5px;
     user-select: none;
     vertical-align: top;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
   }
   .dl-sign {
     width: 14px;
@@ -1759,5 +1836,146 @@
   }
   .mono {
     font-family: var(--font-mono);
+  }
+
+  /* ── Mobile accordion section headers (phones) ─────────────────────────────
+     Each pane (Branches / Commits / Diff) gets a tappable header; the body
+     below collapses or expands and scrolls independently. */
+  .mob-sec-head {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 11px 14px;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: start;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mob-sec-head:active {
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+  }
+  .mob-sec-count {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text-dim);
+  }
+  .mob-diff-head {
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+    position: sticky;
+    top: 0;
+    z-index: 3;
+  }
+  .mob-diff-title {
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .mob-close {
+    font-size: 16px;
+    color: var(--text-dim);
+    line-height: 1;
+    padding-inline-start: 6px;
+  }
+
+  /* ── Mobile + tablet (≤1024px) layout: vertical accordion ── */
+  @media (max-width: 1024px) {
+    .graphview.mobile {
+      flex-direction: column;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .mobile .mob-sec-head { display: flex; }
+
+    /* Branches/refs pane: capped height, scrolls on its own when expanded. */
+    .mobile .refs-panel {
+      width: 100%;
+      flex: 0 0 auto;
+      max-height: 38vh;
+      overflow-y: auto;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+    /* Commit list: takes the remaining room, scrolls on its own. */
+    .mobile .graph-panel,
+    .mobile .graph-panel.panel-shrunk {
+      flex: 1 1 auto;
+      min-width: 0;
+      width: auto;
+      min-height: 180px;
+      overflow-y: auto;
+      overflow-x: auto;
+      border-inline-end: none;
+    }
+    /* Diff/detail pane: the prominent section once a commit is open. */
+    .mobile .detail-panel {
+      width: 100%;
+      border-inline-start: none;
+    }
+    .mobile .detail-panel.mob-visible {
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 50vh;
+      width: 100%;
+      overflow: hidden;
+      display: flex;
+    }
+
+    /* A collapsed section hides its body entirely (header stays tappable). */
+    .mobile .mob-collapsed {
+      display: none !important;
+    }
+    /* No commit selected → drop the empty diff pane so the list fills the view. */
+    .mobile .detail-panel.mob-hidden {
+      display: none !important;
+    }
+
+    /* Bigger touch targets + legible text on the commit rows. */
+    .mobile .graph-row { height: 46px; }
+    .mobile .ci-subject { font-size: 14px; }
+    .mobile .ci-meta { font-size: 12px; }
+    .mobile .ci-sha { font-size: 12px; }
+    .mobile .ci-author { font-size: 12px; max-width: 110px; }
+    .mobile .ci-date { font-size: 12px; }
+    .mobile .ref-chip { font-size: 11px; max-width: 130px; }
+
+    /* Refs rows: bigger tap targets + legible text. */
+    .mobile .ref-row { height: 36px; font-size: 14px; }
+    .mobile .ref-name { font-size: 13px; }
+    .mobile .ref-header { font-size: 12px; padding: 8px 12px; }
+
+    /* Diff: bump the tiny code + gutter text so it's legible on a phone. */
+    .mobile .detail-diff { -webkit-overflow-scrolling: touch; }
+    .mobile .diff-summary-bar { font-size: 13px; padding: 9px 12px; }
+    .mobile .diff-summary-bar .dim { font-size: 13px !important; }
+    .mobile .ds-add,
+    .mobile .ds-del { font-size: 13px; }
+    .mobile .df-head { font-size: 13px; padding: 9px 12px; }
+    .mobile .df-path { font-size: 13px; }
+    .mobile .hunk-header { font-size: 12px; padding: 4px 10px; }
+    .mobile .dl-table { font-size: 12.5px; }
+    /* Wrap long code lines so they're readable without horizontal scrolling. */
+    .mobile .dl-code {
+      font-size: 12.5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: visible;
+      text-overflow: clip;
+    }
+    .mobile .dl-gut { font-size: 11px; width: 30px; min-width: 30px; }
+    .mobile .dl-sign { font-size: 12.5px; }
+    .mobile .detail-subject { font-size: 14px; }
+    .mobile .detail-sha { font-size: 12px; }
+    .mobile .detail-author,
+    .mobile .detail-date { font-size: 12px; }
   }
 </style>

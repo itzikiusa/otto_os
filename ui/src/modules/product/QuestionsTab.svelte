@@ -685,13 +685,13 @@
     line-height: 1.45;
     padding: 6px 10px;
     background: color-mix(in srgb, var(--accent) 7%, transparent);
-    border-left: 3px solid var(--accent);
+    border-inline-start: 3px solid var(--accent);
     border-radius: 0 var(--radius-s) var(--radius-s) 0;
   }
   .answer-label {
     font-weight: 700;
     color: var(--accent);
-    margin-right: 4px;
+    margin-inline-end: 4px;
   }
   .q-ref {
     font-size: 11px;
@@ -816,7 +816,7 @@
 
   /* ── Answer panel ────────────────────────────────────────────────── */
   .answer-panel {
-    padding-left: 28px; /* align under text, past checkbox */
+    padding-inline-start: 28px; /* align under text, past checkbox */
     display: flex;
     flex-direction: column;
     gap: 6px;

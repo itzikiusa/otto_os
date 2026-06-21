@@ -234,7 +234,7 @@
   .otto-find-bar {
     position: fixed;
     top: 40px; /* below the tab bar / titlebar area */
-    right: 12px;
+    inset-inline-end: 12px;
     z-index: 9000;
     display: flex;
     align-items: center;
@@ -317,7 +317,7 @@
     cursor: pointer;
     transition: background 130ms ease-out, color 130ms ease-out;
     padding: 0;
-    margin-left: 2px;
+    margin-inline-start: 2px;
   }
   .find-close-btn:hover {
     background: color-mix(in srgb, var(--text-dim) 15%, transparent);

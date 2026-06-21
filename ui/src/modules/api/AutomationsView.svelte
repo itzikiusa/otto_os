@@ -412,7 +412,7 @@
     align-items: center;
     gap: 2px;
     height: 28px;
-    padding-right: 4px;
+    padding-inline-end: 4px;
     border-radius: var(--radius-s);
   }
   .auto-item:hover {
@@ -430,7 +430,7 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     height: 100%;
     padding: 0 6px;
   }
@@ -509,7 +509,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding-left: 24px;
+    padding-inline-start: 24px;
   }
   .mini-head {
     display: flex;
@@ -570,7 +570,7 @@
     font-weight: 600;
   }
   .report-banner .rb-meta {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-size: 11px;
     font-weight: 500;
     opacity: 0.8;
@@ -585,15 +585,15 @@
   }
   .r-step {
     border: 1px solid var(--border);
-    border-left-width: 3px;
+    border-inline-start-width: 3px;
     border-radius: var(--radius-s);
     padding: 6px 8px;
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
-  .r-step.ok { border-left-color: var(--status-working); }
-  .r-step.fail { border-left-color: var(--status-exited); }
+  .r-step.ok { border-inline-start-color: var(--status-working); }
+  .r-step.fail { border-inline-start-color: var(--status-exited); }
   .r-top {
     display: flex;
     align-items: center;
@@ -637,7 +637,7 @@
   .r-error {
     font-size: 11px;
     color: var(--status-exited);
-    padding-left: 14px;
+    padding-inline-start: 14px;
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -646,7 +646,7 @@
     align-items: center;
     gap: 5px;
     font-size: 11px;
-    padding-left: 14px;
+    padding-inline-start: 14px;
     min-width: 0;
   }
   .r-assert.ok { color: var(--status-working); }

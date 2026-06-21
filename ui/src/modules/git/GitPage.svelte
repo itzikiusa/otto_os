@@ -532,7 +532,7 @@
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   }
   .repo-main {
-    text-align: left;
+    text-align: start;
     border: none;
     background: transparent;
     padding: 14px 14px 6px;

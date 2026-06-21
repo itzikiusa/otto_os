@@ -5,6 +5,7 @@
     TERM_FONT_OPTIONS,
     type SchemePref,
     type ThemeName,
+    type Direction,
   } from '../../lib/stores/ui.svelte';
 
   const themes: { id: ThemeName; name: string; desc: string }[] = [
@@ -16,6 +17,10 @@
     { id: 'auto', label: 'Auto' },
     { id: 'light', label: 'Light' },
     { id: 'dark', label: 'Dark' },
+  ];
+  const directions: { id: Direction; label: string }[] = [
+    { id: 'ltr', label: 'Left-to-right' },
+    { id: 'rtl', label: 'Right-to-left' },
   ];
 
   const swatches: Record<ThemeName, { bg: string; fg: string; acc: string }> = {
@@ -55,6 +60,14 @@
     {/each}
   </div>
   <p class="hint-line">Auto follows the system light/dark preference.</p>
+
+  <div class="section-title">Direction</div>
+  <div class="segmented">
+    {#each directions as d (d.id)}
+      <button class:active={ui.direction === d.id} onclick={() => ui.setDirection(d.id)}>{d.label}</button>
+    {/each}
+  </div>
+  <p class="hint-line">Right-to-left mirrors the layout for RTL languages (Hebrew, Arabic).</p>
 
   <div class="section-title">Accent color</div>
   <div class="row">
@@ -101,6 +114,20 @@
     monospace grid no longer lines up exactly — great for chat-style output, imperfect for TUI
     tables or box art. Toggling reloads open terminals.
   </p>
+
+  <div class="section-title">Sessions on this device</div>
+  <label class="switch-row">
+    <input
+      type="checkbox"
+      checked={ui.sessionIsolation}
+      onchange={(e) => ui.setSessionIsolation(e.currentTarget.checked)}
+    />
+    <span>Isolate sessions to this device</span>
+  </label>
+  <p class="hint-line">
+    Only show sessions started on this device. Other devices' sessions stay hidden here (they
+    still run on the daemon).
+  </p>
 </div>
 
 <style>
@@ -111,7 +138,7 @@
     max-width: min(620px, 92vw);
   }
   .theme-card {
-    text-align: left;
+    text-align: start;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
@@ -189,7 +216,7 @@
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     padding: 1px 6px;
-    margin-left: 6px;
+    margin-inline-start: 6px;
     vertical-align: middle;
   }
   .accent-input {

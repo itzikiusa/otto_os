@@ -237,7 +237,7 @@
   }
   .compat-msgs {
     margin: 4px 0 0;
-    padding-left: 18px;
+    padding-inline-start: 18px;
     font-size: 11.5px;
     color: var(--status-exited, #ff5f57);
   }

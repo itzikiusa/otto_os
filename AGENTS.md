@@ -78,9 +78,16 @@ cargo clippy --workspace --all-targets -- -D warnings   # lints (CI-enforced)
 # UI (run from ui/)
 cd ui
 npm ci          # install (uses package-lock.json); `npm install` when adding deps
-npm run check   # svelte-check + tsc — the type-check gate (CI-enforced)
+npm run check   # svelte-check + tsc (app + node + e2e tsconfigs) — the type-check gate
 npm run build   # production build → ui/dist
 npm run dev     # Vite dev server on :5173 (talks to a running ottod)
+npm run test:e2e # Playwright mobile/tablet E2E (spins an ISOLATED throwaway daemon
+                 # on a temp data dir + port — never touches real sessions/DBs —
+                 # serves the live UI via Vite, drives every page across iPhone/iPad
+                 # portrait+landscape: fits/scrolls, collapsible sections, real flows
+                 # (query→results, commit→diff, terminal I/O), light/dark + RTL).
+                 # Slot-isolated via OTTO_E2E_SLOT/OTTO_E2E_PORT/OTTO_E2E_PW_PORT for
+                 # parallel per-page runs. Specs: ui/e2e/*.spec.ts.
 ```
 
 Run the daemon and the UI separately for hot-reload during development:

@@ -508,7 +508,7 @@
     content: '';
     position: absolute;
     top: 2px;
-    left: 2px;
+    inset-inline-start: 2px;
     width: 11px;
     height: 11px;
     border-radius: 50%;

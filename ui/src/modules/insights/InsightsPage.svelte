@@ -422,7 +422,7 @@
     height: 30px;
   }
   .btn :global(svg) {
-    margin-right: 2px;
+    margin-inline-end: 2px;
   }
 
   .link {
@@ -476,7 +476,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 14px 16px;
-    text-align: left;
+    text-align: start;
     cursor: pointer;
     transition: border-color 120ms ease-out, background 120ms ease-out;
   }
@@ -564,7 +564,7 @@
     gap: 14px;
     padding: 16px 18px;
     margin: 10px 0;
-    border-left: 3px solid var(--warn, #d08a18);
+    border-inline-start: 3px solid var(--warn, #d08a18);
     background: color-mix(in srgb, var(--warn, #d08a18) 10%, transparent);
     border-radius: var(--radius-m, 8px);
     color: var(--text);

@@ -1228,7 +1228,7 @@
   /* ── Lists ────────────────────────────────────────────────────── */
   .findings-list {
     list-style: disc;
-    padding-left: 20px;
+    padding-inline-start: 20px;
     margin: 6px 0 6px;
     display: flex;
     flex-direction: column;
@@ -1324,7 +1324,7 @@
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
     vertical-align: middle;
-    margin-right: 2px;
+    margin-inline-end: 2px;
   }
   @keyframes spin {
     to { transform: rotate(360deg); }

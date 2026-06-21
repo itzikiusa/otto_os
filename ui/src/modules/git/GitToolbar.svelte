@@ -261,7 +261,7 @@
   .branch-form {
     position: absolute;
     top: 32px;
-    left: 0;
+    inset-inline-start: 0;
     display: flex;
     align-items: center;
     gap: 6px;

@@ -154,7 +154,7 @@
   .settings-nav {
     width: 180px;
     flex-shrink: 0;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     padding: 16px 10px;
     display: flex;
     flex-direction: column;
@@ -190,7 +190,7 @@
   .settings-nav-item {
     height: 28px;
     padding: 0 10px;
-    text-align: left;
+    text-align: start;
     border: none;
     background: transparent;
     border-radius: var(--radius-s);
@@ -219,7 +219,7 @@
     }
     .settings-nav {
       width: 100%;
-      border-right: none;
+      border-inline-end: none;
       border-bottom: 1px solid var(--border);
       flex-direction: row;
       flex-wrap: wrap;

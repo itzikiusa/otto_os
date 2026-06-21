@@ -350,7 +350,7 @@
     border: none;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: background 100ms;
   }
   .sec-trigger:hover {
@@ -428,7 +428,7 @@
   .md-body :global(h3) { font-size: 1.05em; }
   .md-body :global(p) { margin: 0 0 0.7em; }
   .md-body :global(ul),
-  .md-body :global(ol) { padding-left: 1.5em; margin: 0 0 0.7em; }
+  .md-body :global(ol) { padding-inline-start: 1.5em; margin: 0 0 0.7em; }
   .md-body :global(li) { margin-bottom: 0.2em; }
   .md-body :global(code) {
     font-family: var(--font-mono, monospace);
@@ -447,8 +447,8 @@
   }
   .md-body :global(pre code) { background: none; padding: 0; font-size: 0.86em; }
   .md-body :global(blockquote) {
-    border-left: 3px solid var(--border);
-    padding-left: 12px;
+    border-inline-start: 3px solid var(--border);
+    padding-inline-start: 12px;
     color: var(--text-dim);
     margin: 0 0 0.7em;
     font-style: italic;

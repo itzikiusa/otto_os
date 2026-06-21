@@ -504,7 +504,7 @@
   }
   .lrp-cfg-note {
     font-size: 11px;
-    margin-left: auto;
+    margin-inline-start: auto;
   }
   .lrp-cfg-note a {
     color: var(--accent);
@@ -543,7 +543,7 @@
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
     vertical-align: middle;
-    margin-right: 3px;
+    margin-inline-end: 3px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
@@ -757,7 +757,7 @@
     border: none;
     cursor: pointer;
     padding: 8px 12px;
-    text-align: left;
+    text-align: start;
     flex-wrap: wrap;
   }
   .lrp-history-run-header:hover {

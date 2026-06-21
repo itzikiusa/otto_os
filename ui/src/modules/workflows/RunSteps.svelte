@@ -121,7 +121,7 @@
     font-size: 11.5px;
   }
   .ms {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-size: 10.5px;
     color: var(--text-dim);
     font-family: var(--font-mono);

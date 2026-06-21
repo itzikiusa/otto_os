@@ -979,7 +979,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 10px;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     background: var(--surface);
     min-height: 0;
   }
@@ -1036,7 +1036,7 @@
     color: var(--text);
     font-size: 12px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .pal-item:hover {
     background: var(--surface-2);
@@ -1393,9 +1393,9 @@
 
   .fk-bar {
     position: absolute;
-    left: 12px;
+    inset-inline-start: 12px;
     bottom: 12px;
-    right: 12px;
+    inset-inline-end: 12px;
     z-index: 4;
     display: flex;
     flex-wrap: wrap;
@@ -1463,7 +1463,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    margin-left: 6px;
+    margin-inline-start: 6px;
     padding: 0 7px;
     height: 17px;
     border-radius: 999px;
@@ -1499,7 +1499,7 @@
   }
   .b-col-head .btn,
   .b-actions {
-    margin-left: auto;
+    margin-inline-start: auto;
     text-transform: none;
     letter-spacing: 0;
   }
@@ -1622,7 +1622,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    padding-left: 2px;
+    padding-inline-start: 2px;
   }
   .snip {
     height: 19px;
@@ -1645,7 +1645,7 @@
   .fn-menu {
     position: absolute;
     top: calc(100% + 4px);
-    left: 0;
+    inset-inline-start: 0;
     z-index: 6;
     display: flex;
     flex-direction: column;
@@ -1657,7 +1657,7 @@
     box-shadow: var(--shadow);
   }
   .fn-item {
-    text-align: left;
+    text-align: start;
     padding: 4px 7px;
     border: none;
     border-radius: 4px;

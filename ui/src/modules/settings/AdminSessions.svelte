@@ -258,7 +258,7 @@
   .bulk-count {
     font-size: 12.5px;
     color: var(--text-dim);
-    margin-right: auto;
+    margin-inline-end: auto;
   }
 
   .session-table {
@@ -315,7 +315,7 @@
     border-radius: 3px;
     background: var(--surface-2);
     color: var(--text-dim);
-    margin-right: 4px;
+    margin-inline-end: 4px;
   }
 
   .provider-name {

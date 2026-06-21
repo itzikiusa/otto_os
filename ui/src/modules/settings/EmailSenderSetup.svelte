@@ -23,9 +23,16 @@
   let fGmail = $state('');
   let fPassword = $state('');
 
+  // ── public link domain (share_base_url) ─────────────────────────────────────────
+  /** The operator-configured public domain used to build share links + the link
+   *  emailed with the OTP code. Empty ⇒ links fall back to the request host. */
+  let fBaseUrl = $state('');
+  let savingBaseUrl = $state(false);
+
   // ── load current sender on mount ──────────────────────────────────────────────
   onMount(() => {
     void load();
+    void loadBaseUrl();
   });
 
   async function load(): Promise<void> {
@@ -38,6 +45,28 @@
       // Non-fatal: just show the empty form.
     } finally {
       loading = false;
+    }
+  }
+
+  async function loadBaseUrl(): Promise<void> {
+    try {
+      const settings = await api.get<Record<string, unknown>>('/settings');
+      const v = settings.share_base_url;
+      if (typeof v === 'string') fBaseUrl = v;
+    } catch {
+      // Non-fatal: just show the empty field.
+    }
+  }
+
+  async function saveBaseUrl(): Promise<void> {
+    savingBaseUrl = true;
+    try {
+      await api.put('/settings', { share_base_url: fBaseUrl.trim() });
+      toasts.success('Public link domain saved', 'Share links will use this domain.');
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      savingBaseUrl = false;
     }
   }
 
@@ -211,6 +240,29 @@
     </button>
   </div>
 
+  <!-- ── Public link domain ── -->
+  <div class="section-title">Public link domain</div>
+  <div class="card pad">
+    <div class="field">
+      <label for="es-base-url">Public link domain</label>
+      <input
+        id="es-base-url"
+        class="input"
+        type="url"
+        placeholder="https://otto.example.com"
+        bind:value={fBaseUrl}
+      />
+      <span class="hint dim">
+        Used to build share links + the link emailed with the code (otherwise links
+        use the request host / 127.0.0.1).
+      </span>
+    </div>
+
+    <button class="btn primary" disabled={savingBaseUrl} onclick={saveBaseUrl}>
+      {savingBaseUrl ? 'Saving…' : 'Save'}
+    </button>
+  </div>
+
   <!-- ── How it works ── -->
   <div class="section-title">How it works</div>
   <div class="card pad">
@@ -283,7 +335,7 @@
     font-size: 12.5px;
     line-height: 1.6;
     margin: 0;
-    padding-left: 18px;
+    padding-inline-start: 18px;
     display: flex;
     flex-direction: column;
     gap: 6px;

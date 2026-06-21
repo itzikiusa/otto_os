@@ -131,7 +131,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    text-align: left;
+    text-align: start;
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius-m);

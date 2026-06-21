@@ -340,7 +340,7 @@
   .coach-close {
     position: absolute;
     top: 12px;
-    right: 12px;
+    inset-inline-end: 12px;
     background: none;
     border: none;
     cursor: pointer;
@@ -438,7 +438,7 @@
   }
   .install-list {
     margin: 6px 0;
-    padding-left: 16px;
+    padding-inline-start: 16px;
     display: flex;
     flex-direction: column;
     gap: 3px;

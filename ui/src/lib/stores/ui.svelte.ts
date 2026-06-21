@@ -3,6 +3,7 @@
 
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
+export type Direction = 'ltr' | 'rtl';
 export type RightTab = 'git' | 'files' | 'notes' | 'activity' | 'info' | 'browser' | 'api';
 
 /** Terminal font choice. 'Cousine' supplies Hebrew glyphs in every stack so RTL
@@ -31,6 +32,7 @@ const LS = {
   railWidth: 'otto_rail_width',
   theme: 'otto_theme',
   scheme: 'otto_scheme',
+  direction: 'otto_direction',
   accent: 'otto_accent',
   zoom: 'otto_zoom',
   termFont: 'otto_term_font',
@@ -40,6 +42,8 @@ const LS = {
   termToolbar: 'otto_term_toolbar',
   dbDock: 'otto_db_dock',
   dbDockWidth: 'otto_db_dock_width',
+  clientId: 'otto_client_id',
+  sessionIsolation: 'otto_session_isolation',
 };
 
 export const RIGHT_MIN = 260;
@@ -62,6 +66,21 @@ function lsSet(key: string, val: string): void {
   } catch {
     /* private mode */
   }
+}
+
+/** Stable per-DEVICE id. Persisted once in localStorage and reused thereafter;
+ *  identifies which browser/device started a session (see meta.client_id) so the
+ *  optional session-isolation filter can show only this device's sessions. */
+export function clientId(): string {
+  let id = lsGet(LS.clientId);
+  if (!id) {
+    id =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    lsSet(LS.clientId, id);
+  }
+  return id;
 }
 
 function clampRight(px: number): number {
@@ -126,6 +145,7 @@ class UiStore {
 
   theme: ThemeName = $state((lsGet(LS.theme) as ThemeName) ?? 'native');
   scheme: SchemePref = $state((lsGet(LS.scheme) as SchemePref) ?? 'auto');
+  direction: Direction = $state((lsGet(LS.direction) as Direction) ?? 'ltr');
   accent: string = $state(lsGet(LS.accent) ?? '');
 
   /** app-level zoom, 1 = 100% */
@@ -145,6 +165,19 @@ class UiStore {
   /** Resolved CSS font-family stack for the terminal, per the current choice. */
   get termFontStack(): string {
     return TERM_FONT_STACKS[this.termFontFamily] ?? TERM_FONT_STACKS.system;
+  }
+
+  /** Per-DEVICE session isolation: when on, the sessions list/tabs/Navigator
+   *  only show sessions this device started (meta.client_id === clientId()).
+   *  Other devices' sessions stay hidden here but still run on the daemon.
+   *  Default off (current behavior = see all). Persisted per device. */
+  sessionIsolation = $state(lsGet(LS.sessionIsolation) === '1');
+
+  setSessionIsolation(on: boolean): void {
+    this.sessionIsolation = on;
+    lsSet(LS.sessionIsolation, on ? '1' : '0');
+    // Re-apply the filter immediately against the already-loaded sessions.
+    void import('./workspace.svelte').then(({ ws }) => ws.refreshSessions());
   }
 
   /** resolved light|dark after applying `auto` */
@@ -202,6 +235,12 @@ class UiStore {
   setAccent(accent: string): void {
     this.accent = accent;
     lsSet(LS.accent, accent);
+    this.applyTheme();
+  }
+
+  setDirection(direction: Direction): void {
+    this.direction = direction;
+    lsSet(LS.direction, direction);
     this.applyTheme();
   }
 
@@ -285,6 +324,9 @@ class UiStore {
     const el = document.documentElement;
     el.setAttribute('data-theme', this.theme);
     el.setAttribute('data-scheme', resolved);
+    // Document direction (RTL support). CSS uses logical properties so the
+    // layout mirrors automatically when this flips to 'rtl'.
+    el.dir = this.direction;
     if (this.accent) el.style.setProperty('--accent', this.accent);
     else el.style.removeProperty('--accent');
   }

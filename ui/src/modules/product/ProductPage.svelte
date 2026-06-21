@@ -22,11 +22,21 @@
   let importOpen = $state(false);
   let draftCreating = $state(false);
 
+  // ── Mobile (≤640px) accordion state ───────────────────────────────────────
+  // On a phone the two panels (story list + the per-story content) stack and
+  // each becomes an independently-scrollable, collapsible section. Exactly one
+  // is expanded at a time so the open panel gets the full remaining height to
+  // scroll in; the other shows just its tappable header. This is a no-op on
+  // desktop/tablet where the CSS for these classes is never applied.
+  let mobileSection = $state<'list' | 'content'>('list');
+
   async function createDraft(): Promise<void> {
     draftCreating = true;
     try {
       await product.createDraft();
       product.tab = 'overview';
+      // On mobile, reveal the new draft's content panel right away.
+      mobileSection = 'content';
     } catch (e) {
       console.error('createDraft failed', e);
     } finally {
@@ -100,6 +110,8 @@
     void product.select(s.id);
     // Reset to overview whenever a new story is selected.
     product.tab = 'overview';
+    // On mobile, switch to the content panel so the picked story is visible.
+    mobileSection = 'content';
   }
 
   async function deleteStory(s: ProductStory): Promise<void> {
@@ -112,9 +124,40 @@
   }
 </script>
 
-<div class="product-page">
+<div class="product-page" class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'}>
+  <!-- ── Mobile accordion header for the list panel (phone only) ───────── -->
+  <button
+    class="m-acc-head"
+    aria-expanded={mobileSection === 'list'}
+    onclick={() => (mobileSection = 'list')}
+  >
+    <Icon name={mobileSection === 'list' ? 'chevronDown' : 'chevronRight'} size={14} />
+    <span class="m-acc-title">{product.view === 'learnings' ? 'Learnings' : 'Stories'}</span>
+    {#if product.view === 'stories'}
+      <span class="m-acc-count">{product.stories.length}</span>
+    {/if}
+  </button>
+
   <!-- ── Left sidebar — always rendered to avoid layout jump ───────────── -->
   <aside class="product-side">
+    <!-- Mobile-only Stories|Learnings toggle (the desktop one lives in the
+         content header, which is collapsed when the list panel is open). -->
+    <div class="m-view-toggle" role="tablist" aria-label="View (mobile)">
+      <button
+        class="vt"
+        class:active={product.view === 'stories'}
+        role="tab"
+        aria-selected={product.view === 'stories'}
+        onclick={() => (product.view = 'stories')}
+      >Stories</button>
+      <button
+        class="vt"
+        class:active={product.view === 'learnings'}
+        role="tab"
+        aria-selected={product.view === 'learnings'}
+        onclick={() => (product.view = 'learnings')}
+      >Learnings</button>
+    </div>
     {#if product.view === 'stories'}
       <!-- Stories sidebar -->
       <div class="side-head">
@@ -240,6 +283,26 @@
     {/if}
   </aside>
 
+  <!-- ── Mobile accordion header for the content panel (phone only) ────── -->
+  <button
+    class="m-acc-head"
+    aria-expanded={mobileSection === 'content'}
+    onclick={() => (mobileSection = 'content')}
+  >
+    <Icon name={mobileSection === 'content' ? 'chevronDown' : 'chevronRight'} size={14} />
+    <span class="m-acc-title">
+      {#if product.view === 'learnings'}
+        Knowledge base
+      {:else if product.selectedId && product.detail?.story}
+        {product.detail.story.title}
+      {:else if product.selectedId}
+        Story
+      {:else}
+        Get started
+      {/if}
+    </span>
+  </button>
+
   <!-- ── Main area ──────────────────────────────────────────────────────── -->
   <div class="product-main">
     <!-- Header row 1: Stories | Learnings toggle (always visible) -->
@@ -341,7 +404,7 @@
   .product-side {
     width: 260px;
     flex-shrink: 0;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -454,7 +517,7 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .story-row.active {
     color: var(--accent);
@@ -466,7 +529,7 @@
     flex-shrink: 0;
     width: 22px;
     height: 22px;
-    margin-right: 6px;
+    margin-inline-end: 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -637,7 +700,10 @@
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
     padding: 0 14px;
-    overflow: hidden;
+    /* The inner .tab-strip scrolls horizontally; overflow:hidden here clipped it
+       so tabs past the first few were unreachable on a narrow screen. */
+    overflow-x: auto;
+    scrollbar-width: none;
   }
   .view-toggle {
     display: flex;
@@ -791,7 +857,7 @@
     font-size: 12.5px;
     font-weight: 500;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: background 100ms, color 100ms;
   }
   .learn-filter-btn:hover {
@@ -804,16 +870,169 @@
     font-weight: 600;
   }
 
+  /* ── Mobile-only chrome — hidden on desktop/tablet ───────────────────── */
+  .m-acc-head {
+    display: none;
+  }
+  .m-view-toggle {
+    display: none;
+  }
+
   @media (max-width: 640px) {
+    /* The page becomes a vertical accordion: two tappable section headers,
+       each followed by its panel. Exactly one panel is expanded at a time and
+       takes all the remaining height to scroll inside; the other collapses to
+       just its header. */
     .product-page {
       flex-direction: column;
     }
+
+    /* The desktop view toggle lives in the content header; on mobile that header
+       collapses with the content panel, so show the list-panel copy instead. */
+    .product-header-row1 {
+      display: none;
+    }
+    .m-view-toggle {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex-shrink: 0;
+      padding: 4px 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .m-acc-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      flex-shrink: 0;
+      padding: 12px 14px;
+      border: none;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-sidebar, var(--surface));
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: start;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .m-acc-head:active {
+      background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    }
+    .m-acc-title {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .m-acc-count {
+      flex-shrink: 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+      border-radius: 999px;
+      padding: 1px 9px;
+    }
+
+    /* Panels: collapsed by default; the open one gets the remaining height and
+       scrolls on its own. */
     .product-side {
       width: 100%;
-      border-right: none;
-      border-bottom: 1px solid var(--border);
-      max-height: 35vh;
+      border-inline-end: none;
+      max-height: none;
+      min-height: 0;
+      overflow: hidden;
+      flex: 0 0 0;
+      height: 0;
+    }
+    .product-main {
+      min-height: 0;
+      overflow: hidden;
+      flex: 0 0 0;
+      height: 0;
+    }
+    .m-list-open .product-side {
+      flex: 1 1 auto;
+      height: auto;
       overflow-y: auto;
+    }
+    .m-content-open .product-main {
+      flex: 1 1 auto;
+      height: auto;
+      overflow: hidden; /* inner .product-body owns the scroll */
+    }
+
+    /* The list's own internal scroller fills the expanded panel. */
+    .m-list-open .story-list,
+    .m-list-open .learn-nav {
+      flex: 1 1 auto;
+    }
+
+    /* ── Bigger, more legible text on phones ───────────────────────────── */
+    .side-title {
+      font-size: 12px;
+    }
+    .head-btn {
+      font-size: 13px;
+      padding: 6px 11px;
+    }
+    .list-empty,
+    .link {
+      font-size: 14px;
+    }
+    .story-title {
+      font-size: 15px;
+    }
+    .story-key,
+    .story-meta {
+      font-size: 12.5px;
+    }
+    .stage-badge {
+      font-size: 11px;
+    }
+    .tag-filter-btn,
+    .story-tag-chip {
+      font-size: 12px;
+    }
+    .import-btn {
+      font-size: 14px;
+      padding: 9px 12px;
+    }
+    .vt {
+      height: 38px;
+      font-size: 14.5px;
+      padding: 0 14px;
+    }
+    .st {
+      height: 38px;
+      font-size: 14px;
+      padding: 0 13px;
+    }
+    .learn-filter-btn {
+      font-size: 14.5px;
+      padding: 10px 12px;
+    }
+    .empty-state p {
+      font-size: 14.5px;
+    }
+    .btn {
+      font-size: 14px;
+      padding: 9px 16px;
+    }
+    .product-body {
+      padding: 14px;
+    }
+    /* Comfortable touch target for the per-row delete button. */
+    .delete-btn {
+      width: 30px;
+      height: 30px;
+    }
+    .story-row {
+      padding: 10px 8px;
     }
   }
 </style>

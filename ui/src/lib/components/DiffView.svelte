@@ -303,8 +303,8 @@
   .dv-no {
     flex: 0 0 auto;
     width: 3.2em;
-    text-align: right;
-    padding-right: 8px;
+    text-align: end;
+    padding-inline-end: 8px;
     color: var(--text-dim);
     user-select: none;
   }
@@ -353,7 +353,7 @@
     white-space: pre-wrap;
     word-break: break-word;
     padding: 0 6px;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
   }
   .dv-col.del {
     background: color-mix(in srgb, var(--status-exited) 12%, transparent);

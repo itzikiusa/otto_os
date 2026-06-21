@@ -167,7 +167,7 @@
     margin-top: 8px;
   }
   th {
-    text-align: left;
+    text-align: start;
     font-weight: 500;
     color: var(--text-dim);
     font-size: 11px;

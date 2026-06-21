@@ -212,6 +212,7 @@
     flex-direction: column;
     gap: 2px;
     overflow-y: auto;
+    min-height: 0;
   }
 
   .rail-search {
@@ -245,7 +246,7 @@
     border-radius: var(--radius-s, 6px);
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: background 120ms ease-out;
     width: 100%;
   }

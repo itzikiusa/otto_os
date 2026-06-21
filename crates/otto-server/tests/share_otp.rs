@@ -80,11 +80,12 @@ async fn seed_user(pool: &SqlitePool, username: &str) -> Id {
     id
 }
 
-/// A capturing mailer: records `(to, otp)` instead of sending real email, so the
-/// test can assert the OTP that was "emailed" WITHOUT touching SMTP.
+/// A capturing mailer: records `(to, otp, share_url)` instead of sending real
+/// email, so the test can assert the OTP (and the link) that was "emailed"
+/// WITHOUT touching SMTP.
 #[derive(Default, Clone)]
 struct CaptureMailer {
-    sent: Arc<Mutex<Vec<(String, String)>>>,
+    sent: Arc<Mutex<Vec<(String, String, String)>>>,
 }
 
 impl OtpMailer for CaptureMailer {
@@ -92,12 +93,14 @@ impl OtpMailer for CaptureMailer {
         &'a self,
         to: &'a str,
         otp: &'a str,
+        share_url: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
         let sent = self.sent.clone();
         let to = to.to_string();
         let otp = otp.to_string();
+        let share_url = share_url.to_string();
         Box::pin(async move {
-            sent.lock().unwrap().push((to, otp));
+            sent.lock().unwrap().push((to, otp, share_url));
             Ok(())
         })
     }
@@ -130,6 +133,7 @@ impl OtpMailer for FailingMailer {
         &'a self,
         _to: &'a str,
         _otp: &'a str,
+        _share_url: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
         Box::pin(async move { Err(Error::Upstream("smtp down".into())) })
     }
@@ -218,6 +222,7 @@ async fn mint_otp_share_emails_code_and_is_pending() {
         Some("for guest".into()),
         "guest@example.com",
         &mailer,
+        "https://otto.example.com",
     )
     .await
     .expect("mint otp share");
@@ -228,6 +233,12 @@ async fn mint_otp_share_emails_code_and_is_pending() {
     assert_eq!(sent.len(), 1, "exactly one OTP email is sent");
     assert_eq!(sent[0].0, "guest@example.com", "to the locked recipient");
     assert_eq!(sent[0].1.len(), 6, "the OTP is 6 digits");
+    // The ready-to-open link (built from the passed origin) is emailed too.
+    assert_eq!(
+        sent[0].2,
+        format!("https://otto.example.com/#/s/S1/{token}"),
+        "the share link is emailed alongside the code"
+    );
 
     // The minted share authenticates as OTP-pending.
     let ctx = repo.authenticate(&token).await.expect("auth share");
@@ -254,6 +265,7 @@ async fn mint_otp_share_revokes_on_delivery_failure() {
         None,
         "guest@example.com",
         &FailingMailer,
+        "https://otto.example.com",
     )
     .await;
     assert!(err.is_err(), "a delivery failure must fail the mint");
@@ -287,6 +299,7 @@ async fn get_session_denied_until_otp_verified() {
         None,
         "guest@example.com",
         &mailer,
+        "https://otto.example.com",
     )
     .await
     .unwrap();
@@ -352,6 +365,7 @@ async fn expired_otp_is_rejected() {
         None,
         "guest@example.com",
         &mailer,
+        "https://otto.example.com",
     )
     .await
     .unwrap();
@@ -439,6 +453,7 @@ async fn extend_emails_fresh_otp_to_locked_recipient_and_re_pends() {
         Some("for guest".into()),
         "guest@example.com",
         &mailer,
+        "https://otto.example.com",
     )
     .await
     .expect("mint otp share");
@@ -549,6 +564,7 @@ async fn extend_destination_is_read_from_row_not_request() {
         None,
         "original@example.com",
         &mailer,
+        "https://otto.example.com",
     )
     .await
     .unwrap();

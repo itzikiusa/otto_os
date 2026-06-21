@@ -662,7 +662,7 @@
     color: var(--text-dim);
   }
   .evolve-dismiss {
-    margin-left: auto;
+    margin-inline-start: auto;
     flex-shrink: 0;
     background: transparent;
     border: none;

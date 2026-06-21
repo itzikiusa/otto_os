@@ -278,6 +278,9 @@
     flex-direction: column;
     gap: 8px;
     overflow-y: auto;
+    /* Allow the card list to scroll within the column instead of growing the
+       column past the viewport (the flex-child height-collapse rule). */
+    min-height: 0;
   }
   .card {
     background: var(--surface);

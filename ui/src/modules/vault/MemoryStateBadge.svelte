@@ -86,7 +86,7 @@
   .state-menu {
     position: absolute;
     top: calc(100% + 4px);
-    left: 0;
+    inset-inline-start: 0;
     z-index: 100;
     background: var(--surface, #1a1a1a);
     border: 1px solid var(--border, #333);
@@ -108,7 +108,7 @@
     border: none;
     cursor: pointer;
     color: var(--text, #ddd);
-    text-align: left;
+    text-align: start;
   }
   .state-opt:hover,
   .state-opt.current {

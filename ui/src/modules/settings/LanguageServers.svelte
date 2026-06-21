@@ -215,7 +215,7 @@
   }
 
   .ls-table th {
-    text-align: left;
+    text-align: start;
     padding: 6px 10px;
     font-size: 11px;
     font-weight: 600;
@@ -259,7 +259,7 @@
 
   .action-cell {
     white-space: nowrap;
-    text-align: right;
+    text-align: end;
   }
 
   .badge {

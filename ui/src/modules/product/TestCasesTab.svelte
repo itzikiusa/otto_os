@@ -1289,7 +1289,7 @@
     opacity: 0.45;
     letter-spacing: -3px;
     cursor: grab;
-    padding-right: 2px;
+    padding-inline-end: 2px;
     user-select: none;
     transition: opacity 90ms;
   }
@@ -1475,7 +1475,7 @@
   }
   .steps-list {
     margin: 0;
-    padding-left: 20px;
+    padding-inline-start: 20px;
     display: flex;
     flex-direction: column;
     gap: 3px;
@@ -1490,7 +1490,7 @@
     line-height: 1.5;
     color: var(--text);
     background: color-mix(in srgb, var(--status-working) 6%, transparent);
-    border-left: 3px solid var(--status-working);
+    border-inline-start: 3px solid var(--status-working);
     padding: 6px 10px;
     border-radius: 0 var(--radius-s) var(--radius-s) 0;
   }

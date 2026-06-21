@@ -230,7 +230,7 @@
     font-size: 11px;
     color: var(--fg-muted);
     margin-top: 6px;
-    text-align: right;
+    text-align: end;
   }
   .btn-ghost {
     padding: 6px 14px;

@@ -138,7 +138,7 @@
     gap: 8px;
   }
   .pr-row {
-    text-align: left;
+    text-align: start;
     padding: 10px 14px;
     cursor: pointer;
     transition: border-color 130ms ease-out;
@@ -152,7 +152,7 @@
   }
   .pr-num {
     font-weight: 400;
-    margin-right: 4px;
+    margin-inline-end: 4px;
   }
   .pr-meta {
     display: flex;
@@ -160,5 +160,17 @@
     gap: 10px;
     margin-top: 5px;
     font-size: 11.5px;
+  }
+
+  /* ── Mobile + tablet (≤1024px): legible PR cards whose meta wraps instead of
+     overflowing. 1024 so iPad portrait + landscape phone widths also wrap. */
+  @media (max-width: 1024px) {
+    .prlist { padding: 12px; }
+    .pr-toolbar { flex-wrap: wrap; gap: 8px; }
+    .pr-toolbar .row { flex-wrap: wrap; }
+    .filter-chip { height: 28px; font-size: 13px; }
+    .pr-title { font-size: 14px; }
+    .pr-meta { flex-wrap: wrap; gap: 6px 10px; font-size: 12.5px; }
+    .pr-meta .grow { display: none; }
   }
 </style>

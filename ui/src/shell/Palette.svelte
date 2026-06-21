@@ -655,7 +655,7 @@
     font-size: 12.5px;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
   }
   .pal-item.selected {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -805,7 +805,7 @@
   .pal-hit-actions {
     display: flex;
     gap: 4px;
-    padding-left: 18px;
+    padding-inline-start: 18px;
   }
   .pal-hit-btn {
     padding: 1px 6px;

@@ -7,7 +7,7 @@ use std::process::Stdio;
 
 use otto_core::api::{
     BranchInfo, CommitInfo, ConflictFile, DiffResp, LocalMergeStrategy, MergeConflictStatus,
-    MergeResult, RefBranch, RefTag, RefsResp, RepoStatusResp,
+    MergePreview, MergeResult, RefBranch, RefTag, RefsResp, RepoStatusResp,
 };
 use otto_core::{Error, Result};
 use tokio::io::AsyncReadExt;
@@ -726,25 +726,103 @@ impl LocalGit {
             .collect())
     }
 
+    /// True if the working tree has staged/unstaged TRACKED changes (untracked
+    /// files don't block a merge and aren't stashed by a plain `git stash`).
+    async fn working_dirty(&self) -> Result<bool> {
+        let st = self.status().await?;
+        Ok(st
+            .changes
+            .iter()
+            .any(|c| (c.staged || c.unstaged) && c.kind != "untracked"))
+    }
+
+    /// Pop the stash after a clean merge. Returns a human note: a confirmation on
+    /// a clean pop, or a warning if the pop conflicted (git KEEPS the stash in
+    /// that case, so the user's work is never lost).
+    async fn pop_after_merge(&self) -> Option<String> {
+        match self.stash_pop().await {
+            Ok(_) => Some("Your stashed changes were restored.".into()),
+            Err(_) => Some(
+                "Merge succeeded, but restoring your stashed changes hit a conflict — \
+                 they're preserved in `git stash`; resolve the working tree and run \
+                 `git stash pop` manually."
+                    .into(),
+            ),
+        }
+    }
+
+    /// Dry-run a merge of `source` into `target` via `git merge-tree --write-tree`
+    /// (writes only to the object DB — the index and working tree are NEVER
+    /// touched). Lets callers warn about conflicts BEFORE starting a real merge.
+    pub async fn merge_preview(&self, source: &str, target: &str) -> Result<MergePreview> {
+        // No-op merge: source already contained in target.
+        if self.is_ancestor_of(source, target).await.unwrap_or(false) {
+            return Ok(MergePreview {
+                conflicts: false,
+                conflicted_files: Vec::new(),
+                up_to_date: true,
+            });
+        }
+        let (ok, stdout, _stderr, code) = self
+            .run_raw(
+                &["merge-tree", "--write-tree", "--name-only", target, source],
+                &[],
+            )
+            .await?;
+        if ok {
+            return Ok(MergePreview {
+                conflicts: false,
+                conflicted_files: Vec::new(),
+                up_to_date: false,
+            });
+        }
+        // `merge-tree` exits exactly 1 for "conflicts". Any other non-zero code is
+        // a usage/ref error (e.g. an older git) — don't block; let the real merge
+        // surface it.
+        if code != Some(1) {
+            return Ok(MergePreview {
+                conflicts: false,
+                conflicted_files: Vec::new(),
+                up_to_date: false,
+            });
+        }
+        // Output: tree OID on line 1, then conflicted file names (--name-only).
+        let conflicted_files: Vec<String> = stdout
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        Ok(MergePreview {
+            conflicts: true,
+            conflicted_files,
+            up_to_date: false,
+        })
+    }
+
     /// Merge `source` into `target`. Never auto-resolves; conflicts are returned
     /// as `Ok(MergeResult{status:"conflicts", ..})`, not an error.
+    ///
+    /// When `auto_stash` is set and the working tree is dirty, the changes are
+    /// stashed before the merge and popped afterwards (stash → merge → pop).
     pub async fn merge_branch(
         &self,
         source: &str,
         target: &str,
         strategy: LocalMergeStrategy,
+        auto_stash: bool,
     ) -> Result<MergeResult> {
         let already_merging = self.is_merging().await;
 
-        // Guard: refuse to start a merge on a dirty tree (but allow continuing an
-        // in-progress merge whose working tree naturally shows conflicts).
-        if !already_merging {
-            let st = self.status().await?;
-            let dirty = st
-                .changes
-                .iter()
-                .any(|c| (c.staged || c.unstaged) && c.kind != "untracked");
-            if dirty {
+        // Dirty-tree handling (continuing an in-progress merge is exempt — its
+        // working-tree conflicts are expected). Either auto-stash, or refuse.
+        let mut stashed = false;
+        if !already_merging && self.working_dirty().await? {
+            if auto_stash {
+                self.stash_save().await?;
+                stashed = true;
+            } else {
                 return Err(Error::Conflict(
                     "working tree has uncommitted changes; commit or stash first".into(),
                 ));
@@ -788,26 +866,27 @@ impl LocalGit {
 
         if success {
             // Distinguish "nothing to do" from a real merge.
-            if combined.contains("Already up to date") || combined.contains("Already up-to-date") {
-                return Ok(MergeResult {
-                    status: "up_to_date".into(),
-                    commit: None,
-                    conflicted_files: Vec::new(),
-                    repo_status: self.status().await?,
-                });
-            }
+            let up_to_date =
+                combined.contains("Already up to date") || combined.contains("Already up-to-date");
             // `--squash` leaves changes staged but creates NO commit; the caller
             // must still run merge/commit, so report commit = None.
-            let commit = if matches!(strategy, LocalMergeStrategy::Squash) {
+            let commit = if up_to_date || matches!(strategy, LocalMergeStrategy::Squash) {
                 None
             } else {
                 Some(self.run(&["rev-parse", "HEAD"]).await?.trim().to_string())
             };
+            // Merge landed cleanly — restore any auto-stashed work.
+            let note = if stashed {
+                self.pop_after_merge().await
+            } else {
+                None
+            };
             return Ok(MergeResult {
-                status: "merged".into(),
+                status: if up_to_date { "up_to_date" } else { "merged" }.into(),
                 commit,
                 conflicted_files: Vec::new(),
                 repo_status: self.status().await?,
+                note,
             });
         }
 
@@ -818,12 +897,30 @@ impl LocalGit {
             || combined.contains("Automatic merge failed")
             || !conflicted.is_empty();
         if is_conflict {
+            // We auto-stashed and the merge conflicted: do NOT pop onto a
+            // conflicted tree. Leave the stash saved and tell the user.
+            let note = if stashed {
+                Some(
+                    "Your uncommitted changes were stashed before the merge, which then \
+                     conflicted. Resolve the conflicts and commit, then run `git stash pop` \
+                     to restore your changes."
+                        .into(),
+                )
+            } else {
+                None
+            };
             return Ok(MergeResult {
                 status: "conflicts".into(),
                 commit: None,
                 conflicted_files: conflicted,
                 repo_status: self.status().await?,
+                note,
             });
+        }
+        // Hard error — if we stashed, restore the user's work before surfacing it
+        // so nothing is stranded.
+        if stashed {
+            let _ = self.stash_pop().await;
         }
         Err(upstream_err(&stderr, &stdout, code))
     }
@@ -922,6 +1019,7 @@ impl LocalGit {
             commit: Some(commit),
             conflicted_files: Vec::new(),
             repo_status: self.status().await?,
+            note: None,
         })
     }
 

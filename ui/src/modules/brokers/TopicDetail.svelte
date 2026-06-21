@@ -802,7 +802,7 @@
   .msg-list {
     flex: 1;
     overflow: auto;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
   }
   .msg-detail {
     width: 45%;
@@ -816,7 +816,7 @@
     font-size: 12.5px;
   }
   th {
-    text-align: left;
+    text-align: start;
     font-weight: 500;
     color: var(--text-dim);
     font-size: 11px;

@@ -437,7 +437,7 @@
     font-size: 12.5px;
   }
   table.grid th {
-    text-align: left;
+    text-align: start;
     font-weight: 500;
     color: var(--text-dim);
     font-size: 11px;
@@ -450,7 +450,7 @@
     border-bottom: 1px solid var(--border);
   }
   table.grid th.num {
-    text-align: right;
+    text-align: end;
     width: 110px;
   }
   table.grid td {
@@ -458,7 +458,7 @@
     border-bottom: 1px solid var(--border);
   }
   table.grid td.num {
-    text-align: right;
+    text-align: end;
     font-variant-numeric: tabular-nums;
   }
   table.grid td.err-cell {

@@ -1294,7 +1294,7 @@
     border-radius: var(--radius-s, 4px);
     padding: 5px 10px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     font-size: 12.5px;
     color: var(--text);
     transition: background 100ms;
@@ -1516,7 +1516,7 @@
   }
   .md-body :global(ul),
   .md-body :global(ol) {
-    padding-left: 1.5em;
+    padding-inline-start: 1.5em;
     margin: 0 0 0.75em;
   }
   .md-body :global(li) {
@@ -1543,8 +1543,8 @@
     font-size: 0.86em;
   }
   .md-body :global(blockquote) {
-    border-left: 3px solid var(--border);
-    padding-left: 12px;
+    border-inline-start: 3px solid var(--border);
+    padding-inline-start: 12px;
     color: var(--text-dim);
     margin: 0 0 0.75em;
     font-style: italic;
@@ -1613,7 +1613,7 @@
     border: none;
     padding: 10px 14px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     color: var(--text-dim);
     font-size: 12px;
     border-radius: var(--radius-s);
@@ -1630,7 +1630,7 @@
     font-size: 11px;
     font-weight: 400;
     color: var(--text-dim);
-    margin-left: 2px;
+    margin-inline-start: 2px;
   }
 
   /* ── Status control ────────────────────────────────────────── */
@@ -1733,7 +1733,7 @@
   .dropdown-menu {
     position: absolute;
     top: calc(100% + 4px);
-    right: 0;
+    inset-inline-end: 0;
     z-index: 50;
     background: var(--surface-raised, var(--surface));
     border: 1px solid var(--border);
@@ -1759,7 +1759,7 @@
     padding: 7px 12px;
     background: none;
     border: none;
-    text-align: left;
+    text-align: start;
     font-size: 12.5px;
     color: var(--text);
     cursor: pointer;
@@ -1773,7 +1773,7 @@
   .dropdown-item-sub {
     font-size: 11px;
     color: var(--text-dim);
-    margin-left: 4px;
+    margin-inline-start: 4px;
   }
 
   /* ── Details grid ──────────────────────────────────────────── */
@@ -2179,7 +2179,7 @@
     border: none;
     padding: 8px 10px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     color: var(--text);
     font-size: 12.5px;
     transition: background 80ms;
@@ -2212,7 +2212,7 @@
     font-size: 11px;
     color: var(--text-dim);
     transition: color 80ms, background 80ms;
-    margin-right: 4px;
+    margin-inline-end: 4px;
     border-radius: var(--radius-s);
   }
   .del-transcript-btn:hover {

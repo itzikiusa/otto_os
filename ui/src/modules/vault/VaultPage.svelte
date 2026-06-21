@@ -119,7 +119,7 @@
   ];
 </script>
 
-<div class="vault">
+<div class="vault" class:has-selection={!!vault.selected || vault.mode === 'graph'}>
   <aside class="vault-side">
     <div class="vault-search">
       <input
@@ -215,6 +215,17 @@
   </aside>
 
   <main class="vault-main">
+    <!-- Phone-only: return to the index/list (the two panes don't fit side by
+         side on a phone, so the main pane covers the list when active). -->
+    <button
+      class="mobile-back"
+      onclick={() => {
+        if (vault.mode === 'graph') vault.mode = 'list';
+        vault.selected = null;
+      }}
+    >
+      ‹ Index
+    </button>
     {#if vault.mode === 'graph'}
       <svg viewBox={`0 0 ${W} ${H}`} class="vault-graph" role="img" aria-label="Knowledge graph">
         {#each vault.graph?.edges ?? [] as e (e.src_id + e.dst_id + e.rel)}
@@ -356,7 +367,7 @@
   .vault-side {
     display: flex;
     flex-direction: column;
-    border-right: 1px solid var(--border, #2a2a2a);
+    border-inline-end: 1px solid var(--border, #2a2a2a);
     min-height: 0;
   }
   .vault-search {
@@ -429,7 +440,7 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    text-align: left;
+    text-align: start;
     padding: 6px 8px;
     border: none;
     background: none;
@@ -582,5 +593,141 @@
   }
   .undo-btn:hover {
     background: color-mix(in srgb, #fab005 15%, transparent);
+  }
+
+  /* The phone "‹ Index" back button is hidden on desktop/tablet (two panes
+     show side by side); it only appears in the phone single-column layout. */
+  .mobile-back {
+    display: none;
+  }
+
+  /* ───────────────── Phone (≤640px) ─────────────────
+     The desktop layout is a fixed two-column grid (300px sidebar | reader). On a
+     phone that 300px sidebar leaves the reader/graph a ~120px sliver where the
+     note title wraps one word per line and the SVG graph spills off-screen. On a
+     phone we make it a single full-width column that swaps between the INDEX
+     (search + filters + note list) and the OPEN note / graph — controlled by the
+     `.has-selection` class (set when a note is selected or the graph is shown).
+     A "‹ Index" back button returns to the list. Each pane scrolls on its own. */
+  @media (max-width: 640px) {
+    .vault {
+      grid-template-columns: 1fr;
+      grid-template-rows: 1fr;
+    }
+    /* The sidebar (index) fills the page when nothing is open… */
+    .vault-side {
+      grid-row: 1;
+      grid-column: 1;
+      width: 100%;
+      border-inline-end: none;
+      min-height: 0;
+      overflow: hidden;
+    }
+    /* …and the reader/graph occupies the SAME cell, stacked on top, only when a
+       note is open or the graph is shown. */
+    .vault-main {
+      grid-row: 1;
+      grid-column: 1;
+      display: none;
+      padding: 0 14px 20px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .vault.has-selection .vault-side {
+      display: none;
+    }
+    .vault.has-selection .vault-main {
+      display: block;
+    }
+
+    /* Bigger, legible search box + tap targets. */
+    .vault-search input {
+      padding: 10px 12px;
+      font-size: 16px; /* ≥16px stops iOS Safari from zooming on focus */
+    }
+    .vault-toggle button,
+    .vault-chips button {
+      font-size: 13px;
+      padding: 7px 12px;
+      min-height: 36px;
+    }
+    .merge-bar button {
+      font-size: 13px;
+      padding: 7px 12px;
+      min-height: 36px;
+    }
+    /* The note list: roomy rows with readable titles, its own scroll. */
+    .vault-list {
+      -webkit-overflow-scrolling: touch;
+    }
+    .vault-item {
+      padding: 12px 10px;
+      gap: 8px;
+    }
+    .vault-item .kind {
+      font-size: 11px;
+      padding: 2px 7px;
+    }
+    .vault-item .title {
+      font-size: 15px;
+    }
+
+    /* Phone back bar to leave the reader/graph and return to the index. */
+    .mobile-back {
+      display: block;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      width: 100%;
+      text-align: start;
+      padding: 12px 4px;
+      margin: 0 -14px 6px;
+      padding-inline-start: 14px;
+      border: none;
+      border-bottom: 1px solid var(--border, #2a2a2a);
+      background: var(--bg, #0d1117);
+      color: var(--accent-fg, #74c0fc);
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    /* Reader: prevent the long words / code / refs from forcing the page wider
+       than the viewport. */
+    .note-head h1 {
+      font-size: 22px;
+      overflow-wrap: anywhere;
+    }
+    .note-body {
+      overflow-wrap: anywhere;
+      font-size: 15px;
+    }
+    .note-body :global(pre),
+    .note-body :global(code) {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .prov.warn code {
+      overflow-wrap: anywhere;
+    }
+    .refs,
+    .backlinks {
+      overflow-wrap: anywhere;
+    }
+    .note-actions button,
+    .note-actions .copy-btn {
+      min-height: 36px;
+    }
+
+    /* Graph: cap the SVG to the viewport so it pans/fits instead of spilling. */
+    .vault-graph {
+      width: 100%;
+      max-width: 100%;
+      height: 70vh;
+    }
+    .placeholder {
+      /* When nothing's selected on a phone, the index covers the page, so this
+         placeholder is never seen — but keep it sane if it ever shows. */
+      text-align: center;
+    }
   }
 </style>

@@ -16,9 +16,11 @@
 //! Both checks mirror the PAT-mint guard in `auth_routes.rs:188-192`.
 //!
 //! ## URL construction
-//! `url = format!("{origin}/#/s/{session_id}/{token}")` where `origin` is
-//! derived from the `Host` request header (defaults to a relative
-//! `/#/s/{session_id}/{token}` when unavailable).
+//! `url = format!("{origin}/#/s/{session_id}/{token}")` where `origin` is the
+//! operator-configured public domain (`share_base_url` in settings) when set,
+//! else derived from the `Host` request header (defaults to a relative
+//! `/#/s/{session_id}/{token}` when unavailable). The same `origin` is used to
+//! build the link emailed alongside an OTP code.
 //!
 //! ## Eviction on revoke
 //! After revoking a share, `SessionManager::evict(&session_id)` is called so
@@ -66,13 +68,15 @@ const OTP_EMAIL_SUBJECT: &str = "Your Otto access code";
 ///
 /// Boxed-future (not `async_trait`) to stay dependency-light and object-safe.
 pub trait OtpMailer: Send + Sync {
-    /// Send the 6-digit `otp` to `to`. Errors surface to the share-mint caller
-    /// (so a broken sender fails the mint loudly rather than minting a share no
-    /// one can redeem).
+    /// Send the 6-digit `otp` to `to`, including the `share_url` (the ready-to-open
+    /// link) when it is non-empty so the recipient can open the session straight
+    /// from the email. Errors surface to the share-mint caller (so a broken sender
+    /// fails the mint loudly rather than minting a share no one can redeem).
     fn send_otp<'a>(
         &'a self,
         to: &'a str,
         otp: &'a str,
+        share_url: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
 }
 
@@ -85,13 +89,24 @@ impl OtpMailer for GmailMailer {
         &'a self,
         to: &'a str,
         otp: &'a str,
+        share_url: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
         Box::pin(async move {
-            let body = format!(
-                "Your Otto access code is: {otp}\n\n\
-                 Enter it on the share link to view the session. \
-                 The code expires in 10 minutes. If you didn't expect this, ignore this email."
-            );
+            let body = if share_url.is_empty() {
+                // No link available (e.g. an extend re-send) — code-only body.
+                format!(
+                    "Your Otto access code is: {otp}\n\n\
+                     Enter it on the share link to view the session. \
+                     The code expires in 10 minutes. If you didn't expect this, ignore this email."
+                )
+            } else {
+                format!(
+                    "You've been invited to view an Otto session.\n\n\
+                     Open: {share_url}\n\n\
+                     Access code: {otp}\n\n\
+                     The code expires in 10 minutes. If you didn't expect this, ignore this email."
+                )
+            };
             self.0.send(to, OTP_EMAIL_SUBJECT, &body).await
         })
     }
@@ -181,6 +196,18 @@ pub async fn mint_share(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
+    // Resolve the base origin ONCE: prefer the operator-configured public domain
+    // (`share_base_url` in settings — so links work remotely, not just at the
+    // request Host which is 127.0.0.1 for a tunneled daemon), falling back to the
+    // request's Host header.
+    let configured = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("share_base_url")
+        .await?
+        .and_then(|v| v.as_str().map(str::to_string))
+        .map(|s| s.trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    let origin = configured.unwrap_or_else(|| origin_from_headers(&headers));
+
     let (token, info) = if let Some(recipient) = recipient {
         // Resolve the owner's verified Gmail sender → build the production mailer.
         let mailer = gmail_mailer_for(&ctx, &user.id).await?;
@@ -194,6 +221,7 @@ pub async fn mint_share(
             label,
             recipient,
             &mailer,
+            &origin,
         )
         .await?
     } else {
@@ -207,8 +235,7 @@ pub async fn mint_share(
             .await?
     };
 
-    // Build the share URL from the request's Host header.
-    let origin = origin_from_headers(&headers);
+    // Build the share URL from the resolved origin (configured domain or Host).
     let url = format!("{origin}/#/s/{session_id}/{token}");
 
     ctx.audit(NewAuditEntry {
@@ -285,12 +312,17 @@ pub async fn mint_otp_share(
     label: Option<String>,
     recipient_email: &str,
     mailer: &dyn OtpMailer,
+    share_origin: &str,
 ) -> ApiResult<(String, otto_core::api::ShareInfo)> {
     let (token, otp, info) = repo
         .issue_share_otp_token(owner_id, session_id, role, duration_secs, label, recipient_email)
         .await?;
 
-    if let Err(e) = mailer.send_otp(recipient_email, &otp).await {
+    // The ready-to-open link, emailed alongside the code so the guest can open the
+    // session directly (empty `share_origin` ⇒ a relative URL, handled by the body).
+    let share_url = format!("{share_origin}/#/s/{session_id}/{token}");
+
+    if let Err(e) = mailer.send_otp(recipient_email, &otp, &share_url).await {
         // Delivery failed — revoke the just-minted share so we don't leave an
         // OTP-pending capability whose code nobody received.
         let _ = repo.revoke_share(owner_id, &info.id).await;
@@ -337,8 +369,9 @@ pub async fn extend_otp_share(
     debug_assert_eq!(&owner_id, expected_owner);
 
     // Email the fresh code to the STORED recipient — never an address from the
-    // request (there is none).
-    mailer.send_otp(&recipient, &otp).await.map_err(|e| {
+    // request (there is none). No share_url here (the guest already has the link
+    // from the first email) → code-only body.
+    mailer.send_otp(&recipient, &otp, "").await.map_err(|e| {
         ApiError(Error::Upstream(format!(
             "failed to re-email the access code to {recipient}: {e}"
         )))
@@ -408,7 +441,8 @@ pub async fn extend_share(
         Ok(m) => m,
         Err(e) => return e.into_response(),
     };
-    if let Err(e) = mailer.send_otp(&recipient, &otp).await {
+    // No share_url on extend (the guest already has the link) → code-only body.
+    if let Err(e) = mailer.send_otp(&recipient, &otp, "").await {
         return ApiError(Error::Upstream(format!(
             "failed to re-email the access code to {recipient}: {e}"
         )))

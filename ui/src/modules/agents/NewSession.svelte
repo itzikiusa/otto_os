@@ -220,7 +220,7 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: border-color 130ms ease-out, background 130ms ease-out;
   }
   .provider-card:hover {
@@ -333,7 +333,7 @@
     font-size: 13px;
     font-weight: 600;
     color: var(--text);
-    text-align: left;
+    text-align: start;
   }
   .preview-toggle .hint {
     font-weight: 400;

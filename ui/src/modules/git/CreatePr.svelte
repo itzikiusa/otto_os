@@ -173,7 +173,7 @@
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
     vertical-align: middle;
-    margin-right: 4px;
+    margin-inline-end: 4px;
   }
   @keyframes spin {
     to { transform: rotate(360deg); }

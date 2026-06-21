@@ -223,7 +223,7 @@
     text-overflow: ellipsis;
   }
   .bc-provider {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-size: 10.5px;
     color: var(--text-dim);
     text-transform: lowercase;

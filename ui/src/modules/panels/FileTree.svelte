@@ -449,10 +449,10 @@
     color: var(--text);
     font-size: 12px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     white-space: nowrap;
     overflow: hidden;
-    padding-right: 6px;
+    padding-inline-end: 6px;
     transition: background 80ms ease-out;
   }
   .tree-row:hover {
@@ -554,7 +554,7 @@
   .preview-toggle {
     display: inline-flex;
     gap: 2px;
-    margin-left: auto;
+    margin-inline-start: auto;
   }
   .pv {
     height: 20px;

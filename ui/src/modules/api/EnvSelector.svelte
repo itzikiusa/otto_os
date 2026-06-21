@@ -175,7 +175,7 @@
     color: var(--text);
     cursor: pointer;
     border-radius: var(--radius-s);
-    text-align: left;
+    text-align: start;
   }
   .env-pick:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);

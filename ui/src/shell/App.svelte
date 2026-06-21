@@ -588,7 +588,14 @@
 
 {#if viewport.isDesktop}
 <!-- DESKTOP (≥1025px): the original, unchanged 3-pane shell. -->
-<div class="shell" style={isTauri ? undefined : `zoom:${ui.zoom}`}>
+<!-- App zoom: Tauri uses the native WKWebView page-zoom (applyNativeZoom). In a
+     BROWSER we used to apply CSS `zoom:${ui.zoom}` here, but CSS zoom (a) stretches
+     the WebGL terminal canvas (oversized + clipped fit) and (b) breaks click
+     hit-testing + absolutely-positioned popover/dropdown coordinates. So in the
+     browser we DON'T CSS-zoom — users scale crisply with the browser's own zoom
+     (⌘+/−), which re-rasterizes everything (terminal included) and keeps
+     coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
+<div class="shell">
   <div class="shell-main">
     <div class="sidebar" class:tauri-top={isTauri}>
       {#if ui.railExpanded}
@@ -817,12 +824,17 @@
     width: 220px;
     flex-shrink: 0;
     display: flex;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
   }
   .mcenter {
     /* the single content pane fills the remaining width */
     flex: 1;
     min-width: 0;
+    /* …and the remaining HEIGHT. Without min-height:0 a flex item refuses to
+       shrink below its content's intrinsic height, which breaks the flex height
+       chain for nested panes (terminal output, DB results grid, diff viewers),
+       collapsing them to ~0 on the narrow mobile shell. Mirrors `.mbody`. */
+    min-height: 0;
   }
 
   /* Upstream/provider outage strip (e.g. Bitbucket 502 / maintenance). */
@@ -861,7 +873,7 @@
   .imp-real {
     font-size: 11.5px;
     color: var(--text-dim);
-    margin-left: 4px;
+    margin-inline-start: 4px;
   }
   .imp-countdown {
     font-size: 11.5px;
@@ -879,7 +891,7 @@
   .bell-anchor {
     position: absolute;
     top: 6px;
-    right: 10px;
+    inset-inline-end: 10px;
     z-index: 50;
   }
   .bell-anchor.tauri-top {
@@ -893,6 +905,6 @@
   /* Reserve room on the right of a module page so its header action buttons
      never sit under the floating notification bell. */
   .content.bell-gutter {
-    padding-right: 42px;
+    padding-inline-end: 42px;
   }
 </style>

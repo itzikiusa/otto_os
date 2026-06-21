@@ -466,7 +466,7 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    margin-left: auto;
+    margin-inline-start: auto;
   }
   .confirm-text {
     font-size: 12px;
@@ -489,7 +489,7 @@
     height: 26px;
     padding: 0 12px;
     border: none;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     background: transparent;
     color: var(--text-dim);
     font-size: 11.5px;
@@ -498,7 +498,7 @@
     transition: background 90ms, color 90ms;
   }
   .segmented button:last-child {
-    border-right: none;
+    border-inline-end: none;
   }
   .segmented button:hover {
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
@@ -593,7 +593,7 @@
   }
   .md-body :global(ul),
   .md-body :global(ol) {
-    padding-left: 1.5em;
+    padding-inline-start: 1.5em;
     margin: 0 0 0.75em;
   }
   .md-body :global(li) {
@@ -620,8 +620,8 @@
     font-size: 0.86em;
   }
   .md-body :global(blockquote) {
-    border-left: 3px solid var(--border);
-    padding-left: 12px;
+    border-inline-start: 3px solid var(--border);
+    padding-inline-start: 12px;
     color: var(--text-dim);
     margin: 0 0 0.75em;
     font-style: italic;

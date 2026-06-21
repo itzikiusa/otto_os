@@ -102,7 +102,7 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     border-radius: var(--radius-s);
   }
   .hist-row:hover {

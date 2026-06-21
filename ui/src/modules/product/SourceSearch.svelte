@@ -343,7 +343,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: background 120ms ease-out, border-color 120ms ease-out;
     width: 100%;
   }

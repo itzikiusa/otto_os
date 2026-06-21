@@ -13,6 +13,7 @@ import type {
   WorkspaceWithRole,
 } from '../api/types';
 import { toasts } from '../toast.svelte';
+import { ui, clientId } from './ui.svelte';
 
 const LS_CURRENT = 'otto_workspace';
 const LS_TABS = 'otto_tabs_'; // + workspace id
@@ -210,9 +211,21 @@ class WorkspaceStore {
       // 'insights') hosted on an arbitrary workspace just for the FK — it's a
       // background scheduled job, not a user session, so keep it out of the
       // Agents list (its report is viewable in the Insights module).
-      this.sessions = all.filter(
+      let kept = all.filter(
         (s) => (s.meta as { source?: string } | null)?.source !== 'insights',
       );
+      // Per-device session isolation (opt-in, default off): show only sessions
+      // this device started (stamped meta.client_id on create). When off, leave
+      // the list unchanged so every device sees every session (current behavior).
+      // Drives tabs/Navigator/agents list consistently since they all derive
+      // from `this.sessions`. The setter re-runs this so flips apply live.
+      if (ui.sessionIsolation) {
+        const me = clientId();
+        kept = kept.filter(
+          (s) => (s.meta as { client_id?: string } | null)?.client_id === me,
+        );
+      }
+      this.sessions = kept;
       for (const s of this.sessions) this.statusMap[s.id] = s.status;
       this.reconcileTabs();
     } finally {
@@ -348,7 +361,14 @@ class WorkspaceStore {
 
   async createSession(req: CreateSessionReq): Promise<Session> {
     if (!this.currentId) throw new Error('no workspace selected');
-    const s = await api.post<Session>(`/workspaces/${this.currentId}/sessions`, req);
+    // Stamp the device that started this session (preserving any caller meta,
+    // e.g. {origin:'manual'}) so the opt-in per-device isolation filter can
+    // recognize its own sessions.
+    const stamped: CreateSessionReq = {
+      ...req,
+      meta: { ...(req.meta ?? {}), client_id: clientId() },
+    };
+    const s = await api.post<Session>(`/workspaces/${this.currentId}/sessions`, stamped);
     this.addSession(s);
     return s;
   }

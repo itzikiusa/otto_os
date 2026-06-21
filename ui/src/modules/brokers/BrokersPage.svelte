@@ -20,6 +20,18 @@
   let editTarget = $state<BrokerCluster | null>(null);
   let testing = $state(false);
 
+  // Mobile (≤640px): the cluster list and the cluster content stack vertically
+  // and each is a collapsible, independently-scrollable section. These toggles
+  // only affect the phone layout (the headers/carets are hidden on desktop).
+  let clustersOpen = $state(true);
+  let contentOpen = $state(true);
+  // Auto-collapse the cluster list after picking a cluster on a phone so the
+  // content gets the screen; expand it again when nothing is selected.
+  $effect(() => {
+    if (brokers.selectedId) clustersOpen = false;
+    else clustersOpen = true;
+  });
+
   $effect(() => {
     const id = ws.currentId;
     if (id) void brokers.load(id);
@@ -233,9 +245,18 @@
 </script>
 
 <div class="brokers-page">
-  <aside class="clusters">
+  <aside class="clusters" class:collapsed={!clustersOpen}>
     <div class="aside-head">
-      <span class="title">Clusters</span>
+      <button
+        class="sec-toggle"
+        onclick={() => (clustersOpen = !clustersOpen)}
+        aria-expanded={clustersOpen}
+        title={clustersOpen ? 'Collapse clusters' : 'Expand clusters'}
+      >
+        <Icon name={clustersOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+        <span class="title">Clusters</span>
+        {#if brokers.clusters.length > 0}<span class="hcount">{brokers.clusters.length}</span>{/if}
+      </button>
       <div class="head-btns">
         <button class="btn small" onclick={() => newSection(null)} title="New section">
           <Icon name="folder" size={13} />
@@ -280,7 +301,7 @@
     </div>
   </aside>
 
-  <main class="cluster-main">
+  <main class="cluster-main" class:collapsed={!contentOpen}>
     {#if brokers.openClusters.length > 0}
       <div class="tabstrip">
         {#each brokers.openClusters as c (c.id)}
@@ -310,6 +331,14 @@
     {/if}
     {#if selected}
       <header class="cluster-head">
+        <button
+          class="content-toggle"
+          onclick={() => (contentOpen = !contentOpen)}
+          aria-expanded={contentOpen}
+          title={contentOpen ? 'Collapse details' : 'Expand details'}
+        >
+          <Icon name={contentOpen ? 'chevronDown' : 'chevronRight'} size={14} />
+        </button>
         <div class="ch-title">
           <span class="dot" style="background: {selected.color || 'var(--accent)'}"></span>
           <span class="name">{selected.name}</span>
@@ -467,7 +496,7 @@
   }
   .clusters {
     width: 220px;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -492,6 +521,7 @@
     flex: 1;
     overflow: auto;
     padding-bottom: 8px;
+    min-height: 0;
   }
   /* Section headers (folders) */
   .sec-head {
@@ -501,7 +531,7 @@
     padding: 6px 8px 6px 6px;
     cursor: grab;
     color: var(--text-dim);
-    border-left: 2px solid transparent;
+    border-inline-start: 2px solid transparent;
     user-select: none;
   }
   .sec-head:hover {
@@ -509,7 +539,7 @@
   }
   .sec-head.drop {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    border-left-color: var(--accent);
+    border-inline-start-color: var(--accent);
   }
   .sec-head.plain {
     cursor: default;
@@ -574,7 +604,7 @@
     flex-direction: column;
   }
   .ctxmenu button {
-    text-align: left;
+    text-align: start;
     border: none;
     background: transparent;
     color: var(--text);
@@ -591,7 +621,7 @@
   }
   .cluster {
     width: 100%;
-    text-align: left;
+    text-align: start;
     border: none;
     background: transparent;
     padding: 8px 12px;
@@ -599,14 +629,14 @@
     align-items: center;
     gap: 8px;
     cursor: pointer;
-    border-left: 2px solid transparent;
+    border-inline-start: 2px solid transparent;
   }
   .cluster:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .cluster.sel {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    border-left-color: var(--accent);
+    border-inline-start-color: var(--accent);
   }
   .dot {
     width: 8px;
@@ -656,7 +686,7 @@
     gap: 7px;
     padding: 0 10px;
     cursor: pointer;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     font-size: 12.5px;
     color: var(--text-dim);
     white-space: nowrap;
@@ -798,5 +828,191 @@
   }
   .btn.danger {
     color: var(--status-exited, #ff5f57);
+  }
+
+  /* Collapse toggles. On desktop the cluster-list toggle is a plain inert label
+     (no caret / count chrome) and the content toggle is hidden entirely, so the
+     desktop layout looks exactly as before. They light up only on phones. */
+  .sec-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 0;
+    cursor: default;
+    min-width: 0;
+  }
+  .sec-toggle > :global(svg),
+  .sec-toggle .hcount {
+    display: none;
+  }
+  .content-toggle {
+    display: none;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 2px;
+    cursor: pointer;
+    align-items: center;
+    flex: none;
+  }
+
+  @media (max-width: 640px) {
+    /* Stack the cluster list above the content; each is its own collapsible,
+       independently-scrollable section, and text gets bumped for readability.
+       The page keeps its bounded height (the host clips), so each section
+       scrolls inside itself rather than the whole page scrolling. */
+    .brokers-page {
+      flex-direction: column;
+    }
+    .clusters {
+      width: 100%;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+      flex: none;
+      min-height: 0;
+    }
+    .aside-head {
+      padding: 12px 14px;
+    }
+    .sec-toggle {
+      flex: 1;
+      cursor: pointer;
+      padding: 6px 0;
+    }
+    .sec-toggle > :global(svg) {
+      display: inline-flex;
+      flex: none;
+    }
+    .sec-toggle .title {
+      font-size: 14px;
+    }
+    .sec-toggle .hcount {
+      display: inline-block;
+      font-size: 11px;
+      color: var(--text-dim);
+      background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+      border-radius: 9px;
+      padding: 1px 8px;
+    }
+    .head-btns .btn.small {
+      font-size: 13px;
+      padding: 6px 8px;
+    }
+    /* Expanded: scroll within a capped height. Collapsed: hidden. */
+    .cluster-list {
+      max-height: 45vh;
+      overflow-y: auto;
+      flex: none;
+    }
+    .clusters.collapsed .cluster-list {
+      display: none;
+    }
+    /* Bigger sidebar text + roomier tap targets. */
+    .cluster {
+      padding: 11px 14px;
+    }
+    .cn {
+      font-size: 15px;
+    }
+    .env {
+      font-size: 10px;
+      padding: 2px 6px;
+    }
+    .sec-name {
+      font-size: 14px;
+    }
+    .sec-head {
+      padding: 8px 10px 8px 8px;
+    }
+    .count {
+      font-size: 11px;
+    }
+    .sec-head.plain {
+      font-size: 12px;
+    }
+
+    /* Content section. */
+    .cluster-main {
+      flex: 1;
+      min-height: 0;
+    }
+    .tabstrip {
+      min-height: 42px;
+    }
+    .ctab {
+      font-size: 14px;
+      padding: 0 12px;
+    }
+    /* The cluster header wraps so the name + bootstrap + actions never collide
+       or clip off the right edge. */
+    .content-toggle {
+      display: inline-flex;
+    }
+    .cluster-head {
+      flex-wrap: wrap;
+      align-items: flex-start;
+      padding: 12px 14px;
+      gap: 8px 10px;
+    }
+    .ch-title {
+      flex: 1 1 100%;
+      flex-wrap: wrap;
+      gap: 6px 8px;
+      align-items: center;
+    }
+    .ch-title .name {
+      font-size: 17px;
+    }
+    .ch-title .boot {
+      flex: 1 1 100%;
+      font-size: 12px;
+      white-space: normal;
+      word-break: break-all;
+    }
+    .env {
+      font-size: 10px;
+    }
+    .actions {
+      flex: 1 1 100%;
+    }
+    .actions .btn.small {
+      flex: 1;
+      font-size: 13px;
+      padding: 8px 10px;
+    }
+    /* Collapsed content: keep only the header (with its caret). */
+    .cluster-main.collapsed .tabstrip,
+    .cluster-main.collapsed .tabs,
+    .cluster-main.collapsed .tab-body {
+      display: none;
+    }
+    /* Tabs scroll horizontally with comfortable tap targets. */
+    .tabs {
+      overflow-x: auto;
+      flex-wrap: nowrap;
+      padding: 6px 10px 0;
+      gap: 4px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .tabs button {
+      font-size: 14px;
+      padding: 10px 12px;
+      white-space: nowrap;
+      flex: none;
+    }
+    /* The active tab's content is its own scroll region. */
+    .tab-body {
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .empty {
+      padding: 28px 18px;
+    }
+    .empty p {
+      font-size: 14px;
+    }
   }
 </style>

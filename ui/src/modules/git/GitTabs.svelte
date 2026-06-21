@@ -97,7 +97,11 @@
   }
 </script>
 
-<div class="git-tabs" role="tablist">
+<div class="git-tabs">
+  <!-- The tablist must contain ONLY role="tab" children (ARIA
+       aria-required-children); `display:contents` keeps the flex layout
+       identical while moving the "new repo" button out of the tablist. -->
+  <div class="git-tablist" role="tablist">
   {#each openRepos as r (r.id)}
     <div
       class="git-tab"
@@ -140,6 +144,7 @@
       >
     </div>
   {/each}
+  </div>
   <button class="git-tab-new" title="Open a repository" aria-label="Open a repository" onclick={openPicker}>
     +
   </button>
@@ -155,6 +160,11 @@
     overflow-x: auto;
     flex-shrink: 0;
     scrollbar-width: none;
+  }
+  /* Layout-neutral wrapper: groups the tabs under role="tablist" without
+     introducing a box (so the flex row above is unchanged). */
+  .git-tablist {
+    display: contents;
   }
   .git-tabs::-webkit-scrollbar {
     display: none;
@@ -184,7 +194,7 @@
   }
   /* Drop target while reordering — faint left beacon (matches TabBar). */
   .git-tab.drag-over {
-    border-left: 2px solid var(--accent);
+    border-inline-start: 2px solid var(--accent);
   }
   .git-tab-dot {
     flex-shrink: 0;

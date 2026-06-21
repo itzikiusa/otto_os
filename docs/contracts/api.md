@@ -529,7 +529,8 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | GET /repos/{id}/refs | ws viewer | — | branch/tag refs |
 | POST /repos/{id}/fetch | ws editor | — | RepoStatusResp |
 | POST /repos/{id}/discard | ws editor | StagePathsReq | RepoStatusResp |
-| POST /repos/{id}/merge | ws editor | MergeReq | merge result |
+| POST /repos/{id}/merge | ws editor | MergeBranchReq (`auto_stash` → stash→merge→pop on a dirty tree) | MergeResult (`note` carries auto-stash outcome) |
+| POST /repos/{id}/merge/preview | ws viewer | MergePreviewReq | MergePreview (dry-run via `git merge-tree`; no tree mutation) |
 | GET /repos/{id}/merge/status | ws viewer | — | in-progress merge state |
 | POST /repos/{id}/merge/abort | ws editor | — | RepoStatusResp |
 | POST /repos/{id}/merge/commit | ws editor | — | `{sha}` |

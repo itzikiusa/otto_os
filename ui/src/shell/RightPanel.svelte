@@ -173,7 +173,7 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
     background: var(--bg);
     flex-shrink: 0;
     position: relative;
@@ -186,11 +186,11 @@
      (the drawer supplies it), no fixed width. */
   .rpanel.embedded {
     width: 100%;
-    border-left: none;
+    border-inline-start: none;
   }
   .resize-handle {
     position: absolute;
-    left: -3px;
+    inset-inline-start: -3px;
     top: 0;
     bottom: 0;
     width: 7px;
@@ -250,7 +250,7 @@
     align-items: center;
     gap: 4px;
     padding-top: 10px;
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
     background: var(--bg);
     flex-shrink: 0;
   }

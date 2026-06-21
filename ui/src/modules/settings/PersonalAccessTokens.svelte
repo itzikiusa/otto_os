@@ -288,7 +288,7 @@
 
   .tok-label {
     font-weight: 500;
-    margin-right: 6px;
+    margin-inline-end: 6px;
   }
 
   .tok-prefix {

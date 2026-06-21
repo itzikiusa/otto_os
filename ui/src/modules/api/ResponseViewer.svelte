@@ -654,8 +654,8 @@
     align-items: center;
     gap: 8px;
     padding: 5px 8px;
-    border-left: 2px solid var(--border);
-    margin-left: 5px;
+    border-inline-start: 2px solid var(--border);
+    margin-inline-start: 5px;
     font-size: 12px;
   }
   .trace-dot {
@@ -663,13 +663,13 @@
     height: 7px;
     border-radius: 50%;
     background: var(--text-dim);
-    margin-left: -10px;
+    margin-inline-start: -10px;
     flex-shrink: 0;
   }
   .trace-step.timing .trace-dot { background: var(--accent); }
-  .trace-step.success { border-left-color: color-mix(in srgb, var(--status-working) 55%, transparent); }
+  .trace-step.success { border-inline-start-color: color-mix(in srgb, var(--status-working) 55%, transparent); }
   .trace-step.success .trace-dot { background: var(--status-working); }
-  .trace-step.error { border-left-color: color-mix(in srgb, var(--status-exited) 55%, transparent); }
+  .trace-step.error { border-inline-start-color: color-mix(in srgb, var(--status-exited) 55%, transparent); }
   .trace-step.error .trace-dot { background: var(--status-exited); }
   .trace-step.redirect .trace-dot { background: #d2691e; }
   .trace-label {

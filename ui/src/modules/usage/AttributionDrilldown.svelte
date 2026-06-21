@@ -254,7 +254,7 @@
     font-size: 12px;
   }
   .attr-table thead th {
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     color: var(--fg-muted, #8b949e);
     padding: 4px 8px 6px;
@@ -298,7 +298,7 @@
     border-radius: 3px;
     transition: width 0.2s;
   }
-  .col-cost, .col-pct, .col-tokens, .col-sessions { text-align: right; }
+  .col-cost, .col-pct, .col-tokens, .col-sessions { text-align: end; }
   .dim-pct { color: var(--fg-muted, #8b949e); }
   .col-copy { width: 32px; text-align: center; }
   .copy-btn {

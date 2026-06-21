@@ -281,7 +281,7 @@
     font-size: 13px;
   }
   .broker-head .leaders {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-size: 11px;
     color: var(--text-dim);
   }
@@ -315,7 +315,7 @@
     font-size: 11px;
     color: var(--text-dim);
     min-width: 80px;
-    text-align: right;
+    text-align: end;
   }
   .mono {
     font-family: var(--font-mono);

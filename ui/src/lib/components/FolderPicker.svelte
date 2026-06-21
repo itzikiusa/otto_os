@@ -194,7 +194,7 @@
     color: var(--text);
     font-size: 13px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     min-width: 0;
   }
   .row:hover {
@@ -210,11 +210,11 @@
   .use-file {
     font-size: 11px;
     flex-shrink: 0;
-    margin-right: 4px;
+    margin-inline-end: 4px;
   }
   .use {
     flex-shrink: 0;
-    margin-right: 8px;
+    margin-inline-end: 8px;
     padding: 3px 10px;
     font-size: 11px;
     border: 1px solid var(--border);

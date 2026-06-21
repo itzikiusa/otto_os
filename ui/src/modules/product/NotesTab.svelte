@@ -401,7 +401,7 @@
   .n-body :global(p)  { margin: 0 0 0.6em; }
   .n-body :global(ul),
   .n-body :global(ol) {
-    padding-left: 1.4em;
+    padding-inline-start: 1.4em;
     margin: 0 0 0.6em;
   }
   .n-body :global(li) { margin-bottom: 0.2em; }
@@ -422,8 +422,8 @@
   }
   .n-body :global(pre code) { background: none; padding: 0; }
   .n-body :global(blockquote) {
-    border-left: 3px solid var(--border);
-    padding-left: 10px;
+    border-inline-start: 3px solid var(--border);
+    padding-inline-start: 10px;
     color: var(--text-dim);
     margin: 0 0 0.6em;
     font-style: italic;

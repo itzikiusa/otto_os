@@ -213,7 +213,7 @@
   }
   .legend-text {
     color: var(--text-dim);
-    margin-right: 8px;
+    margin-inline-end: 8px;
   }
   .badge {
     font-size: 9.5px;
@@ -264,7 +264,7 @@
     border: 1px solid var(--border);
   }
   .chip .ver {
-    margin-left: 4px;
+    margin-inline-start: 4px;
     color: var(--text-dim);
     font-size: 9.5px;
   }
@@ -302,7 +302,7 @@
     background: none;
     border: none;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     font: inherit;
   }
   .file-head:hover {

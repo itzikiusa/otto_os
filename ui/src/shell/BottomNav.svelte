@@ -147,7 +147,7 @@
   .bn-badge {
     position: absolute;
     top: -4px;
-    right: -8px;
+    inset-inline-end: -8px;
     min-width: 14px;
     height: 14px;
     padding: 0 3px;
@@ -168,8 +168,8 @@
   }
   .more-sheet {
     position: fixed;
-    left: 0;
-    right: 0;
+    inset-inline-start: 0;
+    inset-inline-end: 0;
     bottom: 0;
     z-index: 93;
     background: var(--bg);

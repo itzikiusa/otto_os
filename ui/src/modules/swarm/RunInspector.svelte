@@ -320,7 +320,7 @@
   }
   .count {
     color: var(--accent);
-    margin-left: 4px;
+    margin-inline-start: 4px;
   }
   .summary {
     margin: 0;
@@ -349,7 +349,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    text-align: left;
+    text-align: start;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 7px 9px;

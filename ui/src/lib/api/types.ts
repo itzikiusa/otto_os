@@ -998,6 +998,8 @@ export interface MergeBranchReq {
   source: string;
   target: string;
   strategy: LocalMergeStrategy;
+  /** When true and the tree is dirty, stash → merge → pop. Default false. */
+  auto_stash?: boolean;
 }
 
 /** Outcome of a local merge / merge-completion. Conflicts are a normal result. */
@@ -1006,6 +1008,21 @@ export interface MergeResult {
   commit: string | null;
   conflicted_files: string[];
   repo_status: RepoStatusResp;
+  /** Optional note (e.g. auto-stash outcome) to surface as a toast. */
+  note?: string | null;
+}
+
+/** `POST /repos/{id}/merge/preview` — dry-run conflict check (no tree mutation). */
+export interface MergePreviewReq {
+  source: string;
+  target: string;
+}
+
+/** Result of a merge dry-run. */
+export interface MergePreview {
+  conflicts: boolean;
+  conflicted_files: string[];
+  up_to_date: boolean;
 }
 
 /** `GET /repos/{id}/merge/status` */

@@ -335,7 +335,7 @@
     place-items: center;
   }
   .conflict-tab {
-    margin-left: auto;
+    margin-inline-start: auto;
     color: #b8860b;
     gap: 5px;
   }
@@ -388,5 +388,47 @@
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
+  }
+
+  /* ── Mobile + tablet (≤1024px): keep the header + toolbar + tabs usable on a
+     narrow / short screen — the toolbar scrolls horizontally instead of
+     overflowing the page, the tab strip scrolls, and tab labels stay legible.
+     Matched to the body breakpoint (1024) so the tablet/landscape range gets the
+     same scroll-don't-overflow header treatment. ── */
+  @media (max-width: 1024px) {
+    .rv-head {
+      gap: 8px;
+      padding: 8px 10px;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .rv-head::-webkit-scrollbar { display: none; }
+    .rv-name { font-size: 14px; flex-shrink: 0; }
+    /* The toolbar is the wide part — give it its own horizontal scroll so it
+       never forces the page wider than the viewport. */
+    .rv-head :global(.toolbar) {
+      overflow-x: auto;
+      scrollbar-width: none;
+      flex-shrink: 0;
+    }
+    .rv-head :global(.toolbar)::-webkit-scrollbar { display: none; }
+
+    .rv-tabs {
+      gap: 2px;
+      padding: 4px 8px 0;
+      overflow-x: auto;
+      scrollbar-width: none;
+      flex-wrap: nowrap;
+    }
+    .rv-tabs::-webkit-scrollbar { display: none; }
+    .rv-tab {
+      height: 38px;
+      padding: 0 12px;
+      font-size: 14px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .conflict-tab { margin-inline-start: 0; }
   }
 </style>

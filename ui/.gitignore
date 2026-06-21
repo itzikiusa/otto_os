@@ -22,3 +22,16 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+e2e/.auth/
+e2e/.report/
+e2e/.baseline.log
+e2e/.run2.log
+test-results/
+playwright-report/
+/.playwright/
+e2e/.auth-*/
+e2e/.report-*/
+e2e/.shots/
+e2e/.diag*.log
+e2e/.run*.log
+e2e/.deep*.log

@@ -998,7 +998,7 @@
   }
   .md-body :global(p) { margin: 0 0 0.5em; }
   .md-body :global(ul),
-  .md-body :global(ol) { padding-left: 1.4em; margin: 0 0 0.5em; }
+  .md-body :global(ol) { padding-inline-start: 1.4em; margin: 0 0 0.5em; }
   .md-body :global(li) { margin-bottom: 0.15em; }
   .md-body :global(code) {
     font-family: var(--font-mono, monospace);

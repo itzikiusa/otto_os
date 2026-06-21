@@ -4,6 +4,7 @@
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import type {
     BrokerCluster,
     Environment,
@@ -105,7 +106,11 @@
   }
 </script>
 
-<Modal title={editing ? 'Edit cluster' : 'Add Kafka cluster'} width={540} {onclose}>
+<!-- On a phone the shared Modal's grid backdrop sizes its track to this width,
+     so a desktop-sized 540 would overflow the viewport (and clip the footer
+     buttons). Pass a phone-safe width there; the Modal still caps it via its own
+     max-width. Desktop is unchanged at 540. -->
+<Modal title={editing ? 'Edit cluster' : 'Add Kafka cluster'} width={viewport.isPhone ? 320 : 540} {onclose}>
   <div class="form">
     <label class="field">
       <span>Name</span>
@@ -325,5 +330,36 @@
   .browse-btn {
     flex-shrink: 0;
     white-space: nowrap;
+  }
+
+  @media (max-width: 640px) {
+    /* Stack side-by-side fields and bump text so the form is comfortable on a
+       phone (the Modal card itself already caps to the viewport width). */
+    .row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+    }
+    /* Tunnel host/port were forced to fixed flex bases inline — reset them. */
+    .ssh-section .row .field {
+      flex: 1 1 auto !important;
+    }
+    .field span {
+      font-size: 13px;
+    }
+    .field {
+      align-items: stretch;
+    }
+    .field input,
+    .field select {
+      width: 100%;
+      box-sizing: border-box;
+      font-size: 16px; /* ≥16px prevents iOS Safari zoom-on-focus */
+      padding: 10px 11px;
+    }
+    .check {
+      font-size: 13px;
+      align-items: flex-start;
+    }
   }
 </style>

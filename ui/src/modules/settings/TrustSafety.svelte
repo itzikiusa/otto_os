@@ -440,7 +440,7 @@
     font-size: 12px;
   }
   .audit-table th {
-    text-align: left;
+    text-align: start;
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;

@@ -13,7 +13,8 @@ use axum::{Extension, Json, Router};
 use otto_core::api::{
     AddRepoReq, BranchInfo, CheckoutReq, CommitInfo, CommitReq, ConflictFile, CreateGitAccountReq,
     CreatePrReq, DiffResp, MergeBranchReq, MergeCommitReq, MergeConflictStatus, MergePrReq,
-    MergeResult, NewPrCommentReq, PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem,
+    MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq, PrComment, PrCommit, PrDetail,
+    PrState, PrSummary, Problem,
     RefsResp, RepoStatusResp, RequestChangesReq, ResolveConflictReq, StagePathsReq,
     UpdateGitAccountReq, UpdatePrReq,
 };
@@ -89,6 +90,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/stash", post(repo_stash::<S>))
         // local merge + conflict resolution (#4)
         .route("/repos/{id}/merge", post(repo_merge::<S>))
+        .route("/repos/{id}/merge/preview", post(repo_merge_preview::<S>))
         .route("/repos/{id}/merge/status", get(repo_merge_status::<S>))
         .route("/repos/{id}/merge/abort", post(repo_merge_abort::<S>))
         .route("/repos/{id}/merge/commit", post(repo_merge_commit::<S>))
@@ -1209,9 +1211,20 @@ async fn repo_merge<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     Ok(Json(
-        git.merge_branch(&req.source, &req.target, req.strategy)
+        git.merge_branch(&req.source, &req.target, req.strategy, req.auto_stash)
             .await?,
     ))
+}
+
+/// `POST /repos/{id}/merge/preview` — dry-run merge conflict check (no mutation).
+async fn repo_merge_preview<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<MergePreviewReq>,
+) -> ApiResult<Json<MergePreview>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(git.merge_preview(&req.source, &req.target).await?))
 }
 
 async fn repo_merge_status<S: GitCtx>(

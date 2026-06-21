@@ -725,7 +725,7 @@
     min-width: 240px;
     max-width: 240px;
     flex-shrink: 0;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     background: var(--surface-2);
     display: flex;
     flex-direction: column;
@@ -733,6 +733,9 @@
     top: 0;
     max-height: 100vh;
     overflow: hidden;
+    /* Let the inner .nav-files (flex:1, overflow-y:auto) own the scroll: a flex
+       column child can't scroll unless the column allows itself to shrink. */
+    min-height: 0;
   }
   .diff-nav.nav-collapsed {
     width: 32px;
@@ -789,7 +792,7 @@
   }
   .nav-match-count {
     position: absolute;
-    right: 14px;
+    inset-inline-end: 14px;
     top: 50%;
     transform: translateY(-50%);
     font-size: 10px;
@@ -876,7 +879,7 @@
   }
   .toolbar-match-count {
     position: absolute;
-    right: 8px;
+    inset-inline-end: 8px;
     font-size: 10px;
     color: var(--text-dim);
     pointer-events: none;
@@ -892,7 +895,7 @@
     min-width: 0;
   }
   .diff-root.with-nav .diff {
-    padding-left: 12px;
+    padding-inline-start: 12px;
   }
   .diff-toolbar {
     display: flex;
@@ -933,7 +936,7 @@
     cursor: pointer;
     font-size: 12px;
     color: var(--text);
-    text-align: left;
+    text-align: start;
   }
   .dfile-path {
     font-size: 11.5px;
@@ -984,14 +987,14 @@
   .gut {
     width: 42px;
     min-width: 42px;
-    text-align: right;
+    text-align: end;
     padding: 0 8px 0 4px;
     color: var(--text-dim);
     font-family: var(--font-mono);
     font-size: 10.5px;
     user-select: none;
     vertical-align: top;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
   }
   .gut.commentable {
     cursor: pointer;
@@ -1053,6 +1056,66 @@
       min-width: 32px;
       max-width: 32px;
     }
+  }
+
+  /* ── Mobile + tablet (≤1024px): readable diffs that fit the viewport width.
+     Wrap long code lines (no horizontal page overflow), bump the tiny code +
+     gutter + toolbar text up to a legible size, and let the file-navigator (PR
+     mode) sit above the diff as a collapsible strip instead of a side rail.
+     The breakpoint is 1024 so the tablet range (iPad portrait 834, real-phone
+     landscape 932) gets the fits-the-width treatment — at those widths the
+     240px nav rail + diff would otherwise clip the code off-screen right. */
+  @media (max-width: 1024px) {
+    .dfile {
+      max-width: 100%;
+    }
+    /* Stack nav over diff in PR mode so both fit the narrow viewport. */
+    .diff-root.with-nav {
+      flex-direction: column;
+    }
+    .diff-nav,
+    .diff-nav.nav-collapsed {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      position: static;
+      max-height: 34vh;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .diff-root.with-nav .diff {
+      padding-inline-start: 0;
+    }
+    .nav-title { font-size: 13px; }
+    .nav-file { font-size: 13px; padding: 8px; }
+    .nav-base { font-size: 13px; }
+    .nav-dir { font-size: 11px; }
+    .nav-file-stats { font-size: 12px; }
+    .nav-search { font-size: 13px; height: 32px; }
+
+    .diff-toolbar { flex-wrap: wrap; gap: 8px; }
+    .toolbar-search-wrap { flex: 1; min-width: 120px; }
+    .diff-stats { font-size: 13px; }
+    .add, .del { font-size: 13px; }
+    .toolbar-search { font-size: 13px; height: 32px; width: 100%; }
+    .dfile-head { font-size: 13px; padding: 9px 12px; }
+    .dfile-path { font-size: 13px; }
+    .hunk-header { font-size: 12px; padding: 4px 12px; }
+    .dtable { font-size: 12.5px; }
+    .gut {
+      font-size: 11px;
+      width: 30px;
+      min-width: 30px;
+      padding: 0 5px 0 3px;
+    }
+    .sign { width: 13px; }
+    /* Wrap code so long lines don't push the page wider than the screen. */
+    .code {
+      font-size: 12.5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .composer { max-width: 100%; }
   }
 
   /* Hunk line cap: "Show N more lines" affordance */

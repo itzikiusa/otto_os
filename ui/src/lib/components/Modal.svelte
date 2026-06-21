@@ -45,7 +45,13 @@
     if (e.target === e.currentTarget) onclose();
   }}
 >
-  <div class="sheet" role="dialog" aria-modal="true" aria-label={title} style="width:{width}px">
+  <div
+    class="sheet"
+    role="dialog"
+    aria-modal="true"
+    aria-label={title}
+    style="width: min({width}px, calc(100vw - 24px))"
+  >
     <header>
       <h2>{title}</h2>
       <button class="icon-btn" onclick={onclose} aria-label="Close">✕</button>

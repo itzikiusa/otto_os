@@ -1390,7 +1390,7 @@
     height: 5px;
     border-radius: 50%;
     background: var(--accent);
-    margin-left: 5px;
+    margin-inline-start: 5px;
     vertical-align: middle;
   }
   .tabbody {
@@ -1579,7 +1579,7 @@
     color: var(--status-working);
   }
   .cookie-count {
-    margin-left: 4px;
+    margin-inline-start: 4px;
     font-size: 10px;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
     color: var(--accent);
@@ -1592,7 +1592,7 @@
     font-size: 11px;
   }
   .cookie-table th {
-    text-align: left;
+    text-align: start;
     color: var(--text-dim);
     font-weight: 600;
     padding: 2px 6px;

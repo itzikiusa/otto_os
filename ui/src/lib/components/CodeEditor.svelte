@@ -497,7 +497,7 @@
   .send-to-agent-btn {
     position: absolute;
     top: 6px;
-    right: 10px;
+    inset-inline-end: 10px;
     z-index: 20;
     padding: 3px 10px;
     font-size: 11px;

@@ -366,12 +366,12 @@
   }
   .list {
     width: 300px;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     overflow: auto;
   }
   .grow-row {
     width: 100%;
-    text-align: left;
+    text-align: start;
     border: none;
     background: transparent;
     padding: 9px 12px;
@@ -379,14 +379,14 @@
     flex-direction: column;
     gap: 3px;
     cursor: pointer;
-    border-left: 2px solid transparent;
+    border-inline-start: 2px solid transparent;
   }
   .grow-row:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .grow-row.sel {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    border-left-color: var(--accent);
+    border-inline-start-color: var(--accent);
   }
   .gid {
     font-family: var(--font-mono);
@@ -435,7 +435,7 @@
     flex-wrap: wrap;
   }
   .lag-total {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-size: 12px;
     color: var(--text-dim);
   }
@@ -457,7 +457,7 @@
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
-    margin-left: auto;
+    margin-inline-start: auto;
   }
   .lag-col {
     min-width: 70px;
@@ -512,7 +512,7 @@
     font-size: 12.5px;
   }
   th {
-    text-align: left;
+    text-align: start;
     font-weight: 500;
     color: var(--text-dim);
     font-size: 11px;
@@ -540,7 +540,7 @@
     gap: 6px;
     margin: 8px;
     border: 1px solid color-mix(in srgb, var(--status-degraded, #e3b341) 45%, var(--border));
-    border-left: 3px solid var(--status-degraded, #e3b341);
+    border-inline-start: 3px solid var(--status-degraded, #e3b341);
     border-radius: var(--radius-s, 4px);
     background: color-mix(in srgb, var(--status-degraded, #e3b341) 8%, transparent);
   }
@@ -579,7 +579,7 @@
     color: #f5a623;
   }
   .close-dry {
-    margin-left: auto;
+    margin-inline-start: auto;
     border: none;
     background: transparent;
     cursor: pointer;
@@ -592,7 +592,7 @@
     font-size: 12px;
   }
   .dryrun-table th {
-    text-align: left;
+    text-align: start;
     padding: 4px 8px;
     color: var(--text-dim);
     font-size: 11px;

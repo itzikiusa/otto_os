@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.e2e.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node", "@playwright/test"],
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["playwright.config.ts", "e2e/**/*.ts"]
+}

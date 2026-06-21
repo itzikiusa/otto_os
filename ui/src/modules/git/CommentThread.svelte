@@ -98,7 +98,7 @@
   }
   .cmt-body {
     font-size: 12.5px;
-    margin-left: 25px;
+    margin-inline-start: 25px;
   }
   .cmt-actions {
     margin: 4px 0 4px 25px;

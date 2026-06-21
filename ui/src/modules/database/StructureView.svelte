@@ -477,7 +477,7 @@
     background: transparent;
     cursor: pointer;
     padding: 4px 0;
-    text-align: left;
+    text-align: start;
     color: var(--text-dim);
   }
   .copy-ddl {
@@ -509,7 +509,7 @@
     user-select: text;
   }
   .tbl th {
-    text-align: left;
+    text-align: start;
     padding: 6px 10px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
@@ -544,7 +544,7 @@
     font-size: 10.5px;
   }
   .pk {
-    margin-left: 6px;
+    margin-inline-start: 6px;
     font-size: 9px;
     font-weight: 700;
     color: var(--accent);

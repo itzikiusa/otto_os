@@ -5,6 +5,7 @@
   // DISABLES merging when the working tree has uncommitted changes.
   import type {
     LocalMergeStrategy,
+    MergePreview,
     MergeResult,
     RepoStatusResp,
   } from '../../lib/api/types';
@@ -47,6 +48,11 @@
     return git.primary?.id === repoId ? git.primaryStatus : null;
   }
 
+  // Pre-merge conflict check (dry-run; never touches the working tree). When it
+  // predicts conflicts we BLOCK the merge and tell the user to resolve first.
+  let preview = $state<MergePreview | null>(null);
+  let previewLoading = $state(true);
+
   $effect(() => {
     const id = repoId;
     statusLoading = true;
@@ -59,15 +65,34 @@
       .finally(() => (statusLoading = false));
   });
 
+  $effect(() => {
+    const id = repoId;
+    previewLoading = true;
+    void git
+      .mergePreview(id, source, target)
+      .then((p) => (preview = p))
+      .catch(() => (preview = null))
+      .finally(() => (previewLoading = false));
+  });
+
   const dirty = $derived((status?.changes.length ?? 0) > 0);
-  const canMerge = $derived(!merging && !dirty && !statusLoading);
+  const willConflict = $derived(preview?.conflicts === true);
+  // Blocked when the dry-run predicts conflicts — resolve first.
+  const canMerge = $derived(!merging && !statusLoading && !previewLoading && !willConflict);
 
   async function doMerge(): Promise<void> {
     if (!canMerge) return;
     merging = true;
     error = null;
     try {
-      const result = await git.mergeBranch(repoId, { source, target, strategy });
+      // On a dirty tree, stash → merge → pop (the dry-run already cleared conflicts).
+      const result = await git.mergeBranch(repoId, {
+        source,
+        target,
+        strategy,
+        auto_stash: dirty,
+      });
+      if (result.note) toasts.info(result.note);
       if (result.status === 'conflicts') {
         onconflicts(result);
         return;
@@ -124,13 +149,41 @@
       {/each}
     </div>
 
-    <!-- dirty-tree warning -->
-    {#if dirty}
+    <!-- pre-merge conflict check -->
+    {#if previewLoading}
+      <div class="warn check">
+        <span class="spinner-xs"></span>
+        <span>Checking for conflicts…</span>
+      </div>
+    {:else if willConflict}
+      <div class="block">
+        <div class="block-head">
+          <Icon name="x" size={14} />
+          <span>
+            Merging <span class="mono">{source}</span> into <span class="mono">{target}</span>
+            would conflict in {preview?.conflicted_files.length}
+            file{preview && preview.conflicted_files.length === 1 ? '' : 's'}. Resolve these on
+            <span class="mono">{source}</span> (or merge the other direction) first.
+          </span>
+        </div>
+        {#if preview && preview.conflicted_files.length > 0}
+          <ul class="conflict-files">
+            {#each preview.conflicted_files.slice(0, 12) as f (f)}
+              <li class="mono">{f}</li>
+            {/each}
+            {#if preview.conflicted_files.length > 12}
+              <li class="more">+{preview.conflicted_files.length - 12} more</li>
+            {/if}
+          </ul>
+        {/if}
+      </div>
+    {:else if dirty}
+      <!-- clean to merge, but the tree is dirty → offer stash → merge → pop -->
       <div class="warn">
         <Icon name="info" size={14} />
         <span>
-          Working tree has {status?.changes.length} uncommitted change{status && status.changes.length === 1 ? '' : 's'}.
-          Commit or stash them before merging.
+          You have {status?.changes.length} uncommitted change{status && status.changes.length === 1 ? '' : 's'}.
+          They'll be <strong>stashed</strong>, the merge applied, then <strong>restored</strong>.
         </span>
       </div>
     {/if}
@@ -146,7 +199,13 @@
   {#snippet footer()}
     <button class="btn ghost" onclick={onclose} disabled={merging}>Cancel</button>
     <button class="btn primary" onclick={doMerge} disabled={!canMerge}>
-      {merging ? 'Merging…' : 'Merge'}
+      {#if merging}
+        {dirty ? 'Stashing & merging…' : 'Merging…'}
+      {:else if dirty}
+        Stash, merge &amp; restore
+      {:else}
+        Merge
+      {/if}
     </button>
   {/snippet}
 </Modal>
@@ -259,6 +318,60 @@
     color: #b8860b;
     font-size: 11.5px;
     line-height: 1.45;
+  }
+  .warn.check {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text-dim);
+  }
+  /* Blocking conflict notice — merge is disabled until resolved. */
+  .block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 9px 11px;
+    border-radius: var(--radius-m);
+    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-exited) 35%, transparent);
+    color: var(--status-exited);
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .block-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .conflict-files {
+    margin: 0;
+    padding-inline-start: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    color: var(--text);
+  }
+  .conflict-files li {
+    font-size: 11px;
+  }
+  .conflict-files .more {
+    list-style: none;
+    margin-inline-start: -14px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  .spinner-xs {
+    display: inline-block;
+    width: 11px;
+    height: 11px;
+    border: 1.5px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .err {
     display: flex;

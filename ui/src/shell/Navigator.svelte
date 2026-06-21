@@ -599,12 +599,12 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     position: relative;
   }
   .rail-resize {
     position: absolute;
-    right: -3px;
+    inset-inline-end: -3px;
     top: 0;
     bottom: 0;
     width: 7px;
@@ -664,7 +664,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding-right: 4px;
+    padding-inline-end: 4px;
   }
   .nav-label-row .nav-label {
     flex: 1;
@@ -701,7 +701,7 @@
     color: var(--text);
     font-size: 12.5px;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: background 120ms ease-out;
   }
   .nav-item:hover {
@@ -724,7 +724,7 @@
   }
   .nested {
     margin: 2px 0 6px;
-    padding-left: 10px;
+    padding-inline-start: 10px;
   }
   .nested-row {
     display: flex;
@@ -849,7 +849,7 @@
   .show-more {
     display: block;
     width: 100%;
-    text-align: left;
+    text-align: start;
     padding: 4px 10px 6px;
     font-size: 11.5px;
     color: var(--text-dim);

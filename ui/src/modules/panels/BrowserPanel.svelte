@@ -587,7 +587,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     cursor: pointer;
-    text-align: left;
+    text-align: start;
     transition: background 120ms ease-out;
     color: var(--text);
     width: 100%;
@@ -659,7 +659,7 @@
   .annot-badge {
     position: absolute;
     bottom: 34px; /* just above frame-foot */
-    right: 10px;
+    inset-inline-end: 10px;
     z-index: 150;
     display: flex;
     align-items: center;

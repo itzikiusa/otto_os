@@ -6,6 +6,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import RunInspector from './RunInspector.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import type { GraphNode, SwarmRun } from './types';
 
   let inspecting = $state<SwarmRun | null>(null);
@@ -31,6 +32,13 @@
   let ty = $state(20);
   let scale = $state(1);
   let drag: { sx: number; sy: number; ox: number; oy: number } | null = null;
+
+  // Phone auto-fit: scale the whole graph to fit the container width and center
+  // it, recomputed on resize and when the node set changes — but never after the
+  // user has manually panned/zoomed (so we don't fight their gesture).
+  const FIT_MIN_SCALE = 0.35;
+  let wrapEl = $state<HTMLDivElement | null>(null);
+  let userTouchedZoom = $state(false);
 
   interface Placed extends GraphNode {
     x: number;
@@ -75,6 +83,18 @@
 
   const edges = $derived(swarm.graph?.edges ?? []);
 
+  // Bounding box of the laid-out nodes (content coords, pre-transform).
+  const bounds = $derived.by(() => {
+    if (placed.length === 0) return { w: 0, h: 0 };
+    let w = 0;
+    let h = 0;
+    for (const p of placed) {
+      w = Math.max(w, p.x + NODE_W);
+      h = Math.max(h, p.y + NODE_H);
+    }
+    return { w, h };
+  });
+
   function statusIcon(s: string): { icon: string; cls: string } {
     if (s === 'done') return { icon: 'check', cls: 'done' };
     if (s === 'in_progress' || s === 'running' || s === 'waiting') return { icon: 'play', cls: 'run' };
@@ -85,11 +105,13 @@
 
   function onWheel(e: WheelEvent) {
     e.preventDefault();
+    userTouchedZoom = true;
     const next = Math.min(2, Math.max(0.4, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
     scale = next;
   }
   function startPan(e: PointerEvent) {
     if ((e.target as HTMLElement).closest('.node')) return;
+    userTouchedZoom = true;
     drag = { sx: e.clientX, sy: e.clientY, ox: tx, oy: ty };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   }
@@ -101,10 +123,28 @@
   function endPan() {
     drag = null;
   }
+  // Scale the full graph to fit the container width and center it horizontally.
+  // Phone-oriented: clamps to a readable minimum and pins to the top so the
+  // first column is visible. Clears the "touched" flag — fit is a fresh baseline.
+  function autoFit() {
+    const cw = wrapEl?.clientWidth ?? 0;
+    if (cw === 0 || bounds.w === 0) return;
+    const pad = 24;
+    const s = Math.min(2, Math.max(FIT_MIN_SCALE, (cw - pad * 2) / bounds.w));
+    scale = s;
+    tx = Math.max(pad, (cw - bounds.w * s) / 2);
+    ty = 20;
+    userTouchedZoom = false;
+  }
   function fit() {
+    if (viewport.isPhone) {
+      autoFit();
+      return;
+    }
     tx = 40;
     ty = 20;
     scale = 1;
+    userTouchedZoom = false;
   }
 
   function edgePath(from: Placed, to: Placed): string {
@@ -122,12 +162,27 @@
     if (run) inspecting = run;
     else if (n.session_id) swarm.selectedSessionId = n.session_id;
   }
+
+  // Phone only: auto-fit on first layout, when the node set changes, and on
+  // container resize — but only while the user hasn't manually panned/zoomed.
+  $effect(() => {
+    if (!viewport.isPhone || !wrapEl) return;
+    // Track the graph signature so this re-runs when nodes appear/change.
+    const sig = bounds.w + 'x' + bounds.h;
+    void sig;
+    if (!userTouchedZoom) autoFit();
+    const ro = new ResizeObserver(() => {
+      if (!userTouchedZoom) autoFit();
+    });
+    ro.observe(wrapEl);
+    return () => ro.disconnect();
+  });
 </script>
 
-<div class="graph-wrap">
+<div class="graph-wrap" bind:this={wrapEl}>
   <div class="controls">
-    <button class="icon-btn" onclick={() => (scale = Math.min(2, scale * 1.1))} aria-label="zoom in"><Icon name="plus" size={14} /></button>
-    <button class="icon-btn" onclick={() => (scale = Math.max(0.4, scale * 0.9))} aria-label="zoom out"><Icon name="minimize" size={14} /></button>
+    <button class="icon-btn" onclick={() => { userTouchedZoom = true; scale = Math.min(2, scale * 1.1); }} aria-label="zoom in"><Icon name="plus" size={14} /></button>
+    <button class="icon-btn" onclick={() => { userTouchedZoom = true; scale = Math.max(0.4, scale * 0.9); }} aria-label="zoom out"><Icon name="minimize" size={14} /></button>
     <button class="icon-btn" onclick={fit} aria-label="fit"><Icon name="maximize" size={14} /></button>
     <button class="icon-btn" onclick={() => swarm.detail && swarm.loadGraph(swarm.detail.id)} aria-label="refresh"><Icon name="refresh" size={14} /></button>
   </div>
@@ -186,7 +241,7 @@
   }
   .controls {
     position: absolute;
-    right: 10px;
+    inset-inline-end: 10px;
     bottom: 10px;
     z-index: 2;
     display: flex;
@@ -200,6 +255,9 @@
     position: absolute;
     inset: 0;
     cursor: grab;
+    /* Pan via pointer events on all input types; stop the browser from
+       hijacking the touch gesture (scroll/zoom) so drag-to-pan works on phones. */
+    touch-action: none;
     background:
       radial-gradient(circle, color-mix(in srgb, var(--text-dim) 18%, transparent) 1px, transparent 1px);
     background-size: 22px 22px;
@@ -237,7 +295,7 @@
     border-radius: var(--radius-m);
     background: var(--surface);
     color: var(--text);
-    text-align: left;
+    text-align: start;
     cursor: default;
   }
   .node.clickable {

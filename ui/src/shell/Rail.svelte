@@ -113,7 +113,7 @@
     align-items: center;
     padding: 10px 0;
     gap: 4px;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
   }
   .rail-modules {
     display: flex;
@@ -152,7 +152,7 @@
   .rail-badge {
     position: absolute;
     top: -2px;
-    right: -3px;
+    inset-inline-end: -3px;
     min-width: 14px;
     height: 14px;
     padding: 0 3px;

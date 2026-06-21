@@ -93,12 +93,12 @@
   }
   .list {
     width: 300px;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     overflow: auto;
   }
   .srow {
     width: 100%;
-    text-align: left;
+    text-align: start;
     border: none;
     background: transparent;
     padding: 8px 12px;
@@ -106,14 +106,14 @@
     flex-direction: column;
     gap: 2px;
     cursor: pointer;
-    border-left: 2px solid transparent;
+    border-inline-start: 2px solid transparent;
   }
   .srow:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .srow.sel {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    border-left-color: var(--accent);
+    border-inline-start-color: var(--accent);
   }
   .sn {
     font-family: var(--font-mono);
@@ -144,7 +144,7 @@
   .view-tabs {
     display: flex;
     gap: 2px;
-    margin-left: auto;
+    margin-inline-start: auto;
   }
   .view-tabs button {
     border: none;

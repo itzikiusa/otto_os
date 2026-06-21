@@ -67,7 +67,7 @@
     overflow-y: auto;
   }
   .preset {
-    text-align: left;
+    text-align: start;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);

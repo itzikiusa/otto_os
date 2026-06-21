@@ -1,0 +1,344 @@
+import { request, type APIRequestContext } from '@playwright/test';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
+import { join } from 'node:path';
+
+// Helpers to seed REAL data into the isolated test daemon so deep specs can
+// exercise data-dependent behavior (terminal output/input, DB results grid,
+// diff file-list scroll) — the things the empty-state baseline can't catch.
+//
+// Reads the daemon port + root token written by global-setup.
+
+interface DaemonInfo {
+  base: string;
+  token: string;
+}
+
+export function daemonInfo(): DaemonInfo {
+  const slot = process.env.OTTO_E2E_SLOT ?? '0';
+  const dir = join(process.cwd(), 'e2e', `.auth-${slot}`);
+  const meta = JSON.parse(readFileSync(join(dir, 'daemon.json'), 'utf8')) as { port: string };
+  const state = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as {
+    origins: { localStorage: { name: string; value: string }[] }[];
+  };
+  const token =
+    state.origins[0]?.localStorage.find((l) => l.name === 'otto_token')?.value ?? '';
+  return { base: `http://127.0.0.1:${meta.port}`, token };
+}
+
+export async function apiCtx(): Promise<{ ctx: APIRequestContext; base: string; token: string }> {
+  const { base, token } = daemonInfo();
+  const ctx = await request.newContext({
+    extraHTTPHeaders: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  });
+  return { ctx, base, token };
+}
+
+async function postJson(ctx: APIRequestContext, url: string, data: unknown): Promise<any> {
+  const r = await ctx.post(url, { data });
+  if (!r.ok()) throw new Error(`POST ${url} → ${r.status()} ${await r.text()}`);
+  return r.json();
+}
+
+export async function seedWorkspace(ctx: APIRequestContext, base: string): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), 'otto-e2e-ws-'));
+  const ws = await postJson(ctx, `${base}/api/v1/workspaces`, { name: 'E2E WS', root_path: root });
+  return ws.id as string;
+}
+
+/** Seed the Vault (workspace memory store) with several notes — one long body
+ *  with [[backlinks]] so the reader/editor overflows and is scroll-testable — and
+ *  import a small knowledge graph (nodes + edges) so the Graph view has content.
+ *  Returns the created memory ids (first is the long "hub" note). */
+export async function seedVaultNotes(
+  ctx: APIRequestContext,
+  base: string,
+  workspaceId: string,
+): Promise<string[]> {
+  const mk = (
+    title: string,
+    body: string,
+    kind: string,
+    extra: Record<string, unknown> = {},
+  ) =>
+    postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/memories`, {
+      scope: 'workspace',
+      kind,
+      title,
+      body,
+      source_kind: 'manual',
+      ...extra,
+    });
+
+  // A long hub note — body intentionally large so the reader column overflows the
+  // phone viewport vertically (scroll target) and references siblings via [[..]].
+  const longBody = [
+    '# Architecture overview',
+    '',
+    'Otto is composed of a Rust daemon (`ottod`) and a Svelte UI. See [[Daemon design]]',
+    'and [[UI conventions]] for the split. The vault stores workspace knowledge as',
+    'notes with backlinks, hybrid search, and a knowledge graph.',
+    '',
+    ...Array.from({ length: 40 }, (_, i) =>
+      `- Detail line ${i + 1}: the quick brown fox jumps over the lazy dog, repeatedly, to fill vertical space and force the note body to overflow a phone viewport so scrolling can be asserted.`,
+    ),
+    '',
+    'Related: [[Daemon design]], [[UI conventions]], [[Testing strategy]].',
+  ].join('\n');
+
+  const ids: string[] = [];
+  const hub = await mk('Architecture overview', longBody, 'entity', {
+    tags: ['architecture', 'overview'],
+    entities: ['otto'],
+  });
+  ids.push(hub.id as string);
+  const daemon = await mk(
+    'Daemon design',
+    'The daemon is an Axum HTTP+WebSocket server on 127.0.0.1:7700, loopback only by default. It owns sessions, PTYs, git, reviews, channels, and SQLite state.',
+    'decision',
+    { tags: ['daemon', 'rust'] },
+  );
+  ids.push(daemon.id as string);
+  const ui = await mk(
+    'UI conventions',
+    'The UI is Svelte 5 + Vite + TypeScript. Contracts in docs/contracts are authoritative; the TS types mirror them. Match the surrounding code.',
+    'constraint',
+    { tags: ['ui', 'svelte'] },
+  );
+  ids.push(ui.id as string);
+  const testing = await mk(
+    'Testing strategy',
+    'Mobile/tablet E2E runs the real UI against an isolated throwaway daemon. Verify both portrait and landscape, no horizontal overflow, sections independently scrollable.',
+    'qa',
+    { tags: ['testing', 'e2e'] },
+  );
+  ids.push(testing.id as string);
+
+  // Import a knowledge graph (edges) so the Graph view shows links, not just nodes.
+  try {
+    await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/memory/import-graph`, {
+      collection: 'default',
+      graph: {
+        nodes: [
+          { id: 'otto', label: 'Otto', kind: 'entity' },
+          { id: 'daemon', label: 'Daemon', kind: 'entity' },
+          { id: 'ui', label: 'UI', kind: 'entity' },
+          { id: 'vault', label: 'Vault', kind: 'entity' },
+        ],
+        edges: [
+          { source: 'otto', target: 'daemon', rel: 'has', certainty: 'EXTRACTED' },
+          { source: 'otto', target: 'ui', rel: 'has', certainty: 'EXTRACTED' },
+          { source: 'ui', target: 'vault', rel: 'contains', certainty: 'INFERRED' },
+          { source: 'daemon', target: 'vault', rel: 'serves', certainty: 'EXTRACTED' },
+        ],
+      },
+    });
+  } catch {
+    // import-graph is best-effort; the graph view still renders memory nodes.
+  }
+
+  return ids;
+}
+
+/**
+ * Seed a swarm with a real org tree + a project + tasks (some with dependencies)
+ * + a few board posts, so the Swarm page's views render with content:
+ *   - Org tree:  multi-level hierarchy from the `engineering-squad` preset
+ *   - Kanban:    a project with cards across several status columns
+ *   - Graph:     tasks + depends-on edges → a real DAG
+ *   - Board:     a handful of messages
+ * Live coordinator data (runs with live sessions/tokens) isn't produced — the
+ * isolated daemon doesn't actually spawn agent CLIs — so the Runs/Graph "run"
+ * surfaces show their empty/idle layout, which is what these layout tests assert.
+ * Returns the ids callers need to drive the UI.
+ */
+export async function seedSwarm(
+  ctx: APIRequestContext,
+  base: string,
+  workspaceId: string,
+): Promise<{ swarmId: string; projectId: string; taskIds: string[] }> {
+  // Preset gives a deep org tree (vp → lead → be1/be2/fe/devops/reviewer + pm)
+  // and at least one project — independent of which agent CLIs are installed.
+  const sw = await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/swarm/swarms`, {
+    name: 'E2E Swarm',
+    preset_slug: 'engineering-squad',
+  });
+  const swarmId = sw.id as string;
+
+  // Re-fetch detail to discover the preset's project + agents.
+  const detailRes = await ctx.get(`${base}/api/v1/swarm/swarms/${swarmId}`);
+  const d = (await detailRes.json()) as {
+    projects: { id: string }[];
+    agents: { id: string }[];
+  };
+  let projectId = d.projects[0]?.id ?? '';
+  if (!projectId) {
+    const p = await postJson(ctx, `${base}/api/v1/swarm/swarms/${swarmId}/projects`, {
+      name: 'E2E Project',
+      goal_md: 'Ship the mobile swarm page.',
+    });
+    projectId = p.id as string;
+  }
+  const agentIds = d.agents.map((a) => a.id);
+  const pick = (i: number): string | undefined =>
+    agentIds.length ? agentIds[i % agentIds.length] : undefined;
+
+  // Tasks spread across columns + a dependency chain so the Kanban has cards in
+  // multiple columns and the Graph has a non-trivial DAG.
+  const taskDefs: { title: string; status?: string; priority?: string; assignee?: string }[] = [
+    { title: 'Design data model', status: 'done', priority: 'high', assignee: pick(0) },
+    { title: 'Build API endpoints', status: 'in_progress', priority: 'urgent', assignee: pick(1) },
+    { title: 'Wire up frontend', status: 'todo', priority: 'medium', assignee: pick(2) },
+    { title: 'Write integration tests', status: 'todo', priority: 'low', assignee: pick(3) },
+    { title: 'Security review', status: 'in_review', priority: 'high', assignee: pick(4) },
+    { title: 'Plan release', status: 'backlog', priority: 'medium', assignee: pick(5) },
+    { title: 'Fix flaky CI', status: 'blocked', priority: 'urgent', assignee: pick(0) },
+  ];
+  const taskIds: string[] = [];
+  for (const t of taskDefs) {
+    const created = await postJson(ctx, `${base}/api/v1/swarm/projects/${projectId}/tasks`, {
+      title: t.title,
+      priority: t.priority ?? 'medium',
+      ...(t.assignee ? { assignee_agent_id: t.assignee } : {}),
+    });
+    const id = created.id as string;
+    taskIds.push(id);
+    // Move to the target column (create defaults to backlog).
+    if (t.status && t.status !== 'backlog') {
+      await ctx.patch(`${base}/api/v1/swarm/tasks/${id}`, { data: { status: t.status } });
+    }
+  }
+  // Wire a couple of dependencies so the graph DAG has edges.
+  if (taskIds.length >= 4) {
+    await ctx.patch(`${base}/api/v1/swarm/tasks/${taskIds[1]}`, {
+      data: { depends_on: [taskIds[0]] },
+    });
+    await ctx.patch(`${base}/api/v1/swarm/tasks/${taskIds[2]}`, {
+      data: { depends_on: [taskIds[1]] },
+    });
+    await ctx.patch(`${base}/api/v1/swarm/tasks/${taskIds[3]}`, {
+      data: { depends_on: [taskIds[1]] },
+    });
+  }
+
+  // A few board posts so the Feed renders messages.
+  for (const m of [
+    { body: 'Kicking off the project — assignments are out.', kind: 'message' },
+    { body: 'Proposal: use the new layout engine for the graph.', kind: 'idea' },
+    { body: 'Decided to ship behind a flag first.', kind: 'decision' },
+    { body: 'Heads up: CI is flaky on the security job.', kind: 'concern' },
+  ]) {
+    await ctx.post(`${base}/api/v1/swarm/swarms/${swarmId}/board`, {
+      data: { ...m, project_id: projectId },
+    });
+  }
+
+  return { swarmId, projectId, taskIds };
+}
+
+export async function seedShellSession(
+  ctx: APIRequestContext,
+  base: string,
+  workspaceId: string,
+): Promise<string> {
+  const s = await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/sessions`, {
+    kind: 'agent',
+    provider: 'shell',
+    title: 'E2E Shell',
+    cwd: '/tmp',
+    meta: { origin: 'manual' },
+  });
+  return s.id as string;
+}
+
+/** Create a temp git repo with one commit that touches MANY files (so the diff
+ *  file navigator overflows and scroll behavior can be asserted). Returns repoId. */
+export async function seedGitRepo(
+  ctx: APIRequestContext,
+  base: string,
+  workspaceId: string,
+): Promise<{ repoId: string; dir: string }> {
+  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-repo-'));
+  const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
+  git('init', '-q');
+  git('config', 'user.email', 'e2e@otto.local');
+  git('config', 'user.name', 'E2E');
+  for (let i = 0; i < 25; i++) {
+    writeFileSync(join(dir, `file_${String(i).padStart(2, '0')}.txt`), `line ${i}\nmore ${i}\n`);
+  }
+  git('add', '-A');
+  git('commit', '-q', '-m', 'E2E: many files');
+  const repo = await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/repos`, {
+    path: dir,
+    name: 'e2e-repo',
+  });
+  return { repoId: repo.id as string, dir };
+}
+
+/** Spawn an ephemeral redis-server, seed keys, and register a Dev connection.
+ *  Returns the child (to kill in teardown) + connectionId, or null if redis
+ *  isn't available / the connection endpoint rejects it. */
+export async function seedRedis(
+  ctx: APIRequestContext,
+  base: string,
+  workspaceId: string,
+  port = Number(process.env.OTTO_E2E_REDIS_PORT ?? '6399'),
+): Promise<{ proc: ChildProcess; connId: string } | null> {
+  let proc: ChildProcess;
+  try {
+    proc = spawn('redis-server', ['--port', String(port), '--save', '', '--appendonly', 'no'], {
+      stdio: 'ignore',
+    });
+  } catch {
+    return null;
+  }
+  // wait for redis to accept connections
+  let up = false;
+  for (let i = 0; i < 40; i++) {
+    try {
+      const out = execFileSync('redis-cli', ['-p', String(port), 'ping'], { encoding: 'utf8' });
+      if (out.trim() === 'PONG') {
+        up = true;
+        break;
+      }
+    } catch {
+      /* not up */
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!up) {
+    proc.kill('SIGKILL');
+    return null;
+  }
+  for (let i = 0; i < 40; i++) {
+    execFileSync('redis-cli', ['-p', String(port), 'SET', `e2e:key:${i}`, `value-${i}`], {
+      stdio: 'ignore',
+    });
+  }
+  try {
+    const conn = await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/connections`, {
+      name: 'e2e-redis',
+      kind: 'redis',
+      params: { host: '127.0.0.1', port, db: 0 },
+      secret: null,
+      environment: 'dev',
+      read_only: false,
+    });
+    return { proc, connId: conn.id as string };
+  } catch (e) {
+    proc.kill('SIGKILL');
+    throw e;
+  }
+}
+
+export function writeSeed(obj: Record<string, unknown>): void {
+  writeFileSync(join(process.cwd(), 'e2e', '.auth', 'seed.json'), JSON.stringify(obj, null, 2));
+}
+
+export function readSeed(): Record<string, any> {
+  return JSON.parse(readFileSync(join(process.cwd(), 'e2e', '.auth', 'seed.json'), 'utf8'));
+}
+
+// (homedir import kept for parity with global-setup; not used directly here.)
+void homedir;

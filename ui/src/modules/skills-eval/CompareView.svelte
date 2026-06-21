@@ -139,7 +139,7 @@
     background: color-mix(in srgb, var(--text-dim) 6%, transparent);
   }
   .rowlabel {
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     color: var(--text-dim);
     white-space: nowrap;
