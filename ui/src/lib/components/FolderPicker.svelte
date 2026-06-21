@@ -97,9 +97,12 @@
 
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
-    {#if !gitOnly && !files}
+    <!-- Always selectable when picking a plain folder; in gitOnly mode, selectable
+         once you've navigated INTO a git repo (so you're not forced to pick it
+         from the parent listing). -->
+    {#if !files && (!gitOnly || view?.is_git_repo)}
       <button class="btn primary" disabled={!view} onclick={() => view && onpick(view.path)}>
-        Use this folder
+        {gitOnly ? 'Use this repository' : 'Use this folder'}
       </button>
     {/if}
   {/snippet}

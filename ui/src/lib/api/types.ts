@@ -868,6 +868,8 @@ export interface FsEntry {
 export interface FsBrowse {
   path: string;
   parent: string | null;
+  /** True when the browsed directory is itself a git repo. */
+  is_git_repo: boolean;
   entries: FsEntry[];
 }
 

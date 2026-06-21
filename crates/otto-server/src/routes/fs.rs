@@ -262,6 +262,10 @@ pub struct FsBrowse {
     pub path: String,
     /// Parent directory path, or null at the filesystem root.
     pub parent: Option<String>,
+    /// True when the browsed directory is ITSELF a git repo. Lets a `gitOnly`
+    /// folder-picker offer "use this folder" once you've descended into a repo
+    /// (otherwise you could only pick a repo from its parent listing).
+    pub is_git_repo: bool,
     /// Directory entries (sorted: dirs first, then files, case-insensitively).
     pub entries: Vec<FsEntry>,
 }
@@ -419,9 +423,14 @@ pub async fn browse(
     files.sort_by_key(|a| a.name.to_lowercase());
     dirs.extend(files);
 
+    // Whether the browsed directory is itself a git repo (so the picker can let
+    // you select it once you've navigated inside).
+    let is_git_repo = canonical.join(".git").is_dir();
+
     Ok(Json(FsBrowse {
         path: path_str,
         parent,
+        is_git_repo,
         entries: dirs,
     }))
 }
