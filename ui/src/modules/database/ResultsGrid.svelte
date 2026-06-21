@@ -17,6 +17,11 @@
   import { downloadText } from '../../lib/components/exporters';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
+
+  // ── Send-to-agent dialog (B2a: replaces raw injectInput for DB results) ──────
+  let sendToAgentOpen = $state(false);
+  let sendToAgentPayload = $state<unknown>(null);
 
   interface Props {
     result: QueryResult | null;
@@ -1096,13 +1101,14 @@
 
   // Paste the query + result rows into the running agent's input (bracketed
   // paste, not auto-submitted) so it can act on the real DB state.
+  // B2a: open the redacted-preview dialog instead of injecting raw text.
+  // The dialog runs the payload through the server-side redaction pass so the
+  // operator sees what the agent will receive before committing.
   function sendToRunningAgent(): void {
-    const agentId = ws.targetAgentId;
-    if (!agentId) {
-      toasts.error('No running agent', 'Open a claude/codex session in this workspace first');
+    if (!result || !ws.current) {
+      toasts.error('No result to send', 'Run a query first');
       return;
     }
-    if (!result) return;
     const cols = result.columns.map((c) => c.name);
     const cap = 50;
     const rowsObj = viewRows.slice(0, cap).map(({ row }) => {
@@ -1113,13 +1119,14 @@
     const connName =
       (connectionId ? database.connections.find((c) => c.id === connectionId)?.name : null) ?? 'db';
     const more = viewRows.length > cap ? `, first ${cap} shown` : '';
-    const text =
-      `Here is the current database state from "${connName}":\n\n` +
-      (statement ? `Query:\n${statement}\n\n` : '') +
-      `Result (${viewRows.length} row${viewRows.length === 1 ? '' : 's'}${more}):\n` +
-      `${JSON.stringify(rowsObj, null, 2)}\n`;
-    ws.injectInput(agentId, text);
-    toasts.success('Sent to running agent', 'Pasted into the agent — press Enter to send');
+    sendToAgentPayload = {
+      connection: connName,
+      statement: statement ?? null,
+      rows: rowsObj,
+      total_rows: viewRows.length,
+      note: more ? `first ${cap} of ${viewRows.length} rows` : null,
+    };
+    sendToAgentOpen = true;
   }
 
   // Autofocus + select the inline editor input on open. Svelte actions can't be
@@ -1196,6 +1203,11 @@
             onclick={() => (expandJson = !expandJson)}
             title="Expand all nested JSON cells inline (instead of clicking each)"
           ><Icon name={expandJson ? 'minimize' : 'maximize'} size={11} />{expandJson ? 'Collapse' : 'Expand'} JSON</button>
+        {/if}
+        {#if result?.masked}
+          <span class="tb-masked" title="Server-side PII masking was applied — sensitive values were redacted before leaving the server">
+            <Icon name="lock" size={11} />Masked
+          </span>
         {/if}
         <button class="tb-btn" onclick={sendToRunningAgent} title="Paste this query + result into your running agent (so it sees the real DB state)"><Icon name="comment" size={11} />→ Agent</button>
         <button class="tb-btn" onclick={copyTsv} title="Copy as TSV{exportScope}"><Icon name="file" size={11} />Copy</button>
@@ -1612,6 +1624,16 @@
   </div>
 {/if}
 
+{#if sendToAgentOpen && ws.current && sendToAgentPayload !== null}
+  <ContextPacketDialog
+    workspaceId={ws.current.id}
+    sessionId={ws.targetAgentId}
+    kind="db"
+    payload={sendToAgentPayload}
+    onclose={() => (sendToAgentOpen = false)}
+  />
+{/if}
+
 <style>
   .grid-wrap {
     display: flex;
@@ -1948,6 +1970,20 @@
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent);
+  }
+  /* Server-side masking badge — shown in toolbar when result.masked is true. */
+  .tb-masked {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 9px;
+    border-radius: var(--radius-s);
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    font-size: 11.5px;
+    font-weight: 600;
   }
   .grid-scroll {
     flex: 1;

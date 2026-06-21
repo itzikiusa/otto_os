@@ -3,6 +3,7 @@
   // Periodically reviews recent sessions and improves the workspace's memory
   // and handling skills — safe edits apply automatically, risky ones queue for
   // approval here, with a recent-runs log.
+  import { api } from '../../lib/api/client';
   import { improveApi } from '../../lib/api/improve';
   import type {
     Autonomy,
@@ -31,7 +32,14 @@
   let running = $state(false);
   let busyEdit: string | null = $state(null);
 
+  // Evolve-now state: the most recent per-session evolve result.
+  let evolving = $state(false);
+  // null = never run; [] = ran, no skill changes; [...] = changed skill refs
+  let evolveResult: string[] | null = $state(null);
+
   const wsId = $derived(ws.currentId);
+  // The currently-active / focused session in the workspace — used by "Evolve now".
+  const activeSession = $derived(ws.activeSession);
 
   // Agent CLIs the analysis can run on: installed tools (minus shell), plus
   // anything already selected and claude, so the list is stable even before
@@ -183,6 +191,69 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Evolve now — triggers a per-session evolve pass and polls until done,
+  // then summarises which skills changed (target === 'skill', status === 'applied').
+  // The endpoint is fire-and-forget (returns run_id immediately); we poll
+  // GET /improvement/runs/{run_id} at 2s intervals until the run settles.
+  // ---------------------------------------------------------------------------
+
+  const EVOLVE_POLL_MS = 2_000;
+  const EVOLVE_POLL_MAX = 60; // give up after 2 min
+
+  async function evolveNow(): Promise<void> {
+    if (!activeSession) {
+      toasts.error('No active session', 'Open and focus a session first, then click Evolve.');
+      return;
+    }
+    evolving = true;
+    evolveResult = null;
+    try {
+      const { run_id } = await api.post<{ run_id: string }>(`/sessions/${activeSession.id}/evolve`);
+      // Poll until the run settles.
+      let ticks = 0;
+      let settled = false;
+      while (!settled && ticks < EVOLVE_POLL_MAX) {
+        await new Promise((r) => setTimeout(r, EVOLVE_POLL_MS));
+        ticks++;
+        const { run, edits } = await improveApi.getRun(run_id);
+        if (run.status === 'done' || run.status === 'failed' || run.status === 'skipped') {
+          settled = true;
+          if (run.status === 'done') {
+            // Collect the skill target_refs that were applied during this run.
+            const changed = edits
+              .filter((e) => e.target === 'skill' && e.status === 'applied')
+              .map((e) => e.target_ref);
+            evolveResult = changed;
+            if (changed.length > 0) {
+              toasts.success(
+                `${changed.length} skill${changed.length === 1 ? '' : 's'} updated`,
+                changed.slice(0, 3).join(', ') + (changed.length > 3 ? '…' : ''),
+              );
+            } else {
+              toasts.info('Evolve complete', 'No skill changes this session.');
+            }
+            // Refresh runs + pending so the page is up-to-date.
+            if (wsId) await load(wsId);
+          } else if (run.status === 'failed') {
+            toasts.error('Evolve failed', run.error ?? 'Unknown error');
+          } else {
+            // skipped
+            evolveResult = [];
+            toasts.info('Evolve skipped', 'Not enough session content to produce improvements.');
+          }
+        }
+      }
+      if (!settled) {
+        toasts.info('Evolve running', 'The pass is taking longer than expected — check Recent runs.');
+      }
+    } catch (e) {
+      toasts.error('Evolve failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      evolving = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Display helpers
   // ---------------------------------------------------------------------------
 
@@ -290,10 +361,40 @@
         <button class="btn" disabled={running} onclick={runNow}>
           {running ? 'Starting…' : 'Run now'}
         </button>
+        <!-- Evolve now: triggers a per-session evolve pass on the active session. -->
+        <button
+          class="btn"
+          disabled={evolving || !activeSession}
+          title={activeSession ? `Evolve session: ${activeSession.title}` : 'No active session — open one first'}
+          onclick={evolveNow}
+        >
+          {evolving ? 'Evolving…' : 'Evolve now'}
+        </button>
         {#if cfg.next_run_at}
           <span class="dim next-run">Next run: {fmtDate(cfg.next_run_at)}</span>
         {/if}
       </div>
+
+      <!-- Evolve result badge — shown after an Evolve now completes. -->
+      {#if evolveResult !== null}
+        <div class="evolve-badge" class:no-change={evolveResult.length === 0}>
+          {#if evolveResult.length === 0}
+            <span class="evolve-icon">—</span>
+            <span>No skill changes this session.</span>
+          {:else}
+            <span class="evolve-icon">✓</span>
+            <span>
+              {evolveResult.length} skill{evolveResult.length === 1 ? '' : 's'} updated:
+              <span class="evolve-skills mono">{evolveResult.join(', ')}</span>
+            </span>
+          {/if}
+          <button
+            class="evolve-dismiss"
+            aria-label="Dismiss"
+            onclick={() => (evolveResult = null)}
+          >×</button>
+        </div>
+      {/if}
     </div>
 
     <!-- Pending approvals -->
@@ -530,6 +631,49 @@
   .run-error {
     font-size: 12px;
     color: var(--status-exited, #c0392b);
+  }
+
+  /* Evolve-now result badge */
+  .evolve-badge {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--status-working, #2d8) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-working, #2d8) 35%, transparent);
+    font-size: 12px;
+    max-width: 520px;
+  }
+  .evolve-badge.no-change {
+    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    border-color: var(--border);
+  }
+  .evolve-icon {
+    flex-shrink: 0;
+    font-weight: 700;
+    color: var(--status-working, #2d8);
+  }
+  .evolve-badge.no-change .evolve-icon {
+    color: var(--text-dim);
+  }
+  .evolve-skills {
+    font-size: 11.5px;
+    color: var(--text-dim);
+  }
+  .evolve-dismiss {
+    margin-left: auto;
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+  }
+  .evolve-dismiss:hover {
+    color: var(--text);
   }
 
 </style>

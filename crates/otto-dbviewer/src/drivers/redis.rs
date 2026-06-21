@@ -11,7 +11,7 @@
 //! instead of re-dialing every time.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use otto_core::Result;
@@ -301,6 +301,13 @@ impl Driver for RedisDriver {
             }
         }
 
+        // Per-statement timeout: applied as a per-command wall-clock deadline so
+        // each command in a multi-line input gets its own budget (rather than
+        // sharing a single total budget across the batch). Redis itself has no
+        // server-side per-query timeout knob, so this is enforced client-side via
+        // `tokio::time::timeout`.
+        let timeout = req.timeout_ms.filter(|&t| t > 0).map(Duration::from_millis);
+
         let started = Instant::now();
         let mut last_reply = RedisValue::Nil;
         for parts in &commands {
@@ -308,10 +315,20 @@ impl Driver for RedisDriver {
             for arg in &parts[1..] {
                 cmd.arg(arg);
             }
-            last_reply = cmd
-                .query_async::<RedisValue>(&mut conn)
-                .await
-                .map_err(types::upstream)?;
+            let fut = cmd.query_async::<RedisValue>(&mut conn);
+            last_reply = if let Some(dur) = timeout {
+                tokio::time::timeout(dur, fut)
+                    .await
+                    .map_err(|_| {
+                        types::upstream(format!(
+                            "redis: command timed out after {}ms",
+                            dur.as_millis()
+                        ))
+                    })?
+                    .map_err(types::upstream)?
+            } else {
+                fut.await.map_err(types::upstream)?
+            };
         }
         let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -687,6 +704,7 @@ fn single_value(value: JsonValue) -> QueryResult {
         stats: QueryStats::default(),
         message: None,
         truncated: false,
+        masked: false,
     }
 }
 
@@ -702,6 +720,7 @@ fn array_to_result(items: Vec<RedisValue>) -> QueryResult {
         stats: QueryStats::default(),
         message: None,
         truncated: false,
+        masked: false,
     }
 }
 
@@ -717,6 +736,7 @@ fn map_to_result(pairs: Vec<(RedisValue, RedisValue)>) -> QueryResult {
         stats: QueryStats::default(),
         message: None,
         truncated: false,
+        masked: false,
     }
 }
 

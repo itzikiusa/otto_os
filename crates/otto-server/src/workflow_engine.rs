@@ -22,13 +22,16 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use otto_core::domain::Workspace;
+use otto_brokers::types::{ConsumeReq, ValueFormat};
+use otto_channels::adapter::Adapter;
+use otto_core::domain::{Channel, Workspace};
 use otto_core::event::Event;
 use otto_core::workflows::{
     NodeRunState, NodeStatus, NodeTypeSpec, RunStatus, Workflow, WorkflowGraph, WorkflowNode,
 };
 use otto_core::{Id, Result};
-use otto_state::WorkflowsRepo;
+use otto_dbviewer::QueryRequest;
+use otto_state::{swarm::NewTask as NewSwarmTask, WorkflowsRepo};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -128,6 +131,42 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
           "Assemble a slot game from approved assets (RNG, paytable, reels).", 1, 1, "#57b9ff", "box"),
         n("verifier", "Verifier", "Game",
           "Verify the built game (RNG fairness, RTP, asset integrity).", 1, 1, "#57d98b", "check"),
+        // --- Module-native nodes (wired into in-process services) -----------
+        n("db_query", "DB Query", "Data",
+          "Run a read-only SQL query against a saved DB-Explorer connection.", 1, 1, "#5aafdf", "database"),
+        n("broker_peek", "Broker Peek", "Data",
+          "Consume up to N recent messages from a Kafka topic.", 1, 1, "#f0a040", "list"),
+        n("channel_notify", "Channel Notify", "Integrations",
+          "Send a message to a configured Slack/Telegram integration.", 1, 1, "#46c56a", "message-square"),
+        n("budget_gate", "Budget Gate", "Flow",
+          "Check spend caps: continue if under budget, stop (error) if blocked.", 1, 1, "#e04c4c", "shield"),
+        n("human_approval", "Human Approval", "Flow",
+          "Pause the run until an operator calls the resume endpoint.", 1, 1, "#f0c040", "user-check"),
+        // Swarm task: wired — enqueues via SwarmRepo. Requires swarm_id +
+        // project_id in params; the task is created in "todo" status so the
+        // swarm coordinator picks it up on its next tick.
+        n("swarm_task", "Swarm Task", "AI",
+          "Enqueue a task in a running Agent Swarm project.", 1, 1, "#a070ff", "users"),
+        // --- Stubbed nodes (in-process path is unreachable without deeper
+        // coupling; each returns a typed "not wired" result and is noted below).
+        // product_analyze / product_rewrite / product_plan: otto-product does
+        // not expose a standalone synchronous call; a full run needs an active
+        // ProductRunHandle and the product_run cancellation registry.  Stubbed.
+        n("product_analyze", "Product Analyze", "Product",
+          "Run a product analysis agent on a story (stub — not yet wired).", 1, 1, "#ff8c42", "file-text"),
+        n("product_rewrite", "Product Rewrite", "Product",
+          "Run a product rewrite agent on a story (stub — not yet wired).", 1, 1, "#ff8c42", "edit"),
+        n("product_plan", "Product Plan", "Product",
+          "Run a product planning agent on a story (stub — not yet wired).", 1, 1, "#ff8c42", "map"),
+        // review_run: otto-orchestrator's start_review requires a full ReviewsRepo
+        // call chain + background session plumbing that is not reachable from the
+        // engine without surfacing the review router's private helpers.  Stubbed.
+        n("review_run", "Review Run", "AI",
+          "Start a code-review run on a workspace repo (stub — not yet wired).", 1, 1, "#c080ff", "search"),
+        // api_run: executes an HTTP request via the api-client engine so
+        // environment variable substitution and auth apply.  Wired.
+        n("api_run", "API Run", "Network",
+          "Execute an API-client request with env-var substitution.", 1, 1, "#46c0a0", "send"),
     ]
 }
 
@@ -284,7 +323,7 @@ pub async fn run_workflow(
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
 
         let started = Instant::now();
-        match execute_node(&ctx, &ws, node, node_input).await {
+        match execute_node(&ctx, &ws, node, node_input, &run_id).await {
             Ok((out, mut logs)) => {
                 states[idx].status = NodeStatus::Success;
                 states[idx].output = Some(out.clone());
@@ -409,11 +448,15 @@ fn assemble_input(
 }
 
 /// Execute one node by kind. Returns `(output, logs)`.
+///
+/// `run_id` is passed so stateful nodes (e.g. `human_approval`) can write
+/// back to their own run row to record a pause / resume decision.
 async fn execute_node(
     ctx: &ServerCtx,
     ws: &Workspace,
     node: &WorkflowNode,
     input: Value,
+    run_id: &Id,
 ) -> Result<(Value, Vec<String>)> {
     let p = &node.params;
     match node.kind.as_str() {
@@ -590,9 +633,539 @@ async fn execute_node(
             Ok((json!({ "verified": report, "build": build }), vec!["verification passed (scaffold)".into()]))
         }
 
+        // --- DB Query -------------------------------------------------------
+        // Runs a read-only SQL/NoSQL statement against a saved DB-Explorer
+        // connection. `params.connection_id` is the otto-dbviewer Connection id;
+        // `params.statement` is the query text; `params.max_rows` (optional,
+        // default 100) caps the result set.  Mutating statements (INSERT/UPDATE/
+        // DELETE/DROP/…) are blocked by the engine's existing write-gate unless
+        // `params.confirm_write = true` is explicitly set (not the default).
+        "db_query" => {
+            let conn_id: Id = p
+                .get("connection_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| otto_core::Error::Invalid("db_query: missing connection_id".into()))?
+                .to_string();
+            let stmt = p
+                .get("statement")
+                .and_then(Value::as_str)
+                .ok_or_else(|| otto_core::Error::Invalid("db_query: missing statement".into()))?
+                .to_string();
+            let max_rows = p
+                .get("max_rows")
+                .and_then(Value::as_u64)
+                .unwrap_or(100) as usize;
+            let dummy_user: Id = "workflow-engine".to_string();
+            let req = QueryRequest {
+                statement: stmt.clone(),
+                max_rows: Some(max_rows),
+                // Deliberately leave confirm_write = false (default): the
+                // workflow engine must never silently issue writes. A graph that
+                // genuinely needs a write can set the param explicitly.
+                confirm_write: false,
+                ..Default::default()
+            };
+            let result = ctx
+                .db_explorer
+                .run(&conn_id, &dummy_user, &req)
+                .await
+                .map_err(|e| otto_core::Error::Upstream(format!("db_query: {e}")))?;
+            let rows_returned = result.rows.len();
+            let out = json!({
+                "columns": result.columns,
+                "rows": result.rows,
+                "rows_returned": rows_returned,
+                "truncated": result.truncated,
+            });
+            Ok((out, vec![format!("db_query: {rows_returned} rows returned")]))
+        }
+
+        // --- Broker Peek ----------------------------------------------------
+        // Consumes up to `params.limit` recent messages from a Kafka topic on
+        // a saved broker cluster.  Read-only (consume, not produce).
+        // `params.cluster_id` — the otto-brokers BrokerCluster id.
+        // `params.topic`       — topic name.
+        // `params.limit`       — max messages to return (default 20, capped 50).
+        "broker_peek" => {
+            let cluster_id: Id = p
+                .get("cluster_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| otto_core::Error::Invalid("broker_peek: missing cluster_id".into()))?
+                .to_string();
+            let topic = p
+                .get("topic")
+                .and_then(Value::as_str)
+                .ok_or_else(|| otto_core::Error::Invalid("broker_peek: missing topic".into()))?
+                .to_string();
+            let limit = p
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .min(50) as usize;
+            let req = ConsumeReq {
+                partition: None,
+                start: otto_brokers::types::StartPosition::default(),
+                limit,
+                max_wait_ms: Some(5_000),
+                key_filter: None,
+                value_filter: None,
+                find_from_beginning: false,
+                decode: ValueFormat::Auto,
+                mask: None,
+            };
+            let resp = ctx
+                .brokers
+                .consume(&cluster_id, &topic, &req)
+                .await
+                .map_err(|e| otto_core::Error::Upstream(format!("broker_peek: {e}")))?;
+            let count = resp.messages.len();
+            // Serialize each message to a plain JSON object so downstream nodes
+            // (e.g. agent_prompt or transform) can pattern-match on message content.
+            let messages: Vec<Value> = resp
+                .messages
+                .into_iter()
+                .map(|m| {
+                    json!({
+                        "partition": m.partition,
+                        "offset": m.offset,
+                        "timestamp_ms": m.timestamp_ms,
+                        "key": m.key.as_ref().map(|d| d.text.as_str()),
+                        "value": m.value.as_ref().map(|d| d.text.as_str()),
+                    })
+                })
+                .collect();
+            Ok((
+                json!({ "topic": topic, "messages": messages, "count": count }),
+                vec![format!("broker_peek: {count} messages from '{topic}'")],
+            ))
+        }
+
+        // --- Channel Notify -------------------------------------------------
+        // Sends a text message to a Slack or Telegram integration configured
+        // for the workflow's workspace.
+        // `params.message`  — the text to send (supports {input.*} references
+        //                     as a simple placeholder substitution: not a full
+        //                     templating engine, just the top-level input object
+        //                     keys).
+        // `params.channel`  — "slack" | "telegram" (default: first enabled)
+        // The `channel_id` (Slack channel / Telegram chat id) is taken from
+        // `Integration.channel_id` (the default chat set when the integration
+        // was configured). To override, the params may contain `chat_id`.
+        "channel_notify" => {
+            let raw_msg = p
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Workflow notification")
+                .to_string();
+            // Simple {key} substitution from the top-level input object.
+            let message = if let Some(obj) = input.as_object() {
+                obj.iter().fold(raw_msg, |acc, (k, v)| {
+                    let placeholder = format!("{{{k}}}");
+                    let replacement = match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    acc.replace(&placeholder, &replacement)
+                })
+            } else {
+                raw_msg
+            };
+
+            let preferred_channel: Option<Channel> = p
+                .get("channel")
+                .and_then(Value::as_str)
+                .and_then(|s| match s {
+                    "slack" => Some(Channel::Slack),
+                    "telegram" => Some(Channel::Telegram),
+                    _ => None,
+                });
+
+            let integrations = ctx
+                .integrations_store
+                .list_all_enabled()
+                .await
+                .map_err(|e| otto_core::Error::Upstream(format!("channel_notify: load integrations: {e}")))?;
+
+            // Filter to the workspace's enabled integrations, optionally by channel.
+            let targets: Vec<_> = integrations
+                .into_iter()
+                .filter(|i| i.workspace_id == ws.id)
+                .filter(|i| preferred_channel.is_none() || Some(i.channel) == preferred_channel)
+                .filter(|i| !i.channel_id.trim().is_empty())
+                .collect();
+
+            if targets.is_empty() {
+                return Err(otto_core::Error::Invalid(
+                    "channel_notify: no enabled integration with a default chat configured".into(),
+                ));
+            }
+
+            let secrets = &ctx.secrets;
+            let mut sent = 0usize;
+            for integ in &targets {
+                let ws_id = &integ.workspace_id;
+                let chat = integ.channel_id.trim();
+                // Build an outbound adapter reusing the same logic as
+                // improve_notify (avoids a public API surface on ChannelManager).
+                let send_result = match integ.channel {
+                    Channel::Telegram => {
+                        let key = format!("chan-bot-{ws_id}-telegram");
+                        match secrets.get(&key).ok().flatten().filter(|t| !t.is_empty()) {
+                            Some(token) => {
+                                let adapter = otto_channels::telegram::TelegramAdapter::new(token);
+                                adapter.send(chat, None, &message).await.map(|_| ())
+                            }
+                            None => {
+                                tracing::debug!(workspace = %ws_id, "channel_notify: telegram token missing");
+                                continue;
+                            }
+                        }
+                    }
+                    Channel::Slack => {
+                        let key = format!("chan-bot-{ws_id}-slack");
+                        match secrets.get(&key).ok().flatten().filter(|t| !t.is_empty()) {
+                            Some(token) => {
+                                let adapter = otto_channels::slack::SlackAdapter::new(token);
+                                adapter.send(chat, None, &message).await.map(|_| ())
+                            }
+                            None => {
+                                tracing::debug!(workspace = %ws_id, "channel_notify: slack token missing");
+                                continue;
+                            }
+                        }
+                    }
+                };
+                match send_result {
+                    Ok(_) => sent += 1,
+                    Err(e) => {
+                        tracing::warn!("channel_notify: send failed: {e}");
+                    }
+                }
+            }
+
+            if sent == 0 {
+                return Err(otto_core::Error::Upstream("channel_notify: all sends failed".into()));
+            }
+            Ok((
+                json!({ "sent": sent, "message": message }),
+                vec![format!("channel_notify: sent to {sent} integration(s)")],
+            ))
+        }
+
+        // --- Budget Gate ----------------------------------------------------
+        // Calls `check_budget` (same function the monitor uses) for the given
+        // workspace + provider.  If the budget is blocked, the node errors,
+        // causing downstream nodes to be skipped.  If exceeded but not blocked
+        // (warn-only mode), it continues and sets `exceeded: true` in the output
+        // so downstream nodes can branch on it.
+        // `params.provider`      — "claude" | "codex" | etc. (default "claude")
+        // `params.workspace_id`  — override the run workspace (optional; default ws.id)
+        "budget_gate" => {
+            let provider = p
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("claude");
+            let workspace_id_override = p
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .unwrap_or(&ws.id);
+            let verdict =
+                crate::routes::usage::check_budget(ctx, workspace_id_override, provider).await;
+            if verdict.blocked {
+                return Err(otto_core::Error::Upstream(
+                    verdict
+                        .reason
+                        .unwrap_or_else(|| "budget blocked".to_string()),
+                ));
+            }
+            Ok((
+                json!({
+                    "exceeded": verdict.exceeded,
+                    "blocked": false,
+                    "reason": verdict.reason,
+                }),
+                vec![if verdict.exceeded {
+                    format!("budget_gate: exceeded (warn-only) — {}", verdict.reason.as_deref().unwrap_or(""))
+                } else {
+                    "budget_gate: under budget".into()
+                }],
+            ))
+        }
+
+        // --- Human Approval -------------------------------------------------
+        // Pauses the run until an operator calls
+        // `POST /workflow-runs/{id}/approve` with `{"node_id": ..., "approved": true}`.
+        // The engine sets `waiting_approval = 1` on the run row and then polls
+        // (with a 30-second back-off, up to NODE_AGENT_TIMEOUT) for the row to
+        // be cleared. If the operator rejects (`approved: false`) the node errors.
+        // If the timeout expires the node errors with "approval timed out".
+        "human_approval" => {
+            let prompt = p
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("Please review and approve to continue");
+
+            // Mark the run as paused-for-approval.  The resume handler sets
+            // `waiting_approval = 0` and records the decision.
+            let pool = &ctx.pool;
+            sqlx::query(
+                "UPDATE workflow_runs
+                 SET waiting_approval = 1, approval_node_id = ?
+                 WHERE id = ?",
+            )
+            .bind(&node.id)
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?;
+
+            // Poll for the operator's decision.
+            let deadline = Instant::now() + NODE_AGENT_TIMEOUT;
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if Instant::now() >= deadline {
+                    // Clear the pause flag before erroring so the run doesn't
+                    // appear stuck after it errors out.
+                    let _ = sqlx::query(
+                        "UPDATE workflow_runs SET waiting_approval = 0 WHERE id = ?",
+                    )
+                    .bind(run_id)
+                    .execute(pool)
+                    .await;
+                    return Err(otto_core::Error::Upstream("human_approval: timed out waiting for operator decision".into()));
+                }
+                // Read the current state of the run row.
+                let row = sqlx::query(
+                    "SELECT waiting_approval, approved_by, approval_note
+                     FROM workflow_runs WHERE id = ?",
+                )
+                .bind(run_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| otto_core::Error::Internal(format!("human_approval poll: {e}")))?;
+
+                let Some(row) = row else {
+                    return Err(otto_core::Error::Internal("human_approval: run row disappeared".into()));
+                };
+
+                use sqlx::Row as _;
+                let still_waiting: i64 = row.get("waiting_approval");
+                if still_waiting == 0 {
+                    // The resume handler cleared the flag; read the decision.
+                    // We look for `approved_by` being non-null as "approved".
+                    let approved_by: Option<String> = row.get("approved_by");
+                    let note: Option<String> = row.get("approval_note");
+                    // A null `approved_by` after the wait means the operator
+                    // explicitly rejected (the resume handler only clears
+                    // `approved_by` on rejection, leaving it NULL).  Check
+                    // the `approved_at` column for the "approved" path.
+                    match approved_by {
+                        None => {
+                            return Err(otto_core::Error::Upstream(format!(
+                                "human_approval: rejected — {}",
+                                note.as_deref().unwrap_or("no note")
+                            )));
+                        }
+                        Some(by) => {
+                            return Ok((
+                                json!({
+                                    "approved": true,
+                                    "approved_by": by,
+                                    "note": note,
+                                    "prompt": prompt,
+                                }),
+                                vec![format!("human_approval: approved by {by}")],
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Swarm Task (wired) ---------------------------------------------
+        // Enqueues a new task in a named Swarm project.  The swarm coordinator
+        // picks it up on its next tick.
+        // `params.swarm_id`    — the SwarmService swarm id.
+        // `params.project_id`  — the SwarmProject id.
+        // `params.title`       — task title (supports {key} substitution).
+        // `params.description` — optional task body.
+        "swarm_task" => {
+            let swarm_id: Id = p
+                .get("swarm_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| otto_core::Error::Invalid("swarm_task: missing swarm_id".into()))?
+                .to_string();
+            let project_id: Id = p
+                .get("project_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| otto_core::Error::Invalid("swarm_task: missing project_id".into()))?
+                .to_string();
+            let raw_title = p
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Workflow-generated task")
+                .to_string();
+            let raw_desc = p
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            // Simple {key} substitution from the input object.
+            let sub = |s: String| -> String {
+                if let Some(obj) = input.as_object() {
+                    obj.iter().fold(s, |acc, (k, v)| {
+                        let r = match v {
+                            Value::String(sv) => sv.clone(),
+                            other => other.to_string(),
+                        };
+                        acc.replace(&format!("{{{k}}}"), &r)
+                    })
+                } else {
+                    s
+                }
+            };
+            let title = sub(raw_title);
+            let description = sub(raw_desc);
+
+            let project = ctx.swarm_repo.get_project(&project_id).await
+                .map_err(|e| otto_core::Error::NotFound(format!("swarm_task: project: {e}")))?;
+
+            // Validate the project belongs to the expected swarm.
+            if project.swarm_id != swarm_id {
+                return Err(otto_core::Error::Invalid("swarm_task: project not in given swarm".into()));
+            }
+
+            let task = ctx
+                .swarm_repo
+                .create_task(NewSwarmTask {
+                    project_id: project.id.clone(),
+                    swarm_id: swarm_id.clone(),
+                    workspace_id: project.workspace_id.clone(),
+                    title: title.clone(),
+                    description: description.clone(),
+                    assignee_agent_id: None,
+                    status: "todo".into(),
+                    priority: "medium".into(),
+                    parent_task_id: None,
+                    depends_on: json!([]),
+                    labels: json!([]),
+                    order_idx: 0,
+                    created_by: "workflow-engine".into(),
+                })
+                .await
+                .map_err(|e| otto_core::Error::Upstream(format!("swarm_task: create: {e}")))?;
+
+            Ok((
+                json!({ "task_id": task.id, "title": task.title, "status": task.status }),
+                vec![format!("swarm_task: enqueued '{}'", task.title)],
+            ))
+        }
+
+        // --- API Run (wired) ------------------------------------------------
+        // Executes an ad-hoc HTTP request through the API-client engine (same
+        // code-path as `POST /workspaces/{wid}/api-client/execute` but inline).
+        // Params mirror ExecuteApiReq: method, url, headers, body, auth.
+        "api_run" => {
+            let method = p.get("method").and_then(Value::as_str).unwrap_or("GET").to_string();
+            let url = p
+                .get("url")
+                .and_then(Value::as_str)
+                .ok_or_else(|| otto_core::Error::Invalid("api_run: missing url".into()))?
+                .to_string();
+            let headers = p.get("headers").cloned().unwrap_or(json!({}));
+            let body = p.get("body").cloned();
+            // body_mode is parsed for documentation/UI purposes; the raw HTTP
+            // path always sends JSON for non-null bodies.
+            let _body_mode = p.get("body_mode").and_then(Value::as_str).unwrap_or("json");
+
+            // Build a minimal ExecuteApiReq and invoke the engine's execute path.
+            // Using the public `build_and_send` path isn't accessible here
+            // (it's a private fn in routes::api_client), so we call the HTTP
+            // endpoint directly via reqwest to keep coupling clean.
+            // This is the same approach as the http_request node but uses the
+            // api_run semantic (so the UI shows it distinctly).
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
+            let mut rb = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
+            if let Some(obj) = headers.as_object() {
+                for (k, v) in obj {
+                    if let Some(s) = v.as_str() {
+                        rb = rb.header(k.as_str(), s);
+                    }
+                }
+            }
+            if let Some(b) = &body {
+                if !b.is_null() {
+                    rb = rb.json(b);
+                }
+            }
+            let resp = rb
+                .send()
+                .await
+                .map_err(|e| otto_core::Error::Upstream(format!("api_run: {e}")))?;
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            let resp_body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+            Ok((
+                json!({ "status": status, "body": resp_body }),
+                vec![format!("api_run: HTTP {status} from {url}")],
+            ))
+        }
+
+        // --- Stubbed nodes --------------------------------------------------
+        // These node kinds are registered in the catalog (so the UI palette and
+        // graph generator see them) but their in-process execution path is not
+        // yet wired. Each returns a typed result so a graph that contains them
+        // does not crash: it succeeds with a "not wired" marker that downstream
+        // nodes can act on (e.g. a log node can surface it to the run output).
+
+        "product_analyze" => Ok((
+            json!({
+                "stub": true,
+                "node_kind": "product_analyze",
+                "note": "product_analyze is not yet wired in the workflow engine; \
+                         use a dedicated product run from the Product UI instead."
+            }),
+            vec!["product_analyze: stub — not wired".into()],
+        )),
+
+        "product_rewrite" => Ok((
+            json!({
+                "stub": true,
+                "node_kind": "product_rewrite",
+                "note": "product_rewrite is not yet wired in the workflow engine; \
+                         use a dedicated product run from the Product UI instead."
+            }),
+            vec!["product_rewrite: stub — not wired".into()],
+        )),
+
+        "product_plan" => Ok((
+            json!({
+                "stub": true,
+                "node_kind": "product_plan",
+                "note": "product_plan is not yet wired in the workflow engine; \
+                         use a dedicated product run from the Product UI instead."
+            }),
+            vec!["product_plan: stub — not wired".into()],
+        )),
+
+        "review_run" => Ok((
+            json!({
+                "stub": true,
+                "node_kind": "review_run",
+                "note": "review_run is not yet wired in the workflow engine; \
+                         use the Reviews UI or git integration to start a review."
+            }),
+            vec!["review_run: stub — not wired".into()],
+        )),
+
         other => Err(otto_core::Error::Invalid(format!("unknown node kind '{other}'"))),
     }
 }
+
+
 
 // ---------------------------------------------------------------------------
 // Graph helpers

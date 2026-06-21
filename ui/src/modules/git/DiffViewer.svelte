@@ -8,6 +8,7 @@
   import { langFromPath, highlightLine, ensureHljs } from '../../lib/hl';
   import Icon from '../../lib/components/Icon.svelte';
   import CommentThread from './CommentThread.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
 
   interface Props {
     diff: DiffResp;
@@ -175,7 +176,7 @@
     left: DiffLine | null;
     right: DiffLine | null;
   }
-  function splitRows(lines: DiffLine[]): SplitRow[] {
+  function computeSplitRows(lines: DiffLine[]): SplitRow[] {
     const rows: SplitRow[] = [];
     let i = 0;
     while (i < lines.length) {
@@ -197,6 +198,31 @@
     }
     return rows;
   }
+
+  // Memoised side-by-side rows: keyed `{filePath}::{hunkIndex}` so the pairing
+  // is only recomputed when the underlying diff data actually changes.
+  const splitRowsCache = $derived.by(() => {
+    const m = new Map<string, SplitRow[]>();
+    for (const f of diff.files) {
+      for (let hi = 0; hi < f.hunks.length; hi++) {
+        m.set(`${f.path}::${hi}`, computeSplitRows(f.hunks[hi].lines));
+      }
+    }
+    return m;
+  });
+
+  function splitRows(filePath: string, hunkIdx: number, lines: DiffLine[]): SplitRow[] {
+    return splitRowsCache.get(`${filePath}::${hunkIdx}`) ?? computeSplitRows(lines);
+  }
+
+  // Line height estimate for VirtualList (mono code line, 1.55 line-height, 11.5px).
+  // At zoom=1 this is ~18 px; add a little buffer for safety.
+  const VLIST_ROW_H = 20;
+
+  // Large-hunk threshold: hunks with more lines than this use VirtualList
+  // instead of a full DOM table; below it the table renders in full (fast for
+  // small hunks and required to support comments/composer rows).
+  const VLIST_THRESHOLD = 200;
 
   // Search helpers
   function fileMatchesSearch(f: FileDiff): boolean {
@@ -469,148 +495,204 @@
               <div class="hunk-header mono">{hunk.header}</div>
 
               {#if mode === 'unified'}
-                {@const hunkCapped = !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
-                {@const visibleLines = hunkCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
-                <table class="dtable">
-                  <tbody>
-                    {#each visibleLines as line, li (li)}
-                      <tr class="dline {line.origin}">
-                        <td
-                          class="gut old"
-                          class:commentable={prMode}
-                          onclick={() => gutterClick(file.path, line)}
-                          >{line.old_line ?? ''}</td
-                        >
-                        <td
-                          class="gut new"
-                          class:commentable={prMode}
-                          onclick={() => gutterClick(file.path, line)}
-                          >{line.new_line ?? ''}</td
-                        >
-                        <td class="sign">{line.origin === 'add' ? '+' : line.origin === 'del' ? '−' : ''}</td>
-                        <td class="code mono">{@html highlightLine(line.content, lang)}</td>
-                      </tr>
-                      {#each inlineCommentsForLine(fc.anchored, line) as c (c.id)}
-                        <tr class="comment-row">
-                          <td colspan="4"><CommentThread comment={c} /></td>
+                {#if hunk.lines.length > VLIST_THRESHOLD && !isHunkExpanded(file.path, hi)}
+                  <!-- Large hunk: virtualised rendering for smooth scroll.
+                       Comments and the composer are deliberately suppressed here —
+                       the "Load anyway" guard below lets the user fall back to the
+                       full table when they need to comment. -->
+                  <VirtualList
+                    items={hunk.lines}
+                    estimateHeight={VLIST_ROW_H}
+                    class="vlist-hunk"
+                  >
+                    {#snippet row(line: DiffLine, _i: number)}
+                      <div class="vrow dline {line.origin}">
+                        <span class="gut old">{line.old_line ?? ''}</span>
+                        <span class="gut new">{line.new_line ?? ''}</span>
+                        <span class="sign">{line.origin === 'add' ? '+' : line.origin === 'del' ? '−' : ''}</span>
+                        <span class="code mono">{@html highlightLine(line.content, lang)}</span>
+                      </div>
+                    {/snippet}
+                  </VirtualList>
+                  <div class="hunk-cap-cell">
+                    <button
+                      class="btn small ghost hunk-cap-btn"
+                      onclick={() => expandHunk(file.path, hi)}
+                    >
+                      Load all {hunk.lines.length} lines (comments + composer available after loading)
+                    </button>
+                  </div>
+                {:else}
+                  {@const hunkCapped = !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
+                  {@const visibleLines = hunkCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
+                  <table class="dtable">
+                    <tbody>
+                      {#each visibleLines as line, li (li)}
+                        <tr class="dline {line.origin}">
+                          <td
+                            class="gut old"
+                            class:commentable={prMode}
+                            onclick={() => gutterClick(file.path, line)}
+                            >{line.old_line ?? ''}</td
+                          >
+                          <td
+                            class="gut new"
+                            class:commentable={prMode}
+                            onclick={() => gutterClick(file.path, line)}
+                            >{line.new_line ?? ''}</td
+                          >
+                          <td class="sign">{line.origin === 'add' ? '+' : line.origin === 'del' ? '−' : ''}</td>
+                          <td class="code mono">{@html highlightLine(line.content, lang)}</td>
                         </tr>
+                        {#each inlineCommentsForLine(fc.anchored, line) as c (c.id)}
+                          <tr class="comment-row">
+                            <td colspan="4"><CommentThread comment={c} /></td>
+                          </tr>
+                        {/each}
+                        {#if composer && composer.path === file.path && composer.oldLine === line.old_line && composer.newLine === line.new_line}
+                          <tr class="comment-row">
+                            <td colspan="4">
+                              <div class="composer">
+                                <textarea
+                                  class="input"
+                                  rows="2"
+                                  bind:value={composerText}
+                                  placeholder="Comment on line {composer.line}…"
+                                ></textarea>
+                                <div class="composer-actions">
+                                  <button class="btn small" onclick={() => (composer = null)}>Cancel</button>
+                                  <button
+                                    class="btn small primary"
+                                    disabled={composerBusy || composerText.trim() === ''}
+                                    onclick={submitComment}
+                                  >
+                                    {composerBusy ? 'Posting…' : 'Comment'}
+                                  </button>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        {/if}
                       {/each}
-                      {#if composer && composer.path === file.path && composer.oldLine === line.old_line && composer.newLine === line.new_line}
-                        <tr class="comment-row">
-                          <td colspan="4">
-                            <div class="composer">
-                              <textarea
-                                class="input"
-                                rows="2"
-                                bind:value={composerText}
-                                placeholder="Comment on line {composer.line}…"
-                              ></textarea>
-                              <div class="composer-actions">
-                                <button class="btn small" onclick={() => (composer = null)}>Cancel</button>
-                                <button
-                                  class="btn small primary"
-                                  disabled={composerBusy || composerText.trim() === ''}
-                                  onclick={submitComment}
-                                >
-                                  {composerBusy ? 'Posting…' : 'Comment'}
-                                </button>
-                              </div>
-                            </div>
+                      {#if hunkCapped}
+                        <tr class="hunk-cap-row">
+                          <td colspan="4" class="hunk-cap-cell">
+                            <button
+                              class="btn small ghost hunk-cap-btn"
+                              onclick={() => expandHunk(file.path, hi)}
+                            >
+                              Show {hunk.lines.length - HUNK_LINE_CAP} more lines
+                            </button>
                           </td>
                         </tr>
                       {/if}
-                    {/each}
-                    {#if hunkCapped}
-                      <tr class="hunk-cap-row">
-                        <td colspan="4" class="hunk-cap-cell">
-                          <button
-                            class="btn small ghost hunk-cap-btn"
-                            onclick={() => expandHunk(file.path, hi)}
-                          >
-                            Show {hunk.lines.length - HUNK_LINE_CAP} more lines
-                          </button>
-                        </td>
-                      </tr>
-                    {/if}
-                  </tbody>
-                </table>
+                    </tbody>
+                  </table>
+                {/if}
               {:else}
-                {@const hunkSplitCapped = !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
-                {@const splitLines = hunkSplitCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
-                <table class="dtable split">
-                  <tbody>
-                    {#each splitRows(splitLines) as row, ri (ri)}
-                      {@const leftComments = row.left ? inlineCommentsForLine(fc.anchored, row.left) : []}
-                      {@const rightComments = row.right ? inlineCommentsForLine(fc.anchored, row.right) : []}
-                      {@const rowComments = leftComments.length > 0 ? leftComments : rightComments}
-                      <tr>
-                        <td
-                          class="gut old"
-                          class:commentable={prMode}
-                          onclick={() => row.left && gutterClick(file.path, row.left)}
-                          >{row.left?.old_line ?? ''}</td
-                        >
-                        <td class="code mono half {row.left ? (row.left.origin === 'del' ? 'del' : '') : 'void'}">
-                          {#if row.left}{@html highlightLine(row.left.content, lang)}{/if}
-                        </td>
-                        <td
-                          class="gut new"
-                          class:commentable={prMode}
-                          onclick={() => row.right && gutterClick(file.path, row.right)}
-                          >{row.right?.new_line ?? ''}</td
-                        >
-                        <td class="code mono half {row.right ? (row.right.origin === 'add' ? 'add' : '') : 'void'}">
-                          {#if row.right}{@html highlightLine(row.right.content, lang)}{/if}
-                        </td>
-                      </tr>
-                      {#if rowComments.length > 0}
-                        <tr class="comment-row">
-                          <td colspan="4">
-                            {#each rowComments as c (c.id)}
-                              <CommentThread comment={c} />
-                            {/each}
-                          </td>
-                        </tr>
-                      {/if}
-                      {#if composer && composer.path === file.path && ((row.left && composer.oldLine === row.left.old_line && composer.newLine === row.left.new_line) || (row.right && composer.oldLine === row.right.old_line && composer.newLine === row.right.new_line))}
-                        <tr class="comment-row">
-                          <td colspan="4">
-                            <div class="composer">
-                              <textarea
-                                class="input"
-                                rows="2"
-                                bind:value={composerText}
-                                placeholder="Comment on line {composer.line}…"
-                              ></textarea>
-                              <div class="composer-actions">
-                                <button class="btn small" onclick={() => (composer = null)}>Cancel</button>
-                                <button
-                                  class="btn small primary"
-                                  disabled={composerBusy || composerText.trim() === ''}
-                                  onclick={submitComment}
-                                >
-                                  {composerBusy ? 'Posting…' : 'Comment'}
-                                </button>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      {/if}
-                    {/each}
-                    {#if hunkSplitCapped}
-                      <tr class="hunk-cap-row">
-                        <td colspan="4" class="hunk-cap-cell">
-                          <button
-                            class="btn small ghost hunk-cap-btn"
-                            onclick={() => expandHunk(file.path, hi)}
+                {#if hunk.lines.length > VLIST_THRESHOLD && !isHunkExpanded(file.path, hi)}
+                  <!-- Large split-hunk: virtualised. Comments suppressed (same guard above). -->
+                  {@const srows = splitRows(file.path, hi, hunk.lines)}
+                  <VirtualList
+                    items={srows}
+                    estimateHeight={VLIST_ROW_H}
+                    class="vlist-hunk"
+                  >
+                    {#snippet row(sr: SplitRow, _i: number)}
+                      <div class="vrow split-vrow">
+                        <span class="gut old">{sr.left?.old_line ?? ''}</span>
+                        <span class="code mono half {sr.left ? (sr.left.origin === 'del' ? 'del' : '') : 'void'}">{@html sr.left ? highlightLine(sr.left.content, lang) : ''}</span>
+                        <span class="gut new">{sr.right?.new_line ?? ''}</span>
+                        <span class="code mono half {sr.right ? (sr.right.origin === 'add' ? 'add' : '') : 'void'}">{@html sr.right ? highlightLine(sr.right.content, lang) : ''}</span>
+                      </div>
+                    {/snippet}
+                  </VirtualList>
+                  <div class="hunk-cap-cell">
+                    <button
+                      class="btn small ghost hunk-cap-btn"
+                      onclick={() => expandHunk(file.path, hi)}
+                    >
+                      Load all {hunk.lines.length} lines (comments + composer available after loading)
+                    </button>
+                  </div>
+                {:else}
+                  {@const hunkSplitCapped = !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
+                  {@const splitLines = hunkSplitCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
+                  <table class="dtable split">
+                    <tbody>
+                      {#each splitRows(file.path, hi, splitLines) as srow, ri (ri)}
+                        {@const leftComments = srow.left ? inlineCommentsForLine(fc.anchored, srow.left) : []}
+                        {@const rightComments = srow.right ? inlineCommentsForLine(fc.anchored, srow.right) : []}
+                        {@const rowComments = leftComments.length > 0 ? leftComments : rightComments}
+                        <tr>
+                          <td
+                            class="gut old"
+                            class:commentable={prMode}
+                            onclick={() => srow.left && gutterClick(file.path, srow.left)}
+                            >{srow.left?.old_line ?? ''}</td
                           >
-                            Show {hunk.lines.length - HUNK_LINE_CAP} more lines
-                          </button>
-                        </td>
-                      </tr>
-                    {/if}
-                  </tbody>
-                </table>
+                          <td class="code mono half {srow.left ? (srow.left.origin === 'del' ? 'del' : '') : 'void'}">
+                            {#if srow.left}{@html highlightLine(srow.left.content, lang)}{/if}
+                          </td>
+                          <td
+                            class="gut new"
+                            class:commentable={prMode}
+                            onclick={() => srow.right && gutterClick(file.path, srow.right)}
+                            >{srow.right?.new_line ?? ''}</td
+                          >
+                          <td class="code mono half {srow.right ? (srow.right.origin === 'add' ? 'add' : '') : 'void'}">
+                            {#if srow.right}{@html highlightLine(srow.right.content, lang)}{/if}
+                          </td>
+                        </tr>
+                        {#if rowComments.length > 0}
+                          <tr class="comment-row">
+                            <td colspan="4">
+                              {#each rowComments as c (c.id)}
+                                <CommentThread comment={c} />
+                              {/each}
+                            </td>
+                          </tr>
+                        {/if}
+                        {#if composer && composer.path === file.path && ((srow.left && composer.oldLine === srow.left.old_line && composer.newLine === srow.left.new_line) || (srow.right && composer.oldLine === srow.right.old_line && composer.newLine === srow.right.new_line))}
+                          <tr class="comment-row">
+                            <td colspan="4">
+                              <div class="composer">
+                                <textarea
+                                  class="input"
+                                  rows="2"
+                                  bind:value={composerText}
+                                  placeholder="Comment on line {composer.line}…"
+                                ></textarea>
+                                <div class="composer-actions">
+                                  <button class="btn small" onclick={() => (composer = null)}>Cancel</button>
+                                  <button
+                                    class="btn small primary"
+                                    disabled={composerBusy || composerText.trim() === ''}
+                                    onclick={submitComment}
+                                  >
+                                    {composerBusy ? 'Posting…' : 'Comment'}
+                                  </button>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        {/if}
+                      {/each}
+                      {#if hunkSplitCapped}
+                        <tr class="hunk-cap-row">
+                          <td colspan="4" class="hunk-cap-cell">
+                            <button
+                              class="btn small ghost hunk-cap-btn"
+                              onclick={() => expandHunk(file.path, hi)}
+                            >
+                              Show {hunk.lines.length - HUNK_LINE_CAP} more lines
+                            </button>
+                          </td>
+                        </tr>
+                      {/if}
+                    </tbody>
+                  </table>
+                {/if}
               {/if}
             {/each}
           {/if}
@@ -988,5 +1070,46 @@
   }
   .hunk-cap-btn:hover {
     color: var(--text);
+  }
+
+  /* ── VirtualList hunk container ─────────────────────────────────────────
+     Capped at 400 px so the viewport doesn't snap to a giant empty box; the
+     user scrolls inside it. The vrow divs mirror the .dtable tr layout using
+     a fixed-column grid (gutter+gutter+sign+code) so lines align correctly. */
+  :global(.vlist-hunk) {
+    max-height: 400px;
+    border-top: 1px solid var(--border);
+    font-size: 11.5px;
+    line-height: 1.55;
+  }
+  .vrow {
+    display: grid;
+    /* gut-old | gut-new | sign | code — mirrors the four table columns */
+    grid-template-columns: 42px 42px 16px 1fr;
+    align-items: start;
+    min-height: 20px;
+  }
+  .vrow .gut {
+    /* override the td width rule from the table layout — already set inline */
+    display: block;
+  }
+  .vrow.dline.add {
+    background: color-mix(in srgb, var(--status-working) 11%, transparent);
+  }
+  .vrow.dline.del {
+    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+  }
+  /* Split side-by-side rows in VirtualList: 4-col grid matching split table */
+  .split-vrow {
+    grid-template-columns: 42px 1fr 42px 1fr;
+  }
+  .split-vrow .code.half.add {
+    background: color-mix(in srgb, var(--status-working) 11%, transparent);
+  }
+  .split-vrow .code.half.del {
+    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+  }
+  .split-vrow .code.half.void {
+    background: color-mix(in srgb, var(--text-dim) 6%, transparent);
   }
 </style>

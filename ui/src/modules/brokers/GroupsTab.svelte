@@ -3,6 +3,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { BrokerCluster, GroupDetail, GroupOffset, GroupSummary } from '../../lib/api/types';
+  import type { DryRunResp } from './types';
 
   interface Props {
     cluster: BrokerCluster;
@@ -28,6 +29,9 @@
   let resetOffset = $state(0);
   let resetTs = $state('');
   let resetTopic = $state('');
+  // Dry-run preview state.
+  let dryRunLoading = $state(false);
+  let dryRunResult = $state<DryRunResp | null>(null);
 
   $effect(() => {
     void cluster.id;
@@ -102,6 +106,46 @@
     [...new Set(detail?.offsets.map((o) => o.topic) ?? [])].sort(),
   );
 
+  function buildResetBody(confirm: boolean): Record<string, unknown> {
+    let body: Record<string, unknown>;
+    if (resetMode === 'offset') {
+      body = { mode: 'offset', offset: Number(resetOffset), confirm };
+    } else if (resetMode === 'timestamp') {
+      body = {
+        mode: 'timestamp',
+        timestamp_ms: new Date(resetTs).getTime() || Date.now(),
+        confirm,
+      };
+    } else {
+      body = { mode: resetMode, confirm };
+    }
+    if (resetTopic) body['topic'] = resetTopic;
+    return body;
+  }
+
+  async function previewReset() {
+    if (!selected) return;
+    dryRunLoading = true;
+    dryRunResult = null;
+    try {
+      dryRunResult = await api.post<DryRunResp>(
+        `/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(selected)}/reset?dry_run=true`,
+        buildResetBody(false),
+      );
+    } catch (e) {
+      toasts.error('Dry-run failed', String(e));
+    } finally {
+      dryRunLoading = false;
+    }
+  }
+
+  async function applyReset() {
+    if (!selected) return;
+    // Clear preview and proceed to confirmation.
+    dryRunResult = null;
+    await resetOffsets();
+  }
+
   async function resetOffsets() {
     if (!selected) return;
     const typed = await confirmer.promptText(
@@ -110,25 +154,11 @@
     );
     if (typed !== selected) return;
 
-    let body: Record<string, unknown>;
-    if (resetMode === 'offset') {
-      body = { mode: 'offset', offset: Number(resetOffset), confirm: guarded };
-    } else if (resetMode === 'timestamp') {
-      body = {
-        mode: 'timestamp',
-        timestamp_ms: new Date(resetTs).getTime() || Date.now(),
-        confirm: guarded,
-      };
-    } else {
-      body = { mode: resetMode, confirm: guarded };
-    }
-    if (resetTopic) body['topic'] = resetTopic;
-
     resetting = true;
     try {
       const updated = await api.post<GroupDetail>(
         `/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(selected)}/reset`,
-        body,
+        buildResetBody(guarded),
       );
       detail = updated;
       toasts.success(`Offsets reset for "${selected}"`);
@@ -249,36 +279,79 @@
         <p class="muted pad">No committed offsets.</p>
       {/if}
 
-      <!-- Offset reset panel (Editor only; typed confirm required) -->
+      <!-- Offset reset panel (Editor only; dry-run preview then typed confirm) -->
       <h5>Reset offsets</h5>
       <div class="reset-bar">
-        <select bind:value={resetMode}>
+        <select bind:value={resetMode} onchange={() => (dryRunResult = null)}>
           <option value="earliest">Earliest</option>
           <option value="latest">Latest</option>
           <option value="offset">Specific offset</option>
           <option value="timestamp">From timestamp</option>
         </select>
         {#if resetMode === 'offset'}
-          <input type="number" class="sm-input" bind:value={resetOffset} placeholder="offset" />
+          <input type="number" class="sm-input" bind:value={resetOffset} placeholder="offset"
+            oninput={() => (dryRunResult = null)} />
         {/if}
         {#if resetMode === 'timestamp'}
-          <input type="datetime-local" class="sm-input wide" bind:value={resetTs} />
+          <input type="datetime-local" class="sm-input wide" bind:value={resetTs}
+            oninput={() => (dryRunResult = null)} />
         {/if}
         {#if groupTopics.length > 1}
-          <select bind:value={resetTopic} title="Scope to one topic (blank = all)">
+          <select bind:value={resetTopic} title="Scope to one topic (blank = all)"
+            onchange={() => (dryRunResult = null)}>
             <option value="">All topics</option>
             {#each groupTopics as t (t)}<option value={t}>{t}</option>{/each}
           </select>
         {/if}
         <button
+          class="btn small"
+          onclick={previewReset}
+          disabled={dryRunLoading || resetting}
+          title="Preview what this reset would do without committing"
+        >
+          {dryRunLoading ? 'Previewing…' : 'Preview'}
+        </button>
+        <button
           class="btn small danger"
-          onclick={resetOffsets}
-          disabled={resetting}
+          onclick={applyReset}
+          disabled={resetting || dryRunLoading}
           title={guarded ? 'Cluster is guarded — requires confirmation' : 'Reset committed offsets'}
         >
           {resetting ? 'Resetting…' : 'Reset'}
         </button>
       </div>
+
+      <!-- Dry-run preview table -->
+      {#if dryRunResult}
+        <div class="dryrun-preview">
+          <div class="dryrun-summary">
+            <span>Preview: lag <strong>{dryRunResult.total_lag_before.toLocaleString()}</strong>
+            → <strong class:ok={dryRunResult.total_lag_after < dryRunResult.total_lag_before}
+                       class:warn={dryRunResult.total_lag_after > dryRunResult.total_lag_before}>
+              {dryRunResult.total_lag_after.toLocaleString()}</strong>
+            ({dryRunResult.partitions.length} partition{dryRunResult.partitions.length === 1 ? '' : 's'} affected)
+            </span>
+            <button class="close-dry" onclick={() => (dryRunResult = null)} title="Close preview">✕</button>
+          </div>
+          <table class="dryrun-table">
+            <thead><tr><th>Topic</th><th>P</th><th>Current</th><th>Target</th><th>Lag Δ</th></tr></thead>
+            <tbody>
+              {#each dryRunResult.partitions as p (p.topic + '-' + p.partition)}
+                <tr>
+                  <td class="mono">{p.topic}</td>
+                  <td>{p.partition}</td>
+                  <td class="muted">{p.current_offset.toLocaleString()}</td>
+                  <td class="muted">{p.target_offset.toLocaleString()}</td>
+                  <td class:ok={p.lag_delta > 0} class:warn={p.lag_delta < 0}>
+                    {p.lag_delta >= 0 ? '-' : '+'}{Math.abs(p.lag_delta).toLocaleString()}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <p class="muted small">Click <strong>Reset</strong> above to apply after reviewing.</p>
+        </div>
+      {/if}
     {:else}
       <p class="muted pad">Select a consumer group to see members and lag.</p>
     {/if}
@@ -483,5 +556,61 @@
   }
   .btn.danger {
     color: var(--status-exited, #ff5f57);
+  }
+  /* Dry-run preview */
+  .dryrun-preview {
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 4px);
+    overflow: hidden;
+  }
+  .dryrun-summary {
+    display: flex;
+    align-items: center;
+    padding: 6px 10px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    font-size: 12px;
+    gap: 8px;
+  }
+  .dryrun-summary .ok {
+    color: var(--status-working, #28c840);
+  }
+  .dryrun-summary .warn {
+    color: #f5a623;
+  }
+  .close-dry {
+    margin-left: auto;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .dryrun-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .dryrun-table th {
+    text-align: left;
+    padding: 4px 8px;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 500;
+    border-bottom: 1px solid var(--border);
+  }
+  .dryrun-table td {
+    padding: 3px 8px;
+    border-top: 1px solid var(--border);
+  }
+  .dryrun-table td.ok {
+    color: var(--status-working, #28c840);
+  }
+  .dryrun-table td.warn {
+    color: #f5a623;
+  }
+  .dryrun-preview p {
+    padding: 5px 10px;
+    margin: 0;
   }
 </style>

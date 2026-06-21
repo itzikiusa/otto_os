@@ -36,6 +36,7 @@ const REPASTE_PHASE_BUDGET: Duration = Duration::from_secs(25);
 
 use otto_core::api::CreateSessionReq;
 use otto_core::domain::SessionKind;
+use otto_core::workref::WorkRef;
 use otto_core::Id;
 use otto_state::{
     LearningPatch, NewAnalysisAgent, NewEvent, NewLearning, NewQuestion, StoryPatch,
@@ -178,12 +179,24 @@ impl From<RunOutcome> for LensRunResult {
 /// stream the live terminal *while the agent is running* — not only once it
 /// finishes — and keeps the session replayable afterward as history. Callers with
 /// no agent row (rewrite / generate-tests / generate-plan) pass `None`.
+///
+/// `model` — when `Some` and the provider supports `--model`, the spawn path in
+/// `SessionManager` injects `--model <name>` into the CLI args (via `model_args`
+/// in manager.rs).  When the provider is `agy`/`shell` (no flag), the model is
+/// stored in meta for attribution only and the provider falls back to its default.
+/// A `None` leaves the provider's default model intact.
+///
+/// `work` — optional [`otto_core::workref::WorkRef`] serialized to a
+/// `serde_json::Value`; written into `meta["work"]` at session creation so the
+/// usage layer can attribute cost back to the originating story/task.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_lens_session(
     ctx: &ServerCtx,
     ws: &otto_core::domain::Workspace,
     user_id: &Id,
     provider: &str,
+    model: Option<&str>,
+    work: Option<serde_json::Value>,
     cwd: &str,
     prompt: &str,
     out_path: &Path,
@@ -195,13 +208,26 @@ pub async fn run_lens_session(
     // Clear any stale output from a previous run.
     let _ = std::fs::remove_file(out_path);
 
+    // Carry model into meta so SessionManager can inject `--model <name>` for
+    // providers that support it (claude/codex); for others it is attribution-only.
+    // The work-graph ref is stored under "work" for usage attribution.
+    let mut session_meta = serde_json::json!({ "source": appearance.source });
+    if let Some(obj) = session_meta.as_object_mut() {
+        if let Some(m) = model.filter(|s| !s.trim().is_empty()) {
+            obj.insert("model".to_string(), serde_json::Value::String(m.trim().to_string()));
+        }
+        if let Some(w) = work {
+            obj.insert("work".to_string(), w);
+        }
+    }
+
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(provider.to_string()),
         title: Some(appearance.title.clone()),
         cwd: Some(cwd.to_string()),
         connection_id: None,
-        meta: Some(serde_json::json!({ "source": appearance.source })),
+        meta: Some(session_meta),
     };
 
     let session = match ctx.manager.create(ws, user_id, req, None).await {
@@ -666,12 +692,19 @@ fn unregister_cancel(reg: &CancelRegistry, agent_id: &str) {
 /// a manual Stop trips it and the loop returns `stopped` WITHOUT another retry.
 /// Callers with no agent row (rewrite / generate-tests / generate-plan) pass
 /// `None` — they still get retry + stuck-recovery, just no Stop/Open wiring.
+///
+/// `model` — forwarded to [`run_lens_session`]; see that function for the
+/// fall-back note for providers that have no `--model` flag.
+///
+/// `work` — forwarded to [`run_lens_session`] for work-graph attribution.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_with_recovery(
     ctx: &ServerCtx,
     ws: &otto_core::domain::Workspace,
     user_id: &Id,
     provider: &str,
+    model: Option<&str>,
+    work: Option<serde_json::Value>,
     cwd: &str,
     prompt: &str,
     out_path: &Path,
@@ -692,8 +725,8 @@ pub async fn run_agent_with_recovery(
         cancel.as_ref(),
         |_attempt| {
             run_lens_session(
-                ctx, ws, user_id, provider, cwd, prompt, out_path, timeout, agent_id, appearance,
-                on_session,
+                ctx, ws, user_id, provider, model, work.clone(), cwd, prompt, out_path,
+                timeout, agent_id, appearance, on_session,
             )
         },
     )
@@ -798,6 +831,7 @@ pub async fn run_analysis(
         let user_id = user_id.clone();
         let analysis_id = analysis_id.clone();
         let _story_title = story_title.clone();
+        let story_id = story_id.clone();
         let context_path_str = context_path_str.clone();
         // Per-spec session cwd: when the story has no real cwd we fell back to the
         // shared temp dir; give EACH lens session its own unique temp subdir so the
@@ -851,11 +885,22 @@ pub async fn run_analysis(
             let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
             // Run as a real, openable session honoring this spec's provider.
+            // Analysis lenses use no caller-specified model (each spec/lens picks
+            // its own provider; model override is not surfaced at analysis level).
+            // Work-graph: attribute this session to the source story.
+            let lens_work = serde_json::to_value(WorkRef {
+                story_id: Some(story_id.clone()),
+                origin: Some("product".into()),
+                ..Default::default()
+            })
+            .ok();
             let result = run_agent_with_recovery(
                 &ctx,
                 &ws,
                 &user_id,
                 &spec.provider,
+                None,
+                lens_work,
                 &cwd,
                 &prompt,
                 &out_path,
@@ -1015,11 +1060,19 @@ pub async fn run_analysis(
         // Own unique session cwd for the summarizer (same temp-fallback fix as the
         // lenses); a real story cwd passes through unchanged.
         let summarizer_cwd = session_cwd(&cwd);
+        let summarizer_work = serde_json::to_value(WorkRef {
+            story_id: Some(story_id.clone()),
+            origin: Some("product".into()),
+            ..Default::default()
+        })
+        .ok();
         let result = run_agent_with_recovery(
             &ctx,
             &ws,
             &user_id,
             &summarizer_provider,
+            None,   // no model override for the summarizer; uses provider default
+            summarizer_work,
             &summarizer_cwd,
             &prompt,
             &out_path,
@@ -1379,12 +1432,20 @@ pub async fn retry_analysis_agent(
     let base_prompt = build_analysis_prompt(&skill_body, &context_path_str, None);
     let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
-    // 9. Run the session.
+    // 9. Run the session.  Attribute cost to the source story.
+    let retry_work = serde_json::to_value(WorkRef {
+        story_id: Some(analysis.story_id.clone()),
+        origin: Some("product".into()),
+        ..Default::default()
+    })
+    .ok();
     let result = run_agent_with_recovery(
         &ctx,
         &ws,
         &user_id,
         &agent.provider,
+        None,   // retry path: no model override; agent row already has its provider
+        retry_work,
         &cwd,
         &prompt,
         &out_path,
@@ -1613,8 +1674,7 @@ pub async fn run_rewrite(
     user_id: otto_core::Id,
     story_id: otto_core::Id,
     provider: String,
-    // model override reserved for future use when run_lens_session gains per-session model selection
-    _model: Option<String>,
+    model: Option<String>,
     cwd: String,
     focus: Option<String>,
 ) {
@@ -1725,12 +1785,24 @@ pub async fn run_rewrite(
     // 5. Pre-trust provider.
     otto_sessions::trust::ensure_trusted(&provider, &cwd);
 
-    // 6. Run as a provider-honoring session.
+    // 6. Run as a provider-honoring session.  The requested model (if any) is
+    //    injected by run_agent_with_recovery → run_lens_session → SessionManager
+    //    for providers that support `--model` (claude/codex). For agy/shell the
+    //    model value is stored in meta for attribution only.
+    //    Stamp the session with a WorkRef so cost is attributed to this story.
+    let rewrite_work = serde_json::to_value(WorkRef {
+        story_id: Some(story_id.clone()),
+        origin: Some("product".into()),
+        ..Default::default()
+    })
+    .ok();
     let result = run_agent_with_recovery(
         &ctx,
         &ws,
         &user_id,
         &provider,
+        model.as_deref(),
+        rewrite_work,
         &cwd,
         &prompt,
         &out_path,
@@ -1924,8 +1996,7 @@ pub async fn run_generate_tests(
     user_id: otto_core::Id,
     story_id: otto_core::Id,
     provider: String,
-    // model override reserved for future use when run_lens_session gains per-session model selection
-    _model: Option<String>,
+    model: Option<String>,
     cwd: String,
     focus: Option<String>,
 ) {
@@ -2026,12 +2097,22 @@ pub async fn run_generate_tests(
     // 5. Pre-trust provider.
     otto_sessions::trust::ensure_trusted(&provider, &cwd);
 
-    // 6. Run as a provider-honoring session.
+    // 6. Run as a provider-honoring session.  The requested model (if any) is
+    //    threaded through SessionManager's spawn path for claude/codex.
+    //    Stamp the session with a WorkRef so cost is attributed to this story.
+    let tests_work = serde_json::to_value(WorkRef {
+        story_id: Some(story_id.clone()),
+        origin: Some("product".into()),
+        ..Default::default()
+    })
+    .ok();
     let result = run_agent_with_recovery(
         &ctx,
         &ws,
         &user_id,
         &provider,
+        model.as_deref(),
+        tests_work,
         &cwd,
         &prompt,
         &out_path,
@@ -2500,6 +2581,15 @@ pub async fn run_generate_plan(
         }
     };
 
+    // Stamp every planning (and the summarizer) session with a WorkRef so cost is
+    // attributed to this story (merged in from main's single-provider path).
+    let plan_work = serde_json::to_value(WorkRef {
+        story_id: Some(story_id.clone()),
+        origin: Some("product".into()),
+        ..Default::default()
+    })
+    .ok();
+
     // 6. Per-provider concurrent fan-out as real, VISIBLE planning sessions.
     //    Each writes its plan JSON to a distinct out_path. Non-interactive (the
     //    default) prepends the autonomy directive so agents never block on input.
@@ -2513,6 +2603,7 @@ pub async fn run_generate_plan(
         let session_ids = Arc::clone(&session_ids);
         let emit_plan_run = emit_plan_run.clone();
         let plan_id = plan_id.clone();
+        let plan_work = plan_work.clone();
         // Unique per-session cwd (codex usage attribution), like the analysis fan-out.
         let planner_cwd = session_cwd(&cwd);
 
@@ -2545,6 +2636,8 @@ pub async fn run_generate_plan(
                 &ws,
                 &user_id,
                 &provider,
+                None,
+                plan_work,
                 &planner_cwd,
                 &prompt,
                 &out_path,
@@ -2615,6 +2708,8 @@ pub async fn run_generate_plan(
                 &ws,
                 &user_id,
                 &summarizer_provider,
+                None,
+                plan_work.clone(),
                 &summarizer_cwd,
                 &prompt,
                 &out_path,

@@ -10,10 +10,12 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use otto_core::api::{BudgetStatusRow, UsageBudgetConfig, UsageBudgetStatus};
+use otto_core::workref::WorkRef;
 use otto_core::Id;
 use otto_state::SettingsRepo;
 use otto_usage::{
-    FeatureUsage, MetricPoint, SessionTotals, UsageConfig, UsageEvent, UsageStatus, UsageSummary,
+    AttributionDimension, AttributionRow, FeatureUsage, ForecastReq, ForecastResp, MetricPoint,
+    SessionTotals, UsageConfig, UsageEvent, UsageStatus, UsageSummary,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -104,25 +106,16 @@ pub async fn by_kind(
 /// the session-row `kind` badge), and fold into feature buckets. Best-effort —
 /// returns empty on any engine error so the summary still renders.
 async fn by_kind_rollup(ctx: &ServerCtx, days: u32, otto_only: bool) -> Vec<FeatureUsage> {
-    // Resolve each session's feature label up front (async SQLite lookups), then
-    // hand the engine a pure closure to fold the sums. Sessions absent from the
-    // map fall back to "external".
-    let totals = match ctx.usage.session_totals(days, otto_only).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!("usage: session totals for by-kind failed: {e}");
-            return Vec::new();
-        }
-    };
+    // Resolve feature labels in one SQLite scan (list_all) instead of one GET
+    // per session (the original N+1). Sessions absent from the map fall back
+    // to "external". `feature_usage` issues its own `session_totals` query
+    // internally, so we skip the pre-check and go straight to building the map.
     let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
-    let mut labels: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for t in &totals {
-        let label = match repo.get(&t.session_id).await {
-            Ok(sess) => session_kind_label(&sess),
-            Err(_) => "external".to_string(), // not an Otto session
-        };
-        labels.insert(t.session_id.clone(), label);
-    }
+    let all_sessions = repo.list_all().await.unwrap_or_default();
+    let labels: std::collections::HashMap<String, String> = all_sessions
+        .into_iter()
+        .map(|s| (s.id.clone(), session_kind_label(&s)))
+        .collect();
     ctx.usage
         .feature_usage(days, otto_only, |t: &SessionTotals| {
             labels
@@ -279,6 +272,18 @@ pub async fn install(
 // ---------------------------------------------------------------------------
 // Usage budgets (opt-in spend caps; secondary to MCP host config)
 // ---------------------------------------------------------------------------
+
+/// Crate-public accessor for the budget config; used by the budget sampler in
+/// `monitor.rs` without going through the route handler.
+pub(crate) async fn load_budgets_pub(ctx: &ServerCtx) -> UsageBudgetConfig {
+    load_budgets(ctx).await
+}
+
+/// Crate-public accessor for the budget status computation; used by the budget
+/// sampler in `monitor.rs`.
+pub(crate) async fn budget_status_pub(ctx: &ServerCtx, cfg: UsageBudgetConfig) -> otto_core::api::UsageBudgetStatus {
+    budget_status(ctx, cfg).await
+}
 
 /// Load the persisted budget config (defaults: enforcement off).
 async fn load_budgets(ctx: &ServerCtx) -> UsageBudgetConfig {
@@ -494,6 +499,22 @@ pub async fn ingest(
             req.cache_write_tokens,
         )
     };
+
+    // Resolve work-graph attribution from the session's meta_json["work"]. If
+    // absent or malformed the WorkRef defaults to all-None (no dims written).
+    let work_ref: WorkRef = session
+        .meta
+        .get("work")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let dims = work_ref.dimensions();
+    let dim_val = |key: &str| -> String {
+        dims.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+
     ctx.usage.record(UsageEvent {
         workspace_id: session.workspace_id,
         session_id: session.id,
@@ -510,8 +531,57 @@ pub async fn ingest(
         cache_write_tokens: req.cache_write_tokens,
         cost_usd: cost,
         duration_ms: req.duration_ms,
+        // Work-graph dims (B1) — empty strings are omitted in JSON serialization
+        // via `skip_serializing_if = "String::is_empty"` on each field.
+        repo_id: dim_val("repo_id"),
+        branch: dim_val("branch"),
+        pr_number: dim_val("pr_number"),
+        story_id: dim_val("story_id"),
+        swarm_task_id: dim_val("swarm_task_id"),
+        workflow_id: dim_val("workflow_id"),
+        channel: dim_val("channel"),
+        review_id: dim_val("review_id"),
+        origin: dim_val("origin"),
     });
     StatusCode::NO_CONTENT
+}
+
+// ---------------------------------------------------------------------------
+// Work-graph attribution + cost forecast (B1)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct AttributionQuery {
+    /// Dimension to group by: repo|branch|pr|story|swarm_task|workflow|channel|review|origin
+    pub by: Option<String>,
+    /// Look-back window in days (default 30).
+    pub days: Option<u32>,
+}
+
+/// `GET /usage/attribution?by=<dim>&days=N` — grouped cost/tokens by one
+/// work-graph dimension (root). Filters empty-string keys (un-attributed rows).
+pub async fn attribution(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<AttributionQuery>,
+) -> ApiResult<Json<Vec<AttributionRow>>> {
+    require_root(&user)?;
+    let by_str = q.by.as_deref().unwrap_or("origin");
+    let dim = AttributionDimension::from_str(by_str).unwrap_or(AttributionDimension::Origin);
+    let days = q.days.unwrap_or(30).clamp(1, 3650);
+    let rows = ctx.usage.attribution(&dim, days).await.map_err(ApiError)?;
+    Ok(Json(rows))
+}
+
+/// `POST /usage/forecast` — estimate cost before a run (root). Body:
+/// `{feature, provider, est_tokens?}`. Returns `{projected_cost_usd, basis}`.
+pub async fn forecast(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<ForecastReq>,
+) -> ApiResult<Json<ForecastResp>> {
+    require_root(&user)?;
+    Ok(Json(ctx.usage.forecast(&req).await))
 }
 
 /// Map a session's activity-trail entry to a usage row, mining token counts /
@@ -519,11 +589,27 @@ pub async fn ingest(
 /// for noise (task-tracker churn, human notes). This is the automatic path —
 /// every meaningful agent action becomes a usage event (with tokens when the
 /// provider reports them, otherwise an activity count).
+///
+/// The optional `work` reference is flattened into the work-graph attribution
+/// columns (B1). Pass `None` or `Some(&WorkRef::default())` for sessions that
+/// have no work attribution.
 pub fn trail_to_usage(
     workspace_id: &Id,
     session_id: &Id,
     provider: &str,
     event: &otto_core::domain::TrailEvent,
+) -> Option<UsageEvent> {
+    trail_to_usage_with_work(workspace_id, session_id, provider, event, None)
+}
+
+/// Like [`trail_to_usage`] but stamps work-graph dims from `work` when provided.
+/// Callers that have the session's `WorkRef` in scope should prefer this.
+pub fn trail_to_usage_with_work(
+    workspace_id: &Id,
+    session_id: &Id,
+    provider: &str,
+    event: &otto_core::domain::TrailEvent,
+    work: Option<&WorkRef>,
 ) -> Option<UsageEvent> {
     use otto_core::domain::TrailKind;
 
@@ -563,6 +649,17 @@ pub fn trail_to_usage(
         cost = otto_usage::estimate_cost(&model, input, output, cache_read, cache_write);
     }
 
+    // Flatten work-ref dims (empty when no work ref supplied).
+    let empty = WorkRef::default();
+    let wr = work.unwrap_or(&empty);
+    let dims = wr.dimensions();
+    let dim_val = |key: &str| -> String {
+        dims.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+
     Some(UsageEvent {
         workspace_id: workspace_id.clone(),
         session_id: session_id.clone(),
@@ -575,5 +672,14 @@ pub fn trail_to_usage(
         cache_write_tokens: cache_write,
         cost_usd: cost,
         duration_ms: 0,
+        repo_id: dim_val("repo_id"),
+        branch: dim_val("branch"),
+        pr_number: dim_val("pr_number"),
+        story_id: dim_val("story_id"),
+        swarm_task_id: dim_val("swarm_task_id"),
+        workflow_id: dim_val("workflow_id"),
+        channel: dim_val("channel"),
+        review_id: dim_val("review_id"),
+        origin: dim_val("origin"),
     })
 }

@@ -4,6 +4,7 @@
   // Cards support HTML5 drag-and-drop to change status columns.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import StoryLinkCard from './StoryLinkCard.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -14,6 +15,8 @@
   const pid = $derived(swarm.selectedProjectId);
   const tasks = $derived(swarm.tasks(pid));
   const agents = $derived(swarm.detail?.agents ?? []);
+  // Selected project object (needed for the story back-link card).
+  const selectedProject = $derived(projects.find((p) => p.id === pid) ?? null);
 
   const COLUMN_LABEL: Record<TaskStatus, string> = {
     backlog: 'Backlog',
@@ -169,6 +172,10 @@
   {#if !pid}
     <EmptyState icon="note" title="No project selected" body="Create a project to start a board." />
   {:else}
+    <!-- Story back-link: shown when this project was seeded from a Product story. -->
+    {#if selectedProject?.story_id}
+      <StoryLinkCard project={selectedProject} />
+    {/if}
     <div class="columns">
       {#each TASK_COLUMNS as col (col)}
         <div

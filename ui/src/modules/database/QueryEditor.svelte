@@ -336,6 +336,20 @@
         }}
       />
     </label>
+    <label
+      class="qe-mask"
+      class:active={tab.mask}
+      title="Mask PII/prod — server redacts sensitive values (emails, tokens, keys) before returning results"
+    >
+      <input
+        type="checkbox"
+        class="sr-only"
+        checked={tab.mask}
+        onchange={(e) => { database.tab.mask = (e.currentTarget as HTMLInputElement).checked; }}
+      />
+      <Icon name="lock" size={11} />
+      {#if tab.mask}<span class="qe-masked-badge">Masked</span>{:else}<span>Mask</span>{/if}
+    </label>
     <span class="qe-lang mono">{database.queryLanguage}</span>
   </div>
 
@@ -571,6 +585,45 @@
     padding: 0 4px;
     font-size: 11px;
     width: 72px;
+  }
+  /* Mask PII/prod toggle — styled like a small button, highlights when active. */
+  .qe-mask {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    height: 24px;
+    padding: 0 7px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .qe-mask:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+  .qe-mask.active {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .qe-masked-badge {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
   .save-bar {
     display: flex;

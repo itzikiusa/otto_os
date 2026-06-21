@@ -6,6 +6,8 @@
 pub mod agent_run;
 pub mod api_helpers;
 pub mod auth;
+pub mod context_packet;
+pub mod memory_gov;
 pub mod cli_update;
 pub mod error;
 pub mod feature_guard;
@@ -28,6 +30,7 @@ pub mod swarm_runtime;
 pub mod swarm_scheduler;
 pub mod swarm_workspace;
 pub mod workflow_engine;
+pub mod workflow_trigger_scheduler;
 pub mod ws_events;
 
 use axum::http::{header, HeaderValue, Method};
@@ -39,9 +42,10 @@ use tower_http::trace::TraceLayer;
 pub use auth::{require_ws_role, CurrentUser};
 pub use error::{ApiError, ApiResult};
 pub use monitor::{
-    spawn_metrics_sampler, spawn_session_event_listener, spawn_usage_recorder, AuthScanner,
-    CredentialMonitor,
+    spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
+    spawn_usage_recorder, AuthScanner, CredentialMonitor,
 };
+pub use workflow_trigger_scheduler::spawn_workflow_event_trigger_listener;
 pub use state::ServerCtx;
 
 /// Build the full daemon router.

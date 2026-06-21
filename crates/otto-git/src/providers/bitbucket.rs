@@ -13,6 +13,8 @@ use otto_core::api::{
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
 
+use crate::types::CiStatus;
+
 use super::client::Http;
 use super::{map_state, ts, varr, vbool, vstr, vstr_opt, vu64, RemoteRef, RemoteRepoSummary};
 
@@ -122,6 +124,51 @@ impl Bitbucket {
         resp.text()
             .await
             .map_err(|e| Error::Upstream(format!("bitbucket read: {e}")))
+    }
+
+    /// Fetch Bitbucket Cloud commit build statuses for the source-branch HEAD
+    /// commit of PR `number`. Aggregates all statuses into a [`CiStatus`].
+    /// `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{id}/statuses`
+    /// Falls back to `CiStatus::none()` on any error.
+    pub async fn fetch_ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
+        let path = format!(
+            "{}?pagelen=50",
+            Self::pr_path(r, &format!("/{number}/statuses"))
+        );
+        let v = match self.send_json(reqwest::Method::GET, &path, None).await {
+            Ok(v) => v,
+            Err(_) => return CiStatus::none(),
+        };
+        let items = varr(&v, &["values"]);
+        if items.is_empty() {
+            return CiStatus::none();
+        }
+        let total = items.len() as u32;
+        let mut passed = 0u32;
+        let mut failed = 0u32;
+        let mut pending = 0u32;
+        let mut url: Option<String> = None;
+        for item in items {
+            if url.is_none() {
+                url = vstr_opt(item, &["url"]);
+            }
+            // Bitbucket build status states: SUCCESSFUL | FAILED | INPROGRESS | STOPPED
+            match vstr(item, &["state"]).as_str() {
+                "SUCCESSFUL" => passed += 1,
+                "FAILED" | "STOPPED" => failed += 1,
+                _ => pending += 1,
+            }
+        }
+        let state = if failed > 0 {
+            "failure"
+        } else if pending > 0 {
+            "pending"
+        } else if passed == total && total > 0 {
+            "success"
+        } else {
+            "none"
+        };
+        CiStatus { state: state.to_string(), total, passed, failed, url }
     }
 }
 
@@ -255,8 +302,13 @@ impl super::GitProvider for Bitbucket {
             }
         };
 
+        // Best-effort CI build-status — never fails the PR fetch.
+        let ci = self.fetch_ci_status(r, number).await;
+        let mut summary = summary_from(&pr);
+        summary.ci_status = Some(ci.state.clone());
+
         Ok(PrDetail {
-            summary: summary_from(&pr),
+            summary,
             description_md: description,
             comments: top,
             approved_by,
@@ -461,5 +513,83 @@ impl super::GitProvider for Bitbucket {
             })
             .collect();
         Ok(repos)
+    }
+}
+
+/// Parse a small inline build-statuses JSON fixture into a CiStatus aggregate.
+/// Used by unit tests.
+#[cfg(test)]
+fn parse_statuses_fixture(json_str: &str) -> CiStatus {
+    let v: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+    let items = varr(&v, &["values"]);
+    if items.is_empty() {
+        return CiStatus::none();
+    }
+    let total = items.len() as u32;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let mut pending = 0u32;
+    let mut url: Option<String> = None;
+    for item in items {
+        if url.is_none() {
+            url = vstr_opt(item, &["url"]);
+        }
+        match vstr(item, &["state"]).as_str() {
+            "SUCCESSFUL" => passed += 1,
+            "FAILED" | "STOPPED" => failed += 1,
+            _ => pending += 1,
+        }
+    }
+    let state = if failed > 0 {
+        "failure"
+    } else if pending > 0 {
+        "pending"
+    } else if passed == total && total > 0 {
+        "success"
+    } else {
+        "none"
+    };
+    CiStatus { state: state.to_string(), total, passed, failed, url }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_statuses_fixture;
+
+    #[test]
+    fn bb_ci_status_successful() {
+        let fixture = r#"{"values":[
+            {"state":"SUCCESSFUL","url":"https://ci.example.com/build/1"},
+            {"state":"SUCCESSFUL","url":null}
+        ]}"#;
+        let ci = parse_statuses_fixture(fixture);
+        assert_eq!(ci.state, "success");
+        assert_eq!(ci.total, 2);
+        assert_eq!(ci.passed, 2);
+        assert_eq!(ci.failed, 0);
+    }
+
+    #[test]
+    fn bb_ci_status_failed() {
+        let fixture = r#"{"values":[
+            {"state":"SUCCESSFUL","url":null},
+            {"state":"FAILED","url":"https://ci.example.com/build/2"}
+        ]}"#;
+        let ci = parse_statuses_fixture(fixture);
+        assert_eq!(ci.state, "failure");
+        assert_eq!(ci.failed, 1);
+    }
+
+    #[test]
+    fn bb_ci_status_inprogress() {
+        let fixture = r#"{"values":[{"state":"INPROGRESS","url":null}]}"#;
+        let ci = parse_statuses_fixture(fixture);
+        assert_eq!(ci.state, "pending");
+    }
+
+    #[test]
+    fn bb_ci_status_empty_is_none() {
+        let ci = parse_statuses_fixture(r#"{"values":[]}"#);
+        assert_eq!(ci.state, "none");
     }
 }

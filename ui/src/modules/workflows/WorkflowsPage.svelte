@@ -4,6 +4,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunSteps from './RunSteps.svelte';
+  import TriggersPanel from './TriggersPanel.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
@@ -15,6 +16,7 @@
     NodeTypeSpec,
     NodeRunState,
     WorkflowTemplate,
+    WorkflowTrigger,
   } from '../../lib/api/types';
 
   let workflows = $state<Workflow[]>([]);
@@ -32,6 +34,9 @@
   let runs = $state<WorkflowRun[]>([]);
   let runsOpen = $state(false);
   let paletteOpen = $state(false);
+  let triggersOpen = $state(false);
+  let triggers = $state<WorkflowTrigger[]>([]);
+  let approving = $state(false);
 
   const runStates = $derived<Record<string, NodeRunState>>(
     Object.fromEntries((run?.nodes ?? []).map((n) => [n.node_id, n])),
@@ -235,6 +240,22 @@
     }
   }
 
+  async function approveRun(approved: boolean): Promise<void> {
+    if (!run?.waiting_approval || !run.approval_node_id || approving) return;
+    approving = true;
+    try {
+      await api.post(`/workflow-runs/${run.id}/approve`, {
+        node_id: run.approval_node_id,
+        approved,
+      });
+      toasts.success(approved ? 'Approved — run resuming' : 'Rejected — run will error');
+    } catch (e) {
+      toasts.error('Approval failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      approving = false;
+    }
+  }
+
   function nodeName(id: string): string {
     const n = graph.nodes.find((x) => x.id === id);
     return n?.name || n?.kind || id;
@@ -391,6 +412,11 @@
           {/if}
         </div>
 
+        <!-- Triggers config toggle -->
+        <button class="btn small" onclick={() => (triggersOpen = !triggersOpen)} title="Configure workflow triggers">
+          <Icon name="clock" size={12} /> Triggers
+        </button>
+
         {#if running}
           <button class="btn small danger" onclick={stop}><Icon name="square" size={11} /> Stop</button>
         {/if}
@@ -398,6 +424,20 @@
           {#if running}<span class="spin"></span> Running{:else}<Icon name="play" size={12} /> Run{/if}
         </button>
       </header>
+
+      <!-- Human-approval banner: shown when a run is paused at a human_approval node -->
+      {#if run?.waiting_approval && run.approval_node_id}
+        <div class="approval-banner">
+          <Icon name="user-check" size={14} />
+          <span>Run paused — waiting for approval at <strong>{run.approval_node_id}</strong></span>
+          <button class="btn primary small" disabled={approving} onclick={() => approveRun(true)}>
+            Approve
+          </button>
+          <button class="btn small danger" disabled={approving} onclick={() => approveRun(false)}>
+            Reject
+          </button>
+        </div>
+      {/if}
 
       <div class="canvas-wrap">
         <WorkflowCanvas
@@ -409,6 +449,16 @@
           onchange={() => (dirty = true)}
         />
       </div>
+
+      {#if triggersOpen && current}
+        <div class="triggers-wrap">
+          <TriggersPanel
+            workflowId={current.id}
+            bind:triggers
+            ontriggers={(ts) => (triggers = ts)}
+          />
+        </div>
+      {/if}
 
       {#if run || selectedNode}
         <div class="inspector">
@@ -517,6 +567,164 @@
                 <option value="crash">Crash (Aviator-style)</option>
                 <option value="scratch">Scratch card</option>
               </select>
+            {:else if selectedNode.kind === 'db_query'}
+              <label for="np-conn">Connection ID</label>
+              <input
+                id="np-conn"
+                type="text"
+                placeholder="DB-Explorer connection id"
+                value={paramStr('connection_id')}
+                oninput={(e) => onParam('connection_id', e.currentTarget.value)}
+              />
+              <label for="np-stmt">SQL / query statement</label>
+              <textarea
+                id="np-stmt"
+                rows="4"
+                placeholder="SELECT * FROM users LIMIT 100"
+                value={paramStr('statement')}
+                oninput={(e) => onParam('statement', e.currentTarget.value)}
+              ></textarea>
+              <label for="np-maxrows">Max rows (default 100)</label>
+              <input
+                id="np-maxrows"
+                type="number"
+                min="1"
+                max="1000"
+                value={paramNum('max_rows', 100)}
+                oninput={(e) => onParam('max_rows', Number(e.currentTarget.value))}
+              />
+            {:else if selectedNode.kind === 'broker_peek'}
+              <label for="np-cid">Cluster ID</label>
+              <input
+                id="np-cid"
+                type="text"
+                placeholder="Broker cluster id"
+                value={paramStr('cluster_id')}
+                oninput={(e) => onParam('cluster_id', e.currentTarget.value)}
+              />
+              <label for="np-topic">Topic</label>
+              <input
+                id="np-topic"
+                type="text"
+                placeholder="my-topic"
+                value={paramStr('topic')}
+                oninput={(e) => onParam('topic', e.currentTarget.value)}
+              />
+              <label for="np-limit">Limit (max 50)</label>
+              <input
+                id="np-limit"
+                type="number"
+                min="1"
+                max="50"
+                value={paramNum('limit', 20)}
+                oninput={(e) => onParam('limit', Number(e.currentTarget.value))}
+              />
+            {:else if selectedNode.kind === 'channel_notify'}
+              <label for="np-msg">Message</label>
+              <textarea
+                id="np-msg"
+                rows="3"
+                placeholder="Workflow step completed: &#123;reply&#125;"
+                value={paramStr('message')}
+                oninput={(e) => onParam('message', e.currentTarget.value)}
+              ></textarea>
+              <label for="np-ch">Channel (optional)</label>
+              <select
+                id="np-ch"
+                value={paramStr('channel') || ''}
+                onchange={(e) => onParam('channel', e.currentTarget.value || undefined)}
+              >
+                <option value="">Any enabled</option>
+                <option value="slack">Slack</option>
+                <option value="telegram">Telegram</option>
+              </select>
+            {:else if selectedNode.kind === 'budget_gate'}
+              <label for="np-provider">Provider</label>
+              <select
+                id="np-provider"
+                value={paramStr('provider') || 'claude'}
+                onchange={(e) => onParam('provider', e.currentTarget.value)}
+              >
+                <option value="claude">Claude</option>
+                <option value="codex">Codex</option>
+              </select>
+              <p class="node-hint">Errors the run if the provider budget is exceeded and enforcement is on.</p>
+            {:else if selectedNode.kind === 'human_approval'}
+              <label for="np-aprompt">Approval prompt</label>
+              <input
+                id="np-aprompt"
+                type="text"
+                placeholder="Please review and approve to continue"
+                value={paramStr('prompt')}
+                oninput={(e) => onParam('prompt', e.currentTarget.value)}
+              />
+              <p class="node-hint">Pauses the run until an operator calls the resume endpoint or clicks Approve above.</p>
+            {:else if selectedNode.kind === 'swarm_task'}
+              <label for="np-swarm">Swarm ID</label>
+              <input
+                id="np-swarm"
+                type="text"
+                placeholder="Swarm id"
+                value={paramStr('swarm_id')}
+                oninput={(e) => onParam('swarm_id', e.currentTarget.value)}
+              />
+              <label for="np-proj">Project ID</label>
+              <input
+                id="np-proj"
+                type="text"
+                placeholder="Swarm project id"
+                value={paramStr('project_id')}
+                oninput={(e) => onParam('project_id', e.currentTarget.value)}
+              />
+              <label for="np-title">Task title</label>
+              <input
+                id="np-title"
+                type="text"
+                placeholder="Workflow-generated task title"
+                value={paramStr('title')}
+                oninput={(e) => onParam('title', e.currentTarget.value)}
+              />
+              <label for="np-desc">Description (optional)</label>
+              <textarea
+                id="np-desc"
+                rows="2"
+                placeholder="Task details…"
+                value={paramStr('description')}
+                oninput={(e) => onParam('description', e.currentTarget.value)}
+              ></textarea>
+            {:else if selectedNode.kind === 'api_run'}
+              <label for="np-method">Method</label>
+              <select
+                id="np-method"
+                value={paramStr('method') || 'GET'}
+                onchange={(e) => onParam('method', e.currentTarget.value)}
+              >
+                {#each ['GET','POST','PUT','PATCH','DELETE'] as m (m)}
+                  <option value={m}>{m}</option>
+                {/each}
+              </select>
+              <label for="np-url">URL</label>
+              <input
+                id="np-url"
+                type="url"
+                placeholder="https://api.example.com/endpoint"
+                value={paramStr('url')}
+                oninput={(e) => onParam('url', e.currentTarget.value)}
+              />
+              <label for="np-body">Body (JSON, optional)</label>
+              <textarea
+                id="np-body"
+                rows="3"
+                placeholder="&#123;&#125;"
+                value={paramJson('body')}
+                oninput={(e) => onParamJson('body', e.currentTarget.value)}
+              ></textarea>
+            {:else if selectedNode.kind === 'product_analyze' || selectedNode.kind === 'product_rewrite' || selectedNode.kind === 'product_plan' || selectedNode.kind === 'review_run'}
+              <p class="node-hint stub">
+                <Icon name="alert-circle" size={12} />
+                This node kind is registered but not yet wired in the engine. It will
+                run as a stub and pass a "not wired" marker to downstream nodes.
+              </p>
             {:else if selectedNode.kind !== 'manual_trigger' && selectedNode.kind !== 'log' && selectedNode.kind !== 'verifier'}
               <!-- Fallback raw-JSON editor for unrecognised or future node kinds -->
               <label for="np-raw">Params (JSON)</label>
@@ -1025,5 +1233,40 @@
     to {
       transform: rotate(360deg);
     }
+  }
+  /* Triggers panel: collapsible section below the canvas */
+  .triggers-wrap {
+    border-top: 1px solid var(--border);
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  /* Human-approval banner */
+  .approval-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--warn-bg, rgba(240, 192, 64, 0.12));
+    border-bottom: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .approval-banner strong {
+    font-weight: 700;
+  }
+  .approval-banner > span {
+    flex: 1;
+  }
+  /* Node hint / info text in the inspector */
+  .node-hint {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    margin: 2px 0 0;
+  }
+  .node-hint.stub {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--warn, #b07a00);
   }
 </style>

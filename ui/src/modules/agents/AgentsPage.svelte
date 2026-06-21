@@ -1,7 +1,8 @@
 <script lang="ts">
-  // Agent Mode: tabbed split panes OR a tiled grid of every active session.
+  // Agent Mode: tabbed split panes, tiled grid, or Mission Control work queue.
   import Splits from './Splits.svelte';
   import TiledView from './TiledView.svelte';
+  import MissionControl from './MissionControl.svelte';
   import FirstRunCoach from './FirstRunCoach.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -9,6 +10,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
 
   const tiled = $derived(ws.viewMode === 'tiled');
+  const mission = $derived(ws.viewMode === 'mission');
 
   // First-run coach: a guided path from a fresh account to a launched agent.
   // Shown only on a truly empty Agents view (no agent sessions at all) and only
@@ -30,6 +32,8 @@
     <div style="padding: 16px">
       <Skeleton rows={3} height={48} />
     </div>
+  {:else if mission}
+    <MissionControl />
   {:else if tiled}
     <TiledView />
   {:else if ws.panes.length === 0}

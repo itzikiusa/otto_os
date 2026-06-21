@@ -12,7 +12,10 @@
 
 use std::time::Duration;
 
-use otto_usage::{ClickHouse, MetricsSampler, UsageConfig, UsageEngine, UsageEvent};
+use otto_usage::{
+    AttributionDimension, ClickHouse, ForecastReq, MetricsSampler, UsageConfig, UsageEngine,
+    UsageEvent,
+};
 
 fn event(provider: &str, session: &str, model: &str, kind: &str, inp: u64, out: u64, cost: f64) -> UsageEvent {
     UsageEvent {
@@ -27,6 +30,35 @@ fn event(provider: &str, session: &str, model: &str, kind: &str, inp: u64, out: 
         cache_write_tokens: 0,
         cost_usd: cost,
         duration_ms: 1200,
+        ..Default::default()
+    }
+}
+
+/// Build a usage event with work-graph dims populated (B1).
+fn event_with_dims(
+    provider: &str,
+    session: &str,
+    cost: f64,
+    origin: &str,
+    repo_id: &str,
+    branch: &str,
+) -> UsageEvent {
+    UsageEvent {
+        workspace_id: "ws1".into(),
+        session_id: session.into(),
+        provider: provider.into(),
+        model: "claude-opus-4".into(),
+        kind: "completion".into(),
+        input_tokens: 100,
+        output_tokens: 200,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: cost,
+        duration_ms: 500,
+        origin: origin.to_string(),
+        repo_id: repo_id.to_string(),
+        branch: branch.to_string(),
+        ..Default::default()
     }
 }
 
@@ -162,4 +194,180 @@ async fn disabled_engine_is_a_noop() {
     engine.insert_events(&[event("claude", "s1", "m", "prompt", 1, 1, 0.0)]).await.unwrap();
     assert_eq!(engine.summary(7, false).await.unwrap().total_events, 0);
     assert!(!engine.status().await.available);
+}
+
+// ---------------------------------------------------------------------------
+// Work-ref attribution tests (B1)
+// ---------------------------------------------------------------------------
+
+/// Verify that a `UsageEvent` with work-graph dims round-trips through JSON
+/// serialization and that absent dims are omitted (matching the column DEFAULT).
+#[test]
+fn usage_event_workref_round_trip() {
+    let ev = UsageEvent {
+        workspace_id: "ws1".into(),
+        session_id: "s1".into(),
+        provider: "claude".into(),
+        model: "claude-opus-4".into(),
+        kind: "completion".into(),
+        input_tokens: 100,
+        output_tokens: 200,
+        cost_usd: 0.05,
+        origin: "review".into(),
+        repo_id: "repo-abc".into(),
+        branch: "feature/b1".into(),
+        // All other dims left as empty string (default) → omitted in JSON.
+        ..Default::default()
+    };
+
+    let json = serde_json::to_string(&ev).expect("serialize");
+    // Set dims must be present.
+    assert!(json.contains("\"origin\":\"review\""), "origin present");
+    assert!(json.contains("\"repo_id\":\"repo-abc\""), "repo_id present");
+    assert!(json.contains("\"branch\":\"feature/b1\""), "branch present");
+    // Unset dims must be absent (skip_serializing_if = is_empty).
+    assert!(!json.contains("\"pr_number\""), "pr_number absent");
+    assert!(!json.contains("\"story_id\""), "story_id absent");
+    assert!(!json.contains("\"swarm_task_id\""), "swarm_task_id absent");
+
+    // Round-trip.
+    let back: UsageEvent = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back.origin, "review");
+    assert_eq!(back.repo_id, "repo-abc");
+    assert_eq!(back.branch, "feature/b1");
+    assert_eq!(back.pr_number, "");  // defaulted to empty on missing key
+    assert_eq!(back.story_id, "");
+}
+
+/// End-to-end attribution query: insert events with origin dims, then group by
+/// origin and verify the aggregates.
+#[tokio::test]
+async fn attribution_groups_by_dimension() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let engine = UsageEngine::start(
+        UsageConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        tmp.path().to_path_buf(),
+    )
+    .await;
+    assert!(engine.available());
+
+    // Insert 3 events across 2 origins.
+    engine
+        .insert_events(&[
+            event_with_dims("claude", "s1", 0.05, "review", "repo-1", "main"),
+            event_with_dims("claude", "s2", 0.03, "review", "repo-1", "feature"),
+            event_with_dims("claude", "s3", 0.08, "product", "repo-2", "main"),
+        ])
+        .await
+        .expect("insert with dims");
+
+    // Group by origin.
+    let rows = engine
+        .attribution(&AttributionDimension::Origin, 30)
+        .await
+        .expect("attribution by origin");
+
+    assert_eq!(rows.len(), 2, "two distinct origins");
+    let review = rows.iter().find(|r| r.key == "review").expect("review row");
+    assert_eq!(review.sessions, 2, "review: 2 distinct sessions");
+    assert!(
+        (review.cost_usd - 0.08).abs() < 1e-6,
+        "review cost = 0.05 + 0.03 = {:.6}",
+        review.cost_usd
+    );
+
+    let product = rows.iter().find(|r| r.key == "product").expect("product row");
+    assert_eq!(product.sessions, 1, "product: 1 session");
+    assert!((product.cost_usd - 0.08).abs() < 1e-6);
+
+    // Group by repo_id.
+    let by_repo = engine
+        .attribution(&AttributionDimension::Repo, 30)
+        .await
+        .expect("attribution by repo");
+    assert_eq!(by_repo.len(), 2, "two distinct repos");
+    let repo1 = by_repo.iter().find(|r| r.key == "repo-1").expect("repo-1");
+    assert_eq!(repo1.sessions, 2);
+
+    // Empty dim (no events without origin) should not appear.
+    assert!(
+        by_repo.iter().all(|r| !r.key.is_empty()),
+        "empty keys must be filtered"
+    );
+}
+
+/// Forecast returns a no-data response when the engine has no history for the
+/// requested feature/provider (and must not panic or error).
+#[tokio::test]
+async fn forecast_no_history_returns_zero() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let engine = UsageEngine::start(
+        UsageConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        tmp.path().to_path_buf(),
+    )
+    .await;
+    assert!(engine.available());
+
+    let resp = engine
+        .forecast(&ForecastReq {
+            feature: "review".to_string(),
+            provider: "claude".to_string(),
+            est_tokens: None,
+        })
+        .await;
+
+    assert_eq!(resp.projected_cost_usd, 0.0);
+    assert!(
+        resp.basis.contains("no recent"),
+        "basis explains no history: {}",
+        resp.basis
+    );
+}
+
+/// Forecast with an explicit token estimate prices it directly (no ClickHouse needed).
+#[tokio::test]
+async fn forecast_with_est_tokens_prices_directly() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Engine can be disabled — forecast with est_tokens doesn't need ClickHouse.
+    let engine = UsageEngine::start(
+        UsageConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        tmp.path().to_path_buf(),
+    )
+    .await;
+
+    let resp = engine
+        .forecast(&ForecastReq {
+            feature: "agent".to_string(),
+            provider: "claude".to_string(),
+            est_tokens: Some(2_000),
+        })
+        .await;
+
+    // Must price 1000 in + 1000 out at claude rates (whatever that comes to;
+    // we just check it's non-zero and the basis explains it).
+    assert!(resp.projected_cost_usd > 0.0, "should produce a non-zero estimate");
+    assert!(
+        resp.basis.contains("2000"),
+        "basis must mention token count: {}",
+        resp.basis
+    );
 }

@@ -14,6 +14,7 @@ use axum::{Extension, Json, Router};
 use otto_core::api::{CreateSessionReq, Problem, UpdateSessionReq};
 use otto_core::auth::{session_owner_or_admin, AuthUser, RoleChecker};
 use otto_core::domain::{Session, User, WorkspaceRole};
+use otto_core::workref::WorkRef;
 use otto_core::{Error, Id};
 use otto_state::WorkspacesRepo;
 
@@ -151,11 +152,34 @@ async fn create_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(ws_id): Path<Id>,
-    Json(req): Json<CreateSessionReq>,
+    Json(mut req): Json<CreateSessionReq>,
 ) -> ApiResult<Json<Session>> {
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Editor)
         .await?;
+
+    // Stamp a minimal WorkRef into the session meta so every manually-created
+    // session carries at least `origin = "manual"` for usage attribution (B1).
+    // Runners that create sessions programmatically (review, product, swarm …)
+    // overwrite `meta["work"]` with a richer ref; this is the plain-create path
+    // fallback. We merge into the existing meta object so any caller-supplied
+    // fields are preserved.
+    {
+        let meta = req.meta.get_or_insert_with(|| serde_json::Value::Object(Default::default()));
+        if let serde_json::Value::Object(m) = meta {
+            // Only stamp if the caller hasn't already supplied a work ref.
+            if !m.contains_key("work") {
+                let work_ref = WorkRef {
+                    origin: Some("manual".to_string()),
+                    ..Default::default()
+                };
+                if let Ok(v) = serde_json::to_value(&work_ref) {
+                    m.insert("work".to_string(), v);
+                }
+            }
+        }
+    }
+
     let ws = ctx.workspaces().get(&ws_id).await?;
     let session = ctx.manager().create(&ws, &user.id, req, None).await?;
     Ok(Json(session))

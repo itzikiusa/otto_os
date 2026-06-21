@@ -131,6 +131,9 @@ struct Conn {
     /// `KILL QUERY WHERE query_id = '<id>'` can target it. `None` for
     /// introspection/completion (no need to cancel those).
     query_id: Option<String>,
+    /// Per-statement wall-clock timeout (seconds), sent as the ClickHouse
+    /// `max_execution_time` HTTP request setting. `None` = no limit.
+    timeout_secs: Option<u64>,
 }
 
 /// The shape of a `FORMAT JSONCompact` reply.
@@ -186,15 +189,27 @@ impl ClickhouseDriver {
     }
 
     /// Build a [`Conn`] for one operation: the cached `reqwest::Client` plus the
-    /// base URL, auth headers, session timezone, optional active database, and an
+    /// base URL, auth headers, session timezone, optional active database, an
     /// optional server-side `query_id` (set so `run` can later cancel via
-    /// `KILL QUERY WHERE query_id = '<id>'`; `None` for introspection/completion).
+    /// `KILL QUERY WHERE query_id = '<id>'`; `None` for introspection/completion),
+    /// and an optional per-statement timeout in seconds (`max_execution_time`).
     /// All derived cheaply from `cfg`.
+    #[allow(dead_code)]
     async fn connect_id(
         &self,
         cfg: &ResolvedConfig,
         active_db: Option<&str>,
         query_id: Option<String>,
+    ) -> Result<Conn> {
+        self.connect_id_timeout(cfg, active_db, query_id, None).await
+    }
+
+    async fn connect_id_timeout(
+        &self,
+        cfg: &ResolvedConfig,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
     ) -> Result<Conn> {
         let client = self.client(cfg).await?;
 
@@ -232,6 +247,7 @@ impl ClickhouseDriver {
             timezone,
             database: active_db.map(str::to_string),
             query_id,
+            timeout_secs,
         })
     }
 
@@ -320,12 +336,13 @@ impl ClickhouseDriver {
     /// Like [`Self::query_rows`] but scopes unqualified table names to
     /// `active_db` (when `Some`) and, when `query_id` is set, tags the HTTP
     /// request so a concurrent cancel can `KILL QUERY` it. On the HTTP transport
-    /// this sets the `database` / `query_id` request params. NATIVE TRANSPORT
-    /// TODO: the native client's default database is fixed at connect time
-    /// (cached per config), so active-db scoping is not applied there yet —
-    /// unqualified names resolve against the profile's database. The native
-    /// transport also doesn't expose a per-query `query_id` here, so a native
-    /// query isn't server-cancellable (cancel becomes a no-op). Most connections
+    /// this sets the `database` / `query_id` / `max_execution_time` request
+    /// params. NATIVE TRANSPORT TODO: the native client's default database is
+    /// fixed at connect time (cached per config), so active-db scoping is not
+    /// applied there yet — unqualified names resolve against the profile's
+    /// database. The native transport also doesn't expose a per-query `query_id`
+    /// or per-statement timeout here, so native queries aren't server-cancellable
+    /// or timeout-bounded (cancel / timeout become no-ops there). Most connections
     /// use HTTP.
     async fn query_rows_db(
         &self,
@@ -334,9 +351,22 @@ impl ClickhouseDriver {
         active_db: Option<&str>,
         query_id: Option<String>,
     ) -> Result<RawRows> {
+        self.query_rows_db_timeout(cfg, sql, active_db, query_id, None).await
+    }
+
+    async fn query_rows_db_timeout(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<RawRows> {
         match transport_for(cfg) {
             Transport::Http => {
-                let conn = self.connect_id(cfg, active_db, query_id).await?;
+                let conn = self
+                    .connect_id_timeout(cfg, active_db, query_id, timeout_secs)
+                    .await?;
                 Ok(conn.query_json(sql).await?.into_raw())
             }
             Transport::Native => self.native_query(cfg, sql).await,
@@ -361,9 +391,22 @@ impl ClickhouseDriver {
         active_db: Option<&str>,
         query_id: Option<String>,
     ) -> Result<String> {
+        self.query_text_db_timeout(cfg, sql, active_db, query_id, None).await
+    }
+
+    async fn query_text_db_timeout(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<String> {
         match transport_for(cfg) {
             Transport::Http => {
-                let conn = self.connect_id(cfg, active_db, query_id).await?;
+                let conn = self
+                    .connect_id_timeout(cfg, active_db, query_id, timeout_secs)
+                    .await?;
                 conn.query_raw(sql).await
             }
             Transport::Native => {
@@ -445,6 +488,12 @@ impl Conn {
             // Tag the server-side query so `KILL QUERY WHERE query_id = '<id>'`
             // can target it from another connection.
             req = req.query(&[("query_id", qid.as_str())]);
+        }
+        if let Some(secs) = self.timeout_secs {
+            // `max_execution_time` is a ClickHouse per-query setting (seconds,
+            // integer). 0 means unlimited — the guard in `run_tracked` ensures
+            // only positive values reach here.
+            req = req.query(&[("max_execution_time", secs.to_string().as_str())]);
         }
         let resp = req.body(body).send().await.map_err(req_err)?;
         let status = resp.status();
@@ -938,20 +987,31 @@ impl Driver for ClickhouseDriver {
         &self,
         cfg: &ResolvedConfig,
         parent: &NodePath,
-        _filter: Option<&str>,
+        filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
         let db = parent
             .get("db")
             .ok_or_else(|| types::invalid("clickhouse: missing database in node path"))?;
 
         if let Some(table) = parent.get("table") {
-            // Columns of a table/view.
-            let sql = format!(
-                "SELECT name, type FROM system.columns \
-                 WHERE database = '{}' AND table = '{}' ORDER BY position",
-                esc(db),
-                esc(table)
-            );
+            // Columns of a table/view — filter by name when a prefix/substring
+            // is supplied (case-insensitive server-side via ILIKE).
+            let sql = if let Some(f) = filter.filter(|s| !s.is_empty()) {
+                format!(
+                    "SELECT name, type FROM system.columns \
+                     WHERE database = '{}' AND table = '{}' AND name ILIKE '%{}%' ORDER BY position",
+                    esc(db),
+                    esc(table),
+                    esc(f),
+                )
+            } else {
+                format!(
+                    "SELECT name, type FROM system.columns \
+                     WHERE database = '{}' AND table = '{}' ORDER BY position",
+                    esc(db),
+                    esc(table),
+                )
+            };
             let resp = self.query_rows(cfg, &sql).await?;
             let base = parent.to_id();
             Ok(resp
@@ -967,11 +1027,20 @@ impl Driver for ClickhouseDriver {
                 })
                 .collect())
         } else {
-            // Tables + views of a database.
-            let sql = format!(
-                "SELECT name, engine FROM system.tables WHERE database = '{}' ORDER BY name",
-                esc(db)
-            );
+            // Tables + views of a database — filter by name when present.
+            let sql = if let Some(f) = filter.filter(|s| !s.is_empty()) {
+                format!(
+                    "SELECT name, engine FROM system.tables \
+                     WHERE database = '{}' AND name ILIKE '%{}%' ORDER BY name",
+                    esc(db),
+                    esc(f),
+                )
+            } else {
+                format!(
+                    "SELECT name, engine FROM system.tables WHERE database = '{}' ORDER BY name",
+                    esc(db),
+                )
+            };
             let resp = self.query_rows(cfg, &sql).await?;
             Ok(resp
                 .data
@@ -1150,10 +1219,13 @@ impl Driver for ClickhouseDriver {
             token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
         }
 
+        // Convert ms → seconds (round up) for ClickHouse's `max_execution_time`.
+        let timeout_secs = req.timeout_ms.filter(|&t| t > 0).map(|t| t.div_ceil(1000));
+
         if returns_rows(sql) {
             let limited = types::inject_row_limit(sql, max_rows.saturating_add(1));
             let resp = self
-                .query_rows_db(cfg, &limited, active_db, Some(query_id))
+                .query_rows_db_timeout(cfg, &limited, active_db, Some(query_id), timeout_secs)
                 .await?;
             let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -1186,10 +1258,11 @@ impl Driver for ClickhouseDriver {
                 },
                 message: None,
                 truncated,
+                masked: false,
             })
         } else {
             // Write / DDL statement: no rowset, just acknowledge.
-            self.query_text_db(cfg, sql, active_db, Some(query_id)).await?;
+            self.query_text_db_timeout(cfg, sql, active_db, Some(query_id), timeout_secs).await?;
             let duration_ms = started.elapsed().as_millis() as u64;
             let mut result = QueryResult::message("OK");
             result.rows_affected = None;

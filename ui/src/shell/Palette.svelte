@@ -2,11 +2,15 @@
   // ⌘K palette. Two modes: fuzzy command list (registry) and plain-English
   // orchestrator (⇥ toggles). English mode posts /orchestrate, shows the plan
   // for confirmation, then /orchestrate/execute.
-  import { api } from '../lib/api/client';
+  // Commands mode also fans out to GET /workspaces/{id}/search when the query
+  // is ≥ 2 chars and a workspace is active; cross-module hits appear as a
+  // second "Results" section below commands.
+  import { api, isAbortError } from '../lib/api/client';
   import type {
     Action,
     ExecuteResult,
     OrchestrateResp,
+    SearchHit,
   } from '../lib/api/types';
   import { registry, type Command } from '../lib/commands.svelte';
   import { parseCommand, parseClose, type CloseRequest } from '../lib/commandParser';
@@ -66,6 +70,85 @@
   let inputEl: HTMLInputElement | null = $state(null);
   let textareaEl: HTMLTextAreaElement | null = $state(null);
 
+  // ---- cross-module search ----
+  // Debounced fan-out to GET /workspaces/{id}/search when the query is
+  // non-trivial and a workspace is active. Results render as a second section.
+  let searchHits: SearchHit[] = $state([]);
+  let searchBusy = $state(false);
+  let searchAbort: AbortController | null = null;
+
+  const SEARCH_DEBOUNCE_MS = 250;
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Kick off a debounced cross-module search. Cancels any in-flight request. */
+  function scheduleSearch(q: string): void {
+    if (searchTimer !== null) clearTimeout(searchTimer);
+    // Cancel in-flight request immediately so we don't show stale hits.
+    searchAbort?.abort();
+    searchAbort = null;
+    if (q.trim().length < 2 || !ws.currentId) {
+      searchHits = [];
+      searchBusy = false;
+      return;
+    }
+    searchBusy = true;
+    searchTimer = setTimeout(() => {
+      void doSearch(q.trim(), ws.currentId!);
+    }, SEARCH_DEBOUNCE_MS);
+  }
+
+  async function doSearch(q: string, wsId: string): Promise<void> {
+    const ctrl = new AbortController();
+    searchAbort = ctrl;
+    try {
+      const hits = await api.get<SearchHit[]>(
+        `/workspaces/${wsId}/search?q=${encodeURIComponent(q)}`,
+        ctrl.signal,
+      );
+      searchHits = hits ?? [];
+    } catch (e) {
+      if (!isAbortError(e)) {
+        // Silently swallow search errors — the palette still shows commands.
+        searchHits = [];
+      }
+    } finally {
+      if (searchAbort === ctrl) {
+        searchAbort = null;
+        searchBusy = false;
+      }
+    }
+  }
+
+  /** Icon name for a search hit kind. */
+  function hitIcon(kind: string): string {
+    switch (kind) {
+      case 'story': return 'book-open';
+      case 'workflow': return 'git-merge';
+      case 'api_request': return 'zap';
+      case 'swarm_task': return 'check-square';
+      case 'swarm_project': return 'layers';
+      case 'memory': return 'database';
+      case 'repo': return 'git-branch';
+      case 'broker_cluster': return 'server';
+      default: return 'file';
+    }
+  }
+
+  /** Emit an event/action for a search hit action button. */
+  function hitAction(hit: SearchHit, action: string): void {
+    // "open" navigates to the appropriate module view. Other actions dispatch
+    // a custom event that module-level listeners can pick up.
+    close();
+    if (action === 'open') {
+      // Navigation: emit a global custom event that App.svelte routes on.
+      window.dispatchEvent(new CustomEvent('otto:open-hit', { detail: hit }));
+    } else {
+      // Contextual actions (send-to-agent, copy-context, rerun, review, …)
+      // are emitted as a distinct event so they don't require nav awareness here.
+      window.dispatchEvent(new CustomEvent('otto:hit-action', { detail: { hit, action } }));
+    }
+  }
+
   const filtered: { cmd: Command; score: number }[] = $derived.by(() => {
     const cmds = registry.all;
     const frecency = loadFrecency();
@@ -88,6 +171,21 @@
       .slice(0, 14);
   });
 
+  // Fire a debounced cross-module search whenever the query changes in commands
+  // mode. Using $effect ensures this tracks `query` and `mode` reactively.
+  $effect(() => {
+    if (mode === 'commands') {
+      scheduleSearch(query);
+    } else {
+      // Clear stale results when switching to English mode.
+      searchHits = [];
+      searchBusy = false;
+      if (searchTimer !== null) { clearTimeout(searchTimer); searchTimer = null; }
+      searchAbort?.abort();
+      searchAbort = null;
+    }
+  });
+
   $effect(() => {
     // reset on open + focus, honoring the requested mode + prefill
     if (ui.paletteOpen) {
@@ -96,6 +194,8 @@
       selected = 0;
       plan = null;
       optimizedText = null;
+      searchHits = [];
+      searchBusy = false;
       if (mode === 'english') englishText = ui.palettePrefill;
       ui.palettePrefill = '';
       queueMicrotask(() => {
@@ -107,6 +207,11 @@
           textareaEl?.setSelectionRange(len, len);
         }
       });
+    } else {
+      // Palette closed — cancel any pending search so we don't waste a round-trip.
+      if (searchTimer !== null) { clearTimeout(searchTimer); searchTimer = null; }
+      searchAbort?.abort();
+      searchAbort = null;
     }
   });
 
@@ -324,11 +429,11 @@
       case 'spawn_sessions':
         return `Spawn ${a.count} ${a.provider} session${a.count === 1 ? '' : 's'}`;
       case 'broadcast':
-        return `Broadcast to all sessions: “${a.text}”`;
+        return `Broadcast to all sessions: "${a.text}"`;
       case 'open_connection':
         return `Open connection ${a.connection_id}`;
       case 'run_command':
-        return `Send to session: “${a.text}”`;
+        return `Send to session: "${a.text}"`;
     }
   }
 </script>
@@ -395,18 +500,44 @@
               onclick={askOtto}
             >
               <Icon name="zap" size={13} />
-              <span class="pal-item-title">Ask Otto: “{query}”</span>
+              <span class="pal-item-title">Ask Otto: "{query}"</span>
               <span class="grow"></span>
               <span class="pal-group">plain english</span>
             </button>
           {/if}
+
+          {#if searchHits.length > 0 || searchBusy}
+            <div class="pal-section-header">
+              {searchBusy ? 'Searching…' : 'Results'}
+            </div>
+          {/if}
+          {#each searchHits as hit (hit.kind + ':' + hit.id)}
+            <div class="pal-hit">
+              <div class="pal-hit-main">
+                <Icon name={hitIcon(hit.kind)} size={12} />
+                <span class="pal-hit-title">{hit.title}</span>
+                {#if hit.subtitle}
+                  <span class="pal-hit-sub">{hit.subtitle}</span>
+                {/if}
+                <span class="grow"></span>
+                <span class="pal-group pal-hit-kind">{hit.kind.replace('_', ' ')}</span>
+              </div>
+              <div class="pal-hit-actions">
+                {#each hit.actions as action}
+                  <button class="pal-hit-btn" onclick={() => hitAction(hit, action)}>
+                    {action}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/each}
         </div>
       {:else}
         <div class="pal-english">
           <textarea
             bind:this={textareaEl}
             bind:value={englishText}
-            placeholder="Describe what you want… e.g. “spawn 3 claude agents and tell them to fix the failing tests”"
+            placeholder="Describe what you want… e.g. 'spawn 3 claude agents and tell them to fix the failing tests'"
             onkeydown={onEnglishKey}
             rows="3"
             spellcheck="false"
@@ -625,6 +756,71 @@
     justify-content: flex-end;
     gap: 8px;
     margin-top: 4px;
+  }
+  .pal-section-header {
+    padding: 6px 10px 2px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+  }
+  .pal-hit {
+    padding: 4px 8px 4px 10px;
+    border-radius: var(--radius-s);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .pal-hit:hover {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .pal-hit-main {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text);
+    min-width: 0;
+  }
+  .pal-hit-title {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+  }
+  .pal-hit-sub {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+  }
+  .pal-hit-kind {
+    flex-shrink: 0;
+  }
+  .pal-hit-actions {
+    display: flex;
+    gap: 4px;
+    padding-left: 18px;
+  }
+  .pal-hit-btn {
+    padding: 1px 6px;
+    font-size: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+    cursor: pointer;
+    line-height: 1.6;
+  }
+  .pal-hit-btn:hover {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border-color: var(--accent);
+    color: var(--accent);
   }
   @keyframes fade-in {
     from {

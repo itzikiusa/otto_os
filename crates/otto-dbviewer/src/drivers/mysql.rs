@@ -126,24 +126,24 @@ impl Driver for MysqlDriver {
         &self,
         cfg: &ResolvedConfig,
         parent: &NodePath,
-        _filter: Option<&str>,
+        filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
         let db = parent
             .get("db")
             .ok_or_else(|| types::invalid("schema_children: parent has no database segment"))?
             .to_string();
 
-        // db:<n>/table:<t> -> columns of the table.
+        // db:<n>/table:<t> -> columns of the table (filter by column name).
         if let Some(table) = parent.get("table") {
-            return self.columns_of(cfg, &db, table, parent).await;
+            return self.columns_of(cfg, &db, table, parent, filter).await;
         }
 
-        // db:<n>/folder:tables | folder:views -> the objects in that folder.
+        // db:<n>/folder:tables | folder:views -> the objects in that folder (filter by name).
         if let Some(folder) = parent.get("folder") {
-            return self.objects_in_folder(cfg, &db, folder).await;
+            return self.objects_in_folder(cfg, &db, folder, filter).await;
         }
 
-        // db:<n> -> the two folders (Tables, Views).
+        // db:<n> -> the two folders (Tables, Views); no per-folder filter at this level.
         let tables = SchemaNode::new(
             parent.child("folder", "tables").to_id(),
             "Tables",
@@ -504,24 +504,42 @@ impl Driver for MysqlDriver {
 }
 
 impl MysqlDriver {
-    /// Columns of a table (lazy expansion of a `table:` node).
+    /// Columns of a table (lazy expansion of a `table:` node). When `filter` is
+    /// given, returns only columns whose name contains the substring
+    /// (case-insensitive, via SQL LIKE).
     async fn columns_of(
         &self,
         cfg: &ResolvedConfig,
         db: &str,
         table: &str,
         parent: &NodePath,
+        filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
         let pool = self.pool(cfg).await?;
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT CAST(column_name AS CHAR), CAST(column_type AS CHAR) \
-             FROM information_schema.columns \
-             WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position",
-        )
-        .bind(db)
-        .bind(table)
-        .fetch_all(&pool)
-        .await
+        // Build the LIKE pattern when a filter is present; the `%` wrapping makes
+        // it a substring match. `LOWER()` on both sides is the portable MySQL way
+        // to do case-insensitive LIKE without relying on the collation.
+        let (sql, name_filter): (&str, Option<String>) = match filter {
+            Some(f) if !f.is_empty() => (
+                "SELECT CAST(column_name AS CHAR), CAST(column_type AS CHAR) \
+                 FROM information_schema.columns \
+                 WHERE table_schema = ? AND table_name = ? \
+                 AND LOWER(CAST(column_name AS CHAR)) LIKE LOWER(?) \
+                 ORDER BY ordinal_position",
+                Some(format!("%{f}%")),
+            ),
+            _ => (
+                "SELECT CAST(column_name AS CHAR), CAST(column_type AS CHAR) \
+                 FROM information_schema.columns \
+                 WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position",
+                None,
+            ),
+        };
+        let rows: Vec<(String, String)> = if let Some(pat) = name_filter {
+            sqlx::query_as(sql).bind(db).bind(table).bind(pat).fetch_all(&pool).await
+        } else {
+            sqlx::query_as(sql).bind(db).bind(table).fetch_all(&pool).await
+        }
         .map_err(types::upstream)?;
         Ok(rows
             .into_iter()
@@ -536,12 +554,14 @@ impl MysqlDriver {
             .collect())
     }
 
-    /// Tables or views in a database folder.
+    /// Tables or views in a database folder. When `filter` is given, returns only
+    /// objects whose name contains the substring (case-insensitive, via SQL LIKE).
     async fn objects_in_folder(
         &self,
         cfg: &ResolvedConfig,
         db: &str,
         folder: &str,
+        filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
         let (table_type, kind, seg) = match folder {
             "tables" => ("BASE TABLE", NodeKind::Table, "table"),
@@ -554,14 +574,28 @@ impl MysqlDriver {
         // expanding a database on big servers. The per-table count still shows
         // up in `object_detail` (a single table). CAST text → CHAR (MySQL 8
         // returns information_schema text as VARBINARY) so sqlx decodes String.
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT CAST(table_name AS CHAR) FROM information_schema.tables \
-             WHERE table_schema = ? AND table_type = ? ORDER BY table_name",
-        )
-        .bind(db)
-        .bind(table_type)
-        .fetch_all(&pool)
-        .await
+        //
+        // The optional LIKE clause implements the server-side case-insensitive
+        // substring filter passed from `schema_children`.
+        let (sql, name_filter): (&str, Option<String>) = match filter {
+            Some(f) if !f.is_empty() => (
+                "SELECT CAST(table_name AS CHAR) FROM information_schema.tables \
+                 WHERE table_schema = ? AND table_type = ? \
+                 AND LOWER(CAST(table_name AS CHAR)) LIKE LOWER(?) \
+                 ORDER BY table_name",
+                Some(format!("%{f}%")),
+            ),
+            _ => (
+                "SELECT CAST(table_name AS CHAR) FROM information_schema.tables \
+                 WHERE table_schema = ? AND table_type = ? ORDER BY table_name",
+                None,
+            ),
+        };
+        let rows: Vec<(String,)> = if let Some(pat) = name_filter {
+            sqlx::query_as(sql).bind(db).bind(table_type).bind(pat).fetch_all(&pool).await
+        } else {
+            sqlx::query_as(sql).bind(db).bind(table_type).fetch_all(&pool).await
+        }
         .map_err(types::upstream)?;
         // The db node only carries `db:<n>`, not the folder; build children off
         // a clean db path so ids are `db:<n>/<seg>:<name>`.
@@ -883,6 +917,7 @@ async fn run_read(
         stats: QueryStats::default(),
         message: None,
         truncated,
+        masked: false,
     })
 }
 

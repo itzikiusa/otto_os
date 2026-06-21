@@ -129,7 +129,7 @@ impl Driver for MongoDriver {
         &self,
         cfg: &ResolvedConfig,
         parent: &NodePath,
-        _filter: Option<&str>,
+        filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
         let client = self.connect(cfg).await?;
         let db_name = parent
@@ -138,28 +138,39 @@ impl Driver for MongoDriver {
         let db = client.database(db_name);
 
         match parent.get("coll") {
-            // Collection node → sampled top-level fields.
+            // Collection node → sampled top-level fields (filtered by name when set).
             Some(coll_name) => {
                 let coll: Collection<Document> = db.collection(coll_name);
                 let fields = sample_field_types(&coll).await?;
+                let filter_lower = filter.map(|f| f.to_lowercase());
                 Ok(fields
                     .into_iter()
+                    .filter(|(name, _)| {
+                        filter_lower
+                            .as_deref()
+                            .is_none_or(|f| name.to_lowercase().contains(f))
+                    })
                     .map(|(name, ty)| {
                         let id = parent.child("field", &name).to_id();
                         SchemaNode::new(id, name, NodeKind::Field).with_detail(ty)
                     })
                     .collect())
             }
-            // Database node → collections (name only; no estimated counts —
-            // estimated_document_count is an estimate the user doesn't want).
+            // Database node → collections, filtered by name (case-insensitive) when set.
             None => {
                 let mut names = db
                     .list_collection_names()
                     .await
                     .map_err(types::upstream)?;
                 names.sort();
+                let filter_lower = filter.map(|f| f.to_lowercase());
                 let mut nodes = Vec::with_capacity(names.len());
                 for name in names {
+                    if let Some(f) = &filter_lower {
+                        if !name.to_lowercase().contains(f.as_str()) {
+                            continue;
+                        }
+                    }
                     let id = parent.child("coll", &name).to_id();
                     nodes.push(SchemaNode::new(id, name, NodeKind::Collection).expandable());
                 }
@@ -482,6 +493,10 @@ impl MongoDriver {
         let db = client.database(&db_name);
         let coll: Collection<Document> = db.collection(&parsed.collection);
         let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
+        // Per-statement timeout: MongoDB accepts `maxTimeMS` on cursors/commands.
+        let max_time_ms = req.timeout_ms.filter(|&t| t > 0).map(|t| {
+            i64::try_from(t).unwrap_or(i64::MAX)
+        });
         let started = Instant::now();
 
         // `.explain()` (or the request's explain flag) → return the query plan.
@@ -492,8 +507,13 @@ impl MongoDriver {
         let mut result = match parsed.op {
             MongoOp::Count => {
                 let filter = parsed.filter.unwrap_or_default();
+                let mut count_opts = mongodb::options::CountOptions::default();
+                if let Some(ms) = max_time_ms {
+                    count_opts.max_time = Some(std::time::Duration::from_millis(ms as u64));
+                }
                 let n = coll
                     .count_documents(filter)
+                    .with_options(count_opts)
                     .await
                     .map_err(types::upstream)?;
                 let mut result = QueryResult::message(n.to_string());
@@ -516,6 +536,11 @@ impl MongoDriver {
                 }
                 let limit = parsed.limit.unwrap_or(max_rows as i64).min(max_rows as i64);
                 action = action.limit(limit + 1);
+                if let Some(ms) = max_time_ms {
+                    // maxTimeMS on the cursor tells the server to abort the query
+                    // when the time budget is exceeded.
+                    action = action.max_time(std::time::Duration::from_millis(ms as u64));
+                }
                 let cursor = action.await.map_err(types::upstream)?;
                 // Cap collection at the effective limit (not just max_rows) so an
                 // explicit `.limit(n)` is honored; the extra fetched row flags truncation.
@@ -523,7 +548,15 @@ impl MongoDriver {
             }
             MongoOp::Aggregate => {
                 let pipeline = parsed.pipeline.unwrap_or_default();
-                let cursor = coll.aggregate(pipeline).await.map_err(types::upstream)?;
+                let mut agg_opts = mongodb::options::AggregateOptions::default();
+                if let Some(ms) = max_time_ms {
+                    agg_opts.max_time = Some(std::time::Duration::from_millis(ms as u64));
+                }
+                let cursor = coll
+                    .aggregate(pipeline)
+                    .with_options(agg_opts)
+                    .await
+                    .map_err(types::upstream)?;
                 collect_docs(cursor, max_rows, started).await
             }
             MongoOp::UpdateOne | MongoOp::UpdateMany => {
@@ -1652,6 +1685,7 @@ async fn collect_docs(
         },
         message: None,
         truncated,
+        masked: false,
     })
 }
 

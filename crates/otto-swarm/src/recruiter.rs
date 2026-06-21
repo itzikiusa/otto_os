@@ -6,6 +6,34 @@ use serde_json::Value;
 
 use crate::types::{PresetAgent, RecruitedAgent};
 
+/// Maximum number of skills injected into the recruiter prompt. Injecting the
+/// full library (potentially hundreds of names) wastes tokens and can produce
+/// bloated skill lists; we prioritise role-relevant skills and hard-cap the rest.
+pub const RECRUITER_SKILL_CAP: usize = 40;
+
+/// Return at most `cap` skill names from `all_skills`, ranked by how many words
+/// from `role` appear in the skill name (case-insensitive prefix/infix match).
+/// Within the same score tier names are sorted alphabetically for stability.
+///
+/// Used by the otto-server recruiter endpoint (pure so it is unit-testable).
+pub fn cap_skills_for_role(all_skills: &[String], role: &str, cap: usize) -> Vec<String> {
+    let role_lower = role.to_lowercase();
+    let role_words: std::collections::HashSet<&str> = role_lower
+        .split_whitespace()
+        .collect();
+    let mut scored: Vec<(usize, &String)> = all_skills
+        .iter()
+        .map(|name| {
+            let n = name.to_lowercase();
+            let score = role_words.iter().filter(|&&w| n.contains(w)).count();
+            (score, name)
+        })
+        .collect();
+    // Higher score first; stable alphabetical within a tier.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    scored.iter().take(cap).map(|(_, n)| (*n).clone()).collect()
+}
+
 /// Build the recruiter prompt: given a role the user named, propose a complete
 /// agent definition (title, reports-to, specialization, soul, skills with
 /// must-use flags, provider/model, schedule, scope).
@@ -174,5 +202,44 @@ mod tests {
         assert_eq!(a.title, "CTO");
         assert_eq!(a.skills.len(), 1);
         assert!(a.skills[0].must_use);
+    }
+
+    // -----------------------------------------------------------------------
+    // cap_skills_for_role tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cap_skills_respects_hard_limit() {
+        // 60 dummy skills, cap = 40 → result must be ≤ 40.
+        let skills: Vec<String> = (0..60).map(|i| format!("skill-{i:02}")).collect();
+        let capped = cap_skills_for_role(&skills, "engineer", RECRUITER_SKILL_CAP);
+        assert!(
+            capped.len() <= RECRUITER_SKILL_CAP,
+            "expected ≤ {} skills, got {}",
+            RECRUITER_SKILL_CAP, capped.len()
+        );
+    }
+
+    #[test]
+    fn cap_skills_fewer_than_cap_returns_all() {
+        let skills: Vec<String> = (0..10).map(|i| format!("skill-{i}")).collect();
+        let capped = cap_skills_for_role(&skills, "developer", RECRUITER_SKILL_CAP);
+        assert_eq!(capped.len(), 10, "all skills should be returned when count < cap");
+    }
+
+    #[test]
+    fn cap_skills_ranks_relevant_first() {
+        let skills = vec![
+            "code-review".to_string(),
+            "deploy-ops".to_string(),
+            "review-guide".to_string(),
+        ];
+        // Role = "code review" → words "code" and "review".
+        // "code-review" contains BOTH words (score 2); "review-guide" contains "review"
+        // (score 1); "deploy-ops" contains neither (score 0).
+        let capped = cap_skills_for_role(&skills, "code review", 10);
+        assert_eq!(capped[0], "code-review");
+        assert_eq!(capped[1], "review-guide");
+        assert_eq!(capped[2], "deploy-ops");
     }
 }

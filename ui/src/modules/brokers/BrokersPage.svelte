@@ -11,8 +11,10 @@
   import TopicsTab from './TopicsTab.svelte';
   import GroupsTab from './GroupsTab.svelte';
   import SchemaTab from './SchemaTab.svelte';
+  import ReplayPanel from './ReplayPanel.svelte';
+  import LagAlertsPanel from './LagAlertsPanel.svelte';
 
-  type Tab = 'overview' | 'topics' | 'groups' | 'schema';
+  type Tab = 'overview' | 'topics' | 'groups' | 'schema' | 'replay' | 'alerts';
   let tab = $state<Tab>('overview');
   let formOpen = $state(false);
   let editTarget = $state<BrokerCluster | null>(null);
@@ -334,6 +336,8 @@
         <button class:on={tab === 'topics'} onclick={() => (tab = 'topics')}>Topics</button>
         <button class:on={tab === 'groups'} onclick={() => (tab = 'groups')}>Consumer Groups</button>
         <button class:on={tab === 'schema'} onclick={() => (tab = 'schema')}>Schema Registry</button>
+        <button class:on={tab === 'replay'} onclick={() => (tab = 'replay')}>Replay</button>
+        <button class:on={tab === 'alerts'} onclick={() => (tab = 'alerts')}>Lag Alerts</button>
       </nav>
 
       <div class="tab-body">
@@ -346,6 +350,10 @@
             <GroupsTab cluster={selected} />
           {:else if tab === 'schema'}
             <SchemaTab cluster={selected} />
+          {:else if tab === 'replay'}
+            <ReplayPanel cluster={selected} />
+          {:else if tab === 'alerts'}
+            <LagAlertsPanel cluster={selected} />
           {/if}
         {/key}
       </div>

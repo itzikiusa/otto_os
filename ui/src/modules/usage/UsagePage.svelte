@@ -9,6 +9,10 @@
   import type { UsageBudgetConfig } from '../../lib/api/usage.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
+  import { budgetBus } from '../../lib/events.svelte';
+  // Work-graph attribution drilldown + cost forecast (B1).
+  import AttributionDrilldown from './AttributionDrilldown.svelte';
+  import CostForecastChip from './CostForecastChip.svelte';
 
   // Navigate to a session from the top-sessions table (click-through drill-down).
   function openSession(sessionId: string): void {
@@ -40,6 +44,39 @@
   });
   let budgetsOpen = $state(false);
   let budgetsDirty = $state(false);
+
+  // Live budget-exceeded banner — driven by the BudgetExceeded WS event via
+  // budgetBus. The banner is dismissible; a "recovered" direction auto-clears
+  // it. Null means no active alert.
+  type BudgetAlert = {
+    provider: string;
+    spendUsd: number;
+    capUsd: number;
+    direction: string;
+  };
+  let budgetAlert: BudgetAlert | null = $state(null);
+  // Track which tick we last processed to avoid re-applying the same event.
+  let budgetAlertTick = $state(0);
+
+  $effect(() => {
+    const tick = budgetBus.tick;
+    if (tick === 0 || tick === budgetAlertTick) return;
+    budgetAlertTick = tick;
+    if (budgetBus.direction === 'recovered') {
+      budgetAlert = null;
+    } else {
+      budgetAlert = {
+        provider: budgetBus.provider,
+        spendUsd: budgetBus.spendUsd,
+        capUsd: budgetBus.capUsd,
+        direction: budgetBus.direction,
+      };
+    }
+  });
+
+  function dismissBudgetAlert(): void {
+    budgetAlert = null;
+  }
 
   onMount(() => {
     if (auth.isRoot) void usage.loadAll();
@@ -308,6 +345,26 @@
     {/if}
   </header>
 
+  <!-- Live budget-exceeded banner (driven by BudgetExceeded WS event).
+       Dismissible; clears automatically on a "recovered" event. -->
+  {#if budgetAlert}
+    <div class="budget-banner" class:recovered={budgetAlert.direction === 'recovered'}>
+      <Icon name="warning" size={14} />
+      {#if budgetAlert.direction === 'recovered'}
+        <span>
+          Budget recovered — <strong>{budgetAlert.provider || 'workspace'}</strong>
+          spend (${budgetAlert.spendUsd.toFixed(2)}) is back below the ${budgetAlert.capUsd.toFixed(2)} cap.
+        </span>
+      {:else}
+        <span>
+          Budget exceeded — <strong>{budgetAlert.provider || 'workspace'}</strong>
+          spent ${budgetAlert.spendUsd.toFixed(2)} of the ${budgetAlert.capUsd.toFixed(2)} cap.
+        </span>
+      {/if}
+      <button class="close-btn" onclick={dismissBudgetAlert} title="Dismiss">×</button>
+    </div>
+  {/if}
+
   {#if !auth.isRoot}
     <div class="empty">
       <Icon name="gauge" size={28} />
@@ -379,7 +436,17 @@
           <div class="stat card">
             <span class="stat-label">Est. cost</span>
             <span class="stat-value">{fmtCost(usage.summary.total_cost_usd)}</span>
-            <span class="stat-sub">over {usage.summary.days}d</span>
+            <span class="stat-sub">
+              over {usage.summary.days}d
+              <!-- Pre-launch forecast chip: projects the cost of the next run
+                   using the most-used provider over the current window. -->
+              {#if usage.summary.providers.length > 0}
+                <CostForecastChip
+                  feature="agent"
+                  provider={usage.summary.providers[0].provider}
+                />
+              {/if}
+            </span>
           </div>
           <div class="stat card">
             <span class="stat-label">Activity</span>
@@ -575,6 +642,12 @@
         {/if}
       </div>
 
+      <!-- Work-graph attribution drilldown (B1): "why did this cost so much?" -->
+      <!-- Shows only when the engine is available (same guard as other panels). -->
+      {#if usage.status?.available}
+        <AttributionDrilldown days={usage.days} />
+      {/if}
+
       <!-- Budgets (opt-in spend caps) -->
       <div class="panel card">
         <div class="panel-head">
@@ -618,6 +691,19 @@
                 ? 'Enforcement is ON (blocking). Work in an over-budget scope can be blocked by the daemon.'
                 : 'Enforcement is ON (warn-only). Over-budget scopes are flagged but not blocked.'}
             </div>
+          {/if}
+          <!-- Pre-launch hint: surface the most-constrained cap as a lightweight
+               "heads up" for users about to start work, without hiding it behind
+               the Configure toggle. Only shows when not already in exceeded
+               state (that case is covered by the alert above). -->
+          {#if !usage.budgets.config.enforce || !usage.budgets.rows.some((r) => r.exceeded)}
+            {#each usage.budgets.rows.filter((r) => r.warning && !r.exceeded) as r (r.scope + ':' + r.key)}
+              <p class="dim small" style="margin-top: 4px;">
+                Pre-launch note: {r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
+                is at {(r.used_fraction * 100).toFixed(0)}% of its cap
+                ({fmtCost(r.spent_usd)} / {fmtCost(r.limit_usd)}).
+              </p>
+            {/each}
           {/if}
         {:else}
           <p class="dim small">No budgets set. Configure caps to track spend against a target.</p>
@@ -1526,6 +1612,38 @@
     font-weight: 600;
     margin-left: 4px;
     text-transform: uppercase;
+  }
+  /* Live WS budget-exceeded banner — shown at the top of the Usage page. */
+  .budget-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin: 0 0 8px;
+    border-radius: var(--radius-s, 6px);
+    background: color-mix(in srgb, var(--danger, #c0392b) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger, #c0392b) 40%, transparent);
+    color: var(--text);
+    font-size: 12.5px;
+  }
+  .budget-banner.recovered {
+    background: color-mix(in srgb, var(--success, #27ae60) 12%, transparent);
+    border-color: color-mix(in srgb, var(--success, #27ae60) 40%, transparent);
+  }
+  .budget-banner span {
+    flex: 1;
+  }
+  .budget-banner .close-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    color: var(--text-dim);
+    padding: 0 2px;
+  }
+  .budget-banner .close-btn:hover {
+    color: var(--text);
   }
   .budget-alert {
     margin-top: 10px;

@@ -5,6 +5,7 @@
 //! optional 0.0.0.0 listener controlled by the `network_listener` setting).
 
 mod config;
+mod mcp_tools;
 mod usage_tailer;
 
 use std::process::ExitCode;
@@ -18,14 +19,15 @@ use otto_orchestrator::Orchestrator;
 use otto_rbac::{RbacAuthenticator, RbacRoleChecker};
 use otto_server::modules::{module_routers, PtySpawner};
 use otto_server::{
-    build_router, spawn_metrics_sampler, spawn_session_event_listener, spawn_usage_recorder,
-    AuthScanner, CredentialMonitor, ServerCtx,
+    build_router, spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
+    spawn_usage_recorder, spawn_workflow_event_trigger_listener, AuthScanner, CredentialMonitor,
+    ServerCtx,
 };
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
     ActivityRepo, ConnectionSectionsRepo, ConnectionsRepo, GitStore, ImprovementsRepo,
-    IntegrationsRepo, IssuesRepo, ReviewsRepo, SessionsRepo, SettingsRepo, SkillEvalsRepo,
-    UsersRepo, WorkspacesRepo,
+    IntegrationsRepo, IssuesRepo, ReviewFindingsRepo, ReviewsRepo, SessionsRepo, SettingsRepo,
+    SkillEvalsRepo, UsersRepo, WorkspacesRepo,
 };
 use tokio::sync::{broadcast, watch};
 use tracing_subscriber::layer::SubscriberExt;
@@ -35,6 +37,32 @@ use crate::config::Config;
 
 fn main() -> ExitCode {
     augment_path();
+
+    // Subcommand dispatch. `ottod mcp-tools` runs the first-party read-only MCP
+    // tool server (Task B2b) over stdio instead of starting the daemon. It is
+    // spawned as a child of an agent's CLI via the workspace `.mcp.json`, talks
+    // JSON-RPC on stdin/stdout, and calls back into the running daemon. No
+    // tracing-to-stderr setup here — stdout/stdin are the MCP transport.
+    // Only `mcp-tools` is intercepted; any other argv falls through to the
+    // daemon (back-compat: the daemon historically ignores extra argv, and a
+    // leading flag like `--version` should keep the daemon's behaviour).
+    if std::env::args().nth(1).as_deref() == Some("mcp-tools") {
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("ottod mcp-tools: tokio runtime: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match runtime.block_on(mcp_tools::run()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ottod mcp-tools: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let cfg = Config::load();
 
     // Tracing: daily-rolling file in ~/Library/Logs/Otto/ AND stderr.
@@ -145,6 +173,10 @@ async fn run(cfg: Config) -> Result<(), String> {
             ))
             // Agent activity hooks post back to this loopback daemon.
             .with_ingest_base(format!("http://127.0.0.1:{}", cfg.port))
+            // First-party read-only MCP tool server (Task B2b): mint a per-session
+            // token when `otto_mcp_enabled` is on for the workspace, and inject the
+            // `otto` server (runs `ottod mcp-tools`) into the workspace `.mcp.json`.
+            .with_auth_repo(otto_rbac::AuthRepo::new(pool.clone()))
             // Record Otto-side lifecycle + user actions to the activity trail.
             .with_activity_repo(ActivityRepo::new(pool.clone())),
     );
@@ -261,6 +293,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         issues_store: IssuesRepo::new(pool.clone()),
         integrations_store: IntegrationsRepo::new(pool.clone()),
         reviews_store: ReviewsRepo::new(pool.clone()),
+        findings_store: ReviewFindingsRepo::new(pool.clone()),
         skill_evals_store: SkillEvalsRepo::new(pool.clone()),
         skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         orchestrator: Arc::clone(&orchestrator),
@@ -546,12 +579,22 @@ async fn run(cfg: Config) -> Result<(), String> {
         Err(e) => tracing::warn!("swarm restore: {e}"),
     }
 
+    // --- Workflow event-trigger listener (B8) ---
+    // Subscribes to the daemon event bus; for each event whose kind matches an
+    // enabled `event`-kind trigger's `event_kind` spec field, starts a workflow
+    // run via the same path as schedule/webhook triggers. Best-effort: errors
+    // inside the listener are logged and never propagate to the event producer.
+    let _workflow_event_trigger_handle = spawn_workflow_event_trigger_listener(ctx.clone());
+    tracing::info!("workflow event-trigger listener started");
+
     // --- Usage tracking + system metrics (embedded ClickHouse) ---
-    // The recorder mines usage from the activity-trail event stream; the sampler
-    // periodically writes CPU/RAM. Both are cheap no-ops until ClickHouse is
-    // available, so they're always started.
+    // The recorder mines usage from the activity-trail event stream; the
+    // metrics sampler writes CPU/RAM; the budget sampler rides the metrics tick
+    // to check spend-vs-cap and emit BudgetExceeded events (with dedupe). All
+    // three are cheap no-ops until ClickHouse is available.
     spawn_usage_recorder(ctx.clone());
     spawn_metrics_sampler(ctx.clone());
+    spawn_budget_sampler(ctx.clone());
     if usage.available() {
         tracing::info!("usage tracking started (embedded clickhouse)");
     } else {

@@ -336,3 +336,21 @@ pub struct SwarmPreset {
     pub max_attempts: Option<i64>,
     pub agents: Vec<PresetAgent>,
 }
+
+// ---------------------------------------------------------------------------
+// Product↔Swarm closure response  (`GET /swarm/tasks/{tid}/story`)
+// ---------------------------------------------------------------------------
+
+/// Back-link from a swarm task to the Product story that originated it (if any).
+/// Returned by `GET /swarm/tasks/{tid}/story`.  Read-only; no migration needed.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskStoryLink {
+    /// The source Product story, when the task's project was created from a
+    /// story's implementation plan (Plan → Swarm hand-off).  `None` when the
+    /// task was created directly in the swarm UI.
+    pub story: Option<otto_state::ProductStory>,
+    /// Acceptance criteria extracted from the task `description` field.  For
+    /// tasks generated from a story plan this often contains structured ACs.
+    /// Surfaced here as a convenience so the task view can show them directly.
+    pub acceptance: Option<String>,
+}

@@ -1160,6 +1160,25 @@ export interface ReviewFinding {
   line: number | null;
   severity: string; // 'info' | 'warn' | 'bug'
   body: string;
+  /** Stable sha2 fingerprint for cross-run deduplication (added A1). */
+  fingerprint?: string | null;
+  /** Lifecycle state: open | fixing | resolved | regressed | declined (added A1). */
+  state?: string | null;
+}
+
+/** A persistent finding row from /reviews/{id}/findings (A1 verified-review loop). */
+export interface ReviewFindingRow {
+  id: string;
+  review_id: string;
+  fingerprint: string;
+  path: string | null;
+  line: number | null;
+  severity: string;
+  category: string | null;
+  body: string;
+  state: string; // open | fixing | resolved | regressed | declined
+  fix_session_id: string | null;
+  updated_at: string;
 }
 
 export interface ReviewAgentState {
@@ -1227,7 +1246,18 @@ export interface MergeReadiness {
   unresolved_blocker_count: number;
   unresolved_total: number;
   resolved_count: number;
-  last_updated: string | null;
+  last_updated?: string | null;
+  // A1 additions from the /merge-readiness endpoint:
+  total_findings?: number | null;
+  /** Aggregated CI state: "success" | "failure" | "pending" | "none" */
+  ci_status?: string | null;
+  /** Number of human approvals on the PR. */
+  approvals?: number | null;
+  /** Whether the PR is mergeable according to the provider (null = unknown). */
+  mergeable?: boolean | null;
+  conflicts?: boolean | null;
+  branch_freshness?: string | null;
+  unpushed?: boolean | null;
 }
 
 export interface StartReviewReq {
@@ -2051,6 +2081,50 @@ export interface WorkflowRun {
   error?: string | null;
   started_at: string;
   finished_at?: string | null;
+  /** True when the run is paused waiting for a human_approval node decision. */
+  waiting_approval?: boolean;
+  /** The node id of the human_approval node the run is paused at. */
+  approval_node_id?: string | null;
+  /** User id of the person who approved (null if rejected or pending). */
+  approved_by?: string | null;
+  /** Human note attached to the approval/rejection decision. */
+  approval_note?: string | null;
+  /** RFC-3339 timestamp when the decision was recorded. */
+  approved_at?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow triggers (schedule / webhook / event)
+// ---------------------------------------------------------------------------
+
+export type TriggerKind = 'schedule' | 'webhook' | 'event';
+
+/** A workflow trigger row from the database. */
+export interface WorkflowTrigger {
+  id: Id;
+  workflow_id: Id;
+  kind: TriggerKind;
+  /** Kind-specific configuration object. */
+  spec: Record<string, unknown>;
+  enabled: boolean;
+  created_at: string;
+}
+
+export interface CreateTriggerReq {
+  kind: TriggerKind;
+  spec?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface UpdateTriggerReq {
+  spec?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface ApproveRunReq {
+  node_id: string;
+  approved: boolean;
+  note?: string | null;
 }
 
 export interface NodeTypeSpec {
@@ -2203,6 +2277,8 @@ export interface QueryResult {
   stats: QueryStats;
   message?: string | null;
   truncated: boolean;
+  /** True when the server ran cell values through `otto_core::redact` (QueryRequest.mask=true). */
+  masked?: boolean;
 }
 
 /** Selectable output format for the streaming local-file export. */
@@ -2845,6 +2921,10 @@ export interface ConsumeReq {
   /** Applied post-decode in the service layer. */
   value_filter?: string | null;
   decode?: ValueFormat;
+  /** When true, the server runs message key/value/headers through
+   * `otto_core::redact` before returning. Raw payloads never leave the server
+   * when this flag is set. The response `masked` field confirms it. */
+  mask?: boolean;
 }
 
 export interface DecodedPayload {
@@ -2879,6 +2959,9 @@ export interface ConsumeResp {
   messages: KafkaMessage[];
   partitions: PartitionRange[];
   truncated: boolean;
+  /** True when message payloads were run through `otto_core::redact` server-side
+   * (ConsumeReq.mask=true). The UI surfaces this as a badge. */
+  masked?: boolean;
 }
 
 export interface ProduceReq {
@@ -2983,4 +3066,60 @@ export interface SchemaSubject {
   id: number;
   schema_type: string;
   schema: string;
+}
+
+// ---------------------------------------------------------------------------
+// Context-packet (B2a) — send API/DB/broker payloads to agent sessions
+// ---------------------------------------------------------------------------
+
+/** Source kind for a context packet. */
+export type ContextPacketKind = 'api' | 'db' | 'broker';
+
+/** Request body for `/context-packet/preview` and `/context-packet/send`. */
+export interface ContextPacketReq {
+  kind: ContextPacketKind;
+  payload: unknown;
+}
+
+/** Per-kind redaction tally entry (mirrors `RedactionHit` in otto-core). */
+export interface RedactionHit {
+  kind: string;
+  count: number;
+}
+
+/** Response from `POST /context-packet/preview`. */
+export interface ContextPacketPreviewResp {
+  redacted: unknown;
+  redactions: RedactionHit[];
+  size_bytes: number;
+}
+
+/** Response from `POST /context-packet/send`. */
+export interface ContextPacketSendResp {
+  ok: boolean;
+  size_bytes: number;
+  redactions: RedactionHit[];
+}
+
+// ---------------------------------------------------------------------------
+// Cross-module search  (GET /workspaces/{id}/search?q=)
+// ---------------------------------------------------------------------------
+
+/**
+ * One ranked result from the cross-module search endpoint.
+ * `kind` discriminates the object type; `actions[0]` is always the primary
+ * "open" navigation action.
+ */
+export interface SearchHit {
+  /** Object type: "story" | "workflow" | "api_request" | "swarm_task" |
+   *  "swarm_project" | "memory" | "repo" | "broker_cluster" */
+  kind: string;
+  /** Row id in the originating table. */
+  id: string;
+  /** Primary display title. */
+  title: string;
+  /** Secondary display text (method+URL, status, collection, …). */
+  subtitle?: string;
+  /** Contextual action labels; first entry is the primary "open" action. */
+  actions: string[];
 }

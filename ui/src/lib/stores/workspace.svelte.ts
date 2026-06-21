@@ -32,9 +32,10 @@ class WorkspaceStore {
   injections: Record<Id, { text: string; n: number }> = $state({});
   sessionsLoading = $state(false);
 
-  /** view mode for Agent Mode: tabbed (one at a time) or tiled (grid). */
-  viewMode: 'tabs' | 'tiled' = $state(
-    (localStorage.getItem('otto_view_mode') as 'tabs' | 'tiled') ?? 'tabs',
+  /** view mode for Agent Mode: tabbed (one at a time), tiled (grid), or the
+   *  Mission Control work-queue surface. */
+  viewMode: 'tabs' | 'tiled' | 'mission' = $state(
+    (localStorage.getItem('otto_view_mode') as 'tabs' | 'tiled' | 'mission') ?? 'tabs',
   );
 
   /** In tiled view, a session id to show maximized (zoomed) on its own. */
@@ -470,7 +471,7 @@ class WorkspaceStore {
     if (idx >= 0 && idx < this.panes.length) this.focusedPane = idx;
   }
 
-  setViewMode(mode: 'tabs' | 'tiled'): void {
+  setViewMode(mode: 'tabs' | 'tiled' | 'mission'): void {
     this.viewMode = mode;
     if (mode === 'tabs') this.maximizedId = null;
     localStorage.setItem('otto_view_mode', mode);

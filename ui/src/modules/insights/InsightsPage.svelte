@@ -1,6 +1,7 @@
 <script lang="ts">
-  // Insights view — lists generated HTML insight reports (filterable by kind),
-  // opens a report in an in-app iframe, and runs an ad-hoc report on demand.
+  // Insights view — two tabs:
+  //   • Reports: generated HTML insight reports (filterable by kind)
+  //   • Health:  Capability & Health Registry (B3, GET /capabilities)
   // Scheduled reports are opt-in (Settings → Insights) and catch-up.
   import { insightsApi } from '../../lib/api/insights';
   import type {
@@ -14,6 +15,10 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { downloadText } from '../../lib/components/exporters';
+  import CapabilitiesPage from './CapabilitiesPage.svelte';
+
+  // Tab: 'reports' (default) or 'health' (sub-route `#/insights/health`).
+  const tab = $derived(router.parts[1] === 'health' ? 'health' : 'reports');
 
   let reports: InsightReport[] = $state([]);
   let loading = $state(true);
@@ -218,6 +223,22 @@
 </script>
 
 <div class="page">
+  <!-- Tab switcher: Reports | Health -->
+  <div class="tab-bar">
+    <button class="tab" class:active={tab === 'reports'} onclick={() => router.go('insights')}>
+      <Icon name="gauge" size={13} />
+      Reports
+    </button>
+    <button class="tab" class:active={tab === 'health'} onclick={() => router.go('insights/health')}>
+      <Icon name="check" size={13} />
+      Health
+    </button>
+  </div>
+
+  {#if tab === 'health'}
+    <CapabilitiesPage />
+  {:else}
+  <!-- ---- Reports tab (original content follows) ---- -->
   <div class="page-header head-row">
     <div>
       <h1>Insights</h1>
@@ -320,9 +341,10 @@
       </div>
     {/if}
   {/if}
+  {/if}<!-- end tab === reports -->
 </div>
 
-<!-- Full report overlay -->
+<!-- Full report overlay (outside tab guard — not rendered in health tab) -->
 {#if openReport}
   {@const rep = openReport}
   <div class="overlay" role="dialog" aria-modal="true" aria-label="Insight report">
@@ -354,6 +376,32 @@
 {/if}
 
 <style>
+  /* Tab bar (Reports / Health) */
+  .tab-bar {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border, #e2e8f0);
+    margin-bottom: 20px;
+    padding: 0 0 0 0;
+  }
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: none;
+    background: transparent;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 120ms ease-out, border-color 120ms ease-out;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 500; }
+
   .head-row {
     display: flex;
     align-items: flex-start;

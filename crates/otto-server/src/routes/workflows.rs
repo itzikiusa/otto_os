@@ -1,7 +1,9 @@
 //! Workflow engine routes: CRUD, the node-type catalog, agent-mode generation
-//! (describe a flow → we build the graph), and run + run-status.
+//! (describe a flow → we build the graph), run + run-status, triggers, and
+//! the human-approval resume endpoint.
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::Json;
 use otto_core::domain::WorkspaceRole;
 use otto_core::workflows::{
@@ -9,9 +11,9 @@ use otto_core::workflows::{
     Workflow, WorkflowEdge, WorkflowGraph, WorkflowNode, WorkflowRun, WorkflowTemplate,
 };
 use otto_core::{Error, Id};
-use otto_state::WorkflowsRepo;
+use otto_state::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger, WorkflowsRepo};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
@@ -447,6 +449,278 @@ fn game_templates() -> Vec<WorkflowTemplate> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// Trigger CRUD: GET/POST/PATCH/DELETE on workflow triggers
+// ---------------------------------------------------------------------------
+
+fn triggers(ctx: &ServerCtx) -> TriggersRepo {
+    TriggersRepo::new(ctx.pool.clone())
+}
+
+/// `GET /workflows/{id}/triggers`
+pub async fn list_triggers(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<WorkflowTrigger>>> {
+    let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(triggers(&ctx).list(&id).await.map_err(ApiError)?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTriggerReq {
+    pub kind: String,
+    #[serde(default)]
+    pub spec: Value,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `POST /workflows/{id}/triggers`
+pub async fn create_trigger(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<CreateTriggerReq>,
+) -> ApiResult<Json<WorkflowTrigger>> {
+    let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
+    if !matches!(req.kind.as_str(), "schedule" | "webhook" | "event") {
+        return Err(ApiError(Error::Invalid(
+            "trigger kind must be 'schedule', 'webhook', or 'event'".into(),
+        )));
+    }
+    // For webhook triggers, auto-generate a cryptographically random token if
+    // the caller didn't supply one.  Always normalise spec to a JSON object.
+    let mut spec = match req.spec {
+        Value::Object(m) => Value::Object(m),
+        _ => Value::Object(Default::default()),
+    };
+    if req.kind == "webhook" && spec.get("token").and_then(Value::as_str).is_none() {
+        let token = generate_webhook_token();
+        if let Value::Object(obj) = &mut spec {
+            obj.insert("token".into(), Value::String(token));
+        }
+    }
+    let t = triggers(&ctx)
+        .create(NewWorkflowTrigger {
+            workflow_id: id.clone(),
+            kind: req.kind,
+            spec,
+            enabled: req.enabled,
+        })
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(t))
+}
+
+/// Produce a 32-byte URL-safe random token for webhook triggers.
+fn generate_webhook_token() -> String {
+    use std::fmt::Write;
+    let bytes: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        write!(s, "{b:02x}").unwrap();
+    }
+    s
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTriggerReq {
+    pub spec: Option<Value>,
+    pub enabled: Option<bool>,
+}
+
+/// `PATCH /workflow-triggers/{id}`
+pub async fn update_trigger(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<UpdateTriggerReq>,
+) -> ApiResult<Json<WorkflowTrigger>> {
+    let t = triggers(&ctx).get(&id).await.map_err(ApiError)?;
+    let wf = repo(&ctx).get(&t.workflow_id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
+    let updated = triggers(&ctx)
+        .update(&id, req.spec, req.enabled)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
+}
+
+/// `DELETE /workflow-triggers/{id}`
+pub async fn delete_trigger(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<StatusCode> {
+    let t = triggers(&ctx).get(&id).await.map_err(ApiError)?;
+    let wf = repo(&ctx).get(&t.workflow_id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
+    triggers(&ctx).delete(&id).await.map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Webhook trigger: PUBLIC-by-token endpoint
+// Route: POST /workflows/{id}/webhook/{token}
+// Policy: PUBLIC (validated by token in the handler, not by bearer auth).
+// Consumers: any external system that knows the workflow id + token.
+// ---------------------------------------------------------------------------
+
+/// `POST /workflows/{id}/webhook/{token}` — start a workflow run. The bearer
+/// auth is NOT required; the token in the URL path IS the credential.
+/// The request body (if any, JSON) becomes the run input.
+pub async fn webhook_trigger(
+    Path((wf_id, token)): Path<(Id, String)>,
+    State(ctx): State<ServerCtx>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<WorkflowRun>> {
+    // Verify the token belongs to an enabled webhook trigger on this workflow.
+    let _trigger = triggers(&ctx)
+        .find_webhook(&wf_id, &token)
+        .await
+        .map_err(|_| ApiError(Error::Unauthorized))?;
+
+    let wf = repo(&ctx).get(&wf_id).await.map_err(ApiError)?;
+    let ws = ctx.workspaces.get(&wf.workspace_id).await.map_err(ApiError)?;
+
+    // Parse the body as JSON input; fall back to null if empty/invalid.
+    let input: Value = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap_or(Value::Null)
+    };
+
+    let run = repo(&ctx)
+        .create_run(&wf.id, &wf.workspace_id, &input)
+        .await
+        .map_err(ApiError)?;
+
+    let ctx2 = ctx.clone();
+    let run_id = run.id.clone();
+    tokio::spawn(async move {
+        workflow_engine::run_workflow(ctx2, ws, wf, run_id, input, None, false).await;
+    });
+
+    Ok(Json(run))
+}
+
+// ---------------------------------------------------------------------------
+// Human-approval resume: POST /workflow-runs/{id}/approve
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ApproveRunReq {
+    /// The node id of the `human_approval` node being resolved.
+    pub node_id: String,
+    /// `true` = approve, `false` = reject.
+    pub approved: bool,
+    /// Optional human-readable note (shown in the run log).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `POST /workflow-runs/{id}/approve` — resume (or reject) a paused run.
+///
+/// The `human_approval` node polls the run row's `waiting_approval` flag.
+/// This handler:
+///   1. Validates the caller is an Editor in the run's workspace.
+///   2. Writes the decision into the row (`approved_by` + `approval_note`).
+///   3. Clears `waiting_approval = 0` so the engine's poll loop resumes.
+///   4. On rejection, leaves `approved_by = NULL` (the engine detects this
+///      and errors the node).
+pub async fn approve_run(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<ApproveRunReq>,
+) -> ApiResult<Json<Value>> {
+    let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
+
+    // Confirm the run is actually waiting for approval.
+    let row = sqlx::query(
+        "SELECT waiting_approval, approval_node_id FROM workflow_runs WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| ApiError(Error::Internal(format!("approve_run: {e}"))))?
+    .ok_or_else(|| ApiError(Error::NotFound("run".into())))?;
+
+    use sqlx::Row as _;
+    let waiting: i64 = row.get("waiting_approval");
+    if waiting == 0 {
+        return Err(ApiError(Error::Invalid(
+            "run is not currently waiting for approval".into(),
+        )));
+    }
+    let node_in_row: Option<String> = row.get("approval_node_id");
+    if node_in_row.as_deref() != Some(&req.node_id) {
+        return Err(ApiError(Error::Invalid(format!(
+            "approval node_id mismatch: run is paused at '{}', not '{}'",
+            node_in_row.as_deref().unwrap_or("?"),
+            req.node_id
+        ))));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    if req.approved {
+        // Record the approver and clear the pause flag atomically.
+        sqlx::query(
+            "UPDATE workflow_runs
+             SET waiting_approval = 0,
+                 approved_by     = ?,
+                 approval_note   = ?,
+                 approved_at     = ?
+             WHERE id = ?",
+        )
+        .bind(&user.id)
+        .bind(req.note.as_deref().unwrap_or(""))
+        .bind(&now)
+        .bind(&id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("approve_run record: {e}"))))?;
+
+        Ok(Json(json!({
+            "approved": true,
+            "approved_by": user.id,
+            "note": req.note,
+        })))
+    } else {
+        // Rejection: clear `approved_by` (NULL) and clear the pause flag so the
+        // engine's poll loop sees `waiting_approval = 0` AND `approved_by = NULL`
+        // and errors the node.
+        sqlx::query(
+            "UPDATE workflow_runs
+             SET waiting_approval = 0,
+                 approved_by     = NULL,
+                 approval_note   = ?,
+                 approved_at     = ?
+             WHERE id = ?",
+        )
+        .bind(req.note.as_deref().unwrap_or("rejected"))
+        .bind(&now)
+        .bind(&id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("reject_run record: {e}"))))?;
+
+        Ok(Json(json!({
+            "approved": false,
+            "rejected_by": user.id,
+            "note": req.note,
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +751,27 @@ mod tests {
                 t.id
             );
         }
+    }
+
+    #[test]
+    fn all_new_kinds_are_in_catalog() {
+        let new_kinds = [
+            "db_query", "broker_peek", "channel_notify", "budget_gate",
+            "human_approval", "swarm_task", "api_run",
+            "product_analyze", "product_rewrite", "product_plan", "review_run",
+        ];
+        for kind in new_kinds {
+            assert!(
+                workflow_engine::is_known_kind(kind),
+                "catalog missing new kind '{kind}'"
+            );
+        }
+    }
+
+    #[test]
+    fn webhook_token_is_64_hex_chars() {
+        let t = super::generate_webhook_token();
+        assert_eq!(t.len(), 64, "token should be 32 bytes as 64 hex chars");
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

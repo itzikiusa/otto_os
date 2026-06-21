@@ -31,6 +31,7 @@ use tokio::sync::Mutex;
 use crate::config::{self};
 use crate::driver::Driver;
 use crate::registry::Registry;
+use otto_core::redact;
 use otto_ssh::SshTunnel;
 use crate::types::{
     statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse, Engine,
@@ -525,6 +526,22 @@ impl DbViewerService {
         let started = Instant::now();
         let result = r.driver.run_tracked(&r.config, req, &token).await;
         let elapsed = started.elapsed().as_millis() as i64;
+
+        // Apply server-side PII masking when the request opts in. Raw cell values
+        // are passed through `otto_core::redact::redact_json` before leaving the
+        // server — unmasked data never reaches the client when the flag is set.
+        let result = result.map(|mut res| {
+            if req.mask == Some(true) {
+                for row in &mut res.rows {
+                    for cell in row.iter_mut() {
+                        *cell = redact::redact_json(cell).value;
+                    }
+                }
+                res.masked = true;
+            }
+            res
+        });
+
         match &result {
             Ok(res) => {
                 let _ = self

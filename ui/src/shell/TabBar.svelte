@@ -142,9 +142,14 @@
             : []),
           { separator: true },
           {
-            label: ws.viewMode === 'tabs' ? 'Switch to tiled view' : 'Switch to tabbed view',
-            icon: ws.viewMode === 'tabs' ? 'grid' : 'square',
-            action: () => ws.setViewMode(ws.viewMode === 'tabs' ? 'tiled' : 'tabs'),
+            label: ws.viewMode === 'tiled' ? 'Switch to tabbed view' : 'Switch to tiled view',
+            icon: ws.viewMode === 'tiled' ? 'square' : 'grid',
+            action: () => ws.setViewMode(ws.viewMode === 'tiled' ? 'tabs' : 'tiled'),
+          },
+          {
+            label: ws.viewMode === 'mission' ? 'Exit Mission Control' : 'Mission Control',
+            icon: 'gauge',
+            action: () => ws.setViewMode(ws.viewMode === 'mission' ? 'tabs' : 'mission'),
           },
         ])}
       >
@@ -211,6 +216,14 @@
       aria-label="Tiled view"
     >
       <Icon name="grid" size={12} />
+    </button>
+    <button
+      class:active={ws.viewMode === 'mission'}
+      onclick={() => ws.setViewMode('mission')}
+      title="Mission Control — work queue"
+      aria-label="Mission Control"
+    >
+      <Icon name="gauge" size={12} />
     </button>
   </div>
   <button

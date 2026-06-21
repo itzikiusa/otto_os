@@ -29,6 +29,12 @@ pub trait SwarmCtx: Clone + Send + Sync + 'static {
     /// Providers (agent CLIs) currently installed/usable, for preset mapping and
     /// the recruiter. Best-effort; order = preference.
     fn available_providers(&self) -> Vec<String>;
+    /// Product repository — used by the Swarm↔Product closure endpoint to read
+    /// the Product story that originated a swarm task's project.  Returns `None`
+    /// for host implementations that have no product layer.
+    fn product_repo(&self) -> Option<&otto_state::ProductRepo> {
+        None
+    }
 }
 
 pub(crate) struct ApiErr(pub Error);
@@ -98,6 +104,8 @@ pub fn router<S: SwarmCtx>() -> Router<S> {
             "/swarm/tasks/{tid}",
             axum::routing::patch(update_task::<S>).delete(delete_task::<S>),
         )
+        // Tasks — item GET + closure back-link to Product story
+        .route("/swarm/tasks/{tid}/story", get(task_story_link::<S>))
         // Runs
         .route("/workspaces/{id}/swarm/runs", get(list_runs::<S>))
         .route("/swarm/runs/{rid}", get(get_run::<S>))
@@ -422,6 +430,47 @@ async fn graph<S: SwarmCtx>(
     let swarm = s.swarm().get_swarm(&sid).await?;
     check(&s, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
     Ok(Json(s.swarm().graph(&sid).await?))
+}
+
+// -- Swarm↔Product closure  (GET /swarm/tasks/{tid}/story) ------------------
+
+/// `GET /swarm/tasks/{tid}/story` — The Product story that originated this
+/// swarm task, if any.  Traversal: task → project (via `project_id`) → story
+/// (via `swarm_projects.story_id`) → product story row.
+///
+/// Read-only join; requires workspace Viewer. Returns `TaskStoryLink` with
+/// `story: null` when no story is linked.  Always 200 — never 404 for a
+/// "no story" case; callers can distinguish by the `story` field.
+async fn task_story_link<S: SwarmCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(tid): Path<Id>,
+) -> ApiResult<Json<TaskStoryLink>> {
+    let task = s.swarm().get_task(&tid).await?;
+    check(&s, &user, &task.workspace_id, WorkspaceRole::Viewer).await?;
+
+    let Some(product_repo) = s.product_repo() else {
+        // Host application has no product layer; return empty link.
+        return Ok(Json(TaskStoryLink { story: None, acceptance: None }));
+    };
+
+    // Find the swarm project for this task, then look up its source story.
+    let project = s.swarm().repo.get_project(&task.project_id).await.ok();
+    let story_id = project.as_ref().and_then(|p| p.story_id.clone());
+    let story = match story_id {
+        Some(ref sid) => product_repo.get_story(sid).await.ok(),
+        None => None,
+    };
+
+    // Acceptance criteria: the task description often holds structured ACs
+    // (especially when generated from a plan); surface as a convenience field.
+    let acceptance = if task.description.trim().is_empty() {
+        None
+    } else {
+        Some(task.description.clone())
+    };
+
+    Ok(Json(TaskStoryLink { story, acceptance }))
 }
 
 // -- event helpers ----------------------------------------------------------

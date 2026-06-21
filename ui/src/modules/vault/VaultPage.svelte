@@ -1,18 +1,54 @@
 <script lang="ts">
   // Obsidian-like memory vault: index + hybrid search + note reader + backlinks
   // + a dependency-free SVG knowledge graph. Scoped to the current workspace.
+  // Includes lifecycle governance: state chips/filter, forget-with-undo, merge,
+  // split, provenance diff, and governed import of AGENTS.md/CLAUDE.md/.cursorrules.
   import { vault } from './vault.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
   import type { Memory } from '../../lib/api/types';
   import { copyAsJson } from '../../lib/components/exporters';
+  import DiffView from '../../lib/components/DiffView.svelte';
+  import MemoryStateBadge from './MemoryStateBadge.svelte';
+  import ImportGovDialog from './ImportGovDialog.svelte';
+  import MergeDialog from './MergeDialog.svelte';
+  import SplitDialog from './SplitDialog.svelte';
+  import type { MemoryState } from './vault.svelte';
 
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // Provenance diff: show the body of the selected memory against its
+  // superseded-by sibling (if present and loaded).
+  let supersededMemory = $state<Memory | null>(null);
+  let showProvDiff = $state(false);
+
+  // Dialog visibility flags.
+  let showImport = $state(false);
+  let showMerge = $state(false);
+  let showSplit = $state(false);
+
   $effect(() => {
-    // Reload when the workspace changes.
     if (ws.currentId) void vault.load();
   });
+
+  // Load the superseded-by memory whenever the selected note changes.
+  $effect(() => {
+    const m = vault.selected;
+    supersededMemory = null;
+    showProvDiff = false;
+    if (m?.superseded_by && ws.currentId) {
+      void loadSuperseded(m.superseded_by, ws.currentId);
+    }
+  });
+
+  async function loadSuperseded(id: string, wsId: string) {
+    try {
+      const { api } = await import('../../lib/api/client');
+      supersededMemory = await api.get<Memory>(`/workspaces/${wsId}/memories/${id}`);
+    } catch {
+      // superseded memory may be inaccessible — ignore
+    }
+  }
 
   function onSearchInput() {
     clearTimeout(searchTimer);
@@ -20,8 +56,18 @@
   }
 
   function pick(m: Memory) {
-    void vault.select(m);
+    // In merge mode, toggle selection; otherwise open the note.
+    if (vault.mergeMode) {
+      vault.toggleMergeSelect(m);
+    } else {
+      void vault.select(m);
+    }
   }
+
+  // Merge sources from the store (resolved Memory objects).
+  const mergeSources = $derived.by(() => {
+    return vault.items.filter((m) => vault.mergeIds.includes(m.id));
+  });
 
   // --- graph layout (circular, no external lib) ---
   type Pt = { x: number; y: number };
@@ -63,6 +109,14 @@
         return '#74c0fc';
     }
   }
+
+  const STATE_FILTER_OPTS: Array<{ value: MemoryState | ''; label: string }> = [
+    { value: '', label: 'all' },
+    { value: 'suggested', label: 'suggested' },
+    { value: 'accepted', label: 'accepted' },
+    { value: 'stale', label: 'stale' },
+    { value: 'contradicted', label: 'contradicted' },
+  ];
 </script>
 
 <div class="vault">
@@ -104,12 +158,49 @@
       </div>
     {/if}
 
+    <!-- State filter chips -->
+    <div class="vault-chips state-chips">
+      {#each STATE_FILTER_OPTS as opt (opt.value)}
+        <button
+          class:active={vault.stateFilter === opt.value}
+          onclick={() => (vault.stateFilter = opt.value)}
+        >
+          {opt.label}
+        </button>
+      {/each}
+    </div>
+
+    <!-- Merge mode toolbar -->
+    <div class="merge-bar">
+      {#if !vault.mergeMode}
+        <button class="merge-enter" onclick={() => (vault.mergeMode = true)} title="Select memories to merge">
+          Merge…
+        </button>
+        <button class="import-btn" onclick={() => (showImport = true)} title="Import AGENTS.md / CLAUDE.md / .cursorrules">
+          Import…
+        </button>
+      {:else}
+        <span class="merge-hint">{vault.mergeIds.length} selected</span>
+        <button
+          class="merge-go"
+          disabled={vault.mergeIds.length < 2}
+          onclick={() => (showMerge = true)}
+        >
+          Merge {vault.mergeIds.length}
+        </button>
+        <button onclick={() => { vault.mergeMode = false; vault.mergeIds = []; }}>
+          Cancel
+        </button>
+      {/if}
+    </div>
+
     <ul class="vault-list">
       {#each vault.visible as m (m.id)}
         <li>
           <button
             class="vault-item"
             class:active={vault.selected?.id === m.id}
+            class:merge-selected={vault.mergeIds.includes(m.id)}
             onclick={() => pick(m)}
           >
             <span class="kind" style:background={nodeColor(m.kind)}>{m.kind}</span>
@@ -162,13 +253,32 @@
           <span class="badge" style:background={nodeColor(m.kind)}>{m.kind}</span>
           <span class="badge">{m.collection}</span>
           <span class="badge">{m.visibility}</span>
+          <!-- Governance state chip -->
+          <MemoryStateBadge memory={m} />
           {#each m.tags as t (t)}<span class="tag">#{t}</span>{/each}
         </div>
         <div class="prov">
           source: {m.source_kind}{#if m.source_ref}
             · {m.source_ref}{/if} · confidence {m.confidence.toFixed(2)}
         </div>
+        {#if m.superseded_by}
+          <div class="prov warn">
+            Superseded by: <code>{m.superseded_by}</code>
+            {#if supersededMemory}
+              <button class="inline-btn" onclick={() => (showProvDiff = !showProvDiff)}>
+                {showProvDiff ? 'Hide diff' : 'Show diff'}
+              </button>
+            {/if}
+          </div>
+        {/if}
       </header>
+
+      {#if showProvDiff && supersededMemory}
+        <section class="prov-diff">
+          <h3>Provenance diff (this → superseded)</h3>
+          <DiffView before={m.body} after={supersededMemory.body} mode="word" contextLines={3} />
+        </section>
+      {/if}
 
       <article class="note-body">{@html renderMarkdown(m.body)}</article>
 
@@ -205,13 +315,36 @@
         <button class="copy-btn" onclick={() => void copyAsJson(m)} title="Copy memory as JSON">
           Copy JSON
         </button>
-        <button class="danger" onclick={() => void vault.forget(m)}>Forget</button>
+        <button onclick={() => (showSplit = true)} title="Split this memory into parts">
+          Split…
+        </button>
+        <!-- Governance forget with undo affordance -->
+        {#if vault._pendingUndo}
+          <button class="undo-btn" onclick={() => void vault.undoForget()}>
+            Undo forget
+          </button>
+        {:else}
+          <button class="danger" onclick={() => void vault.softForget(m)}>Forget</button>
+        {/if}
       </footer>
     {:else}
       <div class="placeholder">Select a memory to read it.</div>
     {/if}
   </main>
 </div>
+
+<!-- Dialogs -->
+{#if showImport}
+  <ImportGovDialog onclose={() => (showImport = false)} />
+{/if}
+
+{#if showMerge && mergeSources.length >= 2}
+  <MergeDialog sources={mergeSources} onclose={() => (showMerge = false)} />
+{/if}
+
+{#if showSplit && vault.selected}
+  <SplitDialog source={vault.selected} onclose={() => (showSplit = false)} />
+{/if}
 
 <style>
   .vault {
@@ -253,6 +386,37 @@
     opacity: 1;
     font-weight: 600;
   }
+  .state-chips {
+    border-top: 1px solid var(--border, #2a2a2a);
+    padding-top: 6px;
+  }
+  .merge-bar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 4px 8px 6px;
+    border-bottom: 1px solid var(--border, #2a2a2a);
+    flex-wrap: wrap;
+  }
+  .merge-bar button {
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 5px;
+    border: 1px solid var(--border, #444);
+    background: transparent;
+    color: var(--text-dim, #aaa);
+    cursor: pointer;
+  }
+  .merge-enter, .import-btn {
+    opacity: 0.8;
+  }
+  .merge-go {
+    background: var(--accent, #4c6ef5) !important;
+    color: #fff !important;
+    border-color: transparent !important;
+  }
+  .merge-go:disabled { opacity: 0.4 !important; cursor: default !important; }
+  .merge-hint { font-size: 11px; opacity: 0.6; }
   .vault-list {
     list-style: none;
     margin: 0;
@@ -272,6 +436,10 @@
   }
   .vault-item.active {
     background: var(--surface-2, #1e2330);
+  }
+  .vault-item.merge-selected {
+    outline: 2px solid var(--accent, #4c6ef5);
+    outline-offset: -2px;
   }
   .vault-item .kind {
     font-size: 9px;
@@ -319,6 +487,36 @@
     font-size: 11px;
     opacity: 0.6;
     margin-top: 6px;
+  }
+  .prov.warn {
+    opacity: 0.85;
+    color: #fab005;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .prov.warn code {
+    font-size: 10px;
+    opacity: 0.8;
+    word-break: break-all;
+  }
+  .inline-btn {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid currentColor;
+    background: transparent;
+    cursor: pointer;
+    color: inherit;
+  }
+  .prov-diff {
+    margin: 12px 0;
+  }
+  .prov-diff h3 {
+    font-size: 12px;
+    opacity: 0.7;
+    margin: 0 0 6px;
   }
   .note-body {
     margin-top: 14px;
@@ -372,5 +570,17 @@
   .danger {
     color: #ff6b6b;
     font-size: 12px;
+  }
+  .undo-btn {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 5px;
+    border: 1px solid #fab005;
+    color: #fab005;
+    background: transparent;
+    cursor: pointer;
+  }
+  .undo-btn:hover {
+    background: color-mix(in srgb, #fab005 15%, transparent);
   }
 </style>

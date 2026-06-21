@@ -288,6 +288,23 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // ---- Agents (sessions, orchestration, broadcast, handover, input, LSP) ----
     // §3.2: list/inspect own = View; create/restart/archive/input/broadcast/
     // orchestrate = Edit. No Admin tier.
+    // Send-to-agent context packets (preview + send) inject into a session = Edit
+    // (the handler additionally enforces session owner/admin).
+    if p.starts_with("/workspaces/{wid}/agents/") {
+        return Require(Agents, Edit);
+    }
+    // Mission Control (B4): work-queue read aggregation = View; saved-view
+    // create/delete = Edit (the handler adds the per-view owner guard).
+    if p.starts_with("/workspaces/{id}/mission") {
+        return Require(Agents, if get { View } else { Edit });
+    }
+    if p.starts_with("/mission-views/") {
+        return Require(Agents, Edit);
+    }
+    // Cross-module workspace search (B5): broad read-only fan-out.
+    if p == "/workspaces/{id}/search" {
+        return Require(Agents, View);
+    }
     if p == "/workspaces/{id}/sessions" {
         return Require(Agents, if get { View } else { Edit });
     }
@@ -355,9 +372,16 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // PR review machinery, commit/push/pull/merge/stage etc. writes=Edit.
         return Require(Git, if get { View } else { Edit });
     }
-    if p.starts_with("/pr-review-comments/") || p.starts_with("/reviews/") {
-        // approve / decline a review comment; review handoff / agent retry.
+    if p.starts_with("/pr-review-comments/") {
+        // approve / decline a review comment: these are always writes.
         return Require(Git, Edit);
+    }
+    if p.starts_with("/reviews/") {
+        // review handoff / agent retry / state mutations = Edit;
+        // findings list + merge-readiness are read-only = View.
+        // Specifically: GET .../findings and GET .../merge-readiness are View;
+        // POST .../findings/{fp}/state is Edit; all other POSTs are Edit.
+        return Require(Git, if get { View } else { Edit });
     }
     if p == "/settings/pr-review" {
         // PR-review config — read=View, write=Edit (it's a Git-feature setting,
@@ -427,12 +451,18 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
 
     // ---- Workflows ------------------------------------------------------------
     // §3.2: view=View; create/edit/run=Edit. (node-types catalog already exempt.)
+    // Webhook trigger is PUBLIC-by-token (registered in public_routes); the handler
+    // validates the path token against workflow_triggers — exempt from feature gate.
+    if p == "/workflows/{id}/webhook/{token}" {
+        return Exempt;
+    }
     if p == "/workflows/templates" {
         return Require(Workflows, View);
     }
     if p.starts_with("/workflows/")
         || p == "/workflows"
         || p.starts_with("/workflow-runs/")
+        || p.starts_with("/workflow-triggers/")
         || p.starts_with("/workspaces/{wid}/workflows")
     {
         return Require(Workflows, if get { View } else { Edit });
@@ -475,6 +505,19 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // (audit-log, security-posture) and daemon logs are daemon-wide diagnostics —
     // map them to Settings:Admin (their `require_root` handler gate stays).
     if p == "/settings" {
+        return Require(Settings, Admin);
+    }
+    // Capability/health registry + support bundle — daemon diagnostics (root),
+    // same tier as the audit log / security posture below.
+    if matches!(p, "/capabilities" | "/support-bundle") {
+        return Require(Settings, Admin);
+    }
+    // Settings export/import + state backup/restore (C3) — root diagnostics, same
+    // tier as the audit log; handlers also enforce require_root.
+    if matches!(
+        p,
+        "/settings/export" | "/settings/import" | "/state/backup" | "/state/restore"
+    ) {
         return Require(Settings, Admin);
     }
     if matches!(p, "/audit-log" | "/security-posture" | "/logs/daemon") {
@@ -939,6 +982,19 @@ mod tests {
         );
         assert_eq!(
             pol(Method::GET, "/api/v1/settings/pr-review"),
+            Require(Git, View)
+        );
+        // A1: new findings / merge-readiness routes — GET=View, POST=Edit.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/reviews/{rid}/findings"),
+            Require(Git, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/reviews/{rid}/findings/{fp}/state"),
+            Require(Git, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/reviews/{rid}/merge-readiness"),
             Require(Git, View)
         );
     }

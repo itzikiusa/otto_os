@@ -3203,6 +3203,7 @@ name = "otto-state"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hex",
  "otto-core",
  "serde",
  "serde_json",
@@ -3273,6 +3274,7 @@ dependencies = [
  "otto-swarm",
  "otto-usage",
  "rcgen",
+ "reqwest",
  "rustls",
  "rustls-pemfile",
  "serde_json",

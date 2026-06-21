@@ -11,7 +11,7 @@
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
-  import type { SessionStatus, WsSearchResultFrame } from '../api/types';
+  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame } from '../api/types';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
@@ -101,10 +101,68 @@
   /** Pixels of dragged distance per terminal line (approximate; refined at runtime). */
   const PX_PER_LINE = 20;
 
-  // find bar
+  // ── Find / ring-search bar ──────────────────────────────────────────────────
+  // Two complementary search modes share the single find bar:
+  //
+  //   1. LOCAL  — xterm's SearchAddon searches the emulator's visible buffer
+  //      (term rows) and highlights matches in the viewport with decorations.
+  //      Active immediately as the user types.
+  //
+  //   2. SERVER — sends a `{"type":"search","query":"…"}` WebSocket frame; the
+  //      daemon greps the persistent ring-buffer (survives reconnects) and replies
+  //      with a `search_result` frame containing up to 200 matching `{line, text}`
+  //      pairs. These are listed below the input and the user can navigate them.
+  //      Because the ring buffer stores raw bytes the matches are ANSI-stripped
+  //      text; xterm.scrollToLine jumps the viewport to each hit.
+  //
+  // The two modes run in parallel — the local search updates on every keystroke
+  // while the server result arrives asynchronously a frame later.
+
   let findOpen = $state(false);
   let findQuery = $state('');
   let findInput: HTMLInputElement | null = $state(null);
+
+  /** Server-side ring-buffer matches for the current query. */
+  let serverMatches = $state<TermSearchMatch[]>([]);
+  /** Index of the currently highlighted server match (−1 = none). */
+  let serverMatchIdx = $state(-1);
+  /** True while the server search round-trip is in flight. */
+  let serverSearchPending = $state(false);
+  /** Debounce timer id for server searches. */
+  let serverSearchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Send the current query to the daemon ring-buffer search. */
+  function sendServerSearch(query: string): void {
+    if (!query) {
+      serverMatches = [];
+      serverMatchIdx = -1;
+      serverSearchPending = false;
+      return;
+    }
+    serverSearchPending = true;
+    sendJson({ type: 'search', query });
+  }
+
+  /** Debounced wrapper so we don't flood the WS on every keystroke. */
+  function scheduleServerSearch(query: string): void {
+    if (serverSearchTimer !== null) clearTimeout(serverSearchTimer);
+    serverSearchTimer = setTimeout(() => {
+      serverSearchTimer = null;
+      sendServerSearch(query);
+    }, 300);
+  }
+
+  /** Jump the xterm viewport to the server match at `idx`. */
+  function goToServerMatch(idx: number): void {
+    if (serverMatches.length === 0) return;
+    const clamped = ((idx % serverMatches.length) + serverMatches.length) % serverMatches.length;
+    serverMatchIdx = clamped;
+    const lineIdx = serverMatches[clamped].line;
+    // xterm's scrollToLine(n) scrolls to line n in the buffer (0-based from top
+    // of the scrollback). The ring buffer line indices are oldest → newest, which
+    // matches the xterm buffer order when the scrollback is full.
+    term?.scrollToLine(lineIdx);
+  }
 
   function sendJson(obj: unknown): void {
     if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(obj));
@@ -209,11 +267,22 @@
           case 'error':
             term?.write(`\r\n\x1b[31m[otto] ${msg.code}: ${msg.message ?? ''}\x1b[0m\r\n`);
             break;
-          case 'search_result':
-            // Server-side ring-buffer search result — pass to parent for display.
-            // No UI panel yet; parent may wire onsearchresult to surface matches.
-            onsearchresult?.(msg as WsSearchResultFrame);
+          case 'search_result': {
+            // Server-side ring-buffer search result. Populate the find-bar's
+            // match list (next/prev navigation) and forward to any parent listener.
+            const frame = msg as WsSearchResultFrame;
+            serverSearchPending = false;
+            // Only apply if the result matches the current query (avoid a
+            // stale response overwriting results from a newer, faster one).
+            if (frame.query === findQuery) {
+              serverMatches = frame.matches;
+              // Jump to the first match automatically when the list refreshes.
+              serverMatchIdx = -1;
+              if (frame.matches.length > 0) goToServerMatch(0);
+            }
+            onsearchresult?.(frame);
             break;
+          }
         }
       } catch {
         /* ignore malformed control frame */
@@ -278,6 +347,14 @@
   function closeFind(): void {
     findOpen = false;
     search?.clearDecorations();
+    // Clear server-side results so they don't linger on next open.
+    serverMatches = [];
+    serverMatchIdx = -1;
+    serverSearchPending = false;
+    if (serverSearchTimer !== null) {
+      clearTimeout(serverSearchTimer);
+      serverSearchTimer = null;
+    }
     term?.focus();
   }
 
@@ -287,9 +364,16 @@
   };
 
   function findNext(back = false): void {
-    if (!search || findQuery === '') return;
-    if (back) search.findPrevious(findQuery, { decorations: searchDecorations });
-    else search.findNext(findQuery, { decorations: searchDecorations });
+    if (findQuery === '') return;
+    // Local xterm search (visible buffer + decorations).
+    if (search) {
+      if (back) search.findPrevious(findQuery, { decorations: searchDecorations });
+      else search.findNext(findQuery, { decorations: searchDecorations });
+    }
+    // Server ring-buffer navigation: cycle through matches.
+    if (serverMatches.length > 0) {
+      goToServerMatch(back ? serverMatchIdx - 1 : serverMatchIdx + 1);
+    }
   }
 
   // ── Clickable links (URLs + `file:line(:col)`) ─────────────────────────────
@@ -714,15 +798,53 @@
           bind:this={findInput}
           bind:value={findQuery}
           placeholder="Find in terminal"
+          oninput={() => {
+            // Local search: xterm SearchAddon (immediate, visible buffer only).
+            if (search && findQuery) search.findNext(findQuery, { decorations: searchDecorations });
+            else search?.clearDecorations();
+            // Server search: ring-buffer grep (debounced, full scrollback history).
+            scheduleServerSearch(findQuery);
+          }}
           onkeydown={(e) => {
             if (e.key === 'Enter') findNext(e.shiftKey);
             if (e.key === 'Escape') closeFind();
           }}
         />
+        <!-- Server-match count badge (spinner while pending) -->
+        {#if serverSearchPending}
+          <span class="find-status" title="Searching scrollback…">…</span>
+        {:else if serverMatches.length > 0}
+          <span class="find-status" title="{serverMatches.length} scrollback match{serverMatches.length === 1 ? '' : 'es'}">
+            {serverMatchIdx >= 0 ? serverMatchIdx + 1 : '?'}/{serverMatches.length}
+          </span>
+        {/if}
         <button class="icon-btn" onclick={() => findNext(true)} title="Previous (⇧↵)">↑</button>
         <button class="icon-btn" onclick={() => findNext(false)} title="Next (↵)">↓</button>
         <button class="icon-btn" onclick={closeFind} title="Close (esc)">✕</button>
       </div>
+      {#if serverMatches.length > 0}
+        <!-- Server ring-buffer match list: up to 8 rows shown, scroll for more.
+             Clicking a row jumps the viewport to that line in the scrollback. -->
+        <div class="find-results" role="listbox" aria-label="Scrollback search results">
+          {#each serverMatches.slice(0, 8) as m, i (m.line)}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <div
+              class="find-result-row"
+              class:active={i === serverMatchIdx}
+              role="option"
+              aria-selected={i === serverMatchIdx}
+              tabindex="-1"
+              onclick={() => goToServerMatch(i)}
+            >
+              <span class="find-result-line">{m.line + 1}</span>
+              <span class="find-result-text">{m.text}</span>
+            </div>
+          {/each}
+          {#if serverMatches.length > 8}
+            <div class="find-result-more">{serverMatches.length - 8} more — use ↑↓ to navigate</div>
+          {/if}
+        </div>
+      {/if}
     {/if}
 
     <!-- Desktop terminal toolbar: font zoom + copy-on-select toggle. Visible on
@@ -924,6 +1046,66 @@
     font-size: 12px;
     color: var(--text);
     outline: none;
+  }
+  /* Scrollback match count / spinner badge next to the input */
+  .find-status {
+    font-size: 10px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    user-select: none;
+    padding: 0 2px;
+  }
+  /* Dropdown list of server ring-buffer matches */
+  .find-results {
+    position: absolute;
+    top: calc(8px + 30px + 2px);
+    right: 16px;
+    z-index: 5;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    box-shadow: var(--shadow);
+    width: 340px;
+    max-height: 200px;
+    overflow-y: auto;
+    font-size: 11px;
+    font-family: var(--font-mono);
+  }
+  .find-result-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 3px 8px;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .find-result-row:hover {
+    background: var(--hover);
+  }
+  .find-result-row.active {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--text);
+  }
+  .find-result-line {
+    color: var(--text-dim);
+    min-width: 36px;
+    text-align: right;
+    flex-shrink: 0;
+    font-size: 10px;
+  }
+  .find-result-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .find-result-more {
+    padding: 3px 8px;
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: var(--font-sans, sans-serif);
+    text-align: center;
+    border-top: 1px solid var(--border);
   }
   /* Small unobtrusive chip in the top-right — never covers the input line. */
   .term-overlay {

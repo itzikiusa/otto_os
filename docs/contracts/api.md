@@ -556,6 +556,9 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent |
+| GET /reviews/{review_id}/findings | ws viewer | — | `ReviewFindingRow[]` (persistent findings keyed by fingerprint, with lifecycle state) |
+| POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated `ReviewFindingRow` (lifecycle transition) |
+| GET /reviews/{review_id}/merge-readiness | ws viewer | — | `MergeReadiness` (open/total findings + approvals + ci_status + mergeable + conflicts + branch freshness) |
 
 ## Orchestrator & broadcast (beyond #23–#24)
 
@@ -1184,3 +1187,100 @@ Notes:
 - `ProduceReq` now honors `headers: MessageHeader[]`, `key_base64: bool`, `value_base64: bool`
   (already in the DTO). A tombstone is produced by sending an empty string `value` with
   `value_base64: false`.
+
+## Must-have wave (Wave 2) — additional routes
+
+Extensions to existing features (work-graph attribution, broker operator workflows,
+product↔swarm closure, vault governance). Auth is covered by the existing per-feature
+policy prefixes (`/usage/`→Usage, `/brokers/cluster`→Database, `/product/`→Product,
+`/swarm/`→Swarm, `/workspaces/{ws}/memory/`→Product).
+
+**Work-graph attribution (Usage):**
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /usage/attribution | ws viewer (Usage:View) | `?by=repo\|branch\|pr\|story\|swarm_task\|workflow\|channel\|review\|origin` | grouped `{key, cost_usd, tokens, sessions}[]` |
+| POST /usage/forecast | ws viewer (Usage:View) | `{feature, provider, est_tokens?}` | `{projected_cost_usd, basis}` |
+
+**Broker operator workflows (Database tier; `/brokers/cluster` prefix):**
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /brokers/clusters/{id}/replay | ws editor | `ReplayReq {source_topic, target_topic, selector, transform?}` | `ReplayResp {produced, evidence_id}` |
+| GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions | ws viewer | — | `SchemaVersion[]` |
+| GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions/{version} | ws viewer | — | `SchemaVersionDetail` |
+| POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws editor | `{schema}` | `CompatibilityResult {compatible, messages}` |
+| GET /brokers/clusters/{id}/lag-alerts | ws viewer | — | `LagAlert[]` |
+| POST /brokers/clusters/{id}/lag-alerts | ws editor | `UpsertLagAlertReq` | `LagAlert` |
+| DELETE /brokers/clusters/{id}/lag-alerts/{alert_id} | ws editor | — | 204 |
+
+`POST /brokers/clusters/{id}/groups/{group}/reset` now also accepts `?dry_run=true` — returns the computed target vs current offsets + lag delta **without writing**.
+
+**Product↔Swarm closure:**
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /product/stories/{sid}/swarm | ws viewer (Product:View) | — | `StorySwarmLink {project?, tasks, runs, artifacts, prs, reviews, cost_usd}` |
+| GET /swarm/tasks/{tid}/story | ws viewer (Swarm:View) | — | `TaskStoryLink {story?, acceptance}` |
+
+**Vault governance (Memory; Product tier; `/workspaces/{ws}/memory/` prefix):**
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /workspaces/{ws}/memory/{mid}/state | ws editor | `{state}` (suggested\|accepted\|stale\|contradicted) | updated `Memory` |
+| POST /workspaces/{ws}/memory/{mid}/forget | ws editor | — | `{undo_token}` (soft-delete) |
+| POST /workspaces/{ws}/memory/{mid}/forget/undo | ws editor | `{undo_token}` | restored `Memory` |
+| POST /workspaces/{ws}/memory/merge | ws editor | `{ids}` | merged `Memory` |
+| POST /workspaces/{ws}/memory/{mid}/split | ws editor | `{parts}` | `Memory[]` |
+| POST /workspaces/{ws}/memory/import | ws editor | `{kind, content}` (AGENTS.md\|CLAUDE.md\|.cursorrules) | `{imported}` |
+
+## Must-have wave (Wave 3) — additional routes
+
+First-party agent context (redacted packets), capability/health registry, and workflow
+nodes/triggers. Packet routes are Agents:Edit (+ session owner/admin); capability routes
+are root; workflow trigger routes ride the Workflows prefix; the webhook is public-by-token.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /workspaces/{wid}/agents/{sid}/context-packet/preview | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{redacted, redactions, size_bytes}` (preview only) |
+| POST /workspaces/{wid}/agents/{sid}/context-packet/send | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{ok, size_bytes, redactions}` (injects the redacted packet) |
+| GET /capabilities | root | — | `ModuleCapability[]` (per-feature ready/degraded/missing_setup + deps + fixes) |
+| GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level) |
+| POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `{run_id}` (token validated against workflow_triggers) |
+| GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
+| POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
+| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` |
+| DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
+| POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status |
+
+New workflow node kinds (node-types catalog): product_analyze, product_rewrite, product_plan,
+review_run, swarm_task, api_run, db_query, broker_peek, channel_notify, budget_gate, human_approval.
+
+First-party Otto MCP tools (no new HTTP route): the `otto` MCP server is injected into `.mcp.json`
+at spawn when the per-workspace `otto_mcp_enabled` setting is on (default off, via `PUT /settings`).
+It runs as `ottod mcp-tools` (stdio JSON-RPC) exposing read-only, redacted, row/timeout-capped,
+audited tools — `otto_db_schema`, `otto_git_pr_review`, `otto_product_story` (db_query / swarm_task /
+broker_topic deferred). Tool calls are logged to `mcp_tool_calls` (migration 0060).
+
+## Must-have wave (Wave 4) — additional routes
+
+Mission Control (work-queue + saved views), cross-module search, and settings/state
+portability. DB per-statement timeouts + schema filter + masking ride EXISTING query/peek
+routes via request flags (`timeout_ms` / `filter` / `mask`) — no new route.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{id}/mission | ws viewer (Agents:View) | — | `MissionView` (needs_you/working/review_ready/waiting/failed/budget_warn) |
+| GET /workspaces/{id}/mission/views | ws viewer (Agents:View) | — | `SavedView[]` |
+| POST /workspaces/{id}/mission/views | ws editor (Agents:Edit) | `{name, filter}` | `SavedView` (201) |
+| DELETE /mission-views/{id} | ws editor (Agents:Edit, owner) | — | 204 |
+| GET /workspaces/{id}/search | ws viewer (Agents:View) | `?q=` | `SearchHit[]` (ranked cross-module: stories/workflows/api-requests/swarm/memories/repos/broker-clusters) |
+| GET /settings/export | root | — | redacted settings JSON + `excluded_keys` |
+| POST /settings/import | root | settings JSON (secret-keyed entries rejected) | `{accepted, rejected}` |
+| GET /state/backup | root | — | non-secret state snapshot (settings + manifest + migration level) |
+| POST /state/restore | root | `{backup, confirm:true}` | `{restored}` |
+
+DB Explorer query/peek now honor `timeout_ms` on all engines (ClickHouse/Mongo/Redis, not
+just MySQL), a server-side schema-children `filter`, and a `mask` flag that redacts result
+cells / broker payloads server-side via `otto_core::redact` (the response carries a `masked`
+flag) — all on the EXISTING query/consume routes.

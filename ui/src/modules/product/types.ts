@@ -479,3 +479,24 @@ export interface PublishAsStoryReq {
   project_key: string;
   issue_type: string;
 }
+
+// ---------------------------------------------------------------------------
+// Product↔Swarm closure types  (GET /product/stories/{sid}/swarm)
+// ---------------------------------------------------------------------------
+
+/** Full swarm project view linked to a story via the Plan → Swarm hand-off.
+ *  Returned by `GET /product/stories/{sid}/swarm`. */
+export interface StorySwarmLink {
+  /** The linked swarm project, null when no project exists for this story. */
+  project: SwarmProject | null;
+  tasks: SwarmTask[];
+  runs: import('../swarm/types').SwarmRun[];
+  /** File paths / references collected from run result blobs (best-effort). */
+  artifacts: string[];
+  /** PR numbers / references (best-effort). */
+  prs: string[];
+  /** Review ids (best-effort). */
+  reviews: string[];
+  /** Accumulated cost in USD across all runs. */
+  cost_usd: number;
+}
