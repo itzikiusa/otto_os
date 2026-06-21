@@ -41,6 +41,16 @@
   let busy = $state(false);
   let pickerOpen = $state(false);
 
+  // Clone destination dir — REMEMBERED across sessions so the user never has to
+  // re-pick it (persisted to localStorage; defaults to the last-used location).
+  const CLONE_DIR_KEY = 'otto_git_clone_dir';
+  let cloneDir = $state(localStorage.getItem(CLONE_DIR_KEY) ?? '');
+  let cloneDirPickerOpen = $state(false);
+  function rememberCloneDir(): void {
+    const v = cloneDir.trim();
+    if (v) localStorage.setItem(CLONE_DIR_KEY, v);
+  }
+
   // "Browse remote" mode: search repos under a git account's namespace.
   let browseAccount = $state('');
   let browseQuery = $state('');
@@ -116,7 +126,9 @@
         clone_url: repo.clone_url,
         name: repo.name || null,
         git_account_id: browseAccount || null,
+        clone_dir: cloneDir.trim() || null,
       });
+      rememberCloneDir();
       toasts.success('Clone started', created.name);
       addOpen = false;
       await git.loadAllRepos(true);
@@ -147,8 +159,10 @@
               clone_url: addUrl.trim(),
               name: addName.trim() || null,
               git_account_id: addAccount === '' ? null : addAccount,
+              clone_dir: cloneDir.trim() || null,
             };
       const repo = await api.post<Repo>(`/workspaces/${ws.currentId}/repos`, body);
+      if (addMode === 'clone') rememberCloneDir();
       toasts.success(addMode === 'clone' ? 'Clone started' : 'Repo registered', repo.name);
       addOpen = false;
       addPath = addUrl = addName = '';
@@ -180,7 +194,7 @@
   <PrDetail repoId={prRepo.id} number={Number(router.parts[3])} />
 {:else}
   <div class="gitpage">
-    <GitTabs onopen={openRepo} onadd={() => (addOpen = true)} />
+    <GitTabs onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
 
     {#if activeRepo}
       {#key activeRepo.id}
@@ -332,6 +346,22 @@
       </div>
     {/if}
 
+    {#if addMode !== 'register'}
+      <div class="field">
+        <label for="ar-clonedir">Clone to <span class="dim">(directory — remembered)</span></label>
+        <div class="path-row">
+          <input
+            id="ar-clonedir"
+            class="input mono"
+            bind:value={cloneDir}
+            placeholder="~/code  ·  defaults to the workspace folder"
+            spellcheck="false"
+          />
+          <button class="btn" type="button" onclick={() => (cloneDirPickerOpen = true)}>Browse…</button>
+        </div>
+      </div>
+    {/if}
+
     {#if addMode !== 'browse'}
       <div class="field">
         <label for="ar-name">Name <span class="dim">(optional)</span></label>
@@ -365,6 +395,19 @@
       pickerOpen = false;
     }}
     onclose={() => (pickerOpen = false)}
+  />
+{/if}
+
+{#if cloneDirPickerOpen}
+  <FolderPicker
+    title="Choose a clone destination"
+    start={cloneDir}
+    onpick={(p) => {
+      cloneDir = p;
+      rememberCloneDir();
+      cloneDirPickerOpen = false;
+    }}
+    onclose={() => (cloneDirPickerOpen = false)}
   />
 {/if}
 

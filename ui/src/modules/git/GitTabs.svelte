@@ -14,8 +14,8 @@
   interface Props {
     /** Open a repo as a tab (parent loads/wires the active RepoView). */
     onopen: (repoId: string) => void;
-    /** Open the "Add repository" flow (parent owns the modal). */
-    onadd: () => void;
+    /** Open the "Add repository" flow in a given mode (parent owns the modal). */
+    onadd: (mode: 'register' | 'clone' | 'browse') => void;
   }
   let { onopen, onadd }: Props = $props();
 
@@ -49,11 +49,14 @@
   }
 
   function openPicker(e: MouseEvent): void {
-    // Always offer "Add repository…"; then list any not-yet-open repos to open.
-    // Picking one that is somehow already open just activates it (openRepoTab is
+    // ALWAYS offer ways to add a new repo (clone or local) — even when every
+    // registered repo is already open — then list any not-yet-open repos to
+    // open. Picking one that's already open just activates it (openRepoTab is
     // idempotent), so there's no duplicate-tab risk.
     ctxMenu.show(e, [
-      { label: 'Add repository…', icon: 'plus', action: () => onadd() },
+      { label: 'Clone a repository…', icon: 'download', action: () => onadd('clone') },
+      { label: 'Browse remote to clone…', icon: 'globe', action: () => onadd('browse') },
+      { label: 'Add a local repository…', icon: 'folder', action: () => onadd('register') },
       ...(closedRepos.length > 0 ? [{ separator: true }] : []),
       ...closedRepos.map((r) => ({
         label: r.name,

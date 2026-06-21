@@ -494,6 +494,7 @@ async fn detect_repo<S: GitCtx>(
         clone_url: None,
         name: None,
         git_account_id: None,
+        clone_dir: None,
     };
     Ok(Json(register_repo(&s, &user, &ws_id, &top, &add).await?))
 }
@@ -545,7 +546,15 @@ async fn clone_into_workspace<S: GitCtx>(
         .clone()
         .or_else(|| derive_repo_name(url))
         .ok_or_else(|| Error::Invalid("cannot derive repo name from clone url".into()))?;
-    let dest = FsPath::new(&ws.root_path).join(&name);
+    // Clone INTO a user-chosen parent dir when provided (`~` expanded), else the
+    // workspace root. The repo lands at `<base>/<name>`.
+    let base = match req.clone_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(dir) => expand_home(dir),
+        None => ws.root_path.clone(),
+    };
+    let dest = FsPath::new(&base).join(&name);
+    // The chosen parent must exist for `git clone <url> <dest>` to succeed.
+    let _ = tokio::fs::create_dir_all(&base).await;
     if tokio::fs::metadata(&dest).await.is_ok() {
         return Err(Error::Conflict(format!(
             "destination already exists: {}",
@@ -647,6 +656,22 @@ fn derive_repo_name(url: &str) -> Option<String> {
     } else {
         Some(tail.to_string())
     }
+}
+
+/// Expand a leading `~` (or `~/…`) to the daemon user's `$HOME`. Other paths are
+/// returned unchanged. Used to resolve a user-chosen clone destination.
+fn expand_home(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = home.to_string_lossy();
+            return if path == "~" {
+                home.into_owned()
+            } else {
+                format!("{home}{}", &path[1..])
+            };
+        }
+    }
+    path.to_string()
 }
 
 async fn delete_repo<S: GitCtx>(

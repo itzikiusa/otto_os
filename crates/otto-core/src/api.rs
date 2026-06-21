@@ -907,6 +907,11 @@ pub struct AddRepoReq {
     pub clone_url: Option<String>,
     pub name: Option<String>,
     pub git_account_id: Option<Id>,
+    /// Optional parent directory to clone INTO (the repo lands at
+    /// `<clone_dir>/<name>`). A leading `~` is expanded. Defaults to the
+    /// workspace `root_path` when absent. Only meaningful with `clone_url`.
+    #[serde(default)]
+    pub clone_dir: Option<String>,
 }
 
 /// One changed file in `GET /repos/{id}/status`.
