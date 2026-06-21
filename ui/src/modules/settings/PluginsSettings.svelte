@@ -12,15 +12,22 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
 
-  async function load() {
+  async function load(attempt = 0) {
     error = null;
     try {
       list = await api.get<PluginRecord[]>('/plugin-admin');
     } catch (e) {
-      error = String(e);
+      // The daemon can be briefly unreachable right after an app update (it
+      // restarts), which surfaces as a fetch "Load failed". Retry once on a fresh
+      // connection before showing an error.
+      if (attempt < 1) {
+        await new Promise((r) => setTimeout(r, 600));
+        return load(attempt + 1);
+      }
+      error = `Could not reach the daemon (${e instanceof Error ? e.message : String(e)}). Click Retry.`;
     }
   }
-  onMount(load);
+  onMount(() => load());
 
   async function install() {
     if (!source.trim()) return;
@@ -85,7 +92,7 @@
     <button class="btn primary" onclick={install} disabled={busy || !source.trim()}>Install</button>
   </div>
 
-  {#if error}<div class="error">{error}</div>{/if}
+  {#if error}<div class="error">{error} <button class="btn" onclick={() => load()}>Retry</button></div>{/if}
 
   {#if list.length === 0}
     <p class="empty">No plugins installed.</p>
