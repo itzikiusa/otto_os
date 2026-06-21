@@ -283,4 +283,25 @@
     inset: 0;
     z-index: 50;
   }
+
+  /* ── Mobile + tablet (≤1024px): the toolbar already scrolls horizontally
+     inside RepoView's header, so just give the buttons comfortable touch heights
+     and keep the branch-create popover inside the viewport (its 300px min-width
+     would otherwise spill off a 375px screen). ── */
+  @media (max-width: 1024px) {
+    .tbtn {
+      height: 36px;
+      padding: 0 11px;
+      font-size: 13px;
+    }
+    .branch-form {
+      min-width: 0;
+      width: min(300px, calc(100vw - 28px));
+      max-width: calc(100vw - 28px);
+    }
+    .branch-input {
+      height: 34px;
+      font-size: 14px;
+    }
+  }
 </style>

@@ -693,10 +693,15 @@
      text. 1024 so iPad portrait (834) + real-phone landscape (932) also wrap. ── */
   @media (max-width: 1024px) {
     .prd { padding: 12px 12px 48px; }
-    /* Header actions wrap instead of overflowing. */
+    /* Header actions wrap instead of overflowing; comfortable touch targets. */
     .prd-head { flex-wrap: wrap; gap: 6px; }
-    .prd-title { font-size: 18px; }
-    .prd-meta { flex-wrap: wrap; gap: 8px; font-size: 13px; }
+    .prd-head .btn { height: 34px; }
+    .prd-head .grow { display: none; }
+    .prd-title { font-size: 18px; overflow-wrap: anywhere; }
+    .prd-title-input { height: 38px; font-size: 16px; }
+    .prd-meta { flex-wrap: wrap; gap: 8px; font-size: 13px; min-width: 0; }
+    /* Long branch names break instead of forcing horizontal overflow. */
+    .prd-meta .mono { overflow-wrap: anywhere; min-width: 0; }
 
     /* Tab strip scrolls horizontally; bigger touch targets. */
     .prd-tabs {
@@ -712,10 +717,13 @@
       flex-shrink: 0;
     }
 
-    /* Action bar wraps so every button stays reachable. */
+    /* Action bar wraps so every button stays reachable, full-height for touch. */
     .prd-actions { flex-wrap: wrap; gap: 8px; }
+    .prd-actions .btn { height: 38px; }
     .prd-actions .grow { display: none; }
-    .merge-group { flex: 1; }
+    .merge-group { flex: 1; gap: 8px; }
+    .merge-group select.input { height: 38px; }
+    .merge-group .btn { flex: 1; }
 
     /* Commit rows: drop the rigid 4-col grid for a wrapping two-line layout. */
     .commit-row {
@@ -723,11 +731,18 @@
       gap: 4px 10px;
       font-size: 13px;
     }
-    .commit-subject { grid-column: 1 / -1; white-space: normal; }
+    .commit-subject { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; }
     .commit-sha { font-size: 12px; }
     .commit-author, .commit-date { font-size: 12px; }
 
+    /* Comment composer + edit areas: legible, comfortable, edit always shown. */
     .prd-comments { max-width: 100%; }
-    .md-body { font-size: 14px; }
+    .new-comment textarea,
+    .prd-desc textarea,
+    .prd-request-changes textarea { font-size: 14px; }
+    .new-comment .btn,
+    .prd-request-changes .btn { height: 34px; }
+    .edit-btn { opacity: 1; }
+    .md-body { font-size: 14px; overflow-wrap: anywhere; }
   }
 </style>

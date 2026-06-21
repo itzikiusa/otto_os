@@ -259,4 +259,37 @@
   .mono {
     font-family: var(--font-mono);
   }
+
+  /* ── Mobile + tablet (≤1024px): the open-repo strip scrolls horizontally with
+     momentum (it already overflow-x:auto) — bump tap targets so tabs + the close
+     ✕ + the + button are comfortable, and keep + pinned to the trailing edge so
+     it stays reachable however many repos are open. ── */
+  @media (max-width: 1024px) {
+    .git-tabs {
+      gap: 4px;
+      padding: 6px 6px 0;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-x: contain;
+    }
+    .git-tab {
+      max-width: 200px;
+      padding: 8px 6px 8px 12px;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+    .git-tab-close {
+      font-size: 18px;
+      padding: 4px 6px;
+    }
+    /* Keep the new-repo affordance glued to the end of the scroller so it never
+       disappears off-screen behind a long row of tabs. */
+    .git-tab-new {
+      position: sticky;
+      inset-inline-end: 0;
+      font-size: 22px;
+      padding: 0 12px;
+      min-width: 40px;
+      background: var(--surface);
+    }
+  }
 </style>

@@ -249,4 +249,31 @@
   .mono {
     font-family: var(--font-mono);
   }
+
+  /* ── Mobile + tablet (≤1024px): let the head wrap so the long file path, the
+     progress chip and the "Mark file resolved" button all stay reachable; bump
+     the button to a real touch target. The body already wraps + owns its
+     scroll, so it just gets a touch of legibility. ── */
+  @media (max-width: 1024px) {
+    .pane-head {
+      flex-wrap: wrap;
+      gap: 6px 10px;
+    }
+    .pane-path {
+      flex-basis: 100%;
+      font-size: 13px;
+    }
+    .pane-head .btn {
+      min-height: 40px;
+    }
+    .pane-body {
+      padding: 10px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .context {
+      font-size: 12.5px;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+  }
 </style>

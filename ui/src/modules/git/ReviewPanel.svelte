@@ -1142,6 +1142,7 @@
     border-radius: var(--radius-s, 4px);
     font-size: 11.5px;
     font-weight: 500;
+    flex-wrap: wrap;
   }
   .rp-merge-ok {
     background: color-mix(in srgb, #22c55e 12%, transparent);
@@ -1199,6 +1200,7 @@
     border-radius: var(--radius-s, 4px);
     font-size: 11.5px;
     line-height: 1.4;
+    flex-wrap: wrap;
   }
   .rp-precheck-icon {
     color: #b07d00;
@@ -1245,6 +1247,7 @@
     align-items: center;
     gap: 10px;
     padding: 12px 0 10px;
+    flex-wrap: wrap;
   }
   .rp-running-title {
     font-size: 13px;
@@ -1401,12 +1404,15 @@
     align-items: center;
     gap: 10px;
     margin-bottom: 12px;
+    flex-wrap: wrap;
   }
   .rp-stats {
     display: flex;
     align-items: center;
     gap: 8px;
     flex: 1;
+    flex-wrap: wrap;
+    min-width: 0;
   }
   .rp-stat {
     font-size: 12.5px;
@@ -1537,6 +1543,7 @@
   }
   .rp-diff-content {
     flex: 1;
+    min-width: 0;
   }
 
   /* Config modal */
@@ -1627,6 +1634,23 @@
   }
   .grow {
     flex: 1;
+  }
+
+  /* Config modal on a phone: the agent row's side action column stacks below the
+     fields so nothing is squeezed, the provider checkboxes get tap room, and the
+     add/save controls grow to a comfortable touch height. The Modal shell caps
+     its own width to the viewport, so only the inner layout needs stacking. */
+  @media (max-width: 640px) {
+    .cfg-agent-row { flex-direction: column; }
+    .cfg-agent-actions {
+      flex-direction: row;
+      align-items: center;
+      align-self: stretch;
+    }
+    .cfg-agent-actions .btn { min-height: 34px; }
+    .cfg-add-row { flex-wrap: wrap; }
+    .cfg-add-row .btn { min-height: 36px; flex: 1 1 auto; }
+    .cfg-check-label { padding: 4px 0; }
   }
 
   /* Custom presets section */
@@ -1723,6 +1747,48 @@
   }
   .rp-context-input::placeholder {
     color: var(--text-dim);
+  }
+
+  /* ── Mobile + tablet (≤1024px) ──────────────────────────────────────────────
+     ReviewPanel is a single vertical flow inside the PR detail's own scroll
+     container, so the work here is: (1) the per-comment diff snippet must WRAP
+     rather than scroll a fixed-width code block off the page, (2) dense button
+     rows (header, comment actions) wrap and get real touch height, and (3) the
+     "Configure agents" button stops overlapping the empty-state on a phone.
+     Desktop (≥1025) keeps the compact 22px buttons + horizontally-scrolled
+     diff snippet untouched. */
+  @media (max-width: 1024px) {
+    /* Diff snippet: wrap long code lines instead of an inner side-scroll, so a
+       wide finding never overflows the viewport (HARD INVARIANT). */
+    .rp-diff-snippet { overflow-x: visible; }
+    .rp-diff-line { white-space: normal; }
+    .rp-diff-content {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    /* Bigger touch targets across the panel's action buttons. */
+    .rp-header .btn,
+    .rp-running-header .btn,
+    .rp-comment-head .btn { min-height: 32px; }
+    .rp-loc { max-width: 100%; }
+  }
+  @media (max-width: 640px) {
+    .rp-header .btn,
+    .rp-running-header .btn,
+    .rp-comment-head .btn,
+    .rp-error .btn { min-height: 38px; }
+    /* The absolutely-positioned Configure button collides with the empty-state
+       title on a narrow phone — drop it back into normal flow, full-width. */
+    .rp-cfg-btn {
+      position: static;
+      width: 100%;
+      margin-top: 8px;
+      min-height: 38px;
+    }
+    /* Comment action buttons (Approve / Decline) span the row so they're easy
+       to tap once the head has wrapped them to their own line. */
+    .rp-comment-head .btn { flex: 1 1 auto; }
   }
 
   /* History section */

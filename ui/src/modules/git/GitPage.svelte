@@ -567,4 +567,61 @@
     gap: 6px;
     padding: 6px 10px 10px 14px;
   }
+
+  /* ── Mobile + tablet (≤1024px): tighten the landing hub so the repo cards +
+     add-flow fit a phone without horizontal overflow — single-column grid,
+     stacked header, lighter padding, and full-width segmented/path rows inside
+     the Add Repository modal. The modal box itself is already viewport-clamped
+     (Modal.svelte: min(width, 100vw-24px)). ── */
+  @media (max-width: 1024px) {
+    .landing {
+      padding: 16px 12px 32px;
+    }
+    .landing-head {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .landing-head .btn {
+      align-self: flex-start;
+      min-height: 38px;
+    }
+    /* One column on phone — minmax(320px) would otherwise force a track wider
+       than the content box on a 375px screen. */
+    .repo-grid {
+      grid-template-columns: 1fr;
+    }
+    .repo-actions .btn,
+    .repo-actions .icon-btn {
+      min-height: 36px;
+    }
+    /* Segmented mode switch + path rows: wrap / go full width so nothing spills
+       past the (already clamped) modal edge. */
+    .segmented {
+      display: flex;
+      width: 100%;
+    }
+    .segmented > button {
+      flex: 1;
+      height: 32px;
+    }
+    .path-row {
+      flex-wrap: wrap;
+    }
+    .path-row .input {
+      flex: 1 1 100%;
+    }
+    .path-row .btn {
+      min-height: 36px;
+    }
+    .remote-list {
+      max-height: 50vh;
+    }
+    .remote-row {
+      padding: 10px;
+    }
+    .remote-row .btn {
+      min-height: 36px;
+      flex-shrink: 0;
+    }
+  }
 </style>

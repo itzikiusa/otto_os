@@ -33,6 +33,26 @@
 
   let busy = $state<'' | 'abort' | 'complete'>('');
 
+  // ── Mobile (phone + tablet) ───────────────────────────────────────────────
+  // The desktop two-pane (files rail | detail) doesn't fit a narrow viewport,
+  // so ≤1024 stacks the conflicted-files list as a collapsible strip above the
+  // detail pane (mirrors ChangesView). Picking a file collapses the list so the
+  // resolver gets the screen.
+  let isMobile = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 1024px)');
+    const sync = () => (isMobile = mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
+  let secFilesOpen = $state(true);
+
+  function selectFile(f: string): void {
+    selected = f;
+    if (isMobile) secFilesOpen = false;
+  }
+
   $effect(() => {
     const id = repoId;
     loading = true;
@@ -120,7 +140,7 @@
   }
 </script>
 
-<div class="resolver">
+<div class="resolver" class:mobile={isMobile}>
   <header class="resolver-head">
     <Icon name="merge" size={14} />
     <span class="head-title">Resolve merge conflicts</span>
@@ -139,9 +159,25 @@
     {#if loading}
       <div style="padding: 16px; flex: 1"><Skeleton rows={6} height={28} /></div>
     {:else}
+      {#if isMobile}
+        <!-- Mobile: collapsible files strip above the detail pane. -->
+        <button
+          class="mob-sec-head"
+          onclick={() => (secFilesOpen = !secFilesOpen)}
+          aria-expanded={secFilesOpen}
+        >
+          <Icon name={secFilesOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+          <Icon name="merge" size={13} />
+          <span>Conflicted files</span>
+          <span class="grow"></span>
+          <span class="mob-sec-count">{resolved.size}/{allFiles.length}</span>
+        </button>
+      {/if}
       <!-- LEFT: conflicted files -->
-      <aside class="files-panel">
-        <div class="files-head">CONFLICTED FILES</div>
+      <aside class="files-panel" class:mob-collapsed={isMobile && !secFilesOpen}>
+        {#if !isMobile}
+          <div class="files-head">CONFLICTED FILES</div>
+        {/if}
         {#if allFiles.length === 0}
           <div class="dim files-empty">No conflicted files.</div>
         {:else}
@@ -150,7 +186,7 @@
               class="file-row"
               class:active={selected === f}
               class:is-resolved={isResolved(f)}
-              onclick={() => (selected = f)}
+              onclick={() => selectFile(f)}
               title={f}
             >
               <span class="file-status">
@@ -165,6 +201,20 @@
           {/each}
         {/if}
       </aside>
+
+      {#if isMobile && selected}
+        <!-- Mobile: header for the detail pane that reopens the files strip. -->
+        <button
+          class="mob-sec-head mob-detail-head"
+          onclick={() => (secFilesOpen = true)}
+          aria-expanded="true"
+        >
+          <Icon name="file" size={13} />
+          <span class="mob-detail-title">{selected.split('/').pop()}</span>
+          <span class="grow"></span>
+          <span class="mob-back">↑ Files</span>
+        </button>
+      {/if}
 
       <!-- RIGHT: selected file -->
       <div class="file-detail">
@@ -338,5 +388,104 @@
   }
   .mono {
     font-family: var(--font-mono);
+  }
+
+  /* ── Mobile accordion section headers (hidden on desktop) ── */
+  .mob-sec-head {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 11px 14px;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: start;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mob-sec-head:active {
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+  }
+  .mob-sec-count {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text-dim);
+  }
+  .mob-detail-head {
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+  }
+  .mob-detail-title {
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .mob-back {
+    font-size: 12px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+
+  /* ── Mobile + tablet (≤1024px): stack files strip over the detail pane.
+     The body switches from a horizontal split to a vertical column; the files
+     list scrolls in a capped strip and the detail pane takes the rest. ── */
+  @media (max-width: 1024px) {
+    .resolver.mobile .resolver-head {
+      flex-wrap: wrap;
+      gap: 6px 8px;
+    }
+    .resolver.mobile .resolver-body {
+      flex-direction: column;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .mobile .mob-sec-head {
+      display: flex;
+    }
+    .mobile .files-panel {
+      width: 100%;
+      flex: 0 0 auto;
+      max-height: 32vh;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .mobile .files-panel.mob-collapsed {
+      display: none;
+    }
+    .mobile .file-row {
+      font-size: 13px;
+      padding: 9px 12px;
+      min-height: 40px;
+    }
+    .mobile .file-name {
+      font-size: 13px;
+    }
+    .mobile .file-detail {
+      flex: 1 1 auto;
+      min-height: 50vh;
+    }
+    /* Footer can wrap so both actions stay reachable; hint drops to its own row. */
+    .resolver.mobile .resolver-foot {
+      flex-wrap: wrap;
+      gap: 8px 10px;
+    }
+    .resolver.mobile .resolver-foot .btn {
+      min-height: 40px;
+    }
+    .resolver.mobile .foot-hint {
+      flex-basis: 100%;
+      order: -1;
+    }
   }
 </style>

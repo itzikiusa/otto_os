@@ -629,8 +629,18 @@
     .mobile .cs-name { height: 34px; }
     .mobile .cs-path { font-size: 13px; }
     .mobile .cs-file input[type='checkbox'] { width: 17px; height: 17px; }
-    .mobile .composer textarea { font-size: 14px; }
+    /* Stage/Unstage/Discard pills (head + selection bar) are 22px .btn.small on
+       desktop — too small to tap reliably; give them a finger-sized hit area. */
+    .mobile .cs-head .btn,
+    .mobile .cs-selbar .btn { height: 32px; padding: 0 11px; font-size: 12.5px; }
+    .mobile .cs-selbar { gap: 6px; padding: 7px 10px; flex-wrap: wrap; }
+    /* The composer textarea drives the keyboard — 16px stops iOS Safari from
+       auto-zooming the page on focus; the commit/draft buttons get full height. */
+    .mobile .composer textarea { font-size: 16px; line-height: 1.45; }
+    .mobile .composer .draft-btn { height: 28px; }
+    .mobile .composer .btn.primary { height: 36px; padding: 0 16px; font-size: 14px; }
+    .mobile .composer .checkbox-row input[type='checkbox'] { width: 17px; height: 17px; }
     /* Discard button always visible on touch (no hover). */
-    .mobile .cs-discard { opacity: 1; }
+    .mobile .cs-discard { opacity: 1; padding: 6px 7px; }
   }
 </style>

@@ -354,4 +354,41 @@
     color: #d9534f;
     font-weight: 600;
   }
+
+  /* ── Mobile + tablet (≤1024px): full-width account rows + form. Long mono
+     namespace / api-base values must wrap (min-width:0 + word-break) so a row
+     can't push the page wider than the viewport; bump icon-button + segmented
+     tap targets. The modal box is already viewport-clamped by Modal.svelte. ── */
+  @media (max-width: 1024px) {
+    .page {
+      padding: 16px 12px 32px;
+    }
+    .acct-list {
+      max-width: none;
+    }
+    .acct {
+      gap: 10px;
+      padding: 12px;
+    }
+    .acct .grow {
+      min-width: 0;
+    }
+    .acct-sub {
+      font-size: 12px;
+      word-break: break-word;
+    }
+    .acct .icon-btn {
+      min-width: 36px;
+      min-height: 36px;
+    }
+    /* Provider switch fills the row instead of overflowing a narrow modal. */
+    .segmented {
+      display: flex;
+      width: 100%;
+    }
+    .segmented > button {
+      flex: 1;
+      height: 32px;
+    }
+  }
 </style>

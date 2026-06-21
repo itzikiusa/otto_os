@@ -124,11 +124,10 @@
       onclick={() => { secListOpen = true; }}
       aria-expanded="true"
     >
-      <Icon name="chevronDown" size={13} />
       <Icon name="file" size={13} />
       <span class="mob-diff-title">Diff</span>
       <span class="grow"></span>
-      <span class="mob-back">← Commits</span>
+      <span class="mob-back">↑ Commits</span>
     </button>
   {/if}
   <div class="hist-diff" class:mob-hidden={isMobile && selected === null}>
@@ -226,8 +225,16 @@
     color: var(--text-dim);
   }
   .mob-diff-head { background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
-  .mob-diff-title { font-size: 13px; color: var(--accent); font-weight: 700; }
-  .mob-back { font-size: 12px; color: var(--text-dim); }
+  .mob-diff-title {
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .mob-back { font-size: 12px; color: var(--text-dim); flex-shrink: 0; }
 
   /* ── Mobile + tablet (≤1024px): stack commit list over the diff, each collapsible ── */
   @media (max-width: 1024px) {
@@ -254,5 +261,7 @@
     .mobile .c-subject { font-size: 14px; }
     .mobile .c-meta { font-size: 12px; }
     .mobile .c-sha { font-size: 12px; }
+    /* Load-more pill gets a finger-sized hit area. */
+    .mobile .hist-side .btn.ghost { height: 36px; }
   }
 </style>

@@ -24,6 +24,20 @@
   let initializedFor: DiffResp | null = null;
   let hlReady = $state(false);
 
+  // ≤1024 (phone + tablet): side-by-side is unusable in the narrow width (two
+  // code columns + 140-char lines either clip off-screen or wrap into an
+  // unreadable mess), so we force the unified renderer and hide the toggle.
+  // `mode` is left untouched so the user's choice is restored on a wider screen.
+  let isMobile = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 1024px)');
+    const sync = () => (isMobile = mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
+  const effMode = $derived(isMobile ? 'unified' : mode);
+
   // Nav sidebar state
   let navCollapsed = $state(false);
   let viewed = $state(new Set<string>());
@@ -447,10 +461,13 @@
           {/if}
         </div>
       {/if}
-      <div class="segmented">
-        <button class:active={mode === 'unified'} onclick={() => (mode = 'unified')}>Unified</button>
-        <button class:active={mode === 'split'} onclick={() => (mode = 'split')}>Side by side</button>
-      </div>
+      {#if !isMobile}
+        <!-- Side-by-side is desktop-only; ≤1024 always renders unified. -->
+        <div class="segmented">
+          <button class:active={mode === 'unified'} onclick={() => (mode = 'unified')}>Unified</button>
+          <button class:active={mode === 'split'} onclick={() => (mode = 'split')}>Side by side</button>
+        </div>
+      {/if}
     </div>
 
     {#each filteredFiles as file (file.path)}
@@ -494,7 +511,7 @@
             {#each file.hunks as hunk, hi (hi)}
               <div class="hunk-header mono">{hunk.header}</div>
 
-              {#if mode === 'unified'}
+              {#if effMode === 'unified'}
                 {#if hunk.lines.length > VLIST_THRESHOLD && !isHunkExpanded(file.path, hi)}
                   <!-- Large hunk: virtualised rendering for smooth scroll.
                        Comments and the composer are deliberately suppressed here —
@@ -1069,6 +1086,20 @@
     .dfile {
       max-width: 100%;
     }
+    /* The diff is its own vertical scroll container on mobile (E2E invariant):
+       hosts (PR/review/history) embed DiffViewer without always wrapping it in a
+       scroll pane, so own it here. min-width:0 lets the flex child shrink so the
+       wrapping .code below actually fits the viewport instead of pushing wider. */
+    .diff {
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .diff-root {
+      min-width: 0;
+      max-width: 100%;
+    }
     /* Stack nav over diff in PR mode so both fit the narrow viewport. */
     .diff-root.with-nav {
       flex-direction: column;
@@ -1098,10 +1129,13 @@
     .diff-stats { font-size: 13px; }
     .add, .del { font-size: 13px; }
     .toolbar-search { font-size: 13px; height: 32px; width: 100%; }
-    .dfile-head { font-size: 13px; padding: 9px 12px; }
+    .dfile-head { font-size: 13px; padding: 9px 12px; min-height: 40px; }
     .dfile-path { font-size: 13px; }
     .hunk-header { font-size: 12px; padding: 4px 12px; }
-    .dtable { font-size: 12.5px; }
+    /* table-layout:fixed pins the gutter+sign columns so the code column can't
+       be stretched past the viewport by a single long token — it wraps within
+       its remaining width (E2E seeds 140-char lines that must wrap, not clip). */
+    .dtable { font-size: 12.5px; table-layout: fixed; width: 100%; }
     .gut {
       font-size: 11px;
       width: 30px;
@@ -1109,13 +1143,20 @@
       padding: 0 5px 0 3px;
     }
     .sign { width: 13px; }
-    /* Wrap code so long lines don't push the page wider than the screen. */
+    /* Wrap code so long lines don't push the page wider than the screen.
+       overflow-wrap:anywhere is the belt-and-suspenders for unbreakable tokens. */
     .code {
       font-size: 12.5px;
       white-space: pre-wrap;
       word-break: break-word;
+      overflow-wrap: anywhere;
     }
     .composer { max-width: 100%; }
+    /* Virtualised unified rows: match the table's narrower mobile gutters and
+       let the code cell wrap. (Split-vrow is never reached on mobile — effMode
+       forces unified — but stays aligned for safety.) */
+    .vrow { grid-template-columns: 30px 30px 13px 1fr; }
+    .vrow .code { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
   }
 
   /* Hunk line cap: "Show N more lines" affordance */

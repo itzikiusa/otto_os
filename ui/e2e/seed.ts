@@ -276,6 +276,88 @@ export async function seedGitRepo(
   return { repoId: repo.id as string, dir };
 }
 
+/** Create a temp git repo left MID-MERGE with a real conflict in one file, so
+ *  the Conflict Resolver view renders (ours/theirs/base segments) and its mobile
+ *  3-pane→stacked layout can be asserted. The conflicted line is intentionally
+ *  long (140 chars) so a wrap/overflow regression would cut it off off-screen.
+ *  Returns the registered repoId + the conflicted file path. */
+export async function seedConflictRepo(
+  ctx: APIRequestContext,
+  base: string,
+  workspaceId: string,
+): Promise<{ repoId: string; dir: string; file: string }> {
+  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-conflict-'));
+  const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
+  git('init', '-q');
+  git('config', 'user.email', 'e2e@otto.local');
+  git('config', 'user.name', 'E2E');
+  git('config', 'commit.gpgsign', 'false');
+  const file = 'conflict.txt';
+  const LONG = 'x'.repeat(140);
+  // Long, IDENTICAL surrounding lines so the conflict view's context rows (not
+  // just the conflicting line) also carry 140-char content — exercising context
+  // wrapping too. Only the middle line differs between the branches → conflicts.
+  const pre = `unchanged context above ${LONG}`;
+  const post = `unchanged context below ${LONG}`;
+  // Base commit on the default branch.
+  writeFileSync(join(dir, file), `${pre}\nshared value ${LONG}\n${post}\n`);
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  // A feature branch changes the shared line.
+  git('checkout', '-q', '-b', 'feature');
+  writeFileSync(join(dir, file), `${pre}\nfeature change ${LONG}\n${post}\n`);
+  git('add', '-A');
+  git('commit', '-q', '-m', 'feature edit');
+  // Back to the default branch (checkout '-'), change the SAME line differently.
+  git('checkout', '-q', '-');
+  writeFileSync(join(dir, file), `${pre}\nmainline change ${LONG}\n${post}\n`);
+  git('add', '-A');
+  git('commit', '-q', '-m', 'mainline edit');
+  // Merge feature → conflict. `git merge` exits non-zero and leaves the tree
+  // mid-merge (MERGE_HEAD + unmerged paths); swallow the non-zero exit.
+  try {
+    git('merge', '--no-edit', 'feature');
+  } catch {
+    /* expected: the merge conflicts, which is exactly what we want to seed */
+  }
+  const repo = await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/repos`, {
+    path: dir,
+    name: 'e2e-conflict',
+  });
+  return { repoId: repo.id as string, dir, file };
+}
+
+/** Create a temp git repo with a committed base AND a DIRTY working tree (one
+ *  modified tracked file + one untracked file), so the Changes view shows real
+ *  staging rows + an enabled commit composer — letting the mobile staging→commit
+ *  layout (touch targets, the no-iOS-zoom 16px textarea) be asserted. Returns
+ *  repoId + dir. */
+export async function seedDirtyRepo(
+  ctx: APIRequestContext,
+  base: string,
+  workspaceId: string,
+): Promise<{ repoId: string; dir: string }> {
+  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-dirty-'));
+  const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
+  git('init', '-q');
+  git('config', 'user.email', 'e2e@otto.local');
+  git('config', 'user.name', 'E2E');
+  git('config', 'commit.gpgsign', 'false');
+  for (let i = 0; i < 4; i++) {
+    writeFileSync(join(dir, `tracked_${i}.txt`), `original ${i}\n`);
+  }
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  // Leave the tree dirty: modify a tracked file + add an untracked one. No commit.
+  writeFileSync(join(dir, 'tracked_0.txt'), `original 0\nMODIFIED on the working tree\n`);
+  writeFileSync(join(dir, 'untracked_new.txt'), `brand new file\n`);
+  const repo = await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/repos`, {
+    path: dir,
+    name: 'e2e-dirty',
+  });
+  return { repoId: repo.id as string, dir };
+}
+
 /** Spawn an ephemeral redis-server, seed keys, and register a Dev connection.
  *  Returns the child (to kill in teardown) + connectionId, or null if redis
  *  isn't available / the connection endpoint rejects it. */

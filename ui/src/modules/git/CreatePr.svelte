@@ -104,14 +104,15 @@
 </script>
 
 <Modal title="New Pull Request" width={520} {onclose}>
-  <div class="row" style="gap: 12px; margin-bottom: 12px">
+  <div class="createpr-form">
+  <div class="row branch-row" style="gap: 12px; margin-bottom: 12px">
     <div class="field grow" style="margin: 0">
       <label for="pr-src">Source</label>
       <select id="pr-src" class="input" bind:value={source}>
         {#each branches as b (b.name)}<option value={b.name}>{b.name}</option>{/each}
       </select>
     </div>
-    <span class="dim" style="margin-top: 16px">→</span>
+    <span class="dim branch-arrow" style="margin-top: 16px">→</span>
     <div class="field grow" style="margin: 0">
       <label for="pr-tgt">Target</label>
       <select id="pr-tgt" class="input" bind:value={target}>
@@ -140,6 +141,7 @@
     <label for="pr-desc">Description <span class="dim">(markdown)</span></label>
     <textarea id="pr-desc" class="input" rows="6" bind:value={description}></textarea>
   </div>
+  </div>
 
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
@@ -154,6 +156,10 @@
 </Modal>
 
 <style>
+  /* Selects must be able to shrink inside the flex row so a long branch name
+     never forces the modal wider than the viewport. */
+  .branch-row .field { min-width: 0; }
+  .branch-row select.input { width: 100%; min-width: 0; }
   .draft-row {
     display: flex;
     align-items: center;
@@ -177,5 +183,27 @@
   }
   @keyframes spin {
     to { transform: rotate(360deg); }
+  }
+
+  /* ── Mobile + tablet (≤1024px): stack the branch selectors so each gets full
+     width (the arrow becomes a downward separator), and grow touch targets so
+     the form is comfortable on a phone. The shared Modal already fits the
+     viewport horizontally + scrolls when tall. ── */
+  @media (max-width: 1024px) {
+    .branch-row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .branch-arrow {
+      align-self: center;
+      margin-top: 0 !important;
+      transform: rotate(90deg);
+    }
+    /* Scoped to this modal's own controls so nothing leaks to other pages. */
+    .createpr-form input.input,
+    .createpr-form select.input { height: 40px; font-size: 14px; }
+    .createpr-form textarea.input { font-size: 14px; }
+    .draft-row .btn { height: 36px; }
   }
 </style>

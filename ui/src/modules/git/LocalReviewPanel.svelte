@@ -641,6 +641,7 @@
     align-items: center;
     gap: 8px;
     margin-bottom: 8px;
+    flex-wrap: wrap;
   }
   .lrp-findings-count {
     font-size: 12.5px;
@@ -789,5 +790,27 @@
   .lrp-history-comment {
     opacity: 0.85;
     user-select: text;
+  }
+
+  /* ── Mobile + tablet (≤1024px) ──────────────────────────────────────────────
+     The panel is a single vertical flow inside RepoView's own scroll container,
+     so the main risks are dense button rows overflowing and small touch targets.
+     The toolbar + findings header already wrap; here we give the base <select>
+     and the action buttons real width/height on a phone, and let the "Compare
+     to" note drop to its own line instead of being pinned to the far edge. */
+  @media (max-width: 1024px) {
+    .lrp-select { min-width: 0; flex: 1 1 160px; max-width: 100%; }
+    .lrp-handoff-bar { flex-wrap: wrap; }
+  }
+  @media (max-width: 640px) {
+    .lrp-cfg-note { margin-inline-start: 0; flex-basis: 100%; }
+    .lrp-toolbar .btn,
+    .lrp-findings-header .btn,
+    .lrp-handoff-bar .btn { min-height: 38px; }
+    /* Stretch the primary handoff actions so they're easy to tap. */
+    .lrp-handoff-bar { gap: 8px; }
+    .lrp-handoff-bar .btn.primary { flex: 1 1 auto; }
+    .lrp-loc { max-width: 100%; }
+    .lrp-chk { width: 18px; height: 18px; }
   }
 </style>

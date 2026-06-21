@@ -15,6 +15,20 @@
   let replyText = $state('');
   let busy = $state(false);
 
+  // On a phone the desktop 18px-per-level indent quickly eats the narrow width
+  // for deep reply chains; halve it under ≤1024 so nested threads stay readable
+  // without pushing content off-screen. Tracked via matchMedia (same convention
+  // as the other git views) so desktop nesting is unchanged.
+  let isMobile = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 1024px)');
+    const sync = () => (isMobile = mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
+  const indent = $derived(Math.min(depth, 4) * (isMobile ? 9 : 18));
+
   function fmtDate(iso: string): string {
     const d = new Date(iso);
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
@@ -35,12 +49,12 @@
   }
 </script>
 
-<div class="cmt" style="margin-left: {Math.min(depth, 4) * 18}px">
+<div class="cmt" style="margin-inline-start: {indent}px">
   <div class="cmt-head">
     <span class="cmt-avatar">{comment.author.slice(0, 1).toUpperCase()}</span>
     <span class="cmt-author">{comment.author}</span>
     {#if comment.path && comment.line !== null && depth === 0}
-      <span class="chip mono">{comment.path}:{comment.line}</span>
+      <span class="chip mono cmt-loc">{comment.path}:{comment.line}</span>
     {/if}
     <span class="cmt-date dim">{fmtDate(comment.created_at)}</span>
   </div>
@@ -77,6 +91,7 @@
     align-items: center;
     gap: 7px;
     margin-bottom: 3px;
+    flex-wrap: wrap;
   }
   .cmt-avatar {
     width: 18px;
@@ -101,10 +116,33 @@
     margin-inline-start: 25px;
   }
   .cmt-actions {
-    margin: 4px 0 4px 25px;
+    margin: 4px 0;
+    margin-inline-start: 25px;
     display: flex;
     flex-direction: column;
     gap: 6px;
     max-width: 480px;
+  }
+
+  /* ── Mobile + tablet (≤1024px) ──────────────────────────────────────────────
+     The location chip can hold a long "path:line"; let it shrink + ellipsis so
+     it never forces the head row (or the page) wider than the viewport. The
+     reply box + buttons go full-width and grow their touch height on a phone. */
+  @media (max-width: 1024px) {
+    .cmt-loc {
+      display: inline-block;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      box-sizing: border-box;
+    }
+    .cmt-actions { max-width: 100%; }
+  }
+  @media (max-width: 640px) {
+    .cmt-body { margin-inline-start: 0; }
+    .cmt-actions { margin-inline-start: 0; }
+    .cmt-actions .btn { min-height: 38px; }
   }
 </style>

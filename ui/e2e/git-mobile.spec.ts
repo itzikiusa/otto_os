@@ -2,7 +2,7 @@ import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
+import { apiCtx, seedWorkspace, seedGitRepo, seedConflictRepo, seedDirtyRepo } from './seed';
 
 // Durable mobile/tablet-layout coverage for the Git page. Asserts the REAL
 // workflow on a phone AND in the tablet/landscape range: the commit graph/list
@@ -39,12 +39,18 @@ import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
 
 let workspaceId = '';
 let repoId = '';
+// A repo left mid-merge with a real conflict → drives the Conflict Resolver.
+let conflictRepoId = '';
+// A repo with a dirty working tree → drives the Changes staging/commit flow.
+let dirtyRepoId = '';
 
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
   const r = await seedGitRepo(ctx, base, workspaceId);
   repoId = r.repoId;
+  conflictRepoId = (await seedConflictRepo(ctx, base, workspaceId)).repoId;
+  dirtyRepoId = (await seedDirtyRepo(ctx, base, workspaceId)).repoId;
   const git = (...args: string[]) =>
     execFileSync('git', ['-C', r.dir, ...args], { stdio: 'ignore' });
   // Several more commits, each touching multiple files with multi-line edits AND
@@ -356,3 +362,178 @@ for (const vw of [834, 932]) {
     await expectDiffCodeReachable(page);
   });
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Shared helpers for the section suites below
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Assert a single element's right edge is within the viewport (not clipped /
+ *  pushed off-screen right). */
+async function expectElemFits(page: Page, selector: string): Promise<void> {
+  const m = await page.locator(selector).first().evaluate((el) => ({
+    right: el.getBoundingClientRect().right,
+    vw: window.innerWidth,
+  }));
+  expect(
+    Math.round(m.right),
+    `${selector} right edge (${Math.round(m.right)}) must be within the viewport (${m.vw})`,
+  ).toBeLessThanOrEqual(m.vw + 4);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SHELL — repo tabs, sub-route nav, toolbar (the git chrome)
+// ────────────────────────────────────────────────────────────────────────────
+
+test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ page }) => {
+  await page.goto(`/#/git/${repoId}/graph`);
+  await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+  // Repo tab strip renders; the "+" (open repo) button stays reachable on-screen.
+  await expect(page.locator('.git-tabs')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.git-tab-new')).toBeVisible();
+  await expectElemFits(page, '.git-tab-new');
+  // The per-repo sub-route nav (graph/changes/history/prs/review) renders with all
+  // tabs and never overflows the document (it scrolls within its own strip).
+  await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 15_000 });
+  expect(await page.locator('.rv-tabs .rv-tab').count()).toBeGreaterThanOrEqual(4);
+  // Toolbar (Fetch/Pull/Push/…) is present in the header.
+  await expect(page.locator('.rv-head .toolbar')).toBeVisible();
+  await expectFitsWidth(page);
+});
+
+test('shell: tapping a sub-route tab navigates without overflow', async ({ page }) => {
+  await page.goto(`/#/git/${repoId}/graph`);
+  await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 30_000 });
+  // Tap the History sub-route tab → the History view mounts. Tabs may live in a
+  // horizontally-scrollable strip, so scroll it into view before tapping.
+  const histTab = page.locator('.rv-tabs .rv-tab', { hasText: 'History' });
+  await histTab.scrollIntoViewIfNeeded();
+  await histTab.click();
+  await expect(page.locator('.history')).toBeVisible({ timeout: 20_000 });
+  await expectFitsWidth(page);
+});
+
+test('shell: many open repo tabs scroll instead of overflowing the page', async ({ page }) => {
+  // Open all three seeded repos as tabs, then assert the tablist owns the overflow
+  // (its own scroll) while the document itself never scrolls horizontally.
+  for (const id of [repoId, dirtyRepoId, conflictRepoId]) {
+    await page.goto(`/#/git/${id}/graph`);
+    await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+  }
+  await expect(page.locator('.git-tab')).toHaveCount(3, { timeout: 15_000 });
+  // New-tab affordance still reachable even with several tabs open.
+  await expectElemFits(page, '.git-tab-new');
+  await expectFitsWidth(page);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// CHANGES — staging / commit flow on a dirty working tree
+// ────────────────────────────────────────────────────────────────────────────
+
+test('changes: dirty tree shows file rows + a touch-friendly commit composer', async ({ page }) => {
+  await page.goto(`/#/git/${dirtyRepoId}/changes`);
+  await expect(page.locator('.changes.mobile')).toBeVisible({ timeout: 25_000 });
+  // The seeded dirty tree (1 modified + 1 untracked) yields real change rows.
+  await expect(page.locator('.changes .cs-name').first()).toBeVisible({ timeout: 15_000 });
+  expect(await page.locator('.changes .cs-name').count()).toBeGreaterThanOrEqual(2);
+  await expectFitsWidth(page);
+
+  // The commit textarea uses ≥16px on mobile so iOS Safari doesn't auto-zoom on
+  // focus (the regression the Changes polish pass guards).
+  const fs = await page.locator('.changes.mobile .composer textarea').evaluate(
+    (el) => parseFloat(getComputedStyle(el).fontSize),
+  );
+  expect(fs, 'mobile commit textarea must be ≥16px (no iOS zoom)').toBeGreaterThanOrEqual(16);
+
+  // The commit button is a comfortable touch target.
+  const box = await page.locator('.changes.mobile .composer .btn.primary').first().boundingBox();
+  expect(box?.height ?? 0, 'commit button should be a comfortable tap target').toBeGreaterThanOrEqual(32);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// REVIEW — local code-review panel layout (a real agent run needs CLIs the
+// isolated daemon doesn't spawn, so the toolbar + config/empty state is exercised
+// for LAYOUT, like the PR views).
+// ────────────────────────────────────────────────────────────────────────────
+
+test('review: local-review panel renders and fits', async ({ page }) => {
+  await page.goto(`/#/git/${repoId}/review`);
+  await expect(page.locator('.rv-tab-scroll')).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.lrp')).toBeVisible({ timeout: 15_000 });
+  // The toolbar (Compare-to select + "Review changes") renders and fits the width.
+  await expect(page.locator('.lrp .lrp-toolbar')).toBeVisible({ timeout: 10_000 });
+  await expectElemFits(page, '.lrp .lrp-toolbar');
+  await expectFitsWidth(page);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// CONFLICT RESOLVER — a repo left mid-merge (seedConflictRepo). On mobile the
+// 3-pane resolver collapses to a single column, the conflicted-files strip is a
+// collapsible accordion, the hunk renders STACKED (not side-by-side), and the
+// long conflicting lines wrap so the code stays reachable.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** The conflict hunk's own code cells (stacked ours/theirs, base, editor) must
+ *  all be reachable within the viewport — i.e. long lines wrap, not clip. */
+async function expectConflictCodeReachable(page: Page): Promise<void> {
+  const m = await page.evaluate(() => {
+    const cells = Array.from(
+      document.querySelectorAll(
+        '.resolver .stack-code, .resolver .base-code, .resolver .split-table .code, .resolver .edit-editor, .resolver .context',
+      ),
+    ) as HTMLElement[];
+    let maxRight = 0;
+    let count = 0;
+    for (const c of cells) {
+      const r = c.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      count++;
+      maxRight = Math.max(maxRight, r.right);
+    }
+    return { maxRight, count, vw: window.innerWidth };
+  });
+  expect(m.count, 'conflict code cells should be present').toBeGreaterThan(0);
+  expect(
+    Math.round(m.maxRight),
+    `conflict code must fit within the viewport (max right=${Math.round(m.maxRight)} vw=${m.vw})`,
+  ).toBeLessThanOrEqual(m.vw + 4);
+}
+
+async function openResolver(page: Page): Promise<void> {
+  await page.goto(`/#/git/${conflictRepoId}/changes`);
+  await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+  // The in-progress merge is detected asynchronously → the "Resolve conflicts"
+  // tab appears. Tap it to open the resolver.
+  const tab = page.locator('.rv-tab.conflict-tab');
+  await expect(tab).toBeVisible({ timeout: 20_000 });
+  await tab.click();
+  await expect(page.locator('.resolver')).toBeVisible({ timeout: 15_000 });
+}
+
+test('conflict: resolver renders, stacks to one column, and fits', async ({ page }) => {
+  await openResolver(page);
+  await expect(page.locator('.resolver.mobile')).toBeVisible();
+  // The body stacks vertically on mobile (no side-by-side panes).
+  const dir = await page.locator('.resolver .resolver-body').evaluate(
+    (el) => getComputedStyle(el).flexDirection,
+  );
+  expect(dir, 'resolver must stack to a single column on mobile').toBe('column');
+  // The conflicted file is auto-selected; its pane + a stacked hunk render.
+  await expect(page.locator('.resolver .file-row').first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('.resolver .file-detail .pane').first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.resolver .stack-sides').first()).toBeVisible({ timeout: 15_000 });
+  // Side-by-side table must NOT be used on mobile (it would overflow).
+  expect(await page.locator('.resolver .split-table').count()).toBe(0);
+  await expectFitsWidth(page);
+  await expectConflictCodeReachable(page);
+});
+
+test('conflict: conflicted-files strip is a collapsible accordion', async ({ page }) => {
+  await openResolver(page);
+  const head = page.locator('.resolver.mobile .mob-sec-head').first();
+  await expect(head).toBeVisible({ timeout: 10_000 });
+  // Files strip starts open; tapping the header collapses it.
+  await expect(page.locator('.resolver .files-panel')).toBeVisible();
+  await head.click();
+  await expect(page.locator('.resolver .files-panel.mob-collapsed')).toHaveCount(1);
+  await expectFitsWidth(page);
+});

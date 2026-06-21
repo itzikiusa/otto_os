@@ -167,10 +167,14 @@
   @media (max-width: 1024px) {
     .prlist { padding: 12px; }
     .pr-toolbar { flex-wrap: wrap; gap: 8px; }
-    .pr-toolbar .row { flex-wrap: wrap; }
-    .filter-chip { height: 28px; font-size: 13px; }
-    .pr-title { font-size: 14px; }
-    .pr-meta { flex-wrap: wrap; gap: 6px 10px; font-size: 12.5px; }
+    .pr-toolbar .row { flex-wrap: wrap; gap: 6px; }
+    .filter-chip { height: 32px; padding: 0 12px; font-size: 13px; }
+    .pr-toolbar .btn.small { height: 32px; }
+    .pr-row { padding: 12px 14px; }
+    .pr-title { font-size: 14px; overflow-wrap: anywhere; }
+    .pr-meta { flex-wrap: wrap; gap: 6px 10px; font-size: 12.5px; min-width: 0; }
     .pr-meta .grow { display: none; }
+    /* Long branch names break instead of forcing horizontal overflow. */
+    .pr-meta .mono { overflow-wrap: anywhere; min-width: 0; }
   }
 </style>

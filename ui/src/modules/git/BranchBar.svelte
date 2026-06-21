@@ -199,4 +199,26 @@
     inset: 0;
     z-index: 40;
   }
+
+  /* ── Mobile + tablet (≤1024px): keep the branch row on one line, bump the
+     pull/push tap targets, and clamp the switch/create dropdown to the viewport
+     so its fixed 280px width can't spill off a narrow phone. ── */
+  @media (max-width: 1024px) {
+    .branchbar {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .branchbar::-webkit-scrollbar { display: none; }
+    .branch-btn,
+    .branchbar :global(.btn.small) {
+      min-height: 34px;
+      flex-shrink: 0;
+    }
+    .dd {
+      width: min(280px, calc(100vw - 24px));
+    }
+    .dd-item { height: 34px; font-size: 13px; }
+    .dd-filter { height: 34px; font-size: 14px; }
+  }
 </style>

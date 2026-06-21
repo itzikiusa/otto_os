@@ -145,6 +145,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
   }
   .rp-agent-name {
     font-size: 12.5px;
@@ -287,4 +288,28 @@
   .rp-state-resolved  { background: color-mix(in srgb, #22c55e 12%, transparent); color: #15803d; }
   .rp-state-regressed { background: color-mix(in srgb, var(--status-exited) 12%, transparent); color: var(--status-exited); }
   .rp-state-declined  { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
+
+  /* ── Mobile + tablet (≤1024px) ──────────────────────────────────────────────
+     The per-agent header is a dense row of name + chip + Open/Retry/findings
+     buttons + status pill — it already wraps, but on a phone we give the action
+     buttons real touch height, let the agent name shrink/ellipsis instead of
+     forcing the row wider, and cap the inline terminal so it fits a short
+     viewport. The findings list body keeps its own min-width:0 so long text
+     wraps within the card rather than pushing the page. */
+  @media (max-width: 1024px) {
+    .rp-agent { padding: 10px 12px; }
+    .rp-agent-name {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .rp-agent-top .btn { min-height: 32px; }
+  }
+  @media (max-width: 640px) {
+    .rp-agent-top .btn { min-height: 38px; }
+    .rp-loc { max-width: 100%; }
+    .rp-term { height: 280px; }
+  }
 </style>

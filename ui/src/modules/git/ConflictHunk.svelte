@@ -28,6 +28,18 @@
   let editText = $state('');
   // Whether the diff3 merge base is currently expanded.
   let showBase = $state(false);
+
+  // ≤1024 (phone + tablet): the ours/theirs side-by-side columns are too narrow
+  // to read, so the table stacks vertically (ours block over theirs block) with
+  // its own per-side label. matchMedia drives a class toggle on the table.
+  let isMobile = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 1024px)');
+    const sync = () => (isMobile = mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
   // True when the parser populated a merge base (diff3 conflict style).
   const hasBase = $derived(base.length > 0);
 
@@ -142,33 +154,56 @@
         {/if}
       </div>
     {/if}
-    <table class="split-table">
-      <thead>
-        <tr>
-          <th class="side-head ours">OURS</th>
-          <th class="side-head theirs">THEIRS</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each splitRows as row, ri (ri)}
+    {#if isMobile}
+      <!-- Stacked ours/theirs blocks: the side-by-side columns are too narrow on
+           a phone, so each side is its own full-width, labelled, scrolling block. -->
+      <div class="stack-sides">
+        <div class="stack-side ours" class:dim-side={choice === 'theirs'}>
+          <div class="stack-label ours-label">OURS</div>
+          {#if ours.length === 0}
+            <pre class="stack-code mono empty-side">(empty)</pre>
+          {:else}
+            <pre class="stack-code mono">{ours.join('\n')}</pre>
+          {/if}
+        </div>
+        <div class="stack-side theirs" class:dim-side={choice === 'ours'}>
+          <div class="stack-label theirs-label">THEIRS</div>
+          {#if theirs.length === 0}
+            <pre class="stack-code mono empty-side">(empty)</pre>
+          {:else}
+            <pre class="stack-code mono">{theirs.join('\n')}</pre>
+          {/if}
+        </div>
+      </div>
+    {:else}
+      <table class="split-table">
+        <thead>
           <tr>
-            <td
-              class="code mono half ours"
-              class:void={row.left === null}
-              class:dim-side={choice === 'theirs'}
-            >{row.left ?? ''}</td>
-            <td
-              class="code mono half theirs"
-              class:void={row.right === null}
-              class:dim-side={choice === 'ours'}
-            >{row.right ?? ''}</td>
+            <th class="side-head ours">OURS</th>
+            <th class="side-head theirs">THEIRS</th>
           </tr>
-        {/each}
-        {#if splitRows.length === 0}
-          <tr><td class="code dim" colspan="2">(empty on both sides)</td></tr>
-        {/if}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {#each splitRows as row, ri (ri)}
+            <tr>
+              <td
+                class="code mono half ours"
+                class:void={row.left === null}
+                class:dim-side={choice === 'theirs'}
+              >{row.left ?? ''}</td>
+              <td
+                class="code mono half theirs"
+                class:void={row.right === null}
+                class:dim-side={choice === 'ours'}
+              >{row.right ?? ''}</td>
+            </tr>
+          {/each}
+          {#if splitRows.length === 0}
+            <tr><td class="code dim" colspan="2">(empty on both sides)</td></tr>
+          {/if}
+        </tbody>
+      </table>
+    {/if}
   {/if}
 </div>
 
@@ -340,5 +375,75 @@
     white-space: pre-wrap;
     word-break: break-all;
     overflow-x: auto;
+  }
+
+  /* ── Stacked ours/theirs sides (≤1024px) ── */
+  .stack-sides {
+    display: flex;
+    flex-direction: column;
+  }
+  .stack-side.ours {
+    background: color-mix(in srgb, var(--status-working) 9%, transparent);
+  }
+  .stack-side.theirs {
+    background: color-mix(in srgb, #5b8bf5 11%, transparent);
+    border-top: 1px solid var(--border);
+  }
+  .stack-side.dim-side {
+    opacity: 0.4;
+  }
+  .stack-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 4px 10px 2px;
+    color: var(--text-dim);
+  }
+  .stack-label.ours-label {
+    color: color-mix(in srgb, var(--status-working) 75%, var(--text));
+  }
+  .stack-label.theirs-label {
+    color: color-mix(in srgb, #5b8bf5 80%, var(--text));
+  }
+  .stack-code {
+    margin: 0;
+    padding: 0 10px 6px;
+    font-size: 12.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    user-select: text;
+  }
+  .empty-side {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  /* ── Mobile + tablet (≤1024px): the action bar wraps so all four resolution
+     buttons stay reachable with real touch targets, and the bar/label don't
+     clip off-screen on a narrow phone. ── */
+  @media (max-width: 1024px) {
+    .hunk-bar {
+      flex-wrap: wrap;
+      gap: 6px 8px;
+      padding: 7px 10px;
+    }
+    .hunk-label {
+      font-size: 12px;
+    }
+    /* Let the segmented control take a full row of its own and grow each button
+       so they're tappable; they distribute evenly across the width. */
+    .seg {
+      flex-basis: 100%;
+      flex-shrink: 1;
+    }
+    .seg button {
+      flex: 1;
+      font-size: 12px;
+      padding: 8px 6px;
+      min-height: 40px;
+      white-space: nowrap;
+    }
   }
 </style>

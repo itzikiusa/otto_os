@@ -1962,12 +1962,21 @@
     .mobile .df-head { font-size: 13px; padding: 9px 12px; }
     .mobile .df-path { font-size: 13px; }
     .mobile .hunk-header { font-size: 12px; padding: 4px 10px; }
-    .mobile .dl-table { font-size: 12.5px; }
-    /* Wrap long code lines so they're readable without horizontal scrolling. */
+    /* table-layout:fixed pins the gutter/sign columns to their declared widths
+       and hands the rest to the code column, so a long unbroken line wraps
+       INSIDE that column instead of widening the table past the viewport (the
+       auto layout otherwise sizes to the content's min-width and overflows). */
+    .mobile .df-hunks { overflow-x: hidden; }
+    .mobile .dl-table { font-size: 12.5px; table-layout: fixed; width: 100%; }
+    /* Wrap long code lines so they're readable without horizontal scrolling.
+       break-word keeps whole words together when they fit; overflow-wrap +
+       a width:auto cell let a 140-char unbroken token still break to fit. */
     .mobile .dl-code {
       font-size: 12.5px;
+      width: auto;
       white-space: pre-wrap;
       word-break: break-word;
+      overflow-wrap: anywhere;
       overflow: visible;
       text-overflow: clip;
     }

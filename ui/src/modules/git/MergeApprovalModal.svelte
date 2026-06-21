@@ -390,4 +390,20 @@
   .mono {
     font-family: var(--font-mono);
   }
+
+  /* ── Mobile + tablet (≤1024px): long branch names / conflict paths break
+     instead of overflowing, and the strategy rows get comfortable touch
+     targets. The shared Modal already fits the viewport + scrolls when tall. ── */
+  @media (max-width: 1024px) {
+    /* Keep the source/target chips within the modal — ellipsize, never overflow. */
+    .bchip { max-width: 100%; }
+    .bchip .mono { min-width: 0; }
+    .conflict-files li { overflow-wrap: anywhere; }
+    .block-head .mono,
+    .note .mono { overflow-wrap: anywhere; }
+    .strat { padding: 11px 12px; }
+    .strat input { width: 18px; height: 18px; }
+    .strat-label { font-size: 13px; }
+    .strat-hint { font-size: 11.5px; }
+  }
 </style>
