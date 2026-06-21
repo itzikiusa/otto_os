@@ -5,6 +5,7 @@
   import { product } from '../../lib/stores/product.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
@@ -12,10 +13,57 @@
   import { parsePlan, setItemStatus, type Status, type Task } from './plan_parse';
   import type { ProductStoryVersion } from './types';
 
-  const PROVIDERS = ['claude', 'openai'] as const;
+  // ── Provider selection (Otto's REAL provider list, like NewSession) ──────────
+  // Drop the 'shell' pseudo-provider — it can't plan. Fall back to ['claude'] if
+  // /meta hasn't loaded yet.
+  const availableProviders = $derived(
+    (auth.meta?.providers ?? ['claude']).filter((p) => p !== 'shell'),
+  );
+  // Effective default agent: this workspace's override, else the global default,
+  // else the first available provider.
+  const wsDefaultProvider = $derived(
+    typeof ws.current?.settings?.default_provider === 'string'
+      ? (ws.current.settings.default_provider as string)
+      : '',
+  );
+  const defaultProvider = $derived(
+    wsDefaultProvider || auth.meta?.default_provider || availableProviders[0] || 'claude',
+  );
+
+  // Multi-select set of planning providers + the consolidating summarizer.
+  let selectedProviders = $state<string[]>([]);
+  let summarizerProvider = $state<string>('');
+  // Autonomy toggle — DEFAULT ON (non-interactive): agents work unattended and
+  // do NOT ask questions; the user reviews the finished plan. OFF ⇒ interactive.
+  let dontAsk = $state(true);
+
+  // Seed the selection once providers/default are known (and prune stale picks if
+  // the provider list changes). Pre-selects the default provider.
+  $effect(() => {
+    const avail = availableProviders;
+    if (avail.length === 0) return;
+    const pruned = selectedProviders.filter((p) => avail.includes(p));
+    if (pruned.length === 0) {
+      selectedProviders = [defaultProvider];
+    } else if (pruned.length !== selectedProviders.length) {
+      selectedProviders = pruned;
+    }
+    if (!avail.includes(summarizerProvider)) summarizerProvider = defaultProvider;
+  });
+
+  const multiAgent = $derived(selectedProviders.length > 1);
+
+  function toggleProvider(p: string): void {
+    if (selectedProviders.includes(p)) {
+      // Keep at least one provider selected.
+      if (selectedProviders.length === 1) return;
+      selectedProviders = selectedProviders.filter((x) => x !== p);
+    } else {
+      selectedProviders = [...selectedProviders, p];
+    }
+  }
 
   // ── Local UI state ──────────────────────────────────────────────────────────
-  let provider = $state<string>('claude');
   let generating = $state(false);
   let saving = $state(false);
   let showRaw = $state(false);
@@ -113,6 +161,7 @@
     planVersion = null;
     body = '';
     showRaw = false;
+    planSessionIds = [];
     clearPoll();
     if (product.selectedId) void initialLoad();
     return () => { clearPoll(); };
@@ -125,6 +174,32 @@
     });
     return off;
   });
+
+  // Live planning sessions surfaced by the `plan_run` event — tiled side-by-side
+  // so the user can watch them (and answer questions in interactive mode).
+  let planSessionIds = $state<string[]>([]);
+  let planInteractive = $state(false);
+
+  // Subscribe to `plan_run`: tile the live planning sessions the moment they
+  // spawn. We open them automatically on the FIRST event so multi-agent planning
+  // is visible by default; later events (e.g. the summarizer starting) just keep
+  // the id list fresh for the "Watching N agents" affordance.
+  $effect(() => {
+    const off = product.onPlanRun((sessionIds: string[], interactive: boolean) => {
+      const firstBatch = planSessionIds.length === 0;
+      planSessionIds = sessionIds;
+      planInteractive = interactive;
+      if (sessionIds.length > 0 && firstBatch) tilePlanSessions();
+    });
+    return off;
+  });
+
+  /** Tile the live planning sessions in the Agents grid and jump there. */
+  function tilePlanSessions(): void {
+    if (planSessionIds.length === 0) return;
+    ws.tileSessions(planSessionIds);
+    router.go('agents');
+  }
 
   const story = $derived(product.detail?.story ?? null);
 
@@ -142,10 +217,24 @@
 
   async function generate(): Promise<void> {
     if (generating) return;
+    const providers =
+      selectedProviders.length > 0 ? selectedProviders : [defaultProvider];
     generating = true;
     try {
-      await product.generatePlan({ provider: provider || null });
-      toasts.info('Plan triggered', 'Waiting for the plan to appear…');
+      await product.generatePlan({
+        // Keep single-provider back-compat: also send `provider` for the 1-agent case.
+        provider: providers.length === 1 ? providers[0] : null,
+        providers,
+        summarizer_provider: summarizerProvider || defaultProvider,
+        interactive: !dontAsk,
+      });
+      const n = providers.length;
+      toasts.info(
+        n > 1 ? `Planning with ${n} agents` : 'Plan triggered',
+        dontAsk
+          ? 'Agents run unattended — watch them, then review the plan.'
+          : 'Watch the agents and answer any questions they ask.',
+      );
       startPolling();
     } catch (e) {
       toasts.error('Plan generation failed', product.errMsg(e));
@@ -292,29 +381,65 @@
     {:else if !planVersion}
       <!-- ── No plan yet: generate panel ─────────────────────────────────────── -->
       <section class="card gen-panel">
-        <div class="gen-row">
-          <div class="provider-wrap">
-            <label class="field-label" for="plan-provider-sel">Provider</label>
+        <!-- Provider multi-select (plan by one or many agents at once). -->
+        <div class="cfg-row">
+          <span class="field-label">
+            Planning agents
+            <span class="sel-count">{selectedProviders.length} selected</span>
+          </span>
+          <div class="chip-group">
+            {#each availableProviders as p (p)}
+              <button
+                class="chip"
+                class:chip-on={selectedProviders.includes(p)}
+                disabled={generating || pollTimer !== null}
+                onclick={() => toggleProvider(p)}
+                title={p}
+              >
+                {p}
+              </button>
+            {/each}
+          </div>
+        </div>
+
+        <!-- Summarizer (only meaningful with >1 planning agent). -->
+        {#if multiAgent}
+          <div class="cfg-row">
+            <label class="field-label" for="plan-summarizer-sel">Summarizer</label>
             <select
-              id="plan-provider-sel"
+              id="plan-summarizer-sel"
               class="sel"
-              bind:value={provider}
-              disabled={generating}
+              bind:value={summarizerProvider}
+              disabled={generating || pollTimer !== null}
             >
-              {#each PROVIDERS as p (p)}
+              {#each availableProviders as p (p)}
                 <option value={p}>{p}</option>
               {/each}
             </select>
+            <span class="cfg-hint">consolidates the agents' plans into one</span>
           </div>
+        {/if}
+
+        <!-- Autonomy toggle — DEFAULT ON (non-interactive). -->
+        <label class="autonomy-toggle">
+          <input type="checkbox" bind:checked={dontAsk} disabled={generating} />
+          <span class="autonomy-text">
+            Don't ask me questions — I'm not available; I'll review the plan at the end
+          </span>
+        </label>
+
+        <div class="gen-row">
           <button
             class="action-btn primary"
             onclick={generate}
-            disabled={generating || pollTimer !== null}
+            disabled={generating || pollTimer !== null || selectedProviders.length === 0}
           >
             {#if generating}
               Triggering…
             {:else if pollTimer !== null}
               Generating…
+            {:else if multiAgent}
+              Generate plan · {selectedProviders.length} agents
             {:else}
               Generate plan
             {/if}
@@ -332,12 +457,23 @@
           </button>
         </div>
       </section>
+
+      {#if planSessionIds.length > 0}
+        <div class="watching">
+          <span class="watching-dot"></span>
+          <span class="watching-text">
+            Watching {planSessionIds.length} planning agent{planSessionIds.length > 1 ? 's' : ''}
+            {planInteractive ? ' — answer any questions in their tiles' : ' (running unattended)'}
+          </span>
+          <button class="watching-btn" onclick={tilePlanSessions}>Show agents</button>
+        </div>
+      {/if}
       {#if swarmLink}
         <div class="muted">
           Linked to swarm project <strong>{swarmLink.project_name}</strong>.
         </div>
       {/if}
-      {#if pollTimer === null && !swarmLink}
+      {#if pollTimer === null && !swarmLink && planSessionIds.length === 0}
         <div class="muted">No implementation plan yet. Generate one to break the story into trackable tasks, or send straight to a swarm.</div>
       {/if}
     {:else}
@@ -447,13 +583,19 @@
   }
 
   /* Generate panel */
+  .gen-panel { display: flex; flex-direction: column; gap: 10px; }
   .gen-row {
     display: flex;
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
   }
-  .provider-wrap { display: flex; align-items: center; gap: 6px; }
+  .cfg-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
   .field-label {
     font-size: 11px;
     font-weight: 600;
@@ -462,6 +604,91 @@
     color: var(--text-dim);
     white-space: nowrap;
   }
+  .sel-count {
+    font-weight: 400;
+    font-size: 10px;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text-dim);
+    margin-left: 4px;
+  }
+  .cfg-hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  /* Provider chips (multi-select) — mirrors AnalysisTab's chip styling. */
+  .chip-group { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip {
+    height: 24px;
+    padding: 0 11px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 100ms, color 100ms, border-color 100ms;
+    white-space: nowrap;
+  }
+  .chip:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+  .chip-on {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .chip:disabled { cursor: not-allowed; opacity: 0.5; }
+
+  /* Autonomy toggle */
+  .autonomy-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .autonomy-toggle input { accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
+  .autonomy-text { font-size: 12.5px; color: var(--text); line-height: 1.4; }
+
+  /* Live "watching N agents" banner */
+  .watching {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .watching-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+    animation: watch-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes watch-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .watching-text { font-size: 12.5px; color: var(--text); flex: 1; min-width: 0; }
+  .watching-btn {
+    height: 26px;
+    padding: 0 12px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .watching-btn:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   .sel {
     background: var(--surface);
     border: 1px solid var(--border);

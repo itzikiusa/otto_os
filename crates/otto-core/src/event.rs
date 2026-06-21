@@ -123,6 +123,18 @@ pub enum Event {
         section: String,
         status: String,
     },
+    /// A multi-agent plan generation kicked off N visible planning sessions (and,
+    /// when >1 planner, a summarizer session). The Plan tab uses this to tile the
+    /// sessions side-by-side so the user can watch them work (and answer questions
+    /// in interactive mode). `session_ids` are the live, openable sessions in
+    /// spawn order (planners first, summarizer appended when it starts).
+    /// `interactive` mirrors the request: `false` ⇒ agents run unattended.
+    PlanRun {
+        workspace_id: Id,
+        story_id: Id,
+        session_ids: Vec<Id>,
+        interactive: bool,
+    },
     /// A PR/code-review row changed state (queued | running | done | error |
     /// cancelled). The Review Panel uses this to poll immediately instead of
     /// waiting for its back-off timer. `session_id` is the orchestrating session

@@ -311,6 +311,18 @@ export type OttoEvent =
       section: string;
       status: string;
     }
+  /** A multi-agent plan generation kicked off N visible planning sessions (and,
+   *  with >1 planner, a summarizer). The Plan tab tiles `session_ids`
+   *  side-by-side so the user can watch them (and answer questions when
+   *  `interactive`). Ids are in spawn order; the summarizer is appended when it
+   *  starts. A3 — Product cluster. */
+  | {
+      type: 'plan_run';
+      workspace_id: Id;
+      story_id: Id;
+      session_ids: Id[];
+      interactive: boolean;
+    }
   /** A self-improvement run finished or an approval became pending. Lets the
    *  Self-Improvement settings pane refresh on the event instead of guessing.
    *  `kind` is "run_finished" | "approval_pending".

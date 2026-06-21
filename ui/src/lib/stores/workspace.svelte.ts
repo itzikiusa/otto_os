@@ -476,6 +476,31 @@ class WorkspaceStore {
     localStorage.setItem('otto_view_mode', mode);
   }
 
+  /**
+   * Make a set of sessions visible side-by-side: switch to the tiled grid and
+   * register them as open tabs (≤4 ⇒ also lay them out as split panes so they
+   * tile even in tabs view). Used by the Plan tab to surface its live planning
+   * agents the moment they spawn. Unknown ids are tolerated — `reconcileTabs`
+   * prunes any that never materialize; `session_created` events fill the rest in.
+   */
+  tileSessions(ids: Id[]): void {
+    const fresh = ids.filter((id) => !this.openTabs.includes(id));
+    if (fresh.length > 0) {
+      this.openTabs = [...this.openTabs, ...fresh];
+      this.persistTabs();
+    }
+    // Lay out up to 4 as side-by-side panes (the grid shows them all in tiled
+    // view; panes give a clean split if the user flips back to tabs view).
+    const paneset = [...this.panes];
+    for (const id of ids) {
+      if (paneset.length >= 4) break;
+      if (!paneset.includes(id)) paneset.push(id);
+    }
+    this.panes = paneset.length > 0 ? paneset : this.panes;
+    this.maximizedId = null;
+    this.setViewMode('tiled');
+  }
+
   /** Whether the UI is currently focused on a single session (tabbed view, or
    *  a maximized tile) — the right panel only shows in this case. */
   get singleSessionView(): boolean {

@@ -189,6 +189,8 @@ pub async fn run_lens_session(
     out_path: &Path,
     timeout: Duration,
     agent_id: Option<&Id>,
+    appearance: &SessionAppearance,
+    on_session: Option<&(dyn Fn(&Id) + Send + Sync)>,
 ) -> RunOutcome {
     // Clear any stale output from a previous run.
     let _ = std::fs::remove_file(out_path);
@@ -196,10 +198,10 @@ pub async fn run_lens_session(
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(provider.to_string()),
-        title: Some(format!("Analysis: {provider}")),
+        title: Some(appearance.title.clone()),
         cwd: Some(cwd.to_string()),
         connection_id: None,
-        meta: Some(serde_json::json!({ "source": "product-analysis" })),
+        meta: Some(serde_json::json!({ "source": appearance.source })),
     };
 
     let session = match ctx.manager.create(ws, user_id, req, None).await {
@@ -217,6 +219,13 @@ pub async fn run_lens_session(
         if let Err(e) = ctx.product_repo.set_agent_session(aid, &sid).await {
             warn!("product_run: early set_agent_session {aid}: {e}");
         }
+    }
+
+    // Early session-id hook (plan flow): surface the live session id the moment
+    // it exists so the caller can tile it side-by-side while it runs — analysis
+    // callers (which track ids via the agent DB row) pass `None`.
+    if let Some(cb) = on_session {
+        cb(&sid);
     }
 
     // Inject the prompt once the TUI has drawn + settled.
@@ -350,6 +359,28 @@ pub async fn run_lens_session(
         },
     )
     .await
+}
+
+/// How a product agent session presents itself: its terminal title and the
+/// `meta.source` tag. The `source` matters for UI visibility — analysis sessions
+/// use `"product-analysis"`, which the workspace store FILTERS OUT of the Agents
+/// list/grid (they're opened on demand inline). Plan sessions instead use
+/// `"product-plan"`, which is NOT filtered, so they tile side-by-side in the
+/// Agents view by default — exactly what the Plan flow wants (watch them live).
+#[derive(Clone)]
+pub struct SessionAppearance {
+    pub title: String,
+    pub source: &'static str,
+}
+
+impl SessionAppearance {
+    /// The analysis default (hidden from the Agents grid; opened inline).
+    fn analysis(provider: &str) -> Self {
+        Self {
+            title: format!("Analysis: {provider}"),
+            source: "product-analysis",
+        }
+    }
 }
 
 /// Append the "write your JSON to this file" instruction to a built prompt.
@@ -646,6 +677,8 @@ pub async fn run_agent_with_recovery(
     out_path: &Path,
     timeout: Duration,
     agent_id: Option<&Id>,
+    appearance: &SessionAppearance,
+    on_session: Option<&(dyn Fn(&Id) + Send + Sync)>,
 ) -> LensRunResult {
     let cancel_key = agent_id.map(|a| a.to_string());
     let cancel = cancel_key
@@ -657,7 +690,12 @@ pub async fn run_agent_with_recovery(
         MAX_AGENT_ATTEMPTS,
         &RETRY_BACKOFF,
         cancel.as_ref(),
-        |_attempt| run_lens_session(ctx, ws, user_id, provider, cwd, prompt, out_path, timeout, agent_id),
+        |_attempt| {
+            run_lens_session(
+                ctx, ws, user_id, provider, cwd, prompt, out_path, timeout, agent_id, appearance,
+                on_session,
+            )
+        },
     )
     .await;
 
@@ -823,6 +861,8 @@ pub async fn run_analysis(
                 &out_path,
                 LENS_TIMEOUT,
                 Some(&agent_id),
+                &SessionAppearance::analysis(&spec.provider),
+                None,
             )
             .await;
 
@@ -985,6 +1025,8 @@ pub async fn run_analysis(
             &out_path,
             SUMMARIZER_TIMEOUT,
             summarizer_agent.as_ref().map(|a| &a.id),
+            &SessionAppearance::analysis(&summarizer_provider),
+            None,
         )
         .await;
 
@@ -1348,6 +1390,8 @@ pub async fn retry_analysis_agent(
         &out_path,
         LENS_TIMEOUT,
         Some(&agent_id),
+        &SessionAppearance::analysis(&agent.provider),
+        None,
     )
     .await;
 
@@ -1692,6 +1736,8 @@ pub async fn run_rewrite(
         &out_path,
         Duration::from_secs(300),
         None,
+        &SessionAppearance::analysis(&provider),
+        None,
     )
     .await;
 
@@ -1991,6 +2037,8 @@ pub async fn run_generate_tests(
         &out_path,
         Duration::from_secs(300),
         None,
+        &SessionAppearance::analysis(&provider),
+        None,
     )
     .await;
 
@@ -2128,6 +2176,70 @@ const PLAN_OUTPUT_CONTRACT: &str = r#"Respond with EXACTLY ONE ```json code bloc
 {"plan_markdown":"..."}
 where plan_markdown is the full implementation plan as Markdown using level-3 headings of the form `### Task N: <title>`, each followed by `**Goal:** ...`, a checklist of steps as `- [ ]` items, and `**Verify:** ...`. Emit every checkbox as `- [ ]` (todo)."#;
 
+/// Prepended to a planning prompt when the run is NON-interactive (the default).
+/// Instructs the agent to work fully autonomously and NOT ask the user anything —
+/// the operator is away and will only review the finished plan.
+const PLAN_AUTONOMY_DIRECTIVE: &str = r#"AUTONOMY: You are running UNATTENDED. The user is NOT available and will only review the finished plan at the end. Do NOT ask the user any questions, and do NOT wait for input. Where something is ambiguous, make reasonable assumptions, STATE those assumptions explicitly in the plan, and continue. Produce the complete plan autonomously and write the final JSON to the output path.
+
+---
+
+"#;
+
+/// The verbatim consolidation contract for the PLAN summarizer agent. It merges
+/// the candidate plans (possibly from different providers) into ONE plan obeying
+/// the same `plan_markdown` output shape.
+const PLAN_SUMMARIZER_CONTRACT: &str = r#"You are the SUMMARIZER. Several planning agents (possibly on different AI providers) each produced an implementation plan for the SAME story. Consolidate them into ONE best plan:
+- Merge the tasks across all candidate plans; remove duplicates and collapse near-identical tasks.
+- Keep the clearest wording and the most complete, correct steps; reconcile any disagreements, choosing the best approach.
+- Preserve good coverage (setup, implementation, tests, verification) without redundant busywork.
+- Keep the SAME Markdown structure: level-3 headings `### Task N: <title>`, each with `**Goal:** ...`, a `- [ ]` checklist of steps, and `**Verify:** ...`. Emit every checkbox as `- [ ]` (todo).
+
+Respond with EXACTLY ONE ```json code block (no prose) matching:
+{"plan_markdown":"..."}"#;
+
+/// Build the plan-summarizer prompt: feed every candidate plan (labelled by
+/// provider) and instruct consolidation into one plan, same output contract.
+/// `candidates` is `(provider, plan_markdown)` per successful planner.
+fn build_plan_summarizer_prompt(
+    skill_body: &str,
+    story_title: &str,
+    context_path: &str,
+    candidates: &[(String, String)],
+) -> String {
+    let mut prompt = String::new();
+
+    if !skill_body.is_empty() {
+        prompt.push_str(skill_body);
+        prompt.push_str("\n\n---\n\n");
+    }
+
+    prompt.push_str("## Story: ");
+    prompt.push_str(story_title);
+    prompt.push_str("\n\n");
+
+    prompt.push_str(
+        "The full story context (body, answered questions, analysis summary, approved test \
+         cases, learnings) is in this file — read it fully before consolidating:\n",
+    );
+    prompt.push_str(context_path);
+    prompt.push_str("\n\n");
+
+    prompt.push_str("## Candidate Plans to Consolidate\n\n");
+    for (provider, plan) in candidates {
+        prompt.push_str("### Plan (");
+        prompt.push_str(provider);
+        prompt.push_str("):\n\n");
+        prompt.push_str(plan);
+        prompt.push_str("\n\n");
+    }
+
+    prompt.push_str("---\n\n");
+    prompt.push_str(PLAN_SUMMARIZER_CONTRACT);
+    prompt.push('\n');
+
+    prompt
+}
+
 // ---------------------------------------------------------------------------
 // build_plan_prompt — pure, unit-testable
 // ---------------------------------------------------------------------------
@@ -2175,26 +2287,40 @@ struct PlanFindings {
 /// tokio task by the generate-plan handler. Returns `()` — all errors are
 /// logged; no panic propagates.
 ///
-/// Mirrors `run_rewrite`: provider-honoring (runs via `run_lens_session`), with a
-/// temp context file enriched with answered questions, the latest analysis
-/// summary, AND the latest run's approved test cases.
+/// MULTI-AGENT, mirroring `run_analysis`: one planning agent runs per provider in
+/// `providers` (each as its own real, openable, VISIBLE session so the user can
+/// watch them), and — when >1 planner produced a plan — a summarizer consolidates
+/// the candidate plans into ONE. A `plan_run` event surfaces the live session ids
+/// so the UI can tile them side-by-side. When `interactive` is false (the default)
+/// every planning prompt is prefixed with an autonomy directive so agents work
+/// unattended and never block on questions.
+///
+/// The shared context file is enriched with answered questions, the latest
+/// analysis summary, AND the latest run's approved test cases — same as before.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_generate_plan(
     ctx: ServerCtx,
     ws: otto_core::domain::Workspace,
     user_id: otto_core::Id,
     story_id: otto_core::Id,
-    provider: String,
+    providers: Vec<String>,
+    summarizer_provider: String,
+    interactive: bool,
     // model override reserved for future use when run_lens_session gains per-session model selection
     _model: Option<String>,
     cwd: String,
     focus: Option<String>,
 ) {
-    // Per-invocation session cwd: when there's no real story cwd we fell back to
-    // the shared temp dir; give this plan-gen session its own unique temp subdir so
-    // the codex usage tailer attributes it 1:1 by cwd. A real story cwd passes
-    // through unchanged.
-    let cwd = session_cwd(&cwd);
+    // Normalize the provider list: drop blanks; if somehow empty, the handler
+    // should have guaranteed at least one — but guard anyway.
+    let providers: Vec<String> = providers
+        .into_iter()
+        .filter(|p| !p.trim().is_empty())
+        .collect();
+    if providers.is_empty() {
+        warn!("product_run(plan): no providers resolved; nothing to do");
+        return;
+    }
 
     // 1. Load story
     let story = match ctx.product_repo.get_story(&story_id).await {
@@ -2337,44 +2463,196 @@ pub async fn run_generate_plan(
         }
     }
 
-    // 4. Build prompt (references the context file) + out_path for JSON output.
-    let out_path = std::env::temp_dir()
-        .join(format!("otto-product-plan-{plan_id}.json"));
-    let base_prompt = build_plan_prompt(&skill_body, &context_path.to_string_lossy());
-    let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
+    let context_path_str = context_path.to_string_lossy().to_string();
 
-    // 5. Pre-trust provider.
-    otto_sessions::trust::ensure_trusted(&provider, &cwd);
+    // 4. Pre-trust every distinct provider on the base cwd (mirror analysis) so no
+    //    session stalls on the interactive "trust this folder?" prompt.
+    {
+        let mut trusted = HashSet::<String>::new();
+        for provider in providers
+            .iter()
+            .cloned()
+            .chain(std::iter::once(summarizer_provider.clone()))
+        {
+            if trusted.insert(provider.clone()) {
+                otto_sessions::trust::ensure_trusted(&provider, &cwd);
+            }
+        }
+    }
 
-    // 6. Run as a provider-honoring session.
-    let result = run_agent_with_recovery(
-        &ctx,
-        &ws,
-        &user_id,
-        &provider,
-        &cwd,
-        &prompt,
-        &out_path,
-        Duration::from_secs(300),
-        None,
-    )
-    .await;
+    // 5. Shared live session-id collector. Each planner reports its session id the
+    //    moment it exists (via the run_lens_session on_session hook); we re-emit a
+    //    `plan_run` event each time so the Plan tab can tile the sessions live.
+    let session_ids: Arc<Mutex<Vec<Id>>> = Arc::new(Mutex::new(Vec::new()));
+    let emit_plan_run = {
+        let ctx = ctx.clone();
+        let ws_id = ws.id.clone();
+        let story_id = story_id.clone();
+        let session_ids = Arc::clone(&session_ids);
+        move || {
+            let ids = session_ids.lock().unwrap().clone();
+            let _ = ctx.events.send(otto_core::event::Event::PlanRun {
+                workspace_id: ws_id.clone(),
+                story_id: story_id.clone(),
+                session_ids: ids,
+                interactive,
+            });
+        }
+    };
 
-    // 7. Parse + persist the outcome.
-    let parsed_opt = result.raw.as_deref()
-        .and_then(extract_json_block)
-        .and_then(|v| serde_json::from_value::<PlanFindings>(v).ok());
+    // 6. Per-provider concurrent fan-out as real, VISIBLE planning sessions.
+    //    Each writes its plan JSON to a distinct out_path. Non-interactive (the
+    //    default) prepends the autonomy directive so agents never block on input.
+    let mut set = tokio::task::JoinSet::new();
+    for (i, provider) in providers.iter().cloned().enumerate() {
+        let ctx = ctx.clone();
+        let ws = ws.clone();
+        let user_id = user_id.clone();
+        let context_path_str = context_path_str.clone();
+        let skill_body = skill_body.clone();
+        let session_ids = Arc::clone(&session_ids);
+        let emit_plan_run = emit_plan_run.clone();
+        let plan_id = plan_id.clone();
+        // Unique per-session cwd (codex usage attribution), like the analysis fan-out.
+        let planner_cwd = session_cwd(&cwd);
 
-    match parsed_opt {
-        Some(findings) if !findings.plan_markdown.trim().is_empty() => {
-            // 8. Persist the plan as a new kind="plan" version.
+        set.spawn(async move {
+            let out_path = std::env::temp_dir()
+                .join(format!("otto-product-plan-{plan_id}-{i}.json"));
+            let base_prompt = build_plan_prompt(&skill_body, &context_path_str);
+            let mut prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
+            if !interactive {
+                prompt = format!("{PLAN_AUTONOMY_DIRECTIVE}{prompt}");
+            }
+
+            // Surface the session id for live tiling as soon as it's created.
+            let on_session = {
+                let session_ids = Arc::clone(&session_ids);
+                let emit_plan_run = emit_plan_run.clone();
+                move |sid: &Id| {
+                    {
+                        let mut guard = session_ids.lock().unwrap();
+                        if !guard.contains(sid) {
+                            guard.push(sid.clone());
+                        }
+                    }
+                    emit_plan_run();
+                }
+            };
+
+            let result = run_agent_with_recovery(
+                &ctx,
+                &ws,
+                &user_id,
+                &provider,
+                &planner_cwd,
+                &prompt,
+                &out_path,
+                Duration::from_secs(300),
+                None,
+                &SessionAppearance {
+                    title: format!("Plan: {provider}"),
+                    source: "product-plan",
+                },
+                Some(&on_session),
+            )
+            .await;
+
+            let plan_markdown = result
+                .raw
+                .as_deref()
+                .and_then(extract_json_block)
+                .and_then(|v| serde_json::from_value::<PlanFindings>(v).ok())
+                .map(|f| f.plan_markdown)
+                .filter(|m| !m.trim().is_empty());
+            (provider, plan_markdown)
+        });
+    }
+
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((provider, Some(plan))) = joined {
+            candidates.push((provider, plan));
+        }
+    }
+
+    // 7. Consolidate: if >1 candidate plan, run a VISIBLE summarizer session to
+    //    merge them into one. With 0 or 1 candidate, no summarizer is needed.
+    let final_plan: Option<String> = match candidates.len() {
+        0 => None,
+        1 => Some(candidates.remove(0).1),
+        _ => {
+            let out_path = std::env::temp_dir()
+                .join(format!("otto-product-plan-{plan_id}-summary.json"));
+            let base = build_plan_summarizer_prompt(
+                &skill_body,
+                &story.title,
+                &context_path_str,
+                &candidates,
+            );
+            let mut prompt = augment_with_out_path(&base, &out_path.to_string_lossy());
+            if !interactive {
+                prompt = format!("{PLAN_AUTONOMY_DIRECTIVE}{prompt}");
+            }
+            let summarizer_cwd = session_cwd(&cwd);
+
+            let on_session = {
+                let session_ids = Arc::clone(&session_ids);
+                let emit_plan_run = emit_plan_run.clone();
+                move |sid: &Id| {
+                    {
+                        let mut guard = session_ids.lock().unwrap();
+                        if !guard.contains(sid) {
+                            guard.push(sid.clone());
+                        }
+                    }
+                    emit_plan_run();
+                }
+            };
+
+            let result = run_agent_with_recovery(
+                &ctx,
+                &ws,
+                &user_id,
+                &summarizer_provider,
+                &summarizer_cwd,
+                &prompt,
+                &out_path,
+                Duration::from_secs(300),
+                None,
+                &SessionAppearance {
+                    title: format!("Plan summarizer: {summarizer_provider}"),
+                    source: "product-plan",
+                },
+                Some(&on_session),
+            )
+            .await;
+
+            let summarized = result
+                .raw
+                .as_deref()
+                .and_then(extract_json_block)
+                .and_then(|v| serde_json::from_value::<PlanFindings>(v).ok())
+                .map(|f| f.plan_markdown)
+                .filter(|m| !m.trim().is_empty());
+
+            // Fall back to the first candidate plan if the summarizer produced
+            // nothing usable — better a single plan than no plan at all.
+            summarized.or_else(|| candidates.into_iter().next().map(|(_, p)| p))
+        }
+    };
+
+    // 8. Persist the final (consolidated, or single) plan as a new kind="plan"
+    //    version — exactly as before.
+    match final_plan {
+        Some(plan_markdown) => {
             if let Err(e) = ctx
                 .product_repo
                 .add_version(otto_state::NewVersion {
                     story_id: story_id.clone(),
                     kind: "plan".into(),
                     title: "Implementation Plan".into(),
-                    body_md: findings.plan_markdown,
+                    body_md: plan_markdown,
                     raw_json: None,
                     change_notes: None,
                     created_by: story.created_by.clone(),
@@ -2384,7 +2662,7 @@ pub async fn run_generate_plan(
                 warn!("product_run(plan): add_version: {e}");
             }
 
-            // 9. Update story stage to "planned".
+            // Update story stage to "planned".
             if let Err(e) = ctx
                 .product_repo
                 .update_story(
@@ -2399,7 +2677,7 @@ pub async fn run_generate_plan(
                 warn!("product_run(plan): update_story stage: {e}");
             }
 
-            // 10. Add event.
+            // Add event.
             if let Err(e) = ctx
                 .product_repo
                 .add_event(otto_state::NewEvent {
@@ -2421,15 +2699,10 @@ pub async fn run_generate_plan(
                 status: "done".into(),
             });
         }
-        _ => {
-            let reason = if result.errored {
-                "plan generation session failed (timeout/exit/start failure)".to_string()
-            } else {
-                format!(
-                    "plan generation agent returned unparseable/empty output (len={})",
-                    result.raw.as_deref().map(|s| s.len()).unwrap_or(0)
-                )
-            };
+        None => {
+            let reason = "plan generation produced no usable plan (all planning agents \
+                          failed or returned unparseable/empty output)"
+                .to_string();
             warn!("product_run(plan): {reason}");
             let _ = ctx
                 .product_repo
@@ -2991,6 +3264,40 @@ mod tests {
             prompt.contains("- [ ]"),
             "prompt must instruct emitting '- [ ]' checkboxes; got:\n{prompt}"
         );
+    }
+
+    #[test]
+    fn build_plan_summarizer_prompt_includes_candidates_and_consolidate_contract() {
+        let candidates = vec![
+            ("claude".to_string(), "### Task 1: A\n- [ ] do a".to_string()),
+            ("codex".to_string(), "### Task 1: B\n- [ ] do b".to_string()),
+        ];
+        let prompt = build_plan_summarizer_prompt(
+            "synth skill",
+            "Login Story",
+            "/tmp/ctx.md",
+            &candidates,
+        );
+        // Consolidation instruction + the plan output contract marker.
+        assert!(prompt.to_lowercase().contains("consolidate"), "must instruct consolidation:\n{prompt}");
+        assert!(prompt.contains("plan_markdown"), "must keep the plan_markdown contract:\n{prompt}");
+        assert!(prompt.contains("EXACTLY ONE"), "must include the EXACTLY ONE contract text:\n{prompt}");
+        // Each candidate is labelled by provider and fed in verbatim.
+        assert!(prompt.contains("Plan (claude)"), "must label the claude candidate:\n{prompt}");
+        assert!(prompt.contains("Plan (codex)"), "must label the codex candidate:\n{prompt}");
+        assert!(prompt.contains("- [ ] do a"), "must include the first candidate body:\n{prompt}");
+        // Story title + context path are referenced.
+        assert!(prompt.contains("Login Story"));
+        assert!(prompt.contains("/tmp/ctx.md"));
+    }
+
+    #[test]
+    fn autonomy_directive_instructs_no_questions_and_assumptions() {
+        // The non-interactive directive must tell the agent to work unattended,
+        // not ask questions, and state assumptions.
+        assert!(PLAN_AUTONOMY_DIRECTIVE.to_uppercase().contains("UNATTENDED"));
+        assert!(PLAN_AUTONOMY_DIRECTIVE.to_lowercase().contains("do not ask"));
+        assert!(PLAN_AUTONOMY_DIRECTIVE.to_lowercase().contains("assumption"));
     }
 
     #[test]

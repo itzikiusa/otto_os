@@ -237,6 +237,32 @@ AI-run task (analysis, rewrite, test-case generation, plan generation).
   `PlanTab`, `RewriteTab`, `TestCasesTab`). Each tab's callback triggers a single poll to
   refresh its data immediately, supplementing the existing timed polling as a fallback.
 
+## Multi-agent plan kickoff (A3)
+
+Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs::run_generate_plan` each
+time a planning (or the summarizer) session is created during a `plan/generate` run, carrying
+the live session ids known so far. Lets the Plan tab tile the planning sessions side-by-side so
+the user can watch them (and answer questions when `interactive`).
+
+```json
+{
+  "type": "plan_run",
+  "workspace_id": "<Id>",
+  "story_id": "<Id>",
+  "session_ids": ["<Id>", "..."],
+  "interactive": false
+}
+```
+
+- `session_ids` — live, openable sessions in spawn order (planners first; the summarizer is
+  appended when it starts). The event is re-emitted as each new session appears, so later
+  frames are supersets of earlier ones.
+- `interactive` — mirrors the request: `false` (the default) means agents run unattended and
+  are instructed NOT to ask questions; `true` means the user will answer questions in the tiles.
+- UI routing: `events.svelte.ts` → `product.applyPlanRun()` → `PlanTab` subscribers, which call
+  `ws.tileSessions(session_ids)` (switch to tiled view + open the sessions) and route to
+  `#/agents` on the first frame, then keep a "Watching N planning agents" affordance fresh.
+
 ## Workflow run progress (A11)
 
 Workspace-scoped. Emitted by `crates/otto-server/src/workflow_engine.rs` at

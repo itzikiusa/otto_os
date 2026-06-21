@@ -200,7 +200,7 @@ async fn enrich_sessions(ctx: &ServerCtx, sessions: &mut [otto_usage::SessionUsa
 fn session_kind_label(s: &otto_core::domain::Session) -> String {
     if let Some(src) = s.meta.get("source").and_then(Value::as_str) {
         return match src {
-            "product-analysis" => "product".to_string(),
+            "product-analysis" | "product-plan" => "product".to_string(),
             other => other.to_string(), // "review", "channel"
         };
     }

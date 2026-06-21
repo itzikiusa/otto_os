@@ -210,10 +210,30 @@ pub struct GenerateTestsReq {
 }
 
 /// Request body for the `POST …/plan/generate` endpoint.
+///
+/// Multi-agent, mirroring `AnalyzeReq`: when `providers` has >1 entry, one
+/// planning agent runs per provider (each as its own real, openable session,
+/// visible side-by-side), and a summarizer consolidates their plans into one.
+/// `provider` is kept for single-agent back-compat — old callers that send only
+/// `provider` still work unchanged.
 #[derive(Debug, Default, Deserialize)]
 pub struct GeneratePlanReq {
+    /// Single-provider back-compat. Used only when `providers` is empty.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Multi-agent providers: one planning session per entry. Empty falls back
+    /// to `[provider]` (or the workspace/global default).
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// Provider for the consolidating summarizer agent (only used when >1
+    /// planning agent ran). Defaults to the workspace/global default provider.
+    #[serde(default)]
+    pub summarizer_provider: Option<String>,
+    /// When `false`, agents run fully unattended (an autonomy directive is
+    /// prepended instructing them NOT to ask the user questions). `None` is
+    /// treated as non-interactive (the default) — the same as `Some(false)`.
+    #[serde(default)]
+    pub interactive: Option<bool>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]

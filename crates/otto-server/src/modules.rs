@@ -716,7 +716,39 @@ async fn generate_plan(
         otto_core::provider::workspace_default(&ws.settings),
         otto_core::provider::global_default(global_default.as_ref()),
     ]);
-    let provider = req.provider.clone().unwrap_or(default_provider);
+
+    // Resolve the planning provider list (multi-agent). Prefer `providers`
+    // (non-empty); else the single back-compat `provider`; else the default.
+    // Blanks are dropped, and an empty result falls back to the default provider.
+    let providers: Vec<String> = {
+        let mut list: Vec<String> = req
+            .providers
+            .iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if list.is_empty() {
+            list = vec![req
+                .provider
+                .clone()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| default_provider.clone())];
+        }
+        list
+    };
+
+    // Summarizer provider: request override → default provider.
+    let summarizer_provider = req
+        .summarizer_provider
+        .clone()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| default_provider.clone());
+
+    // Interactivity: `None` ⇒ non-interactive (the default). `Some(true)` only
+    // when the UI explicitly turned the autonomy toggle OFF.
+    let interactive = req.interactive.unwrap_or(false);
 
     // Resolve cwd: req → story.cwd → temp dir.
     let cwd = req
@@ -730,7 +762,9 @@ async fn generate_plan(
         ws.clone(),
         user.id.clone(),
         sid,
-        provider,
+        providers,
+        summarizer_provider,
+        interactive,
         req.model,
         cwd,
         req.focus,

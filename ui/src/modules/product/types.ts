@@ -333,7 +333,14 @@ export interface GenerateTestsReq {
 }
 
 export interface GeneratePlanReq {
+  /** Single-provider back-compat; used only when `providers` is empty. */
   provider?: string | null;
+  /** Multi-agent: one planning session per entry (visible side-by-side). */
+  providers?: string[];
+  /** Provider for the consolidating summarizer (only when >1 planner). */
+  summarizer_provider?: string | null;
+  /** `false` (default) ⇒ agents run unattended and don't ask questions. */
+  interactive?: boolean | null;
   model?: string | null;
   cwd?: string | null;
   focus?: string | null;

@@ -531,6 +531,26 @@ class ProductStore {
     };
   }
 
+  // `plan_run` subscribers (the Plan tab tiles the live planning sessions).
+  private planRunListeners: Set<(sessionIds: string[], interactive: boolean) => void> =
+    new Set();
+
+  onPlanRun(cb: (sessionIds: string[], interactive: boolean) => void): () => void {
+    this.planRunListeners.add(cb);
+    return () => {
+      this.planRunListeners.delete(cb);
+    };
+  }
+
+  /** Dispatch a `plan_run` WS event (only for the selected story). Returns true
+   *  when handled (always — the event is product-owned), like {@link applyEvent}. */
+  applyPlanRun(ev: import('../api/types').OttoEvent): boolean {
+    if (ev.type !== 'plan_run') return false;
+    if (ev.story_id !== this.selectedId) return true;
+    for (const cb of this.planRunListeners) cb(ev.session_ids, ev.interactive);
+    return true;
+  }
+
   applyEvent(ev: import('../api/types').OttoEvent): boolean {
     if (ev.type !== 'product_changed') return false;
     // Only fire if the event is for the currently-selected story.

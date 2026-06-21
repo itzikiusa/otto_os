@@ -230,6 +230,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::SwarmStatus { workspace_id, .. }
         // Product events are workspace-scoped.
         | Event::ProductChanged { workspace_id, .. }
+        | Event::PlanRun { workspace_id, .. }
         // Review, workflow, and skill-eval events are workspace-scoped too.
         | Event::ReviewChanged { workspace_id, .. }
         | Event::WorkflowRunUpdated { workspace_id, .. }

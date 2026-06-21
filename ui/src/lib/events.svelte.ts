@@ -145,6 +145,9 @@ class EventsClient {
         } else if (parsed.type === 'product_changed') {
           // Let product section tabs know a run completed (kills a poll cycle).
           product.applyEvent(parsed);
+        } else if (parsed.type === 'plan_run') {
+          // Multi-agent plan kickoff: the Plan tab tiles the live sessions.
+          product.applyPlanRun(parsed);
         } else if (parsed.type === 'improvement_updated') {
           // Let the Self-Improvement pane refresh without waiting for its poll.
           improvementBus.apply(parsed.kind, parsed.id);
