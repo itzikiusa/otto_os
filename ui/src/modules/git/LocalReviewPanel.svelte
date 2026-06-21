@@ -50,6 +50,12 @@
       .map(([k]) => k);
   });
 
+  // Runs shown under "Past reviews": everything that isn't the currently active
+  // run. Whenever a review is active it is always history[0] (mount adopts only
+  // history[0]; start/poll/retry all write history[0]), so drop it; on a clean
+  // slate (review === null) every stored run is "past".
+  const pastRuns = $derived(review ? history.slice(1) : history);
+
   const PROVIDER_OPTIONS = ['claude', 'codex', 'agy'];
 
   // ---------------------------------------------------------------------------
@@ -93,9 +99,18 @@
     try {
       const runs = await api.get<Review[]>(`/repos/${rid}/local-reviews`);
       history = runs;
-      review = runs.length > 0 ? runs[0] : null;
-      if (review?.status === 'running') schedulePoll();
-      if (review?.status === 'done') initChecked(review.comments);
+      // Clean slate by default: a finished run (done/error) is kept in history
+      // only — never resurrected as the active panel, because its findings were
+      // computed against an earlier working tree that may no longer exist. Only
+      // a still-running review is re-adopted (and polling resumed) so an
+      // in-flight run survives navigating away from the tab and back.
+      const newest = runs.length > 0 ? runs[0] : null;
+      if (newest && newest.status === 'running') {
+        review = newest;
+        schedulePoll();
+      } else {
+        review = null;
+      }
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
         review = null;
@@ -317,8 +332,10 @@
   {:else if !review}
     <EmptyState
       icon="zap"
-      title="No local review yet"
-      body="Select a base branch and click 'Review changes' to run AI agents on your uncommitted work."
+      title="No active review"
+      body={pastRuns.length > 0
+        ? "Click 'Review changes' to review your current changes. Earlier runs are kept under 'Past reviews' below."
+        : "Select a base branch and click 'Review changes' to run AI agents on your current uncommitted work."}
     />
   {:else if review.status === 'running'}
     <div class="lrp-running-header">
@@ -403,8 +420,8 @@
     {/if}
   {/if}
 
-  <!-- Past local reviews history (runs index 1+) -->
-  {#if history.length > 1}
+  <!-- Past local reviews history: all stored runs except the active one -->
+  {#if pastRuns.length > 0}
     {@const headerOpen = !!historyExpanded['_header' as unknown as number]}
     <div class="lrp-history">
       <button
@@ -412,11 +429,11 @@
         onclick={() => { historyExpanded = { ...historyExpanded, ['_header' as unknown as number]: !headerOpen }; }}
         aria-expanded={headerOpen}
       >
-        Past reviews ({history.length - 1}){headerOpen ? ' ▾' : ' ▸'}
+        Past reviews ({pastRuns.length}){headerOpen ? ' ▾' : ' ▸'}
       </button>
       {#if headerOpen}
         <div class="lrp-history-list">
-          {#each history.slice(1) as run, i (run.id)}
+          {#each pastRuns as run, i (run.id)}
             {@const isOpen = !!historyExpanded[i]}
             <div class="lrp-history-run card">
               <button
