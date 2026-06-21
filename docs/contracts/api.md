@@ -55,8 +55,8 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 41 | POST /api/v1/repos/{id}/stage | ws editor | StagePathsReq | RepoStatusResp |
 | 42 | POST /api/v1/repos/{id}/unstage | ws editor | StagePathsReq | RepoStatusResp |
 | 43 | POST /api/v1/repos/{id}/commit | ws editor | CommitReq | `{"sha":"..."}` |
-| 44 | POST /api/v1/repos/{id}/push | ws editor | — | `{"output":"..."}` |
-| 45 | POST /api/v1/repos/{id}/pull | ws editor | — | `{"output":"..."}` |
+| 44 | POST /api/v1/repos/{id}/push | ws editor | — | RepoStatusResp |
+| 45 | POST /api/v1/repos/{id}/pull | ws editor | — | RepoStatusResp |
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | CheckoutReq | RepoStatusResp |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"}` | RepoStatusResp |
 | 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all | ws viewer | — | `PrSummary[]` |
@@ -527,7 +527,7 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | GET /git/repos | Git:View | — | `Repo[]` across **all** workspaces the caller may view (root → all); workspace-independent list backing the Git page's top-level repo tabs + landing |
 | POST /workspaces/{id}/repos/detect | ws editor | DetectRepoReq | detect a local git repo (resolve remote/provider) |
 | GET /repos/{id}/refs | ws viewer | — | branch/tag refs |
-| POST /repos/{id}/fetch | ws editor | — | `{output}` |
+| POST /repos/{id}/fetch | ws editor | — | RepoStatusResp |
 | POST /repos/{id}/discard | ws editor | StagePathsReq | RepoStatusResp |
 | POST /repos/{id}/merge | ws editor | MergeReq | merge result |
 | GET /repos/{id}/merge/status | ws viewer | — | in-progress merge state |

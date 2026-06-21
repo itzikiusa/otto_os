@@ -818,22 +818,27 @@ async fn repo_push<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<RepoStatusResp>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
-    let output = git.push(token).await?;
-    Ok(Json(serde_json::json!({ "output": output })))
+    git.push(token).await?;
+    // Return the FRESH status so the UI's ahead/behind chip updates after push.
+    Ok(Json(git.status().await?))
 }
 
 async fn repo_pull<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<RepoStatusResp>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
-    let output = git.pull(token).await?;
-    Ok(Json(serde_json::json!({ "output": output })))
+    // Pull, then return the FRESH status so the UI's branch chip clears its
+    // ahead/behind. (Previously returned `{output}`, which the UI consumed as a
+    // RepoStatusResp — so the behind count never updated and pull looked like a
+    // no-op even when it fast-forwarded.)
+    git.pull(token).await?;
+    Ok(Json(git.status().await?))
 }
 
 /// `POST /repos/{id}/api-collections/pull` — pull the repo, then read every
