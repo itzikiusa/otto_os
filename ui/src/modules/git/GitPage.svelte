@@ -180,7 +180,7 @@
   <PrDetail repoId={prRepo.id} number={Number(router.parts[3])} />
 {:else}
   <div class="gitpage">
-    <GitTabs onopen={openRepo} />
+    <GitTabs onopen={openRepo} onadd={() => (addOpen = true)} />
 
     {#if activeRepo}
       {#key activeRepo.id}
@@ -194,16 +194,9 @@
         </div>
       {/key}
     {:else}
-      <!-- ── Full-width landing (no tab open) ─────────────────────────────── -->
+      <!-- ── Compact, centered hub (no tab open). Adding/opening also live in
+           the + tab, so this is just a tidy launcher, not a separate screen. ── -->
       <div class="landing">
-        <div class="page-header">
-          <div>
-            <h1>Git</h1>
-            <div class="sub">Repositories</div>
-          </div>
-          <button class="btn primary" onclick={() => (addOpen = true)}>Add Repository</button>
-        </div>
-
         {#if git.loading && !git.allReposLoaded}
           <Skeleton rows={3} height={56} />
         {:else if git.allRepos.length === 0}
@@ -215,8 +208,21 @@
             onaction={() => (addOpen = true)}
           />
         {:else}
-          <div class="repo-grid">
-            {#each git.allRepos as r (r.id)}
+          <div class="landing-inner">
+            <div class="landing-head">
+              <div>
+                <h2 class="landing-title">No repository open</h2>
+                <div class="landing-hint">
+                  Open one below, or use the <strong>+</strong> tab — you can also add a
+                  new repository there.
+                </div>
+              </div>
+              <button class="btn primary" onclick={() => (addOpen = true)}>
+                <Icon name="plus" size={12} /> Add Repository
+              </button>
+            </div>
+            <div class="repo-grid">
+              {#each git.allRepos as r (r.id)}
               <div class="repo-card card">
                 <button class="repo-main" onclick={() => openRepo(r.id)}>
                   <div class="repo-name">
@@ -238,6 +244,7 @@
                 </div>
               </div>
             {/each}
+            </div>
           </div>
         {/if}
       </div>
@@ -380,7 +387,32 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 20px 24px 40px;
+    padding: 28px 24px 40px;
+  }
+  /* Centered, constrained hub so the no-tab state isn't a sprawling near-empty
+     page — the + tab is the primary add/open entry point. */
+  .landing-inner {
+    max-width: 880px;
+    margin: 0 auto;
+    width: 100%;
+  }
+  .landing-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .landing-title {
+    font-size: 16px;
+    font-weight: 650;
+    margin: 0;
+  }
+  .landing-hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 3px;
+    max-width: 520px;
   }
   .path-row {
     display: flex;

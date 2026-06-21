@@ -564,7 +564,9 @@
                     <Icon name="check" size={8} />
                   </span>
                 {/if}
-                <span class="ci-subject">{row.commit.subject}</span>
+                <!-- Ref chips sit on the LEFT, attached to the graph node (like
+                     GitKraken's BRANCH/TAG column) so the checked-out branch reads
+                     on the graph itself, not floated to the far right. -->
                 {#each chipsFor(row.commit) as chip}
                   <span
                     class="ref-chip kind-{chip.kind}"
@@ -583,6 +585,7 @@
                     {/if}
                   </span>
                 {/each}
+                <span class="ci-subject">{row.commit.subject}</span>
               </div>
               <div class="ci-meta">
                 <span class="mono ci-sha">{row.commit.short_sha}</span>

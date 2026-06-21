@@ -14,8 +14,10 @@
   interface Props {
     /** Open a repo as a tab (parent loads/wires the active RepoView). */
     onopen: (repoId: string) => void;
+    /** Open the "Add repository" flow (parent owns the modal). */
+    onadd: () => void;
   }
-  let { onopen }: Props = $props();
+  let { onopen, onadd }: Props = $props();
 
   const byId = $derived(new Map(git.allRepos.map((r) => [r.id, r])));
   const openRepos = $derived(
@@ -47,18 +49,18 @@
   }
 
   function openPicker(e: MouseEvent): void {
-    if (closedRepos.length === 0) {
-      ctxMenu.show(e, [{ label: 'All repositories are open', icon: 'folder' }]);
-      return;
-    }
-    ctxMenu.show(
-      e,
-      closedRepos.map((r) => ({
+    // Always offer "Add repository…"; then list any not-yet-open repos to open.
+    // Picking one that is somehow already open just activates it (openRepoTab is
+    // idempotent), so there's no duplicate-tab risk.
+    ctxMenu.show(e, [
+      { label: 'Add repository…', icon: 'plus', action: () => onadd() },
+      ...(closedRepos.length > 0 ? [{ separator: true }] : []),
+      ...closedRepos.map((r) => ({
         label: r.name,
         icon: 'branch',
         action: () => onopen(r.id),
       })),
-    );
+    ]);
   }
 
   // ── Drag-to-reorder (mirrors shell/TabBar) ───────────────────────────────
