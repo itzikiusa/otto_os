@@ -26,6 +26,10 @@ Otto.app (Tauri / otto-desktop)
 - **`docs/contracts/` is authoritative.** The Rust API (`api.md`, `ws.md`) is the
   source of truth; the TypeScript types in `ui/src/lib/api/types.ts` mirror it.
   Change the contract and the types together.
+- **Per-feature guides live in [`docs/features/`](./docs/features/README.md)** —
+  setup, full walkthrough, the relevant API/WS surface, capabilities & limits,
+  and troubleshooting for every feature (one doc per feature). These are
+  code-grounded explainers; `docs/contracts/` remains the API source of truth.
 
 ### Rust workspace (`crates/`)
 
@@ -35,21 +39,25 @@ Otto.app (Tauri / otto-desktop)
 | `otto-state` | SQLite persistence + migrations (`crates/otto-state/migrations/`) |
 | `otto-rbac` | Auth, roles, API tokens |
 | `otto-keychain` | macOS Keychain secret storage |
+| `otto-netguard` | Outbound SSRF guard (blocks loopback/private/metadata) |
 | `otto-pty` | PTY plumbing |
 | `otto-sessions` | Session manager + PTY + trust + prompt-guard |
 | `otto-connections` | SSH / MySQL / Redis / MongoDB / ClickHouse sessions |
+| `otto-ssh` | Shared SSH-tunnel helper (`-L`/SOCKS5 `-D`, SFTP, Kafka-aware proxy) |
 | `otto-dbviewer` | Database Explorer engine |
-| `otto-orchestrator` | Multi-agent code review |
+| `otto-brokers` | Message Brokers (Kafka viewer) |
+| `otto-orchestrator` | Claude-PTY agent runner + ⌘K plan parsing (summaries, PR/commit drafts) |
 | `otto-git` | Repos, diffs, commits, PRs |
 | `otto-issues` | Jira / Confluence integration |
 | `otto-channels` | Slack / Telegram bridges |
 | `otto-improve` | Self-improvement engine |
 | `otto-context` | Context assembly |
+| `otto-memory` | Vault knowledge store (keyword + vector hybrid recall) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
 | `otto-skills` | Bundled, versioned skill library |
 | `otto-product` | Jira/Confluence product workflows |
 | `otto-swarm` | Agent Swarm (role agents, org tree, coordinator) |
-| `otto-server` | Axum routes wiring the crates together |
+| `otto-server` | Axum routes wiring the crates together; also hosts the multi-agent code-review engine, swarm runtime, workflow engine & plugin supervisor |
 | `ottod` | The daemon binary |
 
 > The Tauri desktop shell lives in `apps/desktop/src-tauri` and is a **separate,
@@ -59,10 +67,12 @@ Otto.app (Tauri / otto-desktop)
 
 ### UI module areas (`ui/src/modules/`)
 
-`agents`, `api` (REST client), `connections`, `database` (Database Explorer),
-`git`, `help`, `insights`, `panels`, `product`, `settings`, `skills-eval`,
-`swarm`, `usage`, `workflows`. Shared code lives in `ui/src/lib/` (`api/`,
-`components/`, `stores/`); the app shell is `ui/src/shell/` + `ui/src/App.svelte`.
+`agents`, `api` (REST client), `brokers` (Kafka viewer), `connections`,
+`database` (Database Explorer), `git`, `help`, `insights`, `panels`, `plugins`,
+`product`, `settings`, `share` (remote/mobile), `skills-eval`, `swarm`, `usage`,
+`vault` (knowledge store), `workflows`. Shared code lives in `ui/src/lib/`
+(`api/`, `components/`, `stores/`); the app shell is `ui/src/shell/` +
+`ui/src/App.svelte`.
 
 ## Build & test commands
 

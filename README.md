@@ -101,7 +101,18 @@ bridges so an agent can work a ticket from a chat thread.
   usage and cost by tailing Claude and Codex transcripts (no manual
   instrumentation), with per-provider / day / session rollups and configurable
   retention.
-- **API client** — a built-in REST workbench (collections, environments, history).
+- **API client** — a built-in REST workbench (collections, environments, history),
+  with import/export (Postman / OpenAPI / HAR) and an SSRF-guarded executor.
+- **Workflows** — a visual workflow engine that chains steps (agent prompts, HTTP
+  requests, DB queries, broker peeks, channel notifications, human approvals,
+  swarm tasks, …) into runnable graphs. Manual, webhook, and event triggers fire
+  today; scheduled triggers and a few Product/Review nodes are still being wired.
+- **Custom plugins** — extend Otto at runtime with out-of-process **sidecar
+  plugins** (any language) you install/enable/remove **without rebuilding**: the
+  daemon supervises each plugin process, reverse-proxies its HTTP/UI into an
+  iframe panel, exposes a small **scoped host API**, and gates each by slug-keyed
+  RBAC. Node and Rust examples ship in `examples/plugins/` (see
+  `docs/plugins/AUTHORING.md`).
 
 ## Architecture
 
@@ -238,7 +249,19 @@ apps/desktop/   Tauri desktop shell (otto-desktop)
 ui/             Svelte 5 + Vite frontend
 packaging/      sign.sh, dmg.sh, make-cert.sh, launchd plist
 docs/contracts/ API + WebSocket contracts (source of truth for the TS types)
+docs/features/  Per-feature guides (setup, walkthrough, API, limits)
 ```
+
+## Documentation
+
+Every feature above has a dedicated, code-grounded guide under
+**[`docs/features/`](./docs/features/README.md)** — setup (incl. token/account
+and Slack-manifest steps), a full walkthrough, the relevant REST/WS surface,
+explicit capabilities & limitations, security notes, and troubleshooting. Start
+at the [features index](./docs/features/README.md). The API itself is specified
+in `docs/contracts/` (authoritative); operator runbooks for multi-user/RBAC and
+remote access live at [`docs/MULTI-USER-RBAC.md`](./docs/MULTI-USER-RBAC.md) and
+[`docs/remote-access-runbook.md`](./docs/remote-access-runbook.md).
 
 ## Contributing
 
