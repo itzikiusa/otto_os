@@ -1,358 +1,562 @@
 import React from 'react';
+import { useCurrentFrame } from 'remotion';
+import { T, brand, fonts, alpha, status } from '../theme';
+import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
+import { OttoWindow } from '../components/Frame';
+import { Navigator } from '../components/Nav';
 import {
-  AbsoluteFill,
-  Sequence,
-  useCurrentFrame,
-  useVideoConfig,
-  interpolate,
-  spring,
-} from 'remotion';
-import { theme } from '../theme';
-import { OttoWindow } from '../components/OttoWindow';
-import { Appear, Caption, TitleCard } from '../components/ui';
+  Appear,
+  Stagger,
+  TitleCard,
+  Caption,
+  Chip,
+  Field,
+  Card,
+  Icon,
+  track,
+} from '../components/kit';
 
-// ─── Vault — workspace knowledge store walkthrough — ~30s ────────────────────
-// Obsidian-like memory vault: notes with [[backlinks]], keyword/semantic search,
-// SVG knowledge graph.
-// ─────────────────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+//  KNOWLEDGE VAULT — workspace knowledge store with hybrid recall
+// ════════════════════════════════════════════════════════════════════════════
 
-const TITLE_DUR  = 75;
-const S1_DUR     = 180;  // note list + search
-const S2_DUR     = 210;  // note reader with backlinks
-const S3_DUR     = 180;  // knowledge graph
-const OUTRO_DUR  = 90;
-
-const S1_START   = TITLE_DUR;
-const S2_START   = S1_START + S1_DUR;
-const S3_START   = S2_START + S2_DUR;
-const OUTRO_START = S3_START + S3_DUR;
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function typewriter(text: string, frame: number, cps = 20): string {
-  const chars = Math.floor((frame / 30) * cps);
-  return text.slice(0, Math.min(chars, text.length));
-}
-
-// ─── Memory item kinds + colors ───────────────────────────────────────────────
-const KIND_COLOR: Record<string, string> = {
-  entity:      '#6ea8fe',
-  decision:    '#63e6be',
-  requirement: '#ffa94d',
-  qa:          '#da77f2',
-  chunk:       '#8b97a8',
+// kind → chip color (entity / decision / requirement / qa / chunk)
+const KIND: Record<string, string> = {
+  entity: brand.cyan,
+  decision: brand.violet,
+  requirement: '#febc2e',
+  qa: '#28c840',
+  chunk: '#98989f',
 };
 
-const KindChip: React.FC<{ kind: string }> = ({ kind }) => (
-  <span style={{ fontFamily: theme.mono, fontSize: 11, fontWeight: 700, color: KIND_COLOR[kind] ?? theme.textDim, background: `${KIND_COLOR[kind] ?? theme.textDim}22`, border: `1px solid ${KIND_COLOR[kind] ?? theme.textDim}44`, borderRadius: 6, padding: '2px 8px', letterSpacing: 0.4, textTransform: 'uppercase' }}>
+const KindChip: React.FC<{ kind: keyof typeof KIND }> = ({ kind }) => (
+  <Chip color={KIND[kind]} style={{ height: 19, fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4 }}>
     {kind}
+  </Chip>
+);
+
+const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div
+    style={{
+      fontFamily: fonts.ui,
+      fontSize: 11,
+      fontWeight: 700,
+      letterSpacing: 0.7,
+      textTransform: 'uppercase',
+      color: T.textDim,
+      marginBottom: 10,
+    }}
+  >
+    {children}
+  </div>
+);
+
+// ── Scene 1 — title card ──────────────────────────────────────────────────────
+const Title: React.FC = () => (
+  <TitleCard
+    kicker="Knowledge Vault"
+    title="Your team's memory, searchable"
+    subtitle="Notes, backlinks & semantic recall — fed straight to your agents"
+  />
+);
+
+// ── Scene 2 — notes list + note reader ───────────────────────────────────────
+const NOTES: { title: string; kind: keyof typeof KIND }[] = [
+  { title: 'JWT auth flow', kind: 'decision' },
+  { title: 'Player balance model', kind: 'entity' },
+  { title: 'Withdrawal limits', kind: 'requirement' },
+  { title: 'Why ClickHouse?', kind: 'qa' },
+];
+
+const NoteRow: React.FC<{ title: string; kind: keyof typeof KIND; active?: boolean }> = ({ title, kind, active }) => (
+  <div
+    style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      height: 44,
+      padding: '0 12px',
+      borderRadius: 8,
+      background: active ? alpha(T.accent, 0.12) : 'transparent',
+      border: `1px solid ${active ? alpha(T.accent, 0.4) : 'transparent'}`,
+    }}
+  >
+    <Icon name="note" size={15} color={active ? T.accent : T.textDim} />
+    <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 14.5, fontWeight: active ? 600 : 500, color: T.text }}>
+      {title}
+    </span>
+    <KindChip kind={kind} />
+  </div>
+);
+
+// inline backlink token rendered inside the prose
+const Backlink: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <span
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 4,
+      padding: '0 6px',
+      margin: '0 1px',
+      borderRadius: 5,
+      background: alpha(brand.cyan, 0.14),
+      border: `1px solid ${alpha(brand.cyan, 0.4)}`,
+      color: brand.cyan,
+      fontWeight: 600,
+    }}
+  >
+    <Icon name="link" size={12} color={brand.cyan} />
+    {children}
   </span>
 );
 
-// ─── Vault sidebar ────────────────────────────────────────────────────────────
-const NOTES = [
-  { title: 'Player onboarding flow',     kind: 'entity',      preview: 'Steps from registration to first deposit…' },
-  { title: 'Bonus engine decision',      kind: 'decision',    preview: 'Chose tier-based granting over flat rate…' },
-  { title: 'KYC requirements 2024',      kind: 'requirement', preview: 'Documents required per jurisdiction…' },
-  { title: 'Q: How does re-activation work?', kind: 'qa',     preview: 'A: Sends email + unlocks wallet on…' },
-  { title: 'Wallet architecture notes',  kind: 'entity',      preview: 'Unified wallet — no legacy brandId+500k…' },
-];
-
-const VaultSidebar: React.FC<{ active?: number; searchVal?: string }> = ({ active = 0, searchVal = '' }) => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  return (
-    <div style={{ width: 300, background: theme.surface, borderRight: `1px solid ${theme.border}`, display: 'flex', flexDirection: 'column', height: '100%', flexShrink: 0 }}>
-      <div style={{ padding: '14px 16px 12px', borderBottom: `1px solid ${theme.border}` }}>
-        <div style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 11, fontWeight: 700, letterSpacing: 1.2, textTransform: 'uppercase', marginBottom: 8 }}>Vault</div>
-        <div style={{ background: theme.surface2, borderRadius: 8, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8, border: `1px solid ${searchVal ? theme.accent : theme.border}`, boxShadow: searchVal ? `0 0 0 2px ${theme.accent}22` : 'none' }}>
-          <span style={{ color: theme.textDim, fontSize: 14 }}>⌕</span>
-          <span style={{ color: searchVal ? theme.text : theme.textDim, fontFamily: theme.mono, fontSize: 13 }}>{searchVal || 'Search memory…'}</span>
-        </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-          {(['Index', 'Graph'] as const).map((m) => (
-            <div key={m} style={{ flex: 1, textAlign: 'center', padding: '6px 0', borderRadius: 8, background: m === 'Index' ? `${theme.accent}18` : 'transparent', border: `1px solid ${m === 'Index' ? theme.accent : theme.border}`, color: m === 'Index' ? theme.accent : theme.textDim, fontFamily: theme.font, fontSize: 12, fontWeight: m === 'Index' ? 700 : 400 }}>{m}</div>
-          ))}
-        </div>
-      </div>
-      <div style={{ flex: 1, overflow: 'hidden', padding: '8px 0' }}>
-        {NOTES.map((note, i) => {
-          const s = spring({ frame: frame - i * 10, fps, config: { damping: 200 } });
-          const isActive = i === active;
-          return (
-            <div key={note.title} style={{ opacity: s, transform: `translateX(${interpolate(s, [0, 1], [-10, 0])}px)`, padding: '10px 16px', background: isActive ? `${theme.accent}14` : 'transparent', borderLeft: isActive ? `2px solid ${theme.accent}` : '2px solid transparent', cursor: 'pointer' }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 4 }}>
-                <span style={{ fontFamily: theme.font, fontSize: 13, color: isActive ? theme.text : theme.textDim, fontWeight: isActive ? 700 : 400, flex: 1, lineHeight: 1.3 }}>{note.title}</span>
-                <KindChip kind={note.kind} />
-              </div>
-              <div style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 12, lineHeight: 1.4, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{note.preview}</div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
-
-// ─── Scene 1 – Note list + semantic search ────────────────────────────────────
-const Scene1List: React.FC = () => {
-  const frame = useCurrentFrame();
-  const SEARCH_START = 70;
-  const searchVal = frame >= SEARCH_START ? typewriter('bonus engine', frame - SEARCH_START, 14) : '';
-
-  return (
-    <div style={{ display: 'flex', height: '100%' }}>
-      <VaultSidebar active={0} searchVal={searchVal} />
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
-        <Appear delay={10}>
-          <div style={{ textAlign: 'center', maxWidth: 500 }}>
-            <div style={{ fontSize: 56, marginBottom: 20 }}>🧠</div>
-            <div style={{ color: theme.text, fontFamily: theme.font, fontSize: 28, fontWeight: 800, marginBottom: 12 }}>Your workspace memory</div>
-            <div style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 17, lineHeight: 1.6 }}>
-              Capture decisions, notes, and context. Otto recalls them automatically — keyword or semantic search across everything.
-            </div>
-          </div>
-        </Appear>
-        <Appear delay={40}>
-          <div style={{ marginTop: 36, display: 'flex', gap: 12 }}>
-            {[
-              { icon: '📝', label: 'Notes & decisions' },
-              { icon: '🔗', label: '[[Backlinks]]' },
-              { icon: '🔍', label: 'Semantic recall' },
-            ].map(({ icon, label }) => (
-              <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', borderRadius: 10, background: theme.surface2, border: `1px solid ${theme.border}`, color: theme.textDim, fontFamily: theme.font, fontSize: 14 }}>
-                <span style={{ fontSize: 16 }}>{icon}</span> {label}
-              </div>
-            ))}
-          </div>
-        </Appear>
-      </div>
-
-      <Caption step={1} title="Workspace knowledge store" sub="Notes, decisions, and context — all searchable" delay={50} />
-    </div>
-  );
-};
-
-// ─── Scene 2 – Note reader with [[backlinks]] ─────────────────────────────────
-const NOTE_BODY = `# Bonus engine decision
-
-After evaluating flat-rate vs tier-based granting we chose
-**tier-based granting** to allow dynamic adjustment per brand.
-
-## Related
-- [[Player onboarding flow]] — trigger point for first bonus
-- [[Wallet architecture notes]] — ledger that records grants
-- [[KYC requirements 2024]] — blocks bonus until verified
-
-## Rationale
-Flat-rate was simpler but couldn't accommodate per-brand
-caps required by compliance in EU markets.`;
-
-const Scene2Note: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  // Highlight [[backlinks]] as they appear in the rendered note
-  const LINK_PULSE = Math.abs(Math.sin((frame / 30) * Math.PI * 0.8)) * 0.4 + 0.6;
-
-  const renderNote = (body: string) => {
-    return body.split('\n').map((line, i) => {
-      // Heading
-      if (line.startsWith('## ')) return <div key={i} style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 15, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', margin: '18px 0 6px' }}>{line.slice(3)}</div>;
-      if (line.startsWith('# '))  return <div key={i} style={{ color: theme.text, fontFamily: theme.font, fontSize: 22, fontWeight: 800, marginBottom: 12 }}>{line.slice(2)}</div>;
-      if (line === '') return <div key={i} style={{ height: 8 }} />;
-
-      // Parse backlinks
-      const parts = line.split(/(\[\[[^\]]+\]\])/g);
-      return (
-        <div key={i} style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 15, lineHeight: 1.7, marginBottom: 2 }}>
-          {parts.map((part, j) => {
-            if (part.startsWith('[[') && part.endsWith(']]')) {
-              const label = part.slice(2, -2);
-              return (
-                <span key={j} style={{ color: theme.accent, fontWeight: 700, background: `${theme.accent}18`, borderRadius: 4, padding: '1px 6px', border: `1px solid ${theme.accent}44`, opacity: LINK_PULSE }}>
-                  {label}
-                </span>
-              );
-            }
-            // Bold text
-            if (part.includes('**')) {
-              return <span key={j} dangerouslySetInnerHTML={{ __html: part.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') }} style={{ color: theme.text }} />;
-            }
-            return <span key={j}>{part}</span>;
-          })}
-        </div>
-      );
-    });
-  };
-
-  return (
-    <div style={{ display: 'flex', height: '100%' }}>
-      <VaultSidebar active={1} />
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {/* note toolbar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 24px', borderBottom: `1px solid ${theme.border}`, flexShrink: 0 }}>
-          <KindChip kind="decision" />
-          <span style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 13 }}>Bonus engine decision</span>
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            <div style={{ padding: '6px 14px', borderRadius: 8, border: `1px solid ${theme.border}`, color: theme.textDim, fontFamily: theme.font, fontSize: 13 }}>Edit</div>
-          </div>
-        </div>
-
-        {/* note body */}
-        <div style={{ flex: 1, overflow: 'hidden', padding: '28px 40px' }}>
-          <Appear delay={4}>
-            {renderNote(NOTE_BODY)}
-          </Appear>
-        </div>
-
-        {/* backlinks panel */}
-        <Appear delay={60}>
-          <div style={{ borderTop: `1px solid ${theme.border}`, padding: '14px 24px', background: theme.surface2, flexShrink: 0 }}>
-            <div style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 }}>Backlinks</div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {['Player onboarding flow', 'Wallet architecture notes', 'KYC requirements 2024'].map((bl) => (
-                <div key={bl} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', borderRadius: 8, background: `${theme.accent}11`, border: `1px solid ${theme.accent}33`, color: theme.accent, fontFamily: theme.font, fontSize: 13, fontWeight: 600 }}>
-                  🔗 {bl}
-                </div>
+const NotesScene: React.FC = () => (
+  <>
+    <Stage scale={0.92}>
+      <OttoWindow nav={<Navigator active="vault" />} title="Otto — Knowledge Vault · sinatra-wallet">
+        <div style={{ display: 'flex', height: '100%', boxSizing: 'border-box' }}>
+          {/* left — notes list */}
+          <div
+            style={{
+              width: 420,
+              flexShrink: 0,
+              borderRight: `1px solid ${T.border}`,
+              padding: 18,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+              background: alpha('#fff', 0.012),
+            }}
+          >
+            <Appear delay={4} y={10}>
+              <Field placeholder="Search the vault…" icon="search" focused />
+            </Appear>
+            <Appear delay={8} y={8} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
+              <SectionLabel>Notes · 128</SectionLabel>
+              <Chip color={brand.cyan} style={{ height: 19, fontSize: 11 }}>collection · wallet</Chip>
+            </Appear>
+            <Stagger delay={14} step={7} y={12} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {NOTES.map((n, i) => (
+                <NoteRow key={n.title} title={n.title} kind={n.kind} active={i === 1} />
               ))}
-            </div>
+            </Stagger>
           </div>
-        </Appear>
-      </div>
 
-      <Caption step={2} title="Notes with [[backlinks]]" sub="Link related decisions — Otto traverses the graph automatically" delay={50} />
-    </div>
-  );
-};
-
-// ─── Scene 3 – Knowledge graph (SVG, circular layout) ────────────────────────
-const GRAPH_NODES = [
-  { id: 'n0', label: 'Bonus engine decision',     kind: 'decision',    cx: 540, cy: 260 },
-  { id: 'n1', label: 'Player onboarding flow',    kind: 'entity',      cx: 280, cy: 160 },
-  { id: 'n2', label: 'Wallet architecture',       kind: 'entity',      cx: 800, cy: 180 },
-  { id: 'n3', label: 'KYC requirements 2024',     kind: 'requirement', cx: 280, cy: 380 },
-  { id: 'n4', label: 'Deposit flow notes',        kind: 'chunk',       cx: 800, cy: 380 },
-  { id: 'n5', label: 'Q: Re-activation flow',     kind: 'qa',          cx: 540, cy: 450 },
-];
-const GRAPH_EDGES = [
-  ['n0', 'n1'], ['n0', 'n2'], ['n0', 'n3'], ['n1', 'n3'], ['n2', 'n4'], ['n0', 'n5'], ['n3', 'n5'],
-];
-
-const Scene3Graph: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  const nodeS = (i: number) => spring({ frame: frame - i * 10, fps, config: { damping: 180 } });
-  const edgeS = (i: number) => spring({ frame: frame - (i * 8 + 20), fps, config: { damping: 200 } });
-
-  return (
-    <div style={{ display: 'flex', height: '100%' }}>
-      <VaultSidebar active={0} />
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {/* toggle to graph */}
-        <div style={{ display: 'flex', gap: 8, padding: '14px 24px', borderBottom: `1px solid ${theme.border}`, flexShrink: 0 }}>
-          {(['Index', 'Graph'] as const).map((m) => (
-            <div key={m} style={{ padding: '7px 18px', borderRadius: 8, background: m === 'Graph' ? `${theme.accent}18` : 'transparent', border: `1px solid ${m === 'Graph' ? theme.accent : theme.border}`, color: m === 'Graph' ? theme.accent : theme.textDim, fontFamily: theme.font, fontSize: 13, fontWeight: m === 'Graph' ? 700 : 400 }}>{m}</div>
-          ))}
+          {/* right — note reader */}
+          <div style={{ flex: 1, minWidth: 0, padding: 26, display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <Appear delay={20} y={12}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <span style={{ fontFamily: fonts.ui, fontSize: 26, fontWeight: 750 as never, color: T.text, letterSpacing: -0.4 }}>
+                  Player balance model
+                </span>
+                <KindChip kind="entity" />
+                <Chip color={status.working} style={{ height: 21 }}>
+                  <Icon name="check" size={12} color={status.working} /> accepted
+                </Chip>
+              </div>
+            </Appear>
+            <Appear delay={26} y={12}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14, fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <Icon name="globe" size={13} color={T.textDim} /> collection · wallet
+                </span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <Icon name="link" size={13} color={T.textDim} /> 6 backlinks
+                </span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <Icon name="clock" size={13} color={T.textDim} /> updated 2d ago
+                </span>
+              </div>
+            </Appear>
+            <Appear delay={32} y={14} style={{ flex: 1 }}>
+              <Card pad={22} style={{ height: '100%', boxSizing: 'border-box' }}>
+                <div style={{ fontFamily: fonts.ui, fontSize: 16.5, lineHeight: 1.85, color: alpha(T.text, 0.92) }}>
+                  The <Backlink>Player balance model</Backlink> unifies cash + bonus into a single ledger row
+                  (<span style={{ fontFamily: fonts.mono, fontSize: 14, color: brand.cyan }}>latestBalance</span>,{' '}
+                  <span style={{ fontFamily: fonts.mono, fontSize: 14, color: brand.cyan }}>bonusBalance</span>). Every
+                  bet/win mutates it atomically via the <Backlink>Wallet gateway</Backlink>, and{' '}
+                  <Backlink>Withdrawal limits</Backlink> read it before a payout clears.
+                  <br />
+                  <br />
+                  Decided in <Backlink>JWT auth flow</Backlink> review — see{' '}
+                  <Backlink>Why ClickHouse?</Backlink> for why aggregates live elsewhere.
+                </div>
+                <div
+                  style={{
+                    marginTop: 22,
+                    paddingTop: 16,
+                    borderTop: `1px solid ${T.border}`,
+                    display: 'flex',
+                    gap: 18,
+                    fontFamily: fonts.ui,
+                    fontSize: 12.5,
+                    color: T.textDim,
+                  }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Icon name="merge" size={14} color={T.textDim} /> Merge
+                  </span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Icon name="split" size={14} color={T.textDim} /> Split
+                  </span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Icon name="archive" size={14} color={T.textDim} /> Forget · undo
+                  </span>
+                </div>
+              </Card>
+            </Appear>
+          </div>
         </div>
-        <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-          <svg width="100%" height="100%" viewBox="0 0 1080 580" style={{ position: 'absolute', inset: 0 }}>
-            {/* edges */}
-            {GRAPH_EDGES.map((edge, i) => {
-              const from = GRAPH_NODES.find((n) => n.id === edge[0])!;
-              const to   = GRAPH_NODES.find((n) => n.id === edge[1])!;
-              const s = edgeS(i);
-              const mx = (from.cx + to.cx) / 2;
-              const my = (from.cy + to.cy) / 2;
-              return (
-                <line
-                  key={i}
-                  x1={interpolate(s, [0, 1], [from.cx, from.cx])}
-                  y1={from.cy}
-                  x2={interpolate(s, [0, 1], [from.cx, to.cx])}
-                  y2={interpolate(s, [0, 1], [from.cy, to.cy])}
-                  stroke={`${theme.border}`}
-                  strokeWidth={1.5}
-                  opacity={s}
-                />
-              );
-            })}
-            {/* nodes */}
-            {GRAPH_NODES.map((node, i) => {
-              const s = nodeS(i);
-              const color = KIND_COLOR[node.kind] ?? theme.textDim;
-              const isCenter = node.id === 'n0';
-              const r = isCenter ? 14 : 10;
-              return (
-                <g key={node.id} opacity={s} transform={`translate(${node.cx}, ${node.cy}) scale(${interpolate(s, [0, 1], [0.3, 1])})`}>
-                  <circle r={r} fill={`${color}22`} stroke={color} strokeWidth={isCenter ? 2.5 : 1.5} />
-                  {isCenter && <circle r={5} fill={color} />}
-                  <text textAnchor="middle" y={r + 18} fill={color} fontFamily={theme.font} fontSize={isCenter ? 13 : 11} fontWeight={isCenter ? 700 : 400}>
-                    {node.label.length > 24 ? node.label.slice(0, 22) + '…' : node.label}
-                  </text>
-                </g>
-              );
-            })}
-          </svg>
+      </OttoWindow>
+    </Stage>
+    <Caption
+      step={1}
+      title="Notes with [[backlinks]] & a lifecycle"
+      sub="entity · decision · requirement · qa — suggested → accepted → stale"
+    />
+  </>
+);
+
+// ── Scene 3 — hybrid search (keyword + semantic, RRF-fused) ───────────────────
+const HITS: { title: string; kind: keyof typeof KIND; snippet: string; keyword: boolean; semantic: boolean; score: string }[] = [
+  {
+    title: 'Withdrawal limits',
+    kind: 'requirement',
+    snippet: 'daily cashout capped at €2,000 · KYC tier gates the ceiling',
+    keyword: true,
+    semantic: true,
+    score: '0.94',
+  },
+  {
+    title: 'Player balance model',
+    kind: 'entity',
+    snippet: 'payout reads latestBalance before a withdrawal clears',
+    keyword: false,
+    semantic: true,
+    score: '0.81',
+  },
+  {
+    title: 'Why ClickHouse?',
+    kind: 'qa',
+    snippet: 'cashout velocity checks run off the hourly aggregate',
+    keyword: false,
+    semantic: true,
+    score: '0.67',
+  },
+];
+
+const MatchBadge: React.FC<{ kind: 'keyword' | 'semantic'; on: boolean }> = ({ kind, on }) => {
+  const c = kind === 'keyword' ? '#0a84ff' : brand.violet;
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        height: 22,
+        padding: '0 9px',
+        borderRadius: 999,
+        fontFamily: fonts.ui,
+        fontSize: 11.5,
+        fontWeight: 600,
+        color: on ? c : T.textDim,
+        background: on ? alpha(c, 0.14) : alpha(T.textDim, 0.08),
+        border: `1px solid ${on ? alpha(c, 0.4) : T.border}`,
+        opacity: on ? 1 : 0.5,
+      }}
+    >
+      <Icon name={kind === 'keyword' ? 'search' : 'zap'} size={12} color={on ? c : T.textDim} />
+      {kind}
+    </span>
+  );
+};
+
+const HitRow: React.FC<{ hit: (typeof HITS)[number]; rank: number }> = ({ hit, rank }) => (
+  <div
+    style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: 16,
+      padding: '14px 18px',
+      borderRadius: 10,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+    }}
+  >
+    <span
+      style={{
+        width: 26,
+        height: 26,
+        borderRadius: 8,
+        flexShrink: 0,
+        display: 'grid',
+        placeItems: 'center',
+        background: alpha(brand.cyan, 0.16),
+        color: brand.cyan,
+        fontFamily: fonts.ui,
+        fontSize: 13,
+        fontWeight: 700,
+      }}
+    >
+      {rank}
+    </span>
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontFamily: fonts.ui, fontSize: 16, fontWeight: 650 as never, color: T.text }}>{hit.title}</span>
+        <KindChip kind={hit.kind} />
+      </div>
+      <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {hit.snippet}
+      </div>
+    </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+      <MatchBadge kind="keyword" on={hit.keyword} />
+      <MatchBadge kind="semantic" on={hit.semantic} />
+    </div>
+    <div style={{ width: 70, textAlign: 'right', flexShrink: 0 }}>
+      <div style={{ fontFamily: fonts.mono, fontSize: 15, fontWeight: 700, color: brand.cyan }}>{hit.score}</div>
+      <div style={{ fontFamily: fonts.ui, fontSize: 10.5, color: T.textDim, letterSpacing: 0.4 }}>RRF</div>
+    </div>
+  </div>
+);
+
+const SearchScene: React.FC = () => (
+  <>
+    <Stage scale={0.92}>
+      <OttoWindow nav={<Navigator active="vault" />} title="Otto — Knowledge Vault · search">
+        <div style={{ padding: 30, height: '100%', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <Appear delay={4} y={12}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                height: 54,
+                padding: '0 18px',
+                borderRadius: 12,
+                background: T.surface2,
+                border: `1px solid ${T.accent}`,
+                boxShadow: `0 0 0 3px ${alpha(T.accent, 0.18)}`,
+              }}
+            >
+              <Icon name="search" size={20} color={T.accent} />
+              <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 18, color: T.text }}>
+                how are withdrawals limited?
+              </span>
+              <Chip color={brand.violet} style={{ height: 24 }}>hybrid</Chip>
+            </div>
+          </Appear>
+          <Appear delay={10} y={8} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <SectionLabel>3 results · keyword + semantic, fused</SectionLabel>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim }}>
+              <Icon name="zap" size={14} color={brand.violet} /> reciprocal-rank fusion · 12&nbsp;ms
+            </div>
+          </Appear>
+          <Stagger delay={16} step={10} y={16} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {HITS.map((h, i) => (
+              <HitRow key={h.title} hit={h} rank={i + 1} />
+            ))}
+          </Stagger>
         </div>
-      </div>
+      </OttoWindow>
+    </Stage>
+    <Caption
+      step={2}
+      title="Keyword + semantic search, fused"
+      sub="RRF hybrid recall — finds it even when wording differs"
+    />
+  </>
+);
 
-      <Caption step={3} title="Knowledge graph" sub="See how decisions, entities, and Q&A connect at a glance" delay={50} />
-    </div>
-  );
-};
+// ── Scene 4 — knowledge graph + recall brief ─────────────────────────────────
+type GNode = { id: string; x: number; y: number; label: string; color: string; r: number };
 
-// ─── Outro ─────────────────────────────────────────────────────────────────────
-const Outro: React.FC = () => {
+const NODES: GNode[] = [
+  { id: 'balance', x: 168, y: 150, label: 'Balance model', color: brand.cyan, r: 30 },
+  { id: 'wallet', x: 60, y: 70, label: 'Wallet gateway', color: brand.violet, r: 22 },
+  { id: 'limits', x: 290, y: 64, label: 'Withdrawal limits', color: '#febc2e', r: 22 },
+  { id: 'jwt', x: 56, y: 250, label: 'JWT auth', color: brand.violet, r: 21 },
+  { id: 'ch', x: 300, y: 248, label: 'ClickHouse', color: '#28c840', r: 21 },
+];
+const EDGES: [string, string][] = [
+  ['balance', 'wallet'],
+  ['balance', 'limits'],
+  ['balance', 'jwt'],
+  ['balance', 'ch'],
+  ['wallet', 'limits'],
+];
+const NODE_MAP = Object.fromEntries(NODES.map((n) => [n.id, n]));
+
+const Graph: React.FC = () => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const t1 = spring({ frame,              fps, config: { damping: 160 } });
-  const t2 = spring({ frame: frame - 18, fps, config: { damping: 160 } });
-  const t3 = spring({ frame: frame - 32, fps, config: { damping: 160 } });
-
+  const W = 360;
+  const H = 320;
   return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-      <div style={{ opacity: t1, transform: `scale(${interpolate(t1, [0, 1], [0.5, 1])})`, fontSize: 80 }}>🧠</div>
-      <div style={{ opacity: t2, transform: `translateY(${interpolate(t2, [0, 1], [24, 0])}px)`, color: theme.text, fontFamily: theme.font, fontSize: 64, fontWeight: 800, textAlign: 'center' }}>
-        Memory that grows with you.
-      </div>
-      <div style={{ opacity: t3, transform: `translateY(${interpolate(t3, [0, 1], [16, 0])}px)`, color: theme.textDim, fontFamily: theme.font, fontSize: 24, textAlign: 'center' }}>
-        Notes · [[Backlinks]] · Semantic search · Knowledge graph
-      </div>
+    <svg width={W} height={H} style={{ overflow: 'visible' }}>
+      {EDGES.map(([a, b], i) => {
+        const na = NODE_MAP[a];
+        const nb = NODE_MAP[b];
+        const draw = track(frame, [10 + i * 4, 28 + i * 4], [0, 1]);
+        return (
+          <line
+            key={i}
+            x1={na.x}
+            y1={na.y}
+            x2={na.x + (nb.x - na.x) * draw}
+            y2={na.y + (nb.y - na.y) * draw}
+            stroke={alpha(brand.cyan, 0.32)}
+            strokeWidth={1.6}
+          />
+        );
+      })}
+      {NODES.map((n, i) => {
+        const pop = track(frame, [22 + i * 6, 38 + i * 6], [0, 1]);
+        const pulse = n.id === 'balance' ? Math.sin(frame / 14) * 1.5 + 1 : 0;
+        return (
+          <g key={n.id} transform={`translate(${n.x},${n.y}) scale(${pop})`} opacity={pop}>
+            <circle r={n.r + 6 + pulse} fill={alpha(n.color, 0.12)} />
+            <circle r={n.r} fill={alpha(n.color, 0.22)} stroke={n.color} strokeWidth={1.6} />
+            <circle r={n.r * 0.34} fill={n.color} />
+            <text
+              x={0}
+              y={n.r + 17}
+              textAnchor="middle"
+              fontFamily={fonts.ui}
+              fontSize={12}
+              fontWeight={600}
+              fill={T.text}
+            >
+              {n.label}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+};
+
+const BriefLine: React.FC<{ icon: string; color: string; head: string; body: string }> = ({ icon, color, head, body }) => (
+  <div style={{ display: 'flex', gap: 11, alignItems: 'flex-start' }}>
+    <span style={{ width: 24, height: 24, borderRadius: 7, flexShrink: 0, marginTop: 1, display: 'grid', placeItems: 'center', background: alpha(color, 0.16), color }}>
+      <Icon name={icon} size={13} color={color} />
+    </span>
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 600, color: T.text }}>{head}</div>
+      <div style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim, lineHeight: 1.5, marginTop: 1 }}>{body}</div>
     </div>
-  );
-};
+  </div>
+);
 
-// ─── Root composition ─────────────────────────────────────────────────────────
-export const Vault: React.FC = () => {
-  return (
-    <AbsoluteFill style={{ background: theme.bgGradient, fontFamily: theme.font }}>
+const GraphRecallScene: React.FC = () => (
+  <>
+    <Stage scale={0.92}>
+      <OttoWindow nav={<Navigator active="vault" />} title="Otto — Knowledge Vault · recall">
+        <div style={{ display: 'flex', height: '100%', boxSizing: 'border-box' }}>
+          {/* left — graph */}
+          <div style={{ flex: 1, minWidth: 0, padding: 30, display: 'flex', flexDirection: 'column', borderRight: `1px solid ${T.border}` }}>
+            <Appear delay={4} y={8}>
+              <SectionLabel>Graph view · entity relationships</SectionLabel>
+            </Appear>
+            <Appear delay={6} y={10} style={{ flex: 1, display: 'grid', placeItems: 'center' }}>
+              <Graph />
+            </Appear>
+          </div>
+          {/* right — recall brief card */}
+          <div style={{ width: 540, flexShrink: 0, padding: 28, display: 'flex', flexDirection: 'column' }}>
+            <Appear delay={14} y={14} style={{ flex: 1 }}>
+              <Card pad={0} style={{ height: '100%', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                <div
+                  style={{
+                    padding: '16px 20px',
+                    borderBottom: `1px solid ${T.border}`,
+                    background: brand.gradSoft,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 11,
+                  }}
+                >
+                  <Icon name="zap" size={18} color="#fff" />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontFamily: fonts.ui, fontSize: 16, fontWeight: 750 as never, color: '#fff' }}>Recall brief</div>
+                    <div style={{ fontFamily: fonts.ui, fontSize: 12, color: alpha('#fff', 0.85) }}>
+                      Context for SIN-4821 · 1,840 tokens
+                    </div>
+                  </div>
+                  <Chip color="#fff" style={{ height: 22, background: alpha('#fff', 0.2), borderColor: alpha('#fff', 0.4), color: '#fff' }}>
+                    token-budgeted
+                  </Chip>
+                </div>
+                <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 15 }}>
+                  <Stagger delay={22} step={7} y={12} style={{ display: 'flex', flexDirection: 'column', gap: 15 }}>
+                    <BriefLine
+                      icon="note"
+                      color={brand.violet}
+                      head="Decision · JWT auth flow"
+                      body="Withdrawals require a re-validated token; payout path checks balance atomically."
+                    />
+                    <BriefLine
+                      icon="db"
+                      color={brand.cyan}
+                      head="Entity · Player balance model"
+                      body="Unified ledger: latestBalance + bonusBalance, read before any cashout clears."
+                    />
+                    <BriefLine
+                      icon="tag"
+                      color="#febc2e"
+                      head="Requirement · Withdrawal limits"
+                      body="Daily cap €2,000, gated by KYC tier — pulled in at 0.94 relevance."
+                    />
+                  </Stagger>
+                  <div style={{ paddingTop: 14, borderTop: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+                    <Chip color={status.working} style={{ height: 22 }}>
+                      <Icon name="check" size={12} color={status.working} /> no re-fetching
+                    </Chip>
+                    <Chip color="#0a84ff" style={{ height: 22 }}>
+                      <Icon name="file" size={12} color="#0a84ff" /> import AGENTS.md
+                    </Chip>
+                    <Chip style={{ height: 22 }}>
+                      <Icon name="file" size={12} color={T.textDim} /> CLAUDE.md · .cursorrules
+                    </Chip>
+                  </div>
+                </div>
+              </Card>
+            </Appear>
+          </div>
+        </div>
+      </OttoWindow>
+    </Stage>
+    <Caption
+      step={3}
+      title="A recall brief, assembled for each task"
+      sub="Token-budgeted context — no re-fetching · import AGENTS.md/CLAUDE.md"
+    />
+  </>
+);
 
-      <Sequence durationInFrames={TITLE_DUR}>
-        <TitleCard kicker="OTTO ADE" title="Vault" subtitle="Your workspace knowledge store" />
-      </Sequence>
+// ── Scene assembly ────────────────────────────────────────────────────────────
+const SCENES: SceneDef[] = [
+  { dur: 80, node: <Title />, name: 'Title' },
+  { dur: 220, node: <NotesScene />, name: 'Notes' },
+  { dur: 200, node: <SearchScene />, name: 'Hybrid search' },
+  { dur: 150, node: <GraphRecallScene />, name: 'Graph + recall' },
+  {
+    dur: 130,
+    node: (
+      <WalkOutro
+        title="Knowledge Vault"
+        tagline="Context that compounds."
+        pills={[
+          { label: 'Backlinks', color: '#47bfff', icon: 'link' },
+          { label: 'Hybrid search', color: brand.cyan, icon: 'search' },
+          { label: 'Graph view', color: brand.violet, icon: 'globe' },
+          { label: 'Governance', color: '#28c840', icon: 'check' },
+          { label: 'Recall brief', color: '#0a84ff', icon: 'note' },
+        ]}
+      />
+    ),
+    name: 'Outro',
+  },
+];
 
-      <Sequence from={S1_START} durationInFrames={S1_DUR + S2_DUR + S3_DUR}>
-        <AbsoluteFill style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <OttoWindow title="Otto — Vault">
-            <Sequence durationInFrames={S1_DUR}>
-              <Scene1List />
-            </Sequence>
-            <Sequence from={S1_DUR} durationInFrames={S2_DUR}>
-              <Scene2Note />
-            </Sequence>
-            <Sequence from={S1_DUR + S2_DUR} durationInFrames={S3_DUR}>
-              <Scene3Graph />
-            </Sequence>
-          </OttoWindow>
-        </AbsoluteFill>
-      </Sequence>
-
-      <Sequence from={OUTRO_START} durationInFrames={OUTRO_DUR}>
-        <Outro />
-      </Sequence>
-
-    </AbsoluteFill>
-  );
-};
+export const vaultDuration = scenesDuration(SCENES);
+export const Vault: React.FC = () => <Scenes scenes={SCENES} />;

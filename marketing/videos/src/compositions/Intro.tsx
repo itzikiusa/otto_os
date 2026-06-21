@@ -1,578 +1,190 @@
 import React from 'react';
+import { AbsoluteFill, useCurrentFrame, interpolate } from 'remotion';
+import { T, brand, fonts, alpha, providers } from '../theme';
+import { Scenes, scenesDuration, Stage, SceneDef } from '../components/scene';
+import { OttoIcon } from '../components/OttoLogo';
+import { OttoWindow } from '../components/Frame';
+import { Navigator, NavSession } from '../components/Nav';
 import {
-  AbsoluteFill,
-  Sequence,
-  useCurrentFrame,
-  useVideoConfig,
-  interpolate,
-  spring,
-  staticFile,
-  Img,
-  Easing,
-} from 'remotion';
-import { theme, VIDEO } from '../theme';
-import { OttoWindow } from '../components/OttoWindow';
-import { Navigator } from '../components/Navigator';
-import { Appear, KeyCap } from '../components/ui';
+  Appear,
+  Kicker,
+  BrandWord,
+  Caption,
+  FeaturePill,
+  Terminal,
+  StatusDot,
+  Keys,
+  Chip,
+} from '../components/kit';
 
-// ─── Scene 1: Logo + Tagline build (~0–90f, 3s) ────────────────────────────
-
-const Scene1Logo: React.FC = () => {
+// ── Scene 1 — brand cold open ────────────────────────────────────────────────
+const Open: React.FC = () => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  const logoSpring = spring({ frame, fps, config: { damping: 18, stiffness: 120 } });
-  const logoScale = interpolate(logoSpring, [0, 1], [0.55, 1]);
-  const logoOpacity = interpolate(frame, [0, 15], [0, 1], { extrapolateRight: 'clamp' });
-
-  const taglineProgress = spring({ frame: frame - 22, fps, config: { damping: 200 } });
-  const taglineOpacity = interpolate(taglineProgress, [0, 1], [0, 1]);
-  const taglineY = interpolate(taglineProgress, [0, 1], [28, 0]);
-
-  const subProgress = spring({ frame: frame - 36, fps, config: { damping: 200 } });
-  const subOpacity = interpolate(subProgress, [0, 1], [0, 1]);
-  const subY = interpolate(subProgress, [0, 1], [20, 0]);
-
+  const ring = interpolate(frame, [30, 90], [0, 520], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
   return (
-    <AbsoluteFill
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 0,
-      }}
-    >
-      {/* Otto mark */}
-      <div
-        style={{
-          opacity: logoOpacity,
-          transform: `scale(${logoScale})`,
-          marginBottom: 24,
-        }}
-      >
-        <Img
-          src={staticFile('otto-mark.png')}
-          style={{
-            width: 136,
-            height: 136,
-            borderRadius: 32,
-            boxShadow: `0 0 0 1px ${theme.accent}44, 0 20px 80px ${theme.accent}66, 0 0 120px ${theme.accent}22`,
-          }}
-        />
+    <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center' }}>
+      <Appear delay={2} scale={0.62} y={0} style={{ marginBottom: 30 }}>
+        <OttoIcon size={150} glowPx={110} />
+      </Appear>
+      <div style={{ marginBottom: 18 }}>
+        <Kicker delay={14}>Agentic Development Environment</Kicker>
       </div>
-
-      {/* OTTO wordmark */}
-      <div
-        style={{
-          opacity: taglineOpacity,
-          transform: `translateY(${taglineY}px)`,
-          fontFamily: theme.font,
-          fontSize: 100,
-          fontWeight: 900,
-          color: theme.text,
-          letterSpacing: -3,
-          lineHeight: 1,
-        }}
-      >
-        Otto
-      </div>
-
-      {/* Tagline */}
-      <div
-        style={{
-          opacity: subOpacity,
-          transform: `translateY(${subY}px)`,
-          fontFamily: theme.font,
-          fontSize: 30,
-          fontWeight: 500,
-          color: theme.textDim,
-          letterSpacing: 0.5,
-          marginTop: 16,
-        }}
-      >
-        Run your AI agents{' '}
-        <span style={{ color: theme.accent2, fontWeight: 700 }}>like a pro.</span>
-      </div>
-
-      {/* Accent glow line */}
+      <BrandWord delay={20} size={118}>Otto</BrandWord>
+      <Appear delay={32} y={14}>
+        <div style={{ fontFamily: fonts.ui, fontSize: 30, color: alpha('#fff', 0.66), marginTop: 16 }}>
+          Run your coding agents <span style={{ color: brand.cyan, fontWeight: 700 }}>like a pro.</span>
+        </div>
+      </Appear>
       <div
         style={{
           position: 'absolute',
-          bottom: '35%',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          width: interpolate(frame, [40, 90], [0, 400], { extrapolateRight: 'clamp' }),
+          bottom: '30%',
+          width: ring,
           height: 1,
-          background: `linear-gradient(90deg, transparent, ${theme.accent}88, transparent)`,
-          opacity: interpolate(frame, [40, 60], [0, 1], { extrapolateRight: 'clamp' }),
+          background: `linear-gradient(90deg, transparent, ${alpha(brand.cyan, 0.7)}, transparent)`,
         }}
       />
     </AbsoluteFill>
   );
 };
 
-// ─── Scene 2: OttoWindow glimpse + feature pills (~90–330f, ~8s) ────────────
-
-const PILLS = [
-  { label: 'Agent Mode', color: theme.accent },
-  { label: 'Git & PRs', color: theme.accent2 },
-  { label: 'Connections', color: '#bf7aff' },
-  { label: 'Channels', color: '#ff9a3d' },
-  { label: 'Review Agents', color: theme.accent },
+// ── Scene 2 — the real window, agents working ────────────────────────────────
+const sessions: NavSession[] = [
+  { title: 'fix auth tests', provider: 'claude', status: 'working', tasks: [2, 4] },
+  { title: 'refactor api/v2', provider: 'codex', status: 'working', tasks: [1, 3] },
+  { title: 'add rate-limit', provider: 'claude', status: 'idle', tasks: [3, 3] },
 ];
 
-const FeaturePill: React.FC<{ label: string; color: string; delay: number }> = ({
-  label,
+const AgentPane: React.FC<{ name: string; color: string; lines: { text: string; tone?: never }[]; live?: boolean }> = ({
+  name,
   color,
-  delay,
-}) => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const s = spring({ frame: frame - delay, fps, config: { damping: 180, stiffness: 140 } });
-  const opacity = interpolate(s, [0, 1], [0, 1]);
-  const y = interpolate(s, [0, 1], [18, 0]);
-  const scale = interpolate(s, [0, 1], [0.88, 1]);
-
-  return (
-    <div
-      style={{
-        opacity,
-        transform: `translateY(${y}px) scale(${scale})`,
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 10,
-        padding: '10px 22px',
-        borderRadius: 40,
-        background: `${color}18`,
-        border: `1px solid ${color}55`,
-        boxShadow: `0 6px 28px ${color}22`,
-        fontFamily: theme.font,
-        fontSize: 22,
-        fontWeight: 700,
-        color: theme.text,
-        whiteSpace: 'nowrap' as const,
-      }}
-    >
-      <span
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: '50%',
-          background: color,
-          boxShadow: `0 0 8px ${color}`,
-          flexShrink: 0,
-        }}
-      />
-      {label}
+  lines,
+  live = true,
+}) => (
+  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.termBg, border: `1px solid ${T.border}`, borderRadius: 10, overflow: 'hidden' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${T.border}`, background: alpha('#fff', 0.02) }}>
+      <StatusDot kind={live ? 'working' : 'idle'} size={9} />
+      <span style={{ flex: 1, fontFamily: fonts.mono, fontSize: 13, fontWeight: 600, color: T.text }}>{name}</span>
+      <Chip color={color}>{name.split(' ')[0]}</Chip>
     </div>
-  );
-};
+    <Terminal lines={lines as never} delay={18} step={9} pad={14} fontSize={14} style={{ flex: 1, background: 'transparent', borderRadius: 0 }} />
+  </div>
+);
 
-// Mock terminal-style content for the main area
-const AgentTerminal: React.FC<{ frame: number; fps: number }> = ({ frame, fps }) => {
-  const lines = [
-    { t: 0, text: '$ otto run --agent claude --repo sinatra-users-go', color: theme.textDim },
-    { t: 12, text: '✓ Session started · claude-opus-4', color: theme.accent2 },
-    { t: 22, text: '  Analyzing codebase…', color: theme.textDim },
-    { t: 34, text: '  Found 3 failing tests in /auth', color: theme.warn },
-    { t: 46, text: '  Applying fix: add missing JWT validation', color: theme.text },
-    { t: 58, text: '  Running test suite…', color: theme.textDim },
-    { t: 72, text: '✓ All tests passing · 0.8s', color: theme.accent2 },
-    { t: 84, text: '  Opening PR draft…', color: theme.textDim },
-  ];
-
-  return (
-    <div
-      style={{
-        padding: '28px 36px',
-        fontFamily: theme.mono,
-        fontSize: 18,
-        lineHeight: 1.85,
-      }}
-    >
-      {lines.map((line, i) => {
-        const lineStart = line.t;
-        const opacity = interpolate(frame, [lineStart, lineStart + 10], [0, 1], {
-          extrapolateRight: 'clamp',
-          extrapolateLeft: 'clamp',
-        });
-        const x = interpolate(frame, [lineStart, lineStart + 10], [-10, 0], {
-          extrapolateRight: 'clamp',
-          extrapolateLeft: 'clamp',
-        });
-        return (
-          <div
-            key={i}
-            style={{
-              opacity,
-              transform: `translateX(${x}px)`,
-              color: line.color,
-            }}
-          >
-            {line.text}
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
-const Scene2Window: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  // Window slides up from below
-  const windowSpring = spring({ frame, fps, config: { damping: 22, stiffness: 100 } });
-  const windowY = interpolate(windowSpring, [0, 1], [120, 0]);
-  const windowOpacity = interpolate(frame, [0, 20], [0, 1], { extrapolateRight: 'clamp' });
-  const windowScale = interpolate(windowSpring, [0, 1], [0.94, 1]);
-
-  const sessions = [
-    { title: 'fix auth tests', provider: 'claude', status: 'working' as const },
-    { title: 'refactor api/v2', provider: 'codex', status: 'working' as const },
-    { title: 'add rate limit', provider: 'claude', status: 'idle' as const },
-  ];
-
-  // Pills stagger across the scene
-  const pillStartOffset = 60;
-
-  return (
-    <AbsoluteFill
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 36,
-      }}
-    >
-      {/* Window */}
-      <div
-        style={{
-          opacity: windowOpacity,
-          transform: `translateY(${windowY}px) scale(${windowScale})`,
-          transformOrigin: 'center bottom',
-        }}
+const WindowScene: React.FC = () => (
+  <>
+    <Stage scale={0.9}>
+      <OttoWindow
+        nav={<Navigator active="agents" sessions={sessions} activeSessionTitle="fix auth tests" workingCount={2} />}
+        tabs={[
+          { label: 'fix auth tests', icon: 'terminal', active: true, dot: 'working' },
+          { label: 'refactor api/v2', icon: 'terminal', dot: 'working' },
+        ]}
+        title="Otto — sinatra-users-go"
       >
-        <OttoWindow
-          sidebar={<Navigator active="agents" sessions={sessions} />}
-          title="Otto"
-          style={{ width: 1300, height: 720 }}
-        >
-          <AgentTerminal frame={frame} fps={fps} />
-        </OttoWindow>
-      </div>
-
-      {/* Feature pills row — floats below window */}
-      <div
-        style={{
-          display: 'flex',
-          gap: 16,
-          flexWrap: 'wrap' as const,
-          justifyContent: 'center',
-          maxWidth: 1300,
-        }}
-      >
-        {PILLS.map((pill, i) => (
-          <FeaturePill
-            key={pill.label}
-            label={pill.label}
-            color={pill.color}
-            delay={pillStartOffset + i * 14}
+        <div style={{ display: 'flex', gap: 12, padding: 16, height: '100%', boxSizing: 'border-box' }}>
+          <AgentPane
+            name="claude · fix auth tests"
+            color={providers.claude}
+            lines={[
+              { text: '$ go test ./auth/...' },
+              { text: '  reading handler.go, jwt.go…' },
+              { text: '  ✗ 3 failing — missing JWT validation' },
+              { text: '  applying fix → middleware/jwt.go' },
+              { text: '  ✓ 142 passed (3.4s)' },
+            ] as never}
           />
-        ))}
+          <AgentPane
+            name="codex · refactor api/v2"
+            color={providers.codex}
+            lines={[
+              { text: '$ codex run task.md' },
+              { text: '  editing server.go, routes.go…' },
+              { text: '  writing tests/api_test.go' },
+              { text: '  ✓ build ok · 0 issues' },
+              { text: '  drafting PR…' },
+            ] as never}
+          />
+        </div>
+      </OttoWindow>
+    </Stage>
+    <Caption step={1} title="Claude Code, Codex & shell — as first-class sessions" sub="Watch them work, type in live, run many at once. Resumable on the daemon." />
+  </>
+);
+
+// ── Scene 3 — one window, the whole workflow (all pillars) ───────────────────
+const PILLARS: { label: string; color: string; icon: string }[] = [
+  { label: 'Agent Sessions', color: providers.claude, icon: 'terminal' },
+  { label: 'Git & Pull Requests', color: '#28c840', icon: 'branch' },
+  { label: 'Multi-Agent Review', color: brand.violet, icon: 'eye' },
+  { label: 'Jira / Confluence', color: '#2684ff', icon: 'note' },
+  { label: 'Database Explorer', color: '#0a84ff', icon: 'db' },
+  { label: 'Kafka Brokers', color: '#febc2e', icon: 'box' },
+  { label: 'Agent Swarm', color: brand.cyan, icon: 'grid' },
+  { label: 'SSH · SQL · Redis · Mongo', color: '#bf7aff', icon: 'plug' },
+  { label: 'Slack & Telegram', color: '#36c5f0', icon: 'slack' },
+  { label: 'Usage & Budgets', color: '#ff8a65', icon: 'chart' },
+  { label: 'Workflows', color: '#9ee039', icon: 'split' },
+  { label: 'Custom Plugins', color: '#a78bfa', icon: 'zap' },
+  { label: 'Knowledge Vault', color: '#47bfff', icon: 'globe' },
+  { label: 'Remote & Mobile', color: '#0a84ff', icon: 'share' },
+];
+
+const PillarsScene: React.FC = () => (
+  <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', padding: '0 120px' }}>
+    <div style={{ marginBottom: 14 }}>
+      <Kicker delay={2}>One window</Kicker>
+    </div>
+    <Appear delay={8} y={18}>
+      <div style={{ fontFamily: fonts.ui, fontSize: 60, fontWeight: 800, letterSpacing: -1.5, color: '#fff', textAlign: 'center', lineHeight: 1.08 }}>
+        Your whole engineering workflow,
+        <br />
+        <span style={{ backgroundImage: brand.gradSoft, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent', WebkitTextFillColor: 'transparent' }}>
+          wired into one place.
+        </span>
       </div>
-    </AbsoluteFill>
-  );
-};
+    </Appear>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, justifyContent: 'center', maxWidth: 1500, marginTop: 44 }}>
+      {PILLARS.map((p, i) => (
+        <FeaturePill key={p.label} label={p.label} color={p.color} icon={p.icon} delay={26 + i * 4} />
+      ))}
+    </div>
+  </AbsoluteFill>
+);
 
-// ─── Scene 3: "claude · codex · antigravity — together." (~330–450f, ~4s) ──
-
-const Scene3Montage: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  const agents = ['claude', 'codex', 'antigravity'];
-
-  return (
-    <AbsoluteFill
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 0,
-      }}
-    >
-      {/* Agents line */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 0,
-          fontFamily: theme.mono,
-        }}
-      >
-        {agents.map((agent, i) => {
-          const s = spring({ frame: frame - i * 14, fps, config: { damping: 180 } });
-          const opacity = interpolate(s, [0, 1], [0, 1]);
-          const y = interpolate(s, [0, 1], [24, 0]);
-          const agentColors = [theme.accent, theme.accent2, '#bf7aff'];
-          return (
-            <React.Fragment key={agent}>
-              <span
-                style={{
-                  opacity,
-                  transform: `translateY(${y}px)`,
-                  display: 'inline-block',
-                  fontSize: 72,
-                  fontWeight: 700,
-                  color: agentColors[i],
-                }}
-              >
-                {agent}
-              </span>
-              {i < agents.length - 1 && (
-                <span
-                  style={{
-                    opacity: interpolate(frame, [i * 14 + 10, i * 14 + 24], [0, 1], {
-                      extrapolateRight: 'clamp',
-                      extrapolateLeft: 'clamp',
-                    }),
-                    display: 'inline-block',
-                    fontSize: 48,
-                    color: theme.border,
-                    margin: '0 18px',
-                    fontWeight: 300,
-                  }}
-                >
-                  ·
-                </span>
-              )}
-            </React.Fragment>
-          );
-        })}
+// ── Scene 4 — outro lockup + launch hint ─────────────────────────────────────
+const Lockup: React.FC = () => (
+  <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center' }}>
+    <Appear delay={2} scale={0.7} y={0} style={{ marginBottom: 26 }}>
+      <OttoIcon size={128} glowPx={100} />
+    </Appear>
+    <Appear delay={10} y={20}>
+      <div style={{ fontFamily: fonts.ui, fontSize: 80, fontWeight: 800, letterSpacing: -2, color: '#fff', textAlign: 'center', lineHeight: 1.05 }}>
+        Your agents,{' '}
+        <span style={{ backgroundImage: brand.gradSoft, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent', WebkitTextFillColor: 'transparent' }}>
+          orchestrated.
+        </span>
       </div>
-
-      {/* "— together." tagline */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 14,
-          marginTop: 24,
-        }}
-      >
-        {(() => {
-          const s = spring({ frame: frame - 52, fps, config: { damping: 200 } });
-          const opacity = interpolate(s, [0, 1], [0, 1]);
-          const x = interpolate(s, [0, 1], [-20, 0]);
-          return (
-            <div
-              style={{
-                opacity,
-                transform: `translateX(${x}px)`,
-                fontFamily: theme.font,
-                fontSize: 42,
-                fontWeight: 600,
-                color: theme.text,
-                letterSpacing: -0.5,
-              }}
-            >
-              — together, in one window.
-            </div>
-          );
-        })()}
+    </Appear>
+    <Appear delay={20} y={14}>
+      <div style={{ fontFamily: fonts.ui, fontSize: 27, color: alpha('#fff', 0.62), marginTop: 16 }}>
+        Otto — the Agentic Development Environment
       </div>
+    </Appear>
+    <div style={{ marginTop: 44, display: 'flex', alignItems: 'center', gap: 16 }}>
+      <Appear delay={32}><span style={{ fontFamily: fonts.ui, fontSize: 22, color: alpha('#fff', 0.6) }}>Press</span></Appear>
+      <Keys keys={['⌘', 'K']} delay={36} />
+      <Appear delay={40}><span style={{ fontFamily: fonts.ui, fontSize: 22, color: alpha('#fff', 0.6) }}>to launch anything</span></Appear>
+    </div>
+  </AbsoluteFill>
+);
 
-      {/* Horizontal accent divider */}
-      <div
-        style={{
-          marginTop: 40,
-          width: interpolate(frame, [70, 100], [0, 560], {
-            extrapolateRight: 'clamp',
-            extrapolateLeft: 'clamp',
-          }),
-          height: 2,
-          background: `linear-gradient(90deg, ${theme.accent}, ${theme.accent2}, #bf7aff)`,
-          borderRadius: 2,
-          opacity: interpolate(frame, [70, 85], [0, 1], { extrapolateRight: 'clamp' }),
-        }}
-      />
-    </AbsoluteFill>
-  );
-};
+const SCENES: SceneDef[] = [
+  { dur: 120, node: <Open />, name: 'Open' },
+  { dur: 196, node: <WindowScene />, name: 'Window' },
+  { dur: 200, node: <PillarsScene />, name: 'Pillars' },
+  { dur: 124, node: <Lockup />, name: 'Lockup' },
+];
 
-// ─── Scene 4: Outro — Otto mark + name + ⌘K hint (~450–600f, ~5s) ──────────
-
-const Scene4Outro: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  // Soft pulse on the logo glow
-  const pulse = Math.sin(frame / 18) * 0.5 + 0.5;
-  const glowSize = interpolate(pulse, [0, 1], [60, 100]);
-
-  const logoS = spring({ frame, fps, config: { damping: 18, stiffness: 100 } });
-  const logoScale = interpolate(logoS, [0, 1], [0.6, 1]);
-  const logoOpacity = interpolate(frame, [0, 18], [0, 1], { extrapolateRight: 'clamp' });
-
-  const nameS = spring({ frame: frame - 16, fps, config: { damping: 200 } });
-  const nameOpacity = interpolate(nameS, [0, 1], [0, 1]);
-  const nameY = interpolate(nameS, [0, 1], [22, 0]);
-
-  const subtitleS = spring({ frame: frame - 30, fps, config: { damping: 200 } });
-  const subtitleOpacity = interpolate(subtitleS, [0, 1], [0, 1]);
-  const subtitleY = interpolate(subtitleS, [0, 1], [16, 0]);
-
-  const cmdkS = spring({ frame: frame - 60, fps, config: { damping: 200 } });
-  const cmdkOpacity = interpolate(cmdkS, [0, 1], [0, 1]);
-
-  return (
-    <AbsoluteFill
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 0,
-      }}
-    >
-      {/* Otto mark */}
-      <div
-        style={{
-          opacity: logoOpacity,
-          transform: `scale(${logoScale})`,
-          marginBottom: 28,
-        }}
-      >
-        <Img
-          src={staticFile('otto-mark.png')}
-          style={{
-            width: 160,
-            height: 160,
-            borderRadius: 38,
-            boxShadow: `0 0 0 1.5px ${theme.accent}55, 0 20px ${glowSize}px ${theme.accent}55`,
-          }}
-        />
-      </div>
-
-      {/* Otto — Agentic Development Environment */}
-      <div
-        style={{
-          opacity: nameOpacity,
-          transform: `translateY(${nameY}px)`,
-          fontFamily: theme.font,
-          fontSize: 88,
-          fontWeight: 900,
-          color: theme.text,
-          letterSpacing: -3,
-          lineHeight: 1,
-        }}
-      >
-        Otto
-      </div>
-
-      <div
-        style={{
-          opacity: subtitleOpacity,
-          transform: `translateY(${subtitleY}px)`,
-          fontFamily: theme.font,
-          fontSize: 28,
-          fontWeight: 500,
-          color: theme.textDim,
-          letterSpacing: 0.4,
-          marginTop: 18,
-        }}
-      >
-        Agentic Development Environment
-      </div>
-
-      {/* ⌘K hint */}
-      <div
-        style={{
-          opacity: cmdkOpacity,
-          position: 'absolute',
-          bottom: 72,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          fontFamily: theme.font,
-          fontSize: 20,
-          color: theme.textDim,
-        }}
-      >
-        <span>Press</span>
-        <KeyCap>⌘</KeyCap>
-        <KeyCap>K</KeyCap>
-        <span>to launch</span>
-      </div>
-    </AbsoluteFill>
-  );
-};
-
-// ─── Cross-fade helper ────────────────────────────────────────────────────────
-
-const FadeIn: React.FC<{ children: React.ReactNode; durationFrames?: number }> = ({
-  children,
-  durationFrames = 18,
-}) => {
-  const frame = useCurrentFrame();
-  const opacity = interpolate(frame, [0, durationFrames], [0, 1], {
-    extrapolateRight: 'clamp',
-    extrapolateLeft: 'clamp',
-    easing: Easing.ease,
-  });
-  return <div style={{ opacity, width: '100%', height: '100%' }}>{children}</div>;
-};
-
-// ─── Root composition ─────────────────────────────────────────────────────────
-
-export const Intro: React.FC = () => {
-  // Scene timing (frames @ 30fps, total = 600f = 20s)
-  // Scene 1: 0–100   (3.3s)  — Logo + tagline
-  // Scene 2: 85–340  (8.5s)  — OttoWindow + pills  [overlaps scene1 exit]
-  // Scene 3: 325–460 (4.5s)  — claude · codex · antigravity
-  // Scene 4: 445–600 (5.2s)  — Outro
-
-  return (
-    <AbsoluteFill style={{ background: theme.bgGradient, fontFamily: theme.font }}>
-      {/* Scene 1 */}
-      <Sequence from={0} durationInFrames={115}>
-        <FadeIn durationFrames={12}>
-          <AbsoluteFill>
-            <Scene1Logo />
-          </AbsoluteFill>
-        </FadeIn>
-      </Sequence>
-
-      {/* Scene 2 */}
-      <Sequence from={90} durationInFrames={255}>
-        <FadeIn durationFrames={20}>
-          <AbsoluteFill>
-            <Scene2Window />
-          </AbsoluteFill>
-        </FadeIn>
-      </Sequence>
-
-      {/* Scene 3 */}
-      <Sequence from={330} durationInFrames={130}>
-        <FadeIn durationFrames={18}>
-          <AbsoluteFill>
-            <Scene3Montage />
-          </AbsoluteFill>
-        </FadeIn>
-      </Sequence>
-
-      {/* Scene 4 */}
-      <Sequence from={445} durationInFrames={155}>
-        <FadeIn durationFrames={18}>
-          <AbsoluteFill>
-            <Scene4Outro />
-          </AbsoluteFill>
-        </FadeIn>
-      </Sequence>
-    </AbsoluteFill>
-  );
-};
+export const introDuration = scenesDuration(SCENES);
+export const Intro: React.FC = () => <Scenes scenes={SCENES} />;

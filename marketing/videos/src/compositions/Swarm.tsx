@@ -1,373 +1,562 @@
 import React from 'react';
+import { useCurrentFrame } from 'remotion';
+import { T, brand, fonts, providers, status, alpha } from '../theme';
+import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
+import { OttoWindow } from '../components/Frame';
+import { Navigator } from '../components/Nav';
 import {
-  AbsoluteFill,
-  Sequence,
-  useCurrentFrame,
-  useVideoConfig,
-  interpolate,
-  spring,
-} from 'remotion';
-import { theme } from '../theme';
-import { OttoWindow } from '../components/OttoWindow';
-import { Appear, Caption, TitleCard } from '../components/ui';
+  TitleCard,
+  Caption,
+  Appear,
+  Avatar,
+  StatusDot,
+  Chip,
+  Icon,
+  track,
+} from '../components/kit';
 
-// ─── Agent Swarm walkthrough — ~36s ──────────────────────────────────────────
-// Teams of role-specialized agents: org tree → projects → tasks,
-// coordinator, shared Kanban board, run-graph view.
-// ─────────────────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+//  AGENT SWARM — teams of role-specialized agents, an org tree & a coordinator
+// ════════════════════════════════════════════════════════════════════════════
 
-const TITLE_DUR  = 75;
-const S1_DUR     = 195;  // org tree + create swarm
-const S2_DUR     = 210;  // kanban board (projects → tasks)
-const S3_DUR     = 165;  // run-graph / transcript
-const OUTRO_DUR  = 90;
+// ── Scene 1 — title card ──────────────────────────────────────────────────────
+const Title: React.FC = () => (
+  <TitleCard
+    kicker="Agent Swarm"
+    title="A whole team of agents"
+    subtitle="Roles, an org tree, and a coordinator that schedules the work"
+  />
+);
 
-const S1_START   = TITLE_DUR;
-const S2_START   = S1_START + S1_DUR;
-const S3_START   = S2_START + S2_DUR;
-const OUTRO_START = S3_START + S3_DUR;
+// ── shared bits ───────────────────────────────────────────────────────────────
+const ProviderChip: React.FC<{ name: string; color: string }> = ({ name, color }) => (
+  <span
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '0 7px',
+      height: 17,
+      borderRadius: 999,
+      fontFamily: fonts.ui,
+      fontSize: 10,
+      fontWeight: 600,
+      color,
+      background: alpha(color, 0.16),
+      border: `1px solid ${alpha(color, 0.38)}`,
+      whiteSpace: 'nowrap',
+    }}
+  >
+    <span style={{ width: 6, height: 6, borderRadius: '50%', background: color }} />
+    {name}
+  </span>
+);
 
-// ─── Role colors ──────────────────────────────────────────────────────────────
-const ROLE_COLOR: Record<string, string> = {
-  coordinator: theme.accent,
-  engineer:    theme.accent2,
-  reviewer:    '#bf7aff',
-  qa:          theme.warn,
-  product:     '#63e6be',
-};
+// ── Scene 2 — org tree ────────────────────────────────────────────────────────
+interface OrgNode {
+  role: string;
+  person: string;
+  color: string;
+  provider: string;
+  provColor: string;
+  st: keyof typeof status;
+}
 
-const RoleBadge: React.FC<{ role: string }> = ({ role }) => {
-  const c = ROLE_COLOR[role] ?? theme.textDim;
-  return <span style={{ fontFamily: theme.mono, fontSize: 11, fontWeight: 700, color: c, background: `${c}22`, border: `1px solid ${c}44`, borderRadius: 6, padding: '2px 8px', letterSpacing: 0.4 }}>{role}</span>;
-};
-
-// ─── Scene 1 – Org tree + new swarm ──────────────────────────────────────────
-const AGENTS = [
-  { name: 'Otto Coord',   role: 'coordinator', status: 'working', depth: 0 },
-  { name: 'Alex',         role: 'engineer',    status: 'working', depth: 1 },
-  { name: 'Sam',          role: 'engineer',    status: 'idle',    depth: 1 },
-  { name: 'Maya',         role: 'reviewer',    status: 'idle',    depth: 1 },
-  { name: 'Taylor',       role: 'qa',          status: 'idle',    depth: 1 },
+const COORD: OrgNode = { role: 'Coordinator', person: 'C', color: brand.cyan, provider: 'claude', provColor: providers.claude, st: 'working' };
+const LEADS: OrgNode[] = [
+  { role: 'CTO', person: 'T', color: brand.violet, provider: 'claude', provColor: providers.claude, st: 'working' },
+  { role: 'VP Eng', person: 'V', color: '#0a84ff', provider: 'codex', provColor: providers.codex, st: 'idle' },
+];
+const LEAVES: OrgNode[] = [
+  { role: 'Backend Eng', person: 'B', color: providers.codex, provider: 'codex', provColor: providers.codex, st: 'working' },
+  { role: 'Backend Eng', person: 'B', color: providers.codex, provider: 'codex', provColor: providers.codex, st: 'working' },
+  { role: 'Reviewer', person: 'R', color: brand.violet, provider: 'claude', provColor: providers.claude, st: 'idle' },
+  { role: 'QA', person: 'Q', color: '#febc2e', provider: 'gemini', provColor: providers.gemini, st: 'working' },
 ];
 
-const Scene1OrgTree: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  const showWizard = frame >= 80;
-  const wizardS = spring({ frame: frame - 80, fps, config: { damping: 180 } });
-
-  return (
-    <div style={{ display: 'flex', height: '100%' }}>
-      {/* org tree sidebar */}
-      <div style={{ width: 280, background: theme.surface, borderRight: `1px solid ${theme.border}`, display: 'flex', flexDirection: 'column', height: '100%', flexShrink: 0 }}>
-        <div style={{ padding: '14px 16px 10px', borderBottom: `1px solid ${theme.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 11, fontWeight: 700, letterSpacing: 1.2, textTransform: 'uppercase' }}>Swarms</span>
-          <div style={{ width: 22, height: 22, borderRadius: 6, background: `${theme.accent}22`, border: `1px solid ${theme.accent}44`, display: 'grid', placeItems: 'center', color: theme.accent, fontSize: 16, fontWeight: 700 }}>+</div>
-        </div>
-        <div style={{ padding: '8px 0', flex: 1 }}>
-          <div style={{ padding: '6px 16px 4px', color: theme.textDim, fontFamily: theme.mono, fontSize: 12 }}>feat/rbac-multiuser</div>
-          {AGENTS.map((agent, i) => {
-            const s = spring({ frame: frame - i * 10, fps, config: { damping: 200 } });
-            const isCoord = agent.role === 'coordinator';
-            return (
-              <div key={agent.name} style={{ opacity: s, transform: `translateX(${interpolate(s, [0, 1], [-10, 0])}px)`, display: 'flex', alignItems: 'center', gap: 10, padding: `7px 16px 7px ${16 + agent.depth * 18}px`, background: isCoord ? `${theme.accent}14` : 'transparent', borderLeft: isCoord ? `2px solid ${theme.accent}` : '2px solid transparent' }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: agent.status === 'working' ? theme.accent2 : theme.textDim, flexShrink: 0 }} />
-                <span style={{ color: isCoord ? theme.text : theme.textDim, fontFamily: theme.font, fontSize: 13, flex: 1, fontWeight: isCoord ? 700 : 400 }}>{agent.name}</span>
-                <RoleBadge role={agent.role} />
-              </div>
-            );
-          })}
-        </div>
+const OrgCard: React.FC<{ node: OrgNode; w?: number }> = ({ node, w = 184 }) => (
+  <div
+    style={{
+      width: w,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '11px 12px',
+      borderRadius: 12,
+      background: T.surface,
+      border: `1px solid ${alpha(node.color, 0.4)}`,
+      boxShadow: `0 8px 26px rgba(0,0,0,0.4), 0 0 0 1px ${alpha(node.color, 0.12)}`,
+      boxSizing: 'border-box',
+    }}
+  >
+    <Avatar name={node.person} color={node.color} size={34} />
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 700, color: T.text }}>{node.role}</span>
+        <StatusDot kind={node.st} size={7} />
       </div>
+      <div style={{ marginTop: 5 }}>
+        <ProviderChip name={node.provider} color={node.provColor} />
+      </div>
+    </div>
+  </div>
+);
 
-      {/* main panel */}
-      <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        {!showWizard && (
-          <Appear delay={8}>
-            <div style={{ textAlign: 'center', maxWidth: 480 }}>
-              <div style={{ fontSize: 56, marginBottom: 20 }}>🐝</div>
-              <div style={{ color: theme.text, fontFamily: theme.font, fontSize: 26, fontWeight: 800, marginBottom: 12 }}>Agent Swarm</div>
-              <div style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 16, lineHeight: 1.65 }}>
-                Assemble a team of role-specialized agents. A coordinator breaks down the work; engineers, reviewers, and QA agents run in parallel — sharing a Kanban board and run-graph.
-              </div>
+// SVG connector layer drawn behind the cards (relative to the content box).
+const OrgWires: React.FC = () => {
+  const frame = useCurrentFrame();
+  const draw = track(frame, [10, 40], [0, 1]);
+  const W = 1130;
+  const H = 560;
+  // coordinate anchors (matched to the flex layout below)
+  const coordX = W / 2;
+  const coordY = 96;
+  const leadY = 250;
+  const leadXs = [W / 2 - 220, W / 2 + 220];
+  const leafY = 420;
+  const leafXs = [W / 2 - 360, W / 2 - 120, W / 2 + 120, W / 2 + 360];
+  const stroke = alpha(brand.cyan, 0.5);
+  const lines: [number, number, number, number][] = [
+    // coordinator → leads
+    [coordX, coordY, leadXs[0], leadY],
+    [coordX, coordY, leadXs[1], leadY],
+    // CTO → backend ×2
+    [leadXs[0], leadY, leafXs[0], leafY],
+    [leadXs[0], leadY, leafXs[1], leafY],
+    // VP Eng → reviewer, QA
+    [leadXs[1], leadY, leafXs[2], leafY],
+    [leadXs[1], leadY, leafXs[3], leafY],
+  ];
+  return (
+    <svg width={W} height={H} style={{ position: 'absolute', left: '50%', top: 0, transform: 'translateX(-50%)', pointerEvents: 'none' }}>
+      {lines.map(([x1, y1, x2, y2], i) => {
+        const my = (y1 + y2) / 2;
+        const d = `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
+        return (
+          <path
+            key={i}
+            d={d}
+            fill="none"
+            stroke={stroke}
+            strokeWidth={2}
+            strokeDasharray={460}
+            strokeDashoffset={460 * (1 - draw)}
+          />
+        );
+      })}
+    </svg>
+  );
+};
+
+const OrgTreeScene: React.FC = () => (
+  <>
+    <Stage scale={0.9}>
+      <OttoWindow
+        nav={<Navigator active="swarm" counts={{ swarm: 7 }} />}
+        title="Otto — Swarm · Platform Team"
+      >
+        <div style={{ position: 'relative', height: '100%', padding: '28px 0', boxSizing: 'border-box' }}>
+          {/* board header */}
+          <div style={{ position: 'absolute', top: 18, left: 26, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Icon name="grid" size={16} color={brand.cyan} />
+            <span style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 700, color: T.text }}>Org Tree</span>
+            <Chip color={brand.cyan}>7 agents</Chip>
+            <Chip tone="default">3 working</Chip>
+          </div>
+
+          <OrgWires />
+
+          <div style={{ position: 'relative', height: '100%' }}>
+            {/* Coordinator */}
+            <div style={{ position: 'absolute', top: 70, left: '50%', transform: 'translateX(-50%)' }}>
+              <Appear delay={4} y={14}>
+                <OrgCard node={COORD} w={210} />
+              </Appear>
             </div>
-          </Appear>
-        )}
-
-        {showWizard && (
-          <div style={{ opacity: wizardS, transform: `scale(${interpolate(wizardS, [0, 1], [0.9, 1])})`, width: 580, background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 18, boxShadow: '0 40px 100px rgba(0,0,0,0.7)', padding: '28px 32px' }}>
-            <div style={{ color: theme.text, fontFamily: theme.font, fontSize: 20, fontWeight: 800, marginBottom: 6 }}>New Swarm</div>
-            <div style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 13, marginBottom: 24 }}>Choose a role template — the coordinator recruits the right agents automatically</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {[
-                { template: 'Full-stack feature', desc: 'Coordinator · 2× Engineer · Reviewer · QA', selected: true },
-                { template: 'Code review team', desc: 'Coordinator · Architecture · Security · Performance', selected: false },
-                { template: 'Product sprint',    desc: 'Product agent · Engineer · QA · Docs', selected: false },
-              ].map(({ template, desc, selected }) => (
-                <div key={template} style={{ padding: '14px 18px', borderRadius: 12, background: selected ? `${theme.accent}14` : theme.surface2, border: `1px solid ${selected ? theme.accent : theme.border}`, display: 'flex', alignItems: 'center', gap: 14 }}>
-                  <div style={{ width: 14, height: 14, borderRadius: '50%', border: `2px solid ${selected ? theme.accent : theme.border}`, display: 'grid', placeItems: 'center', flexShrink: 0 }}>
-                    {selected && <div style={{ width: 6, height: 6, borderRadius: '50%', background: theme.accent }} />}
-                  </div>
-                  <div>
-                    <div style={{ color: theme.text, fontFamily: theme.font, fontSize: 15, fontWeight: selected ? 700 : 400 }}>{template}</div>
-                    <div style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 12, marginTop: 2 }}>{desc}</div>
-                  </div>
-                </div>
+            {/* Leads row */}
+            <div style={{ position: 'absolute', top: 224, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 256 }}>
+              {LEADS.map((n, i) => (
+                <Appear key={i} delay={14 + i * 4} y={14}>
+                  <OrgCard node={n} w={196} />
+                </Appear>
               ))}
             </div>
-            <div style={{ display: 'flex', gap: 12, marginTop: 24, justifyContent: 'flex-end' }}>
-              <div style={{ padding: '9px 22px', border: `1px solid ${theme.border}`, borderRadius: 10, color: theme.textDim, fontFamily: theme.font, fontSize: 14 }}>Cancel</div>
-              <div style={{ padding: '9px 26px', background: theme.accent, borderRadius: 10, color: '#fff', fontFamily: theme.font, fontSize: 14, fontWeight: 700, boxShadow: `0 6px 20px ${theme.accent}44` }}>Launch Swarm</div>
+            {/* Leaves row */}
+            <div style={{ position: 'absolute', top: 396, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 56 }}>
+              {LEAVES.map((n, i) => (
+                <Appear key={i} delay={26 + i * 5} y={14}>
+                  <OrgCard node={n} w={184} />
+                </Appear>
+              ))}
+            </div>
+            {/* recruiter strip */}
+            <div style={{ position: 'absolute', bottom: 6, left: '50%', transform: 'translateX(-50%)' }}>
+              <Appear delay={52} y={12}>
+                <div
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 9,
+                    padding: '8px 14px',
+                    borderRadius: 999,
+                    background: alpha(providers.claude, 0.1),
+                    border: `1px solid ${alpha(providers.claude, 0.32)}`,
+                    fontFamily: fonts.ui,
+                    fontSize: 13,
+                    color: T.text,
+                  }}
+                >
+                  <Icon name="user" size={14} color={providers.claude} />
+                  Recruiter drafted each agent — role, persona, skills &amp; schedule
+                </div>
+              </Appear>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      </OttoWindow>
+    </Stage>
+    <Caption
+      step={1}
+      title="Role agents in an org hierarchy"
+      sub="A recruiter drafts each one · 5 presets ship in the box"
+    />
+  </>
+);
 
-      <Caption step={1} title="Assemble a swarm" sub="Pick a role template — coordinator recruits the team" delay={70} />
+// ── Scene 3 — Kanban board ────────────────────────────────────────────────────
+interface KCard {
+  title: string;
+  who: string;
+  whoColor: string;
+  st: keyof typeof status;
+  stLabel: string;
+}
+
+const COLUMNS: { name: string; tone: string; cards: KCard[] }[] = [
+  {
+    name: 'Backlog',
+    tone: T.textDim,
+    cards: [
+      { title: 'Add pagination to /orders', who: 'B', whoColor: providers.codex, st: 'idle', stLabel: 'queued' },
+      { title: 'Cache currency rates', who: 'B', whoColor: providers.codex, st: 'idle', stLabel: 'queued' },
+    ],
+  },
+  {
+    name: 'In progress',
+    tone: status.working,
+    cards: [
+      { title: 'JWT refresh middleware', who: 'B', whoColor: providers.codex, st: 'working', stLabel: 'running' },
+      { title: 'Rate-limit gateway', who: 'V', whoColor: '#0a84ff', st: 'working', stLabel: 'running' },
+    ],
+  },
+  {
+    name: 'Review',
+    tone: brand.violet,
+    cards: [
+      { title: 'Refactor wallet ledger', who: 'R', whoColor: brand.violet, st: 'needsYou', stLabel: 'in review' },
+    ],
+  },
+  {
+    name: 'Done',
+    tone: status.working,
+    cards: [
+      { title: 'Fix flaky auth tests', who: 'Q', whoColor: '#febc2e', st: 'exited', stLabel: 'merged' },
+      { title: 'Seed staging DB', who: 'B', whoColor: providers.codex, st: 'exited', stLabel: 'merged' },
+    ],
+  },
+];
+
+const TaskCard: React.FC<{ c: KCard; moving?: boolean }> = ({ c, moving }) => {
+  const frame = useCurrentFrame();
+  const lift = moving ? track(frame, [70, 96], [0, 1]) : 0;
+  return (
+    <div
+      style={{
+        padding: '11px 12px',
+        borderRadius: 10,
+        background: T.surface,
+        border: `1px solid ${moving ? alpha(brand.cyan, 0.6) : T.border}`,
+        boxShadow: moving
+          ? `0 ${12 + lift * 8}px ${22 + lift * 10}px rgba(0,0,0,0.5), 0 0 0 1px ${alpha(brand.cyan, 0.4)}`
+          : '0 4px 14px rgba(0,0,0,0.28)',
+        transform: moving ? `translate(${lift * 18}px, ${-lift * 6}px) rotate(${lift * 1.4}deg)` : 'none',
+      }}
+    >
+      <div style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 600, color: T.text, lineHeight: 1.3 }}>{c.title}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 9 }}>
+        <Avatar name={c.who} color={c.whoColor} size={20} />
+        <span style={{ flex: 1 }} />
+        <StatusDot kind={c.st} size={7} />
+        <span style={{ fontFamily: fonts.ui, fontSize: 11, color: T.textDim }}>{c.stLabel}</span>
+      </div>
     </div>
   );
 };
 
-// ─── Scene 2 – Kanban board ────────────────────────────────────────────────────
-const KANBAN_COLS = ['Backlog', 'In progress', 'In review', 'Done'] as const;
-type KanbanCol = typeof KANBAN_COLS[number];
+const KanbanScene: React.FC = () => (
+  <>
+    <Stage scale={0.9}>
+      <OttoWindow
+        nav={<Navigator active="swarm" counts={{ swarm: 7 }} />}
+        tabs={[
+          { label: 'Kanban', icon: 'grid', active: true },
+          { label: 'Run Graph', icon: 'split' },
+          { label: 'Org Tree', icon: 'box' },
+          { label: 'Runs', icon: 'clock' },
+          { label: 'Board', icon: 'comment' },
+        ]}
+        title="Otto — Swarm · Checkout Revamp"
+      >
+        <div style={{ display: 'flex', gap: 14, padding: 20, height: '100%', boxSizing: 'border-box' }}>
+          {COLUMNS.map((col, ci) => (
+            <Appear key={col.name} delay={6 + ci * 6} y={18} style={{ flex: 1, display: 'flex' }}>
+              <div
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  background: alpha('#fff', 0.018),
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 12,
+                  padding: 11,
+                  minWidth: 0,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 11, padding: '0 2px' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: col.tone }} />
+                  <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{col.name}</span>
+                  <span style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim }}>{col.cards.length}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {col.cards.map((c, i) => (
+                    <Appear key={i} delay={16 + ci * 6 + i * 5} y={12}>
+                      <TaskCard c={c} moving={ci === 1 && i === 0} />
+                    </Appear>
+                  ))}
+                </div>
+              </div>
+            </Appear>
+          ))}
+        </div>
+      </OttoWindow>
+    </Stage>
+    <Caption
+      step={2}
+      title="Projects break into tasks on a board"
+      sub="The Coordinator assigns work within a parallel cap"
+    />
+  </>
+);
 
-const TASKS: { title: string; col: KanbanCol; agent: string; role: string }[] = [
-  { title: 'Design RBAC migration',           col: 'Done',        agent: 'Otto Coord', role: 'coordinator' },
-  { title: 'Implement user_feature_grants',   col: 'Done',        agent: 'Alex',       role: 'engineer' },
-  { title: 'Write component tests',           col: 'In review',   agent: 'Sam',        role: 'engineer' },
-  { title: 'Architecture review',             col: 'In review',   agent: 'Maya',       role: 'reviewer' },
-  { title: 'E2E session isolation test',      col: 'In progress', agent: 'Taylor',     role: 'qa' },
-  { title: 'Update OpenAPI spec',             col: 'In progress', agent: 'Alex',       role: 'engineer' },
-  { title: 'Impersonation audit log',         col: 'Backlog',     agent: '-',          role: 'engineer' },
+// ── Scene 4 — run graph + board ───────────────────────────────────────────────
+interface GNode {
+  id: string;
+  label: string;
+  x: number;
+  y: number;
+  st: keyof typeof status;
+  color: string;
+}
+
+const GNODES: GNode[] = [
+  { id: 'plan', label: 'Plan', x: 70, y: 150, st: 'exited', color: status.idle },
+  { id: 'api', label: 'API layer', x: 280, y: 78, st: 'exited', color: status.idle },
+  { id: 'db', label: 'DB schema', x: 280, y: 222, st: 'exited', color: status.idle },
+  { id: 'impl', label: 'Implement', x: 500, y: 150, st: 'working', color: status.working },
+  { id: 'review', label: 'Review', x: 720, y: 78, st: 'working', color: status.working },
+  { id: 'qa', label: 'QA', x: 720, y: 222, st: 'idle', color: status.idle },
+  { id: 'merge', label: 'Merge PR', x: 930, y: 150, st: 'idle', color: status.idle },
+];
+const GEDGES: [string, string][] = [
+  ['plan', 'api'],
+  ['plan', 'db'],
+  ['api', 'impl'],
+  ['db', 'impl'],
+  ['impl', 'review'],
+  ['impl', 'qa'],
+  ['review', 'merge'],
+  ['qa', 'merge'],
 ];
 
-const Scene2Kanban: React.FC = () => {
+const RunGraph: React.FC = () => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  const colTasks = (col: KanbanCol) => TASKS.filter((t) => t.col === col);
-  const COL_ORDER = { 'Backlog': 0, 'In progress': 1, 'In review': 2, 'Done': 3 };
-  const COL_COLOR: Record<KanbanCol, string> = {
-    Backlog:      theme.textDim,
-    'In progress': theme.accent,
-    'In review':  '#bf7aff',
-    Done:         theme.accent2,
-  };
-
+  const draw = track(frame, [8, 40], [0, 1]);
+  const byId = (id: string) => GNODES.find((n) => n.id === id)!;
+  const NW = 116;
+  const NH = 44;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-      {/* toolbar */}
-      <Appear delay={4}>
-        <div style={{ padding: '16px 24px', borderBottom: `1px solid ${theme.border}`, display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: theme.accent2 }} />
-          <span style={{ color: theme.text, fontFamily: theme.font, fontSize: 16, fontWeight: 700 }}>feat/rbac-multiuser</span>
-          <span style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 13 }}>2 active agents · 3 tasks remaining</span>
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            <div style={{ padding: '6px 14px', borderRadius: 8, background: `${theme.accent}14`, border: `1px solid ${theme.accent}44`, color: theme.accent, fontFamily: theme.font, fontSize: 13, fontWeight: 700 }}>Board</div>
-            <div style={{ padding: '6px 14px', borderRadius: 8, border: `1px solid ${theme.border}`, color: theme.textDim, fontFamily: theme.font, fontSize: 13 }}>Run graph</div>
-          </div>
-        </div>
-      </Appear>
-
-      {/* columns */}
-      <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 0, overflow: 'hidden' }}>
-        {KANBAN_COLS.map((col) => {
-          const tasks = colTasks(col);
-          const colColor = COL_COLOR[col];
+    <div style={{ position: 'relative', width: 1046, height: 320 }}>
+      <svg width={1046} height={320} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+        {GEDGES.map(([a, b], i) => {
+          const na = byId(a);
+          const nb = byId(b);
+          const x1 = na.x + NW;
+          const y1 = na.y + NH / 2;
+          const x2 = nb.x;
+          const y2 = nb.y + NH / 2;
+          const mx = (x1 + x2) / 2;
+          const d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+          const active = na.st === 'exited' && (nb.st === 'working' || nb.st === 'exited');
+          const col = active ? brand.cyan : alpha('#fff', 0.18);
           return (
-            <div key={col} style={{ borderRight: `1px solid ${theme.border}`, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              {/* column header */}
-              <div style={{ padding: '12px 16px', borderBottom: `1px solid ${theme.border}`, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: colColor }} />
-                <span style={{ color: colColor, fontFamily: theme.font, fontSize: 13, fontWeight: 700 }}>{col}</span>
-                <span style={{ marginLeft: 'auto', color: theme.textDim, fontFamily: theme.mono, fontSize: 12, background: `${colColor}18`, padding: '2px 8px', borderRadius: 6 }}>{tasks.length}</span>
-              </div>
-              {/* task cards */}
-              <div style={{ flex: 1, overflow: 'hidden', padding: '12px 10px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {tasks.map((task, i) => {
-                  const globalIdx = TASKS.indexOf(task);
-                  const s = spring({ frame: frame - (globalIdx * 10 + 12), fps, config: { damping: 200 } });
-                  return (
-                    <div key={task.title} style={{ opacity: s, transform: `translateY(${interpolate(s, [0, 1], [12, 0])}px)`, background: theme.surface2, borderRadius: 10, border: `1px solid ${theme.border}`, padding: '12px 14px' }}>
-                      <div style={{ color: theme.text, fontFamily: theme.font, fontSize: 13, fontWeight: 600, marginBottom: 8, lineHeight: 1.4 }}>{task.title}</div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: ROLE_COLOR[task.role] ?? theme.textDim }} />
-                        <span style={{ color: theme.textDim, fontFamily: theme.mono, fontSize: 11 }}>{task.agent}</span>
-                        <RoleBadge role={task.role} />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            <path
+              key={i}
+              d={d}
+              fill="none"
+              stroke={col}
+              strokeWidth={active ? 2.4 : 1.6}
+              strokeDasharray={300}
+              strokeDashoffset={300 * (1 - draw)}
+            />
           );
         })}
-      </div>
-
-      <Caption step={2} title="Shared Kanban board" sub="Tasks flow across agents — progress visible to all" delay={55} />
+      </svg>
+      {GNODES.map((n, i) => {
+        const op = track(frame, [10 + i * 4, 22 + i * 4], [0, 1]);
+        const lit = n.st === 'working';
+        return (
+          <div
+            key={n.id}
+            style={{
+              position: 'absolute',
+              left: n.x,
+              top: n.y,
+              width: NW,
+              height: NH,
+              opacity: op,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '0 12px',
+              boxSizing: 'border-box',
+              borderRadius: 10,
+              background: lit ? alpha(status.working, 0.14) : T.surface,
+              border: `1px solid ${lit ? alpha(status.working, 0.6) : T.border}`,
+              boxShadow: lit ? `0 0 22px ${alpha(status.working, 0.35)}` : '0 4px 12px rgba(0,0,0,0.3)',
+            }}
+          >
+            <StatusDot kind={n.st} size={8} pulse={lit} />
+            <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 600, color: T.text }}>{n.label}</span>
+          </div>
+        );
+      })}
     </div>
   );
 };
 
-// ─── Scene 3 – Run-graph (coordinator + agent nodes) ──────────────────────────
-type NodeStatus = 'done' | 'running' | 'waiting';
-
-const RUN_NODES: { id: string; label: string; role: string; status: NodeStatus; x: number; y: number }[] = [
-  { id: 'coord', label: 'Coordinator',           role: 'coordinator', status: 'done',    x: 540, y: 120 },
-  { id: 'alex',  label: 'Alex: implement RBAC',  role: 'engineer',    status: 'done',    x: 280, y: 260 },
-  { id: 'maya',  label: 'Maya: review PR',        role: 'reviewer',    status: 'running', x: 800, y: 260 },
-  { id: 'sam',   label: 'Sam: write tests',       role: 'engineer',    status: 'running', x: 280, y: 400 },
-  { id: 'taylor', label: 'Taylor: E2E tests',     role: 'qa',          status: 'waiting', x: 800, y: 400 },
+interface BoardMsg {
+  who: string;
+  color: string;
+  text: string;
+  st: keyof typeof status;
+}
+const BOARD: BoardMsg[] = [
+  { who: 'Reviewer', color: brand.violet, text: 'approved #142 — wallet ledger LGTM', st: 'working' },
+  { who: 'QA', color: '#febc2e', text: '3 cases passing · 0 failing', st: 'working' },
+  { who: 'Backend Eng', color: providers.codex, text: 'pushed impl, requesting review', st: 'idle' },
+  { who: 'Coordinator', color: brand.cyan, text: 'handed off Merge PR → VP Eng', st: 'idle' },
 ];
-const RUN_EDGES = [['coord', 'alex'], ['coord', 'maya'], ['alex', 'sam'], ['maya', 'taylor']];
 
-const STATUS_NODE_COLOR: Record<NodeStatus, string> = {
-  done:    theme.accent2,
-  running: theme.accent,
-  waiting: theme.textDim,
-};
-
-const Scene3RunGraph: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const dotPulse = Math.abs(Math.sin((frame / 30) * Math.PI * 1.5)) * 0.4 + 0.6;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-      <div style={{ padding: '14px 24px', borderBottom: `1px solid ${theme.border}`, display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-        <div style={{ width: 8, height: 8, borderRadius: '50%', background: theme.accent2 }} />
-        <span style={{ color: theme.text, fontFamily: theme.font, fontSize: 16, fontWeight: 700 }}>Run graph</span>
-        <span style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 13 }}>feat/rbac-multiuser · 2 of 5 agents still running</span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-          <div style={{ padding: '6px 14px', borderRadius: 8, border: `1px solid ${theme.border}`, color: theme.textDim, fontFamily: theme.font, fontSize: 13 }}>Board</div>
-          <div style={{ padding: '6px 14px', borderRadius: 8, background: `${theme.accent}14`, border: `1px solid ${theme.accent}44`, color: theme.accent, fontFamily: theme.font, fontSize: 13, fontWeight: 700 }}>Run graph</div>
-        </div>
-      </div>
-
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-        <svg width="100%" height="100%" viewBox="0 0 1080 520" style={{ position: 'absolute', inset: 0 }}>
-          {/* edges */}
-          {RUN_EDGES.map((edge, i) => {
-            const from = RUN_NODES.find((n) => n.id === edge[0])!;
-            const to   = RUN_NODES.find((n) => n.id === edge[1])!;
-            const s = spring({ frame: frame - i * 10, fps, config: { damping: 200 } });
-            return (
-              <line
-                key={i}
-                x1={from.x}
-                y1={from.y}
-                x2={interpolate(s, [0, 1], [from.x, to.x])}
-                y2={interpolate(s, [0, 1], [from.y, to.y])}
-                stroke={theme.border}
-                strokeWidth={1.5}
-                opacity={s}
-              />
-            );
-          })}
-
-          {/* nodes */}
-          {RUN_NODES.map((node, i) => {
-            const s = spring({ frame: frame - i * 12, fps, config: { damping: 180 } });
-            const c = STATUS_NODE_COLOR[node.status];
-            const isRunning = node.status === 'running';
-            const r = node.id === 'coord' ? 18 : 14;
-            return (
-              <g key={node.id} opacity={s} transform={`translate(${node.x}, ${node.y})`}>
-                {/* pulse ring for running */}
-                {isRunning && (
-                  <circle r={r + 8} fill="none" stroke={c} strokeWidth={1.5} opacity={dotPulse * 0.5} />
-                )}
-                <circle r={r} fill={`${c}22`} stroke={c} strokeWidth={2} />
-                {node.status === 'done' && (
-                  <text textAnchor="middle" y={6} fill={c} fontSize={14} fontWeight={700}>✓</text>
-                )}
-                {isRunning && (
-                  <circle r={5} fill={c} opacity={dotPulse} />
-                )}
-                {node.status === 'waiting' && (
-                  <text textAnchor="middle" y={5} fill={c} fontSize={13}>⋯</text>
-                )}
-                <text textAnchor="middle" y={r + 18} fill={ROLE_COLOR[node.role] ?? theme.textDim} fontFamily={theme.font} fontSize={12} fontWeight={700}>
-                  {node.label.length > 22 ? node.label.slice(0, 20) + '…' : node.label}
-                </text>
-                <text textAnchor="middle" y={r + 32} fill={theme.textDim} fontFamily={theme.mono} fontSize={10}>
-                  {node.role}
-                </text>
-              </g>
-            );
-          })}
-        </svg>
-
-        {/* legend */}
-        <Appear delay={30} style={{ position: 'absolute', bottom: 20, right: 24 }}>
-          <div style={{ background: theme.surface2, borderRadius: 12, padding: '12px 18px', border: `1px solid ${theme.border}`, display: 'flex', gap: 16 }}>
-            {(['done', 'running', 'waiting'] as NodeStatus[]).map((st) => (
-              <div key={st} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: STATUS_NODE_COLOR[st] }} />
-                <span style={{ color: theme.textDim, fontFamily: theme.font, fontSize: 12 }}>{st}</span>
+const SwarmBoard: React.FC = () => (
+  <div
+    style={{
+      width: 360,
+      flexShrink: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      background: alpha('#fff', 0.02),
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: 12,
+    }}
+  >
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+      <Icon name="comment" size={15} color={brand.cyan} />
+      <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 700, color: T.text }}>Board</span>
+      <StatusDot kind="working" size={7} />
+    </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {BOARD.map((m, i) => (
+        <Appear key={i} delay={30 + i * 7} y={10}>
+          <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start' }}>
+            <Avatar name={m.who} color={m.color} size={24} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 700, color: m.color }}>{m.who}</span>
+                <StatusDot kind={m.st} size={6} />
               </div>
-            ))}
+              <div style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim, marginTop: 3, lineHeight: 1.35 }}>{m.text}</div>
+            </div>
           </div>
         </Appear>
-      </div>
-
-      <Caption step={3} title="Run graph" sub="Trace how the coordinator delegated — done, running, waiting" delay={45} />
+      ))}
     </div>
-  );
-};
+  </div>
+);
 
-// ─── Outro ─────────────────────────────────────────────────────────────────────
-const Outro: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const t1 = spring({ frame,              fps, config: { damping: 160 } });
-  const t2 = spring({ frame: frame - 18, fps, config: { damping: 160 } });
-  const t3 = spring({ frame: frame - 32, fps, config: { damping: 160 } });
+const RunGraphScene: React.FC = () => (
+  <>
+    <Stage scale={0.9}>
+      <OttoWindow
+        nav={<Navigator active="swarm" counts={{ swarm: 7 }} />}
+        tabs={[
+          { label: 'Kanban', icon: 'grid' },
+          { label: 'Run Graph', icon: 'split', active: true, dot: 'working' },
+          { label: 'Org Tree', icon: 'box' },
+          { label: 'Runs', icon: 'clock' },
+          { label: 'Board', icon: 'comment' },
+        ]}
+        title="Otto — Swarm · Checkout Revamp"
+      >
+        <div style={{ display: 'flex', gap: 16, padding: 20, height: '100%', boxSizing: 'border-box' }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <Icon name="split" size={16} color={brand.cyan} />
+              <span style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 700, color: T.text }}>Run Graph</span>
+              <Chip color={status.working}>2 active</Chip>
+              <span style={{ flex: 1 }} />
+              <Chip tone="default">pause</Chip>
+              <Chip tone="default">abort</Chip>
+              <Chip color={brand.cyan}>resume</Chip>
+            </div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <RunGraph />
+            </div>
+          </div>
+          <SwarmBoard />
+        </div>
+      </OttoWindow>
+    </Stage>
+    <Caption
+      step={3}
+      title="Watch the run graph live"
+      sub="Delegation, hand-offs &amp; a shared board — pause/abort/resume anytime"
+    />
+  </>
+);
 
-  return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-      <div style={{ opacity: t1, transform: `scale(${interpolate(t1, [0, 1], [0.5, 1])})`, fontSize: 80 }}>🐝</div>
-      <div style={{ opacity: t2, transform: `translateY(${interpolate(t2, [0, 1], [24, 0])}px)`, color: theme.text, fontFamily: theme.font, fontSize: 64, fontWeight: 800, textAlign: 'center' }}>
-        Your whole team, automated.
-      </div>
-      <div style={{ opacity: t3, transform: `translateY(${interpolate(t3, [0, 1], [16, 0])}px)`, color: theme.textDim, fontFamily: theme.font, fontSize: 24, textAlign: 'center' }}>
-        Coordinator · Engineers · Reviewer · QA · Shared board
-      </div>
-    </div>
-  );
-};
+// ── Scene 5 — outro ───────────────────────────────────────────────────────────
+const Outro: React.FC = () => (
+  <WalkOutro
+    title="Agent Swarm"
+    tagline="Delegate to a team that runs itself."
+    pills={[
+      { label: 'Org tree', color: brand.cyan, icon: 'grid' },
+      { label: 'Recruiter', color: providers.claude, icon: 'user' },
+      { label: 'Kanban', color: '#0a84ff', icon: 'grid' },
+      { label: 'Run graph', color: brand.violet, icon: 'split' },
+      { label: 'Budgets', color: '#febc2e', icon: 'gauge' },
+    ]}
+  />
+);
 
-// ─── Root composition ─────────────────────────────────────────────────────────
-export const Swarm: React.FC = () => {
-  return (
-    <AbsoluteFill style={{ background: theme.bgGradient, fontFamily: theme.font }}>
+const SCENES: SceneDef[] = [
+  { dur: 80, node: <Title />, name: 'Title' },
+  { dur: 230, node: <OrgTreeScene />, name: 'Org Tree' },
+  { dur: 230, node: <KanbanScene />, name: 'Kanban' },
+  { dur: 210, node: <RunGraphScene />, name: 'Run Graph' },
+  { dur: 130, node: <Outro />, name: 'Outro' },
+];
 
-      <Sequence durationInFrames={TITLE_DUR}>
-        <TitleCard kicker="OTTO ADE" title="Agent Swarm" subtitle="Teams of specialized agents, in sync" />
-      </Sequence>
-
-      <Sequence from={S1_START} durationInFrames={S1_DUR + S2_DUR + S3_DUR}>
-        <AbsoluteFill style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <OttoWindow title="Otto — Agent Swarm">
-            <Sequence durationInFrames={S1_DUR}>
-              <Scene1OrgTree />
-            </Sequence>
-            <Sequence from={S1_DUR} durationInFrames={S2_DUR}>
-              <Scene2Kanban />
-            </Sequence>
-            <Sequence from={S1_DUR + S2_DUR} durationInFrames={S3_DUR}>
-              <Scene3RunGraph />
-            </Sequence>
-          </OttoWindow>
-        </AbsoluteFill>
-      </Sequence>
-
-      <Sequence from={OUTRO_START} durationInFrames={OUTRO_DUR}>
-        <Outro />
-      </Sequence>
-
-    </AbsoluteFill>
-  );
-};
+export const swarmDuration = scenesDuration(SCENES);
+export const Swarm: React.FC = () => <Scenes scenes={SCENES} />;
