@@ -242,6 +242,23 @@
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+    // Enforce ONE socket per Terminal. connect() is reached from several paths
+    // (initial fit, session-switch, scheduleReconnect, and the online/visibility
+    // retry); a daemon restart + window re-activate can race two of them. Since
+    // the PTY output is BROADCAST to every subscribed WS client, a leaked second
+    // socket makes the terminal write each byte — including the shell's echo of
+    // your keystrokes — twice (N sockets → N× duplication). Detach the old
+    // socket's handlers (so its onclose can't scheduleReconnect for a superseded
+    // connection) and close it before opening the new one.
+    if (sock) {
+      const old = sock;
+      old.onopen = null;
+      old.onmessage = null;
+      old.onerror = null;
+      old.onclose = null;
+      try { old.close(); } catch { /* already closing/closed */ }
+      sock = null;
+    }
     closedByUs = false;
     disconnected = false;
     connectedSid = sessionId;
