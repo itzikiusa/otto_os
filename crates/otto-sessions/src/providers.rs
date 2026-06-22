@@ -64,6 +64,20 @@ impl ProviderRegistry {
 
     fn build_map(overrides: Option<&serde_json::Value>) -> HashMap<String, ProviderSpec> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        // Give agent CLIs a BROAD working-dir scope (the user's home) via
+        // `--add-dir`. Claude Code only resets the bash cwd when a `cd` leaves
+        // the allowed working dirs (verified: `cd` WITHIN an allowed dir
+        // persists; outside it is reset to the launch dir). Without this an
+        // agent session is pinned to its one launch directory and `cd` to any
+        // sibling project gets reset — so add `$HOME` to let the user hop
+        // between projects freely. Sessions already run skip-permissions, so
+        // this only widens the cwd SCOPE, not tool access.
+        let home = std::env::var("HOME").unwrap_or_default();
+        let home_add_dir: Vec<String> = if home.is_empty() {
+            vec![]
+        } else {
+            vec![format!("--add-dir={home}")]
+        };
         let mut map = HashMap::new();
         // Each agent CLI is launched as-is (no `-p`) with its own
         // skip-permissions flag so unattended sessions never block on a
@@ -72,16 +86,24 @@ impl ProviderRegistry {
             "claude".to_string(),
             ProviderSpec {
                 cmd: "claude".into(),
-                args: vec![
-                    "--session-id".into(),
-                    "{sid}".into(),
-                    "--dangerously-skip-permissions".into(),
-                ],
-                resume_args: Some(vec![
-                    "--resume".into(),
-                    "{sid}".into(),
-                    "--dangerously-skip-permissions".into(),
-                ]),
+                args: {
+                    let mut a = vec![
+                        "--session-id".into(),
+                        "{sid}".into(),
+                        "--dangerously-skip-permissions".into(),
+                    ];
+                    a.extend(home_add_dir.iter().cloned());
+                    a
+                },
+                resume_args: Some({
+                    let mut a = vec![
+                        "--resume".into(),
+                        "{sid}".into(),
+                        "--dangerously-skip-permissions".into(),
+                    ];
+                    a.extend(home_add_dir.iter().cloned());
+                    a
+                }),
                 update_command: Some("claude update".into()),
             },
         );
@@ -101,10 +123,14 @@ impl ProviderRegistry {
             "agy".to_string(),
             ProviderSpec {
                 cmd: "agy".into(),
-                args: vec![
-                    "--dangerously-skip-permissions".into(),
-                    "--add-dir={cwd}".into(),
-                ],
+                args: {
+                    let mut a = vec![
+                        "--dangerously-skip-permissions".into(),
+                        "--add-dir={cwd}".into(),
+                    ];
+                    a.extend(home_add_dir.iter().cloned());
+                    a
+                },
                 resume_args: None,
                 update_command: Some("agy update".into()),
             },
