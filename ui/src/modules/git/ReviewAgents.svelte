@@ -107,9 +107,16 @@
       {/if}
       {#if agent.session_id && openTerminals.has(agent.session_id)}
         <div class="rp-term">
-          {#key agent.session_id}
-            <Terminal sessionId={agent.session_id} />
-          {/key}
+          <!-- No {#key} here. Terminal retargets its WS internally when
+               `sessionId` changes (no xterm/WS teardown — see Terminal's
+               session-switch effect, commit e72edf78). Wrapping it in
+               {#key agent.session_id} forced a full teardown + reconnect on
+               every parent re-render; during a RUNNING review (the panel
+               refetches `review` on every poll/bus tick) that became a ~90/sec
+               WS reconnect storm, leaving a running agent's terminal stuck on
+               "reconnecting". The {#each} is keyed by agent.name, so the
+               component instance is stable across refetches. -->
+          <Terminal sessionId={agent.session_id} />
         </div>
       {/if}
       {#if agentExpanded[agent.name] && agent.findings}

@@ -229,8 +229,16 @@
 
   /** Load the merge-readiness and persistent findings for a completed review. */
   async function loadFindingsAndReadiness(reviewId: string): Promise<void> {
-    findingsLoading = true;
-    mergeReadinessLoading = true;
+    // Only show the loading state on the FIRST load. This function is called on
+    // every `review_changed` bus event (refreshFromBus); flipping the loading
+    // flag on each background refetch made the merge-readiness box flicker
+    // "Loading…" ↔ value. On refetches we keep the current value visible and
+    // swap it in silently when the new data arrives.
+    const firstLoad = mergeReadiness === null;
+    if (firstLoad) {
+      findingsLoading = true;
+      mergeReadinessLoading = true;
+    }
     try {
       const [fp, mr] = await Promise.all([
         api.get<ReviewFindingRow[]>(`/reviews/${reviewId}/findings`),

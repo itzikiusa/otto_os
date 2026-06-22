@@ -1177,6 +1177,80 @@ fn render_diff(diff: &otto_core::api::DiffResp, cap: usize) -> (String, bool) {
     (out, truncated)
 }
 
+/// Append every `references/*.md` file sitting beside `skill_md` to `out`
+/// (sorted for determinism), so agents that cannot read files still get the
+/// skill's full method. Best-effort: a missing/unreadable dir is ignored.
+fn append_skill_references(out: &mut String, skill_md: &std::path::Path) {
+    let Some(refs_dir) = skill_md.parent().map(|d| d.join("references")) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&refs_dir) else {
+        return;
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md"))
+        .collect();
+    files.sort();
+    for p in files {
+        if let Ok(content) = std::fs::read_to_string(&p) {
+            let fname = p
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            out.push_str("\n\n---\n\n# Reference: ");
+            out.push_str(&fname);
+            out.push_str("\n\n");
+            out.push_str(&content);
+        }
+    }
+}
+
+/// Resolve a skill's full instructional text for inlining into a review prompt:
+/// its `SKILL.md` body plus every `references/*.md` beside it, so the method
+/// travels *in the prompt* and runs on any provider (claude/codex/agy/…), not
+/// only ones with a native skill loader. Mirrors how `product_run` feeds skills
+/// to its agents. Looked up in order: the Otto Library (canonical store), the
+/// compiled-in bundled skills (body only), then the operator's global Claude
+/// skills dir (`~/.claude/skills/<name>/`) so skills authored there — e.g.
+/// `golang-feature-implementation` — work too. Empty/unknown → empty string.
+fn resolve_skill_inline(library: &otto_context::Library, name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    // 1. Otto Library (multi-file skills with references on disk).
+    if let Some(skill) = library.get_skill(name) {
+        let mut out = skill.body;
+        if let Some(md) = library.skill_path(name) {
+            append_skill_references(&mut out, &md);
+        }
+        return out;
+    }
+    // 2. Compiled-in bundled skill body (no separate references).
+    if let Some(body) = otto_product::skill_body(name) {
+        return body.to_string();
+    }
+    // 3. Operator's global Claude skills dir, for skills authored outside the
+    //    Library (e.g. `golang-feature-implementation`). Inline the `SKILL.md`
+    //    body ONLY — these are general skills, not review-tuned, and their
+    //    `references/` can be hundreds of KB of implementation templates that
+    //    would bloat every review prompt (and are about *writing* code, not
+    //    reviewing it). Reject path-y names so we stay inside ~/.claude/skills.
+    if !name.contains(['/', '\\']) && !name.contains("..") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let md = std::path::Path::new(&home)
+                .join(".claude/skills")
+                .join(name)
+                .join("SKILL.md");
+            if let Ok(body) = std::fs::read_to_string(&md) {
+                return body;
+            }
+        }
+    }
+    String::new()
+}
+
 /// The default config used when no `pr_review` setting has been stored. The
 /// reviewer agents follow the configured default agent (`default_provider`);
 /// the summarizer stays on claude because its run path is hard-wired to the
@@ -1195,6 +1269,7 @@ fn default_review_config(default_provider: &str) -> ReviewConfig {
                          \"body\":string}. Focus on correctness and bugs: logic errors, off-by-one, \
                          nullability, panics, data races, incorrect assumptions."
                     .to_string(),
+                skill: "correctness-review".to_string(),
             },
             ReviewAgentCfg {
                 name: "Security & error handling".to_string(),
@@ -1207,6 +1282,7 @@ fn default_review_config(default_provider: &str) -> ReviewConfig {
                          \"body\":string}. Focus on security and error handling: injection, \
                          unhandled errors, missing auth checks, sensitive data exposure."
                     .to_string(),
+                skill: "security-review".to_string(),
             },
         ],
         summarizer: ReviewAgentCfg {
@@ -1220,6 +1296,7 @@ fn default_review_config(default_provider: &str) -> ReviewConfig {
                      \"body\":string}. Drop trivial duplicates. Return at most 20 items ranked by \
                      severity (bug first). Here are the batches of comments from each agent:"
                 .to_string(),
+            skill: String::new(),
         },
         custom_presets: vec![],
         max_attempts: None,
@@ -1377,17 +1454,26 @@ async fn run_review_core(
         .flat_map(|a| {
             let providers = effective_providers(a);
             let multi = providers.len() > 1;
+            // Inline the agent's skill (body + references) ahead of its lens
+            // prompt so every provider runs the full method, not just ones with
+            // a native skill loader. Resolved once per agent, reused per provider.
+            let skill_text = resolve_skill_inline(&ctx.context_library, &a.skill);
             providers.into_iter().map(move |p| {
                 let display_name = if multi {
                     format!("{} \u{00b7} {}", a.name, p)
                 } else {
                     a.name.clone()
                 };
+                let prompt_lens = if skill_text.is_empty() {
+                    a.prompt.clone()
+                } else {
+                    format!("{skill_text}\n\n---\n\n{}", a.prompt)
+                };
                 AgentRun {
                     display_name,
                     provider: p,
                     model: a.model.clone(),
-                    prompt_lens: a.prompt.clone(),
+                    prompt_lens,
                 }
             })
         })

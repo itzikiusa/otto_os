@@ -886,6 +886,14 @@ pub struct ReviewAgentCfg {
     pub model: String,
     /// Lens prompt — what this agent looks for.
     pub prompt: String,
+    /// Optional Library/bundled skill name. When non-empty, the skill's full
+    /// instructional text (its `SKILL.md` body plus every `references/*.md`
+    /// beside it) is resolved at review time and inlined into this agent's
+    /// prompt, so every provider (claude/codex/agy/…) runs the full skill
+    /// method — not only providers that have a native skill loader. Empty =
+    /// nothing inlined (the `prompt` is used verbatim).
+    #[serde(default)]
+    pub skill: String,
 }
 
 /// One finding produced by a single review agent (before summarization), for
@@ -1380,6 +1388,11 @@ pub struct ApiRequest {
     pub body: String,
     /// `{ "type": "none|bearer|basic|api_key", ... }`
     pub auth: Value,
+    /// Optional `ssh`-kind connection id to tunnel this request through (SOCKS5
+    /// over SSH, so it egresses from the bastion's whitelisted IP). None = send
+    /// directly.
+    #[serde(default)]
+    pub ssh_connection_id: Option<Id>,
     pub position: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

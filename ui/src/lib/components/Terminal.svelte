@@ -84,6 +84,13 @@
   // until this is true, because Effect 1's RAF/fit chain handles the initial
   // connect; Effect 2 only needs to act on subsequent sessionId changes.
   let termDidInit = false;
+  // The session id we currently have (or are opening) a socket for. Effect 2
+  // (session-switch) reconnects ONLY when this actually changes. Without it, a
+  // churning parent — e.g. the review panel re-rendering on every poll/bus tick
+  // and passing a NEW agent object with the SAME session_id string — re-runs
+  // Effect 2 and tears down + reconnects the WS on every render, which became a
+  // ~20–90 reconnect-per-second storm that left the terminal stuck "reconnecting".
+  let connectedSid: string | null = null;
 
   function scheduleReconnect(): void {
     if (closedByUs || exitCode !== null || reconnectTimer) return;
@@ -237,6 +244,7 @@
     }
     closedByUs = false;
     disconnected = false;
+    connectedSid = sessionId;
     // When a shareToken is supplied (guest share view) use the otto-bearer
     // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
     // the URL query string (keeps it out of access logs). The stored owner
@@ -736,6 +744,12 @@
     // termDidInit is set by Effect 1 once the first fit fires; until then the xterm
     // canvas isn't ready and Effect 1's initial untrack(connect) handles the first WS.
     if (!termDidInit || !term) return;
+    // No-op when the value is UNCHANGED. Svelte re-runs this effect whenever the
+    // `sessionId` prop source updates — and a churning parent (review panel) passes
+    // a new agent object with the same session_id on every render. Without this
+    // guard each such re-run did a full close+reconnect, storming the WS. A real
+    // session switch still falls through (connectedSid differs).
+    if (sessionId === connectedSid) return;
     // 1. Cancel any pending reconnect timer — it belongs to the old session.
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
