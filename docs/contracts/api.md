@@ -58,7 +58,7 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 44 | POST /api/v1/repos/{id}/push | ws editor | — | RepoStatusResp |
 | 45 | POST /api/v1/repos/{id}/pull | ws editor | — | RepoStatusResp |
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | CheckoutReq | RepoStatusResp |
-| 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"}` | RepoStatusResp |
+| 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
 | 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all | ws viewer | — | `PrSummary[]` |
 | 49 | POST /api/v1/repos/{id}/prs | ws editor | CreatePrReq | PrSummary |
 | 50 | GET /api/v1/repos/{id}/prs/{number} | ws viewer | — | PrDetail |
@@ -227,8 +227,11 @@ that user's workspace roles. Bootstrap one with a one-time login, then save it i
 | 87 | POST /api/v1/auth/tokens | member | CreateApiTokenReq `{label?}` | CreateApiTokenResp `{token, info}` (secret shown once) |
 | 88 | GET /api/v1/auth/tokens | member | — | `ApiTokenInfo[]` (never the secret; newest first) |
 | 89 | DELETE /api/v1/auth/tokens/{id} | member | — | 204 (404 if not found / not owned) |
+| 90 | GET /api/v1/repos/{id}/stashes | ws viewer | — | `StashInfo[]` (read-only `git stash list`) |
 
 Notes:
+- `StashInfo` = `{index, ref, sha, parents[], date, message, branch?}` — one entry per
+  `git stash list`. `ref` is the `stash@{N}` selector; `parents` are `[base, index, (untracked)]`.
 - `ApiTokenInfo` = `{id, label?, token_prefix, created_at, last_seen_at, expires_at}`.
   `token_prefix` is the first 12 chars of the raw token (for identifying it in a list);
   the rest is unrecoverable.

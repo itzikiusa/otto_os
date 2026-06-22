@@ -15,7 +15,7 @@ use otto_core::api::{
     CreatePrReq, DiffResp, MergeBranchReq, MergeCommitReq, MergeConflictStatus, MergePrReq,
     MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq, PrComment, PrCommit, PrDetail,
     PrState, PrSummary, Problem,
-    RefsResp, RepoStatusResp, RequestChangesReq, ResolveConflictReq, StagePathsReq,
+    RefsResp, RepoStatusResp, RequestChangesReq, ResolveConflictReq, StagePathsReq, StashInfo,
     UpdateGitAccountReq, UpdatePrReq,
 };
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
@@ -67,6 +67,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/branches", get(repo_branches::<S>))
         .route("/repos/{id}/refs", get(repo_refs::<S>))
         .route("/repos/{id}/log", get(repo_log::<S>))
+        .route("/repos/{id}/stashes", get(repo_stashes::<S>))
         .route("/repos/{id}/fetch", post(repo_fetch::<S>))
         .route("/repos/{id}/diff", get(repo_diff::<S>))
         .route("/repos/{id}/stage", post(repo_stage::<S>))
@@ -1173,9 +1174,24 @@ async fn repo_tag_delete<S: GitCtx>(
     Ok(Json(git.status().await?))
 }
 
+/// List stashes (read-only). Viewer role — no working-tree mutation.
+async fn repo_stashes<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Vec<StashInfo>>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(git.stash_list().await?))
+}
+
 #[derive(Deserialize)]
 struct StashReq {
     op: String,
+    /// Stash commit SHA for `apply`/`drop` (SHA-anchored so a renumbered stack
+    /// can't hit the wrong entry). Required for those ops; ignored by
+    /// `save`/`pop`, which always operate on the top of the stack.
+    #[serde(default)]
+    sha: Option<String>,
 }
 
 async fn repo_stash<S: GitCtx>(
@@ -1191,6 +1207,17 @@ async fn repo_stash<S: GitCtx>(
         }
         "pop" => {
             git.stash_pop().await?;
+        }
+        "apply" | "drop" => {
+            let sha = req
+                .sha
+                .as_deref()
+                .ok_or_else(|| Error::Invalid(format!("stash {} requires a sha", req.op)))?;
+            if req.op == "apply" {
+                git.stash_apply(sha).await?;
+            } else {
+                git.stash_drop(sha).await?;
+            }
         }
         other => return Err(Error::Invalid(format!("bad stash op: {other}")).into()),
     }

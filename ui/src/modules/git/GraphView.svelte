@@ -1,7 +1,7 @@
 <script lang="ts">
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { api } from '../../lib/api/client';
-  import type { CommitInfo, RefsResp, RefBranch, RefTag, RepoStatusResp, DiffResp, FileDiff, DiffLine } from '../../lib/api/types';
+  import type { CommitInfo, RefsResp, RefBranch, RefTag, StashInfo, RepoStatusResp, DiffResp, FileDiff, DiffLine } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -103,12 +103,16 @@
   let localOpen = $state(true);
   let remoteOpen = $state(true);
   let tagsOpen = $state(false);
+  let stashesOpen = $state(false);
 
   let checkoutBusy = $state('');
 
   // ── Commits / graph ───────────────────────────────────────────────────────
   let commits: CommitInfo[] = $state([]);
   let commitsLoading = $state(true);
+
+  // ── Stashes (read-only `git stash list`) ──────────────────────────────────
+  let stashes: StashInfo[] = $state([]);
 
   // ── Commit detail / diff ─────────────────────────────────────────────────
   let selectedSha = $state<string | null>(null);
@@ -124,6 +128,7 @@
     commitsLoading = true;
     refs = null;
     commits = [];
+    stashes = [];
 
     void api
       .get<RefsResp>(`/repos/${id}/refs`)
@@ -136,6 +141,13 @@
       .then((c) => (commits = c))
       .catch(() => (commits = []))
       .finally(() => (commitsLoading = false));
+
+    // Stashes are best-effort: a failure (or empty list) just leaves the section
+    // empty; it must never block the graph from rendering.
+    void api
+      .get<StashInfo[]>(`/repos/${id}/stashes`)
+      .then((s) => (stashes = s))
+      .catch(() => (stashes = []));
   });
 
   // ── Context-menu helpers ────────────────────────────────────────────────────
@@ -159,6 +171,7 @@
         .get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=200`)
         .then((c) => (commits = c))
         .catch(() => {}),
+      api.get<StashInfo[]>(`/repos/${repoId}/stashes`).then((s) => (stashes = s)).catch(() => {}),
     ]);
   }
 
@@ -546,6 +559,41 @@
     await mutate('/tag/delete', { name, remote }, remote ? 'Tag deleted on origin' : 'Tag deleted', name);
   }
 
+  // ── Stash context menu + actions (sidebar STASHES section) ──────────────────
+  async function stashApply(s: StashInfo): Promise<void> {
+    // SHA-anchored (not positional index): the backend resolves the live
+    // stash@{N} so a renumbered stack can't apply the wrong entry.
+    await mutate('/stash', { op: 'apply', sha: s.sha }, 'Stash applied', stashShortMsg(s));
+  }
+
+  async function stashDrop(s: StashInfo): Promise<void> {
+    const ok = await confirmer.ask(
+      `Drop ${s.ref} — "${stashShortMsg(s)}"? This discards the stash and cannot be undone.`,
+      { title: 'Drop stash', confirmLabel: 'Drop', danger: true },
+    );
+    if (!ok) return;
+    // SHA-anchored drop — irreversible, so never trust a stale positional index.
+    await mutate('/stash', { op: 'drop', sha: s.sha }, 'Stash dropped', s.ref);
+  }
+
+  function stashMenu(e: MouseEvent | KeyboardEvent, s: StashInfo): void {
+    const items: MenuItem[] = [
+      { label: 'Apply stash', icon: 'stash', action: () => void stashApply(s) },
+      { separator: true },
+      { label: 'Drop stash', icon: 'trash', danger: true, action: () => void stashDrop(s) },
+      { separator: true },
+      { label: 'Copy message', icon: 'note', action: () => void clip(s.message, s.message) },
+    ];
+    ctxMenu.show(e, items);
+  }
+
+  /** Click a stash row → select its commit in the graph if it's present (the top
+   *  stash usually is via `--all`; older reflog-only stashes won't be). */
+  function selectStash(s: StashInfo): void {
+    const c = bySha.get(s.sha);
+    if (c) void selectCommit(c);
+  }
+
   async function checkout(branch: string, create: boolean): Promise<void> {
     checkoutBusy = branch;
     try {
@@ -761,6 +809,94 @@
     return Math.min(graph.widest * LANE_W + LANE_W / 2, MAX_GUTTER_W);
   });
 
+  // ── Stash detection (in-graph dashed rendering) ───────────────────────────
+  // From the stash list we know each stash's commit sha and its internal helper
+  // commits (the index/untracked parents = parents[1..]; parents[0] is the base
+  // commit = real history, left alone). Commits in the log matching either get a
+  // dashed, de-emphasised "stash plumbing" treatment instead of a normal node.
+  const stashShas = $derived(new Set(stashes.map((s) => s.sha)));
+  const stashHelperShas = $derived.by(() => {
+    const set = new Set<string>();
+    for (const s of stashes) for (const p of s.parents.slice(1)) set.add(p);
+    return set;
+  });
+  const stashMsgBySha = $derived.by(() => {
+    const m = new Map<string, string>();
+    for (const s of stashes) m.set(s.sha, stashShortMsg(s));
+    return m;
+  });
+  // Fallback: the stash (WIP) commit also carries a `refs/stash` decoration in
+  // the log, so the in-graph dashed treatment survives even if the /stashes
+  // fetch failed (the two sources can't then visibly disagree on the entry node).
+  const stashRefShas = $derived.by(() => {
+    const set = new Set<string>();
+    for (const c of commits) if (c.refs.includes('refs/stash')) set.add(c.sha);
+    return set;
+  });
+  function isStashNode(sha: string): boolean {
+    return stashShas.has(sha) || stashHelperShas.has(sha) || stashRefShas.has(sha);
+  }
+  /** Strip the "WIP on <branch>: " / "On <branch>: " prefix for a compact label. */
+  function stashShortMsg(s: StashInfo): string {
+    const m = s.message.replace(/^(WIP on|On)\s+[^:]+:\s*/, '').trim();
+    return m || s.message;
+  }
+
+  // ── Branch-line highlight (press a commit → see which branch it's on) ──────
+  // Walk the FIRST-PARENT spine through the selected commit (ancestors via
+  // parents[0], descendants via the first child whose parents[0] is this commit).
+  // That contiguous spine reads as "the branch"; everything off it dims.
+  const bySha = $derived.by(() => {
+    const m = new Map<string, CommitInfo>();
+    for (const c of commits) m.set(c.sha, c);
+    return m;
+  });
+  const firstParentChild = $derived.by(() => {
+    // parentSha → child sha where the child's FIRST parent is parentSha. Commits
+    // arrive newest-first, so the first match is the most-recent (tip-ward) child.
+    const m = new Map<string, string>();
+    for (const c of commits) {
+      const fp = c.parents[0];
+      if (fp && !m.has(fp)) m.set(fp, c.sha);
+    }
+    return m;
+  });
+  const highlightSpine = $derived.by((): Set<string> | null => {
+    if (!selectedSha || commits.length === 0) return null;
+    const set = new Set<string>();
+    // ancestors (first-parent)
+    let cur: string | undefined = selectedSha;
+    while (cur && !set.has(cur)) {
+      set.add(cur);
+      cur = bySha.get(cur)?.parents[0];
+    }
+    // first-parent descendants
+    cur = firstParentChild.get(selectedSha);
+    while (cur && !set.has(cur)) {
+      set.add(cur);
+      cur = firstParentChild.get(cur);
+    }
+    return set;
+  });
+  // The branch the spine resolves to (for the detail-header "on <branch>" hint).
+  // The ancestor half of the spine is exact; the first-parent DESCENDANT half is
+  // best-effort (a commit has no single canonical branch — at a fork we follow
+  // the newest child), so this hint is indicative, not authoritative.
+  // First head/local ref found along the spine wins, else the first remote.
+  const selectedBranch = $derived.by((): string | null => {
+    const spine = highlightSpine;
+    if (!spine) return null;
+    let remoteFallback: string | null = null;
+    for (const c of commits) {
+      if (!spine.has(c.sha)) continue;
+      for (const chip of chipsFor(c)) {
+        if (chip.kind === 'head' || chip.kind === 'local') return chip.label;
+        if (chip.kind === 'remote' && remoteFallback === null) remoteFallback = chip.label;
+      }
+    }
+    return remoteFallback;
+  });
+
   // ── Helpers ───────────────────────────────────────────────────────────────
   function fmtDate(iso: string): string {
     const d = new Date(iso);
@@ -787,7 +923,7 @@
   // a chip kind so the row instantly shows what's local vs remote vs the
   // checked-out branch. `RefsResp` (local/remote names) disambiguates a bare
   // name when the decoration alone is ambiguous.
-  type ChipKind = 'head' | 'local' | 'remote' | 'tag' | 'detached';
+  type ChipKind = 'head' | 'local' | 'remote' | 'tag' | 'detached' | 'stash';
   interface RefChip {
     kind: ChipKind;
     label: string; // text shown on the chip
@@ -810,6 +946,11 @@
   });
 
   function classifyRef(ref: string): RefChip {
+    // Stash ref (`refs/stash` for the top stash, or a `stash@{N}` selector) —
+    // its own kind, never bucketed as a remote branch.
+    if (ref === 'refs/stash' || /^stash@\{/.test(ref)) {
+      return { kind: 'stash', label: 'stash', current: false };
+    }
     if (isTagRef(ref)) return { kind: 'tag', label: refLabel(ref), current: false };
     // "HEAD -> branch": the checked-out branch — the most prominent chip.
     const arrow = ref.match(/^HEAD\s*->\s*(.+)$/);
@@ -826,10 +967,17 @@
     return { kind: 'local', label: ref, current: ref === currentBranch };
   }
 
-  // Chips for one commit row, ordered head → local → remote → tag for a tidy row.
+  // Chips for one commit row, ordered head → local → remote → tag → stash for a
+  // tidy column. `origin/HEAD` (and any `<remote>/HEAD` symbolic pointer) is
+  // dropped — it's noise that never helps the reader.
   function chipsFor(c: CommitInfo): RefChip[] {
-    const order: Record<ChipKind, number> = { head: 0, detached: 0, local: 1, remote: 2, tag: 3 };
-    return c.refs.map(classifyRef).sort((a, b) => order[a.kind] - order[b.kind]);
+    const order: Record<ChipKind, number> = {
+      head: 0, detached: 0, local: 1, remote: 2, tag: 3, stash: 4,
+    };
+    return c.refs
+      .filter((r) => !/\/HEAD$/.test(r))
+      .map(classifyRef)
+      .sort((a, b) => order[a.kind] - order[b.kind]);
   }
 
   // A commit is the HEAD ("you are here") when any decoration is HEAD-ish.
@@ -1009,6 +1157,37 @@
           {/each}
         {/if}
       </div>
+
+      <!-- STASHES — read-only `git stash list`; right-click for Apply / Drop. -->
+      <div class="ref-section">
+        <button class="ref-header" onclick={() => (stashesOpen = !stashesOpen)}>
+          <Icon name={stashesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name="stash" size={12} />
+          <span>STASHES</span>
+          <span class="ref-count">{stashes.length}</span>
+        </button>
+        {#if stashesOpen}
+          {#each stashes as s (s.ref)}
+            <div
+              class="ref-row stash-row"
+              role="button"
+              tabindex="0"
+              title={`${s.ref} · ${s.message}`}
+              onclick={() => selectStash(s)}
+              oncontextmenu={(e) => stashMenu(e, s)}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') selectStash(s);
+              }}
+            >
+              <Icon name="stash" size={10} />
+              <span class="ref-name stash-msg">{stashShortMsg(s)}</span>
+              {#if s.branch}<span class="stash-branch mono dim">{s.branch}</span>{/if}
+            </div>
+          {:else}
+            <div class="dim ref-empty">No stashes</div>
+          {/each}
+        {/if}
+      </div>
     {/if}
   </aside>
 
@@ -1045,15 +1224,53 @@
           {@const totalH = 28}
           {@const isSelected = selectedSha === row.commit.sha}
           {@const isHead = isHeadCommit(row.commit)}
+          {@const isStash = isStashNode(row.commit.sha)}
+          {@const chips = chipsFor(row.commit)}
+          {@const dimmed = highlightSpine !== null && !highlightSpine.has(row.commit.sha)}
+          {@const onSpine = highlightSpine !== null && highlightSpine.has(row.commit.sha)}
           <button
             class="graph-row"
             class:graph-row-selected={isSelected}
             class:graph-row-head={isHead}
+            class:dimmed
+            class:on-spine={onSpine}
+            class:stash-row-commit={isStash}
             onclick={() => selectCommit(row.commit)}
             oncontextmenu={(e) => commitMenu(e, row.commit)}
             title={isHead ? `${row.commit.subject} — you are here (HEAD)` : row.commit.subject}
             aria-pressed={isSelected}
           >
+            <!-- BRANCH / TAG column: refs for this row, right-aligned so labels
+                 line up vertically and butt against the graph node (GitKraken). -->
+            <div class="branch-cell">
+              {#each chips as chip (chip.kind + chip.label)}
+                {@const label = chip.kind === 'stash'
+                  ? (stashMsgBySha.get(row.commit.sha) ?? 'stash')
+                  : chip.label}
+                <span
+                  class="ref-chip kind-{chip.kind}"
+                  class:current-chip={chip.current}
+                  title={chip.kind === 'stash'
+                    ? `Stash · ${label}`
+                    : chip.current
+                      ? `Checked out · ${chip.label}`
+                      : chip.label}
+                >
+                  {#if chip.current}<Icon name="check" size={8} />{/if}
+                  {#if chip.kind === 'remote'}<Icon name="globe" size={8} />{/if}
+                  {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
+                  {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
+                  <span class="chip-label">{label}</span>
+                  {#if chip.current && (status.ahead > 0 || status.behind > 0)}
+                    <span class="chip-ab">
+                      {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
+                      {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
+                    </span>
+                  {/if}
+                </span>
+              {/each}
+            </div>
+
             <!-- SVG gutter -->
             <svg
               class="gutter"
@@ -1087,39 +1304,28 @@
               {/each}
               <!-- vertical continuation for current lane -->
               <line x1={cx} y1={cy + NODE_R} x2={cx} y2={totalH} stroke={row.color} stroke-width="1.5" />
-              <!-- node circle -->
-              <circle cx={cx} cy={cy} r={NODE_R} fill={row.color} />
+              <!-- node: dashed + muted for stash plumbing; a halo ring when selected -->
+              {#if isStash}
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={NODE_R}
+                  fill="var(--surface)"
+                  stroke="var(--text-dim)"
+                  stroke-width="1.3"
+                  stroke-dasharray="2 1.6"
+                />
+              {:else}
+                {#if isSelected}
+                  <circle cx={cx} cy={cy} r={NODE_R + 3} fill="none" stroke={row.color} stroke-width="1.5" opacity="0.55" />
+                {/if}
+                <circle cx={cx} cy={cy} r={NODE_R} fill={row.color} />
+              {/if}
             </svg>
 
             <!-- commit info -->
             <div class="commit-info">
               <div class="ci-top">
-                {#if isHead}
-                  <span class="here-pip" title="You are here (HEAD)" aria-label="HEAD">
-                    <Icon name="check" size={8} />
-                  </span>
-                {/if}
-                <!-- Ref chips sit on the LEFT, attached to the graph node (like
-                     GitKraken's BRANCH/TAG column) so the checked-out branch reads
-                     on the graph itself, not floated to the far right. -->
-                {#each chipsFor(row.commit) as chip}
-                  <span
-                    class="ref-chip kind-{chip.kind}"
-                    class:current-chip={chip.current}
-                    title={chip.current ? `Checked out · ${chip.label}` : chip.label}
-                  >
-                    {#if chip.current}<Icon name="check" size={8} />{/if}
-                    {#if chip.kind === 'remote'}<Icon name="globe" size={8} />{/if}
-                    {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
-                    {chip.label}
-                    {#if chip.current && (status.ahead > 0 || status.behind > 0)}
-                      <span class="chip-ab">
-                        {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
-                        {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
-                      </span>
-                    {/if}
-                  </span>
-                {/each}
                 <span class="ci-subject">{row.commit.subject}</span>
               </div>
               <div class="ci-meta">
@@ -1183,9 +1389,15 @@
                 {#if chip.current}<Icon name="check" size={8} />{/if}
                 {#if chip.kind === 'remote'}<Icon name="globe" size={8} />{/if}
                 {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
-                {chip.label}
+                {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
+                {chip.kind === 'stash' ? (stashMsgBySha.get(selectedCommit.sha) ?? 'stash') : chip.label}
               </span>
             {/each}
+            {#if selectedBranch}
+              <span class="on-branch-hint" title="On branch {selectedBranch}">
+                <Icon name="branch" size={9} /> {selectedBranch}
+              </span>
+            {/if}
             <span class="grow"></span>
             <button class="detail-close" onclick={clearSelection} title="Close" aria-label="Close commit detail">
               ✕
@@ -1406,6 +1618,9 @@
 
   /* ── graph panel ── */
   .graph-panel {
+    /* Width of the BRANCH / TAG column on every row (kept equal so labels align
+       vertically). Narrows when the detail panel takes the page width. */
+    --branch-col-w: 168px;
     flex: 1;
     min-width: 0;
     overflow-y: auto;
@@ -1415,9 +1630,10 @@
   /* When detail is open, the commit list becomes a fixed-width column and the
      detail panel flexes to fill the rest of the page (see .detail-visible). */
   .graph-panel.panel-shrunk {
-    flex: 0 0 380px;
+    --branch-col-w: 88px;
+    flex: 0 0 420px;
     width: auto;
-    min-width: 280px;
+    min-width: 300px;
     border-inline-end: 1px solid var(--border);
   }
   .graph-list {
@@ -1548,17 +1764,6 @@
     border-inline-start: 1px solid color-mix(in srgb, var(--accent-contrast) 45%, transparent);
     font-variant-numeric: tabular-nums;
   }
-  /* "You are here" pip on the HEAD row. */
-  .here-pip {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: var(--accent-contrast);
-  }
   .ab-ahead {
     color: var(--status-working, #98c379);
   }
@@ -1589,6 +1794,88 @@
   }
   .ci-date {
     font-size: 10px;
+    white-space: nowrap;
+  }
+
+  /* ── BRANCH / TAG column ──────────────────────────────────────────────────
+     A fixed-width, right-aligned cell at the start of every row. Equal width
+     across rows → labels line up vertically; right-alignment butts them against
+     the graph node (GitKraken layout). Overflowing chips clip on the left so the
+     chip nearest the graph stays visible. */
+  .branch-cell {
+    width: var(--branch-col-w, 168px);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    overflow: hidden;
+    padding-inline: 6px;
+    transition: width 180ms ease-out;
+  }
+  .chip-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  /* Stash decoration — dashed + muted so it reads as plumbing, not a branch. */
+  .ref-chip.kind-stash {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px dashed var(--text-dim);
+  }
+
+  /* ── Branch-line highlight (press a commit → see its branch) ───────────────
+     Off-spine rows fade; spine rows get a faint wash. The selected row keeps its
+     own accent wash (.graph-row-selected wins via later/!specificity). */
+  .graph-row.dimmed {
+    opacity: 0.34;
+  }
+  .graph-row.dimmed:hover {
+    opacity: 0.62;
+  }
+  .graph-row.on-spine:not(.graph-row-selected):not(.graph-row-head) {
+    background: color-mix(in srgb, var(--accent) 4%, transparent);
+  }
+  /* A stash commit row: muted, italic subject (it's a WIP snapshot, not history). */
+  .graph-row.stash-row-commit .ci-subject {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  /* "on <branch>" hint in the open commit's detail header. */
+  .on-branch-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-dim);
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--surface-2);
+    white-space: nowrap;
+  }
+
+  /* ── STASHES sidebar rows ── */
+  .stash-row {
+    cursor: pointer;
+    color: var(--text-dim);
+  }
+  .stash-row:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .stash-msg {
+    font-size: 11.5px;
+  }
+  .stash-branch {
+    flex-shrink: 0;
+    font-size: 9.5px;
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
@@ -1982,16 +2269,12 @@
     .mobile .ci-sha { font-size: 12px; }
     .mobile .ci-author { font-size: 12px; max-width: 110px; }
     .mobile .ci-date { font-size: 12px; }
-    .mobile .ref-chip { font-size: 11px; max-width: 130px; }
-    /* On a narrow phone, let the inline commit-row chips give way to the subject
-       rather than squeezing it to zero: they shrink (each keeps a legible floor)
-       and the subject keeps at least ~40% of the row. */
-    .mobile .ci-top .ref-chip {
-      flex-shrink: 1;
-      min-width: 2.5em;
-      max-width: 42vw;
-    }
-    .mobile .ci-subject { flex-basis: 40%; }
+    .mobile .ref-chip { font-size: 11px; max-width: 120px; }
+    /* Branch/tag column stays a compact, aligned column on phones; chips clip on
+       the left and the full refs are available in the detail header on tap. */
+    .mobile .graph-panel { --branch-col-w: 108px; }
+    .mobile .branch-cell { gap: 3px; padding-inline: 4px; }
+    .mobile .branch-cell .ref-chip { max-width: 96px; }
 
     /* Close (✕) for the open commit detail — bump to a ≥40px touch target. */
     .mobile .detail-close {

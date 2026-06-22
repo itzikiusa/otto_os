@@ -4,7 +4,7 @@
 
 use otto_core::api::{
     BranchInfo, CommitInfo, ConflictSegment, DiffLine, DiffResp, FileChange, FileDiff, Hunk,
-    LineOrigin, RepoStatusResp,
+    LineOrigin, RepoStatusResp, StashInfo,
 };
 use otto_core::{Error, Result};
 
@@ -310,6 +310,67 @@ pub fn parse_log(out: &str) -> Result<Vec<CommitInfo>> {
 }
 
 // ---------------------------------------------------------------------------
+// Stash list
+// ---------------------------------------------------------------------------
+
+/// Parse `git stash list --pretty=format:%gd%x1f%H%x1f%P%x1f%aI%x1f%gs`.
+/// Fields per line: selector (`stash@{N}`), sha, parents (space-sep), dateISO,
+/// reflog subject (`%gs`). Malformed lines are skipped rather than failing the
+/// whole listing (an empty list is the common, healthy case).
+pub fn parse_stash_list(out: &str) -> Vec<StashInfo> {
+    let mut stashes = Vec::new();
+    for line in out.lines() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\u{1f}').collect();
+        if fields.len() < 5 {
+            continue;
+        }
+        let selector = fields[0].trim();
+        // index = N in "stash@{N}"; default 0 if the selector is unexpected.
+        let index = selector
+            .strip_prefix("stash@{")
+            .and_then(|r| r.strip_suffix('}'))
+            .and_then(|n| n.parse::<u32>().ok())
+            .unwrap_or(0);
+        let parents: Vec<String> = fields[2]
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        let message = fields[4].trim().to_string();
+        let branch = parse_stash_branch(&message);
+        stashes.push(StashInfo {
+            index,
+            r#ref: selector.to_string(),
+            sha: fields[1].trim().to_string(),
+            parents,
+            date: fields[3].trim().to_string(),
+            message,
+            branch,
+        });
+    }
+    stashes
+}
+
+/// Extract the branch from a stash reflog subject: "WIP on main: …" or
+/// "On main: …" → `Some("main")`; anything else → `None`.
+fn parse_stash_branch(msg: &str) -> Option<String> {
+    let rest = msg
+        .strip_prefix("WIP on ")
+        .or_else(|| msg.strip_prefix("On "))?;
+    let branch = rest.split(':').next()?.trim();
+    // A stash taken on a detached HEAD reads "On (no branch): …" — not a branch.
+    if branch.is_empty() || branch == "(no branch)" {
+        None
+    } else {
+        Some(branch.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unified diff
 // ---------------------------------------------------------------------------
 
@@ -568,6 +629,34 @@ fn parse_hunk_header(rest: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stash_list_parses_selector_parents_and_branch() {
+        // %gd \x1f %H \x1f %P \x1f %aI \x1f %gs
+        let us = '\u{1f}';
+        let out = format!(
+            "stash@{{0}}{us}dd92c29aaa{us}ebe28ba 931dcdd{us}2026-06-22T12:30:45+03:00{us}WIP on main: my work\n\
+             stash@{{1}}{us}aaaa111{us}bbbb222{us}2026-06-20T09:00:00+00:00{us}On feature/x: spike",
+        );
+        let stashes = parse_stash_list(&out);
+        assert_eq!(stashes.len(), 2);
+        assert_eq!(stashes[0].index, 0);
+        assert_eq!(stashes[0].r#ref, "stash@{0}");
+        assert_eq!(stashes[0].sha, "dd92c29aaa");
+        assert_eq!(stashes[0].parents, vec!["ebe28ba", "931dcdd"]);
+        assert_eq!(stashes[0].branch.as_deref(), Some("main"));
+        assert_eq!(stashes[0].message, "WIP on main: my work");
+        assert_eq!(stashes[1].index, 1);
+        assert_eq!(stashes[1].branch.as_deref(), Some("feature/x"));
+        // detached-HEAD stash → "(no branch)" is NOT a real branch label
+        let detached = format!(
+            "stash@{{0}}{us}c0ffee{us}d00d{us}2026-06-22T00:00:00+00:00{us}On (no branch): poke",
+        );
+        assert_eq!(parse_stash_list(&detached)[0].branch, None);
+        // empty input → empty list (the common, healthy case)
+        assert!(parse_stash_list("").is_empty());
+        assert!(parse_stash_list("\n  \n").is_empty());
+    }
 
     #[test]
     fn status_branch_and_entries() {

@@ -945,6 +945,18 @@ export interface RefsResp {
   tags: RefTag[];
 }
 
+/** One `git stash list` entry. `ref` is the `stash@{N}` selector; `parents` are
+ *  `[base, index, (untracked)]`. Read-only — fed by GET /repos/{id}/stashes. */
+export interface StashInfo {
+  index: number;
+  ref: string;
+  sha: string;
+  parents: string[];
+  date: string;
+  message: string;
+  branch: string | null;
+}
+
 export type LineOrigin = 'context' | 'add' | 'del';
 
 export interface DiffLine {

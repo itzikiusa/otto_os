@@ -974,6 +974,30 @@ pub struct RefsResp {
     pub tags: Vec<RefTag>,
 }
 
+/// One entry from `git stash list`. Read-only; surfaced in the graph's STASHES
+/// sidebar section and rendered as a dashed node in the commit graph when the
+/// stash commit happens to be present in the (`--all`) log. `parents` are
+/// `[base, index, (untracked)]` — the helper commits the frontend de-emphasises.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StashInfo {
+    /// N in `stash@{N}` (0 = most recent).
+    pub index: u32,
+    /// Reflog selector, e.g. "stash@{0}".
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+    /// Full SHA of the stash (WIP) commit.
+    pub sha: String,
+    /// Parent SHAs: `[base, index, (untracked)]`.
+    #[serde(default)]
+    pub parents: Vec<String>,
+    /// Author date, ISO 8601 (the frontend formats it).
+    pub date: String,
+    /// Reflog subject, e.g. "On main: my WIP work".
+    pub message: String,
+    /// Branch the stash was created on, parsed from the message (if present).
+    pub branch: Option<String>,
+}
+
 /// One line origin in a diff hunk: "context" | "add" | "del".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

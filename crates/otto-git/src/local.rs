@@ -7,7 +7,7 @@ use std::process::Stdio;
 
 use otto_core::api::{
     BranchInfo, CommitInfo, ConflictFile, DiffResp, LocalMergeStrategy, MergeConflictStatus,
-    MergePreview, MergeResult, RefBranch, RefTag, RefsResp, RepoStatusResp,
+    MergePreview, MergeResult, RefBranch, RefTag, RefsResp, RepoStatusResp, StashInfo,
 };
 use otto_core::{Error, Result};
 use tokio::io::AsyncReadExt;
@@ -700,7 +700,59 @@ impl LocalGit {
     }
 
     pub async fn stash_pop(&self) -> Result<String> {
-        let (out, _) = self.run_env(&["stash", "pop"], &[]).await?;
+        let (ok, out, err, code) = self.run_raw(&["stash", "pop"], &[]).await?;
+        // A conflicting pop exits non-zero but HAS applied the stash (conflict
+        // markers written, paths left unmerged) — a normal result the user
+        // resolves, not a failure. Surface it as Ok so the caller refreshes into
+        // the conflict flow rather than toasting a bogus error over stale state.
+        if ok || out.contains("CONFLICT") {
+            return Ok(out.trim().to_string());
+        }
+        Err(upstream_err(&err, &out, code))
+    }
+
+    /// `git stash list` → parsed entries (read-only). Empty list when there are
+    /// no stashes (`git` exits 0 with empty output).
+    pub async fn stash_list(&self) -> Result<Vec<StashInfo>> {
+        let out = self
+            .run(&[
+                "stash",
+                "list",
+                "--pretty=format:%gd%x1f%H%x1f%P%x1f%aI%x1f%gs",
+            ])
+            .await?;
+        Ok(crate::parse::parse_stash_list(&out))
+    }
+
+    /// Resolve the live `stash@{N}` selector for a stash commit SHA, reading the
+    /// stash list at execution time. SHA-anchored (not the client's possibly
+    /// stale positional index) so a concurrent drop/push that renumbers the
+    /// stack can't make us apply/drop the WRONG stash — important since `drop`
+    /// is irreversible. Errors if the stash is gone.
+    async fn resolve_stash_selector(&self, sha: &str) -> Result<String> {
+        self.stash_list()
+            .await?
+            .into_iter()
+            .find(|s| s.sha == sha)
+            .map(|s| format!("stash@{{{}}}", s.index))
+            .ok_or_else(|| Error::Invalid(format!("stash {sha} no longer exists")))
+    }
+
+    /// Apply the stash with commit `sha` onto the working tree, keeping it in the
+    /// list. A resulting merge conflict is a normal outcome (see `stash_pop`).
+    pub async fn stash_apply(&self, sha: &str) -> Result<String> {
+        let sel = self.resolve_stash_selector(sha).await?;
+        let (ok, out, err, code) = self.run_raw(&["stash", "apply", &sel], &[]).await?;
+        if ok || out.contains("CONFLICT") {
+            return Ok(out.trim().to_string());
+        }
+        Err(upstream_err(&err, &out, code))
+    }
+
+    /// Drop (discard) the stash with commit `sha` without applying it.
+    pub async fn stash_drop(&self, sha: &str) -> Result<String> {
+        let sel = self.resolve_stash_selector(sha).await?;
+        let (out, _) = self.run_env(&["stash", "drop", &sel], &[]).await?;
         Ok(out.trim().to_string())
     }
 
