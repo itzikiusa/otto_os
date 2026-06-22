@@ -219,6 +219,41 @@ mod tests {
     }
 
     #[test]
+    fn bundled_development_commit_pr_skills_present() {
+        let all = list_bundled();
+        for name in ["commit-message", "pull-request"] {
+            let s = all
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} not bundled"));
+            assert_eq!(s.category, "development", "{name} wrong category");
+            assert!(!s.description.is_empty(), "{name} missing description");
+        }
+    }
+
+    #[test]
+    fn install_commit_message_skill_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::new(dir.path());
+        assert!(install_into(&lib, "commit-message").unwrap());
+        // The full multi-file tree lands, and the helper script is executable.
+        assert!(dir.path().join("skills/commit-message/SKILL.md").exists());
+        assert!(dir
+            .path()
+            .join("skills/commit-message/references/commit-conventions.md")
+            .exists());
+        let script = dir
+            .path()
+            .join("skills/commit-message/scripts/prepare-commit-context.sh");
+        assert!(script.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(std::fs::metadata(&script).unwrap().permissions().mode() & 0o111 != 0);
+        }
+    }
+
+    #[test]
     fn install_and_state_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let lib = Library::new(dir.path());

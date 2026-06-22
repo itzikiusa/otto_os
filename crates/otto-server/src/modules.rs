@@ -1980,6 +1980,80 @@ async fn fetch_pr_details_for_readiness(
     provider.get_pr(&remote_ref, review.pr_number).await
 }
 
+/// First `[A-Z]+-[0-9]+` token in a branch name (e.g. `feature/GS-16232-x` →
+/// `GS-16232`). Seeds the Jira key into commit/PR drafts. Returns `None` when the
+/// branch carries no such token — we never fabricate a key.
+fn jira_key_from_branch(branch: &str) -> Option<String> {
+    let b = branch.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_uppercase() {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_uppercase() {
+                i += 1;
+            }
+            // …immediately followed by `-` and at least one digit.
+            if i < b.len() && b[i] == b'-' {
+                let mut j = i + 1;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 1 {
+                    return Some(branch[start..j].to_string());
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Prepend an installed skill (its body + `references/`, via `resolve_skill_inline`)
+/// ahead of a built-in draft prompt — the same shape `run_review_core` uses to
+/// inline its review lenses, so the method travels in the prompt on any provider.
+/// An empty skill string ⇒ the prompt is returned byte-for-byte unchanged, so an
+/// un-installed skill is a no-op (identical to the prior drafting behaviour).
+fn compose_draft_prompt(skill_text: &str, base_prompt: &str) -> String {
+    if skill_text.is_empty() {
+        base_prompt.to_string()
+    } else {
+        format!("{skill_text}\n\n---\n\n{base_prompt}")
+    }
+}
+
+#[cfg(test)]
+mod commit_pr_draft_tests {
+    use super::{compose_draft_prompt, jira_key_from_branch};
+
+    #[test]
+    fn jira_key_parsed_from_branch() {
+        assert_eq!(
+            jira_key_from_branch("feature/GS-16232-rate-limit").as_deref(),
+            Some("GS-16232")
+        );
+        assert_eq!(jira_key_from_branch("GRV-445").as_deref(), Some("GRV-445"));
+        assert_eq!(
+            jira_key_from_branch("bugfix/PROJ-7").as_deref(),
+            Some("PROJ-7")
+        );
+        assert_eq!(jira_key_from_branch("main"), None);
+        assert_eq!(jira_key_from_branch("hotfix/no-key-here"), None);
+        // An uppercase run without a numeric suffix is not a key.
+        assert_eq!(jira_key_from_branch("release/NOTES-final"), None);
+    }
+
+    #[test]
+    fn compose_passthrough_when_no_skill() {
+        assert_eq!(compose_draft_prompt("", "BASE PROMPT"), "BASE PROMPT");
+    }
+
+    #[test]
+    fn compose_prepends_skill() {
+        assert_eq!(compose_draft_prompt("SKILL", "BASE"), "SKILL\n\n---\n\nBASE");
+    }
+}
+
 /// Tolerantly pull `{title, description}` out of an agent reply (which may wrap
 /// the JSON in prose or a markdown fence). Falls back to using the branch name
 /// as the title and the whole reply as the description.
@@ -2050,17 +2124,31 @@ async fn draft_pr(
         diff.as_str()
     };
 
-    let prompt = format!(
+    // Seed the Jira key from the branch (best-effort). It belongs in the PR
+    // TITLE only — a key in the body auto-links in some clients (GitKraken) and
+    // can crash them. Enrichment (issue summary) is left to the installed skill.
+    let jira = match jira_key_from_branch(&source) {
+        Some(key) => format!(
+            "This branch is for Jira issue {key}. Use `{key}` as the PR title prefix \
+             (e.g. `{key} <summary>`); do NOT put the key, a Jira link, or a Jira \
+             hostname anywhere in the description body.\n"
+        ),
+        None => String::new(),
+    };
+
+    let base_prompt = format!(
         "You are preparing a pull request from branch `{source}` into `{base}`. Based ONLY on \
          the diff below, write:\n\
          - a concise, imperative PR title (max ~72 chars, no trailing period)\n\
          - a clear PR description in Markdown: a one-line summary, then a \"What changed\" bullet \
          list, then \"Testing\" notes if any are evident from the diff.\n\
+         {jira}\
          Reply with ONLY a JSON object, no prose and no markdown fence: \
          {{\"title\": \"...\", \"description\": \"...\"}}.\n\n\
          {trunc}DIFF:\n{diff}",
         source = source,
         base = body.base,
+        jira = jira,
         trunc = if truncated {
             "(diff truncated for brevity)\n\n"
         } else {
@@ -2068,6 +2156,9 @@ async fn draft_pr(
         },
         diff = diff_slice,
     );
+    // Prepend the installed `pull-request` skill (if any). Un-installed ⇒ no-op.
+    let skill_text = resolve_skill_inline(&ctx.context_library, "pull-request");
+    let prompt = compose_draft_prompt(&skill_text, &base_prompt);
 
     let reply = ctx
         .orchestrator
@@ -2162,7 +2253,14 @@ async fn draft_commit_message(
     } else {
         "the working-tree changes (nothing is staged yet)"
     };
-    let prompt = format!(
+    // Seed the Jira key from the current branch (best-effort) so the subject
+    // carries it. Enrichment (issue summary) is left to the installed skill.
+    let branch = git.current_branch().await.unwrap_or_default();
+    let jira = match jira_key_from_branch(&branch) {
+        Some(key) => format!("This change is for Jira issue {key}; include `{key}` in the subject line. "),
+        None => String::new(),
+    };
+    let base_prompt = format!(
         "You are writing a git commit message for {scope}. Based ONLY on the diff below, write:\n\
          - a Conventional Commits subject line: `type(scope): summary` (type ∈ feat, fix, docs, \
          style, refactor, perf, test, build, ci, chore; scope optional; imperative mood; \
@@ -2170,10 +2268,11 @@ async fn draft_commit_message(
          - an optional body (blank line, then a short bullet list of WHAT changed and WHY) when \
          the change is non-trivial; omit the body for tiny changes.\n\
          Infer and honor any repo convention you can see in the diff (e.g. an emoji prefix or a \
-         scope naming style). Reply with ONLY the raw commit message text — no prose, no \
+         scope naming style). {jira}Reply with ONLY the raw commit message text — no prose, no \
          explanation, and no markdown code fence.\n\n\
          {trunc}DIFF:\n{diff}",
         scope = scope,
+        jira = jira,
         trunc = if truncated {
             "(diff truncated for brevity)\n\n"
         } else {
@@ -2181,6 +2280,9 @@ async fn draft_commit_message(
         },
         diff = diff_slice,
     );
+    // Prepend the installed `commit-message` skill (if any). Un-installed ⇒ no-op.
+    let skill_text = resolve_skill_inline(&ctx.context_library, "commit-message");
+    let prompt = compose_draft_prompt(&skill_text, &base_prompt);
 
     let reply = ctx
         .orchestrator

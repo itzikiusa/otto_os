@@ -1,0 +1,20 @@
+# Commit message template — fill in, then delete every comment line (#).
+# One concern per commit. If two concerns are staged, split first (see SKILL.md).
+
+# --- Subject (required, <=72 chars, imperative, no trailing period) -----------
+# Shape:  <emoji?> <type>(<scope?>): <JIRA-KEY?> <summary>
+#   emoji   -> ONLY if the repo's git log already uses emoji; else omit
+#   type    -> feat|fix|docs|style|refactor|perf|test|build|ci|chore
+#   scope   -> optional area (mirror the repo's scope style)
+#   JIRA-KEY-> include when one exists (branch -> commits -> user); else omit
+<type>(<scope>): <JIRA-KEY> <summary>
+
+# --- Body (optional; include for non-trivial changes) -------------------------
+# Blank line above. Bullet WHAT changed and WHY — not a file list. Wrap ~72.
+- <what changed and why>
+- <what changed and why>
+
+# --- Footer ------------------------------------------------------------------
+# NO attribution. No "Co-Authored-By", no "Generated with ...", no model/tool
+# name, no footer the user did not ask for. The ticket key may appear naturally
+# in the body, but is NOT required as a trailer.
