@@ -332,6 +332,9 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             "/workspaces/{id}/product/stories/{sid}/analyze",
             post(analyze),
         )
+        // Curated analysis-lens catalog the Analysis tab renders as configurable
+        // checks. Read-only (Viewer); the prefix policy gates it as Product/View.
+        .route("/workspaces/{id}/product/lenses", get(product_lenses))
         .route(
             "/workspaces/{id}/product/stories/{sid}/rewrite",
             post(rewrite),
@@ -453,6 +456,17 @@ async fn workspace_broadcast(
         .await
         .map_err(ApiError)?;
     Ok(Json(otto_core::api::BroadcastResp { session_ids }))
+}
+
+/// `GET /workspaces/{id}/product/lenses` — the curated analysis-lens catalog
+/// the Analysis tab renders as configurable checks. Read-only: Viewer role.
+async fn product_lenses(
+    Path(ws_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<otto_core::api::ProductLens>>> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(otto_product::analysis_lenses()))
 }
 
 /// `POST /workspaces/{id}/product/stories/{sid}/analyze` — create a

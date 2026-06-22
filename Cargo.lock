@@ -2980,6 +2980,7 @@ dependencies = [
  "axum 0.8.9",
  "base64",
  "chrono",
+ "futures-util",
  "otto-core",
  "otto-state",
  "reqwest",

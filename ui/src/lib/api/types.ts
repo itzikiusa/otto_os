@@ -3160,3 +3160,18 @@ export interface SearchHit {
   /** Contextual action labels; first entry is the primary "open" action. */
   actions: string[];
 }
+
+/** One product-analysis lens offered in the Analysis tab. Curated subset of the
+ *  bundled product skills (only those that emit the Findings contract).
+ *  Mirrors `otto_core::api::ProductLens`; returned by
+ *  `GET /workspaces/{id}/product/lenses`. */
+export interface ProductLens {
+  /** Library skill name (e.g. "po-story-overview"). */
+  skill: string;
+  /** Human label shown in the UI checkbox row. */
+  label: string;
+  /** One-line description of what the lens does. */
+  description: string;
+  /** Whether the lens is checked by default in the Analysis tab. */
+  default_on: boolean;
+}

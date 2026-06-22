@@ -21,12 +21,12 @@ static PRODUCT_SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/skills");
 
 /// Version that governs the seeded skill dirs. Increment this when the bundled
 /// skill content changes and existing installs need to be upgraded. A future
-/// version bump will re-seed (overwrite) all skill dirs. Bumped to 3 to seed the
-/// new `story-task-breakdown` skill.
-const PRODUCT_SKILLS_SEED_VERSION: u32 = 3;
+/// version bump will re-seed (overwrite) all skill dirs. Bumped to 4 to seed the
+/// new `grill` skill.
+const PRODUCT_SKILLS_SEED_VERSION: u32 = 4;
 
 /// The skills this feature owns, by library name.
-pub const SKILL_NAMES: [&str; 7] = [
+pub const SKILL_NAMES: [&str; 8] = [
     "po-story-overview",
     "story-clarifying-questions",
     "story-architecture-overview",
@@ -34,6 +34,7 @@ pub const SKILL_NAMES: [&str; 7] = [
     "jira-story-writer",
     "rfc-writer",
     "story-task-breakdown",
+    "grill",
 ];
 
 /// The bundled body of a product skill's `SKILL.md`, or `None` if the name is
@@ -45,6 +46,44 @@ pub fn skill_body(name: &str) -> Option<&'static str> {
     PRODUCT_SKILLS
         .get_file(format!("{name}/SKILL.md"))
         .and_then(|f| f.contents_utf8())
+}
+
+/// The curated list of analysis lenses offered in the Analysis tab. Only skills
+/// that emit the Findings contract belong here — generative product skills
+/// (`jira-story-writer`, `rfc-writer`, `story-task-breakdown`, `story-test-cases`)
+/// are intentionally excluded since they do not produce Findings JSON.
+///
+/// The first three entries' `skill`/`label` pairs deliberately mirror the
+/// analyze-handler fallback so the default run set stays in sync. `grill` ships
+/// `default_on: false` — it's an opt-in adversarial pass, not part of the
+/// every-run baseline.
+pub fn analysis_lenses() -> Vec<otto_core::api::ProductLens> {
+    vec![
+        otto_core::api::ProductLens {
+            skill: "po-story-overview".into(),
+            label: "PO Overview".into(),
+            description: "Product-owner read: value, clarity, scope, and acceptance-criteria completeness.".into(),
+            default_on: true,
+        },
+        otto_core::api::ProductLens {
+            skill: "story-architecture-overview".into(),
+            label: "Architecture".into(),
+            description: "Map the story to the codebase: repos, integration points, data impact, technical risks.".into(),
+            default_on: true,
+        },
+        otto_core::api::ProductLens {
+            skill: "story-clarifying-questions".into(),
+            label: "Clarifying Questions".into(),
+            description: "The fewest, sharpest questions that make the story unambiguous.".into(),
+            default_on: true,
+        },
+        otto_core::api::ProductLens {
+            skill: "grill".into(),
+            label: "Grill".into(),
+            description: "Adversarial interrogation: scope holes, ambiguities, untestable criteria, hidden dependencies.".into(),
+            default_on: false,
+        },
+    ]
 }
 
 /// Seed each product skill into the library, version-gated.

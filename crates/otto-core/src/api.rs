@@ -2176,3 +2176,19 @@ pub struct TaskInput {
 pub struct PutTasksReq {
     pub tasks: Vec<TaskInput>,
 }
+
+/// One product-analysis lens offered in the Analysis tab. A curated subset of
+/// the bundled product skills — only those that emit the Findings contract
+/// (generative skills like `jira-story-writer`/`rfc-writer` are excluded).
+/// Returned by `GET /workspaces/{id}/product/lenses`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductLens {
+    /// Library skill name (e.g. `"po-story-overview"`).
+    pub skill: String,
+    /// Human label shown in the UI checkbox row.
+    pub label: String,
+    /// One-line description of what the lens does.
+    pub description: String,
+    /// Whether the lens is checked by default in the Analysis tab.
+    pub default_on: bool,
+}

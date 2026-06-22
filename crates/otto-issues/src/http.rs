@@ -19,7 +19,9 @@ use otto_state::{IssuesRepo, NewIssueAccount};
 
 use crate::confluence::ConfluenceClient;
 use crate::confluence::{ConfluencePageSummary, ConfluenceSpace};
-use crate::jira::{CommentRef, IssueFull, JiraClient, JiraTransition, JiraUser};
+use crate::jira::{
+    CommentRef, DevStatus, EditableField, IssueFull, JiraClient, JiraTransition, JiraUser,
+};
 
 /// Dependencies the issues router needs from the host application state.
 pub trait IssuesCtx: Clone + Send + Sync + 'static {
@@ -114,6 +116,10 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
         // Extended issue view + write operations
         .route("/issue/{account_id}/{key}/full", get(get_issue_full::<S>))
         .route(
+            "/issue/{account_id}/{key}/devstatus",
+            get(get_devstatus::<S>),
+        )
+        .route(
             "/issue/{account_id}/{key}/transitions",
             get(list_transitions::<S>).post(do_transition::<S>),
         )
@@ -131,6 +137,11 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
             "/issue/{account_id}/{key}/comment",
             post(add_comment::<S>),
         )
+        .route(
+            "/issue/{account_id}/{key}/editmeta",
+            get(list_editmeta::<S>),
+        )
+        .route("/issue/{account_id}/{key}/fields", put(update_fields::<S>))
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +373,36 @@ async fn get_issue_full<S: IssuesCtx>(
     Ok(Json(full))
 }
 
+/// `GET /issue/{account_id}/{key}/devstatus?issueId=<id>`
+///
+/// Best-effort: returns the branches / commits / PRs linked to the issue across
+/// every detected dev tool (GitHub / Bitbucket / GitLab / Stash). Returns an
+/// empty [`DevStatus`] when no integration is connected — it never hard-errors on
+/// a missing dev tool. The dev-status API keys on the numeric issue id; when the
+/// optional `issueId` query param is present it is used directly, skipping the
+/// lightweight id-resolution round-trip.
+async fn get_devstatus<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<DevStatus>> {
+    let account = load_authorized_account(&s, &account_id, &user).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    // Use the numeric id from the query param when supplied (avoids a round-trip).
+    let issue_id = if let Some(id) = params.get("issueId").filter(|s| !s.is_empty()) {
+        id.clone()
+    } else {
+        client.get_issue_id(&key).await?
+    };
+    let dev = client.dev_status(&issue_id).await?;
+    Ok(Json(dev))
+}
+
 /// `GET /issue/{account_id}/{key}/transitions`
 ///
 /// Returns the list of status transitions available for the issue.
@@ -525,6 +566,56 @@ async fn add_comment<S: IssuesCtx>(
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let comment_ref = client.add_comment(&key, &comment_body).await?;
     Ok(Json(comment_ref))
+}
+
+/// `GET /issue/{account_id}/{key}/editmeta`
+///
+/// Returns the fields the caller may edit on the issue (the generic
+/// editmeta-driven field editor). Fields with dedicated UI controls
+/// (status / assignee / summary / description) are filtered out upstream.
+async fn list_editmeta<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+) -> ApiResult<Json<Vec<EditableField>>> {
+    let account = load_authorized_account(&s, &account_id, &user).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    let fields = client.editmeta(&key).await?;
+    Ok(Json(fields))
+}
+
+/// `PUT /issue/{account_id}/{key}/fields`
+///
+/// Body: `{"fields": { <jiraFieldId>: <jiraShapedValue>, … }}` — update arbitrary
+/// editable fields in Jira's native shape (e.g. number, `{"id":"…"}`, `["a","b"]`).
+/// Re-fetches and returns the updated [`IssueFull`] so the UI can swap state in
+/// one round-trip.
+async fn update_fields<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Json<IssueFull>> {
+    let fields = body
+        .get("fields")
+        .cloned()
+        .ok_or_else(|| Error::Invalid("fields is required".into()))?;
+    if !fields.is_object() {
+        return Err(Error::Invalid("fields must be an object".into()).into());
+    }
+    let account = load_authorized_account(&s, &account_id, &user).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    client.update_fields(&key, fields).await?;
+    let full = client.get_issue_full(&key).await?;
+    Ok(Json(full))
 }
 
 // ---------------------------------------------------------------------------

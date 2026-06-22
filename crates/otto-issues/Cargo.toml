@@ -15,6 +15,7 @@ base64.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

@@ -598,6 +598,7 @@ the row. AI-producing actions (analyze/rewrite/generate/plan) live under
 | POST /product/versions/{vid}/publish | ws editor | — | publish a version back to the source |
 | GET /product/stories/{sid}/analyses | ws viewer | — | `Analysis[]` |
 | GET /product/analyses/{aid} | ws viewer | — | Analysis (with per-agent state) |
+| GET /workspaces/{id}/product/lenses | ws viewer | — | `ProductLens[]` (curated analysis-lens catalog: `{skill,label,description,default_on}`) |
 | GET /product/stories/{sid}/questions | ws viewer | — | `Question[]` |
 | POST /product/stories/{sid}/questions | ws editor | CreateQuestionReq | Question |
 | POST /product/stories/{sid}/questions/post | ws editor | — | post questions back to the source story |
@@ -658,13 +659,21 @@ configured Jira/Confluence account.
 | GET /issue/confluence/search | member | — | Confluence page search |
 | GET /issue/{account_id}/{key} | member | — | issue summary |
 | GET /issue/{account_id}/{key}/full | member | — | full issue detail |
+| GET /issue/{account_id}/{key}/devstatus?issueId=<id> | member | — | `DevStatus` (branches/commits/PRs; best-effort, empty if no dev tool connected); `issueId` optional — when present skips a round-trip to resolve the numeric id |
 | GET /issue/{account_id}/{key}/transitions | member | — | available transitions |
 | POST /issue/{account_id}/{key}/transitions | member | DoTransitionReq | apply a transition |
 | GET /issue/{account_id}/{key}/assignable | member | — | assignable users |
 | PUT /issue/{account_id}/{key}/assignee | member | AssignReq | assign the issue |
 | GET /issue/{account_id}/{key}/attachment/{attachment_id} | member | — | attachment bytes |
 | POST /issue/{account_id}/{key}/comment | member | AddCommentReq | add a comment |
+| GET /issue/{account_id}/{key}/editmeta | member | — | editable fields (`EditableField[]`) |
+| PUT /issue/{account_id}/{key}/fields | member | `{ "fields": { "<fieldId>": <value>, ... } }` | full issue detail (re-fetched after update) |
 | GET /issue/{account_id}/{project_key}/issue-types | member | — | issue types for a project |
+
+Fields body shape: `{ "fields": { <jiraFieldId>: <jiraShapedValue>, … } }` — values are sent
+in Jira's native shape (number; `{"id":"…"}` for a single option/version/component/priority;
+`[{"id":"…"}]` for an option array; `["a","b"]` for labels; `{"accountId":"…"}` for a user;
+`"YYYY-MM-DD"` for a date; `"YYYY-MM-DDTHH:mm:ss.sssZ"` for a datetime). `null` / `[]` clears a non-required field.
 
 ## Channel integrations (Telegram / Slack / Loom)
 

@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use futures_util::future::join_all;
+
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use otto_core::domain::{IssueDetail, IssueProject, IssueSummary};
@@ -80,6 +82,34 @@ pub struct JiraField {
     pub value: String,
 }
 
+/// One selectable value for an editable Jira field (option, version, component, user, …).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FieldOption {
+    /// Identifier to send back in the PUT body — Jira `id`, or `accountId` for users,
+    /// or the `value`/`key`/`name` fallback. Labels key on their own string value.
+    pub id: String,
+    /// Human-readable label for the dropdown.
+    pub label: String,
+}
+
+/// A field the current user is allowed to edit, as reported by `editmeta`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EditableField {
+    /// Raw Jira field key (e.g. `"customfield_10016"`, `"labels"`, `"priority"`).
+    pub key: String,
+    /// Display name (editmeta `name`).
+    pub name: String,
+    /// Schema type: `string`, `number`, `option`, `array`, `date`, `datetime`, `user`,
+    /// `priority`, `version`, `component`, … (editmeta `schema.type`).
+    pub schema_type: String,
+    /// For `array` types, the element type (editmeta `schema.items`, e.g. `option`, `string`, `user`).
+    pub items: Option<String>,
+    /// Allowed values when the field is constrained (option / array-of-option / version / component / priority).
+    pub allowed_values: Vec<FieldOption>,
+    /// Whether Jira marks the field required.
+    pub required: bool,
+}
+
 /// An attachment on a Jira issue.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct JiraAttachment {
@@ -131,6 +161,9 @@ pub struct JiraChangeItem {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IssueFull {
     pub key: String,
+    /// Numeric Jira issue id (top-level `"id"` of the issue resource). Needed by
+    /// the dev-status API, which keys on the numeric id rather than the issue key.
+    pub id: String,
     pub summary: String,
     pub status: String,
     pub issue_type: String,
@@ -148,6 +181,47 @@ pub struct IssueFull {
     pub links: Vec<JiraLink>,
     /// Story points or time estimate, e.g. "5 pts" or "1d 2h".
     pub estimate: Option<String>,
+}
+
+/// A branch surfaced by Jira's dev-status integration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DevBranch {
+    pub name: String,
+    pub url: String,
+    pub repo: String,
+    pub last_commit: Option<String>,
+}
+
+/// A commit surfaced by Jira's dev-status integration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DevCommit {
+    /// Commit hash (full or short `displayId` as returned by the dev tool).
+    pub id: String,
+    pub message: String,
+    pub url: String,
+    pub author: String,
+    pub timestamp: String,
+    pub repo: String,
+}
+
+/// A pull request surfaced by Jira's dev-status integration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DevPr {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub status: String,
+    pub repo: String,
+    pub last_update: String,
+}
+
+/// Aggregated development info (branches / commits / PRs) linked to an issue
+/// across all detected dev tools. Empty vecs are normal (no integration connected).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DevStatus {
+    pub branches: Vec<DevBranch>,
+    pub commits: Vec<DevCommit>,
+    pub pull_requests: Vec<DevPr>,
 }
 
 /// The result of a successful issue creation.
@@ -616,6 +690,112 @@ impl JiraClient {
         Ok(parse_issue_full(&body, &names, &self.base_url))
     }
 
+    /// Resolve an issue key to its numeric Jira id with a lightweight fetch.
+    ///
+    /// The dev-status API keys on the numeric id, not the issue key. Rather than
+    /// re-fetching the heavy `*all` expansion via [`Self::get_issue_full`], we ask
+    /// only for the top-level `id` (always returned regardless of `fields`).
+    ///
+    /// Uses `GET /rest/api/3/issue/{key}?fields=id`.
+    pub async fn get_issue_id(&self, key: &str) -> Result<String> {
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth_header)
+            .header("Accept", "application/json")
+            .query(&[("fields", "id")])
+            .send()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira get_issue_id request: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Upstream(format!(
+                "jira issue id {key} failed ({status}): {body}"
+            )));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira get_issue_id parse: {e}")))?;
+
+        Ok(body
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// Aggregate branches / commits / PRs linked to an issue across every dev tool.
+    ///
+    /// Jira's dev-status panel is fed by `GET /rest/dev-status/latest/issue/detail`,
+    /// which must be queried per `(applicationType, dataType)` combination. Many
+    /// combos return empty or 404 — that is normal; per-combo errors are swallowed
+    /// and we return whatever aggregates (an empty [`DevStatus`] if nothing is
+    /// connected). This method never hard-errors on a missing dev tool.
+    pub async fn dev_status(&self, issue_id: &str) -> Result<DevStatus> {
+        // The application/data-type matrix Jira exposes for dev-status detail.
+        const APP_TYPES: [&str; 4] = ["github", "bitbucket", "gitlab", "stash"];
+        const DATA_TYPES: [&str; 3] = ["pullrequest", "branch", "repository"];
+
+        let url = format!("{}/rest/dev-status/latest/issue/detail", self.base_url);
+
+        // Fire all 12 (app_type × data_type) requests concurrently rather than
+        // sequentially. Per-combo errors (transport or non-2xx) are swallowed so a
+        // missing/disconnected dev tool never hard-errors the whole call.
+        let combos: Vec<(&str, &str)> = APP_TYPES
+            .iter()
+            .flat_map(|&a| DATA_TYPES.iter().map(move |&d| (a, d)))
+            .collect();
+
+        let futures = combos.iter().map(|(app_type, data_type)| {
+            let url = url.clone();
+            let auth = self.auth_header.clone();
+            let http = self.http.clone();
+            let issue_id = issue_id.to_string();
+            let app_type = *app_type;
+            let data_type = *data_type;
+            async move {
+                let resp = match http
+                    .get(&url)
+                    .header("Authorization", &auth)
+                    .header("Accept", "application/json")
+                    .query(&[
+                        ("issueId", issue_id.as_str()),
+                        ("applicationType", app_type),
+                        ("dataType", data_type),
+                    ])
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(_) => return None,
+                };
+                if !resp.status().is_success() {
+                    return None;
+                }
+                match resp.json::<serde_json::Value>().await {
+                    Ok(b) => Some(b),
+                    Err(_) => None,
+                }
+            }
+        });
+
+        let results = join_all(futures).await;
+
+        let mut out = DevStatus::default();
+        for body in results.into_iter().flatten() {
+            merge_dev_detail(&mut out, &body);
+        }
+
+        // The same item can surface under multiple combos — dedupe before returning.
+        dedupe_dev_status(&mut out);
+        Ok(out)
+    }
+
     /// List the available status transitions for an issue.
     ///
     /// Uses `GET /rest/api/3/issue/{key}/transitions`
@@ -804,6 +984,67 @@ impl JiraClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(Error::Upstream(format!(
                 "jira update_description {key} failed ({status}): {body}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Fetch the set of fields the caller may edit on an issue.
+    ///
+    /// Uses `GET /rest/api/3/issue/{key}/editmeta` and flattens the
+    /// `fields` map into a `Vec<EditableField>` sorted by display name.
+    pub async fn editmeta(&self, key: &str) -> Result<Vec<EditableField>> {
+        let url = format!("{}/rest/api/3/issue/{}/editmeta", self.base_url, key);
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth_header)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira editmeta request: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Upstream(format!(
+                "jira editmeta {key} failed ({status}): {body}"
+            )));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira editmeta parse: {e}")))?;
+
+        Ok(parse_editmeta(&body))
+    }
+
+    /// Update arbitrary issue fields. `fields` is the caller-built object placed
+    /// under the top-level `"fields"` key, e.g. `{ "customfield_10016": 5 }`.
+    ///
+    /// Uses `PUT /rest/api/3/issue/{key}` with `{"fields": fields}`.
+    pub async fn update_fields(&self, key: &str, fields: serde_json::Value) -> Result<()> {
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let payload = serde_json::json!({ "fields": fields });
+
+        let resp = self
+            .http
+            .put(&url)
+            .header("Authorization", &self.auth_header)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira update_fields request: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Upstream(format!(
+                "jira update_fields {key} failed ({status}): {body}"
             )));
         }
 
@@ -1025,6 +1266,99 @@ pub(crate) fn parse_transitions(body: &serde_json::Value) -> Vec<JiraTransition>
         .collect()
 }
 
+/// Parse an `editmeta` response body into a list of [`EditableField`].
+///
+/// Iterates the `fields` map `{fieldId → meta}` and flattens each entry. Fields
+/// the UI already handles through dedicated controls (status/assignee via the
+/// transition/assignee cards, summary/description via their own editors, plus the
+/// container fields comment/attachment/issuelinks) are skipped to avoid double
+/// editors. Mirrors the `skip_keys` set in [`parse_issue_full`].
+pub(crate) fn parse_editmeta(body: &serde_json::Value) -> Vec<EditableField> {
+    // Fields with their own dedicated UI affordances — keep them out of the
+    // generic editor so we never render two controls for the same field.
+    let skip_keys: std::collections::HashSet<&str> = [
+        "summary",
+        "description",
+        "status",
+        "issuetype",
+        "assignee",  // assignee has its own card + assignable search flow
+        "reporter",  // reporter has its own read-only row; generic editor is wrong for it
+        "issuelinks",
+        "comment",
+        "attachment",
+    ]
+    .into_iter()
+    .collect();
+
+    let fields_obj = match body.get("fields").and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+
+    let mut out: Vec<EditableField> = Vec::new();
+    for (fkey, meta) in fields_obj {
+        if skip_keys.contains(fkey.as_str()) {
+            continue;
+        }
+        let name = meta
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(fkey.as_str())
+            .to_string();
+        let schema = meta.get("schema");
+        let schema_type = schema
+            .and_then(|s| s.get("type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("string")
+            .to_string();
+        let items = schema
+            .and_then(|s| s.get("items"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let required = meta
+            .get("required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Allowed values: option / version / component / priority / user-typed
+        // fields constrain the choices. Labels and free-text arrays have none.
+        let allowed_values: Vec<FieldOption> = meta
+            .get("allowedValues")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|opt| {
+                        // id: prefer the stable identifier Jira expects back in the PUT.
+                        let id = opt
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| opt.get("accountId").and_then(|v| v.as_str()))
+                            .or_else(|| opt.get("key").and_then(|v| v.as_str()))
+                            .or_else(|| opt.get("value").and_then(|v| v.as_str()))
+                            .or_else(|| opt.get("name").and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .to_string();
+                        let label = stringify_value(opt);
+                        FieldOption { id, label }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        out.push(EditableField {
+            key: fkey.clone(),
+            name,
+            schema_type,
+            items,
+            allowed_values,
+            required,
+        });
+    }
+    // Sort for deterministic output (mirror extra_fields in parse_issue_full).
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// Parse the full issue JSON (from `?expand=changelog,names,renderedFields&fields=*all`)
 /// into an [`IssueFull`].
 ///
@@ -1037,6 +1371,13 @@ pub fn parse_issue_full(
 ) -> IssueFull {
     let key = body
         .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Top-level numeric id (distinct from the human-readable key) — the dev-status
+    // API keys on this rather than on the issue key.
+    let id = body
+        .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
@@ -1435,6 +1776,7 @@ pub fn parse_issue_full(
 
     IssueFull {
         key,
+        id,
         summary,
         status,
         issue_type,
@@ -1568,6 +1910,237 @@ fn escape_jql(s: &str) -> String {
     s.replace('"', "\\\"")
 }
 
+/// Read a string field, falling back through alternate keys, ending in `""`.
+fn dev_str(v: &serde_json::Value, key: &str) -> String {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Merge one dev-status `detail` response into the running aggregate.
+///
+/// Shape (`GET /rest/dev-status/latest/issue/detail`):
+/// ```text
+/// { "detail": [ { "repositories": [ { "name", "commits": [...], "branches": [...],
+///                                     "pullRequests": [...] } ],
+///                 "pullRequests": [...] } ] }
+/// ```
+/// PRs appear both at `detail[].pullRequests` and (for some tools) nested under
+/// `repositories[].pullRequests`; both paths are scanned. Extraction is lenient —
+/// missing fields default to `""` rather than dropping the whole item.
+pub(crate) fn merge_dev_detail(out: &mut DevStatus, body: &serde_json::Value) {
+    let details = match body.get("detail").and_then(|d| d.as_array()) {
+        Some(d) => d,
+        None => return,
+    };
+    for d in details {
+        // Repositories: commits + branches (+ possibly nested pull requests).
+        if let Some(repos) = d.get("repositories").and_then(|r| r.as_array()) {
+            for repo in repos {
+                let repo_name = dev_str(repo, "name");
+                if let Some(commits) = repo.get("commits").and_then(|c| c.as_array()) {
+                    for c in commits {
+                        // `id` falls back to the shorter `displayId`.
+                        let id = {
+                            let full = dev_str(c, "id");
+                            if full.is_empty() {
+                                dev_str(c, "displayId")
+                            } else {
+                                full
+                            }
+                        };
+                        // Author is an object (`{name}`) in the standard shape; tolerate a
+                        // bare string too.
+                        let author = c
+                            .get("author")
+                            .and_then(|a| a.get("name").and_then(|n| n.as_str()))
+                            .or_else(|| c.get("author").and_then(|a| a.as_str()))
+                            .unwrap_or("")
+                            .to_string();
+                        let timestamp = {
+                            let t = dev_str(c, "authorTimestamp");
+                            if !t.is_empty() {
+                                t
+                            } else {
+                                let t = dev_str(c, "timestamp");
+                                if !t.is_empty() {
+                                    t
+                                } else {
+                                    dev_str(c, "date")
+                                }
+                            }
+                        };
+                        out.commits.push(DevCommit {
+                            id,
+                            message: dev_str(c, "message"),
+                            url: dev_str(c, "url"),
+                            author,
+                            timestamp,
+                            repo: repo_name.clone(),
+                        });
+                    }
+                }
+                if let Some(branches) = repo.get("branches").and_then(|b| b.as_array()) {
+                    for b in branches {
+                        let last_commit = b.get("lastCommit").and_then(|lc| {
+                            lc.get("displayId")
+                                .and_then(|x| x.as_str())
+                                .or_else(|| lc.get("id").and_then(|x| x.as_str()))
+                                .map(|s| s.to_string())
+                        });
+                        out.branches.push(DevBranch {
+                            name: dev_str(b, "name"),
+                            url: dev_str(b, "url"),
+                            repo: repo_name.clone(),
+                            last_commit,
+                        });
+                    }
+                }
+                if let Some(prs) = repo.get("pullRequests").and_then(|p| p.as_array()) {
+                    for pr in prs {
+                        out.pull_requests.push(extract_dev_pr(pr, &repo_name));
+                    }
+                }
+            }
+        }
+        // Pull requests at the detail level (the common GitHub/Bitbucket shape).
+        if let Some(prs) = d.get("pullRequests").and_then(|p| p.as_array()) {
+            for pr in prs {
+                out.pull_requests.push(extract_dev_pr(pr, ""));
+            }
+        }
+        // Branches at the detail level (dataType=branch responses from some tools
+        // return branches here with a nested `repository` object rather than under
+        // repositories[].branches).
+        if let Some(branches) = d.get("branches").and_then(|b| b.as_array()) {
+            for b in branches {
+                let repo_name = b
+                    .get("repository")
+                    .and_then(|r| r.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let last_commit = b.get("lastCommit").and_then(|lc| {
+                    lc.get("displayId")
+                        .and_then(|x| x.as_str())
+                        .or_else(|| lc.get("id").and_then(|x| x.as_str()))
+                        .map(|s| s.to_string())
+                });
+                out.branches.push(DevBranch {
+                    name: dev_str(b, "name"),
+                    url: dev_str(b, "url"),
+                    repo: repo_name,
+                    last_commit,
+                });
+            }
+        }
+        // Commits at the detail level (some tools return them outside repositories).
+        if let Some(commits) = d.get("commits").and_then(|c| c.as_array()) {
+            for c in commits {
+                let repo_name = c
+                    .get("repository")
+                    .and_then(|r| r.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let id = {
+                    let full = dev_str(c, "id");
+                    if full.is_empty() {
+                        dev_str(c, "displayId")
+                    } else {
+                        full
+                    }
+                };
+                let author = c
+                    .get("author")
+                    .and_then(|a| a.get("name").and_then(|n| n.as_str()))
+                    .or_else(|| c.get("author").and_then(|a| a.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                let timestamp = {
+                    let t = dev_str(c, "authorTimestamp");
+                    if !t.is_empty() {
+                        t
+                    } else {
+                        let t = dev_str(c, "timestamp");
+                        if !t.is_empty() { t } else { dev_str(c, "date") }
+                    }
+                };
+                out.commits.push(DevCommit {
+                    id,
+                    message: dev_str(c, "message"),
+                    url: dev_str(c, "url"),
+                    author,
+                    timestamp,
+                    repo: repo_name,
+                });
+            }
+        }
+    }
+}
+
+/// Extract a [`DevPr`] from a dev-status pull-request object.
+///
+/// The repository name is read from `source.repository.name` (the standard
+/// dev-status shape), falling back to `destination.repository.name`, then to the
+/// `default_repo` hint (used when PRs are nested under a repository), then `""`.
+fn extract_dev_pr(pr: &serde_json::Value, default_repo: &str) -> DevPr {
+    let repo = pr
+        .get("source")
+        .and_then(|s| s.get("repository"))
+        .and_then(|r| r.get("name"))
+        .and_then(|n| n.as_str())
+        .or_else(|| {
+            pr.get("destination")
+                .and_then(|s| s.get("repository"))
+                .and_then(|r| r.get("name"))
+                .and_then(|n| n.as_str())
+        })
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| default_repo.to_string());
+    let last_update = {
+        let t = dev_str(pr, "lastUpdate");
+        if !t.is_empty() {
+            t
+        } else {
+            let t = dev_str(pr, "updated");
+            if !t.is_empty() {
+                t
+            } else {
+                dev_str(pr, "date")
+            }
+        }
+    };
+    DevPr {
+        id: dev_str(pr, "id"),
+        name: dev_str(pr, "name"),
+        url: dev_str(pr, "url"),
+        status: dev_str(pr, "status"),
+        repo,
+        last_update,
+    }
+}
+
+/// Dedupe each Dev* vec after aggregation — the same item can appear under
+/// multiple `applicationType`/`dataType` combos. First-seen order is preserved
+/// (the combo loop order is fixed, so the result is deterministic).
+pub(crate) fn dedupe_dev_status(status: &mut DevStatus) {
+    use std::collections::HashSet;
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    status
+        .branches
+        .retain(|b| seen.insert((b.repo.clone(), b.name.clone())));
+    seen.clear();
+    status
+        .commits
+        .retain(|c| seen.insert((c.repo.clone(), c.id.clone())));
+    seen.clear();
+    status
+        .pull_requests
+        .retain(|p| seen.insert((p.repo.clone(), p.id.clone())));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1616,6 +2189,93 @@ mod tests {
         assert!(jql.contains("summary ~"), "{jql}");
     }
 
+    // ── parse_editmeta tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_editmeta_flattens_and_filters() {
+        let body = serde_json::json!({
+            "fields": {
+                // Story Points — numeric custom field (the estimation case).
+                "customfield_10016": {
+                    "name": "Story Points",
+                    "required": false,
+                    "schema": {"type": "number", "custom": "…float"}
+                },
+                // Single-option custom field with allowed values.
+                "customfield_10020": {
+                    "name": "Severity",
+                    "required": true,
+                    "schema": {"type": "option"},
+                    "allowedValues": [
+                        {"id": "1", "value": "Critical"},
+                        {"id": "2", "value": "Minor"}
+                    ]
+                },
+                // Labels — array of strings, no allowed values (free text).
+                "labels": {
+                    "name": "Labels",
+                    "required": false,
+                    "schema": {"type": "array", "items": "string"}
+                },
+                // Priority — constrained by name.
+                "priority": {
+                    "name": "Priority",
+                    "required": false,
+                    "schema": {"type": "priority"},
+                    "allowedValues": [
+                        {"id": "3", "name": "High"},
+                        {"id": "4", "name": "Low"}
+                    ]
+                },
+                // Dedicated-control fields — must be filtered out.
+                "summary": {"name": "Summary", "schema": {"type": "string"}},
+                "assignee": {"name": "Assignee", "schema": {"type": "user"}},
+                "issuelinks": {"name": "Linked Issues", "schema": {"type": "array", "items": "issuelinks"}}
+            }
+        });
+
+        let fields = parse_editmeta(&body);
+        let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
+        // Filtered fields are absent.
+        assert!(!keys.contains(&"summary"));
+        assert!(!keys.contains(&"assignee"));
+        assert!(!keys.contains(&"issuelinks"));
+        // Editable fields are present.
+        assert!(keys.contains(&"customfield_10016"));
+        assert!(keys.contains(&"customfield_10020"));
+        assert!(keys.contains(&"labels"));
+        assert!(keys.contains(&"priority"));
+        // Sorted by display name: Labels, Priority, Severity, Story Points.
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["Labels", "Priority", "Severity", "Story Points"]);
+
+        let sp = fields.iter().find(|f| f.key == "customfield_10016").unwrap();
+        assert_eq!(sp.schema_type, "number");
+        assert!(sp.allowed_values.is_empty());
+
+        let severity = fields.iter().find(|f| f.key == "customfield_10020").unwrap();
+        assert_eq!(severity.schema_type, "option");
+        assert!(severity.required);
+        assert_eq!(severity.allowed_values.len(), 2);
+        assert_eq!(severity.allowed_values[0].id, "1");
+        assert_eq!(severity.allowed_values[0].label, "Critical");
+
+        let labels = fields.iter().find(|f| f.key == "labels").unwrap();
+        assert_eq!(labels.schema_type, "array");
+        assert_eq!(labels.items.as_deref(), Some("string"));
+        assert!(labels.allowed_values.is_empty());
+
+        let priority = fields.iter().find(|f| f.key == "priority").unwrap();
+        assert_eq!(priority.allowed_values[0].id, "3");
+        assert_eq!(priority.allowed_values[0].label, "High");
+    }
+
+    #[test]
+    fn test_parse_editmeta_empty() {
+        assert!(parse_editmeta(&serde_json::json!({})).is_empty());
+        assert!(parse_editmeta(&serde_json::json!({"fields": {}})).is_empty());
+    }
+
     // ── parse_issue_full tests ───────────────────────────────────────────────
 
     /// Build a realistic canned Jira issue JSON fixture (what you get from
@@ -1623,6 +2283,7 @@ mod tests {
     fn canned_issue_json() -> (serde_json::Value, serde_json::Value) {
         let body = serde_json::json!({
             "key": "PROJ-123",
+            "id": "10001",
             "fields": {
                 "summary": "Login page crashes on mobile",
                 "status": {"name": "In Progress"},
@@ -1718,6 +2379,7 @@ mod tests {
         let issue = parse_issue_full(&body, &names, "https://example.atlassian.net");
 
         assert_eq!(issue.key, "PROJ-123");
+        assert_eq!(issue.id, "10001");
         assert_eq!(issue.summary, "Login page crashes on mobile");
         assert_eq!(issue.status, "In Progress");
         assert_eq!(issue.issue_type, "Bug");
@@ -1983,5 +2645,104 @@ mod tests {
         let s = stringify_value(&v);
         assert!(s.contains("Alpha"), "{s}");
         assert!(s.contains("Beta"), "{s}");
+    }
+
+    // ── dev-status parsing tests ─────────────────────────────────────────────
+
+    /// A realistic `GET /rest/dev-status/latest/issue/detail` response with one
+    /// repository (1 commit + 1 branch) and one detail-level pull request.
+    fn canned_dev_detail() -> serde_json::Value {
+        serde_json::json!({
+            "detail": [{
+                "repositories": [{
+                    "name": "acme/web",
+                    "commits": [{
+                        "id": "abc1234def5678",
+                        "displayId": "abc1234",
+                        "message": "Fix login crash",
+                        "url": "https://github.com/acme/web/commit/abc1234def5678",
+                        "author": {"name": "Alice Smith"},
+                        "authorTimestamp": "2024-01-15T10:00:00.000Z"
+                    }],
+                    "branches": [{
+                        "name": "feature/PROJ-123-fix",
+                        "url": "https://github.com/acme/web/tree/feature/PROJ-123-fix",
+                        "lastCommit": {"displayId": "abc1234"}
+                    }]
+                }],
+                "pullRequests": [{
+                    "id": "42",
+                    "name": "Fix login crash on mobile",
+                    "url": "https://github.com/acme/web/pull/42",
+                    "status": "OPEN",
+                    "lastUpdate": "2024-01-16T09:00:00.000Z",
+                    "source": {"repository": {"name": "acme/web"}}
+                }]
+            }]
+        })
+    }
+
+    #[test]
+    fn test_merge_dev_detail_commit() {
+        let mut out = DevStatus::default();
+        merge_dev_detail(&mut out, &canned_dev_detail());
+
+        assert_eq!(out.commits.len(), 1);
+        let c = &out.commits[0];
+        assert_eq!(c.id, "abc1234def5678");
+        assert_eq!(c.message, "Fix login crash");
+        assert_eq!(c.author, "Alice Smith");
+        assert_eq!(c.timestamp, "2024-01-15T10:00:00.000Z");
+        assert_eq!(c.repo, "acme/web");
+    }
+
+    #[test]
+    fn test_merge_dev_detail_branch() {
+        let mut out = DevStatus::default();
+        merge_dev_detail(&mut out, &canned_dev_detail());
+
+        assert_eq!(out.branches.len(), 1);
+        let b = &out.branches[0];
+        assert_eq!(b.name, "feature/PROJ-123-fix");
+        assert_eq!(b.repo, "acme/web");
+        assert_eq!(b.last_commit.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn test_merge_dev_detail_pull_request() {
+        let mut out = DevStatus::default();
+        merge_dev_detail(&mut out, &canned_dev_detail());
+
+        assert_eq!(out.pull_requests.len(), 1);
+        let pr = &out.pull_requests[0];
+        assert_eq!(pr.id, "42");
+        assert_eq!(pr.status, "OPEN");
+        assert_eq!(pr.url, "https://github.com/acme/web/pull/42");
+        assert_eq!(pr.repo, "acme/web");
+    }
+
+    #[test]
+    fn test_dedupe_dev_status_collapses_duplicate_combos() {
+        let mut out = DevStatus::default();
+        // The same detail can be returned under two combos (e.g. github+commit
+        // and github+repository) — merge twice, then dedupe.
+        merge_dev_detail(&mut out, &canned_dev_detail());
+        merge_dev_detail(&mut out, &canned_dev_detail());
+        assert_eq!(out.commits.len(), 2);
+        assert_eq!(out.pull_requests.len(), 2);
+
+        dedupe_dev_status(&mut out);
+        assert_eq!(out.commits.len(), 1, "duplicate commit should collapse");
+        assert_eq!(out.branches.len(), 1, "duplicate branch should collapse");
+        assert_eq!(out.pull_requests.len(), 1, "duplicate PR should collapse");
+    }
+
+    #[test]
+    fn test_merge_dev_detail_empty_is_noop() {
+        let mut out = DevStatus::default();
+        merge_dev_detail(&mut out, &serde_json::json!({}));
+        assert!(out.commits.is_empty());
+        assert!(out.branches.is_empty());
+        assert!(out.pull_requests.is_empty());
     }
 }

@@ -9,7 +9,7 @@
   import { renderMarkdown } from '../../lib/md';
   import { toasts } from '../../lib/toast.svelte';
   import { api, authedBlobUrl } from '../../lib/api/client';
-  import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser } from './types';
+  import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser, EditableField, FieldOption, DevStatus } from './types';
   import { confirmer } from '../../lib/confirm.svelte';
   import PublishDialog from './PublishDialog.svelte';
   import SwarmLinkCard from './SwarmLinkCard.svelte';
@@ -50,10 +50,26 @@
   let assigneeWorking = $state(false);
   let assigneeOpen = $state(false);
 
+  // ── Development info (linked branches / commits / PRs via Jira dev-status) ──
+  // Lazily fetched once the issue opens or the section is expanded.
+  let devStatus = $state<DevStatus | null>(null);
+  let devLoading = $state(false);
+  let devLoaded = $state(false); // guards the lazy-load (distinct from "has data")
+  let devError = $state<string | null>(null);
+
+  // ── Editable fields (generic editmeta-driven editor) ──────────────────────
+  // editmeta is lazily fetched once per story; null = not loaded yet.
+  let editmeta = $state<EditableField[] | null>(null);
+  let editmetaLoading = $state(false);
+  let editingField = $state<string | null>(null); // field key currently in edit mode
+  let fieldDraft = $state<unknown>(null); // working value for the field being edited
+  let fieldSaving = $state(false);
+
   // Collapsible sections
   let collapsed = $state<Record<string, boolean>>({
     details: false,
     links: false,
+    development: true,
     comments: false,
     history: true,
     attachments: false,
@@ -157,7 +173,18 @@
     assignablesLoaded = false;
     statusOpen = false;
     assigneeOpen = false;
-    collapsed = { details: false, links: false, comments: false, history: true, attachments: false };
+    // Reset development info.
+    devStatus = null;
+    devLoaded = false;
+    devLoading = false;
+    devError = null;
+    // Reset editable-field state.
+    editmeta = null;
+    editmetaLoading = false;
+    editingField = null;
+    fieldDraft = null;
+    fieldSaving = false;
+    collapsed = { details: false, links: false, development: true, comments: false, history: true, attachments: false };
     newCommentBody = '';
     postingComment = false;
     // Revoke old object URLs.
@@ -172,6 +199,15 @@
   $effect(() => {
     if (isJira && story && !issueFull && !issueLoading) {
       void loadIssueFull();
+    }
+  });
+
+  // Once the issue is loaded, lazily fetch editmeta so edit affordances (and the
+  // always-on Story Points / Estimate add-row) can render. Reads issueFull only;
+  // the mutation of `editmeta` happens inside ensureEditmeta(), never in a $derived.
+  $effect(() => {
+    if (isJira && issueFull && editmeta === null && !editmetaLoading) {
+      void ensureEditmeta();
     }
   });
 
@@ -216,6 +252,30 @@
       issueError = e instanceof Error ? e.message : String(e);
     } finally {
       issueLoading = false;
+    }
+  }
+
+  // Best-effort dev-status fetch. Early-returns once loaded so the expand-trigger
+  // and the on-open effect can both call it safely.
+  async function loadDevStatus(): Promise<void> {
+    if (devLoaded || !story) return;
+    devLoading = true;
+    devError = null;
+    try {
+      const idParam = issueFull?.id ? `?issueId=${encodeURIComponent(issueFull.id)}` : '';
+      devStatus = await api.get<DevStatus>(
+        `/issue/${story.account_id}/${story.source_key}/devstatus${idParam}`,
+      );
+    } catch (e) {
+      devError = e instanceof Error ? e.message : String(e);
+    } finally {
+      // Mark loaded even on error: the on-open $effect gates on `devLoaded`, so
+      // leaving it false after a failed fetch would re-trigger this every time
+      // the request settles → an infinite retry loop. (Same guard rationale as
+      // ensureEditmeta's `editmeta = []` on error.) The explicit refresh path
+      // resets `devLoaded = false` to force a fresh fetch.
+      devLoaded = true;
+      devLoading = false;
     }
   }
 
@@ -284,6 +344,173 @@
     }
   }
 
+  // ── Editable-field helpers ──────────────────────────────────────────────
+
+  /** Lazily fetch editmeta once and cache it. On error mark it loaded-but-empty
+   *  so everything stays read-only and we don't retry-loop. */
+  async function ensureEditmeta(): Promise<void> {
+    if (editmeta !== null || editmetaLoading || !story) return;
+    editmetaLoading = true;
+    try {
+      editmeta = await api.get<EditableField[]>(
+        `/issue/${story.account_id}/${story.source_key}/editmeta`,
+      );
+    } catch (e) {
+      toasts.error('Could not load editable fields', e instanceof Error ? e.message : String(e));
+      editmeta = []; // loaded-but-empty: every field stays read-only
+    } finally {
+      editmetaLoading = false;
+    }
+  }
+
+  /** The EditableField metadata for a given key, or undefined if not editable. */
+  function editableFor(key: string): EditableField | undefined {
+    return editmeta?.find((f) => f.key === key);
+  }
+
+  /** The numeric estimate field (Story Points / Original Estimate), if editable.
+   *  Pure read of editmeta — safe inside $derived. Returns null when none. */
+  const estimateField = $derived(
+    editmeta?.find(
+      (f) => f.schema_type === 'number' && /story point|estimate/i.test(f.name),
+    ) ?? null,
+  );
+
+  /** Raw current numeric value for the estimate field, sourced from issueFull.fields
+   *  (parse_issue_full strips ".0", so a plain number string is fine to seed). */
+  function rawFieldValue(key: string): string {
+    const f = issueFull?.fields.find((ff) => ff.key === key);
+    return f?.value ?? '';
+  }
+
+  /** Enter edit mode for a field, seeding fieldDraft from its current value. */
+  async function beginEdit(ef: EditableField, currentRaw: string): Promise<void> {
+    await ensureEditmeta();
+    if (!editableFor(ef.key)) return; // not actually editable — stay read-only
+    if (ef.schema_type === 'array') {
+      if (ef.items === 'string') {
+        // labels / free-text array: comma text
+        fieldDraft = currentRaw;
+      } else {
+        // array of options/users: list of selected ids (best-effort from labels)
+        const labels = currentRaw.split(',').map((s) => s.trim()).filter(Boolean);
+        fieldDraft = ef.allowed_values
+          .filter((o) => labels.includes(o.label))
+          .map((o) => o.id);
+      }
+    } else if (
+      ef.schema_type === 'option' ||
+      ef.schema_type === 'priority' ||
+      ef.schema_type === 'version' ||
+      ef.schema_type === 'component'
+    ) {
+      // select: pre-select by matching label → id
+      fieldDraft = ef.allowed_values.find((o) => o.label === currentRaw)?.id ?? '';
+    } else if (ef.schema_type === 'user') {
+      await loadAssignables();
+      fieldDraft = '';
+    } else if (ef.schema_type === 'datetime') {
+      // Seed datetime-local input from an existing ISO value. Parse to local
+      // "YYYY-MM-DDTHH:mm" which is what <input type="datetime-local"> expects.
+      if (currentRaw) {
+        try {
+          const d = new Date(currentRaw);
+          // Use local time by offsetting so the user sees their TZ.
+          const offset = d.getTimezoneOffset() * 60000;
+          const local = new Date(d.getTime() - offset);
+          fieldDraft = local.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:mm"
+        } catch {
+          fieldDraft = '';
+        }
+      } else {
+        fieldDraft = '';
+      }
+    } else {
+      // string / number / date / unknown → raw text
+      fieldDraft = currentRaw;
+    }
+    editingField = ef.key;
+  }
+
+  /** Cancel the in-progress field edit. */
+  function cancelEdit(): void {
+    editingField = null;
+    fieldDraft = null;
+  }
+
+  /** Toggle membership of an option id in the multi-select array draft. */
+  function toggleArrayOption(id: string): void {
+    const cur = Array.isArray(fieldDraft) ? (fieldDraft as string[]) : [];
+    fieldDraft = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+  }
+
+  /** Build the Jira-shaped value for a field from the working draft. */
+  function buildFieldValue(ef: EditableField, draft: unknown): unknown {
+    switch (ef.schema_type) {
+      case 'number': {
+        const s = String(draft ?? '').trim();
+        return s === '' ? null : Number(s);
+      }
+      case 'option':
+      case 'priority':
+      case 'version':
+      case 'component': {
+        const id = String(draft ?? '').trim();
+        return id === '' ? null : { id };
+      }
+      case 'user': {
+        const id = String(draft ?? '').trim();
+        return id === '' ? null : { accountId: id };
+      }
+      case 'array': {
+        if (ef.items === 'string') {
+          // labels / free-text: split csv
+          return String(draft ?? '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+        }
+        const ids = Array.isArray(draft) ? (draft as string[]) : [];
+        if (ef.items === 'user') return ids.map((id) => ({ accountId: id }));
+        // option / version / component arrays
+        return ids.map((id) => ({ id }));
+      }
+      case 'date':
+        // <input type="date"> yields YYYY-MM-DD; Jira date fields accept this.
+        return String(draft ?? '').trim() || null;
+      case 'datetime': {
+        // <input type="datetime-local"> yields "YYYY-MM-DDTHH:mm"; Jira datetime
+        // fields require a full ISO-8601 string with offset — emit UTC.
+        const raw = String(draft ?? '').trim();
+        if (!raw) return null;
+        return new Date(raw).toISOString(); // e.g. "2024-01-15T10:00:00.000Z"
+      }
+      default:
+        // unknown → raw string
+        return String(draft ?? '');
+    }
+  }
+
+  /** PUT a single field then swap in the refreshed issue returned by the server. */
+  async function saveField(ef: EditableField): Promise<void> {
+    if (!story) return;
+    fieldSaving = true;
+    try {
+      const value = buildFieldValue(ef, fieldDraft);
+      issueFull = await api.put<IssueFull>(
+        `/issue/${story.account_id}/${story.source_key}/fields`,
+        { fields: { [ef.key]: value } },
+      );
+      editingField = null;
+      fieldDraft = null;
+      toasts.info('Field updated');
+    } catch (e) {
+      toasts.error('Could not update field', e instanceof Error ? e.message : String(e));
+    } finally {
+      fieldSaving = false;
+    }
+  }
+
   async function loadAttachmentUrl(attId: string): Promise<void> {
     if (!story || attachmentUrls[attId] || attachmentLoading[attId]) return;
     attachmentLoading = { ...attachmentLoading, [attId]: true };
@@ -309,6 +536,10 @@
           void loadAttachmentUrl(att.id);
         }
       }
+    }
+    // Lazy-load development info when the section opens (no-op if already loaded).
+    if (key === 'development' && !collapsed[key]) {
+      void loadDevStatus();
     }
   }
 
@@ -345,7 +576,13 @@
       viewingVersion = null;
       toasts.info('Story refreshed');
       // Re-fetch IssueFull after refresh.
-      if (isJira) await loadIssueFull();
+      if (isJira) {
+        await loadIssueFull();
+        // Force the dev-status section to repopulate with fresh data.
+        devLoaded = false;
+        devStatus = null;
+        await loadDevStatus();
+      }
     } catch (e) {
       toasts.error('Refresh failed', product.errMsg(e));
     } finally {
@@ -463,6 +700,81 @@
     }
   }
 </script>
+
+<!-- Inline "Edit" pencil shown next to an editable detail value. Renders only
+     when editmeta marks the field editable. `current` seeds the draft. -->
+{#snippet editBtn(key: string, current: string)}
+  {#if editableFor(key)}
+    <button
+      class="field-edit-btn"
+      title="Edit"
+      aria-label="Edit field"
+      onclick={() => beginEdit(editableFor(key)!, current)}
+    >
+      ✎
+    </button>
+  {/if}
+{/snippet}
+
+<!-- Inline editor for a single editable field, dispatched by schema_type. -->
+{#snippet fieldEditor(ef: EditableField)}
+  <div class="field-editor">
+    {#if ef.schema_type === 'number'}
+      <input class="field-input" type="number" step="any" bind:value={fieldDraft} />
+    {:else if ef.schema_type === 'date'}
+      <input class="field-input" type="date" bind:value={fieldDraft} />
+    {:else if ef.schema_type === 'datetime'}
+      <input class="field-input" type="datetime-local" bind:value={fieldDraft} />
+    {:else if ef.schema_type === 'user'}
+      <select class="field-input" bind:value={fieldDraft}>
+        <option value="">Unassigned</option>
+        {#if assignablesLoading}
+          <option disabled>Loading…</option>
+        {/if}
+        {#each assignables as u (u.account_id)}
+          <option value={u.account_id}>{u.display_name}</option>
+        {/each}
+      </select>
+    {:else if (ef.schema_type === 'option' || ef.schema_type === 'priority' || ef.schema_type === 'version' || ef.schema_type === 'component') && ef.allowed_values.length > 0}
+      <select class="field-input" bind:value={fieldDraft}>
+        {#if !ef.required}
+          <option value="">— None —</option>
+        {/if}
+        {#each ef.allowed_values as opt (opt.id)}
+          <option value={opt.id}>{opt.label}</option>
+        {/each}
+      </select>
+    {:else if ef.schema_type === 'array' && ef.items !== 'string' && ef.allowed_values.length > 0}
+      <div class="field-multiselect">
+        {#each ef.allowed_values as opt (opt.id)}
+          <label class="field-check">
+            <input
+              type="checkbox"
+              checked={Array.isArray(fieldDraft) && (fieldDraft as string[]).includes(opt.id)}
+              onchange={() => toggleArrayOption(opt.id)}
+            />
+            {opt.label}
+          </label>
+        {/each}
+      </div>
+    {:else if ef.schema_type === 'array'}
+      <!-- labels / free-text array (no allowed values) → comma-separated text -->
+      <input class="field-input" type="text" placeholder="comma,separated" bind:value={fieldDraft} />
+    {:else}
+      <!-- string / unknown → raw text -->
+      <input class="field-input" type="text" bind:value={fieldDraft} />
+      {#if ef.schema_type !== 'string'}
+        <span class="field-raw-note">raw ({ef.schema_type})</span>
+      {/if}
+    {/if}
+    <div class="field-editor-actions">
+      <button class="field-save-btn" onclick={() => saveField(ef)} disabled={fieldSaving}>
+        {fieldSaving ? 'Saving…' : 'Save'}
+      </button>
+      <button class="field-cancel-btn" onclick={cancelEdit} disabled={fieldSaving}>Cancel</button>
+    </div>
+  </div>
+{/snippet}
 
 {#if product.loadingDetail}
   <div class="loading">Loading…</div>
@@ -862,36 +1174,126 @@
                     {#if issueFull.reporter}
                       <span class="detail-key">Reporter</span>
                       <span class="detail-val">
-                        <div class="user-row-sm">
-                          {#if issueFull.reporter.avatar_url}
-                            <img class="avatar-sm" src={issueFull.reporter.avatar_url} alt={issueFull.reporter.display_name} />
-                          {/if}
-                          {issueFull.reporter.display_name}
-                        </div>
+                        {#if editingField === 'reporter' && editableFor('reporter')}
+                          {@render fieldEditor(editableFor('reporter')!)}
+                        {:else}
+                          <div class="detail-val-row">
+                            <div class="user-row-sm">
+                              {#if issueFull.reporter.avatar_url}
+                                <img class="avatar-sm" src={issueFull.reporter.avatar_url} alt={issueFull.reporter.display_name} />
+                              {/if}
+                              {issueFull.reporter.display_name}
+                            </div>
+                            {@render editBtn('reporter', issueFull.reporter.display_name)}
+                          </div>
+                        {/if}
                       </span>
                     {/if}
-                    {#if issueFull.priority}
-                      <span class="detail-key">Priority</span>
-                      <span class="detail-val">{issueFull.priority}</span>
-                    {/if}
-                    {#if issueFull.estimate}
+
+                    <span class="detail-key">Priority</span>
+                    <span class="detail-val">
+                      {#if editingField === 'priority' && editableFor('priority')}
+                        {@render fieldEditor(editableFor('priority')!)}
+                      {:else}
+                        <div class="detail-val-row">
+                          <span>{issueFull.priority ?? '—'}</span>
+                          {@render editBtn('priority', issueFull.priority ?? '')}
+                        </div>
+                      {/if}
+                    </span>
+
+                    <!-- Story Points / Estimate — always editable when editmeta exposes a
+                         numeric estimate field, even if currently empty (the "add" case). -->
+                    {#if estimateField}
+                      <span class="detail-key">{estimateField.name}</span>
+                      <span class="detail-val">
+                        {#if editingField === estimateField.key}
+                          {@render fieldEditor(estimateField)}
+                        {:else}
+                          <div class="detail-val-row">
+                            {#if issueFull.estimate}
+                              <span class="estimate-chip">{issueFull.estimate}</span>
+                            {:else}
+                              <span class="detail-empty">No estimate</span>
+                            {/if}
+                            {@render editBtn(estimateField.key, rawFieldValue(estimateField.key))}
+                          </div>
+                        {/if}
+                      </span>
+                    {:else if issueFull.estimate}
                       <span class="detail-key">Estimate</span>
                       <span class="detail-val"><span class="estimate-chip">{issueFull.estimate}</span></span>
                     {/if}
-                    {#if issueFull.labels && issueFull.labels.length > 0}
-                      <span class="detail-key">Labels</span>
-                      <span class="detail-val">
-                        <div class="label-chips">
-                          {#each issueFull.labels as lbl (lbl)}
-                            <span class="label-chip">{lbl}</span>
-                          {/each}
+
+                    <span class="detail-key">Labels</span>
+                    <span class="detail-val">
+                      {#if editingField === 'labels' && editableFor('labels')}
+                        {@render fieldEditor(editableFor('labels')!)}
+                      {:else}
+                        <div class="detail-val-row">
+                          {#if issueFull.labels && issueFull.labels.length > 0}
+                            <div class="label-chips">
+                              {#each issueFull.labels as lbl (lbl)}
+                                <span class="label-chip">{lbl}</span>
+                              {/each}
+                            </div>
+                          {:else}
+                            <span class="detail-empty">No labels</span>
+                          {/if}
+                          {@render editBtn('labels', (issueFull.labels ?? []).join(', '))}
                         </div>
-                      </span>
-                    {/if}
+                      {/if}
+                    </span>
+
                     {#each issueFull.fields.filter((f) => f.value && f.value.trim() !== '') as field (field.key)}
-                      <span class="detail-key">{field.name}</span>
-                      <span class="detail-val">{field.value}</span>
+                      {#if field.key === estimateField?.key || (estimateField === null && /story\s*point/i.test(field.name))}
+                        <!-- already rendered as the dedicated estimate row above, or matches story-points heuristic -->
+                      {:else}
+                        <span class="detail-key">{field.name}</span>
+                        <span class="detail-val">
+                          {#if editingField === field.key && editableFor(field.key)}
+                            {@render fieldEditor(editableFor(field.key)!)}
+                          {:else}
+                            <div class="detail-val-row">
+                              <span>{field.value}</span>
+                              {@render editBtn(field.key, field.value)}
+                            </div>
+                          {/if}
+                        </span>
+                      {/if}
                     {/each}
+
+                    <!-- Empty-field add rows: editmeta fields with no current value,
+                         not already rendered by a dedicated row above. -->
+                    {#if editmeta}
+                      {#each editmeta.filter((ef) => {
+                        // Skip fields rendered by dedicated controls above.
+                        if (ef.key === 'priority' || ef.key === 'labels') return false;
+                        if (estimateField && ef.key === estimateField.key) return false;
+                        if (!estimateField && /story\s*point/i.test(ef.name)) return false;
+                        // Skip if there's already a populated value row for this field.
+                        const existing = issueFull?.fields.find((f) => f.key === ef.key);
+                        if (existing && existing.value && existing.value.trim() !== '') return false;
+                        return true;
+                      }) as ef (ef.key)}
+                        <span class="detail-key detail-key-empty">{ef.name}</span>
+                        <span class="detail-val">
+                          {#if editingField === ef.key}
+                            {@render fieldEditor(ef)}
+                          {:else}
+                            <div class="detail-val-row">
+                              <span class="detail-empty">—</span>
+                              <button
+                                class="field-edit-btn"
+                                title="Set {ef.name}"
+                                aria-label="Set {ef.name}"
+                                onclick={() => beginEdit(ef, '')}
+                              >+</button>
+                            </div>
+                          {/if}
+                        </span>
+                      {/each}
+                    {/if}
                   </div>
                 {/if}
               </div>
@@ -923,6 +1325,88 @@
                   {/if}
                 </div>
               {/if}
+
+              <!-- ── Development (linked branches / commits / PRs) ─── -->
+              <div class="jira-card collapsible-card">
+                <button
+                  class="jira-coll-trigger"
+                  onclick={() => toggleSection('development')}
+                  aria-expanded={!collapsed.development}
+                >
+                  <span class="coll-arrow">{collapsed.development ? '▶' : '▼'}</span>
+                  <span class="jira-section-label">Development</span>
+                  {#if devStatus}
+                    <span class="section-count">
+                      ({devStatus.branches.length + devStatus.commits.length + devStatus.pull_requests.length})
+                    </span>
+                  {/if}
+                </button>
+                {#if !collapsed.development}
+                  <div class="dev-body">
+                    {#if devLoading}
+                      <div class="dropdown-loading">Loading development info…</div>
+                    {:else if devError}
+                      <div class="jira-error">Could not load development info: {devError}</div>
+                    {:else if devStatus && (devStatus.branches.length || devStatus.commits.length || devStatus.pull_requests.length)}
+                      {#if devStatus.pull_requests.length}
+                        <div class="dev-group">
+                          <span class="dev-group-label">Pull requests</span>
+                          {#each devStatus.pull_requests as pr (pr.repo + ':' + pr.id)}
+                            <a
+                              class="dev-row"
+                              href={pr.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <span class="dev-pr-status status-sm">{pr.status}</span>
+                              <span class="dev-pr-name">{pr.name}</span>
+                              <span class="dev-repo chip-sm">{pr.repo}</span>
+                            </a>
+                          {/each}
+                        </div>
+                      {/if}
+                      {#if devStatus.branches.length}
+                        <div class="dev-group">
+                          <span class="dev-group-label">Branches</span>
+                          {#each devStatus.branches as b (b.repo + ':' + b.name)}
+                            <a
+                              class="dev-row"
+                              href={b.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <span class="dev-branch-name mono-sm">{b.name}</span>
+                              <span class="dev-repo chip-sm">{b.repo}</span>
+                            </a>
+                          {/each}
+                        </div>
+                      {/if}
+                      {#if devStatus.commits.length}
+                        <div class="dev-group">
+                          <span class="dev-group-label">Commits</span>
+                          {#each devStatus.commits as c (c.repo + ':' + c.id)}
+                            <a
+                              class="dev-row"
+                              href={c.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <span class="dev-commit-id mono-sm">{c.id.slice(0, 8)}</span>
+                              <span class="dev-commit-msg">{c.message}</span>
+                              <span class="dev-repo chip-sm">{c.repo}</span>
+                            </a>
+                          {/each}
+                        </div>
+                      {/if}
+                    {:else}
+                      <div class="comments-empty">
+                        No linked development info — connect GitHub/Bitbucket in Jira to see
+                        branches, commits and PRs here.
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
 
               <!-- ── Comments ─────────────────────────────────────── -->
               <div class="jira-card collapsible-card">
@@ -1791,6 +2275,9 @@
     white-space: nowrap;
     padding-top: 1px;
   }
+  .detail-key-empty {
+    opacity: 0.65;
+  }
   .detail-val {
     font-size: 12.5px;
     color: var(--text);
@@ -1807,6 +2294,120 @@
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);
+  }
+
+  /* ── Editable detail fields ────────────────────────────────── */
+  .detail-val-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .detail-empty {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  .field-edit-btn {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    line-height: 1;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 100ms, background 100ms, color 100ms;
+  }
+  .detail-val-row:hover .field-edit-btn,
+  .field-edit-btn:focus-visible {
+    opacity: 1;
+  }
+  .field-edit-btn:hover {
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    color: var(--text);
+  }
+  .field-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+  }
+  .field-input {
+    width: 100%;
+    max-width: 240px;
+    height: 26px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 12.5px;
+  }
+  .field-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .field-multiselect {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    max-height: 160px;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+  }
+  .field-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .field-raw-note {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  .field-editor-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .field-save-btn,
+  .field-cancel-btn {
+    height: 24px;
+    padding: 0 10px;
+    border-radius: var(--radius-s);
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: background 100ms, color 100ms;
+  }
+  .field-save-btn {
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: var(--bg, #fff);
+  }
+  .field-save-btn:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  .field-cancel-btn {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .field-cancel-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text);
+  }
+  .field-save-btn:disabled,
+  .field-cancel-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   /* ── Links ─────────────────────────────────────────────────── */
@@ -1860,6 +2461,58 @@
   .mono-sm {
     font-family: var(--font-mono, monospace);
     font-size: 11.5px;
+  }
+
+  /* ── Development (branches / commits / PRs) ────────────────── */
+  .dev-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 0 14px 10px;
+  }
+  .dev-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .dev-group-label {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 6px 0 2px;
+  }
+  .dev-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+    text-decoration: none;
+    color: inherit;
+  }
+  .dev-row:hover {
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+  .dev-pr-name,
+  .dev-commit-msg {
+    font-size: 12.5px;
+    color: var(--text);
+    flex: 1;
+    min-width: 120px;
+  }
+  .dev-branch-name,
+  .dev-commit-id {
+    color: var(--accent);
+  }
+  .dev-pr-status {
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .dev-repo {
+    margin-inline-start: auto;
   }
 
   /* ── Comments ──────────────────────────────────────────────── */

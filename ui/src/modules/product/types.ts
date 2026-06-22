@@ -395,6 +395,22 @@ export interface JiraTransition {
   to_status: string;
 }
 
+/** One selectable value for an editable field (option / version / component / user). */
+export interface FieldOption {
+  id: string;
+  label: string;
+}
+
+/** A field the caller may edit, as reported by Jira `editmeta`. */
+export interface EditableField {
+  key: string;
+  name: string;
+  schema_type: string;
+  items?: string | null;
+  allowed_values: FieldOption[];
+  required: boolean;
+}
+
 export interface JiraChangeItem {
   field: string;
   from: string | null;
@@ -416,6 +432,8 @@ export interface JiraComment {
 
 export interface IssueFull {
   key: string;
+  /** Numeric Jira issue id (needed by the dev-status API). */
+  id: string;
   summary: string;
   status: string;
   issue_type: string;
@@ -431,6 +449,38 @@ export interface IssueFull {
   attachments: JiraAttachment[];
   links: JiraLink[];
   estimate?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Development info (Jira dev-status: linked branches / commits / PRs)
+// ---------------------------------------------------------------------------
+
+export interface DevBranch {
+  name: string;
+  url: string;
+  repo: string;
+  last_commit?: string | null;
+}
+export interface DevCommit {
+  id: string;
+  message: string;
+  url: string;
+  author: string;
+  timestamp: string;
+  repo: string;
+}
+export interface DevPr {
+  id: string;
+  name: string;
+  url: string;
+  status: string;
+  repo: string;
+  last_update: string;
+}
+export interface DevStatus {
+  branches: DevBranch[];
+  commits: DevCommit[];
+  pull_requests: DevPr[];
 }
 
 // ---------------------------------------------------------------------------

@@ -6,22 +6,41 @@
   import Terminal from '../../lib/components/Terminal.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { ProductAnalysis, ProductAnalysisDetail, ProductAnalysisAgent } from './types';
+  import type { ProductLens } from '../../lib/api/types';
 
   // ── Lens definitions ─────────────────────────────────────────────────────────
-  const LENS_DEFS = [
-    { skill: 'po-story-overview',           label: 'PO Overview' },
-    { skill: 'story-architecture-overview', label: 'Architecture' },
-    { skill: 'story-clarifying-questions',  label: 'Clarifying Questions' },
-  ] as const;
+  // The lens catalog is fetched from GET /workspaces/{id}/product/lenses so the
+  // set of offered checks (and their defaults) is backend-curated and stays in
+  // sync with the bundled product skills. If that fetch fails or returns empty
+  // we fall back to this hardcoded trio so the tab never breaks.
+  const FALLBACK_LENSES: ProductLens[] = [
+    { skill: 'po-story-overview',           label: 'PO Overview',          description: '', default_on: true },
+    { skill: 'story-architecture-overview', label: 'Architecture',         description: '', default_on: true },
+    { skill: 'story-clarifying-questions',  label: 'Clarifying Questions', description: '', default_on: true },
+  ];
 
-  type LensSkill = (typeof LENS_DEFS)[number]['skill'];
+  let lenses = $state<ProductLens[]>(FALLBACK_LENSES);
 
   // ── Provider state (fetched from /meta) ──────────────────────────────────────
   let availableProviders = $state<string[]>(['claude']);
-  let metaLoaded = $state(false);
+  let configLoaded = $state(false);
 
-  async function fetchMeta(): Promise<void> {
-    if (metaLoaded) return;
+  // ── Per-lens UI state (keyed by lens skill; rebuilt from `lenses`) ────────────
+  // Whether each lens is enabled.
+  let lensEnabled = $state<Record<string, boolean>>({});
+  // Selected providers per lens (multi-select chips).
+  let lensProviders = $state<Record<string, string[]>>({});
+
+  let summarizerProvider = $state<string>('claude');
+
+  /** Load the provider list (/meta) and the lens catalog, then (re)build the
+   *  per-lens enabled/provider maps as fresh objects keyed by the returned
+   *  lenses, clamping providers to what's actually available. Plain async fn
+   *  (NOT a $derived) so mutating $state here is safe. */
+  async function initConfig(): Promise<void> {
+    if (configLoaded) return;
+
+    // Providers from /meta (drop the shell pseudo-provider).
     try {
       const meta = await api.get<{ providers: string[] }>('/meta');
       availableProviders = (meta.providers ?? []).filter((p) => p !== 'shell');
@@ -29,35 +48,28 @@
     } catch {
       availableProviders = ['claude'];
     }
-    metaLoaded = true;
-    // Default all lens selected-providers to first available if 'claude' not in list.
-    for (const skill of Object.keys(lensProviders) as LensSkill[]) {
-      lensProviders[skill] = lensProviders[skill].filter((p) => availableProviders.includes(p));
-      if (lensProviders[skill].length === 0 && availableProviders.length > 0) {
-        lensProviders[skill] = [availableProviders[0]];
-      }
+
+    // Lens catalog (curated, backend-driven). Fall back to the trio on any
+    // failure or empty result so the tab is always usable.
+    try {
+      const fetched = await product.loadLenses();
+      if (Array.isArray(fetched) && fetched.length > 0) lenses = fetched;
+    } catch {
+      // keep FALLBACK_LENSES
     }
+
+    const firstProvider = availableProviders[0] ?? 'claude';
+    const defaultPick = availableProviders.includes('claude') ? 'claude' : firstProvider;
+
+    // Build fresh maps keyed by the live lens list — never carry stale keys.
+    lensEnabled = Object.fromEntries(lenses.map((l) => [l.skill, l.default_on]));
+    lensProviders = Object.fromEntries(lenses.map((l) => [l.skill, [defaultPick]]));
+
     if (!availableProviders.includes(summarizerProvider)) {
-      summarizerProvider = availableProviders[0] ?? 'claude';
+      summarizerProvider = firstProvider;
     }
+    configLoaded = true;
   }
-
-  // ── Per-lens UI state ─────────────────────────────────────────────────────────
-  // Whether each lens is enabled.
-  let lensEnabled = $state<Record<LensSkill, boolean>>({
-    'po-story-overview': true,
-    'story-architecture-overview': true,
-    'story-clarifying-questions': true,
-  });
-
-  // Selected providers per lens (multi-select chips).
-  let lensProviders = $state<Record<LensSkill, string[]>>({
-    'po-story-overview': ['claude'],
-    'story-architecture-overview': ['claude'],
-    'story-clarifying-questions': ['claude'],
-  });
-
-  let summarizerProvider = $state<string>('claude');
 
   // ── Focus input ───────────────────────────────────────────────────────────────
   let focusText = $state<string>('');
@@ -70,9 +82,9 @@
   let activeId = $state<string | null>(null);
   let collapsed = $state<Record<string, boolean>>({});
 
-  // ── Load meta on mount ────────────────────────────────────────────────────────
+  // ── Load provider list + lens catalog on mount ────────────────────────────────
   $effect(() => {
-    void fetchMeta();
+    void initConfig();
     return () => {};
   });
 
@@ -164,12 +176,12 @@
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
 
-  function toggleLens(skill: LensSkill): void {
+  function toggleLens(skill: string): void {
     lensEnabled[skill] = !lensEnabled[skill];
   }
 
-  function toggleLensProvider(skill: LensSkill, provider: string): void {
-    const cur = lensProviders[skill];
+  function toggleLensProvider(skill: string, provider: string): void {
+    const cur = lensProviders[skill] ?? [];
     if (cur.includes(provider)) {
       lensProviders[skill] = cur.filter((p) => p !== provider);
     } else {
@@ -179,8 +191,8 @@
 
   // Derived: can we run?
   const canRun = $derived(
-    LENS_DEFS.some(
-      (l) => lensEnabled[l.skill] && lensProviders[l.skill].length > 0
+    lenses.some(
+      (l) => lensEnabled[l.skill] && (lensProviders[l.skill]?.length ?? 0) > 0
     )
   );
 
@@ -188,8 +200,8 @@
 
   async function runAnalysis(): Promise<void> {
     if (running || !canRun) return;
-    const agents = LENS_DEFS.filter(
-      (l) => lensEnabled[l.skill] && lensProviders[l.skill].length > 0
+    const agents = lenses.filter(
+      (l) => lensEnabled[l.skill] && (lensProviders[l.skill]?.length ?? 0) > 0
     ).map((l) => ({
       skill: l.skill,
       name: l.label,
@@ -345,10 +357,10 @@
       </div>
 
       <div class="lens-grid">
-        {#each LENS_DEFS as lens (lens.skill)}
+        {#each lenses as lens (lens.skill)}
           <div class="lens-row" class:lens-disabled={!lensEnabled[lens.skill]}>
             <!-- Enable toggle -->
-            <label class="lens-toggle">
+            <label class="lens-toggle" title={lens.description || lens.label}>
               <input
                 type="checkbox"
                 checked={lensEnabled[lens.skill]}
@@ -363,7 +375,7 @@
               {#each availableProviders as p (p)}
                 <button
                   class="chip"
-                  class:chip-on={lensProviders[lens.skill].includes(p)}
+                  class:chip-on={(lensProviders[lens.skill] ?? []).includes(p)}
                   disabled={running || !lensEnabled[lens.skill]}
                   onclick={() => toggleLensProvider(lens.skill, p)}
                   title="{p}"

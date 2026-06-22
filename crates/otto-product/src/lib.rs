@@ -15,4 +15,4 @@ pub mod types;
 pub use http::{router, ProductCtx};
 pub use memory_facade::ProductMemory;
 pub use service::{CommentInfo, ProductService};
-pub use skills::{seed_skills, skill_body, SKILL_NAMES};
+pub use skills::{analysis_lenses, seed_skills, skill_body, SKILL_NAMES};

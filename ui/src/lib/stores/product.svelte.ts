@@ -5,7 +5,7 @@
 
 import { api } from '../api/client';
 import { ws } from './workspace.svelte';
-import type { Session } from '../api/types';
+import type { Session, ProductLens } from '../api/types';
 import type {
   ProductStory,
   ProductStoryVersion,
@@ -281,6 +281,12 @@ class ProductStore {
 
   async getAnalysis(aid: string): Promise<ProductAnalysisDetail> {
     return api.get<ProductAnalysisDetail>(`/product/analyses/${aid}`);
+  }
+
+  /** Curated analysis-lens catalog for the Configure panel. Workspace-scoped. */
+  async loadLenses(): Promise<ProductLens[]> {
+    const wsId = this.wsId();
+    return api.get<ProductLens[]>(`/workspaces/${wsId}/product/lenses`);
   }
 
   async retryAgent(analysisId: string, agentId: string): Promise<void> {
