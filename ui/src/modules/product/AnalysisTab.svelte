@@ -1,5 +1,6 @@
 <script lang="ts">
   // Analysis tab — multi-provider per-lens config, summarizer select, live polling.
+  import { untrack } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { api } from '../../lib/api/client';
   import Terminal from '../../lib/components/Terminal.svelte';
@@ -139,18 +140,26 @@
   const story = $derived(product.detail?.story ?? null);
 
   $effect(() => {
+    // Depend ONLY on the selected story. Everything else is wrapped in untrack:
+    // `loadHistory()` reads `historyLoaded` (its early-return guard) and we reset
+    // `historyLoaded = false` here, so without untrack this effect would depend on
+    // the very flag it flips → it self-retriggers on every load, hammering
+    // GET /analyses in a tight loop (and saturating the browser's per-host
+    // connection pool, which starved the other tabs' fetches).
     product.selectedId;
-    activeDetail = null;
-    activeId = null;
-    historyLoaded = false;
-    collapsed = {};
-    clearPoll();
-    // Eagerly prime the run-history list so the History <select> is already
-    // populated the first time it's opened. A native <select> paints its option
-    // list at open time, so the old lazy `onfocus` fetch resolved too late — the
-    // first open showed an empty list and the runs only appeared on the second
-    // open. historyLoaded was just reset above, so this won't early-return.
-    void loadHistory();
+    untrack(() => {
+      activeDetail = null;
+      activeId = null;
+      historyLoaded = false;
+      collapsed = {};
+      clearPoll();
+      // Eagerly prime the run-history list so the History <select> is already
+      // populated the first time it's opened. A native <select> paints its option
+      // list at open time, so the old lazy `onfocus` fetch resolved too late — the
+      // first open showed an empty list and the runs only appeared on the second
+      // open. historyLoaded was just reset above, so this won't early-return.
+      void loadHistory();
+    });
   });
 
   // ── Helpers ───────────────────────────────────────────────────────────────────

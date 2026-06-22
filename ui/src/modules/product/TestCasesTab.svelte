@@ -296,24 +296,27 @@
     }
   }
 
+  function defaultAction(): CaseAction {
+    return {
+      mode: 'idle',
+      reviewNote: '',
+      editTitle: '',
+      editCategory: '',
+      editPriority: '',
+      editPreconditions: '',
+      editSteps: '',
+      editExpected: '',
+      busy: false,
+    };
+  }
+
+  // Pure read: returns the stored action or a fresh idle default. It must NOT
+  // mutate `caseActions` — getAction is called from the template ({@const ...}),
+  // and writing state during render throws `state_unsafe_mutation` (which broke
+  // the whole tab: the cases never rendered and it sat on "Loading…" forever).
+  // The real entry is created lazily by setAction() on the first user action.
   function getAction(id: string): CaseAction {
-    if (!caseActions[id]) {
-      caseActions = {
-        ...caseActions,
-        [id]: {
-          mode: 'idle',
-          reviewNote: '',
-          editTitle: '',
-          editCategory: '',
-          editPriority: '',
-          editPreconditions: '',
-          editSteps: '',
-          editExpected: '',
-          busy: false,
-        },
-      };
-    }
-    return caseActions[id];
+    return caseActions[id] ?? defaultAction();
   }
 
   function setAction(id: string, patch: Partial<CaseAction>): void {
@@ -1101,8 +1104,11 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    flex: 1;
+    /* Basis 220px so the Approve/Publish actions wrap below (rather than collide
+       with) the date/count once the content column is narrow — at any width. */
+    flex: 1 1 220px;
     min-width: 0;
+    flex-wrap: wrap;
   }
   .rh-date {
     font-size: 12px;
@@ -1538,5 +1544,31 @@
     flex-direction: column;
     gap: 4px;
     min-width: 120px;
+  }
+
+  /* ── Phone: stack the run-header so the date/count never collide with the
+        Approve/Publish buttons, and make the run picker + actions full-width. */
+  @media (max-width: 640px) {
+    .rh-row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .rh-info {
+      flex: none;
+      flex-wrap: wrap;
+    }
+    .rh-actions {
+      justify-content: flex-start;
+    }
+    .rh-actions .action-btn,
+    .rh-actions .confluence-link {
+      flex: 1 1 auto;
+      justify-content: center;
+      min-height: 34px;
+    }
+    .case-title {
+      font-size: 14.5px;
+    }
   }
 </style>

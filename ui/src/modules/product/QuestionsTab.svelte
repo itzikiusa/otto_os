@@ -639,6 +639,11 @@
     display: flex;
     align-items: flex-start;
     gap: 10px;
+    /* Let the action buttons wrap onto their own row when the content column is
+       narrow (phone portrait, or a phone-landscape 3-pane main column) — driven
+       by `.q-body`'s flex-basis below, so it adapts to the COLUMN width, not just
+       the viewport. On a wide column everything stays on one row. */
+    flex-wrap: wrap;
   }
   .q-cb {
     flex-shrink: 0;
@@ -647,7 +652,9 @@
     cursor: pointer;
   }
   .q-body {
-    flex: 1;
+    /* Basis 240px: keep the text at a readable width and let `.q-actions` wrap
+       below once the row can't hold text + all four buttons. */
+    flex: 1 1 240px;
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -660,7 +667,9 @@
     flex-wrap: wrap;
   }
   .q-text {
-    flex: 1;
+    /* Basis 220px so the category/status chips drop BELOW the text on a narrow
+       column (e.g. iPhone SE) instead of squeezing it to ~2 words per line. */
+    flex: 1 1 220px;
     font-size: 13px;
     font-weight: 500;
     color: var(--text);
@@ -768,6 +777,26 @@
     border-color: #ef4444;
     color: #b91c1c;
     background: color-mix(in srgb, #ef4444 10%, transparent);
+  }
+
+  /* ── Phone: the row-actions wrap below the text automatically (see `.q-body`
+        flex-basis). Here we only bump legibility + touch-target sizes. ─────── */
+  @media (max-width: 640px) {
+    .q-actions {
+      gap: 6px;
+    }
+    .qa-btn {
+      height: 32px;
+      padding: 0 14px;
+      font-size: 13px;
+    }
+    .q-text {
+      font-size: 14.5px;
+    }
+    .q-rationale,
+    .q-answer {
+      font-size: 13.5px;
+    }
   }
 
   /* ── Inline edit form ────────────────────────────────────────────── */
