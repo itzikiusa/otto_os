@@ -355,7 +355,9 @@
   });
   const settings = $derived(draft.settings ?? defaultSettings());
   const settingsBadge = $derived(
-    settings.timeout_ms != null || !settings.follow_redirects || !settings.verify_ssl ? 1 : 0,
+    settings.timeout_ms != null || !settings.follow_redirects || !settings.verify_ssl || draft.ssh_connection_id
+      ? 1
+      : 0,
   );
   function setSetting<K extends keyof ApiSettings>(k: K, v: ApiSettings[K]): void {
     apiClient.draft = { ...draft, settings: { ...settings, [k]: v } };
@@ -1143,6 +1145,28 @@
           <input type="checkbox" checked={settings.verify_ssl} onchange={(e) => setSetting('verify_ssl', (e.currentTarget as HTMLInputElement).checked)} />
           <span class="set-label">Verify TLS certificate <span class="set-unit">(off = accept self-signed / invalid certs)</span></span>
         </label>
+        {#if draft.kind === 'http'}
+          <label class="set-row">
+            <span class="set-label">SSH tunnel</span>
+            <span class="set-control">
+              <select class="input set-select"
+                value={draft.ssh_connection_id ?? ''}
+                onchange={(e) => { const v = (e.currentTarget as HTMLSelectElement).value; apiClient.draft = { ...draft, ssh_connection_id: v === '' ? null : v }; }}>
+                <option value="">None — send directly</option>
+                {#each apiClient.sshConnections as c (c.id)}
+                  <option value={c.id}>{c.name}</option>
+                {/each}
+              </select>
+              <span class="set-unit">
+                {#if apiClient.sshConnections.length === 0}
+                  no SSH connections — add one in Connections
+                {:else}
+                  route via SOCKS5 over SSH (for IP-whitelisted APIs)
+                {/if}
+              </span>
+            </span>
+          </label>
+        {/if}
       </div>
     {/if}
   </div>
@@ -1746,6 +1770,10 @@
   }
   .set-num {
     width: 110px;
+  }
+  .set-select {
+    min-width: 180px;
+    max-width: 260px;
   }
   .set-unit {
     font-size: 11px;

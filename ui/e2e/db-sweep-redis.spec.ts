@@ -397,7 +397,12 @@ test.describe('DB Explorer — Redis (mobile sweep)', () => {
     await openConnection(page);
 
     // CHECK 7: the connection list is visible (and the selected connection is
-    // active). On phone the Connections accordion gates it — it defaults open.
+    // active). On phone the Connections accordion gates it (defaults open); on
+    // tablet/desktop it's the "Connections" tab — opening a connection switches
+    // the sidebar to Schema, so click back to Connections to reveal the list.
+    if (!isPhone(page)) {
+      await page.locator('.side-switch .ss', { hasText: 'Connections' }).click();
+    }
     await expect(page.locator('.conn-list')).toBeVisible();
     await expect(
       page.locator('.conn-row.active .conn-name', { hasText: 'e2e-redis-docker' }),

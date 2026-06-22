@@ -3125,6 +3125,7 @@ dependencies = [
  "otto-rbac",
  "otto-sessions",
  "otto-skills",
+ "otto-ssh",
  "otto-state",
  "otto-swarm",
  "otto-usage",

@@ -14,6 +14,7 @@ import type {
   ApiRequest,
   ApiResponse,
   ApiRunResult,
+  Connection,
   ExecuteApiReq,
   Id,
   ImportCurlReq,
@@ -72,6 +73,9 @@ export interface ApiDraft {
   grpc_method?: string;
   /** Per-request execution settings (optional; defaults applied when absent). */
   settings?: ApiSettings;
+  /** Route the request through this `ssh`-kind connection (SOCKS5 over SSH),
+   * so it egresses from the bastion's whitelisted IP. null = send directly. */
+  ssh_connection_id?: Id | null;
   /** Pre-request JS (runs before send; can mutate request + set variables). */
   pre_request_script?: string;
   /** Post-response JS (runs after; reads response, sets variables, tests). */
@@ -116,6 +120,8 @@ class ApiClientStore {
   environments: ApiEnvironment[] = $state([]);
   history: ApiHistoryEntry[] = $state([]);
   automations: ApiAutomation[] = $state([]);
+  /** Workspace `ssh`-kind connections, for the Settings-tab "SSH tunnel" picker. */
+  sshConnections: Connection[] = $state([]);
 
   /** Last runAutomation() report, shown in the run panel. */
   lastRun: ApiRunResult | null = $state(null);
@@ -213,6 +219,20 @@ class ApiClientStore {
       toasts.error('Could not load API client', errMsg(e));
     } finally {
       this.loading = false;
+    }
+    void this.loadSshConnections();
+  }
+
+  /** Load the workspace's `ssh`-kind connections for the SSH-tunnel picker.
+   * Best-effort: a Viewer without connections access just sees an empty list. */
+  async loadSshConnections(): Promise<void> {
+    const wid = this.wsId();
+    if (!wid) return;
+    try {
+      const all = await api.get<Connection[]>(`/workspaces/${wid}/connections`);
+      this.sshConnections = all.filter((c) => c.kind === 'ssh');
+    } catch {
+      this.sshConnections = [];
     }
   }
 
@@ -421,6 +441,7 @@ class ApiClientStore {
       body_mode: d.body_mode,
       body: d.body,
       auth: d.auth,
+      ssh_connection_id: d.ssh_connection_id ?? null,
     };
     const saved = await this.saveRequest(body, d.requestId ?? undefined);
     if (saved) {
@@ -567,6 +588,7 @@ class ApiClientStore {
       follow_redirects: s?.follow_redirects ?? true,
       verify_ssl: s?.verify_ssl ?? true,
       vars: Object.keys(this.runtimeVars).length ? this.runtimeVars : undefined,
+      ssh_connection_id: draft.ssh_connection_id ?? null,
     };
     this._abortCtrl = new AbortController();
     const { signal } = this._abortCtrl;
@@ -828,6 +850,7 @@ class ApiClientStore {
       body_mode: r.body_mode,
       body: r.body,
       auth: { ...r.auth },
+      ssh_connection_id: r.ssh_connection_id ?? null,
       proto: '',
       grpc_method: '',
     };
@@ -848,6 +871,7 @@ class ApiClientStore {
       body_mode: snap.body_mode ?? 'none',
       body: snap.body ?? '',
       auth: snap.auth ?? { type: 'none' },
+      ssh_connection_id: snap.ssh_connection_id ?? null,
       proto: '',
       grpc_method: '',
     };

@@ -1746,6 +1746,8 @@ export interface ApiRequest {
   body_mode: ApiBodyMode;
   body: string;
   auth: ApiAuth;
+  /** Optional `ssh`-kind connection id to tunnel executions through (null = direct). */
+  ssh_connection_id?: Id | null;
   position: number;
   created_at: string;
   updated_at: string;
@@ -1787,6 +1789,8 @@ export interface UpsertApiRequestReq {
   body_mode?: ApiBodyMode;
   body?: string;
   auth?: ApiAuth;
+  /** Optional `ssh`-kind connection id to tunnel executions through. */
+  ssh_connection_id?: Id | null;
 }
 
 export interface UpsertApiEnvironmentReq {
@@ -1807,6 +1811,8 @@ export interface ExecuteApiReq {
   follow_redirects?: boolean | null;
   verify_ssl?: boolean | null;
   vars?: Record<string, string> | null;
+  /** Route the request through this `ssh`-kind connection (SOCKS5 over SSH). */
+  ssh_connection_id?: Id | null;
 }
 
 export interface ApiResponse {

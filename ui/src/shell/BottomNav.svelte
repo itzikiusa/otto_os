@@ -2,8 +2,9 @@
   // Phone bottom navigation bar. Shows the first few modules the current user
   // can view as large tap targets, plus a "More" affordance that opens an
   // overflow sheet for the rest (and Settings). Tapping a module routes via
-  // router.go(); this mirrors Rail.svelte's ALL_MODULES + auth.can() filtering
-  // so the two navigations stay in lockstep.
+  // router.go(); it draws from the same shared sidebar registry as the Rail and
+  // Navigator and honours the user's saved order + hidden set, so all three
+  // navigations stay in lockstep.
   //
   // Rendered only on phone (App.svelte gates it behind viewport.isPhone), so it
   // adds nothing to the desktop layout.
@@ -12,27 +13,26 @@
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
-
-  // Same source-of-truth list as Rail.svelte. Each entry carries the feature
-  // name used by auth.can(); all gated at 'view' (root always passes).
-  const ALL_MODULES = [
-    { id: 'agents', icon: 'terminal', label: 'Agents', feature: 'agents' as const },
-    { id: 'swarm', icon: 'grid', label: 'Swarm', feature: 'swarm' as const },
-    { id: 'connections', icon: 'plug', label: 'Connections', feature: 'connections' as const },
-    { id: 'git', icon: 'branch', label: 'Git', feature: 'git' as const },
-    { id: 'product', icon: 'note', label: 'Product', feature: 'product' as const },
-    { id: 'api', icon: 'send', label: 'API', feature: 'api_client' as const },
-    { id: 'database', icon: 'db', label: 'Database', feature: 'database' as const },
-    { id: 'workflows', icon: 'split', label: 'Workflows', feature: 'workflows' as const },
-    { id: 'skills-eval', icon: 'zap', label: 'Skills', feature: 'skill_eval' as const },
-    { id: 'insights', icon: 'gauge', label: 'Insights', feature: 'insights' as const },
-    { id: 'usage', icon: 'chart', label: 'Usage', feature: 'usage' as const },
-  ];
+  import { plugins } from '../lib/stores/plugins.svelte';
+  import { availableModules, resolveOrder, visibleOrder } from '../lib/sidebar';
 
   // How many primary tabs sit on the bar before everything spills into "More".
   const PRIMARY_COUNT = 4;
 
-  const modules = $derived(ALL_MODULES.filter((m) => auth.can(m.feature, 'view')));
+  const pluginEntries = $derived(
+    plugins.list
+      .filter((p) => auth.canPlugin(p.slug, 'view'))
+      .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
+  );
+  const modules = $derived(
+    visibleOrder(
+      resolveOrder(
+        availableModules((f) => auth.can(f, 'view'), pluginEntries),
+        ui.sidebarOrder,
+      ),
+      ui.sidebarHidden,
+    ),
+  );
   const primary = $derived(modules.slice(0, PRIMARY_COUNT));
   const overflow = $derived(modules.slice(PRIMARY_COUNT));
 

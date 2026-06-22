@@ -7,6 +7,22 @@
     type ThemeName,
     type Direction,
   } from '../../lib/stores/ui.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { plugins } from '../../lib/stores/plugins.svelte';
+  import { availableModules, resolveOrder, type SidebarModule } from '../../lib/sidebar';
+
+  // The full resolved sidebar list (same logic as the Navigator/Rail): built-ins
+  // the user may see + permitted plugins, in the saved order, including hidden
+  // ones (so they can be toggled back on here).
+  const sidebarPlugins = $derived(
+    plugins.list
+      .filter((p) => auth.canPlugin(p.slug, 'view'))
+      .map((p): SidebarModule => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
+  );
+  const sidebarResolved = $derived(
+    resolveOrder(availableModules((f) => auth.can(f, 'view'), sidebarPlugins), ui.sidebarOrder),
+  );
 
   const themes: { id: ThemeName; name: string; desc: string }[] = [
     { id: 'native', name: 'Native', desc: 'macOS vibrancy, system accent' },
@@ -128,6 +144,50 @@
     Only show sessions started on this device. Other devices' sessions stay hidden here (they
     still run on the daemon).
   </p>
+
+  <div class="section-title">Sidebar</div>
+  <p class="hint-line">
+    Show, hide and reorder the items in the left sidebar — keep only what you use. Hidden items
+    can be brought back here anytime. You can also reorder by dragging directly in the sidebar
+    (“Customize sidebar” at the bottom of the expanded sidebar). Saved per device.
+  </p>
+  <div class="sidebar-list" data-testid="settings-sidebar-list">
+    {#each sidebarResolved as m, i (m.id)}
+      <div class="sidebar-row" class:row-hidden={ui.sidebarHidden.includes(m.id)}>
+        <Icon name={m.icon} size={14} />
+        <span class="grow">{m.label}</span>
+        <button
+          class="sb-btn"
+          onclick={() => ui.moveSidebar(sidebarResolved.map((x) => x.id), m.id, -1)}
+          disabled={i === 0}
+          title="Move up"
+          aria-label={`Move ${m.label} up`}
+        >
+          <Icon name="arrowUp" size={12} />
+        </button>
+        <button
+          class="sb-btn"
+          onclick={() => ui.moveSidebar(sidebarResolved.map((x) => x.id), m.id, 1)}
+          disabled={i === sidebarResolved.length - 1}
+          title="Move down"
+          aria-label={`Move ${m.label} down`}
+        >
+          <Icon name="arrowDown" size={12} />
+        </button>
+        <label class="sb-toggle" title={ui.sidebarHidden.includes(m.id) ? 'Hidden' : 'Shown'}>
+          <input
+            type="checkbox"
+            checked={!ui.sidebarHidden.includes(m.id)}
+            onchange={() => ui.toggleSidebarHidden(m.id)}
+            aria-label={`Show ${m.label}`}
+          />
+        </label>
+      </div>
+    {/each}
+  </div>
+  <div class="row">
+    <button class="btn small" onclick={() => ui.resetSidebar()}>Reset to default</button>
+  </div>
 </div>
 
 <style>
@@ -226,6 +286,72 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
+    cursor: pointer;
+  }
+  .sidebar-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: min(420px, 92vw);
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    padding: 6px;
+    background: var(--surface);
+  }
+  .sidebar-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    padding: 0 4px 0 8px;
+    border-radius: var(--radius-s);
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .sidebar-row:hover {
+    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  }
+  .sidebar-row .grow {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* A hidden module is dimmed but still listed so it can be re-shown. */
+  .sidebar-row.row-hidden {
+    color: var(--text-dim);
+    opacity: 0.7;
+  }
+  .sb-btn {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: var(--radius-s);
+    cursor: pointer;
+  }
+  .sb-btn:hover:not(:disabled) {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .sb-btn:disabled {
+    opacity: 0.25;
+    cursor: default;
+  }
+  .sb-toggle {
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    padding-inline-start: 4px;
+  }
+  .sb-toggle input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
     cursor: pointer;
   }
 </style>

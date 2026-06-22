@@ -98,7 +98,8 @@ From the builder, **Save** (`⌘S`):
 
 > **What gets saved (and what does NOT):** A saved request persists exactly these
 > fields: `name`, `method`, `url`, `headers`, `query`, `body_mode`, `body`,
-> `auth`, plus its `collection_id` and `position`. **Scripts, Docs, Settings
+> `auth`, the **SSH tunnel** choice (`ssh_connection_id`), plus its
+> `collection_id` and `position`. **Scripts, Docs, the other Settings
 > (timeout/redirects/TLS), GraphQL variables, and the transport kind
 > (SSE/WS/gRPC) are part of the in-memory draft only — they are NOT stored with
 > the request and are lost when you reload it.** See
@@ -230,6 +231,16 @@ the three server-to-server grants above.
 - **Automatically follow redirects** (default on).
 - **Verify TLS certificate** (default on; turning it off accepts self-signed /
   invalid certs for that request). (Draft-only; not persisted.)
+- **SSH tunnel** (HTTP only) — pick one of the workspace's `ssh`-kind
+  connections to route the request through a **SOCKS5-over-SSH** proxy, so it
+  egresses from the bastion's IP. Use this for upstreams that **IP-whitelist**
+  callers. The picker lists your SSH connections (add bastions in the
+  **Connections** section); auth reuses the system `ssh` client (ssh-agent /
+  `~/.ssh/config` / the connection's identity file). The bastion tunnel is
+  opened on first use and cached/reused (idle-evicted after 10 min). Unlike the
+  other Settings, this choice **is persisted on the saved request**. The SSRF
+  guard still applies — the target is a public, IP-restricted host, not a
+  private one only reachable through the bastion.
 
 ### gRPC panel
 
@@ -425,10 +436,10 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 
 ```
 ApiRequest      { id, workspace_id, collection_id?, name, method, url,
-                  headers[], query[], body_mode, body, auth, position,
-                  created_at, updated_at }
+                  headers[], query[], body_mode, body, auth, ssh_connection_id?,
+                  position, created_at, updated_at }
 UpsertApiRequestReq { collection_id?, name, method, url, headers, query,
-                  body_mode, body, auth }    // ← exactly these are saved
+                  body_mode, body, auth, ssh_connection_id? }  // ← exactly these are saved
 ApiEnvironment  { id, workspace_id, name, variables{key:value}, is_active, created_at }
 ApiHistoryEntry { id, workspace_id, method, url, status?, duration_ms?,
                   request(snapshot), response(snapshot), executed_at }
@@ -438,8 +449,10 @@ ApiResponse     { status, status_text, headers[], body, body_base64,
 
 `body_mode` persists as one of `none | json | raw | form | graphql`
 (form-data/multipart and the raw sub-types are encoded into `body`/headers).
-**Scripts, Docs, Settings, GraphQL variables, transport kind, and `.proto` are
-not part of `ApiRequest`** — they live only in the UI draft.
+**Scripts, Docs, GraphQL variables, transport kind, and `.proto` are
+not part of `ApiRequest`** — they live only in the UI draft. The Settings tab is
+draft-only too, **except** its **SSH tunnel** choice (`ssh_connection_id`), which
+is persisted.
 
 ---
 

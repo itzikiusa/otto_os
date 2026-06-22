@@ -918,6 +918,7 @@ mod tests {
             body_mode: "json".into(),
             body: r#"{"name":"x"}"#.into(),
             auth: json!({"type":"none"}),
+            ssh_connection_id: None,
             position: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),

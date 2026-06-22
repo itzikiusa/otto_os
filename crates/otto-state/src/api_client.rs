@@ -43,6 +43,8 @@ pub struct NewApiRequest {
     pub body_mode: String,
     pub body: String,
     pub auth: serde_json::Value,
+    /// Optional `ssh`-kind connection id to tunnel executions through.
+    pub ssh_connection_id: Option<Id>,
     pub position: i64,
 }
 
@@ -97,6 +99,7 @@ fn row_to_request(r: &sqlx::sqlite::SqliteRow) -> Result<ApiRequest> {
         body_mode: r.get("body_mode"),
         body: r.get("body"),
         auth: json(&r.get::<String, _>("auth_json"))?,
+        ssh_connection_id: r.get("ssh_connection_id"),
         position: r.get("position"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
@@ -262,8 +265,8 @@ impl ApiClientRepo {
         sqlx::query(
             "INSERT INTO api_requests
                 (id, workspace_id, collection_id, name, method, url, headers_json, query_json,
-                 body_mode, body, auth_json, position, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 body_mode, body, auth_json, ssh_connection_id, position, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&q.workspace_id)
@@ -276,6 +279,7 @@ impl ApiClientRepo {
         .bind(&q.body_mode)
         .bind(&q.body)
         .bind(q.auth.to_string())
+        .bind(&q.ssh_connection_id)
         .bind(q.position)
         .bind(&now)
         .bind(&now)
@@ -292,7 +296,8 @@ impl ApiClientRepo {
         sqlx::query(
             "UPDATE api_requests SET
                 collection_id = ?, name = ?, method = ?, url = ?, headers_json = ?,
-                query_json = ?, body_mode = ?, body = ?, auth_json = ?, updated_at = ?
+                query_json = ?, body_mode = ?, body = ?, auth_json = ?, ssh_connection_id = ?,
+                updated_at = ?
              WHERE id = ?",
         )
         .bind(&q.collection_id)
@@ -304,6 +309,7 @@ impl ApiClientRepo {
         .bind(&q.body_mode)
         .bind(&q.body)
         .bind(q.auth.to_string())
+        .bind(&q.ssh_connection_id)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -637,6 +643,7 @@ mod tests {
                 body_mode: "none".into(),
                 body: String::new(),
                 auth: jval!({"type":"none"}),
+                ssh_connection_id: None,
                 position: 0,
             })
             .await
@@ -666,6 +673,7 @@ mod tests {
                     body_mode: "json".into(),
                     body: "{}".into(),
                     auth: jval!({"type":"none"}),
+                    ssh_connection_id: None,
                     position: 0,
                 },
             )

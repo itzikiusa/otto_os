@@ -3,8 +3,8 @@
   // readOnly=true by default (Files viewer is read-only; LSP still works).
   import { onDestroy } from 'svelte';
   import { EditorView, lineNumbers, keymap, drawSelection } from '@codemirror/view';
-  import { EditorState, Compartment } from '@codemirror/state';
-  import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+  import { EditorState, Compartment, Prec } from '@codemirror/state';
+  import { defaultKeymap, history, historyKeymap, selectAll } from '@codemirror/commands';
   import { search, searchKeymap } from '@codemirror/search';
   import { autocompletion, completionKeymap } from '@codemirror/autocomplete';
   import type { CompletionSource } from '@codemirror/autocomplete';
@@ -345,6 +345,14 @@
       changeListener,
       submitKeymap,
       EditorState.readOnly.of(readOnly),
+      // Highest-precedence Cmd/Ctrl+A → select the WHOLE document. `defaultKeymap`
+      // already binds this (selectAll operates on the doc model, not the rendered
+      // viewport), so this is belt-and-braces: it guarantees nothing can shadow
+      // Mod-a and that CM handles the key (and preventDefault) before any other
+      // extension. Note: a macOS webview's native "Select All" menu action can
+      // still act directly on the virtualized contenteditable (only on-screen
+      // lines exist in the DOM) — that path is outside CM's keymap.
+      Prec.highest(keymap.of([{ key: 'Mod-a', run: selectAll }])),
       keymap.of([
         ...defaultKeymap,
         ...searchKeymap,

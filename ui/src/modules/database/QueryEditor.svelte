@@ -128,10 +128,26 @@
   // Draggable split between the editor and the results (persisted px height).
   let editorH = $state(loadEditorH());
   let resizing = $state(false);
+  // Height to restore when collapsing the double-click "expand" toggle.
+  let prevEditorH = $state(0);
   function loadEditorH(): number {
     if (typeof localStorage === 'undefined') return 240;
     const v = Number(localStorage.getItem('db.editorH'));
     return Number.isFinite(v) && v > 80 ? v : 240;
+  }
+  // Tallest the editor may grow to — viewport-relative so it can take most of the
+  // pane on big screens, while always reserving room for the results grid so it
+  // can never be squeezed off-screen. (≥180 keeps it sane on short windows.)
+  function maxEditorH(): number {
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 1000;
+    return Math.max(180, vh - 260);
+  }
+  function persistEditorH(): void {
+    try {
+      localStorage.setItem('db.editorH', String(Math.round(editorH)));
+    } catch {
+      /* ignore */
+    }
   }
   function startResize(e: PointerEvent): void {
     e.preventDefault();
@@ -139,20 +155,28 @@
     const startY = e.clientY;
     const startH = editorH;
     const onMove = (ev: PointerEvent): void => {
-      editorH = Math.max(100, Math.min(900, startH + (ev.clientY - startY)));
+      editorH = Math.max(100, Math.min(maxEditorH(), startH + (ev.clientY - startY)));
     };
     const onUp = (): void => {
       resizing = false;
-      try {
-        localStorage.setItem('db.editorH', String(Math.round(editorH)));
-      } catch {
-        /* ignore */
-      }
+      persistEditorH();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+  }
+  // Double-click the grip to expand the editor to (nearly) full height, and again
+  // to restore the prior height — a quick way to focus on a long query.
+  function toggleExpand(): void {
+    const max = maxEditorH();
+    if (editorH < max - 8) {
+      prevEditorH = editorH;
+      editorH = max;
+    } else {
+      editorH = prevEditorH > 80 ? prevEditorH : 240;
+    }
+    persistEditorH();
   }
 
   // ── Save query ──────────────────────────────────────────────────────────
@@ -408,8 +432,9 @@
     role="separator"
     aria-orientation="horizontal"
     aria-label="Drag to resize editor and results"
-    title="Drag to resize"
+    title="Drag to resize · double-click to expand"
     onpointerdown={startResize}
+    ondblclick={toggleExpand}
   ><span class="qe-grip"></span></div>
 
   {#if viewport.isPhone}

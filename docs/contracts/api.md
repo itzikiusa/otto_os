@@ -861,6 +861,18 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | — | run an automation |
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command |
 
+**SSH tunnel (IP whitelisting).** Both the saved request (`CreateRequestReq` /
+`UpdateRequestReq` → `Request`) and `ExecuteRequestReq` accept an optional
+`ssh_connection_id` (nullable). When set, the daemon routes the outbound HTTP
+request through a SOCKS5 proxy over that `ssh`-kind connection (a `ssh -N -D`
+tunnel, reused/cached per bastion), so it egresses from the bastion's
+whitelisted IP. The referenced connection must be an `ssh`-kind profile visible
+to the workspace (workspace-scoped or global); it must carry `host`+`user` in
+its params (auth flows through the system `ssh` client). The SSRF guard stays in
+force — the target host is still resolved/classified locally — so this is for
+**public, IP-restricted** upstreams, not for reaching private hosts. A
+resolution or tunnel failure is reported as a `502` and recorded in history.
+
 ## Notifications (notification center)
 
 | Method & path | Auth | Request | Response |

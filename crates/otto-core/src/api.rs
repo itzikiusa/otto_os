@@ -1845,6 +1845,9 @@ pub struct UpsertApiRequestReq {
     pub body: String,
     #[serde(default)]
     pub auth: Value,
+    /// Optional `ssh`-kind connection id to tunnel this request through.
+    #[serde(default)]
+    pub ssh_connection_id: Option<Id>,
 }
 
 /// `POST/PATCH /workspaces/{wid}/api-client/environments[/{id}]`
@@ -1883,6 +1886,11 @@ pub struct ExecuteApiReq {
     pub verify_ssl: Option<bool>,
     #[serde(default)]
     pub vars: Option<Value>,
+    /// Optional `ssh`-kind connection id: route this request through a SOCKS5
+    /// tunnel over that SSH bastion (for IP-whitelisted upstreams). None =
+    /// send directly.
+    #[serde(default)]
+    pub ssh_connection_id: Option<Id>,
 }
 
 /// Response of `POST .../api-client/execute`.

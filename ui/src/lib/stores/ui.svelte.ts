@@ -44,6 +44,8 @@ const LS = {
   dbDockWidth: 'otto_db_dock_width',
   clientId: 'otto_client_id',
   sessionIsolation: 'otto_session_isolation',
+  sidebarOrder: 'otto_sidebar_order',
+  sidebarHidden: 'otto_sidebar_hidden',
 };
 
 export const RIGHT_MIN = 260;
@@ -65,6 +67,17 @@ function lsSet(key: string, val: string): void {
     localStorage.setItem(key, val);
   } catch {
     /* private mode */
+  }
+}
+
+/** Read a JSON-encoded value from localStorage, falling back on miss/parse-error. */
+function lsGetJson<T>(key: string, fallback: T): T {
+  const raw = lsGet(key);
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
   }
 }
 
@@ -172,6 +185,65 @@ class UiStore {
    *  Other devices' sessions stay hidden here but still run on the daemon.
    *  Default off (current behavior = see all). Persisted per device. */
   sessionIsolation = $state(lsGet(LS.sessionIsolation) === '1');
+
+  /** Sidebar personalization (per device). `sidebarOrder` is the user's full
+   *  module id order (visible + hidden, so hiding never loses a slot);
+   *  `sidebarHidden` is the set of ids the user has hidden. Both empty = the
+   *  shipped default. `sidebarEditMode` is an ephemeral toggle (not persisted)
+   *  that turns the Navigator into a reorder/show-hide list. RBAC still wins:
+   *  these only ever rearrange or hide modules the user is already permitted to
+   *  see — they can never reveal a feature RBAC blocks. */
+  sidebarOrder: string[] = $state(lsGetJson<string[]>(LS.sidebarOrder, []));
+  sidebarHidden: string[] = $state(lsGetJson<string[]>(LS.sidebarHidden, []));
+  sidebarEditMode = $state(false);
+
+  /** Replace the full module order (the complete resolved id list, incl. hidden). */
+  setSidebarOrder(ids: string[]): void {
+    this.sidebarOrder = ids;
+    lsSet(LS.sidebarOrder, JSON.stringify(ids));
+  }
+
+  /** Move `id` by `delta` (±1) within `ids` (the current full resolved order). */
+  moveSidebar(ids: string[], id: string, delta: number): void {
+    const next = [...ids];
+    const i = next.indexOf(id);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= next.length) return;
+    [next[i], next[j]] = [next[j], next[i]];
+    this.setSidebarOrder(next);
+  }
+
+  /** Reorder: pull `fromId` out and reinsert it at `toId`'s position. */
+  reorderSidebar(ids: string[], fromId: string, toId: string): void {
+    if (fromId === toId) return;
+    const next = [...ids];
+    const from = next.indexOf(fromId);
+    const to = next.indexOf(toId);
+    if (from < 0 || to < 0) return;
+    next.splice(from, 1);
+    next.splice(to, 0, fromId);
+    this.setSidebarOrder(next);
+  }
+
+  /** Show/hide a single module. */
+  toggleSidebarHidden(id: string): void {
+    this.sidebarHidden = this.sidebarHidden.includes(id)
+      ? this.sidebarHidden.filter((x) => x !== id)
+      : [...this.sidebarHidden, id];
+    lsSet(LS.sidebarHidden, JSON.stringify(this.sidebarHidden));
+  }
+
+  /** Restore the shipped default order with everything visible. */
+  resetSidebar(): void {
+    this.sidebarOrder = [];
+    this.sidebarHidden = [];
+    lsSet(LS.sidebarOrder, '[]');
+    lsSet(LS.sidebarHidden, '[]');
+  }
+
+  toggleSidebarEdit(): void {
+    this.sidebarEditMode = !this.sidebarEditMode;
+  }
 
   setSessionIsolation(on: boolean): void {
     this.sessionIsolation = on;

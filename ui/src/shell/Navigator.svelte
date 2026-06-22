@@ -10,6 +10,7 @@
   import { plugins } from '../lib/stores/plugins.svelte';
   import { activity } from '../lib/stores/activity.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { availableModules, resolveOrder, visibleOrder, type SidebarModule } from '../lib/sidebar';
   import type { Session, SessionStatus } from '../lib/api/types';
 
   // Load the per-session task roll-up for the current workspace (sidebar chips);
@@ -100,6 +101,73 @@
     const next = draft.trim();
     if (next) await ws.renameSession(id, next);
   }
+
+  // ── Module list (shared registry → RBAC + plugins → user order/visibility) ──
+  // `resolved` is the full ordered list (incl. hidden); `visible` drops hidden
+  // modules; `navList` is what we actually render — everything while editing (so
+  // hidden rows can be toggled back on), only the visible ones otherwise.
+  const pluginEntries = $derived(
+    plugins.list
+      .filter((p) => auth.canPlugin(p.slug, 'view'))
+      .map((p): SidebarModule => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
+  );
+  const resolved = $derived(
+    resolveOrder(availableModules((f) => auth.can(f, 'view'), pluginEntries), ui.sidebarOrder),
+  );
+  const visible = $derived(visibleOrder(resolved, ui.sidebarHidden));
+  const navList = $derived(ui.sidebarEditMode ? resolved : visible);
+
+  // Active when the route matches the module id. Plugin entries carry a
+  // `plugin/<slug>` id while router.module is just `plugin`, so compare the slug.
+  // Agents also owns the default ('') route.
+  function isActive(id: string): boolean {
+    if (id.startsWith('plugin/')) {
+      return router.module === 'plugin' && `plugin/${router.parts[1] ?? ''}` === id;
+    }
+    if (id === 'agents') return router.module === 'agents' || router.module === '';
+    return router.module === id;
+  }
+
+  function isHidden(id: string): boolean {
+    return ui.sidebarHidden.includes(id);
+  }
+
+  // ── Edit mode: drag-to-reorder (HTML5 DnD, like TabBar) + up/down buttons
+  // (touch-reliable + keyboard-accessible). Both persist the full module order.
+  let dragId = $state<string | null>(null);
+  let dragOverId = $state<string | null>(null);
+
+  function onDragStart(e: DragEvent, id: string): void {
+    dragId = id;
+    e.dataTransfer?.setData('text/plain', id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+  function onDragOver(e: DragEvent, id: string): void {
+    if (!dragId || id === dragId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    dragOverId = id;
+  }
+  function onDragLeave(id: string): void {
+    if (dragOverId === id) dragOverId = null;
+  }
+  function onDrop(e: DragEvent, id: string): void {
+    e.preventDefault();
+    if (dragId) ui.reorderSidebar(resolved.map((m) => m.id), dragId, id);
+    dragId = null;
+    dragOverId = null;
+  }
+  function onDragEnd(): void {
+    dragId = null;
+    dragOverId = null;
+  }
+  function move(id: string, delta: number): void {
+    ui.moveSidebar(
+      resolved.map((m) => m.id),
+      id,
+      delta,
+    );
+  }
 </script>
 
 <nav class="navigator sidebar-material" class:resizing aria-label="Navigator" style="width:{ui.railWidth}px">
@@ -142,277 +210,62 @@
   </div>
 
   <div class="nav-scroll">
-    <!-- Global session search: filters every group below (Agents / Telegram / Slack). -->
-    <div class="nav-search">
-      <Icon name="search" size={12} />
-      <input
-        class="nav-search-input"
-        placeholder="Search all sessions…"
-        bind:value={sessionQuery}
-      />
-      {#if sessionQuery}
-        <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search">×</button>
-      {/if}
-    </div>
-
-    <!-- "Needs you" filter: narrows every group to sessions blocked on input.
-         Only shown once at least one session is flagged (or while already on). -->
-    {#if ws.needsYouCount > 0 || ws.needsYouFilter}
-      <button
-        class="needs-you-filter"
-        class:active={ws.needsYouFilter}
-        onclick={() => (ws.needsYouFilter = !ws.needsYouFilter)}
-        title="Show only sessions waiting on you"
-      >
-        <Icon name="bell" size={11} />
-        <span class="grow">Needs you</span>
-        {#if ws.needsYouCount > 0}
-          <span class="needs-you-count">{ws.needsYouCount}</span>
+    <!-- Global session search: filters every group below (Agents / Telegram /
+         Slack). Hidden while editing the sidebar (no session lists shown then). -->
+    {#if !ui.sidebarEditMode}
+      <div class="nav-search">
+        <Icon name="search" size={12} />
+        <input
+          class="nav-search-input"
+          placeholder="Search all sessions…"
+          bind:value={sessionQuery}
+        />
+        {#if sessionQuery}
+          <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search">×</button>
         {/if}
-      </button>
+      </div>
+
+      <!-- "Needs you" filter: narrows every group to sessions blocked on input.
+           Only shown once at least one session is flagged (or while already on). -->
+      {#if ws.needsYouCount > 0 || ws.needsYouFilter}
+        <button
+          class="needs-you-filter"
+          class:active={ws.needsYouFilter}
+          onclick={() => (ws.needsYouFilter = !ws.needsYouFilter)}
+          title="Show only sessions waiting on you"
+        >
+          <Icon name="bell" size={11} />
+          <span class="grow">Needs you</span>
+          {#if ws.needsYouCount > 0}
+            <span class="needs-you-count">{ws.needsYouCount}</span>
+          {/if}
+        </button>
+      {/if}
     {/if}
 
-    <div class="nav-section">
-      {#if auth.can('agents', 'view')}
-        <div class="nav-item-row">
-          <button
-            class="nav-item"
-            class:active={router.module === 'agents' || router.module === ''}
-            onclick={() => router.go('agents')}
-            oncontextmenu={(e) => ctxMenu.show(e, [
-              { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
-              { label: 'Add workspace…', icon: 'folder', action: () => (ui.newWorkspaceOpen = true) },
-            ])}
-          >
-            <Icon name="terminal" size={14} />
-            <span class="grow">Agents</span>
-            {#if ws.workingCount > 0}
-              <span class="count-chip working">{ws.workingCount}</span>
-            {/if}
-          </button>
-          <button
-            class="icon-btn twisty"
-            onclick={() => (agentsOpen = !agentsOpen)}
-            aria-label="Toggle session list"
-          >
-            <Icon name={agentsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          </button>
-        </div>
-
-        {#if q ? fAgents.length > 0 : agentsOpen}
-          <div class="nested">
-            {#each fAgents as s (s.id)}
-              {@render sessionRow(s)}
-            {:else}
-              <div class="nested-empty">No sessions — ⌘T to start one</div>
-            {/each}
-          </div>
-        {/if}
-
-        {#if q ? fTelegram.length > 0 : ws.telegramSessions.length > 0}
-          <div class="nav-item-row">
-            <button class="nav-item" onclick={() => (telegramOpen = !telegramOpen)}>
-              <Icon name="send" size={14} />
-              <span class="grow">Telegram</span>
-              <span class="count-chip">{ws.telegramSessions.length}</span>
-            </button>
-            <button
-              class="icon-btn twisty"
-              onclick={() => (telegramOpen = !telegramOpen)}
-              aria-label="Toggle Telegram list"
-            >
-              <Icon name={telegramOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-            </button>
-          </div>
-          {#if telegramOpen || q}
-            <div class="nested">
-              {#each visTelegram as s (s.id)}
-                {@render sessionRow(s)}
-              {:else}
-                <div class="nested-empty">No matching</div>
-              {/each}
-              {#if !q && fTelegram.length > CHANNEL_CAP}
-                <button class="show-more" onclick={() => (telegramShowAll = !telegramShowAll)}>
-                  {telegramShowAll ? 'Show less' : `Show ${fTelegram.length - CHANNEL_CAP} more`}
-                </button>
-              {/if}
-            </div>
-          {/if}
-        {/if}
-
-        {#if q ? fSlack.length > 0 : ws.slackSessions.length > 0}
-          <div class="nav-item-row">
-            <button class="nav-item" onclick={() => (slackOpen = !slackOpen)}>
-              <Icon name="slack" size={14} />
-              <span class="grow">Slack</span>
-              <span class="count-chip">{ws.slackSessions.length}</span>
-            </button>
-            <button
-              class="icon-btn twisty"
-              onclick={() => (slackOpen = !slackOpen)}
-              aria-label="Toggle Slack list"
-            >
-              <Icon name={slackOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-            </button>
-          </div>
-          {#if slackOpen || q}
-            <div class="nested">
-              {#each visSlack as s (s.id)}
-                {@render sessionRow(s)}
-              {:else}
-                <div class="nested-empty">No matching</div>
-              {/each}
-              {#if !q && fSlack.length > CHANNEL_CAP}
-                <button class="show-more" onclick={() => (slackShowAll = !slackShowAll)}>
-                  {slackShowAll ? 'Show less' : `Show ${fSlack.length - CHANNEL_CAP} more`}
-                </button>
-              {/if}
-            </div>
-          {/if}
-        {/if}
+    <div class="nav-section" data-testid="sidebar-modules">
+      {#if ui.sidebarEditMode}
+        <p class="edit-hint">Drag to reorder · tap the eye to hide. Hidden items stay listed here while you edit.</p>
       {/if}
 
-      {#if auth.can('connections', 'view')}
-        <div class="nav-item-row">
-          <button
-            class="nav-item"
-            class:active={router.module === 'connections'}
-            onclick={() => router.go('connections')}
-          >
-            <Icon name="plug" size={14} />
-            <span class="grow">Connections</span>
-            {#if ws.connectionSessions.length > 0}
-              <span class="count-chip">{ws.connectionSessions.length}</span>
-            {/if}
-          </button>
-          <button
-            class="icon-btn twisty"
-            onclick={() => (connectionsOpen = !connectionsOpen)}
-            aria-label="Toggle connection list"
-          >
-            <Icon name={connectionsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          </button>
-        </div>
-
-        {#if connectionsOpen}
-          <div class="nested">
-            {#each ws.connectionSessions as s (s.id)}
-              {@render sessionRow(s)}
-            {:else}
-              <div class="nested-empty">No open connections — open one from the page</div>
-            {/each}
-          </div>
-        {/if}
-      {/if}
-
-      {#if auth.can('swarm', 'view')}
-        <button class="nav-item" class:active={router.module === 'swarm'} onclick={() => router.go('swarm')}>
-          <Icon name="grid" size={14} />
-          <span class="grow">Swarm</span>
-        </button>
-      {/if}
-
-      {#if auth.can('git', 'view')}
-        <button class="nav-item" class:active={router.module === 'git'} onclick={() => router.go('git')}>
-          <Icon name="branch" size={14} />
-          <span class="grow">Git</span>
-        </button>
-      {/if}
-
-      {#if auth.can('product', 'view')}
-        <button class="nav-item" class:active={router.module === 'product'} onclick={() => router.go('product')}>
-          <Icon name="note" size={14} />
-          <span class="grow">Product</span>
-        </button>
-      {/if}
-
-      <!-- "Vault" (memory layer) ships without an RBAC feature key, so it is
-           rendered un-gated — visible to any authenticated member. -->
-      <button class="nav-item" class:active={router.module === 'vault'} onclick={() => router.go('vault')}>
-        <Icon name="globe" size={14} />
-        <span class="grow">Vault</span>
-      </button>
-
-      {#if auth.can('api_client', 'view')}
-        <button class="nav-item" class:active={router.module === 'api'} onclick={() => router.go('api')}>
-          <Icon name="send" size={14} />
-          <span class="grow">API</span>
-        </button>
-      {/if}
-
-      {#if auth.can('database', 'view')}
-        <button class="nav-item" class:active={router.module === 'database'} onclick={() => router.go('database')}>
-          <Icon name="db" size={14} />
-          <span class="grow">Database</span>
-        </button>
-      {/if}
-
-      <!-- "Message Brokers" ships without an RBAC feature key (like "Vault"), so
-           it is rendered un-gated — visible to any authenticated member. -->
-      <button class="nav-item" class:active={router.module === 'brokers'} onclick={() => router.go('brokers')}>
-        <Icon name="box" size={14} />
-        <span class="grow">Message Brokers</span>
-      </button>
-
-      {#if auth.can('workflows', 'view')}
-        <button
-          class="nav-item"
-          class:active={router.module === 'workflows'}
-          onclick={() => router.go('workflows')}
-        >
-          <Icon name="split" size={14} />
-          <span class="grow">Workflows</span>
-        </button>
-      {/if}
-
-      {#if auth.can('skill_eval', 'view')}
-        <button
-          class="nav-item"
-          class:active={router.module === 'skills-eval'}
-          onclick={() => router.go('skills-eval')}
-        >
-          <Icon name="zap" size={14} />
-          <span class="grow">Skills Evaluator</span>
-        </button>
-      {/if}
-
-      {#if auth.can('insights', 'view')}
-        <button
-          class="nav-item"
-          class:active={router.module === 'insights'}
-          onclick={() => router.go('insights')}
-        >
-          <Icon name="gauge" size={14} />
-          <span class="grow">Insights</span>
-        </button>
-      {/if}
-
-      {#if auth.can('usage', 'view')}
-        <button
-          class="nav-item"
-          class:active={router.module === 'usage'}
-          onclick={() => router.go('usage')}
-        >
-          <Icon name="chart" size={14} />
-          <span class="grow">Usage</span>
-        </button>
-      {/if}
-
-      <!-- Runtime custom plugins (RBAC-gated by slug), routing to #/plugin/<slug>. -->
-      {#each plugins.list as p (p.slug)}
-        {#if auth.canPlugin(p.slug, 'view')}
-          <button
-            class="nav-item"
-            class:active={router.module === 'plugin' && router.parts[1] === p.slug}
-            onclick={() => router.go(`plugin/${p.slug}`)}
-          >
-            <Icon name={p.icon} size={14} />
-            <span class="grow">{p.name}</span>
-          </button>
+      <!-- Modules render in the user's saved order (shared registry). While
+           editing, every resolved module shows as a compact draggable row
+           (incl. hidden ones, so they can be toggled back on); otherwise the
+           special Agents/Connections blocks (with their nested session lists)
+           and plain rows render normally. -->
+      {#each navList as m, i (m.id)}
+        {#if ui.sidebarEditMode}
+          {@render editRow(m, i)}
+        {:else if m.id === 'agents'}
+          {@render agentsBlock()}
+        {:else if m.id === 'connections'}
+          {@render connectionsBlock()}
+        {:else}
+          {@render simpleRow(m)}
         {/if}
       {/each}
 
-      {#if ws.archivedSessions.length > 0}
+      {#if !ui.sidebarEditMode && ws.archivedSessions.length > 0}
         <button class="nav-item subtle" onclick={() => (archivedOpen = !archivedOpen)}>
           <Icon name="archive" size={14} />
           <span class="grow">Archived</span>
@@ -489,6 +342,22 @@
   </div>
 
   <div class="nav-foot">
+    {#if ui.sidebarEditMode}
+      <button class="nav-item subtle" onclick={() => ui.resetSidebar()} data-testid="sidebar-reset">
+        <Icon name="refresh" size={14} />
+        <span class="grow">Reset to default</span>
+      </button>
+    {/if}
+    <button
+      class="nav-item subtle"
+      class:active={ui.sidebarEditMode}
+      onclick={() => ui.toggleSidebarEdit()}
+      title="Show, hide and reorder sidebar items"
+      data-testid="sidebar-edit-toggle"
+    >
+      <Icon name={ui.sidebarEditMode ? 'check' : 'edit'} size={14} />
+      <span class="grow">{ui.sidebarEditMode ? 'Done' : 'Customize sidebar'}</span>
+    </button>
     <button
       class="nav-item"
       class:active={router.module === 'walkthroughs'}
@@ -515,6 +384,196 @@
     </div>
   </div>
 </nav>
+
+{#snippet simpleRow(m: SidebarModule)}
+  <button
+    class="nav-item"
+    class:active={isActive(m.id)}
+    onclick={() => router.go(m.id)}
+  >
+    <Icon name={m.icon} size={14} />
+    <span class="grow">{m.label}</span>
+  </button>
+{/snippet}
+
+{#snippet editRow(m: SidebarModule, i: number)}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="edit-row"
+    class:hidden-row={isHidden(m.id)}
+    class:drag-over={dragOverId === m.id}
+    draggable={true}
+    ondragstart={(e) => onDragStart(e, m.id)}
+    ondragover={(e) => onDragOver(e, m.id)}
+    ondragleave={() => onDragLeave(m.id)}
+    ondrop={(e) => onDrop(e, m.id)}
+    ondragend={onDragEnd}
+    data-testid={`sidebar-edit-row-${m.id}`}
+  >
+    <span class="grip" title="Drag to reorder" aria-hidden="true"><Icon name="grip" size={14} /></span>
+    <Icon name={m.icon} size={14} />
+    <span class="grow ellipsis">{m.label}</span>
+    <button
+      class="row-action"
+      onclick={() => move(m.id, -1)}
+      disabled={i === 0}
+      title="Move up"
+      aria-label={`Move ${m.label} up`}
+    >
+      <Icon name="arrowUp" size={12} />
+    </button>
+    <button
+      class="row-action"
+      onclick={() => move(m.id, 1)}
+      disabled={i === navList.length - 1}
+      title="Move down"
+      aria-label={`Move ${m.label} down`}
+    >
+      <Icon name="arrowDown" size={12} />
+    </button>
+    <button
+      class="row-action"
+      onclick={() => ui.toggleSidebarHidden(m.id)}
+      title={isHidden(m.id) ? 'Show' : 'Hide'}
+      aria-label={isHidden(m.id) ? `Show ${m.label}` : `Hide ${m.label}`}
+      data-testid={`sidebar-hide-${m.id}`}
+    >
+      <Icon name={isHidden(m.id) ? 'eyeOff' : 'eye'} size={13} />
+    </button>
+  </div>
+{/snippet}
+
+{#snippet agentsBlock()}
+  <div class="nav-item-row">
+    <button
+      class="nav-item"
+      class:active={router.module === 'agents' || router.module === ''}
+      onclick={() => router.go('agents')}
+      oncontextmenu={(e) => ctxMenu.show(e, [
+        { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+        { label: 'Add workspace…', icon: 'folder', action: () => (ui.newWorkspaceOpen = true) },
+      ])}
+    >
+      <Icon name="terminal" size={14} />
+      <span class="grow">Agents</span>
+      {#if ws.workingCount > 0}
+        <span class="count-chip working">{ws.workingCount}</span>
+      {/if}
+    </button>
+    <button
+      class="icon-btn twisty"
+      onclick={() => (agentsOpen = !agentsOpen)}
+      aria-label="Toggle session list"
+    >
+      <Icon name={agentsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+    </button>
+  </div>
+
+  {#if q ? fAgents.length > 0 : agentsOpen}
+    <div class="nested">
+      {#each fAgents as s (s.id)}
+        {@render sessionRow(s)}
+      {:else}
+        <div class="nested-empty">No sessions — ⌘T to start one</div>
+      {/each}
+    </div>
+  {/if}
+
+  {#if q ? fTelegram.length > 0 : ws.telegramSessions.length > 0}
+    <div class="nav-item-row">
+      <button class="nav-item" onclick={() => (telegramOpen = !telegramOpen)}>
+        <Icon name="send" size={14} />
+        <span class="grow">Telegram</span>
+        <span class="count-chip">{ws.telegramSessions.length}</span>
+      </button>
+      <button
+        class="icon-btn twisty"
+        onclick={() => (telegramOpen = !telegramOpen)}
+        aria-label="Toggle Telegram list"
+      >
+        <Icon name={telegramOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+      </button>
+    </div>
+    {#if telegramOpen || q}
+      <div class="nested">
+        {#each visTelegram as s (s.id)}
+          {@render sessionRow(s)}
+        {:else}
+          <div class="nested-empty">No matching</div>
+        {/each}
+        {#if !q && fTelegram.length > CHANNEL_CAP}
+          <button class="show-more" onclick={() => (telegramShowAll = !telegramShowAll)}>
+            {telegramShowAll ? 'Show less' : `Show ${fTelegram.length - CHANNEL_CAP} more`}
+          </button>
+        {/if}
+      </div>
+    {/if}
+  {/if}
+
+  {#if q ? fSlack.length > 0 : ws.slackSessions.length > 0}
+    <div class="nav-item-row">
+      <button class="nav-item" onclick={() => (slackOpen = !slackOpen)}>
+        <Icon name="slack" size={14} />
+        <span class="grow">Slack</span>
+        <span class="count-chip">{ws.slackSessions.length}</span>
+      </button>
+      <button
+        class="icon-btn twisty"
+        onclick={() => (slackOpen = !slackOpen)}
+        aria-label="Toggle Slack list"
+      >
+        <Icon name={slackOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+      </button>
+    </div>
+    {#if slackOpen || q}
+      <div class="nested">
+        {#each visSlack as s (s.id)}
+          {@render sessionRow(s)}
+        {:else}
+          <div class="nested-empty">No matching</div>
+        {/each}
+        {#if !q && fSlack.length > CHANNEL_CAP}
+          <button class="show-more" onclick={() => (slackShowAll = !slackShowAll)}>
+            {slackShowAll ? 'Show less' : `Show ${fSlack.length - CHANNEL_CAP} more`}
+          </button>
+        {/if}
+      </div>
+    {/if}
+  {/if}
+{/snippet}
+
+{#snippet connectionsBlock()}
+  <div class="nav-item-row">
+    <button
+      class="nav-item"
+      class:active={router.module === 'connections'}
+      onclick={() => router.go('connections')}
+    >
+      <Icon name="plug" size={14} />
+      <span class="grow">Connections</span>
+      {#if ws.connectionSessions.length > 0}
+        <span class="count-chip">{ws.connectionSessions.length}</span>
+      {/if}
+    </button>
+    <button
+      class="icon-btn twisty"
+      onclick={() => (connectionsOpen = !connectionsOpen)}
+      aria-label="Toggle connection list"
+    >
+      <Icon name={connectionsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+    </button>
+  </div>
+
+  {#if connectionsOpen}
+    <div class="nested">
+      {#each ws.connectionSessions as s (s.id)}
+        {@render sessionRow(s)}
+      {:else}
+        <div class="nested-empty">No open connections — open one from the page</div>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
 
 {#snippet sessionRow(s: Session)}
   {@const status = ws.statusMap[s.id] ?? s.status}
@@ -721,6 +780,54 @@
   }
   .nav-item.active-ws {
     font-weight: 600;
+  }
+  /* ── Sidebar edit mode ──────────────────────────────────────────────── */
+  .edit-hint {
+    margin: 2px 6px 8px;
+    padding: 6px 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    border-radius: var(--radius-s);
+  }
+  .edit-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 30px;
+    padding: 0 4px 0 6px;
+    border-radius: var(--radius-s);
+    color: var(--text);
+    font-size: 12.5px;
+    cursor: grab;
+    border: 1px solid transparent;
+  }
+  .edit-row:hover {
+    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  }
+  .edit-row.drag-over {
+    border-inline-start: 2px solid var(--accent);
+  }
+  /* Hidden modules stay listed while editing, dimmed, so they can be re-shown. */
+  .edit-row.hidden-row {
+    opacity: 0.45;
+  }
+  .edit-row .grip {
+    display: grid;
+    place-items: center;
+    color: var(--text-dim);
+    cursor: grab;
+    flex-shrink: 0;
+  }
+  /* Edit-row action buttons are always visible (unlike the hover-revealed
+     session row-actions). */
+  .edit-row .row-action {
+    opacity: 1;
+  }
+  .edit-row .row-action:disabled {
+    opacity: 0.25;
+    cursor: default;
   }
   .nested {
     margin: 2px 0 6px;

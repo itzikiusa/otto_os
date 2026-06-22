@@ -103,6 +103,32 @@
       .sort(sortByName),
   );
 
+  // --- Connection search / filter --------------------------------------------
+  // A filter box over the connection list (mirrors SchemaTree's "Filter schema").
+  // When it has text we show a flat, name-sorted result list instead of the tree
+  // so a connection is findable instantly even with a hundred of them.
+  let connFilter = $state('');
+  // Compact host/uri descriptor used for matching (and shown on flat results).
+  function connDesc(c: Connection): string {
+    const p = (c.params ?? {}) as Record<string, unknown>;
+    const host = String(p.host ?? p.uri ?? p.url ?? p.path ?? '');
+    const port = p.port != null && p.port !== '' ? `:${String(p.port)}` : '';
+    return `${host}${port}`;
+  }
+  const connMatches = $derived.by(() => {
+    const q = connFilter.trim().toLowerCase();
+    if (!q) return [];
+    return database.connections
+      .filter(
+        (c) =>
+          c.name.toLowerCase().includes(q) ||
+          c.kind.toLowerCase().includes(q) ||
+          connDesc(c).toLowerCase().includes(q) ||
+          sectionPath(c).toLowerCase().includes(q),
+      )
+      .sort(sortByName);
+  });
+
   async function loadSections(): Promise<void> {
     const wsId = ws.currentId;
     if (!wsId) return;
@@ -332,69 +358,25 @@
 
 <div class="db-page">
   <aside class="db-side">
-    <!-- Connection picker + management -->
-    <div class="conn-head" class:acc-head={viewport.isPhone}>
-      {#if viewport.isPhone}
+    {#if viewport.isPhone}
+      <!-- PHONE: collapsible accordions (one section at a time), unchanged layout
+           except the connection list now carries a filter box. -->
+      <div class="conn-head acc-head">
         <button class="acc-toggle" onclick={() => (connOpen = !connOpen)} aria-expanded={connOpen}>
           <Icon name={connOpen ? 'chevronDown' : 'chevronRight'} size={14} />
           <span class="conn-head-title">Connections</span>
           {#if database.connections.length > 0}<span class="acc-count">{database.connections.length}</span>{/if}
         </button>
-      {:else}
-        <span class="conn-head-title">Connections</span>
-      {/if}
-      <div class="head-btns">
-        <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section">
-          <Icon name="folder" size={13} />
-        </button>
-        <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection">
-          <Icon name="plus" size={13} />
-        </button>
-      </div>
-    </div>
-    <div class="conn-list" class:acc-collapsed={viewport.isPhone && !connOpen}>
-      {#if database.connections.length === 0 && sections.length === 0}
-        <div class="conn-empty">
-          No database connections.
-          <button class="link" onclick={newConnection}>New connection →</button>
+        <div class="head-btns">
+          <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={13} /></button>
+          <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection"><Icon name="plus" size={13} /></button>
         </div>
-      {:else}
-        {#each tree as node (node.sec.id)}
-          {@render sectionNode(node, 0)}
-        {/each}
+      </div>
+      <div class="conn-list" class:acc-collapsed={!connOpen}>
+        {@render connListBody()}
+      </div>
 
-        {#if sections.length > 0}
-          <!-- Ungrouped doubles as the root / no-section drop target. -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="sec-head plain"
-            class:drop-target={draggedConnId || draggedSectionId}
-            ondragover={(e) => {
-              if (draggedConnId || draggedSectionId) e.preventDefault();
-            }}
-            ondrop={(e) => {
-              e.preventDefault();
-              onRootDrop();
-            }}
-            title="Drop here to remove from a section / make a section top-level"
-          >
-            <span class="caret-spacer"></span>
-            <span class="sec-name grow">Ungrouped</span>
-            {#if ungrouped.length > 0}<span class="count">{ungrouped.length}</span>{/if}
-          </div>
-          {#each ungrouped as c (c.id)}
-            {@render connRow(c, 1)}
-          {/each}
-        {:else}
-          {#each ungrouped as c (c.id)}
-            {@render connRow(c, 0)}
-          {/each}
-        {/if}
-      {/if}
-    </div>
-
-    {#if database.selectedConnId}
-      {#if viewport.isPhone}
+      {#if database.selectedConnId}
         <!-- Phone: a tappable accordion header gates the whole schema panel. -->
         <div class="conn-head acc-head">
           <button class="acc-toggle" onclick={() => (schemaOpen = !schemaOpen)} aria-expanded={schemaOpen}>
@@ -407,47 +389,35 @@
             </div>
           {/if}
         </div>
+        <div class="side-switch" class:acc-collapsed={!schemaOpen} role="tablist">
+          <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => (database.sideTab = 'schema')}>Schema</button>
+          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => (database.sideTab = 'saved')}>Saved</button>
+          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => (database.sideTab = 'history')}>History</button>
+        </div>
+        <div class="side-body" class:acc-collapsed={!schemaOpen}>
+          {@render schemaSideBody()}
+        </div>
       {/if}
-      <!-- Schema / Saved / History switch -->
-      <div class="side-switch" class:acc-collapsed={viewport.isPhone && !schemaOpen} role="tablist">
+    {:else}
+      <!-- TABLET / DESKTOP: one tab strip. "Connections" is the picker tab, so
+           the list takes the full sidebar height instead of a capped section. -->
+      <div class="side-switch" role="tablist">
+        <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} onclick={() => (database.sideTab = 'connections')}>Connections</button>
         <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => (database.sideTab = 'schema')}>Schema</button>
         <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => (database.sideTab = 'saved')}>Saved</button>
         <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => (database.sideTab = 'history')}>History</button>
-        {#if database.sideTab === 'schema' && !viewport.isPhone}
+        {#if database.sideTab === 'schema' && database.selectedConnId}
           <span class="grow"></span>
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
         {/if}
       </div>
-
-      <div class="side-body" class:acc-collapsed={viewport.isPhone && !schemaOpen}>
-        {#if database.sideTab === 'schema'}
-          <SchemaTree />
-        {:else if database.sideTab === 'saved'}
-          {#if database.savedQueries.length === 0}
-            <div class="list-empty">No saved queries. Save one from the Query tab.</div>
-          {:else}
-            {#each database.savedQueries as q (q.id)}
-              <div class="saved-row">
-                <button class="saved-open" onclick={() => database.openSavedQuery(q)} title={q.statement}>
-                  <Icon name="file" size={12} />
-                  <span class="ellipsis">{q.name}</span>
-                </button>
-                <button class="icon-btn row-del" onclick={() => database.deleteSavedQuery(q.id)} aria-label="Delete saved query"><Icon name="trash" size={11} /></button>
-              </div>
-            {/each}
-          {/if}
+      <div class="side-body">
+        {#if database.sideTab === 'connections'}
+          <div class="conn-list">{@render connListBody()}</div>
+        {:else if database.selectedConnId}
+          {@render schemaSideBody()}
         {:else}
-          {#if database.history.length === 0}
-            <div class="list-empty">No query history yet.</div>
-          {:else}
-            {#each database.history as h (h.id)}
-              <button class="hist-row" class:bad={!h.ok} onclick={() => database.openHistory(h)} title={h.error ?? h.statement}>
-                <span class="hist-dot" class:ok={h.ok}></span>
-                <span class="hist-stmt ellipsis mono">{h.statement}</span>
-                <span class="hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {fmtAgo(h.created_at)}</span>
-              </button>
-            {/each}
-          {/if}
+          <div class="list-empty">Open a connection to browse its schema.</div>
         {/if}
       </div>
     {/if}
@@ -546,7 +516,7 @@
   <div
     class="sec-head"
     class:drop-target={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedConnId}
-    style="padding-left: {depth * 14 + 2}px"
+    style="padding-inline-start: {depth * 14 + 2}px"
     draggable="true"
     ondragstart={(e) => {
       draggedSectionId = node.sec.id;
@@ -597,7 +567,7 @@
     class:active={database.selectedConnId === c.id}
     class:open={database.openConnIds.includes(c.id)}
     class:dragging={draggedConnId === c.id}
-    style="padding-left: {depth * 14}px"
+    style="padding-inline-start: {depth * 14}px"
     draggable="true"
     ondragstart={(e) => {
       draggedConnId = c.id;
@@ -607,7 +577,7 @@
     oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}
   >
     <button class="conn-item" onclick={() => database.openConnection(c.id)} title="{c.name} · {c.kind}{isProdConn(c) ? ' · PRODUCTION' : c.read_only ? ' · read-only' : ''} — right-click to open beside agents">
-      <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={13} /></span>
+      <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
       <span class="conn-name ellipsis">{c.name}</span>
       {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
     </button>
@@ -620,6 +590,111 @@
       </button>
     </div>
   </div>
+{/snippet}
+
+{#snippet connSearchBox()}
+  <div class="tree-search">
+    <Icon name="search" size={11} />
+    <input
+      class="tree-search-input"
+      type="text"
+      bind:value={connFilter}
+      placeholder="Filter connections…"
+      spellcheck="false"
+      aria-label="Filter connections"
+    />
+    {#if connFilter}
+      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter"><Icon name="x" size={10} /></button>
+    {/if}
+    {#if !viewport.isPhone}
+      <!-- New section / connection live here on tablet/desktop (the phone keeps
+           them in the accordion header), so the tab strip never overflows. -->
+      <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={12} /></button>
+      <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection"><Icon name="plus" size={12} /></button>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet connListBody()}
+  {@render connSearchBox()}
+  {#if database.connections.length === 0 && sections.length === 0}
+    <div class="conn-empty">
+      No database connections.
+      <button class="link" onclick={newConnection}>New connection →</button>
+    </div>
+  {:else if connFilter.trim()}
+    {#if connMatches.length === 0}
+      <div class="list-empty">No connections match “{connFilter.trim()}”.</div>
+    {:else}
+      {#each connMatches as c (c.id)}
+        {@render connRow(c, 0)}
+      {/each}
+    {/if}
+  {:else}
+    {#each tree as node (node.sec.id)}
+      {@render sectionNode(node, 0)}
+    {/each}
+
+    {#if sections.length > 0}
+      <!-- Ungrouped doubles as the root / no-section drop target. -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="sec-head plain"
+        class:drop-target={draggedConnId || draggedSectionId}
+        ondragover={(e) => {
+          if (draggedConnId || draggedSectionId) e.preventDefault();
+        }}
+        ondrop={(e) => {
+          e.preventDefault();
+          onRootDrop();
+        }}
+        title="Drop here to remove from a section / make a section top-level"
+      >
+        <span class="caret-spacer"></span>
+        <span class="sec-name grow">Ungrouped</span>
+        {#if ungrouped.length > 0}<span class="count">{ungrouped.length}</span>{/if}
+      </div>
+      {#each ungrouped as c (c.id)}
+        {@render connRow(c, 1)}
+      {/each}
+    {:else}
+      {#each ungrouped as c (c.id)}
+        {@render connRow(c, 0)}
+      {/each}
+    {/if}
+  {/if}
+{/snippet}
+
+{#snippet schemaSideBody()}
+  {#if database.sideTab === 'saved'}
+    {#if database.savedQueries.length === 0}
+      <div class="list-empty">No saved queries. Save one from the Query tab.</div>
+    {:else}
+      {#each database.savedQueries as q (q.id)}
+        <div class="saved-row">
+          <button class="saved-open" onclick={() => database.openSavedQuery(q)} title={q.statement}>
+            <Icon name="file" size={12} />
+            <span class="ellipsis">{q.name}</span>
+          </button>
+          <button class="icon-btn row-del" onclick={() => database.deleteSavedQuery(q.id)} aria-label="Delete saved query"><Icon name="trash" size={11} /></button>
+        </div>
+      {/each}
+    {/if}
+  {:else if database.sideTab === 'history'}
+    {#if database.history.length === 0}
+      <div class="list-empty">No query history yet.</div>
+    {:else}
+      {#each database.history as h (h.id)}
+        <button class="hist-row" class:bad={!h.ok} onclick={() => database.openHistory(h)} title={h.error ?? h.statement}>
+          <span class="hist-dot" class:ok={h.ok}></span>
+          <span class="hist-stmt ellipsis mono">{h.statement}</span>
+          <span class="hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {fmtAgo(h.created_at)}</span>
+        </button>
+      {/each}
+    {/if}
+  {:else}
+    <SchemaTree />
+  {/if}
 {/snippet}
 
 {#if connFormOpen}
@@ -651,8 +726,50 @@
     gap: 1px;
     padding: 10px 8px;
     border-bottom: 1px solid var(--border);
-    max-height: 35%;
     overflow-y: auto;
+  }
+  /* On tablet/desktop the list lives inside the scrollable .side-body tab, so it
+     fills the full sidebar height (no cap) and the side-body owns the scroll. */
+  .side-body .conn-list {
+    padding: 0;
+    border-bottom: none;
+    overflow-y: visible;
+  }
+  /* Connection filter box — mirrors SchemaTree's "Filter schema" input. */
+  .tree-search {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 6px 6px;
+    margin-bottom: 2px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .tree-search-input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 11.5px;
+    outline: none;
+    min-width: 0;
+  }
+  .tree-search-input::placeholder {
+    color: var(--text-dim);
+  }
+  .tree-search-clear {
+    display: grid;
+    place-items: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  .tree-search-clear:hover {
+    color: var(--text);
   }
   .conn-empty,
   .list-empty {
@@ -672,9 +789,9 @@
   .conn-item {
     display: flex;
     align-items: center;
-    gap: 8px;
-    height: 30px;
-    padding: 0 8px;
+    gap: 6px;
+    height: 26px;
+    padding: 0 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -714,7 +831,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    height: 28px;
+    height: 24px;
     padding: 0 6px;
     border-radius: var(--radius-s);
     cursor: grab;
@@ -819,7 +936,7 @@
   .conn-name {
     flex: 1;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: 12px;
     font-weight: 500;
   }
   .side-switch {
@@ -828,10 +945,18 @@
     gap: 2px;
     padding: 8px 8px 6px;
     border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .side-switch::-webkit-scrollbar {
+    display: none;
+  }
+  .side-switch .ss {
+    flex-shrink: 0;
   }
   .ss {
     height: 24px;
-    padding: 0 9px;
+    padding: 0 7px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;

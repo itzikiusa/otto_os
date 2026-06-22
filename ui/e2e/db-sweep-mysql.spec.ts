@@ -315,24 +315,29 @@ test.describe('DB Explorer · MySQL sweep', () => {
     test.skip(connId == null, 'mysql connection unavailable');
     await openMysql(page);
 
-    // The connection list is present in every layout. On a phone it's behind the
-    // "Connections" accordion — make sure it's expandable & the row is reachable.
+    // Reveal the connection list. On a phone it's behind the "Connections"
+    // accordion; on tablet/desktop it's the "Connections" sidebar tab (opening a
+    // connection switches the sidebar to Schema, so click back to Connections).
     if (isPhone(page)) {
       const list = page.locator('.conn-list');
       if (!(await list.isVisible().catch(() => false))) {
         await page.locator('.acc-toggle', { hasText: 'Connections' }).click();
       }
-      await expect(list).toBeVisible();
+    } else {
+      await page.locator('.side-switch .ss', { hasText: 'Connections' }).click();
     }
+    await expect(page.locator('.conn-list')).toBeVisible();
     await expect(page.locator('.conn-list .conn-name', { hasText: 'e2e-mysql' }).first()).toBeVisible();
 
-    // The schema side panel exists once a connection is selected. On a phone the
-    // "Schema & saved" accordion gates it — open it.
+    // Open the schema view. Phone: the "Schema & saved" accordion gates it.
+    // Tablet/desktop: click the "Schema" tab.
     if (isPhone(page)) {
       const sideBody = page.locator('.side-body');
       if (!(await sideBody.isVisible().catch(() => false))) {
         await page.locator('.acc-toggle', { hasText: 'Schema' }).click();
       }
+    } else {
+      await page.locator('.side-switch .ss', { hasText: 'Schema' }).click();
     }
     // The schema switch (Schema/Saved/History) and the tree are present.
     await expect(page.locator('.side-switch')).toBeVisible({ timeout: 15_000 });

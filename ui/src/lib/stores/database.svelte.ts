@@ -302,8 +302,9 @@ function blankTab(statement = ''): QueryTab {
 
 /** Main-pane tabs of the DB page. */
 export type DbMainTab = 'query' | 'builder' | 'structure' | 'diagram' | 'dashboards';
-/** Sidebar lower switch (below the schema tree). */
-export type DbSideTab = 'schema' | 'saved' | 'history';
+/** Sidebar tab switch. `connections` is the global connection picker; the
+ *  others are per-connection views of the active connection. */
+export type DbSideTab = 'connections' | 'schema' | 'saved' | 'history';
 
 /**
  * Point-in-time copy of a connection's active-session working set, kept so we
@@ -424,7 +425,10 @@ class DatabaseStore {
 
   // ── UI tabs ────────────────────────────────────────────────────────────────
   mainTab: DbMainTab = $state('query');
-  sideTab: DbSideTab = $state('schema');
+  // Default to the connection picker — it's the global view shown before any
+  // connection is open. Opening a connection switches to 'schema' (see
+  // loadConnectionFresh); snapshots never restore 'connections' (captureSnapshot).
+  sideTab: DbSideTab = $state('connections');
 
   // ── Saved queries / history ─────────────────────────────────────────────
   savedQueries: DbSavedQuery[] = $state([]);
@@ -634,7 +638,10 @@ class DatabaseStore {
       savedQueries: this.savedQueries,
       history: this.history,
       mainTab: this.mainTab,
-      sideTab: this.sideTab,
+      // 'connections' is a global picker view, not a per-connection state —
+      // collapse it to 'schema' so reopening a connection never lands back on
+      // the picker.
+      sideTab: this.sideTab === 'connections' ? 'schema' : this.sideTab,
     });
   }
 
@@ -720,6 +727,8 @@ class DatabaseStore {
       this.activeTab = 0;
       this.history = [];
       this.mainTab = 'query';
+      // Back to the picker — there's no active connection to show a schema for.
+      this.sideTab = 'connections';
       return;
     }
     // Focus the previous tab (or the first if we closed index 0). The active id
