@@ -13,7 +13,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { QueryResult, DbExportFormat, ExportToPathResp } from '../../lib/api/types';
-  import { api } from '../../lib/api/client';
+  import { api, postForText } from '../../lib/api/client';
   import { downloadText } from '../../lib/components/exporters';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
@@ -993,7 +993,7 @@
     if (!connectionId || !statement || exporting) return;
     exporting = true;
     try {
-      const text = await api.post<string>(
+      const text = await postForText(
         `/connections/${connectionId}/db/export`,
         { statement, format: 'csv', node: database.activeDb ?? undefined },
       );

@@ -126,6 +126,40 @@ export async function authedBlobUrl(path: string): Promise<string> {
   return URL.createObjectURL(await resp.blob());
 }
 
+/**
+ * POST a JSON body to /api/v1<path> with the bearer token and return the RAW
+ * response body as text. For download/export endpoints that reply with a
+ * non-JSON body (e.g. `text/csv`) — which the JSON-parsing `request()` helper
+ * cannot read (it would `resp.json()` the CSV and throw a SyntaxError).
+ * Mirrors `authedBlobUrl`'s error handling; skips `serviceHealth.report` for the
+ * same reason `request()` does on infra paths.
+ */
+export async function postForText(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const resp = await fetch(`${baseUrl()}/api/v1${path}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!resp.ok) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try {
+      problem = await resp.json();
+    } catch {
+      // non-JSON error body — keep statusText
+    }
+    throw new ApiError(resp.status, problem);
+  }
+  return resp.text();
+}
+
 /** Build a WS URL with the auth token, e.g. wsUrl('/ws/term/SESSION_ID'). */
 export function wsUrl(path: string): string {
   const base = new URL(baseUrl());
