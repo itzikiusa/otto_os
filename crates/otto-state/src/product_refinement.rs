@@ -243,24 +243,58 @@ mod tests {
     async fn thread_and_message_roundtrip() {
         let pool = mem_pool().await;
         let repo = ProductRefinementRepo::new(pool);
-        let t = repo.create_thread(NewRefinementThread{
-            story_id:"s1".into(), workspace_id:"w1".into(), discovery_run_id:None,
-            cwd:"/tmp/refine/t1".into(), title:"Sharpen ACs".into(), model:None,
-            created_by:"u1".into() }).await.unwrap();
+        let t = repo
+            .create_thread(NewRefinementThread {
+                story_id: "s1".into(),
+                workspace_id: "w1".into(),
+                discovery_run_id: None,
+                cwd: "/tmp/refine/t1".into(),
+                title: "Sharpen ACs".into(),
+                model: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
         assert_eq!(t.status, "active");
-        assert_eq!(repo.get_thread(&t.id).await.unwrap().unwrap().title, "Sharpen ACs");
-        assert_eq!(repo.list_threads_for_story(&"s1".into()).await.unwrap().len(), 1);
+        assert_eq!(
+            repo.get_thread(&t.id).await.unwrap().unwrap().title,
+            "Sharpen ACs"
+        );
+        assert_eq!(
+            repo.list_threads_for_story(&"s1".into())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
-        let m1 = repo.create_message(NewRefinementMessage{ thread_id:t.id.clone(), role:"user".into(),
-            body:"add edge cases".into(), meta_json:None }).await.unwrap();
-        let _m2 = repo.create_message(NewRefinementMessage{ thread_id:t.id.clone(), role:"agent".into(),
-            body:"done".into(), meta_json:Some(r#"{"story_updated":true,"version_no":3}"#.into()) }).await.unwrap();
+        let m1 = repo
+            .create_message(NewRefinementMessage {
+                thread_id: t.id.clone(),
+                role: "user".into(),
+                body: "add edge cases".into(),
+                meta_json: None,
+            })
+            .await
+            .unwrap();
+        let _m2 = repo
+            .create_message(NewRefinementMessage {
+                thread_id: t.id.clone(),
+                role: "agent".into(),
+                body: "done".into(),
+                meta_json: Some(r#"{"story_updated":true,"version_no":3}"#.into()),
+            })
+            .await
+            .unwrap();
         let msgs = repo.list_messages(&t.id).await.unwrap();
         assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].id, m1.id);          // chronological (oldest first)
+        assert_eq!(msgs[0].id, m1.id); // chronological (oldest first)
         assert_eq!(msgs[0].role, "user");
 
         repo.archive_thread(&t.id).await.unwrap();
-        assert_eq!(repo.get_thread(&t.id).await.unwrap().unwrap().status, "archived");
+        assert_eq!(
+            repo.get_thread(&t.id).await.unwrap().unwrap().status,
+            "archived"
+        );
     }
 }

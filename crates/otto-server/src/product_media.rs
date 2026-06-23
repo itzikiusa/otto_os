@@ -113,9 +113,7 @@ fn sniff_ok(declared: &str, bytes: &[u8]) -> bool {
         "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
         "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
         // RIFF....WEBP — 4-byte "RIFF", 4-byte size, then "WEBP".
-        "image/webp" => {
-            bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
-        }
+        "image/webp" => bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
         "application/pdf" => bytes.starts_with(b"%PDF-"),
         // Text-ish formats: accept any valid UTF-8 payload.
         "image/svg+xml" | "text/html" | "text/plain" | "text/markdown" => {
@@ -486,11 +484,7 @@ fn default_kind_for_mime(mime: &str) -> String {
 /// final path segment for display (the on-disk name is the attachment id).
 fn sanitize_filename(name: &str) -> String {
     let trimmed = name.trim();
-    let base = trimmed
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(trimmed)
-        .trim();
+    let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).trim();
     if base.is_empty() || base == "." || base == ".." {
         "attachment".into()
     } else {
@@ -555,7 +549,10 @@ mod tests {
     #[test]
     fn path_within_allows_contained() {
         let root = std::env::temp_dir();
-        assert!(path_within(&root, &root.join("product/attachments/s1/a1.png")));
+        assert!(path_within(
+            &root,
+            &root.join("product/attachments/s1/a1.png")
+        ));
     }
 
     #[test]

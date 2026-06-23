@@ -136,12 +136,13 @@ impl ProductAttachmentRepo {
     }
 
     pub async fn list_for_story(&self, story_id: &Id) -> Result<Vec<ProductAttachment>> {
-        let rows =
-            sqlx::query("SELECT * FROM product_attachments WHERE story_id = ? ORDER BY created_at ASC")
-                .bind(story_id)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(dberr("list attachments for story"))?;
+        let rows = sqlx::query(
+            "SELECT * FROM product_attachments WHERE story_id = ? ORDER BY created_at ASC",
+        )
+        .bind(story_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list attachments for story"))?;
         rows.iter().map(row_to_attachment).collect()
     }
 

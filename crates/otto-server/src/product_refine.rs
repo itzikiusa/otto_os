@@ -354,10 +354,7 @@ pub async fn send_message(
     // 5. Ensure the thread cwd exists (run_prompt canonicalizes it and degrades
     //    if it's missing). Best-effort — logged on error.
     if let Err(e) = std::fs::create_dir_all(&thread.cwd) {
-        warn!(
-            "product_refine: create_dir_all({}) failed: {e}",
-            thread.cwd
-        );
+        warn!("product_refine: create_dir_all({}) failed: {e}", thread.cwd);
     }
 
     // 6. Run the agent (whole history replayed in the prompt).
@@ -378,10 +375,7 @@ pub async fn send_message(
     // 8. On a non-empty updated body: write a `suggested` version + emit refresh.
     let mut story_updated = false;
     let mut version_no: Option<i64> = None;
-    if let Some(updated) = updated_story_md
-        .as_ref()
-        .filter(|u| !u.trim().is_empty())
-    {
+    if let Some(updated) = updated_story_md.as_ref().filter(|u| !u.trim().is_empty()) {
         let v = ctx
             .product_repo
             .add_version(NewVersion {
