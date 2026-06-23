@@ -1678,8 +1678,10 @@
   }
   .grid-toolbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
+    row-gap: 6px;
     padding: 4px 2px 8px;
   }
   /* Notice shown above results (e.g. the Mongo command a SQL query translated to). */
