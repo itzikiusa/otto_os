@@ -42,6 +42,13 @@ import type {
   PublishAsStoryReq,
   ToSwarmReq,
   ToSwarmResp,
+  ProductAttachment,
+  UploadAttachmentReq,
+  DiscoverReq,
+  DiscoverResp,
+  DiscoveryRunSummary,
+  DiscoveryRunDetail,
+  MockupAnnotation,
 } from '../../modules/product/types';
 
 function errMsg(e: unknown): string {
@@ -415,6 +422,69 @@ class ProductStore {
     const resp = await api.post<ToSwarmResp>(`/product/stories/${id}/to-swarm`, req);
     await this.loadDetail();
     return resp;
+  }
+
+  // ── Attachments ────────────────────────────────────────────────────────────
+
+  async listAttachments(): Promise<ProductAttachment[]> {
+    const id = this.storyId();
+    return api.get<ProductAttachment[]>(`/product/stories/${id}/attachments`);
+  }
+
+  async uploadAttachment(req: UploadAttachmentReq): Promise<ProductAttachment> {
+    const id = this.storyId();
+    return api.post<ProductAttachment>(`/product/stories/${id}/attachments`, req);
+  }
+
+  async deleteAttachment(aid: string): Promise<void> {
+    await api.del(`/product/attachments/${aid}`);
+  }
+
+  async patchAttachment(
+    aid: string,
+    patch: { kind?: string; filename?: string },
+  ): Promise<ProductAttachment> {
+    return api.patch<ProductAttachment>(`/product/attachments/${aid}`, patch);
+  }
+
+  // ── Discovery ──────────────────────────────────────────────────────────────
+
+  async discover(req: DiscoverReq = {}): Promise<DiscoverResp> {
+    const id = this.storyId();
+    return api.post<DiscoverResp>(`/product/stories/${id}/discover`, req);
+  }
+
+  async listDiscoveryRuns(): Promise<DiscoveryRunSummary[]> {
+    const id = this.storyId();
+    return api.get<DiscoveryRunSummary[]>(`/product/stories/${id}/discovery-runs`);
+  }
+
+  async getDiscoveryRun(rid: string): Promise<DiscoveryRunDetail> {
+    return api.get<DiscoveryRunDetail>(`/product/discovery-runs/${rid}`);
+  }
+
+  // ── Mockup Annotations ─────────────────────────────────────────────────────
+
+  async listAnnotations(aid: string): Promise<MockupAnnotation[]> {
+    return api.get<MockupAnnotation[]>(`/product/attachments/${aid}/annotations`);
+  }
+
+  async addAnnotation(
+    aid: string,
+    a: { x_pct: number; y_pct: number; body: string },
+  ): Promise<MockupAnnotation> {
+    return api.post<MockupAnnotation>(`/product/attachments/${aid}/annotations`, a);
+  }
+
+  async patchAnnotation(
+    id: string,
+    patch: { body?: string; resolved?: boolean },
+  ): Promise<MockupAnnotation> {
+    return api.patch<MockupAnnotation>(`/product/annotations/${id}`, patch);
+  }
+
+  async deleteAnnotation(id: string): Promise<void> {
+    await api.del(`/product/annotations/${id}`);
   }
 
   // ── Test cases ─────────────────────────────────────────────────────────────

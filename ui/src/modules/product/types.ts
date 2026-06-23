@@ -4,7 +4,7 @@
 // DateTime<Utc> → string (ISO-8601 wire format), Id → string, i64 → number,
 // bool → boolean.  JSON-as-TEXT columns stay as string on the wire.
 
-import type { Swarm, SwarmProject, SwarmTask } from '../swarm/types';
+import type { Swarm, SwarmProject, SwarmTask, SwarmMessage } from '../swarm/types';
 
 // ---------------------------------------------------------------------------
 // Domain structs (otto-state/src/product.rs)
@@ -528,6 +528,88 @@ export interface PublishAsStoryReq {
   account_id: string;
   project_key: string;
   issue_type: string;
+}
+
+// ---------------------------------------------------------------------------
+// Attachment + Discovery + Mockup Annotation types  (C1)
+// ---------------------------------------------------------------------------
+
+export interface ProductAttachment {
+  id: string;
+  story_id: string;
+  workspace_id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  sha256: string | null;
+  storage_path: string;
+  kind: string;
+  source: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UploadAttachmentReq {
+  filename: string;
+  mime: string;
+  kind?: string;
+  data_b64: string;
+}
+
+export interface DiscoveryRun {
+  id: string;
+  story_id: string;
+  swarm_id: string;
+  project_id: string;
+  status: string;
+  brief_md: string;
+  report_md: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiscoveryRunSummary {
+  run: DiscoveryRun;
+  derived_status: string;
+  task_count: number;
+  done_count: number;
+}
+
+export interface DiscoveryRunDetail {
+  run: DiscoveryRun;
+  derived_status: string;
+  tasks: SwarmTask[];
+  task_summaries: [string, string | null][];
+  messages: SwarmMessage[];
+}
+
+export interface DiscoverReq {
+  swarm_id?: string | null;
+  name?: string | null;
+}
+
+/** Response from `POST /product/stories/{sid}/discover`. */
+export interface DiscoverResp {
+  run: DiscoveryRun;
+  swarm: Swarm;
+  project: SwarmProject;
+  tasks: SwarmTask[];
+}
+
+export interface MockupAnnotation {
+  id: string;
+  attachment_id: string;
+  story_id: string;
+  workspace_id: string;
+  x_pct: number;
+  y_pct: number;
+  body: string;
+  resolved: boolean;
+  author_id: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // ---------------------------------------------------------------------------
