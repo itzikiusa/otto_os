@@ -337,6 +337,13 @@ interface ConnSnapshot {
   sideTab: DbSideTab;
 }
 
+export type ConnPhase = 'connecting' | 'ready' | 'error';
+export interface ConnStatus {
+  phase: ConnPhase;
+  /** Failure reason (set only when phase === 'error'). */
+  error?: string;
+}
+
 class DatabaseStore {
   // ── Connections ────────────────────────────────────────────────────────────
   /** All workspace connections, filtered to the four DB engines. */
@@ -344,6 +351,13 @@ class DatabaseStore {
   selectedConnId: Id | null = $state(null);
   /** Connections currently open as top-level tabs, in display order. */
   openConnIds: Id[] = $state([]);
+  /**
+   * Per-connection liveness, keyed by connection id. Persisted across tab
+   * switches (parallel to `openConnIds`); deliberately NOT part of a
+   * per-connection snapshot, so a background tab keeps its red dot. Drives the
+   * tab status indicator and the schema panel's connecting/error states.
+   */
+  connStatus: Map<Id, ConnStatus> = $state(new Map());
   capabilities: DbCapabilities | null = $state(null);
   testResult: DbTestResult | null = $state(null);
   testing = $state(false);
@@ -377,6 +391,11 @@ class DatabaseStore {
   isGuarded: boolean = $derived(
     this.selectedConn != null &&
       (this.selectedConn.environment === 'prod' || this.selectedConn.read_only === true),
+  );
+
+  /** Liveness of the currently-selected connection (null until its first load). */
+  activeConnStatus: ConnStatus | null = $derived(
+    this.selectedConnId ? this.connStatus.get(this.selectedConnId) ?? null : null,
   );
 
   // ── Schema tree ──────────────────────────────────────────────────────────
@@ -707,6 +726,9 @@ class DatabaseStore {
     const wasActive = this.selectedConnId === id;
     this.openConnIds = this.openConnIds.filter((x) => x !== id);
     this.snapshots.delete(id);
+    const cs = new Map(this.connStatus);
+    cs.delete(id);
+    this.connStatus = cs;
     if (!wasActive) return;
 
     if (this.openConnIds.length === 0) {
@@ -780,8 +802,14 @@ class DatabaseStore {
     }
   }
 
+  /** Set a connection's liveness, reassigning the Map for Svelte-5 reactivity. */
+  private setConnStatus(id: Id, status: ConnStatus): void {
+    this.connStatus = new Map(this.connStatus).set(id, status);
+  }
+
   private async loadSchemaRoot(id: Id): Promise<void> {
     this.schemaLoading = true;
+    this.setConnStatus(id, { phase: 'connecting' });
     try {
       this.schemaRoot = await api.get<SchemaNode[]>(`${this.connBase(id)}/schema`);
       // Redis: default the active keyspace to the first DB (db0) so commands have
@@ -791,11 +819,24 @@ class DatabaseStore {
         const ks = this.schemaRoot.find((n) => n.kind === 'keyspace');
         if (ks) this.activeDb = ks.id;
       }
+      this.setConnStatus(id, { phase: 'ready' });
     } catch (e) {
+      this.setConnStatus(id, { phase: 'error', error: errMsg(e) });
       toasts.error('Could not load schema', errMsg(e));
     } finally {
       this.schemaLoading = false;
     }
+  }
+
+  /**
+   * Re-attempt a connection after a failure (or to re-probe): re-run capabilities
+   * + schema only — NOT a full `loadConnectionFresh` — so the user's open query
+   * tabs/editor are preserved. `loadSchemaRoot` flips connStatus connecting →
+   * ready|error. Targets the active connection by default.
+   */
+  async retryConnection(id: Id | null = this.selectedConnId): Promise<void> {
+    if (!id) return;
+    await Promise.all([this.loadCapabilities(id), this.loadSchemaRoot(id)]);
   }
 
   /** Re-fetch the schema root, clearing the children cache. */
