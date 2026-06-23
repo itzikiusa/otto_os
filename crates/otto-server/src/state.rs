@@ -72,6 +72,8 @@ pub struct ServerCtx {
     pub attachment_repo: otto_state::ProductAttachmentRepo,
     /// Discovery-run repo — repeatable discovery-swarm launches per story.
     pub discovery_repo: otto_state::ProductDiscoveryRepo,
+    /// Refinement-thread repo — conversational agent refinement threads per story.
+    pub refinement_repo: otto_state::ProductRefinementRepo,
     /// Mockup pinned-annotation repo.
     pub mockup_repo: otto_state::ProductMockupRepo,
     /// Per-run cancellation flags for in-flight product analysis agents (manual

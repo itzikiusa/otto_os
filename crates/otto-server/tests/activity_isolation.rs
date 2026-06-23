@@ -274,6 +274,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         product_repo,
         attachment_repo: otto_state::ProductAttachmentRepo::new(pool.clone()),
         discovery_repo: otto_state::ProductDiscoveryRepo::new(pool.clone()),
+        refinement_repo: otto_state::ProductRefinementRepo::new(pool.clone()),
         mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
         product_agent_cancels: otto_server::product_run::new_cancel_registry(),
         memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
