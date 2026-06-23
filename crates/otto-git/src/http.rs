@@ -518,11 +518,27 @@ async fn register_repo<S: GitCtx>(
     path: &str,
     req: &AddRepoReq,
 ) -> Result<Repo> {
-    let p = PathBuf::from(path);
-    let git_dir = p.join(".git");
-    if tokio::fs::metadata(&git_dir).await.is_err() {
-        return Err(Error::Invalid(format!("not a git repository: {path}")));
+    // Resolve to the git work-tree root so registering the same repo (or any
+    // subdirectory of one) is idempotent — and this also validates that `path`
+    // actually IS a git repository (toplevel errors otherwise).
+    let top = LocalGit::new(path)
+        .toplevel()
+        .await
+        .map_err(|_| Error::Invalid(format!("not a git repository: {path}")))?;
+    // De-dup: a repo already registered at this root in the workspace is returned
+    // as-is instead of inserting a duplicate row (mirrors `detect_repo`). Without
+    // this, re-adding the same local path mints a fresh id → a second, identical
+    // tab in the Git page.
+    if let Some(found) = s
+        .store()
+        .list_repos(ws_id)
+        .await?
+        .into_iter()
+        .find(|r| r.path == top)
+    {
+        return Ok(found);
     }
+    let p = PathBuf::from(&top);
     let git = LocalGit::new(&p);
     let remote_url = git.remote_url().await;
     let detected = remote_url.as_deref().and_then(detect);
@@ -1694,5 +1710,79 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// `git init` a throwaway repo under the temp dir and return its path.
+    async fn init_git_repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("otto-git-test-{}", new_id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .expect("spawn git init")
+            .success();
+        assert!(ok, "git init failed");
+        dir
+    }
+
+    fn reg_req(path: &str) -> AddRepoReq {
+        AddRepoReq {
+            path: Some(path.to_string()),
+            clone_url: None,
+            name: None,
+            git_account_id: None,
+            clone_dir: None,
+        }
+    }
+
+    /// Re-registering the same local path (or any subdirectory of the repo) must
+    /// return the EXISTING repo rather than minting a duplicate row — otherwise
+    /// the Git page opens a second, identical tab for the same repository.
+    #[tokio::test]
+    async fn register_repo_is_idempotent_by_path() {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool, "u").await;
+        let ws = seed_workspace(&pool).await;
+        let store = GitStore::new(pool.clone());
+        let ctx = TestCtx {
+            store: store.clone(),
+            workspaces: WorkspacesRepo::new(pool.clone()),
+            secrets: Arc::new(FixedSecret),
+            roles: Arc::new(AllowAll),
+            events: tokio::sync::broadcast::channel(8).0,
+        };
+
+        let dir = init_git_repo().await;
+        let path = dir.to_string_lossy().into_owned();
+
+        let first = register_repo(&ctx, &auth(&user, false), &ws, &path, &reg_req(&path))
+            .await
+            .unwrap();
+        let second = register_repo(&ctx, &auth(&user, false), &ws, &path, &reg_req(&path))
+            .await
+            .unwrap();
+        assert_eq!(
+            first.id, second.id,
+            "re-registering the same path must return the same repo"
+        );
+
+        // A subdirectory resolves to the same work-tree root → same repo, no dup.
+        let sub = dir.join("nested");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+        let subpath = sub.to_string_lossy().into_owned();
+        let third = register_repo(&ctx, &auth(&user, false), &ws, &subpath, &reg_req(&subpath))
+            .await
+            .unwrap();
+        assert_eq!(
+            first.id, third.id,
+            "registering a subdirectory must dedup to the repo root"
+        );
+
+        // Exactly one row persisted.
+        let repos = store.list_repos(&ws).await.unwrap();
+        assert_eq!(repos.len(), 1, "expected one repo row, got {}", repos.len());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

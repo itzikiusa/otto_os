@@ -30,7 +30,58 @@ interface GitOpenTabsState {
  *  repo tabs. Survives Tauri restarts; deliberately NOT keyed by workspace so
  *  the Git page is decoupled from the active workspace. */
 const OPEN_TABS_KEY = 'otto_git_open_tabs';
+/** localStorage key for the auto-fetch toggle/interval (per-device). */
+const AUTO_FETCH_KEY = 'otto_git_auto_fetch';
+const DEFAULT_AUTO_FETCH_SEC = 10;
 const DEFAULT_SUB: GitSubTab = 'graph';
+
+/** Read the persisted auto-fetch config, guarded for SSR/test environments with
+ *  no localStorage. Defaults: enabled, every 10s. */
+function readAutoFetchConfig(): { enabled: boolean; intervalSec: number } {
+  const def = { enabled: true, intervalSec: DEFAULT_AUTO_FETCH_SEC };
+  if (typeof localStorage === 'undefined') return def;
+  try {
+    const raw = localStorage.getItem(AUTO_FETCH_KEY);
+    if (!raw) return def;
+    const p = JSON.parse(raw) as Partial<{ enabled: boolean; intervalSec: number }>;
+    return {
+      enabled: typeof p.enabled === 'boolean' ? p.enabled : def.enabled,
+      intervalSec:
+        typeof p.intervalSec === 'number' && p.intervalSec >= 2 ? p.intervalSec : def.intervalSec,
+    };
+  } catch {
+    return def;
+  }
+}
+
+/** Cheap structural equality for a repo status — scalars first, then a light
+ *  per-file signature. Lets `setStatus` skip no-op writes so a fetch that found
+ *  nothing new doesn't recompute the `$derived` status / re-render the toolbar +
+ *  tab chips every round. NOTE: this is load-bearing for ALL status propagation
+ *  (manual fetch/pull/push/checkout/merge route through `setStatus` too), so keep
+ *  it in lockstep with the `RepoStatusResp` shape — any newly-rendered field must
+ *  be compared here or a real change could be silently suppressed. */
+function statusEq(a: RepoStatusResp, b: RepoStatusResp): boolean {
+  if (
+    a.branch !== b.branch ||
+    a.upstream !== b.upstream ||
+    a.ahead !== b.ahead ||
+    a.behind !== b.behind ||
+    a.changes.length !== b.changes.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < a.changes.length; i++) {
+    const x = a.changes[i];
+    const y = b.changes[i];
+    if (x.path !== y.path || x.kind !== y.kind || x.staged !== y.staged || x.unstaged !== y.unstaged) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const INITIAL_AUTO_FETCH = readAutoFetchConfig();
 
 class GitStore {
   repos: Repo[] = $state([]);
@@ -61,6 +112,31 @@ class GitStore {
   subTab: Record<string, string> = $state({});
   /** True once the page has loaded the global repo list at least once. */
   allReposLoaded = $state(false);
+
+  // ── Per-repo status (single source of truth) ───────────────────────────────
+  // Each open tab's branch chip (GitTabs), the active repo's toolbar (RepoView)
+  // and the auto-fetch loop all read/write THIS map, so one fetch updates every
+  // view. `null` is an in-flight / load-attempted marker.
+  statusById: Record<string, RepoStatusResp | null> = $state({});
+
+  // ── Auto-fetch: a quiet background `git fetch` for the OPEN tabs so each tab's
+  // ahead/behind chip stays live. Polls only the repos the user has open, only
+  // while the Git page is mounted, and pauses while the window is hidden. The
+  // on/off toggle is persisted per-device. ──
+  autoFetchEnabled = $state(INITIAL_AUTO_FETCH.enabled);
+  autoFetchIntervalSec = $state(INITIAL_AUTO_FETCH.intervalSec);
+  private autoFetchTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoFetchInFlight = false;
+  // Generation token: bumped on every stop/start so a round that was in flight
+  // when the loop got (re)configured abandons itself instead of leaving an
+  // orphaned, self-perpetuating timer chain (which would multiply fetch traffic
+  // on every navigation in/out of the Git page while a fetch was slow).
+  private autoFetchGen = 0;
+  // Per-repo backoff: a repo whose fetch keeps failing (offline / auth / a
+  // Viewer hitting the Editor-gated endpoint) sits out an increasing number of
+  // rounds instead of being hammered every tick.
+  private autoFetchBackoff: Record<string, number> = {};
+  private autoFetchFailStreak: Record<string, number> = {};
 
   /** All repos across every workspace the caller may view (root → all). Powers
    *  the workspace-independent Git page; does NOT touch `loadedFor` so a later
@@ -211,7 +287,9 @@ class GitStore {
     this.primary = repo;
     if (!this.repos.some((r) => r.id === repo.id)) this.repos = [...this.repos, repo];
     try {
-      this.primaryStatus = await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
+      const s = await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
+      this.primaryStatus = s;
+      this.setStatus(repo.id, s);
     } catch {
       this.primaryStatus = null;
     }
@@ -258,10 +336,129 @@ class GitStore {
   async refreshPrimary(): Promise<void> {
     if (!this.primary) return;
     try {
-      this.primaryStatus = await api.get<RepoStatusResp>(`/repos/${this.primary.id}/status`);
+      const s = await api.get<RepoStatusResp>(`/repos/${this.primary.id}/status`);
+      this.primaryStatus = s;
+      this.setStatus(this.primary.id, s);
       void this.loadPrs(this.primary.id);
     } catch {
       /* keep stale status */
+    }
+  }
+
+  // ── Per-repo status cache + auto-fetch ─────────────────────────────────────
+
+  /** Write a repo's status, but ONLY when it actually changed, so a no-op fetch
+   *  doesn't needlessly recompute the `$derived` status + re-render the toolbar
+   *  and tab chips. Keeps `primaryStatus` in sync when this repo is the
+   *  right-panel primary. */
+  setStatus(repoId: string, s: RepoStatusResp): void {
+    const prev = this.statusById[repoId];
+    if (prev && statusEq(prev, s)) return;
+    this.statusById[repoId] = s;
+    if (this.primary?.id === repoId) this.primaryStatus = s;
+  }
+
+  /** Fetch (cheap, local) status for a repo and store it. */
+  async refreshStatus(repoId: string): Promise<void> {
+    try {
+      const s = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
+      this.setStatus(repoId, s);
+    } catch {
+      /* keep stale status */
+    }
+  }
+
+  /** Lazily load a repo's status once (used by the tab strip). `null` marks an
+   *  in-flight / attempted load so we don't refetch on every render. */
+  ensureStatus(repoId: string): void {
+    if (repoId in this.statusById) return;
+    this.statusById[repoId] = null;
+    void this.refreshStatus(repoId);
+  }
+
+  /** Start the background auto-fetch loop (no-op if disabled). Idempotent. */
+  startAutoFetch(): void {
+    this.stopAutoFetch();
+    if (this.autoFetchEnabled) this.scheduleAutoFetch();
+  }
+
+  /** Stop the background auto-fetch loop. Bumps the generation so any in-flight
+   *  round won't reschedule itself (no orphaned/parallel timer chains). */
+  stopAutoFetch(): void {
+    this.autoFetchGen++;
+    if (this.autoFetchTimer !== null) {
+      clearTimeout(this.autoFetchTimer);
+      this.autoFetchTimer = null;
+    }
+  }
+
+  /** Toggle auto-fetch on/off (persisted) and (re)start the loop. */
+  setAutoFetch(enabled: boolean): void {
+    this.autoFetchEnabled = enabled;
+    this.persistAutoFetch();
+    this.startAutoFetch();
+  }
+
+  private scheduleAutoFetch(): void {
+    const gen = this.autoFetchGen;
+    const ms = Math.max(2, this.autoFetchIntervalSec) * 1000;
+    this.autoFetchTimer = setTimeout(() => void this.autoFetchTick(gen), ms);
+  }
+
+  /** One auto-fetch round: `git fetch` every OPEN repo (minus those in backoff),
+   *  quietly, then update its status. Skipped while the window is hidden or a
+   *  prior round is still running. setTimeout-chained (not setInterval) so rounds
+   *  never overlap; `gen` ties the chain to the current start, so a stop/restart
+   *  abandons stale chains instead of leaking parallel timers. */
+  private async autoFetchTick(gen: number): Promise<void> {
+    if (gen !== this.autoFetchGen) return; // superseded by a stop/restart
+    const hidden = typeof document !== 'undefined' && document.hidden;
+    if (!this.autoFetchInFlight && !hidden) {
+      // Repos in backoff sit this round out (counting down toward 0).
+      const ids = this.openRepoIds.filter((id) => {
+        const skip = this.autoFetchBackoff[id] ?? 0;
+        if (skip > 0) {
+          this.autoFetchBackoff[id] = skip - 1;
+          return false;
+        }
+        return true;
+      });
+      if (ids.length > 0) {
+        this.autoFetchInFlight = true;
+        try {
+          await Promise.allSettled(
+            ids.map(async (id) => {
+              try {
+                const s = await api.post<RepoStatusResp>(`/repos/${id}/fetch`);
+                this.setStatus(id, s); // QUIET — no toast; setStatus skips no-ops
+                this.autoFetchFailStreak[id] = 0;
+                this.autoFetchBackoff[id] = 0;
+              } catch {
+                // offline / auth / Viewer-403 / removed — back this repo off (up
+                // to ~6 rounds) so we don't hammer an unreachable remote.
+                const streak = (this.autoFetchFailStreak[id] ?? 0) + 1;
+                this.autoFetchFailStreak[id] = streak;
+                this.autoFetchBackoff[id] = Math.min(streak, 6);
+              }
+            }),
+          );
+        } finally {
+          this.autoFetchInFlight = false;
+        }
+      }
+    }
+    if (this.autoFetchEnabled && gen === this.autoFetchGen) this.scheduleAutoFetch();
+  }
+
+  private persistAutoFetch(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(
+        AUTO_FETCH_KEY,
+        JSON.stringify({ enabled: this.autoFetchEnabled, intervalSec: this.autoFetchIntervalSec }),
+      );
+    } catch {
+      /* storage full / unavailable — non-fatal */
     }
   }
 
