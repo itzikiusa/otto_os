@@ -208,6 +208,67 @@ Respond with EXACTLY ONE ```json block, no prose:
     )
 }
 
+/// The discovery task-list schema. Investigation tasks carry only a title and a
+/// description (no role assignment / DAG): discovery work fans out, it is not a
+/// dependency chain, and the discovery project is seeded flat.
+const DISCOVERY_SCHEMA: &str = r#"{
+  "tasks": [
+    {
+      "title": "short imperative investigation goal",
+      "description": "what to investigate and what the finding should cover"
+    }
+  ]
+}"#;
+
+/// Build the discovery planner prompt: break a story's discovery brief into a
+/// handful of *investigation* tasks (NOT implementation work). The agents that
+/// pick these up are expected to research and report — map affected
+/// services/files, dependencies, risks, prior art, open questions — never to
+/// write production code. Mirrors `planner_prompt`'s shape (one JSON block) but
+/// is framed for discovery-before-implementation.
+pub fn discovery_planner_prompt(
+    project_name: &str,
+    brief: &str,
+    agents: &[PresetAgent],
+    extra: &str,
+) -> String {
+    let roles: Vec<String> = agents
+        .iter()
+        .map(|a| format!("- {} ({})", a.title, a.name))
+        .collect();
+    let roles_block = if roles.is_empty() {
+        "(no preset agents — tasks will be picked up by whichever agents the swarm has)"
+            .to_string()
+    } else {
+        roles.join("\n")
+    };
+    let extra_line = if extra.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\nExtra emphasis for this discovery: {extra}\n")
+    };
+    format!(
+        r#"You are a discovery lead planning an INVESTIGATION (discovery before implementation).
+
+Project: {project_name}
+Discovery brief:
+{brief}
+{extra_line}
+Team available to do the investigation:
+{roles_block}
+
+Break the brief into 3–6 focused INVESTIGATION tasks. These are research/analysis
+tasks, NOT implementation work — agents must map and report, never write production
+code or open PRs. Cover the angles that matter for this story: affected
+services/files & data flow, dependencies & integration/contract risks, unknowns &
+risks, prior art / similar work already in the codebase, and the open questions a
+stakeholder must answer before implementation. Keep each task crisp and outcome-oriented.
+
+Respond with EXACTLY ONE ```json block, no prose:
+{DISCOVERY_SCHEMA}"#
+    )
+}
+
 /// Merge several candidate task breakdowns (each the JSON from `planner_prompt`)
 /// into one coherent, de-duplicated plan. Used by the multi-agent planner: N
 /// planners run in parallel, then one summarizer reconciles their outputs.
@@ -263,6 +324,18 @@ mod tests {
     fn extract_balanced_json() {
         let t = "prefix {\"a\": {\"b\": 2}} suffix";
         assert_eq!(extract_json(t).unwrap()["a"]["b"], 2);
+    }
+
+    #[test]
+    fn discovery_planner_prompt_is_investigation_framed() {
+        let p = discovery_planner_prompt("Discovery: Login", "## Brief\nstuff", &[], "");
+        // Investigation framing, not implementation; asks for one JSON block.
+        assert!(p.contains("INVESTIGATION"));
+        assert!(p.contains("discovery before implementation"));
+        assert!(p.contains("NOT implementation work"));
+        assert!(p.contains("```json"));
+        // The brief is embedded verbatim.
+        assert!(p.contains("## Brief"));
     }
 
     #[test]

@@ -357,6 +357,22 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             "/product/stories/{sid}/to-swarm",
             post(crate::product_swarm::story_to_swarm),
         )
+        // Discovery: launch a repeatable INVESTIGATION swarm from a story (Editor),
+        // then list/read the runs (Viewer). Discovery projects are NOT story-linked
+        // (the unique story_id index is reserved for the implementation project);
+        // the run row carries the linkage.
+        .route(
+            "/product/stories/{sid}/discover",
+            post(crate::product_swarm::discover_story),
+        )
+        .route(
+            "/product/stories/{sid}/discovery-runs",
+            get(crate::product_swarm::list_discovery_runs),
+        )
+        .route(
+            "/product/discovery-runs/{rid}",
+            get(crate::product_swarm::get_discovery_run),
+        )
         // Story attachments — upload route gets its own 40 MB body cap to bound
         // the ~33 % base64 inflation (raw content cap is enforced at 25 MB).
         .route(
