@@ -438,6 +438,7 @@
       <!-- Top-level connection tabs (one per open connection) -->
       <div class="conn-tabs" role="tablist" aria-label="Open connections">
         {#each openConns as c (c.id)}
+          {@const st = database.connStatus.get(c.id)}
           <div class="conn-tab" class:active={database.selectedConnId === c.id} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="tab" tabindex="-1" aria-selected={database.selectedConnId === c.id} oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
             <button class="conn-tab-main" onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
@@ -445,6 +446,11 @@
               <span class="conn-tab-name ellipsis">{c.name}</span>
               {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
             </button>
+            {#if st?.phase === 'connecting'}
+              <span class="conn-tab-spin spin" title="Connecting…"><Icon name="refresh" size={10} /></span>
+            {:else if st?.phase === 'error'}
+              <span class="conn-tab-dot" title={st.error}></span>
+            {/if}
             <button
               class="conn-tab-close"
               onclick={(e) => {
@@ -483,6 +489,11 @@
         <div class="conn-status">
           {#if database.capabilities}
             <span class="cap-chip mono" title="Engine">{database.capabilities.engine}</span>
+          {/if}
+          {#if database.activeConnStatus?.phase === 'connecting'}
+            <span class="conn-state"><span class="conn-tab-spin spin"><Icon name="refresh" size={11} /></span>Connecting…</span>
+          {:else if database.activeConnStatus?.phase === 'error'}
+            <span class="conn-state err" title={database.activeConnStatus.error}>Disconnected</span>
           {/if}
           <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing}>
             <Icon name="plug" size={11} />{database.testing ? 'Testing…' : 'Test'}
@@ -1261,6 +1272,41 @@
   }
   .test-dot.ok {
     background: var(--status-working);
+  }
+  .conn-tab-spin {
+    color: var(--text-dim);
+    margin-inline-start: 4px;
+    flex-shrink: 0;
+  }
+  .conn-tab-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--status-exited);
+    margin-inline-start: 4px;
+    flex-shrink: 0;
+  }
+  .conn-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .conn-state.err {
+    color: var(--status-exited);
+    font-weight: 500;
+  }
+  /* Component-scoped spinner (SchemaTree's copy doesn't leak here). */
+  .spin {
+    display: grid;
+    place-items: center;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .main-body {
     flex: 1;
