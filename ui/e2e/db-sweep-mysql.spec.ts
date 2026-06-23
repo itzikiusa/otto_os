@@ -260,8 +260,8 @@ test.describe('DB Explorer · MySQL sweep', () => {
     // The core data panes — the editor box and the results grid's scroll
     // container — fit inside the viewport (their own box; the grid's WIDE table
     // scrolls INSIDE .grid-scroll, asserted separately). This is the real
-    // "visible + usable" guarantee. (The dense toolbars / main-tab status row do
-    // overflow on tablet — an escalated shared-UI bug, see the report.)
+    // "visible + usable" guarantee. (The results toolbar now wraps rather than
+    // overflowing — asserted below. The main-tab status row is a separate surface.)
     const ed = await rightEdge(page, '.qe-edit');
     expect(ed.left, 'editor starts within the viewport').toBeGreaterThanOrEqual(-2);
     expect(ed.right, 'editor box fits within the viewport').toBeLessThanOrEqual(ed.vw + 2);
@@ -269,6 +269,16 @@ test.describe('DB Explorer · MySQL sweep', () => {
     const gs = await rightEdge(page, '.grid-scroll');
     expect(gs.left, 'results grid starts within the viewport').toBeGreaterThanOrEqual(-2);
     expect(gs.right, 'results grid scroll container fits within the viewport').toBeLessThanOrEqual(gs.vw + 2);
+
+    // The results toolbar must WRAP, not overflow its container. Before the fix
+    // it clipped trailing controls (Download…/Full Export) in the narrow desktop
+    // results pane (viewport > 1024, pane < viewport). scrollWidth > clientWidth
+    // means content runs off the edge; with flex-wrap they fall to a new row.
+    const toolbarOverflows = await page
+      .locator('.grid-toolbar')
+      .first()
+      .evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+    expect(toolbarOverflows, 'results toolbar wraps instead of clipping its controls').toBe(false);
   });
 
   test('wide result scrolls HORIZONTALLY inside the grid', async ({ page }) => {

@@ -13,7 +13,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { QueryResult, DbExportFormat, ExportToPathResp } from '../../lib/api/types';
-  import { api } from '../../lib/api/client';
+  import { api, postForText } from '../../lib/api/client';
   import { downloadText } from '../../lib/components/exporters';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
@@ -983,21 +983,21 @@
     download(toJson(), 'result.json', 'application/json');
   }
 
-  // Server-side full export: runs the statement again without a row cap.
-  // The server returns the file with `Content-Disposition: attachment` so the
-  // browser auto-downloads. We proxy it through `api.post` to carry the auth
-  // header, then trigger a download from the returned text.
+  // Server-side full export: runs the statement again without a row cap. The
+  // server replies with a `text/csv` body, so we fetch it via `postForText`
+  // (carries the auth header AND reads the body as text — the JSON-parsing
+  // `api.post` would choke on CSV), then trigger a download from the text.
   let exporting = $state(false);
 
   async function exportFullCsv(): Promise<void> {
     if (!connectionId || !statement || exporting) return;
     exporting = true;
     try {
-      const text = await api.post<string>(
+      const text = await postForText(
         `/connections/${connectionId}/db/export`,
         { statement, format: 'csv', node: database.activeDb ?? undefined },
       );
-      downloadText(typeof text === 'string' ? text : JSON.stringify(text), 'export.csv', 'text/csv');
+      downloadText(text, 'export.csv', 'text/csv');
     } catch (e) {
       toasts.error('Export failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -1678,8 +1678,10 @@
   }
   .grid-toolbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
+    row-gap: 6px;
     padding: 4px 2px 8px;
   }
   /* Notice shown above results (e.g. the Mongo command a SQL query translated to). */
