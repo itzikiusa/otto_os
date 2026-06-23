@@ -160,6 +160,58 @@ export async function postForText(
   return resp.text();
 }
 
+/**
+ * POST a JSON body to /api/v1<path> and read a streamed NDJSON response,
+ * invoking `onLine` for each parsed JSON line as it arrives. For long-running
+ * endpoints that emit incremental progress (e.g. the streaming DB export) so the
+ * caller can drive a progress bar and the connection never idles out. Mirrors
+ * `postForText`'s auth + error handling.
+ */
+export async function postNdjsonStream(
+  path: string,
+  body: unknown,
+  onLine: (obj: unknown) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const resp = await fetch(`${baseUrl()}/api/v1${path}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!resp.ok || !resp.body) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try {
+      problem = await resp.json();
+    } catch {
+      // non-JSON error body — keep statusText
+    }
+    throw new ApiError(resp.status, problem);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const drain = (chunk: string): void => {
+    buf += chunk;
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) onLine(JSON.parse(line) as unknown);
+    }
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    drain(decoder.decode(value, { stream: true }));
+  }
+  const tail = buf.trim();
+  if (tail) onLine(JSON.parse(tail) as unknown);
+}
+
 /** Build a WS URL with the auth token, e.g. wsUrl('/ws/term/SESSION_ID'). */
 export function wsUrl(path: string): string {
   const base = new URL(baseUrl());
