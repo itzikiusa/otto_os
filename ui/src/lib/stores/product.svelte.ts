@@ -49,6 +49,10 @@ import type {
   DiscoveryRunSummary,
   DiscoveryRunDetail,
   MockupAnnotation,
+  RefinementThread,
+  RefinementThreadDetail,
+  CreateThreadReq,
+  RefineTurnResp,
 } from '../../modules/product/types';
 
 function errMsg(e: unknown): string {
@@ -461,6 +465,30 @@ class ProductStore {
 
   async getDiscoveryRun(rid: string): Promise<DiscoveryRunDetail> {
     return api.get<DiscoveryRunDetail>(`/product/discovery-runs/${rid}`);
+  }
+
+  // ── Refinement threads ─────────────────────────────────────────────────────
+
+  async listRefinementThreads(): Promise<RefinementThread[]> {
+    const id = this.storyId();
+    return api.get<RefinementThread[]>(`/product/stories/${id}/refinement-threads`);
+  }
+
+  async createRefinementThread(req: CreateThreadReq = {}): Promise<RefinementThread> {
+    const id = this.storyId();
+    return api.post<RefinementThread>(`/product/stories/${id}/refinement-threads`, req);
+  }
+
+  async getRefinementThread(tid: string): Promise<RefinementThreadDetail> {
+    return api.get<RefinementThreadDetail>(`/product/refinement-threads/${tid}`);
+  }
+
+  async sendRefinementMessage(tid: string, body: string): Promise<RefineTurnResp> {
+    return api.post<RefineTurnResp>(`/product/refinement-threads/${tid}/messages`, { body });
+  }
+
+  async archiveRefinementThread(tid: string): Promise<RefinementThread> {
+    return api.post<RefinementThread>(`/product/refinement-threads/${tid}/archive`, {});
   }
 
   // ── Mockup Annotations ─────────────────────────────────────────────────────

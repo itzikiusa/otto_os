@@ -613,6 +613,35 @@ export interface MockupAnnotation {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Refinement thread types  (talk-to-agent, Phase C1)
+// ---------------------------------------------------------------------------
+
+export interface RefinementThread {
+  id: string; story_id: string; workspace_id: string;
+  discovery_run_id: string | null;
+  cwd: string; title: string; status: string;
+  model: string | null;
+  created_by: string; created_at: string; updated_at: string;
+}
+
+export interface RefinementMessage {
+  id: string; thread_id: string; role: string; body: string;
+  meta_json: string | null; created_at: string;
+}
+
+export interface RefinementThreadDetail { thread: RefinementThread; messages: RefinementMessage[] }
+
+export interface CreateThreadReq { discovery_run_id?: string | null; title?: string | null }
+
+export interface RefineTurnResp {
+  user_message: RefinementMessage;
+  agent_message: RefinementMessage;
+  story_updated: boolean;
+  version_no: number | null;
+}
+
+// ---------------------------------------------------------------------------
 // Product↔Swarm closure types  (GET /product/stories/{sid}/swarm)
 // ---------------------------------------------------------------------------
 
