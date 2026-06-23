@@ -1,7 +1,7 @@
 //! Product mockup annotation repository: pinned annotations on attachment mockups.
 
 use chrono::{DateTime, Utc};
-use otto_core::{new_id, Id, Result};
+use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
@@ -102,7 +102,14 @@ impl ProductMockupRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("create annotation"))?;
-        self.get(&id).await.map(|opt| opt.expect("just inserted"))
+        self.get_required(&id).await
+    }
+
+    /// Fetch by id, returning `Err(NotFound)` when the row is absent.
+    async fn get_required(&self, id: &Id) -> Result<MockupAnnotation> {
+        self.get(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("annotation {id}")))
     }
 
     pub async fn get(&self, id: &Id) -> Result<Option<MockupAnnotation>> {
@@ -126,32 +133,21 @@ impl ProductMockupRepo {
     }
 
     pub async fn update(&self, id: &Id, p: AnnotationPatch) -> Result<MockupAnnotation> {
+        let existing = self.get_required(id).await?;
+        let body = p.body.as_deref().unwrap_or(&existing.body);
+        let resolved = p.resolved.unwrap_or(existing.resolved);
         let now = fmt(Utc::now());
-        if let Some(body) = &p.body {
-            sqlx::query(
-                "UPDATE product_mockup_annotations SET body = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(body)
-            .bind(&now)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("update annotation body"))?;
-        }
-        if let Some(resolved) = p.resolved {
-            sqlx::query(
-                "UPDATE product_mockup_annotations SET resolved = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(resolved as i64)
-            .bind(&now)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("update annotation resolved"))?;
-        }
-        self.get(id)
-            .await
-            .map(|opt| opt.expect("annotation not found after update"))
+        sqlx::query(
+            "UPDATE product_mockup_annotations SET body = ?, resolved = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(body)
+        .bind(resolved as i64)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update annotation"))?;
+        self.get_required(id).await
     }
 
     /// Delete the annotation row. Returns `Ok(())` even if absent.

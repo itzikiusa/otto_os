@@ -1,7 +1,7 @@
 //! Product story attachment repository: files/images attached to stories.
 
 use chrono::{DateTime, Utc};
-use otto_core::{new_id, Id, Result};
+use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
@@ -116,7 +116,14 @@ impl ProductAttachmentRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("create attachment"))?;
-        self.get(&id).await.map(|opt| opt.expect("just inserted"))
+        self.get_required(&id).await
+    }
+
+    /// Fetch by id, returning `Err(NotFound)` when the row is absent.
+    async fn get_required(&self, id: &Id) -> Result<ProductAttachment> {
+        self.get(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("attachment {id}")))
     }
 
     pub async fn get(&self, id: &Id) -> Result<Option<ProductAttachment>> {
@@ -139,28 +146,21 @@ impl ProductAttachmentRepo {
     }
 
     pub async fn update(&self, id: &Id, p: AttachmentPatch) -> Result<ProductAttachment> {
+        let existing = self.get_required(id).await?;
+        let kind = p.kind.as_deref().unwrap_or(&existing.kind);
+        let filename = p.filename.as_deref().unwrap_or(&existing.filename);
         let now = fmt(Utc::now());
-        if let Some(kind) = &p.kind {
-            sqlx::query("UPDATE product_attachments SET kind = ?, updated_at = ? WHERE id = ?")
-                .bind(kind)
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update attachment kind"))?;
-        }
-        if let Some(filename) = &p.filename {
-            sqlx::query(
-                "UPDATE product_attachments SET filename = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(filename)
-            .bind(&now)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("update attachment filename"))?;
-        }
-        self.get(id).await.map(|opt| opt.expect("attachment not found after update"))
+        sqlx::query(
+            "UPDATE product_attachments SET kind = ?, filename = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(kind)
+        .bind(filename)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update attachment"))?;
+        self.get_required(id).await
     }
 
     /// Delete the attachment row. Returns `Ok(())` even if the row was absent.

@@ -1,7 +1,7 @@
 //! Product story discovery run repository.
 
 use chrono::{DateTime, Utc};
-use otto_core::{new_id, Id, Result};
+use otto_core::{new_id, Error, Id, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
@@ -95,7 +95,14 @@ impl ProductDiscoveryRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("create discovery run"))?;
-        self.get(&id).await.map(|opt| opt.expect("just inserted"))
+        self.get_required(&id).await
+    }
+
+    /// Fetch by id, returning `Err(NotFound)` when the row is absent.
+    async fn get_required(&self, id: &Id) -> Result<DiscoveryRun> {
+        self.get(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("discovery run {id}")))
     }
 
     pub async fn get(&self, id: &Id) -> Result<Option<DiscoveryRun>> {
@@ -132,7 +139,7 @@ impl ProductDiscoveryRepo {
 
     pub async fn set_status(&self, id: &Id, status: &str) -> Result<()> {
         let now = fmt(Utc::now());
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE product_discovery_runs SET status = ?, updated_at = ? WHERE id = ?",
         )
         .bind(status)
@@ -141,12 +148,15 @@ impl ProductDiscoveryRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("set discovery run status"))?;
+        if result.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("discovery run {id}")));
+        }
         Ok(())
     }
 
     pub async fn set_report(&self, id: &Id, report_md: &str) -> Result<()> {
         let now = fmt(Utc::now());
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE product_discovery_runs SET report_md = ?, updated_at = ? WHERE id = ?",
         )
         .bind(report_md)
@@ -155,6 +165,9 @@ impl ProductDiscoveryRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("set discovery run report"))?;
+        if result.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("discovery run {id}")));
+        }
         Ok(())
     }
 }
@@ -229,5 +242,16 @@ mod tests {
         repo.set_status(&run.id, "done").await.unwrap();
         let fetched2 = repo.get(&run.id).await.unwrap().unwrap();
         assert_eq!(fetched2.status, "done");
+
+        // set_status / set_report on a missing id returns NotFound, not a panic
+        let missing: Id = "nosuchid".into();
+        assert!(matches!(
+            repo.set_status(&missing, "done").await,
+            Err(otto_core::Error::NotFound(_))
+        ));
+        assert!(matches!(
+            repo.set_report(&missing, "## nope").await,
+            Err(otto_core::Error::NotFound(_))
+        ));
     }
 }
