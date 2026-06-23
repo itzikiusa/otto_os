@@ -373,6 +373,27 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             "/product/discovery-runs/{rid}",
             get(crate::product_swarm::get_discovery_run),
         )
+        // Talk-to-agent refinement: a conversational thread on a story. Create +
+        // list its threads (story-scoped), then read/converse/archive a thread
+        // (resolves the workspace from the thread → its story). The converse turn
+        // runs the agent inline and may write a new `suggested` story version.
+        .route(
+            "/product/stories/{sid}/refinement-threads",
+            post(crate::product_refine::create_thread)
+                .get(crate::product_refine::list_threads),
+        )
+        .route(
+            "/product/refinement-threads/{tid}",
+            get(crate::product_refine::get_thread),
+        )
+        .route(
+            "/product/refinement-threads/{tid}/messages",
+            post(crate::product_refine::send_message),
+        )
+        .route(
+            "/product/refinement-threads/{tid}/archive",
+            post(crate::product_refine::archive_thread),
+        )
         // Story attachments — upload route gets its own 40 MB body cap to bound
         // the ~33 % base64 inflation (raw content cap is enforced at 25 MB).
         .route(

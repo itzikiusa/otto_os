@@ -679,6 +679,23 @@ mutations). The upload route carries a 40 MB body cap (raw content cap 25 MB).
 | PATCH /product/annotations/{id} | ws editor | AnnotationPatchReq | MockupAnnotation |
 | DELETE /product/annotations/{id} | ws editor | — | 204 |
 
+### Product story refinement (talk-to-agent)
+
+A conversational refinement thread on a story. Each turn replays the full thread
+history into a one-shot agent run; the agent returns `{reply, updated_story_md?,
+summary?}`. When `updated_story_md` is present the backend writes a new
+`suggested` story version (which Publish-as-Jira/RFC then picks up). Each thread
+has its own working dir; a thread may link a discovery run to seed context. The
+story's workspace gates each route (Viewer reads, Editor converse/mutate).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /product/stories/{sid}/refinement-threads | ws editor | CreateThreadReq? ({discovery_run_id?, title?}) | RefinementThread |
+| GET /product/stories/{sid}/refinement-threads | ws viewer | — | RefinementThread[] (newest first) |
+| GET /product/refinement-threads/{tid} | ws viewer | — | {thread, messages} |
+| POST /product/refinement-threads/{tid}/messages | ws editor | {body} | {user_message, agent_message, story_updated, version_no?} (synchronous; agent turn runs inline) |
+| POST /product/refinement-threads/{tid}/archive | ws editor | — | RefinementThread |
+
 ### Product discovery swarm
 
 Launch a repeatable INVESTIGATION swarm from a story (discovery before
