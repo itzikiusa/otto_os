@@ -6,6 +6,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { product } from '../../lib/stores/product.svelte';
+  import { swarm } from '../../lib/stores/swarm.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { toasts } from '../../lib/toast.svelte';
   import { api, authedBlobUrl } from '../../lib/api/client';
@@ -23,6 +25,10 @@
   let versionLoading = $state(false);
   let refreshing = $state(false);
   let watchWorking = $state(false);
+
+  // ── Discovery launch state ────────────────────────────────────────────────
+  let discoverySwarmId = $state('');
+  let runningDiscovery = $state(false);
 
   // The detail object for the currently selected story.
   const detail = $derived(product.detail);
@@ -274,6 +280,37 @@
       void product.loadTranscripts();
     }
   });
+
+  // Load swarms lazily so the discovery team picker is populated.
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (wsId && swarm.swarms.length === 0) {
+      void swarm.loadSwarms(wsId);
+    }
+  });
+
+  /** Launch a discovery swarm run and switch to the Discovery tab. */
+  async function runDiscovery(): Promise<void> {
+    if (runningDiscovery) return;
+    const targetSwarm = swarm.swarms.find((s) => s.id === discoverySwarmId);
+    const teamName = targetSwarm ? `"${targetSwarm.name}"` : 'a swarm';
+    const attCount = 0; // attachments listed in the panel; count not tracked here
+    const ok = await confirmer.ask(
+      `Run Discovery in ${teamName}? This will START the swarm and send the story info${attCount > 0 ? ` + ${attCount} attachments` : ''} as discovery context.`,
+      { title: 'Run Discovery', confirmLabel: 'Run Discovery' },
+    );
+    if (!ok) return;
+    runningDiscovery = true;
+    try {
+      await product.discover(discoverySwarmId ? { swarm_id: discoverySwarmId } : {});
+      toasts.success('Discovery started', 'The swarm is now analysing the story.');
+      product.tab = 'discovery';
+    } catch (e) {
+      toasts.error('Discovery failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      runningDiscovery = false;
+    }
+  }
 
   // ── Body preview: resolve `attachment:<id>` tokens in rendered HTML ───────
   // After renderMarkdown produces HTML, find any src="attachment:<id>" values
@@ -1033,6 +1070,27 @@
       >
         <Icon name="refresh" size={13} />
         {refreshing ? 'Refreshing…' : 'Refresh'}
+      </button>
+
+      <!-- Discovery: team picker + launch button -->
+      {#if swarm.swarms.length > 1}
+        <select
+          class="disc-swarm-pick"
+          bind:value={discoverySwarmId}
+          title="Which swarm runs the discovery"
+        >
+          <option value="">First swarm</option>
+          {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+        </select>
+      {/if}
+      <button
+        class="toolbar-btn"
+        onclick={runDiscovery}
+        disabled={runningDiscovery}
+        title="Launch a discovery swarm run — agents analyse the story and report findings"
+        aria-label="Run Discovery"
+      >
+        {runningDiscovery ? 'Starting…' : '⚡ Run Discovery'}
       </button>
     </div>
 
@@ -2123,6 +2181,17 @@
     border-color: var(--accent);
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  /* Discovery swarm picker (toolbar) — matches PlanTab .swarm-pick style */
+  .disc-swarm-pick {
+    height: 26px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
   }
 
   /* Body */
