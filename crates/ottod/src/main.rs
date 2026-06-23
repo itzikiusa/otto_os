@@ -236,6 +236,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     let discovery_repo = otto_state::ProductDiscoveryRepo::new(pool.clone());
     let refinement_repo = otto_state::ProductRefinementRepo::new(pool.clone());
     let mockup_repo = otto_state::ProductMockupRepo::new(pool.clone());
+    let discovery_chat_repo = otto_state::DiscoveryChatRepo::new(pool.clone());
+    let canvas_repo = otto_state::CanvasRepo::new(pool.clone());
     let product = std::sync::Arc::new(otto_product::service::ProductService::new(
         product_repo.clone(),
         IssuesRepo::new(pool.clone()),
@@ -352,6 +354,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         discovery_repo,
         refinement_repo,
         mockup_repo,
+        discovery_chat_repo,
+        canvas_repo,
         product_agent_cancels: otto_server::product_run::new_cancel_registry(),
         memory,
         swarm,

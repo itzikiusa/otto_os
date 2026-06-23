@@ -1,6 +1,8 @@
 import { mount } from 'svelte';
 import './lib/tokens.css';
 import './app.css';
+// Svelte Flow base styles for the Canvas Studio module (loaded once, globally).
+import '@xyflow/svelte/dist/style.css';
 // Cousine: a monospace (Croscore) font with proper Hebrew glyphs. Used as the
 // terminal's Hebrew fallback so RTL text renders crisp & aligned instead of
 // falling back to a non-mono system font. latin.css enables it as a full

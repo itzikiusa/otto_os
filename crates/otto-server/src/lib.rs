@@ -6,6 +6,7 @@
 pub mod agent_run;
 pub mod api_helpers;
 pub mod auth;
+pub mod canvas_assist;
 pub mod context_packet;
 pub mod memory_gov;
 pub mod cli_update;
@@ -21,6 +22,7 @@ pub mod modules;
 pub mod monitor;
 pub mod plugins;
 pub mod policy;
+pub mod product_chat;
 pub mod product_media;
 pub mod product_refine;
 pub mod product_run;

@@ -2837,6 +2837,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-canvas"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "otto-core",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-channels"
 version = "0.1.0"
 dependencies = [
@@ -3112,6 +3126,7 @@ dependencies = [
  "keyring",
  "mime_guess",
  "otto-brokers",
+ "otto-canvas",
  "otto-channels",
  "otto-connections",
  "otto-context",

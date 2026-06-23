@@ -579,7 +579,7 @@ export interface NotificationSettings {
 // RBAC — features + capabilities
 // ---------------------------------------------------------------------------
 
-/** The 18 protected features (snake_case, mirrors Rust Feature enum). */
+/** The 19 protected features (snake_case, mirrors Rust Feature enum). */
 export type Feature =
   | 'agents'
   | 'connections'
@@ -598,7 +598,8 @@ export type Feature =
   | 'self_improvement'
   | 'context'
   | 'settings'
-  | 'users';
+  | 'users'
+  | 'canvas';
 
 /** Capability ladder (None < View < Edit < Admin). */
 export type Capability = 'none' | 'view' | 'edit' | 'admin';

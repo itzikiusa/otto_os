@@ -65,7 +65,7 @@
     api_client: 'API Client', workflows: 'Workflows', channels: 'Channels',
     skill_eval: 'Skills Evaluator', skills: 'Skills', insights: 'Insights',
     usage: 'Usage', self_improvement: 'Self-Improvement', context: 'Context',
-    settings: 'Settings', users: 'Users',
+    settings: 'Settings', users: 'Users', canvas: 'Canvas',
   };
   const CAP_OPTIONS: Capability[] = ['none', 'view', 'edit', 'admin'];
 
