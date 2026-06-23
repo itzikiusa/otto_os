@@ -16,6 +16,7 @@
   import HistoryTab from './HistoryTab.svelte';
   import InjectTab from './InjectTab.svelte';
   import DiscoveryTab from './DiscoveryTab.svelte';
+  import MockupsTab from './MockupsTab.svelte';
   import LearningsView from './LearningsView.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory } from './types';
@@ -88,6 +89,7 @@
     { id: 'history', label: 'History' },
     { id: 'inject', label: 'Inject' },
     { id: 'discovery', label: 'Discovery' },
+    { id: 'mockups', label: 'Mockups' },
   ];
 
   function stageColor(stage: string): string {
@@ -386,6 +388,8 @@
         <InjectTab />
       {:else if product.tab === 'discovery'}
         <DiscoveryTab />
+      {:else if product.tab === 'mockups'}
+        <MockupsTab />
       {:else}
         <div class="muted">{product.tab} — coming soon</div>
       {/if}
