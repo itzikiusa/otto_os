@@ -226,10 +226,18 @@
       {/if}
     </div>
   {/if}
-  {#if database.schemaLoading}
+  {#if database.schemaLoading || database.activeConnStatus?.phase === 'connecting'}
     <div class="tree-loading">
       <Icon name="refresh" size={13} />
       <span>Loading schema…</span>
+    </div>
+  {:else if database.activeConnStatus?.phase === 'error'}
+    <div class="tree-error" role="status" aria-live="polite">
+      <div class="tree-error-head"><Icon name="x" size={12} />Couldn't connect</div>
+      <div class="tree-error-msg">{database.activeConnStatus.error}</div>
+      <button class="tree-error-retry" onclick={() => database.retryConnection()}>
+        <Icon name="refresh" size={11} />Retry
+      </button>
     </div>
   {:else if database.schemaRoot.length === 0}
     <div class="tree-empty">No objects. Test the connection or refresh.</div>
@@ -305,6 +313,42 @@
     padding: 8px 6px;
     font-size: 11.5px;
     color: var(--text-dim);
+  }
+  .tree-error {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 10px 8px;
+    font-size: 11.5px;
+  }
+  .tree-error-head {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--status-exited);
+    font-weight: 600;
+  }
+  .tree-error-msg {
+    color: var(--text-dim);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .tree-error-retry {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 11.5px;
+  }
+  .tree-error-retry:hover {
+    background: var(--surface);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   }
   .node {
     display: flex;
