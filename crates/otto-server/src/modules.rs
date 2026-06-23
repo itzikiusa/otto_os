@@ -5,9 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use otto_connections::{ConnectionsService, Spawner};
 use otto_core::api::{
@@ -356,6 +356,30 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         .route(
             "/product/stories/{sid}/to-swarm",
             post(crate::product_swarm::story_to_swarm),
+        )
+        // Story attachments — upload route gets its own 40 MB body cap to bound
+        // the ~33 % base64 inflation (raw content cap is enforced at 25 MB).
+        .route(
+            "/product/stories/{sid}/attachments",
+            post(crate::product_media::upload_attachment)
+                .layer(DefaultBodyLimit::max(40 * 1024 * 1024))
+                .get(crate::product_media::list_attachments),
+        )
+        .route(
+            "/product/attachments/{aid}",
+            get(crate::product_media::serve_attachment)
+                .patch(crate::product_media::patch_attachment)
+                .delete(crate::product_media::delete_attachment),
+        )
+        .route(
+            "/product/attachments/{aid}/annotations",
+            get(crate::product_media::list_annotations)
+                .post(crate::product_media::create_annotation),
+        )
+        .route(
+            "/product/annotations/{id}",
+            patch(crate::product_media::patch_annotation)
+                .delete(crate::product_media::delete_annotation),
         )
         // Approve lives here (not in otto-product) so it can trigger self-improvement.
         .route(
