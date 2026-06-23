@@ -833,6 +833,10 @@ class DatabaseStore {
    * + schema only — NOT a full `loadConnectionFresh` — so the user's open query
    * tabs/editor are preserved. `loadSchemaRoot` flips connStatus connecting →
    * ready|error. Targets the active connection by default.
+   *
+   * Only invoked from the schema panel's error state (the Retry button), where
+   * the tree caches were never populated — so, unlike `refreshSchema`, it does
+   * not need to clear `childrenCache`/`expanded`/`builderTablesCache`.
    */
   async retryConnection(id: Id | null = this.selectedConnId): Promise<void> {
     if (!id) return;
