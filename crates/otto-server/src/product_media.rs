@@ -367,8 +367,12 @@ pub async fn delete_attachment(
     crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Editor).await?;
     ctx.attachment_repo.delete(&aid).await.map_err(ApiError)?;
     // Best-effort file removal (DB row is the source of truth).
+    // Path-sandbox: only unlink if the resolved path is within the attachments root.
+    let root = ctx.data_dir.join(ATTACH_ROOT);
     let full = ctx.data_dir.join(&att.storage_path);
-    let _ = tokio::fs::remove_file(&full).await;
+    if path_within(&root, &full) {
+        let _ = tokio::fs::remove_file(&full).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

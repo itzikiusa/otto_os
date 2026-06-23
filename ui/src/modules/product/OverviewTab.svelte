@@ -114,7 +114,7 @@
   // overlapping resolver runs (mirrors AttachmentsPanel.loadAttUrl guard).
   const bodyAttFetching = new Set<string>();
 
-  // HTML of renderedBody with `attachment:<id>` src values rewritten to blob URLs.
+  // HTML of renderedBody with markdown image tokens rewritten to <img> tags with blob URLs.
   let resolvedBody = $state('');
 
   // Track the last rendered body to avoid redundant re-resolution.
@@ -312,10 +312,12 @@
     }
   }
 
-  // ── Body preview: resolve `attachment:<id>` tokens in rendered HTML ───────
-  // After renderMarkdown produces HTML, find any src="attachment:<id>" values
-  // (or href="attachment:<id>"), fetch authed blob URLs, and write the resolved
-  // HTML into `resolvedBody`. Keeps `draftBody` / source body_md portable.
+  // ── Body preview: resolve markdown image tokens in rendered HTML ────────
+  // renderMarkdown HTML-escapes `![alt](attachment:<id>)` literally — it never
+  // emits src="attachment:<id>". We scan the rendered HTML for those literal
+  // markdown image tokens, fetch authed blob URLs, and replace each token with
+  // an <img> tag so pasted screenshots appear inline. `draftBody` / source
+  // body_md keep the portable `attachment:<id>` form; blob URLs only exist here.
   $effect(() => {
     const html = renderedBody;
     if (!html || html === lastResolvedInput) return;
@@ -323,13 +325,18 @@
     void resolveAttachmentTokens(html);
   });
 
+  function escapeHtmlAttr(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
   async function resolveAttachmentTokens(html: string): Promise<void> {
-    // Match src="attachment:<id>" and href="attachment:<id>" patterns.
-    const tokenRe = /(?:src|href)="(attachment:([^"]+))"/g;
-    const matches: Array<{ full: string; token: string; id: string }> = [];
+    // Match literal markdown image syntax `![alt](attachment:<id>)` in the HTML
+    // (renderMarkdown outputs these as-is since it doesn't handle image syntax).
+    const tokenRe = /!\[([^\]]*)\]\(attachment:([A-Za-z0-9]+)\)/g;
+    const matches: Array<{ full: string; alt: string; id: string }> = [];
     let m: RegExpExecArray | null;
     while ((m = tokenRe.exec(html)) !== null) {
-      matches.push({ full: m[0], token: m[1], id: m[2] });
+      matches.push({ full: m[0], alt: m[1], id: m[2] });
     }
     if (matches.length === 0) {
       resolvedBody = html;
@@ -359,12 +366,12 @@
     if (Object.keys(collected).length > 0) {
       bodyAttUrls = { ...bodyAttUrls, ...collected };
     }
-    // Rewrite the HTML: replace token src/href with the cached blob URL.
+    // Replace each markdown image token with an <img> tag using the blob URL.
     let out = html;
-    for (const { id } of matches) {
+    for (const { full, alt, id } of matches) {
       const blobUrl = bodyAttUrls[id];
       if (blobUrl) {
-        out = out.replaceAll(`attachment:${id}`, blobUrl);
+        out = out.replace(full, `<img class="body-attachment" alt="${escapeHtmlAttr(alt)}" src="${blobUrl}">`);
       }
     }
     resolvedBody = out;

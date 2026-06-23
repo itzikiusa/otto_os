@@ -864,9 +864,19 @@ pub async fn discover_story(
 
     // 9. Auto-start the swarm so the discovery agents actually run. Unlike
     //    `to-swarm` (which leaves the swarm paused), discovery is fire-and-go.
-    //    Replicates the `start` handler in swarm_runtime.rs: set status active,
+    //    Replicates the `start` handler in swarm_runtime.rs: point-of-action
+    //    budget gate first (same guard as `start`), then set status active,
     //    start the coordinator, emit the status event. (Starting the swarm runs
     //    ALL ready tasks, which now includes the discovery tasks — intended.)
+    {
+        let verdict = crate::routes::usage::check_budget(&ctx, &story.workspace_id, "").await;
+        if verdict.blocked {
+            return Err(ApiError(Error::Invalid(format!(
+                "Budget exceeded — swarm blocked: {}",
+                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
+            ))));
+        }
+    }
     ctx.swarm_repo
         .set_swarm_status(&swarm.id, "active")
         .await
