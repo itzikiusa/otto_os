@@ -73,10 +73,13 @@ cd apps/desktop/src-tauri && npx --yes @tauri-apps/cli@^2 build && cd -
 ## 3. Sign (macOS requires it)
 
 Signing with the **same** stable identity each time keeps macOS TCC approvals
-(network, accessibility, …) persistent across rebuilds.
+(network, accessibility, …) persistent across rebuilds. `sign.sh` also ensures
+the cert is **trusted for code signing**, which is what keeps login-keychain
+"Always Allow" grants from re-prompting on every rebuild — see
+[`packaging/README.md`](../packaging/README.md).
 
 ```bash
-# One-time, if not already created:
+# One-time, if not already created (also trusts the cert for code signing):
 packaging/make-cert.sh
 
 # Sign the app and the standalone ottod (path the sidecar copy came from):
@@ -85,8 +88,14 @@ packaging/sign.sh <path-to>/Otto.app target/release/ottod
 
 - [ ] Signing identity `Otto Dev Signing` present
       (`security find-identity -p codesigning`)
+- [ ] Cert trusted for code signing
+      (`security dump-trust-settings | grep -i "Otto Dev Signing"`)
 - [ ] `packaging/sign.sh` reports the bundle + sidecar signed
 - [ ] `codesign -dv <Otto.app>` shows the expected Identifier/Authority
+
+> **Shortcut:** steps 2–5 (build → sign → install → relaunch → verify) are
+> chained in [`packaging/deploy.sh`](../packaging/deploy.sh) — run that for a
+> one-command local redeploy.
 
 ## 4. DMG
 
