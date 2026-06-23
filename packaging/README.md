@@ -75,3 +75,38 @@ Always Trust**.
 your own login keychain — nothing system-wide, no effect on other software. Keep
 signing every build with the *same* cert (all scripts here do) so the identity
 stays stable.
+
+## Daemon won't start after a deploy: `OS_REASON_CODESIGNING` crash-loop
+
+Symptom: after `deploy.sh`, the app launches but `curl localhost:7700/api/v1/health`
+never responds, and:
+
+```bash
+launchctl print "gui/$(id -u)/com.otto.daemon" | grep -iE 'runs =|last exit'
+#   runs = 60                       (climbing — respawning)
+#   last exit reason = OS_REASON_CODESIGNING
+```
+
+The crash report (`~/Library/Logs/DiagnosticReports/ottod-*.ips`) says
+`SIGKILL (Code Signature Invalid)` / namespace `CODESIGNING` / indicator
+`Invalid Page` — **even though `codesign --verify <deployed ottod>` passes**.
+
+**Why:** the app self-deploys `ottod` by overwriting
+`~/Library/Application Support/Otto/bin/ottod` *in place*. If the launchd agent
+(`KeepAlive`) already had that binary mapped and running, overwriting the file
+mid-flight invalidates its mapped code pages → macOS kills it. The kernel then
+caches code-signing validity **per inode**, so that inode is rejected on every
+relaunch — a permanent loop. (Proof: a byte-identical copy at another path,
+e.g. `cp … /tmp/ottod && /tmp/ottod`, runs fine.)
+
+**Fix (now automatic):** `deploy.sh` step 6 detects this and self-heals by
+giving the deployed binary a **fresh inode** (atomic rename of a clean copy of
+the signed bundle sidecar), then kickstarting the agent. To do it by hand:
+
+```bash
+BIN="$HOME/Library/Application Support/Otto/bin"
+cp -f "/Applications/Otto.app/Contents/MacOS/ottod" "$BIN/ottod.fresh"
+mv -f "$BIN/ottod.fresh" "$BIN/ottod"     # atomic → NEW inode, fresh CS evaluation
+launchctl kickstart -k "gui/$(id -u)/com.otto.daemon"
+curl -s localhost:7700/api/v1/health      # {"ok":true}
+```
