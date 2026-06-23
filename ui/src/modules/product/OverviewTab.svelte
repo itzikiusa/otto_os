@@ -104,6 +104,9 @@
   let bodyAttUrls = $state<Record<string, string>>({});
   // Object URLs created for bodyAttUrls — revoked alongside createdObjectUrls.
   let bodyAttObjectUrls: string[] = [];
+  // IDs currently being fetched — prevents duplicate in-flight requests across
+  // overlapping resolver runs (mirrors AttachmentsPanel.loadAttUrl guard).
+  const bodyAttFetching = new Set<string>();
 
   // HTML of renderedBody with `attachment:<id>` src values rewritten to blob URLs.
   let resolvedBody = $state('');
@@ -295,19 +298,30 @@
       resolvedBody = html;
       return;
     }
-    // Fetch any uncached URLs.
+    // Fetch any uncached URLs, guarding against concurrent duplicate fetches.
+    // Collect all results locally so one merged assignment updates the cache
+    // (avoids stale-snapshot overwrites from concurrent reactive spreads).
+    const uncached = matches.map(({ id }) => id).filter(
+      (id) => !bodyAttUrls[id] && !bodyAttFetching.has(id),
+    );
+    for (const id of uncached) bodyAttFetching.add(id);
+    const collected: Record<string, string> = {};
     await Promise.all(
-      matches.map(async ({ id }) => {
-        if (bodyAttUrls[id]) return;
+      uncached.map(async (id) => {
         try {
           const url = await authedBlobUrl(`/product/attachments/${id}`);
           bodyAttObjectUrls.push(url);
-          bodyAttUrls = { ...bodyAttUrls, [id]: url };
+          collected[id] = url;
         } catch (e) {
           console.warn('[OverviewTab] attachment token resolution failed', id, e);
+        } finally {
+          bodyAttFetching.delete(id);
         }
       }),
     );
+    if (Object.keys(collected).length > 0) {
+      bodyAttUrls = { ...bodyAttUrls, ...collected };
+    }
     // Rewrite the HTML: replace token src/href with the cached blob URL.
     let out = html;
     for (const { id } of matches) {

@@ -49,9 +49,10 @@
   $effect(() => {
     // Re-load when selectedId changes (product.selectedId as a reactive read).
     product.selectedId;
-    // Revoke stale URLs, reset state.
-    for (const url of createdLocalUrls) URL.revokeObjectURL(url);
-    createdLocalUrls = [];
+    // Snapshot before clearing so the unmount cleanup always sees an empty list
+    // and we never double-revoke, regardless of effect teardown ordering.
+    const stale = createdLocalUrls.splice(0);
+    for (const url of stale) URL.revokeObjectURL(url);
     localAttUrls = {};
     localAttUrlLoading = {};
     localAtts = [];
@@ -59,9 +60,10 @@
   });
 
   $effect(() => {
-    // Cleanup on unmount.
+    // Cleanup on unmount: revoke any URLs accumulated since the last story change.
     return () => {
-      for (const url of createdLocalUrls) URL.revokeObjectURL(url);
+      const remaining = createdLocalUrls.splice(0);
+      for (const url of remaining) URL.revokeObjectURL(url);
     };
   });
 
