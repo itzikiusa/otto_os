@@ -17,6 +17,7 @@
   import InjectTab from './InjectTab.svelte';
   import DiscoveryTab from './DiscoveryTab.svelte';
   import MockupsTab from './MockupsTab.svelte';
+  import RefineTab from './RefineTab.svelte';
   import LearningsView from './LearningsView.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory } from './types';
@@ -89,6 +90,7 @@
     { id: 'history', label: 'History' },
     { id: 'inject', label: 'Inject' },
     { id: 'discovery', label: 'Discovery' },
+    { id: 'refine', label: 'Refine' },
     { id: 'mockups', label: 'Mockups' },
   ];
 
@@ -388,6 +390,8 @@
         <InjectTab />
       {:else if product.tab === 'discovery'}
         <DiscoveryTab />
+      {:else if product.tab === 'refine'}
+        <RefineTab />
       {:else if product.tab === 'mockups'}
         <MockupsTab />
       {:else}
