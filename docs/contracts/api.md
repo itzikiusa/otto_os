@@ -167,6 +167,8 @@ workspace from the row.
 | 85 | GET /api/v1/swarm/swarms/{sid}/board?project_id=&task_id= | ws viewer | — | `SwarmMessage[]` |
 | 86 | POST /api/v1/swarm/swarms/{sid}/board | ws editor | PostMessageReq | SwarmMessage |
 | — | POST /api/v1/ingest/swarm/board | session token | `{kind?,to_agent_id?,body}` | 204 |
+| — | POST /api/v1/ingest/swarm/product | session token | `{title?,body_md}` | 204 |
+| — | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/agent-stop | ws editor | — | `{ok:true}` |
 
 Notes:
 - `config.max_parallel_sessions` is the per-swarm concurrency cap (the Coordinator's
@@ -200,6 +202,12 @@ Notes:
   token** (`X-Otto-Session` + `X-Otto-Token`), like `/ingest/claude`; the agent posts
   via the materialized `otto-post` helper. The session's `meta` carries
   `swarm_id`/`agent_id`.
+- `POST /ingest/swarm/product` uses the same per-session ingest token and is restricted to
+  swarm sessions (the session `meta` must carry `swarm_id`). A PO/feature-design agent
+  publishes a feature **draft** (`body_md`, optional `title`) to the Product page via the
+  materialized `otto-product` helper; the user/PO reviews it. Fire-and-forget (always 204).
+- `POST /workspaces/{id}/swarm/swarms/{sid}/agent-stop` (ws editor) stops a single running
+  swarm-agent turn for `{sid}` without pausing the whole swarm; returns `{ok:true}`.
 - Assigning a task to a *leader* (an agent with reports) triggers a delegation turn
   that decomposes it into subtasks for the reports.
 - `SwarmRun.tokens_input` / `tokens_output` / `cost_usd` are backfilled on the run's
@@ -675,15 +683,55 @@ in Jira's native shape (number; `{"id":"…"}` for a single option/version/compo
 `[{"id":"…"}]` for an option array; `["a","b"]` for labels; `{"accountId":"…"}` for a user;
 `"YYYY-MM-DD"` for a date; `"YYYY-MM-DDTHH:mm:ss.sssZ"` for a datetime). `null` / `[]` clears a non-required field.
 
-## Channel integrations (Telegram / Slack / Loom)
+## Channel integrations (Telegram / Slack / Webhook / Loom)
+
+`{channel}` is `slack`, `telegram`, or `webhook`. The CRUD endpoints below are
+channel-agnostic. For `webhook`, the reused fields carry webhook meanings:
+`bot_token` = the inbound secret **key** (set manually or generate one client-side),
+`channel_id` = the optional default **reply callback URL**, `allowed_users` = the
+optional allowed caller ids (matched against the request's `user`).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{id}/integrations | ws viewer | — | configured channel integrations |
 | PUT /workspaces/{id}/integrations/{channel} | ws editor | UpsertIntegrationReq | Integration |
 | DELETE /workspaces/{id}/integrations/{channel} | ws editor | — | 204 |
-| POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message to the channel |
+| POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message (webhook: probes the callback URL) |
 | POST /workspaces/{id}/integrations/seed-from-loom | ws editor | — | seed integrations from a Loom config |
+
+### Inbound webhook trigger
+
+Public-by-key endpoint that turns an external HTTP `POST` into an agent session
+(same engine as Slack/Telegram). The per-webhook secret **key** is the credential —
+no Otto session/bearer required — supplied in the `X-Otto-Webhook-Key` header (or
+`Authorization: Bearer <key>`) and compared in constant time. Processing is async:
+the agent's reply (if any) is POSTed to the per-request `callback_url` or the
+integration's configured default. The webhook must be configured and **enabled** via
+the CRUD endpoints above first.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /webhooks/{workspace_id} | public-by-key (`X-Otto-Webhook-Key`) | WebhookInboundReq | 202 `{accepted, conversation}` |
+| POST /webhooks/swarm/{workspace_id}/{swarm_id} | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | SwarmTriggerReq | 202 `{swarm_id, project_id, started}` |
+
+`SwarmTriggerReq`: `{ goal: string (required), name?: string, repo_path?: string,
+start?: bool (default true) }`. An external trigger that starts a swarm fully
+automatically: it creates a project (goal = `goal`), runs the planner to seed tasks, sets
+the swarm active, and starts the coordinator (agents run in git **worktrees** for parallel
+isolation). `start=false` plans only. Auth reuses the **same per-workspace webhook key** as
+the channel webhook above (keychain `chan-bot-{ws}-webhook`), via `X-Otto-Webhook-Key` or
+`Authorization: Bearer <key>`. Errors: 401 (bad/missing key), 404 (swarm not in workspace),
+400 (empty `goal`).
+
+`WebhookInboundReq`: `{ text: string (required), conversation?: string, thread?: string,
+user?: string, callback_url?: string }`. The **conversation key** drives session reuse:
+explicit `conversation` → `user` → a fresh unique id per call (so distinct callers are
+never silently merged into one session). The resolved key is returned as `conversation`
+in the 202 body — pass it back as `conversation` to deliberately continue that session.
+Errors: 404 (no enabled webhook), 401 (bad/missing key), 400 (empty `text`), 503 (no
+root user yet). The callback URL passes through the SSRF guard before each POST. The
+callback body is `{kind:"reply", conversation, thread, text}` or, for attachments /
+long replies, `{kind:"file", conversation, thread, filename, content_base64}`.
 
 ## Self-improvement engine
 
@@ -1145,10 +1193,11 @@ handler. Agent hooks (which have no user session) post to them.
 | POST /ingest/codex | session token | Codex hook event | 204 |
 | POST /ingest/usage | session token | token-usage event | 204 |
 | POST /ingest/swarm/board | session token | `{kind?,to_agent_id?,body}` | 204 (also listed at #—, swarm) |
+| POST /ingest/swarm/product | session token | `{title?,body_md}` | 204 (also listed at #—, swarm) |
 
 Notes:
 - The `/api/v1` public exemptions (no bearer required) are exactly: `/health`, `/meta`,
-  `/onboarding/root`, `/auth/login`, and the four `/ingest/*` routes (session-token gated).
+  `/onboarding/root`, `/auth/login`, and the five `/ingest/*` routes (session-token gated).
 - `kill_all_sessions` (`POST /app/kill-sessions`) is mounted in the sessions api_router, so
   its full path is `/api/v1/app/kill-sessions` and it requires a bearer token.
 - Several AI-producing routes (analyze/rewrite/generate/plan/review) return `202 Accepted`
@@ -1354,3 +1403,28 @@ DB Explorer query/peek now honor `timeout_ms` on all engines (ClickHouse/Mongo/R
 just MySQL), a server-side schema-children `filter`, and a `mask` flag that redacts result
 cells / broker payloads server-side via `otto_core::redact` (the response carries a `masked`
 flag) — all on the EXISTING query/consume routes.
+
+## Goal Loops
+
+Bounded, goal-directed multi-agent iteration. A loop runs Plan → Execute → Evaluate →
+Digest cycles on an isolated git branch (`goal-loop/<id>`) until the goal's
+acceptance criteria are met or a hard limit (iterations / active time) is hit. Live
+updates arrive over `/ws/events` (`goal_loop_updated`). Item routes resolve the
+workspace from the loop row; every handler enforces ws Viewer/Editor.
+
+DTOs are `otto_core::api::{DefineGoalReq, GoalLoopDraft, CreateGoalLoopReq,
+UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDetail}`.
+
+| # | Method & path | Auth | Request | Response |
+|---|---|---|---|---|
+| 91 | POST /api/v1/workspaces/{id}/goal-loops/define | ws editor | DefineGoalReq | GoalLoopDraft (runs the AI definer; persists nothing; `feedback` refines) |
+| 92 | GET /api/v1/workspaces/{id}/goal-loops | ws viewer | — | `GoalLoop[]` |
+| 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; starts when `autostart`) |
+| 94 | GET /api/v1/goal-loops/{id} | ws viewer | — | GoalLoopDetail (`{loop, iterations}`) |
+| 95 | PATCH /api/v1/goal-loops/{id} | ws editor | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only) |
+| 96 | POST /api/v1/goal-loops/{id}/start | ws editor | — | GoalLoop |
+| 97 | POST /api/v1/goal-loops/{id}/pause | ws editor | — | GoalLoop |
+| 98 | POST /api/v1/goal-loops/{id}/resume | ws editor | — | GoalLoop |
+| 99 | POST /api/v1/goal-loops/{id}/stop | ws editor | — | GoalLoop |
+| 100 | POST /api/v1/goal-loops/{id}/iterations/{idx}/agents/{agent}/retry | ws editor | — | 202 (re-run a stuck executor) |
+| 101 | DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (stops + removes worktree; **keeps the branch**) |

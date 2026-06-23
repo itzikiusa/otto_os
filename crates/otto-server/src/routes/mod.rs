@@ -5,10 +5,13 @@ pub mod admin_sessions;
 pub mod api_client;
 pub mod backup;
 pub mod capabilities;
+pub mod channel_webhook;
+pub mod swarm_webhook;
 pub mod api_stream;
 pub mod audit;
 pub mod auth_routes;
 pub mod email_sender;
+pub mod goal_loops;
 pub mod grants;
 pub mod grpc;
 pub mod fs;
@@ -51,6 +54,8 @@ pub fn public_routes() -> Router<ServerCtx> {
         .route("/ingest/usage", post(usage::ingest))
         // Swarm agents post to the shared board via their per-session token.
         .route("/ingest/swarm/board", post(swarm_ingest::board_ingest))
+        // Swarm (PO) agents publish a feature draft to the Product page.
+        .route("/ingest/swarm/product", post(swarm_ingest::product_ingest))
         // Runtime-plugin host API: sidecars call back here with their own
         // OTTO_PLUGIN_TOKEN (validated in each handler) — NOT a user bearer, so it
         // lives in public_routes (outside the user auth chokepoint), like /ingest/*.
@@ -75,6 +80,15 @@ pub fn public_routes() -> Router<ServerCtx> {
             "/workflows/{id}/webhook/{token}",
             post(workflows::webhook_trigger),
         )
+        // Inbound channel webhook: PUBLIC-by-key. The per-webhook secret in the
+        // `X-Otto-Webhook-Key` header (or `Authorization: Bearer`) is the
+        // credential; no user bearer auth. The handler validates the key against
+        // the keychain before triggering any agent session.
+        // POLICY EXEMPTION: same allowlist treatment as /workflows/*/webhook/*.
+        .route("/webhooks/{workspace_id}", post(channel_webhook::inbound))
+        // External trigger that auto-plans + starts a specific swarm (worktree
+        // isolation). Same per-workspace webhook key as the channel webhook.
+        .route("/webhooks/swarm/{workspace_id}/{swarm_id}", post(swarm_webhook::trigger))
 }
 
 /// Routes that require a bearer token (the auth middleware is layered on top

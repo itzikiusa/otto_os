@@ -88,3 +88,71 @@ pub async fn board_ingest(
     }
     StatusCode::NO_CONTENT
 }
+
+#[derive(Deserialize)]
+pub struct ProductIngestReq {
+    #[serde(default)]
+    pub title: Option<String>,
+    pub body_md: String,
+}
+
+/// `POST /ingest/swarm/product` — a swarm (PO/feature-design) agent publishes a
+/// feature DRAFT to the Product page via the materialized `otto-product` helper.
+/// Same per-session auth as the board ingest. Creates a new draft story the
+/// user/PO reviews. Always 204 (fire-and-forget).
+pub async fn product_ingest(
+    State(ctx): State<ServerCtx>,
+    headers: HeaderMap,
+    Json(req): Json<ProductIngestReq>,
+) -> StatusCode {
+    let sid: Id = match headers.get("x-otto-session").and_then(|v| v.to_str().ok()) {
+        Some(s) => s.to_string(),
+        None => return StatusCode::NO_CONTENT,
+    };
+    let token = headers
+        .get("x-otto-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if !ctx.manager.verify_ingest_token(&sid, token) {
+        return StatusCode::NO_CONTENT;
+    }
+    let session = match ctx.manager.get(&sid).await {
+        Ok(s) => s,
+        Err(_) => return StatusCode::NO_CONTENT,
+    };
+    // Only swarm sessions may write drafts.
+    if session.meta.get("swarm_id").and_then(Value::as_str).is_none() {
+        return StatusCode::NO_CONTENT;
+    }
+    let body = req.body_md.trim();
+    if body.is_empty() {
+        return StatusCode::NO_CONTENT;
+    }
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("Feature draft");
+
+    match ctx
+        .product
+        .create_draft(&session.workspace_id, &session.created_by, Some(title))
+        .await
+    {
+        Ok(detail) => {
+            let _ = ctx
+                .product
+                .update_draft_body(&detail.story.id, title, body, &session.created_by)
+                .await;
+            let _ = ctx.events.send(Event::ProductChanged {
+                workspace_id: session.workspace_id.clone(),
+                story_id: detail.story.id,
+                section: "source".into(),
+                status: "draft".into(),
+            });
+        }
+        Err(e) => tracing::warn!("swarm product ingest: {e}"),
+    }
+    StatusCode::NO_CONTENT
+}

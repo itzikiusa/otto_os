@@ -145,6 +145,20 @@ pub enum Event {
         review_id: Id,
         status: String,
     },
+    /// A goal loop advanced (status/phase/iteration change, after each
+    /// evaluation, or when an executor's live state flips — e.g. → waiting).
+    /// The Loops UI re-fetches `GET /goal-loops/{id}` on a matching tick and
+    /// updates the list row directly from these fields.
+    GoalLoopUpdated {
+        workspace_id: Id,
+        loop_id: Id,
+        /// `GoalLoopStatus` as snake_case.
+        status: String,
+        /// `GoalLoopPhase` as snake_case.
+        phase: String,
+        current_iteration: u32,
+        progress_pct: u32,
+    },
     /// A self-improvement run finished or an approval became pending. Lets the
     /// Self-Improvement settings pane refresh on the event instead of guessing.
     /// `kind` is "run_finished" | "approval_pending".

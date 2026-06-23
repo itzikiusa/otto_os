@@ -787,9 +787,12 @@ async fn execute_node(
                 .map_err(|e| otto_core::Error::Upstream(format!("channel_notify: load integrations: {e}")))?;
 
             // Filter to the workspace's enabled integrations, optionally by channel.
+            // Webhooks are inbound-only (not a proactive-push target), so they're
+            // excluded here.
             let targets: Vec<_> = integrations
                 .into_iter()
                 .filter(|i| i.workspace_id == ws.id)
+                .filter(|i| i.channel != Channel::Webhook)
                 .filter(|i| preferred_channel.is_none() || Some(i.channel) == preferred_channel)
                 .filter(|i| !i.channel_id.trim().is_empty())
                 .collect();
@@ -834,6 +837,8 @@ async fn execute_node(
                             }
                         }
                     }
+                    // Webhooks are inbound-only; excluded from `targets` above.
+                    Channel::Webhook => continue,
                 };
                 match send_result {
                     Ok(_) => sent += 1,

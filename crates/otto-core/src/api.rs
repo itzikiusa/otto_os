@@ -1417,6 +1417,61 @@ pub struct ReviewConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Goal Loops
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/workspaces/{id}/goal-loops/define` — run the AI goal-definer to
+/// turn a rough seed into a structured, loop-executable draft. Persists nothing.
+/// Supplying `feedback` (with the prior draft echoed in `context`) refines it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DefineGoalReq {
+    /// The rough goal text the user typed.
+    pub seed: String,
+    /// The repo the loop will work in (gives the definer codebase context).
+    pub repo_path: String,
+    /// Optional extra guidance, or the prior draft when refining.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// When refining: what to change about the prior draft.
+    #[serde(default)]
+    pub feedback: Option<String>,
+}
+
+/// The definer's structured suggestion. The user edits this before launching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalLoopDraft {
+    pub definition: crate::domain::GoalLoopDefinition,
+    pub suggested_limits: crate::domain::GoalLoopLimits,
+    pub suggested_config: crate::domain::GoalLoopConfig,
+}
+
+/// `POST /api/v1/workspaces/{id}/goal-loops` — create a loop (optionally start it).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateGoalLoopReq {
+    pub name: String,
+    pub repo_path: String,
+    pub definition: crate::domain::GoalLoopDefinition,
+    pub limits: crate::domain::GoalLoopLimits,
+    pub config: crate::domain::GoalLoopConfig,
+    /// When true, the controller starts immediately after creation.
+    #[serde(default)]
+    pub autostart: bool,
+}
+
+/// `PATCH /api/v1/goal-loops/{id}` — edit a loop. `config` is editable in Draft
+/// only (reshaping executors mid-run breaks live agent indices); `limits` may be
+/// raised while Paused/Blocked/Exhausted; `name` any non-terminal state.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UpdateGoalLoopReq {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub limits: Option<crate::domain::GoalLoopLimits>,
+    #[serde(default)]
+    pub config: Option<crate::domain::GoalLoopConfig>,
+}
+
+// ---------------------------------------------------------------------------
 // PR Review start request
 // ---------------------------------------------------------------------------
 

@@ -12,7 +12,12 @@ pub mod seed;
 pub mod slack;
 pub mod telegram;
 pub mod transcript;
+pub mod webhook;
 
+pub use adapter::{Adapter, Inbound};
+pub use bridge::Bridge;
 pub use email::GmailSender;
 pub use http::{router, ChannelsCtx};
 pub use manager::ChannelManager;
+pub use mirror::Mirror;
+pub use webhook::WebhookAdapter;

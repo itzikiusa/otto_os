@@ -23,10 +23,19 @@
   const initSched = untrack(
     () => (agent?.schedule ?? prefill?.schedule ?? null) as AgentSchedule | null,
   );
+  // Preserve a library-soul reference (soul_name) through edit AND duplicate —
+  // the form only edits the inline soul_md, so without this a duplicate of a
+  // library-soul agent would silently fall back to the default soul.
+  const initSoulName = untrack(
+    () => (agent?.soul_name ?? prefill?.soul_name ?? null) as string | null,
+  );
 
   let name = $state(src.name ?? '');
   let title = $state(src.title ?? '');
   let provider = $state(src.provider ?? swarm.detail?.config.provider ?? 'claude');
+  // Model alias (e.g. opus / sonnet / haiku) — blank = the provider's default.
+  // Lets you duplicate an agent and run the copy on a different model.
+  let model = $state((src.model ?? '') as string);
   let reportsTo = $state<string>((src.reports_to ?? '') as string);
   let specialization = $state(src.specialization ?? '');
   let soulMd = $state((src.soul_md ?? '') as string);
@@ -76,10 +85,12 @@
     const body: CreateAgentReq = {
       name: name.trim(),
       provider,
+      model: model.trim() || null,
       title: title.trim(),
       reports_to: reportsTo || null,
       specialization: specialization.trim(),
       soul_md: soulMd.trim() || null,
+      soul_name: initSoulName,
       scope_md: scopeMd.trim(),
       avatar: avatar.trim(),
       skills,
@@ -113,6 +124,10 @@
       <select id="ag-provider" class="input" bind:value={provider}>
         {#each providers as p (p)}<option value={p}>{p}</option>{/each}
       </select>
+    </div>
+    <div class="field">
+      <label for="ag-model">Model <span class="dim">(optional)</span></label>
+      <input id="ag-model" class="input" bind:value={model} placeholder="default — e.g. opus / sonnet / haiku" />
     </div>
     <div class="field">
       <label for="ag-reports">Reports to</label>

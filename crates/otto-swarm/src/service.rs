@@ -15,7 +15,10 @@ use crate::types::*;
 /// (D3). Non-null so a runaway swarm self-stops; callers can pass explicit `null`
 /// to opt out (unlimited). `max_cost_usd` defaults to unlimited because cost is
 /// best-effort (often 0 until usage attribution lands) — it's a soft cap when set.
-pub const DEFAULT_MAX_TOTAL_RUNS: i64 = 300;
+// Generous runaway-cost backstop, NOT a usage limit — an ongoing team blows past
+// a few hundred runs quickly. Set per-swarm (or YAML `null`) for a tighter cap or
+// truly unlimited.
+pub const DEFAULT_MAX_TOTAL_RUNS: i64 = 3000;
 pub const DEFAULT_MAX_RUNTIME_SECS: i64 = 4 * 60 * 60; // 4 hours
 pub const DEFAULT_MAX_ATTEMPTS: i64 = 3;
 

@@ -325,6 +325,8 @@ fn build_adapter(secrets: &Arc<dyn SecretStore>, integ: &Integration) -> Option<
                 }
             }
         }
+        // Webhooks are inbound-only — not a proactive-push target.
+        Channel::Webhook => None,
     }
 }
 

@@ -4,19 +4,41 @@
   // Cards support HTML5 drag-and-drop to change status columns.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import StoryLinkCard from './StoryLinkCard.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { isAbortError } from '../../lib/api/client';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { TASK_COLUMNS, type SwarmTask, type TaskStatus } from './types';
 
+  // `onrecruit` lets the board surface the existing Recruiter (the agent
+  // configurator) without owning its modal — SwarmPage flips `showRecruit`.
+  let { onrecruit }: { onrecruit?: () => void } = $props();
+
   const projects = $derived(swarm.detail?.projects ?? []);
-  const pid = $derived(swarm.selectedProjectId);
+  // Fall back to the first project so the board is never wedged when
+  // `selectedProjectId` is null but projects exist (a `<select bind:value>`
+  // shows option 0 visually without writing it back to the model).
+  const pid = $derived(swarm.selectedProjectId ?? projects[0]?.id ?? null);
   const tasks = $derived(swarm.tasks(pid));
   const agents = $derived(swarm.detail?.agents ?? []);
-  // Selected project object (needed for the story back-link card).
+  // Selected project object (needed for the story back-link card + goal view).
   const selectedProject = $derived(projects.find((p) => p.id === pid) ?? null);
+  const goal = $derived((selectedProject?.goal_md ?? '').trim());
+
+  // Reconcile the bound model with what's rendered: when projects exist but
+  // `selectedProjectId` is unset or stale (not in the list), pin it to the first
+  // project. This persists the choice and keeps the toolbar `<select>` in sync,
+  // so Plan-from-goal / Add-task are enabled whenever a project is present.
+  $effect(() => {
+    if (!projects.length) return;
+    const cur = swarm.selectedProjectId;
+    if (!cur || !projects.some((p) => p.id === cur)) {
+      swarm.selectedProjectId = projects[0].id;
+    }
+  });
 
   const COLUMN_LABEL: Record<TaskStatus, string> = {
     backlog: 'Backlog',
@@ -32,6 +54,57 @@
     return tasks.filter((t) => t.status === s);
   }
 
+  // --- Bulk selection -------------------------------------------------------
+  let selected = $state<Set<string>>(new Set());
+  const selectedCount = $derived(selected.size);
+  const selectedTasks = $derived(tasks.filter((t) => selected.has(t.id)));
+
+  function toggleSelect(id: string) {
+    const n = new Set(selected);
+    if (n.has(id)) n.delete(id);
+    else n.add(id);
+    selected = n;
+  }
+  function clearSelection() {
+    selected = new Set();
+  }
+  function bulkMoveMenu(e: MouseEvent) {
+    ctxMenu.show(
+      e,
+      TASK_COLUMNS.map((s) => ({ label: `Move to ${COLUMN_LABEL[s]}`, action: () => bulkMove(s) })),
+    );
+  }
+  function bulkAssignMenu(e: MouseEvent) {
+    ctxMenu.show(e, [
+      { label: 'Unassign', action: () => bulkAssign(null) },
+      { separator: true },
+      ...agents.map((a) => ({ label: a.name, action: () => bulkAssign(a.id) })),
+    ]);
+  }
+  async function bulkMove(status: TaskStatus) {
+    await swarm.bulkUpdateTasks(selectedTasks, { status });
+    clearSelection();
+  }
+  async function bulkAssign(agentId: string | null) {
+    await swarm.bulkUpdateTasks(selectedTasks, { assignee_agent_id: agentId });
+    clearSelection();
+  }
+  async function bulkDelete() {
+    const n = selectedTasks.length;
+    if (!n) return;
+    if (await confirmer.ask(`Delete ${n} selected task${n === 1 ? '' : 's'}?`, { title: 'Delete tasks' })) {
+      await swarm.bulkDeleteTasks(selectedTasks);
+      clearSelection();
+    }
+  }
+  async function clearBoard() {
+    if (!pid || !tasks.length) return;
+    if (await confirmer.ask(`Delete ALL ${tasks.length} tasks on this board? This cannot be undone.`, { title: 'Clear board' })) {
+      await swarm.bulkDeleteTasks(tasks);
+      clearSelection();
+    }
+  }
+
   let adding = $state(false);
   let newTitle = $state('');
   async function addTask() {
@@ -41,14 +114,69 @@
     adding = false;
   }
 
-  async function planFromGoal() {
+  // -- Goal view + edit ------------------------------------------------------
+  // The goal was previously write-once (only the New-project modal). Here it can
+  // be viewed at the top of the board and edited via swarm.updateProject.
+  let editingGoal = $state(false);
+  let goalDraft = $state('');
+  let savingGoal = $state(false);
+
+  function openGoalEditor() {
     if (!pid) return;
+    goalDraft = selectedProject?.goal_md ?? '';
+    editingGoal = true;
+  }
+
+  async function saveGoal() {
+    if (!pid) return;
+    savingGoal = true;
     try {
-      await swarm.plan(pid);
+      await swarm.updateProject(pid, { goal_md: goalDraft.trim() });
+      editingGoal = false;
+      toasts.success('Goal saved');
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      savingGoal = false;
+    }
+  }
+
+  // Planning runs multiple planner agents + a summarizer and can take a few
+  // minutes, so surface an in-progress state with a Stop. Stop abandons the
+  // wait (the run may still finish server-side and tasks appear on next refresh).
+  let planning = $state(false);
+  let planCtl: AbortController | null = null;
+
+  async function planFromGoal() {
+    if (!pid || planning) return;
+    // No goal yet → guide the user to set one instead of firing a request the
+    // backend rejects with "project has no goal to plan".
+    if (!goal) {
+      toasts.info('Set a goal first', 'Plan from goal needs a project goal.');
+      openGoalEditor();
+      return;
+    }
+    planCtl = new AbortController();
+    planning = true;
+    try {
+      await swarm.plan(pid, planCtl.signal);
       toasts.success('Planner created tasks');
     } catch (e) {
-      toasts.error('Plan failed', e instanceof Error ? e.message : String(e));
+      if (isAbortError(e)) {
+        toasts.info('Plan stopped', 'The planner may still finish in the background.');
+      } else {
+        toasts.error('Plan failed', e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      planning = false;
+      planCtl = null;
     }
+  }
+
+  function stopPlan() {
+    // Kill the live planner session(s) server-side, then abandon the UI wait.
+    if (swarm.detail) void swarm.stopAgentRun(swarm.detail.id);
+    planCtl?.abort();
   }
 
   function cardMenu(e: MouseEvent, t: SwarmTask) {
@@ -148,13 +276,56 @@
       <span class="section-title">{projects[0].name}</span>
     {/if}
     <span class="grow"></span>
-    <button class="btn small" onclick={planFromGoal} disabled={!pid} title="Break the project goal into tasks">
-      <Icon name="zap" size={13} /> Plan from goal
+    {#if onrecruit}
+      <button class="btn small" onclick={onrecruit} title="Let the Recruiter propose an agent — role, soul & skills — for you to edit and hire">
+        <Icon name="plus" size={13} /> Recruit agent
+      </button>
+    {/if}
+    <button class="btn small" onclick={openGoalEditor} disabled={!pid} title="View or edit the project goal">
+      <Icon name="note" size={13} /> {goal ? 'Edit goal' : 'Set goal'}
     </button>
+    {#if planning}
+      <span class="planning"><span class="spinner-xs"></span> Planning… <span class="dim">watch live in Runs</span></span>
+      <button class="btn small" onclick={stopPlan} title="Stop waiting for the planner">
+        <Icon name="x" size={13} /> Stop
+      </button>
+    {:else}
+      <button class="btn small" onclick={planFromGoal} disabled={!pid} title="Break the project goal into tasks with multiple planner agents + a summarizer">
+        <Icon name="zap" size={13} /> Plan from goal
+      </button>
+    {/if}
+    {#if pid && tasks.length}
+      <button class="btn small ghost" onclick={clearBoard} title="Delete every task on this board">
+        <Icon name="trash" size={13} /> Clear board
+      </button>
+    {/if}
     <button class="btn small primary" onclick={() => (adding = !adding)} disabled={!pid}>
       <Icon name="plus" size={13} /> Add task
     </button>
   </div>
+
+  {#if selectedCount > 0}
+    <div class="bulk-bar">
+      <span class="bulk-count">{selectedCount} selected</span>
+      <button class="btn small" onclick={bulkMoveMenu}><Icon name="split" size={13} /> Move to…</button>
+      <button class="btn small" onclick={bulkAssignMenu}><Icon name="user" size={13} /> Assign…</button>
+      <button class="btn small danger" onclick={bulkDelete}><Icon name="trash" size={13} /> Delete</button>
+      <span class="grow"></span>
+      <button class="btn small ghost" onclick={clearSelection}>Clear selection</button>
+    </div>
+  {/if}
+
+  {#if pid}
+    <div class="goal-bar" class:empty={!goal}>
+      <Icon name="zap" size={12} />
+      {#if goal}
+        <span class="goal-text" title={goal}>{goal}</span>
+        <button class="link" onclick={openGoalEditor}>Edit</button>
+      {:else}
+        <span class="goal-text dim">No goal set — <button class="link" onclick={openGoalEditor}>set a goal</button> to use Plan from goal.</span>
+      {/if}
+    </div>
+  {/if}
 
   {#if adding}
     <div class="add-row">
@@ -196,6 +367,7 @@
               <div
                 class="card"
                 class:dragging={draggingId === t.id}
+                class:selected={selected.has(t.id)}
                 draggable="true"
                 ondragstart={(e) => onDragStart(e, t)}
                 ondragend={onDragEnd}
@@ -203,7 +375,17 @@
                 role="button"
                 tabindex="0"
               >
-                <div class="card-title">{t.title}</div>
+                <div class="card-title">
+                  <input
+                    type="checkbox"
+                    class="card-sel"
+                    checked={selected.has(t.id)}
+                    onclick={(e) => e.stopPropagation()}
+                    onchange={() => toggleSelect(t.id)}
+                    aria-label="Select task"
+                  />
+                  <span>{t.title}</span>
+                </div>
                 <div class="card-meta">
                   {#if agent}
                     <span class="assignee" title={agent.title}>{agent.avatar || agent.name.slice(0, 1)} {agent.name}</span>
@@ -226,6 +408,25 @@
   {/if}
 </div>
 
+{#if editingGoal}
+  <Modal title={goal ? 'Edit project goal' : 'Set project goal'} width={560} onclose={() => (editingGoal = false)}>
+    <div class="field">
+      <label for="goal-md">Goal</label>
+      <textarea
+        id="goal-md"
+        class="input"
+        rows={8}
+        bind:value={goalDraft}
+        placeholder="Describe what this project should achieve. Plan from goal turns this into tasks."
+      ></textarea>
+    </div>
+    {#snippet footer()}
+      <button class="btn ghost" onclick={() => (editingGoal = false)}>Cancel</button>
+      <button class="btn primary" onclick={saveGoal} disabled={savingGoal}>{savingGoal ? 'Saving…' : 'Save'}</button>
+    {/snippet}
+  </Modal>
+{/if}
+
 <style>
   .kanban {
     display: flex;
@@ -240,6 +441,66 @@
     gap: 8px;
     padding: 8px 10px;
     border-bottom: 1px solid var(--border);
+  }
+  .goal-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    border-bottom: 1px solid var(--border);
+  }
+  .goal-bar.empty {
+    background: transparent;
+  }
+  .goal-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 0;
+    font: inherit;
+  }
+  .link:hover {
+    text-decoration: underline;
+  }
+  .planning {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .spinner-xs {
+    width: 11px;
+    height: 11px;
+    border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: kb-spin 0.7s linear infinite;
+  }
+  @keyframes kb-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .field label {
+    font-size: 12px;
+    color: var(--text-dim);
   }
   .columns {
     display: flex;
@@ -295,6 +556,28 @@
   .card.dragging {
     opacity: 0.4;
     cursor: grabbing;
+  }
+  .card.selected {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  .card-sel {
+    margin-inline-end: 6px;
+    vertical-align: middle;
+    cursor: pointer;
+  }
+  .bulk-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    font-size: 12px;
+  }
+  .bulk-count {
+    font-weight: 600;
+    color: var(--accent);
   }
   .column.drop-target {
     background: color-mix(in srgb, var(--accent) 8%, var(--surface-2));

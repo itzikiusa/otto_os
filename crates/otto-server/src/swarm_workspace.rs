@@ -55,17 +55,24 @@ fn swarm_base(ctx: &ServerCtx, swarm_id: &str, agent_id: &str) -> PathBuf {
         .join(agent_id)
 }
 
-fn cwd_mode(swarm: &Swarm, agent: &SwarmAgent) -> String {
-    agent
-        .cwd_mode
-        .clone()
-        .or_else(|| {
-            swarm
-                .config
-                .get("cwd_mode")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
+fn cwd_mode(swarm: &Swarm, agent: &SwarmAgent, has_repo: bool) -> String {
+    // 1. An explicit PER-AGENT choice always wins (e.g. "worktree" for isolation).
+    if let Some(m) = agent.cwd_mode.clone().filter(|s| !s.trim().is_empty()) {
+        return m;
+    }
+    // 2. A project repo path is a strong "work here" signal — it beats the
+    //    swarm-level default, which is almost always the auto-inserted "scratch"
+    //    (swarm creation stamps config.cwd_mode="scratch"). Honoring the path the
+    //    operator set is what they expect.
+    if has_repo {
+        return "repo".to_string();
+    }
+    // 3. No repo path: fall back to the swarm-level config, else scratch.
+    swarm
+        .config
+        .get("cwd_mode")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
         .unwrap_or_else(|| "scratch".to_string())
 }
 
@@ -82,8 +89,8 @@ pub async fn ensure_cwd(
     agent: &SwarmAgent,
     project: Option<&SwarmProject>,
 ) -> Result<String> {
-    let mode = cwd_mode(swarm, agent);
     let repo = project.and_then(|p| p.repo_path.clone());
+    let mode = cwd_mode(swarm, agent, repo.is_some());
 
     if mode == "repo" {
         if let Some(r) = &repo {
@@ -206,8 +213,36 @@ pub fn render_identity(
     s
 }
 
+/// `otto-product` — a PO/feature-design agent publishes a feature DRAFT to the
+/// Product page (a new draft story the user/PO reviews). Mirrors `otto-post`'s
+/// per-session auth.
+const OTTO_PRODUCT: &str = r#"#!/bin/sh
+# otto-product — publish a feature DRAFT to the Product page for the user/PO to
+# review. Usage: otto-product --title "Feature title" "draft markdown body"
+BASE="${OTTO_INGEST_BASE:-http://127.0.0.1:7700}"
+TITLE=""; BODY=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --title) TITLE="$2"; shift 2 ;;
+    --) shift; BODY="$*"; break ;;
+    *) if [ -z "$BODY" ]; then BODY="$1"; else BODY="$BODY $1"; fi; shift ;;
+  esac
+done
+if [ -z "$BODY" ]; then echo "usage: otto-product --title \"Title\" \"markdown body\"" >&2; exit 1; fi
+PAYLOAD=$(TITLE="$TITLE" BODY="$BODY" python3 - <<'PY'
+import json, os
+print(json.dumps({"title": os.environ.get("TITLE",""), "body_md": os.environ.get("BODY","")}))
+PY
+)
+curl -s -X POST "$BASE/api/v1/ingest/swarm/product" \
+  -H "Content-Type: application/json" \
+  -H "X-Otto-Session: $OTTO_SESSION_ID" \
+  -H "X-Otto-Token: $OTTO_INGEST_TOKEN" \
+  -d "$PAYLOAD" >/dev/null 2>&1
+"#;
+
 /// Materialize the agent's skills + soul + identity into `cwd`, and install the
-/// `otto-post` board helper. Best-effort: never fails the turn.
+/// `otto-post` board helper + `otto-product` draft helper. Best-effort.
 pub fn provision_agent(
     ctx: &ServerCtx,
     agent: &SwarmAgent,
@@ -221,13 +256,14 @@ pub fn provision_agent(
         include_memory: true,
     };
     let _ = otto_context::materialize::provision(&ctx.context_library, &cfg, cwd, &agent.provider);
-    install_otto_post(cwd);
+    install_helper(cwd, "otto-post", OTTO_POST);
+    install_helper(cwd, "otto-product", OTTO_PRODUCT);
 }
 
-/// Write the `otto-post` helper into `cwd` and mark it executable.
-pub fn install_otto_post(cwd: &str) {
-    let path = std::path::Path::new(cwd).join("otto-post");
-    if std::fs::write(&path, OTTO_POST).is_ok() {
+/// Write a helper script into `cwd` and mark it executable (best-effort).
+pub fn install_helper(cwd: &str, name: &str, body: &str) {
+    let path = std::path::Path::new(cwd).join(name);
+    if std::fs::write(&path, body).is_ok() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

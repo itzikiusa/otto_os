@@ -3625,6 +3625,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_skills::http::router::<ServerCtx>(),
         otto_swarm::router::<ServerCtx>(),
         crate::swarm_runtime::routes(),
+        crate::routes::goal_loops::routes(),
         crate::insights::routes(),
         orchestrator_routes(),
         db_explorer_routes(),

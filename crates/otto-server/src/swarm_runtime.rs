@@ -58,6 +58,15 @@ pub fn new_registry() -> CoordinatorRegistry {
 
 const TICK: Duration = Duration::from_secs(5);
 const SLICE: Duration = Duration::from_millis(500);
+/// "Stuck" window for a planner / recruiter turn — NOT a wall-clock cap. The
+/// old 120–150s caps killed perfectly healthy turns: the claude cold-start (MCP
+/// handshake + hook init) alone could eat them before reasoning began. Planning
+/// and recruiting are one-time, quality-sensitive operations the operator is
+/// happy to let run long, so there is no total limit (the orchestrator caps a
+/// truly-wedged session at 1h). This is only how long the turn may make NO
+/// progress — no transcript growth and no PTY activity — before it is deemed
+/// stuck and retried (the orchestrator re-runs it, review-style).
+const AGENT_NO_PROGRESS: Duration = Duration::from_secs(240);
 
 // --- Coordinator -----------------------------------------------------------
 
@@ -639,6 +648,19 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/swarm/runs/{rid}/stop", post(stop_run))
         .route("/workspaces/{id}/swarm/recruit", post(recruit))
         .route("/workspaces/{id}/swarm/projects/{pid}/plan", post(plan))
+        .route("/workspaces/{id}/swarm/swarms/{sid}/agent-stop", post(agent_stop))
+}
+
+/// Stop an in-flight plan/recruit for this swarm: kills the live agent
+/// session(s) and prevents further retries.
+async fn agent_stop(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path((ws, sid)): Path<(Id, Id)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    crate::swarm_agent_run::stop(&ctx, &sid).await;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn check(ctx: &ServerCtx, user: &AuthUser, ws: &Id, role: WorkspaceRole) -> ApiResult<()> {
@@ -733,7 +755,7 @@ async fn resume(
     Ok(Json(ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?))
 }
 
-fn emit_status(ctx: &ServerCtx, ws: &Id, sid: &str, status: &str) {
+pub(crate) fn emit_status(ctx: &ServerCtx, ws: &Id, sid: &str, status: &str) {
     let _ = ctx.events.send(Event::SwarmStatus {
         workspace_id: ws.clone(),
         swarm_id: sid.to_string(),
@@ -836,14 +858,46 @@ async fn recruit(
         ctx.available_providers()
     };
     let prompt = otto_swarm::recruiter::recruiter_prompt(
-        &req.role, &swarm_name, &mission, &titles, &capped_skills, &providers, req.context.as_deref(),
+        &req.role, &swarm_name, &mission, &titles, &capped_skills, &providers,
+        req.context.as_deref(), req.naming_theme.as_deref(),
     );
     let cwd = std::env::temp_dir().to_string_lossy().to_string();
-    let reply = ctx
-        .orchestrator
-        .run_agent(&prompt, &cwd, None, Duration::from_secs(120))
-        .await
-        .map_err(ApiError)?;
+    // When recruiting into an existing swarm, run as a REAL, openable session
+    // (watchable live + Stop-able). With no swarm yet (brand-new), fall back to a
+    // headless one-shot turn (nothing to attach a run/session to).
+    let (reply, run_id): (String, Option<Id>) = match &req.swarm_id {
+        Some(sid) => {
+            let ws_obj = ctx.workspaces.get(&ws).await.map_err(ApiError)?;
+            let nominal = ctx
+                .swarm_repo
+                .list_agents(sid)
+                .await
+                .unwrap_or_default()
+                .first()
+                .map(|a| a.id.clone())
+                .unwrap_or_else(|| "recruiter".to_string());
+            let cancel = crate::swarm_agent_run::begin(sid);
+            let (raw, rid) = crate::swarm_agent_run::run_swarm_agent(
+                &ctx, &ws_obj, &user.0, sid, None, &nominal, "recruit",
+                &format!("Recruit: {}", req.role), &cwd, &prompt,
+                |t| otto_swarm::recruiter::parse_recruited(t).is_some(),
+                &cancel,
+            )
+            .await;
+            crate::swarm_agent_run::end(sid);
+            let raw = raw.ok_or_else(|| {
+                ApiError(Error::Upstream("recruiter produced nothing (stopped or stuck)".into()))
+            })?;
+            (raw, Some(rid))
+        }
+        None => (
+            ctx.orchestrator
+                .run_agent(&prompt, &cwd, None, AGENT_NO_PROGRESS)
+                .await
+                .map_err(ApiError)?,
+            None,
+        ),
+    };
     let mut recruited = otto_swarm::recruiter::parse_recruited(&reply)
         .ok_or_else(|| ApiError(Error::Upstream("recruiter returned no usable definition".into())))?;
     // Validate skills against the FULL library (not just the capped list); any
@@ -853,6 +907,21 @@ async fn recruit(
     // Force the provider to an available one.
     if !providers.iter().any(|p| p == &recruited.suggested_provider) {
         recruited.suggested_provider = providers.first().cloned().unwrap_or_else(|| "claude".into());
+    }
+    // Persist the proposal on the run so it can be hired straight from the Runs
+    // list even if the Recruit modal was closed while the agent worked.
+    if let Some(rid) = run_id {
+        let _ = ctx
+            .swarm_repo
+            .update_run(
+                &rid,
+                RunPatch {
+                    result: Some(Some(serde_json::to_value(&recruited).unwrap_or_default())),
+                    ..Default::default()
+                },
+            )
+            .await;
+        crate::swarm_run::emit_run(&ctx, &rid).await;
     }
     Ok(Json(recruited))
 }
@@ -881,15 +950,58 @@ async fn plan(
             specialization: a.specialization.clone(),
         })
         .collect();
-    let prompt = otto_swarm::recruiter::planner_prompt(&project.name, &goal, &preset_agents);
-    let cwd = project.repo_path.clone().unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
-    let reply = ctx
-        .orchestrator
-        .run_agent(&prompt, &cwd, None, Duration::from_secs(150))
-        .await
-        .map_err(ApiError)?;
-    let v = otto_swarm::recruiter::extract_json(&reply)
-        .ok_or_else(|| ApiError(Error::Upstream("planner returned no tasks".into())))?;
+    let cwd = project
+        .repo_path
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    let ws_obj = ctx.workspaces.get(&ws).await.map_err(ApiError)?;
+    let nominal_agent = agents
+        .first()
+        .map(|a| a.id.clone())
+        .unwrap_or_else(|| "planner".to_string());
+
+    // Multi-agent plan: run one planner per angle as a REAL, openable session
+    // (watchable live in the Runs list, Stop-able), then a summarizer reconciles
+    // the candidate task lists. Each turn has no wall-clock cap + stuck-retry.
+    let cancel = crate::swarm_agent_run::begin(&project.swarm_id);
+    let mut candidates: Vec<String> = Vec::new();
+    let angles = otto_swarm::recruiter::PLANNER_ANGLES;
+    for (i, angle) in angles.iter().enumerate() {
+        let prompt =
+            otto_swarm::recruiter::planner_prompt(&project.name, &goal, &preset_agents, angle);
+        let title = format!("Plan {}/{}: {}", i + 1, angles.len(), project.name);
+        let (raw, _) = crate::swarm_agent_run::run_swarm_agent(
+            &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), &nominal_agent, "plan",
+            &title, &cwd, &prompt,
+            |t| otto_swarm::recruiter::extract_json(t).is_some(),
+            &cancel,
+        )
+        .await;
+        if let Some(raw) = raw {
+            if otto_swarm::recruiter::extract_json(&raw).is_some() {
+                candidates.push(raw);
+            }
+        }
+    }
+    let final_json = if candidates.len() > 1 {
+        let sum_prompt = otto_swarm::recruiter::planner_summarizer_prompt(
+            &project.name, &goal, &preset_agents, &candidates,
+        );
+        let (raw, _) = crate::swarm_agent_run::run_swarm_agent(
+            &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), &nominal_agent, "plan",
+            &format!("Plan summary: {}", project.name), &cwd, &sum_prompt,
+            |t| otto_swarm::recruiter::extract_json(t).is_some(),
+            &cancel,
+        )
+        .await;
+        raw.and_then(|r| otto_swarm::recruiter::extract_json(&r))
+            .or_else(|| otto_swarm::recruiter::extract_json(&candidates[0]))
+    } else {
+        candidates.first().and_then(|c| otto_swarm::recruiter::extract_json(c))
+    };
+    crate::swarm_agent_run::end(&project.swarm_id);
+    let v = final_json
+        .ok_or_else(|| ApiError(Error::Upstream("planner produced no tasks (stopped or stuck)".into())))?;
     let tasks_json = v.get("tasks").and_then(|t| t.as_array()).cloned().unwrap_or_default();
 
     // Two passes: create tasks, then wire depends_on by matching titles.

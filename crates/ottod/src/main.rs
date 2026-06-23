@@ -289,6 +289,28 @@ async fn run(cfg: Config) -> Result<(), String> {
         format!("http://127.0.0.1:{}/api/v1/plugin-host", cfg.port),
     ));
 
+    // Resolve the root user once — owns sessions spawned on behalf of inbound
+    // channel/webhook messages. Used both for the webhook bridge here and the
+    // channel manager further down. None until onboarding creates a root user.
+    let root_user_id: Option<String> = UsersRepo::new(pool.clone())
+        .list()
+        .await
+        .ok()
+        .and_then(|users| users.into_iter().find(|u| u.is_root).map(|u| u.id));
+
+    // Webhook-channel bridge: its own Bridge + Mirror, independent of the live
+    // Slack/Telegram supervisor, so the public inbound HTTP handler can turn a
+    // `POST /webhooks/{ws}` into an agent session. None until a root user exists.
+    let channel_bridge = root_user_id.as_ref().map(|uid| {
+        otto_channels::Bridge::new(
+            Arc::clone(&manager),
+            workspaces.clone(),
+            SettingsRepo::new(pool.clone()),
+            otto_channels::Mirror::new(Arc::clone(&manager)),
+            uid.clone(),
+        )
+    });
+
     let ctx = ServerCtx {
         pool: pool.clone(),
         secrets: secrets.clone(),
@@ -311,6 +333,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         git_store: GitStore::new(pool.clone()),
         issues_store: IssuesRepo::new(pool.clone()),
         integrations_store: IntegrationsRepo::new(pool.clone()),
+        channel_bridge,
         reviews_store: ReviewsRepo::new(pool.clone()),
         findings_store: ReviewFindingsRepo::new(pool.clone()),
         skill_evals_store: SkillEvalsRepo::new(pool.clone()),
@@ -327,6 +350,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         swarm_repo,
         swarm_coords: otto_server::swarm_runtime::new_registry(),
         swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
+        goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
+        goal_loops: otto_server::goal_loop::new_registry(),
     };
 
     // Spawn enabled runtime plugins (sidecar processes Otto supervises + proxies).
@@ -378,6 +403,27 @@ async fn run(cfg: Config) -> Result<(), String> {
         Ok(n) if n > 0 => tracing::info!("workflow recovery: marked {n} orphaned run(s) as error"),
         Ok(_) => {}
         Err(e) => tracing::warn!("workflow recovery: {e}"),
+    }
+
+    // Goal loops: each loop's controller dies with the process, so a row left
+    // running/paused/blocked is orphaned. Fail them, then remove their isolated
+    // worktrees (keeping the branch) and kill any executor sessions so nothing
+    // dangles. (Resume-after-restart is deferred; see docs/features/goal-loops.md.)
+    match ctx
+        .goal_loops_repo
+        .fail_running("Interrupted by a daemon restart — start it again to continue.")
+        .await
+    {
+        Ok(loops) => {
+            if !loops.is_empty() {
+                tracing::info!("goal-loop recovery: failed {} orphaned loop(s)", loops.len());
+            }
+            for l in &loops {
+                otto_server::goal_loop_workspace::remove_worktree(&ctx, l).await;
+                otto_server::goal_loop::cleanup_executor_sessions(&ctx, &l.workspace_id, &l.id).await;
+            }
+        }
+        Err(e) => tracing::warn!("goal-loop recovery: {e}"),
     }
 
     // Periodically auto-archive idle channel (ticket/chat) sessions so they
@@ -471,15 +517,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
 
     // --- Channel Manager (Telegram-first, Slack-ready) ---
-    // Resolve the root user id for spawning agent sessions on behalf of
-    // incoming channel messages.  We use the first root user in the DB;
-    // if onboarding hasn't happened yet there are no users and we skip.
-    let root_user_id: Option<String> = UsersRepo::new(pool.clone())
-        .list()
-        .await
-        .ok()
-        .and_then(|users| users.into_iter().find(|u| u.is_root).map(|u| u.id));
-
+    // Spawns agent sessions on behalf of incoming channel messages as the root
+    // user resolved above (None when onboarding hasn't created one yet → skip).
     let _channel_handle = if let Some(uid) = root_user_id {
         let cm = ChannelManager::new(
             Arc::clone(&manager),
@@ -587,7 +626,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         .fail_running("Interrupted by a daemon restart — the coordinator will re-run the task.")
         .await
     {
-        Ok(n) if n > 0 => tracing::info!("swarm recovery: marked {n} orphaned run(s) as error"),
+        Ok(n) if n > 0 => tracing::info!("swarm recovery: marked {n} orphaned run(s) as stopped"),
         Ok(_) => {}
         Err(e) => tracing::warn!("swarm recovery: {e}"),
     }

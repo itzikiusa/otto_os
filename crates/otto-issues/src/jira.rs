@@ -777,10 +777,7 @@ impl JiraClient {
                 if !resp.status().is_success() {
                     return None;
                 }
-                match resp.json::<serde_json::Value>().await {
-                    Ok(b) => Some(b),
-                    Err(_) => None,
-                }
+                resp.json::<serde_json::Value>().await.ok()
             }
         });
 

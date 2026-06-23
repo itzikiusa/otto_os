@@ -18,7 +18,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { Swarm, SwarmAgent } from './types';
+  import type { CreateAgentReq, RecruitedAgent, Swarm, SwarmAgent } from './types';
 
   type View = 'tree' | 'graph' | 'kanban' | 'runs' | 'board';
   let view = $state<View>('tree');
@@ -44,6 +44,31 @@
 
   let showNew = $state(false);
   let showRecruit = $state(false);
+  // Set when hiring from a completed recruit run → opens the wizard pre-filled.
+  let recruitProposal = $state<RecruitedAgent | null>(null);
+  let recruitProposalRunId = $state<string | null>(null);
+
+  // --- Resizable session panel (drag the divider) --------------------------
+  let viewPct = $state(55); // width % of the board/view; rest goes to the session
+  let bodyEl = $state<HTMLDivElement | null>(null);
+  function startResize(e: MouseEvent) {
+    e.preventDefault();
+    const el = bodyEl;
+    if (!el) return;
+    const onMove = (ev: MouseEvent) => {
+      const rect = el.getBoundingClientRect();
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      viewPct = Math.min(80, Math.max(20, pct));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.userSelect = 'none';
+  }
   let editAgent = $state<SwarmAgent | null>(null);
   let editorOpen = $state(false);
   let projModal = $state(false);
@@ -93,6 +118,24 @@
     await swarm.setParallelCap(detail.id, v);
   }
 
+  // Edit the total-run budget cap (blank/0 = unlimited). The 300 default is a
+  // runaway-cost backstop, not a usage limit.
+  async function setRunsCap() {
+    if (!detail) return;
+    const cur = detail.max_total_runs == null ? '' : String(detail.max_total_runs);
+    const v = await confirmer.promptText('Max total runs for this swarm (blank = unlimited):', {
+      title: 'Run budget',
+      confirmLabel: 'Save',
+      initial: cur,
+      placeholder: 'e.g. 5000 — blank for unlimited',
+    });
+    if (v === null) return;
+    const t = v.trim();
+    const next = t === '' || Number(t) <= 0 ? null : Math.floor(Number(t));
+    if (next !== null && !Number.isFinite(next)) return;
+    await swarm.updateSwarm(detail.id, { max_total_runs: next } as Partial<Swarm>);
+  }
+
   async function createProject() {
     if (!detail || !projName.trim()) return;
     await swarm.createProject(detail.id, {
@@ -127,17 +170,43 @@
     view = 'kanban';
   }
 
+  // `editorPrefill` seeds the editor when creating (not editing) an agent —
+  // either a bare reports_to (Add direct report) or a full copy (Duplicate).
+  let editorPrefill = $state<Partial<CreateAgentReq> | null>(null);
+
   function openEditor(a: SwarmAgent | null) {
     editAgent = a;
+    editorPrefill = null;
     editorOpen = true;
   }
 
   // Prefill the editor to add a new agent reporting to `parent` (or top-level
   // when parent is null). OrgTree calls this via its `onadd` prop.
-  let newAgentReportsTo = $state<string | null>(null);
   function openEditorWithParent(parent: SwarmAgent | null) {
     editAgent = null;
-    newAgentReportsTo = parent?.id ?? null;
+    editorPrefill = { reports_to: parent?.id ?? null };
+    editorOpen = true;
+  }
+
+  // Duplicate an existing agent: open the editor as a NEW agent pre-filled with
+  // the source's full config (name suffixed "(copy)"), so the operator can tweak
+  // one field — e.g. the model — and hire a near-identical sibling.
+  function duplicateAgent(a: SwarmAgent) {
+    editAgent = null;
+    editorPrefill = {
+      name: `${a.name} (copy)`,
+      title: a.title,
+      provider: a.provider,
+      model: a.model ?? null,
+      reports_to: a.reports_to ?? null,
+      specialization: a.specialization,
+      soul_md: a.soul_md ?? null,
+      soul_name: a.soul_name ?? null,
+      scope_md: a.scope_md,
+      avatar: a.avatar,
+      skills: a.skills,
+      schedule: a.schedule ?? null,
+    };
     editorOpen = true;
   }
 
@@ -219,9 +288,15 @@
              + recruit/project/delete. Always shown on desktop/tablet. -->
         <div class="head-controls">
           <div class="budget-bars">
+            <button class="budget-label dim cap-edit" onclick={setRunsCap} title="Click to change the run budget (blank = unlimited)">
+              {#if detail.max_total_runs != null}
+                runs {detail.counts.total_runs}/{detail.max_total_runs}
+              {:else}
+                runs {detail.counts.total_runs} · ∞
+              {/if}
+            </button>
             {#if detail.max_total_runs != null}
               {@const pct = Math.min(100, (detail.counts.total_runs / detail.max_total_runs) * 100)}
-              <span class="budget-label dim">runs {detail.counts.total_runs}/{detail.max_total_runs}</span>
               <div class="budget-bar" title="Run budget: {detail.counts.total_runs}/{detail.max_total_runs}">
                 <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
               </div>
@@ -265,22 +340,32 @@
         {/each}
       </div>
 
-      <div class="body" class:split={swarm.selectedSessionId} class:phone-split={viewport.isPhone && swarm.selectedSessionId}>
+      <div
+        class="body"
+        bind:this={bodyEl}
+        class:split={swarm.selectedSessionId}
+        class:phone-split={viewport.isPhone && swarm.selectedSessionId}
+        style="--view-split:{viewPct}%"
+      >
         <div class="view">
           {#if view === 'tree'}
-            <OrgTree onedit={(a) => openEditor(a)} onruntask={runForAgent} onadd={openEditorWithParent} />
+            <OrgTree onedit={(a) => openEditor(a)} onruntask={runForAgent} onadd={openEditorWithParent} onduplicate={duplicateAgent} />
           {:else if view === 'graph'}
             <RunGraph />
           {:else if view === 'kanban'}
-            <KanbanBoard />
+            <KanbanBoard onrecruit={() => (showRecruit = true)} />
           {:else if view === 'runs'}
-            <RunsList />
+            <RunsList onhire={(p, rid) => { recruitProposal = p; recruitProposalRunId = rid; showRecruit = true; }} />
           {:else if view === 'board'}
             <BoardFeed />
           {/if}
         </div>
 
         {#if swarm.selectedSessionId}
+          {#if !viewport.isPhone}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="resizer" title="Drag to resize" onmousedown={startResize}></div>
+          {/if}
           <div class="session-panel">
             {#key swarm.selectedSessionId}
               <SessionView
@@ -302,13 +387,17 @@
   <NewSwarm onclose={() => (showNew = false)} />
 {/if}
 {#if showRecruit}
-  <RecruiterWizard onclose={() => (showRecruit = false)} />
+  <RecruiterWizard
+    proposal={recruitProposal}
+    proposalRunId={recruitProposalRunId}
+    onclose={() => { showRecruit = false; recruitProposal = null; recruitProposalRunId = null; }}
+  />
 {/if}
 {#if editorOpen}
   <AgentEditor
     agent={editAgent}
-    prefill={editAgent ? null : { reports_to: newAgentReportsTo }}
-    onclose={() => { editorOpen = false; newAgentReportsTo = null; }}
+    prefill={editAgent ? null : editorPrefill}
+    onclose={() => { editorOpen = false; editorPrefill = null; }}
   />
 {/if}
 {#if projModal}
@@ -466,6 +555,17 @@
     font-size: 10.5px;
     white-space: nowrap;
   }
+  .cap-edit {
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0;
+  }
+  .cap-edit:hover {
+    color: var(--text);
+    text-decoration: underline;
+  }
   .budget-bar {
     width: 60px;
     height: 5px;
@@ -546,9 +646,23 @@
     min-height: 0;
     overflow: hidden;
   }
-  .body.split .view {
-    flex: 0 0 55%;
-    border-inline-end: 1px solid var(--border);
+  .body.split:not(.phone-split) .view {
+    /* Width is operator-draggable via the .resizer (defaults to 55%). */
+    flex: 0 0 var(--view-split, 55%);
+  }
+  .body.phone-split.split .view {
+    flex: 0 0 50%;
+    border-block-end: 1px solid var(--border);
+  }
+  .resizer {
+    flex: none;
+    width: 5px;
+    cursor: col-resize;
+    background: var(--border);
+    transition: background 0.12s;
+  }
+  .resizer:hover {
+    background: color-mix(in srgb, var(--accent) 60%, var(--border));
   }
   .session-panel {
     flex: 1;

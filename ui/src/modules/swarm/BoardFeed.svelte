@@ -9,6 +9,12 @@
   let kindFilter = $state<string>('');
   let draft = $state('');
   let draftKind = $state<MessageKind>('message');
+  // Target a specific agent ('' = the whole team). Lets you tag someone and tell
+  // them what to do, or reply to an agent's post.
+  let draftTo = $state<string>('');
+  let composerEl = $state<HTMLInputElement | null>(null);
+
+  const agents = $derived(swarm.detail?.agents ?? []);
 
   const KINDS: MessageKind[] = [
     'message',
@@ -43,8 +49,20 @@
 
   async function post() {
     if (!draft.trim()) return;
-    await swarm.postBoard({ body: draft.trim(), kind: draftKind, project_id: swarm.selectedProjectId ?? undefined });
+    await swarm.postBoard({
+      body: draft.trim(),
+      kind: draftKind,
+      project_id: swarm.selectedProjectId ?? undefined,
+      to_agent_id: draftTo || undefined,
+    });
     draft = '';
+  }
+
+  // Reply to a message: target its author and focus the composer.
+  function reply(m: { author_agent_id?: string | null }) {
+    draftTo = m.author_agent_id ?? '';
+    draftKind = 'message';
+    composerEl?.focus();
   }
 </script>
 
@@ -69,6 +87,9 @@
           <span class="who">{author(m)}</span>
           {#if m.to_agent_id}<span class="dim">→ {swarm.agentById(m.to_agent_id)?.name ?? 'agent'}</span>{/if}
           <span class="grow"></span>
+          {#if m.author_agent_id}
+            <button class="reply-btn" onclick={() => reply(m)} title="Reply to {author(m)}">Reply</button>
+          {/if}
           <span class="dim time">{rel(m.created_at)}</span>
         </div>
         <div class="msg-body">{m.body}</div>
@@ -77,12 +98,17 @@
   </div>
 
   <div class="composer">
+    <select class="input small" bind:value={draftTo} title="Who is this for?">
+      <option value="">— team —</option>
+      {#each agents as a (a.id)}<option value={a.id}>{a.name}</option>{/each}
+    </select>
     <select class="input small" bind:value={draftKind}>
       {#each KINDS as k (k)}<option value={k}>{k}</option>{/each}
     </select>
     <input
+      bind:this={composerEl}
       class="input grow"
-      placeholder="Post to the team board…"
+      placeholder={draftTo ? `Tell ${swarm.agentById(draftTo)?.name ?? 'them'} what to do…` : 'Post to the team board…'}
       bind:value={draft}
       onkeydown={(e) => e.key === 'Enter' && post()}
     />
@@ -136,6 +162,17 @@
   }
   .time {
     font-size: 10.5px;
+  }
+  .reply-btn {
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 4px;
+  }
+  .reply-btn:hover {
+    text-decoration: underline;
   }
   .msg-body {
     font-size: 12.5px;

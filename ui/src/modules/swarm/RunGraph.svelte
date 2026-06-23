@@ -12,6 +12,11 @@
   let inspecting = $state<SwarmRun | null>(null);
   const live = $derived(inspecting ? (swarm.runs.find((r) => r.id === inspecting!.id) ?? inspecting) : null);
 
+  // Hide finished work by default so the graph foregrounds what's active /
+  // pending; toggle to reveal the full history.
+  let showDone = $state(false);
+  const isCompleted = (s: string) => s === 'done' || s === 'cancelled';
+
   // Latest run for a task node (graph nodes are tasks; ids are `task:<id>`).
   function latestRun(nodeId: string): SwarmRun | null {
     const tid = nodeId.startsWith('task:') ? nodeId.slice(5) : null;
@@ -64,6 +69,7 @@
     };
     const byDepth: Record<number, GraphNode[]> = {};
     for (const n of g.nodes) {
+      if (!showDone && isCompleted(n.status)) continue; // hide finished by default
       const d = depthOf(n.id);
       (byDepth[d] ??= []).push(n);
     }
@@ -181,6 +187,7 @@
 
 <div class="graph-wrap" bind:this={wrapEl}>
   <div class="controls">
+    <button class="icon-btn" class:active={showDone} onclick={() => (showDone = !showDone)} aria-label="toggle completed" title={showDone ? 'Hide completed tasks' : 'Show completed tasks'}><Icon name={showDone ? 'eye' : 'eyeOff'} size={14} /></button>
     <button class="icon-btn" onclick={() => { userTouchedZoom = true; scale = Math.min(2, scale * 1.1); }} aria-label="zoom in"><Icon name="plus" size={14} /></button>
     <button class="icon-btn" onclick={() => { userTouchedZoom = true; scale = Math.max(0.4, scale * 0.9); }} aria-label="zoom out"><Icon name="minimize" size={14} /></button>
     <button class="icon-btn" onclick={fit} aria-label="fit"><Icon name="maximize" size={14} /></button>

@@ -242,6 +242,10 @@ pub struct RecruitReq {
     pub role: String,
     #[serde(default)]
     pub context: Option<String>,
+    /// Optional naming theme (e.g. "famous footballers") — the recruiter derives
+    /// the agent's name from it for a cohesive roster.
+    #[serde(default)]
+    pub naming_theme: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

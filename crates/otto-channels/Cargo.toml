@@ -17,6 +17,8 @@ async-trait.workspace = true
 tracing.workspace = true
 chrono.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
+otto-netguard.workspace = true
+base64.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
 anyhow = { workspace = true }

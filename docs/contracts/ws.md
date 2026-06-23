@@ -215,6 +215,36 @@ instead of waiting for the next timed tick.
   `ui/src/lib/api/types.ts` as `{ type: 'review_changed'; workspace_id: string;
   session_id?: string | null; review_id: string; status: string }`.
 
+## Goal-loop progress (Goal Loops)
+
+Workspace-scoped. Emitted by `crates/otto-server/src/goal_loop.rs` on every loop
+transition: status change, phase change (Plan → Execute → Evaluate → Digest), a new
+iteration, after each evaluation, and when an executor's live state flips (e.g.
+→ `waiting`). The Loops UI updates the list row directly from these fields and
+re-fetches `GET /goal-loops/{id}` (it also runs a low-frequency fallback poll while
+a loop is active, covering any missed event).
+
+```json
+{
+  "type": "goal_loop_updated",
+  "workspace_id": "<Id>",
+  "loop_id": "<loop_id>",
+  "status": "draft|running|paused|blocked|succeeded|exhausted|failed|stopped",
+  "phase": "planning|executing|evaluating|digesting|waiting|done",
+  "current_iteration": 0,
+  "progress_pct": 0
+}
+```
+
+- `status` / `phase` — mirror the `goal_loops` row (snake_case enums).
+- `current_iteration` — the iteration index in flight or last completed.
+- `progress_pct` — the latest evaluator score (0–100).
+- Executor sessions are real agent sessions and also emit the normal
+  `session_status` events, so their live status dots work without extra plumbing.
+- TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts` as
+  `{ type: 'goal_loop_updated'; workspace_id: Id; loop_id: Id; status: GoalLoopStatus;
+  phase: GoalLoopPhase; current_iteration: number; progress_pct: number }`.
+
 ## Product AI-run completion (A3)
 
 Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs` at the end of every

@@ -241,6 +241,9 @@ impl ChannelManager {
                         crate::slack::run(integ, bot_token, app_token, b, c).await;
                     });
                 }
+                // Webhooks are request-driven (the inbound HTTP route calls the
+                // bridge directly), so the supervisor spawns no listener for them.
+                Channel::Webhook => {}
             }
         }
         count

@@ -22,6 +22,7 @@ pub mod improvements;
 pub mod integrations;
 pub mod issues;
 pub mod mcp_audit;
+pub mod goal_loops;
 pub mod mcp_servers;
 pub mod memory;
 pub mod notifications;
@@ -61,6 +62,7 @@ pub use db_explorer::{
 };
 pub use email_senders::{EmailSender, EmailSendersRepo};
 pub use git::{GitStore, NewGitAccount, NewRepo};
+pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::GrantsRepo;
 pub use product::*;
 pub use improvements::{ImprovementsRepo, NewEdit};

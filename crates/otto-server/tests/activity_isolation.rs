@@ -261,6 +261,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         git_store: GitStore::new(pool.clone()),
         issues_store: IssuesRepo::new(pool.clone()),
         integrations_store: IntegrationsRepo::new(pool.clone()),
+        channel_bridge: None,
         reviews_store: ReviewsRepo::new(pool.clone()),
         findings_store: otto_state::ReviewFindingsRepo::new(pool.clone()),
         skill_evals_store: SkillEvalsRepo::new(pool.clone()),
@@ -277,6 +278,8 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         swarm_repo,
         swarm_coords: otto_server::swarm_runtime::new_registry(),
         swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
+        goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
+        goal_loops: otto_server::goal_loop::new_registry(),
     }
 }
 

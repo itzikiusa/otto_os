@@ -37,6 +37,16 @@ const SETTLE: Duration = Duration::from_millis(600);
 /// Pause between pasting the prompt and pressing Enter, so the TUI has
 /// processed the paste before the submit keypress arrives.
 const PASTE_TO_ENTER: Duration = Duration::from_millis(200);
+/// Absolute backstop so a truly wedged session can't run forever. There is
+/// otherwise NO wall-clock limit — a healthy turn may run as long as it keeps
+/// making progress (planning/recruiting are one-time, quality-sensitive turns
+/// the operator is happy to let run long for a better result).
+const HARD_CAP: Duration = Duration::from_secs(3600);
+/// Attempts before giving up, mirroring the review engine's recovery loop: a
+/// stuck/failed turn is killed and re-run from scratch.
+const MAX_ATTEMPTS: u32 = 3;
+/// Pause between a stuck/failed attempt and the respawn.
+const RETRY_BACKOFF: Duration = Duration::from_secs(3);
 
 /// A one-shot prompt runner backed by a real interactive claude session.
 pub struct ClaudePty {
@@ -51,6 +61,12 @@ impl ClaudePty {
     /// Run one prompt through a fresh interactive claude session in `cwd`
     /// and return the assistant's reply text (from the session JSONL).
     ///
+    /// `no_progress` is NOT a wall-clock cap: a healthy turn may run as long as
+    /// it keeps making progress (the session transcript grows or the TUI stays
+    /// active). It is the "stuck" window — if NOTHING advances for that long the
+    /// turn is considered wedged, killed, and re-run from scratch (up to
+    /// [`MAX_ATTEMPTS`]). A 1h [`HARD_CAP`] is the only absolute backstop.
+    ///
     /// The session always runs with `--dangerously-skip-permissions` so it
     /// never stalls on an approval prompt nobody can answer.
     pub async fn run_prompt(
@@ -58,31 +74,54 @@ impl ClaudePty {
         prompt: &str,
         cwd: &str,
         model: Option<&str>,
-        timeout: Duration,
+        no_progress: Duration,
     ) -> Result<String> {
-        let sid = uuid::Uuid::new_v4().to_string();
-        let mut args = vec![
-            "--session-id".to_string(),
-            sid.clone(),
-            "--dangerously-skip-permissions".to_string(),
-        ];
-        if let Some(m) = model {
-            if !m.trim().is_empty() {
-                args.push("--model".to_string());
-                args.push(m.trim().to_string());
+        // Canonicalize the cwd: claude resolves symlinks (macOS /var →
+        // /private/var) when computing its transcript dir, so the spawn cwd and
+        // the JSONL path we poll must be the SAME resolved path — otherwise the
+        // completed turn lands in a dir we never read and we false-time-out.
+        let cwd_canon = std::fs::canonicalize(cwd)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| cwd.to_string());
+        let cwd: &str = &cwd_canon;
+        let mut last_err: Option<Error> = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            // Fresh session id (→ fresh JSONL transcript) per attempt.
+            let sid = uuid::Uuid::new_v4().to_string();
+            let mut args = vec![
+                "--session-id".to_string(),
+                sid.clone(),
+                "--dangerously-skip-permissions".to_string(),
+            ];
+            if let Some(m) = model {
+                if !m.trim().is_empty() {
+                    args.push("--model".to_string());
+                    args.push(m.trim().to_string());
+                }
+            }
+            let spec = CommandSpec {
+                program: self.bin.clone(),
+                args,
+                cwd: Some(cwd.to_string()),
+                env: vec![],
+            };
+            let handle = PtyHandle::spawn(&spec)?;
+            let result = drive(&handle, prompt, cwd, &sid, no_progress).await;
+            // Single-shot session: always tear the PTY down, success or not.
+            let _ = handle.kill();
+            match result {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    tracing::warn!("claude turn attempt {attempt}/{MAX_ATTEMPTS} failed: {e}");
+                    last_err = Some(e);
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(RETRY_BACKOFF).await;
+                    }
+                }
             }
         }
-        let spec = CommandSpec {
-            program: self.bin.clone(),
-            args,
-            cwd: Some(cwd.to_string()),
-            env: vec![],
-        };
-        let handle = PtyHandle::spawn(&spec)?;
-        let result = drive(&handle, prompt, cwd, &sid, timeout).await;
-        // Single-shot session: always tear the PTY down, success or not.
-        let _ = handle.kill();
-        result
+        Err(last_err
+            .unwrap_or_else(|| Error::Upstream("claude turn failed with no detail".into())))
     }
 }
 
@@ -93,9 +132,9 @@ async fn drive(
     prompt: &str,
     cwd: &str,
     sid: &str,
-    timeout: Duration,
+    no_progress: Duration,
 ) -> Result<String> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let start = tokio::time::Instant::now();
     let exit_rx = handle.on_exit();
 
     // 1. Wait for the TUI to draw and go quiet before typing.
@@ -122,15 +161,38 @@ async fn drive(
     tokio::time::sleep(PASTE_TO_ENTER).await;
     handle.write(b"\r")?;
 
-    // 3. Poll the session transcript until the turn completes. The JSONL
-    //    can take tens of seconds to appear on cold spawn (hook init + MCP
-    //    load happen first), so "file missing" is just "not yet".
+    // 3. Poll the session transcript until the turn completes. There is NO
+    //    wall-clock deadline: instead we track *progress* and only give up when
+    //    the turn looks wedged. "Progress" is the JSONL transcript growing (the
+    //    model writing messages/tool calls) OR the PTY staying active (TUI
+    //    redraws / "thinking…" — keeps cold-start and long reasoning from being
+    //    mistaken for a stall). If neither advances for `no_progress`, the turn
+    //    is stuck → the caller respawns it. `HARD_CAP` is the only absolute cap.
     let path = session_jsonl_path(cwd, sid);
+    let mut last_len: usize = 0;
+    let mut last_pty = handle.last_output_at();
+    let mut last_progress = tokio::time::Instant::now();
     loop {
+        let mut progressed = false;
         if let Ok(content) = tokio::fs::read_to_string(&path).await {
             if let Some(text) = completed_turn_text(&content) {
                 return Ok(text);
             }
+            if content.len() > last_len {
+                last_len = content.len();
+                progressed = true;
+            }
+        }
+        // PTY liveness: a fresh output timestamp means the session is still
+        // doing something (drawing, streaming, thinking) even if the transcript
+        // hasn't flushed a new line yet.
+        let pty_at = handle.last_output_at();
+        if pty_at > last_pty {
+            last_pty = pty_at;
+            progressed = true;
+        }
+        if progressed {
+            last_progress = tokio::time::Instant::now();
         }
         if exit_rx.borrow().is_some() {
             // Final lines may have landed right at exit — one last read.
@@ -143,10 +205,16 @@ async fn drive(
                 "claude exited before completing a reply".into(),
             ));
         }
-        if tokio::time::Instant::now() >= deadline {
+        if last_progress.elapsed() >= no_progress {
             return Err(Error::Upstream(format!(
-                "claude session timed out after {}s waiting for a reply",
-                timeout.as_secs()
+                "claude session stuck — no transcript progress for {}s",
+                no_progress.as_secs()
+            )));
+        }
+        if start.elapsed() >= HARD_CAP {
+            return Err(Error::Upstream(format!(
+                "claude session exceeded the {}h hard cap",
+                HARD_CAP.as_secs() / 3600
             )));
         }
         tokio::time::sleep(POLL).await;

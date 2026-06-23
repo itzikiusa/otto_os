@@ -331,6 +331,12 @@
   // The flagship Product → Swarm hand-off: turn the story (+ its plan) into a
   // runnable swarm project and jump to the project's Kanban board.
   let sendingToSwarm = $state(false);
+  // Operator-chosen target swarm (blank = first/auto). Populated from the swarm
+  // list so the user picks WHICH swarm (e.g. Platform Team) implements the story.
+  let targetSwarmId = $state('');
+  $effect(() => {
+    if (ws.currentId && swarm.swarms.length === 0) void swarm.loadSwarms(ws.currentId);
+  });
 
   // Existing linked swarm project, if this story was already sent (drives the
   // badge + flips the action to "Open in Swarm").
@@ -350,17 +356,25 @@
       await openLinkedSwarm();
       return;
     }
+    const target = swarm.swarms.find((s) => s.id === targetSwarmId);
+    const where = target ? `“${target.name}”` : 'a swarm';
+    // Lifecycle gate: nudge the operator to approve the story first (soft gate).
+    const stage = product.detail?.story?.stage;
+    const notApproved = stage && stage !== 'approved' && stage !== 'done';
+    const warn = notApproved
+      ? `\n\n⚠ This story is still "${stage}", not "approved". Send it for implementation anyway?`
+      : '';
     const ok = await confirmer.ask(
-      'Create a swarm project from this story and seed it with the plan tasks? You can then run the swarm to implement it.',
-      { title: 'Send to Swarm', confirmLabel: 'Send to Swarm', danger: false },
+      `Create a project in ${where} from this story and seed it with the plan tasks? You can then run the swarm to implement it.${warn}`,
+      { title: 'Send to Swarm', confirmLabel: 'Send to Swarm', danger: !!notApproved },
     );
     if (!ok) return;
     sendingToSwarm = true;
     try {
-      const resp = await product.sendToSwarm();
+      const resp = await product.sendToSwarm(targetSwarmId ? { swarm_id: targetSwarmId } : {});
       toasts.success(
         'Sent to Swarm',
-        `Project “${resp.project.name}” created with ${resp.tasks.length} task(s).`,
+        `Project “${resp.project.name}” created in “${resp.swarm.name}” with ${resp.tasks.length} task(s).`,
       );
       await swarm.openProject(ws.currentId, resp.swarm.id, resp.project.id);
       router.go('swarm');
@@ -447,6 +461,12 @@
           {#if pollTimer !== null}
             <span class="polling-indicator">checking every 3s…</span>
           {/if}
+          {#if !swarmLink && swarm.swarms.length > 1}
+            <select class="action-btn swarm-pick" bind:value={targetSwarmId} title="Which swarm implements this story">
+              <option value="">First swarm</option>
+              {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+            </select>
+          {/if}
           <button
             class="action-btn swarm"
             onclick={sendToSwarm}
@@ -506,6 +526,12 @@
             <button class="action-btn" onclick={() => (showRaw = !showRaw)}>
               {showRaw ? 'Hide raw' : 'Raw'}
             </button>
+            {#if !swarmLink && swarm.swarms.length > 1}
+              <select class="action-btn swarm-pick" bind:value={targetSwarmId} title="Which swarm implements this story">
+                <option value="">First swarm</option>
+                {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+              </select>
+            {/if}
             <button
               class="action-btn swarm"
               onclick={sendToSwarm}

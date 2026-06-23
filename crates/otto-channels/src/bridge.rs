@@ -246,14 +246,19 @@ impl Bridge {
         }
 
         // --- 2. Quick commands (intercepted before routing) ---
+        // Webhook callers are machines, not chat users: treat a leading "/" as a
+        // normal prompt rather than a control command. Command replies go via
+        // `adapter.send`, which the webhook adapter no-ops, and a stray `/stop`
+        // could disrupt a session — so skip interception for webhooks entirely.
         let trimmed = msg.text.trim();
-        if trimmed.starts_with('/')
+        if adapter.channel() != Channel::Webhook
+            && trimmed.starts_with('/')
             && self
                 .handle_command(integ, adapter.clone(), &msg, trimmed)
                 .await
-            {
-                return;
-            }
+        {
+            return;
+        }
 
         // --- 3. Resolve workspace ---
         let ws_id: Id = msg.workspace_id.clone();
@@ -298,6 +303,7 @@ impl Bridge {
                 let channel_label = match adapter.channel() {
                     Channel::Slack => "Slack",
                     Channel::Telegram => "Telegram",
+                    Channel::Webhook => "Webhook",
                 };
                 // Tag the session with its channel source + the initial message
                 // as the title, so the sidebar can group Telegram/Slack sessions
@@ -374,6 +380,7 @@ impl Bridge {
         let channel_label = match adapter.channel() {
             Channel::Slack => "Slack",
             Channel::Telegram => "Telegram",
+            Channel::Webhook => "Webhook",
         };
         let thread_line = match &msg.thread {
             Some(t) => format!("  • thread: {t}\n"),

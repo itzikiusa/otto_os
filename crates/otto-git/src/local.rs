@@ -187,6 +187,35 @@ impl LocalGit {
         Ok(out.trim().to_string())
     }
 
+    /// Resolve a ref (branch/sha/`HEAD`) to its full commit SHA. Used by Goal
+    /// Loops to capture the launch HEAD as the diff base for the loop's branch.
+    pub async fn rev_parse(&self, reference: &str) -> Result<String> {
+        let out = self.run(&["rev-parse", reference]).await?;
+        Ok(out.trim().to_string())
+    }
+
+    /// True when a local branch already exists. Lets Goal Loops re-attach an
+    /// existing loop branch NON-destructively instead of `-B`-resetting it.
+    pub async fn branch_exists(&self, branch: &str) -> bool {
+        let refname = format!("refs/heads/{branch}");
+        match self
+            .run_raw(&["rev-parse", "--verify", "--quiet", &refname], &[])
+            .await
+        {
+            Ok((ok, _, _, _)) => ok,
+            Err(_) => false,
+        }
+    }
+
+    /// Add a worktree at `path` checking out an EXISTING `branch` without
+    /// resetting it (no `-B`, no base). Preserves the branch's commits — the
+    /// safe path for resuming a loop whose worktree was removed but whose branch
+    /// (and its work) must survive. `--force` tolerates a stale path registration.
+    pub async fn worktree_attach(&self, path: &str, branch: &str) -> Result<()> {
+        self.run(&["worktree", "add", "--force", path, branch]).await?;
+        Ok(())
+    }
+
     /// Create (or reset) a linked worktree at `path` on `branch`, based on
     /// `base` (a branch/sha/HEAD). Used by the Agent Swarm to give each code
     /// agent an isolated, unique working directory it can edit in parallel.

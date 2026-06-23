@@ -1276,10 +1276,13 @@ impl SwarmRepo {
     /// `queued`/`running`/`waiting` row would otherwise permanently consume the
     /// parallel cap (and block its agent's "one turn at a time" gate). Mirrors
     /// the review/skill-eval recovery. Returns the number of rows updated.
+    /// Mark non-terminal runs as `stopped` (NOT `error`) on a daemon restart —
+    /// they were interrupted by the restart, not a real agent failure, and the
+    /// coordinator re-runs the task. The note is kept in `error` for context.
     pub async fn fail_running(&self, error: &str) -> Result<u64> {
         let now = fmt(Utc::now());
         let res = sqlx::query(
-            "UPDATE swarm_runs SET status = 'error', error = ?, finished_at = ?
+            "UPDATE swarm_runs SET status = 'stopped', error = ?, finished_at = ?
              WHERE status IN ('queued','running','waiting')",
         )
         .bind(error)
@@ -1607,9 +1610,9 @@ mod tests {
         repo.update_run(&done.id, RunPatch { status: Some("done".into()), ..Default::default() }).await.unwrap();
 
         let n = repo.fail_running("interrupted").await.unwrap();
-        assert_eq!(n, 2, "queued + running failed; done untouched");
-        assert_eq!(repo.get_run(&queued.id).await.unwrap().status, "error");
-        assert_eq!(repo.get_run(&running.id).await.unwrap().status, "error");
+        assert_eq!(n, 2, "queued + running stopped; done untouched");
+        assert_eq!(repo.get_run(&queued.id).await.unwrap().status, "stopped");
+        assert_eq!(repo.get_run(&running.id).await.unwrap().status, "stopped");
         assert_eq!(repo.get_run(&done.id).await.unwrap().status, "done");
     }
 

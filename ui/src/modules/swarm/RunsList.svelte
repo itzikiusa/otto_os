@@ -6,7 +6,11 @@
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { rel } from '../../lib/stores/now.svelte';
-  import type { RunStatus, SwarmRun } from './types';
+  import type { RecruitedAgent, RunStatus, SwarmRun } from './types';
+
+  // `onhire` lets a completed recruit run open the Recruiter wizard pre-filled
+  // with its proposal — so a candidate isn't lost if the modal was closed.
+  let { onhire }: { onhire?: (p: RecruitedAgent, runId: string) => void } = $props();
 
   let agentFilter = $state<string>('');
   let projectFilter = $state<string>('');
@@ -75,7 +79,10 @@
         {#snippet row(r: SwarmRun)}
           {@const agent = swarm.agentById(r.agent_id)}
           <div class="trow" role="button" tabindex="0" onclick={() => (inspecting = r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (inspecting = r)}>
-            <span class="c-agent">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
+            <span class="c-agent">
+              <span class="agent-name">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
+              {#if agent?.title}<span class="agent-title dim">{agent.title}</span>{/if}
+            </span>
             <span class="c-kind dim">{r.kind}{r.summary ? ` · ${r.summary}` : ''}</span>
             <span class="c-status"><span class="badge {r.status}">{r.status}</span></span>
             <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at ?? '')}</span>
@@ -90,6 +97,9 @@
               </button>
               {#if r.session_id}
                 <button class="btn small ghost" onclick={(e) => { e.stopPropagation(); swarm.selectedSessionId = r.session_id!; }}>Open</button>
+              {/if}
+              {#if r.kind === 'recruit' && r.status === 'done' && r.result && onhire && !swarm.recruitHired.has(r.id)}
+                <button class="btn small primary" title="Review & hire this proposed agent" onclick={(e) => { e.stopPropagation(); onhire?.(r.result as unknown as RecruitedAgent, r.id); }}>Hire</button>
               {/if}
               {#if active(r)}
                 <button class="btn small danger" onclick={(e) => { e.stopPropagation(); swarm.stopRun(r.id); }}>Stop</button>

@@ -37,6 +37,7 @@ pub fn cap_skills_for_role(all_skills: &[String], role: &str, cap: usize) -> Vec
 /// Build the recruiter prompt: given a role the user named, propose a complete
 /// agent definition (title, reports-to, specialization, soul, skills with
 /// must-use flags, provider/model, schedule, scope).
+#[allow(clippy::too_many_arguments)]
 pub fn recruiter_prompt(
     role: &str,
     swarm_name: &str,
@@ -45,6 +46,7 @@ pub fn recruiter_prompt(
     available_skills: &[String],
     available_providers: &[String],
     extra_context: Option<&str>,
+    naming_theme: Option<&str>,
 ) -> String {
     let org = if existing_titles.is_empty() {
         "(none yet)".to_string()
@@ -58,6 +60,16 @@ pub fn recruiter_prompt(
     };
     let providers = available_providers.join(", ");
     let ctx = extra_context.unwrap_or("");
+    // Optional naming theme: derive the agent's name from a domain (e.g. famous
+    // footballers, NBA legends) for a cohesive, fun team roster.
+    let name_line = match naming_theme.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(theme) => format!(
+            "\nNAMING THEME: Give the agent a real, recognizable first name (or single \
+             memorable moniker) drawn from \"{theme}\". It MUST fit that theme and MUST NOT \
+             duplicate an existing teammate's name. Keep \"title\" as the role, not the theme.\n"
+        ),
+        None => String::new(),
+    };
     format!(
         r#"You are an expert technical recruiter assembling an AI agent team ("swarm").
 
@@ -66,6 +78,7 @@ Mission: {swarm_mission}
 Existing roles in the org: {org}
 The user wants to add this role: "{role}"
 {ctx}
+{name_line}
 
 Available LIBRARY SKILLS you may assign (use EXACT names; do not invent skills): {skills}
 Available agent providers (CLIs) you may pick from: {providers}
@@ -141,13 +154,79 @@ pub fn parse_recruited(text: &str) -> Option<RecruitedAgent> {
 
 /// Build the planner prompt: break a project goal into tasks, each optionally
 /// assigned to a role and with dependencies (by title) forming the DAG.
-pub fn planner_prompt(project_name: &str, goal_md: &str, agents: &[PresetAgent]) -> String {
+/// The JSON task-list schema both planners and the summarizer must emit.
+const PLAN_SCHEMA: &str = r#"{
+  "tasks": [
+    {
+      "title": "short imperative",
+      "description": "what done looks like (acceptance)",
+      "assignee_title": "a role title from the list, or null",
+      "priority": "low|medium|high|urgent",
+      "depends_on_titles": ["titles of tasks that must finish first"]
+    }
+  ]
+}"#;
+
+/// Distinct planning angles so a multi-agent plan covers the goal from several
+/// perspectives. The summarizer then merges the candidates into one list.
+pub const PLANNER_ANGLES: &[&str] = &[
+    "Break the goal into the smallest shippable increments, end to end.",
+    "Organize the work by component/area and call out cross-cutting concerns, risks, and testing.",
+];
+
+pub fn planner_prompt(
+    project_name: &str,
+    goal_md: &str,
+    agents: &[PresetAgent],
+    angle: &str,
+) -> String {
     let roles: Vec<String> = agents
         .iter()
         .map(|a| format!("- {} ({})", a.title, a.name))
         .collect();
+    let angle_line = if angle.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\nPlanning emphasis for this pass: {angle}\n")
+    };
     format!(
         r#"You are a delivery lead breaking a project into actionable tasks for an AI agent team.
+
+Project: {project_name}
+Goal:
+{goal_md}
+{angle_line}
+Team roles available to assign work to:
+{roles}
+
+Produce a focused task breakdown — enough to deliver the goal, not busywork.
+Order matters: express dependencies so independent work can run in parallel.
+
+Respond with EXACTLY ONE ```json block, no prose:
+{PLAN_SCHEMA}"#,
+        roles = roles.join("\n")
+    )
+}
+
+/// Merge several candidate task breakdowns (each the JSON from `planner_prompt`)
+/// into one coherent, de-duplicated plan. Used by the multi-agent planner: N
+/// planners run in parallel, then one summarizer reconciles their outputs.
+pub fn planner_summarizer_prompt(
+    project_name: &str,
+    goal_md: &str,
+    agents: &[PresetAgent],
+    candidates: &[String],
+) -> String {
+    let roles: Vec<String> = agents
+        .iter()
+        .map(|a| format!("- {} ({})", a.title, a.name))
+        .collect();
+    let mut blocks = String::new();
+    for (i, c) in candidates.iter().enumerate() {
+        blocks.push_str(&format!("\n--- Candidate plan {} ---\n{}\n", i + 1, c.trim()));
+    }
+    format!(
+        r#"You are the lead planner reconciling several independent task breakdowns for the same goal.
 
 Project: {project_name}
 Goal:
@@ -156,22 +235,17 @@ Goal:
 Team roles available to assign work to:
 {roles}
 
-Produce a focused task breakdown — enough to deliver the goal, not busywork.
-Order matters: express dependencies so independent work can run in parallel.
+Below are {n} candidate plans produced independently. Merge them into ONE coherent plan:
+- de-duplicate overlapping tasks (keep the clearest wording),
+- keep the most valuable tasks from any candidate, drop busywork,
+- reconcile and express dependencies so independent work can run in parallel,
+- assign each task to the best-fit role title (or null).
+{blocks}
 
 Respond with EXACTLY ONE ```json block, no prose:
-{{
-  "tasks": [
-    {{
-      "title": "short imperative",
-      "description": "what done looks like (acceptance)",
-      "assignee_title": "a role title from the list, or null",
-      "priority": "low|medium|high|urgent",
-      "depends_on_titles": ["titles of tasks that must finish first"]
-    }}
-  ]
-}}"#,
-        roles = roles.join("\n")
+{PLAN_SCHEMA}"#,
+        n = candidates.len(),
+        roles = roles.join("\n"),
     )
 }
 

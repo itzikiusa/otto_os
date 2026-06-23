@@ -40,6 +40,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'agents', icon: 'terminal', label: 'Agents', feature: 'agents', special: true },
   { id: 'connections', icon: 'plug', label: 'Connections', feature: 'connections', special: true },
   { id: 'swarm', icon: 'grid', label: 'Swarm', feature: 'swarm' },
+  { id: 'loops', icon: 'refresh', label: 'Goal Loops' },
   { id: 'git', icon: 'branch', label: 'Git', feature: 'git' },
   { id: 'product', icon: 'note', label: 'Product', feature: 'product' },
   { id: 'vault', icon: 'globe', label: 'Vault' },

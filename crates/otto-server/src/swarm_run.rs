@@ -182,7 +182,9 @@ fn build_prompt(
     } else {
         p.push_str(
             "Do the work now. Use `./otto-post` to share progress, ideas, reviews and concerns \
-             with the team as you go.\n\n",
+             with the team as you go. If your role is product/feature design (a PO, analyst, \
+             etc.) and you produce a feature draft/spec, publish it to the Product page for the \
+             user to review with: `./otto-product --title \"Feature title\" \"<markdown body>\"`.\n\n",
         );
     }
     p.push_str(&format!(
@@ -479,18 +481,40 @@ async fn run_attempt(
     out: &std::path::Path,
     run_id: &str,
 ) -> RunOutcome {
-    // Reuse the agent's live/resumable session (no history re-feed) or create one.
-    let sid = match find_agent_session(ctx, ws, agent_id).await {
+    // Reuse the agent's live/resumable session (no history re-feed) — but ONLY if
+    // it's in the cwd this turn wants. If the project's repo path was set/changed
+    // after the session was first created (e.g. it started in a scratch dir),
+    // retire the stale session and spawn fresh in the right cwd so the agent
+    // actually works in the configured folder.
+    let reuse = match find_agent_session(ctx, ws, agent_id).await {
         Some(existing) => {
-            let _ = ctx.manager.ensure_live(&existing).await;
-            // Re-tag the reused session with THIS turn's run/task/project ids
-            // (they were only set at creation). Without this, board posts from
-            // later turns carry the first run's id. `update_meta` shallow-merges,
-            // so the current `meta` (source/swarm_id/agent_id + the turn's
-            // run_id/task_id/project_id) overwrites the stale ids in place.
-            let _ = ctx.manager.update_meta(&existing, meta.clone()).await;
-            existing
+            let existing_cwd = ctx.manager.get(&existing).await.ok().map(|s| s.cwd);
+            if existing_cwd.as_deref() == Some(cwd) {
+                let _ = ctx.manager.ensure_live(&existing).await;
+                // Re-tag the reused session with THIS turn's run/task/project ids
+                // (they were only set at creation). Without this, board posts from
+                // later turns carry the first run's id. `update_meta` shallow-merges,
+                // so the current `meta` overwrites the stale ids in place.
+                let _ = ctx.manager.update_meta(&existing, meta.clone()).await;
+                Some(existing)
+            } else {
+                // cwd moved → retire the old session and create a fresh one below.
+                // KILL (status=Exited) rather than ARCHIVE: find_agent_session
+                // skips Exited sessions so it won't be reused, but it stays
+                // OPENABLE (archived sessions are hidden) — the operator can still
+                // open it, and the terminal's ensure_live resumes it on demand.
+                tracing::info!(
+                    "swarm: agent {agent_id} cwd changed ({:?} → {cwd}); recreating session",
+                    existing_cwd
+                );
+                let _ = ctx.manager.kill_session(&existing).await;
+                None
+            }
         }
+        None => None,
+    };
+    let sid = match reuse {
+        Some(existing) => existing,
         None => {
             let req = CreateSessionReq {
                 kind: SessionKind::Agent,

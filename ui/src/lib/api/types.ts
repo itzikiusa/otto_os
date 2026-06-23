@@ -258,6 +258,178 @@ export interface PutTasksReq {
 // Events (WS /ws/events)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Goal Loops — mirror of crates/otto-core domain + api DTOs.
+// ---------------------------------------------------------------------------
+
+export type GoalLoopStatus =
+  | 'draft'
+  | 'running'
+  | 'paused'
+  | 'blocked'
+  | 'succeeded'
+  | 'exhausted'
+  | 'failed'
+  | 'stopped';
+
+export type GoalLoopPhase =
+  | 'planning'
+  | 'executing'
+  | 'evaluating'
+  | 'digesting'
+  | 'waiting'
+  | 'done';
+
+export interface AcceptanceCriterion {
+  id: string;
+  text: string;
+  verify: string;
+  verify_kind: 'command' | 'manual';
+  verify_cmd?: string | null;
+}
+
+export interface GoalLoopDefinition {
+  title: string;
+  summary: string;
+  objectives: string[];
+  acceptance_criteria: AcceptanceCriterion[];
+  constraints: string[];
+  out_of_scope: string[];
+  success_signal: string;
+}
+
+export interface GoalLoopLimits {
+  max_iterations: number;
+  max_runtime_secs: number;
+  per_phase_timeout_secs: number;
+  max_cost_usd?: number | null;
+  max_attempts_per_executor: number;
+}
+
+export interface GoalLoopAgentCfg {
+  name: string;
+  provider: string;
+  model: string;
+  prompt_extra: string;
+}
+
+export interface GoalLoopRoleCfg {
+  provider: string;
+  model: string;
+  prompt: string;
+}
+
+export interface GoalLoopConfig {
+  executors: GoalLoopAgentCfg[];
+  planner: GoalLoopRoleCfg;
+  evaluator: GoalLoopRoleCfg;
+  digester: GoalLoopRoleCfg;
+  definer: GoalLoopRoleCfg;
+}
+
+export interface LoopAgentState {
+  name: string;
+  provider: string;
+  model: string;
+  status: 'pending' | 'running' | 'waiting' | 'done' | 'error';
+  note: string;
+  session_id?: string | null;
+  output_summary?: string | null;
+}
+
+export interface EvalCriterion {
+  id: string;
+  met: boolean;
+  evidence: string;
+}
+
+export interface GoalLoopEvaluation {
+  progress_pct: number;
+  verdict: 'achieved' | 'continue' | 'blocked';
+  criteria: EvalCriterion[];
+  feedback: string;
+  rationale: string;
+}
+
+export interface GoalLoop {
+  id: Id;
+  workspace_id: Id;
+  name: string;
+  repo_path: string;
+  definition: GoalLoopDefinition;
+  limits: GoalLoopLimits;
+  config: GoalLoopConfig;
+  status: GoalLoopStatus;
+  phase: GoalLoopPhase;
+  iterations_started: number;
+  current_iteration: number;
+  progress_pct: number;
+  context_digest: string;
+  branch?: string | null;
+  worktree_path?: string | null;
+  base_commit?: string | null;
+  summary?: string | null;
+  error?: string | null;
+  run_started_at?: string | null;
+  elapsed_secs: number;
+  cost_usd: number;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string | null;
+}
+
+export interface GoalLoopIteration {
+  id: Id;
+  loop_id: Id;
+  workspace_id: Id;
+  idx: number;
+  status: string;
+  plan: string;
+  agents: LoopAgentState[];
+  evaluation?: GoalLoopEvaluation | null;
+  context_in: string;
+  context_out: string;
+  tokens_input: number;
+  tokens_output: number;
+  cost_usd: number;
+  started_at: string;
+  finished_at?: string | null;
+}
+
+export interface GoalLoopDetail {
+  loop: GoalLoop;
+  iterations: GoalLoopIteration[];
+}
+
+export interface DefineGoalReq {
+  seed: string;
+  repo_path: string;
+  context?: string | null;
+  feedback?: string | null;
+}
+
+export interface GoalLoopDraft {
+  definition: GoalLoopDefinition;
+  suggested_limits: GoalLoopLimits;
+  suggested_config: GoalLoopConfig;
+}
+
+export interface CreateGoalLoopReq {
+  name: string;
+  repo_path: string;
+  definition: GoalLoopDefinition;
+  limits: GoalLoopLimits;
+  config: GoalLoopConfig;
+  autostart: boolean;
+}
+
+export interface UpdateGoalLoopReq {
+  name?: string;
+  limits?: GoalLoopLimits;
+  config?: GoalLoopConfig;
+}
+
 export type OttoEvent =
   | { type: 'session_status'; session_id: Id; workspace_id: Id; status: SessionStatus }
   | { type: 'session_created'; session: Session }
@@ -299,6 +471,17 @@ export type OttoEvent =
       session_id?: Id | null;
       review_id: Id;
       status: string;
+    }
+  /** A goal loop advanced (status/phase/iteration change, after each evaluation,
+   *  or when an executor's live state flips). Drives the Loops UI re-fetch. */
+  | {
+      type: 'goal_loop_updated';
+      workspace_id: Id;
+      loop_id: Id;
+      status: GoalLoopStatus;
+      phase: GoalLoopPhase;
+      current_iteration: number;
+      progress_pct: number;
     }
   /** A product story AI run (analysis/rewrite/plan/testcases) completed or
    *  changed. `section` ∈ "analysis" | "rewrite" | "plan" | "testcases".
@@ -1402,7 +1585,7 @@ export interface AttachedIssue {
 // Integrations (Slack / Telegram)
 // ---------------------------------------------------------------------------
 
-export type Channel = 'slack' | 'telegram';
+export type Channel = 'slack' | 'telegram' | 'webhook';
 
 export interface Integration {
   workspace_id: string;

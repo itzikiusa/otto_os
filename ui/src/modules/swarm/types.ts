@@ -34,6 +34,8 @@ export interface SwarmConfig {
   cwd_mode?: string;
   default_soul?: string;
   auto_submit?: boolean;
+  /** Naming theme for recruited agents (e.g. "Famous footballers"). */
+  naming_theme?: string;
   [k: string]: unknown;
 }
 

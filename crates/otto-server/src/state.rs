@@ -50,6 +50,11 @@ pub struct ServerCtx {
     pub git_store: GitStore,
     pub issues_store: IssuesRepo,
     pub integrations_store: IntegrationsRepo,
+    /// Webhook-channel bridge: turns an inbound `POST /webhooks/{ws}` into an
+    /// agent session (reuses the channel `Bridge`). Its own instance, separate
+    /// from the live Slack/Telegram supervisor. `None` until a root user exists
+    /// (onboarding); the inbound handler then returns 503.
+    pub channel_bridge: Option<Arc<otto_channels::Bridge>>,
     pub reviews_store: ReviewsRepo,
     /// Persistent review finding identity + lifecycle (A1 verified-review loop).
     pub findings_store: ReviewFindingsRepo,
@@ -75,6 +80,10 @@ pub struct ServerCtx {
     pub swarm_coords: crate::swarm_runtime::CoordinatorRegistry,
     /// Per-run cancellation flags for in-flight swarm runs (manual Stop / abort).
     pub swarm_run_cancels: crate::swarm_run::CancelRegistry,
+    // -- Goal Loops --------------------------------------------------------
+    pub goal_loops_repo: otto_state::GoalLoopsRepo,
+    /// Per-loop controller runtime handles (start/pause/resume/stop).
+    pub goal_loops: crate::goal_loop::GoalLoopRegistry,
 }
 
 impl ServerCtx {

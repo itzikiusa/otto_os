@@ -89,7 +89,8 @@ class WorkspaceStore {
         (s.meta.source !== 'channel' &&
           s.meta.source !== 'review' &&
           s.meta.source !== 'skilleval' &&
-          s.meta.source !== 'product-analysis') ||
+          s.meta.source !== 'product-analysis' &&
+          s.meta.source !== 'swarm') ||
         this.openTabs.includes(s.id),
     ),
   );
@@ -129,7 +130,8 @@ class WorkspaceStore {
         s.meta.source !== 'channel' &&
         s.meta.source !== 'review' &&
         s.meta.source !== 'skilleval' &&
-        s.meta.source !== 'product-analysis',
+        s.meta.source !== 'product-analysis' &&
+        s.meta.source !== 'swarm',
     ),
   );
 
@@ -147,7 +149,8 @@ class WorkspaceStore {
         s.meta.source !== 'review' &&
         s.meta.source !== 'channel' &&
         s.meta.source !== 'skilleval' &&
-        s.meta.source !== 'product-analysis',
+        s.meta.source !== 'product-analysis' &&
+        s.meta.source !== 'swarm',
     ).length,
   );
 
@@ -161,7 +164,8 @@ class WorkspaceStore {
         s.meta.source !== 'review' &&
         s.meta.source !== 'channel' &&
         s.meta.source !== 'skilleval' &&
-        s.meta.source !== 'product-analysis',
+        s.meta.source !== 'product-analysis' &&
+        s.meta.source !== 'swarm',
     ).length,
   );
 

@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Channels settings page: per-workspace Slack + Telegram integration config.
-  import { api } from '../../lib/api/client';
+  // Channels settings page: per-workspace Slack + Telegram + Webhook integration config.
+  import { api, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { Channel, Integration, UpsertIntegrationReq } from '../../lib/api/types';
@@ -46,6 +46,36 @@
 
   const slack = $derived(integrations.find((i) => i.channel === 'slack') ?? null);
   const telegram = $derived(integrations.find((i) => i.channel === 'telegram') ?? null);
+  const webhook = $derived(integrations.find((i) => i.channel === 'webhook') ?? null);
+
+  // Human label for a channel kind (used in toasts, headings, confirm dialogs).
+  const CHANNEL_LABELS: Record<Channel, string> = {
+    slack: 'Slack',
+    telegram: 'Telegram',
+    webhook: 'Webhook',
+  };
+  const channelLabel = (c: Channel): string => CHANNEL_LABELS[c];
+
+  // The inbound URL an external system POSTs to (host = this Otto daemon).
+  const webhookUrl = $derived(wsId ? `${baseUrl()}/api/v1/webhooks/${wsId}` : '');
+
+  // Fill the key field with a fresh random secret. Shown once — copy it before
+  // saving; after reload it's masked (the key lives only in the Keychain).
+  function generateKey(): void {
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    fBotToken = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function copyText(text: string): Promise<void> {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      toasts.info('Copied to clipboard');
+    } catch {
+      toasts.error('Copy failed', 'Select and copy manually.');
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Load on workspace change
@@ -116,7 +146,7 @@
       ];
       editOpen = false;
       toasts.success(
-        `${editChannel === 'slack' ? 'Slack' : 'Telegram'} integration saved`,
+        `${channelLabel(editChannel)} integration saved`,
         updated.enabled ? 'Enabled' : 'Disabled',
       );
     } catch (e) {
@@ -149,7 +179,7 @@
       );
       integrations = integrations.map((i) => (i.channel === updated.channel ? updated : i));
       toasts.info(
-        `${intg.channel === 'slack' ? 'Slack' : 'Telegram'} ${updated.enabled ? 'enabled' : 'disabled'}`,
+        `${channelLabel(intg.channel)} ${updated.enabled ? 'enabled' : 'disabled'}`,
       );
     } catch (e) {
       toasts.error('Toggle failed', e instanceof Error ? e.message : String(e));
@@ -162,8 +192,9 @@
 
   async function remove(channel: Channel): Promise<void> {
     if (!wsId) return;
-    const label = channel === 'slack' ? 'Slack' : 'Telegram';
-    if (!(await confirmer.ask(`Remove the ${label} integration? Tokens will be deleted from the Keychain.`, { title: 'Remove integration', confirmLabel: 'Remove' }))) return;
+    const label = channelLabel(channel);
+    const secretWord = channel === 'webhook' ? 'The key' : 'Tokens';
+    if (!(await confirmer.ask(`Remove the ${label} integration? ${secretWord} will be deleted from the Keychain.`, { title: 'Remove integration', confirmLabel: 'Remove' }))) return;
     try {
       await api.del(`/workspaces/${wsId}/integrations/${channel}`);
       integrations = integrations.filter((i) => i.channel !== channel);
@@ -214,8 +245,8 @@
     <div>
       <h1>Channels</h1>
       <div class="sub">
-        Configure Slack and Telegram integrations for this workspace. Tokens are stored
-        in the macOS Keychain.
+        Configure Slack, Telegram and inbound Webhook integrations for this workspace.
+        Tokens and webhook keys are stored in the macOS Keychain.
       </div>
     </div>
   </div>
@@ -292,6 +323,7 @@
 
       {@render channelCard('slack', slack, 'slack', 'Slack')}
       {@render channelCard('telegram', telegram, 'bell', 'Telegram')}
+      {@render channelCard('webhook', webhook, 'globe', 'Webhook')}
     </div>
   {/if}
 </div>
@@ -299,7 +331,7 @@
 <!-- Edit modal -->
 {#if editOpen}
   <Modal
-    title={`Configure ${editChannel === 'slack' ? 'Slack' : 'Telegram'}`}
+    title={`Configure ${channelLabel(editChannel)}`}
     width={500}
     onclose={() => (editOpen = false)}
   >
@@ -309,22 +341,52 @@
       <input id="ch-enabled" type="checkbox" bind:checked={fEnabled} />
     </div>
 
-    <!-- Bot token -->
+    {#if editChannel === 'webhook'}
+      <!-- Inbound URL (read-only) — what the external system POSTs to. -->
+      <div class="field">
+        <label for="ch-url">Inbound URL</label>
+        <div class="row-inline">
+          <input id="ch-url" class="input mono" value={webhookUrl} readonly spellcheck="false" />
+          <button class="btn sm" type="button" onclick={() => void copyText(webhookUrl)}>Copy</button>
+        </div>
+        <span class="hint">
+          <code>POST</code> here with header <code>X-Otto-Webhook-Key: &lt;key&gt;</code> and a JSON
+          body <code>{'{ "text": "…" }'}</code>. Reachable wherever this Otto daemon is — by default
+          loopback only (<code>127.0.0.1</code>); expose it yourself if you need remote calls.
+        </span>
+      </div>
+    {/if}
+
+    <!-- Bot token / Webhook key -->
     <div class="field">
-      <label for="ch-bot">Bot token</label>
-      <input
-        id="ch-bot"
-        class="input mono"
-        type="password"
-        bind:value={fBotToken}
-        autocomplete="off"
-        placeholder={integrations.find((i) => i.channel === editChannel)?.has_bot_token
-          ? '•••••• (leave blank to keep)'
-          : editChannel === 'slack'
-            ? 'xoxb-…'
-            : '123456:ABC…'}
-      />
-      {#if integrations.find((i) => i.channel === editChannel)?.has_bot_token}
+      <label for="ch-bot">{editChannel === 'webhook' ? 'Webhook key' : 'Bot token'}</label>
+      <div class="row-inline">
+        <input
+          id="ch-bot"
+          class="input mono"
+          type={editChannel === 'webhook' ? 'text' : 'password'}
+          bind:value={fBotToken}
+          autocomplete="off"
+          spellcheck="false"
+          placeholder={integrations.find((i) => i.channel === editChannel)?.has_bot_token
+            ? '•••••• (leave blank to keep)'
+            : editChannel === 'slack'
+              ? 'xoxb-…'
+              : editChannel === 'telegram'
+                ? '123456:ABC…'
+                : 'paste a key or click Generate'}
+        />
+        {#if editChannel === 'webhook'}
+          <button class="btn sm" type="button" onclick={generateKey}>Generate</button>
+          <button class="btn sm" type="button" disabled={!fBotToken} onclick={() => void copyText(fBotToken)}>Copy</button>
+        {/if}
+      </div>
+      {#if editChannel === 'webhook'}
+        <span class="hint">
+          The secret callers must send. Set your own or Generate one — copy it now, it's masked
+          after save (stored only in the Keychain). Leave blank to keep the existing key.
+        </span>
+      {:else if integrations.find((i) => i.channel === editChannel)?.has_bot_token}
         <span class="hint">Leave blank to keep the existing token.</span>
       {/if}
     </div>
@@ -351,10 +413,14 @@
       </div>
     {/if}
 
-    <!-- Channel / chat ID -->
+    <!-- Channel / chat ID  (webhook: default reply callback URL) -->
     <div class="field">
       <label for="ch-chid">
-        {editChannel === 'slack' ? 'Default channel ID' : 'Default chat ID'}
+        {editChannel === 'slack'
+          ? 'Default channel ID'
+          : editChannel === 'telegram'
+            ? 'Default chat ID'
+            : 'Default reply callback URL'}
       </label>
       <input
         id="ch-chid"
@@ -362,24 +428,38 @@
         bind:value={fChannelId}
         spellcheck="false"
         autocomplete="off"
-        placeholder={editChannel === 'slack' ? 'C0123…' : '-100123456…'}
+        placeholder={editChannel === 'slack'
+          ? 'C0123…'
+          : editChannel === 'telegram'
+            ? '-100123456…'
+            : 'https://example.com/otto-replies (optional)'}
       />
+      {#if editChannel === 'webhook'}
+        <span class="hint">
+          Where the agent's reply is POSTed. A request may override it with <code>callback_url</code>.
+          Leave blank for fire-and-forget (trigger only, no reply delivered).
+        </span>
+      {/if}
     </div>
 
     <!-- Allowed users -->
     <div class="field">
-      <label for="ch-users">Allowed users</label>
+      <label for="ch-users">{editChannel === 'webhook' ? 'Allowed callers' : 'Allowed users'}</label>
       <input
         id="ch-users"
         class="input"
         bind:value={fAllowedUsers}
         spellcheck="false"
         autocomplete="off"
-        placeholder="U01234,U05678"
+        placeholder={editChannel === 'webhook' ? 'ci-bot,deploy-bot' : 'U01234,U05678'}
       />
       <span class="hint">
-        Comma-separated {editChannel === 'slack' ? 'Slack' : 'Telegram'} user IDs.
-        Leave blank to allow everyone.
+        {#if editChannel === 'webhook'}
+          Comma-separated caller ids, matched against the <code>user</code> field in the POST body.
+          Leave blank to allow everyone.
+        {:else}
+          Comma-separated {channelLabel(editChannel)} user IDs. Leave blank to allow everyone.
+        {/if}
       </span>
     </div>
 
@@ -400,7 +480,11 @@
 
     <!-- Agent reply -->
     <div class="field field-row">
-      <label for="ch-agent">Agent posts the final reply itself</label>
+      <label for="ch-agent">
+        {editChannel === 'webhook'
+          ? 'Relay only the agent\'s marked reply (⟦otto-send⟧)'
+          : 'Agent posts the final reply itself'}
+      </label>
       <input id="ch-agent" type="checkbox" bind:checked={fAgentReply} />
     </div>
 
@@ -541,5 +625,28 @@
     resize: vertical;
     font-family: inherit;
     line-height: 1.5;
+  }
+
+  /* Input + inline action button(s) on one row (webhook URL/key fields). */
+  .row-inline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .row-inline .input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .row-inline .btn.sm {
+    flex-shrink: 0;
+  }
+
+  .hint code {
+    font-size: 11px;
+    padding: 1px 4px;
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
   }
 </style>

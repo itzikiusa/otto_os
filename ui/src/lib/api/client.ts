@@ -20,7 +20,11 @@ function isInfraPath(path: string): boolean {
   return (
     path.includes('/brokers') ||
     path.includes('/connections') ||
-    path.startsWith('/db')
+    path.startsWith('/db') ||
+    // Swarm planner/recruiter run an LLM agent and return 502 (Error::Upstream)
+    // when that agent times out — that is NOT a git-provider outage, so it must
+    // not trigger the "remote git provider returned 502" banner.
+    (path.includes('/swarm/') && (path.endsWith('/plan') || path.endsWith('/recruit')))
   );
 }
 

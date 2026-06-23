@@ -677,6 +677,18 @@
     }
   }
 
+  // Lifecycle gate: the operator advances the story through the stages. Approval
+  // is the gate before "Send to Swarm" (PlanTab warns when not approved).
+  const STAGES = ['draft', 'review', 'approved', 'done'];
+  async function setStage(stage: string): Promise<void> {
+    if (!story || stage === story.stage) return;
+    try {
+      await product.updateStory({ stage });
+    } catch (e) {
+      toasts.error('Could not update stage', product.errMsg(e));
+    }
+  }
+
   function fmtBytes(n: number): string {
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -785,7 +797,14 @@
     <!-- ── Story header (full width) ────────────────────────────── -->
     <div class="story-header">
       <div class="story-meta-row">
-        <span class="stage-badge {stageColor(story.stage)}">{story.stage}</span>
+        <select
+          class="stage-badge stage-select {stageColor(story.stage)}"
+          value={story.stage}
+          onchange={(e) => setStage((e.currentTarget as HTMLSelectElement).value)}
+          title="Lifecycle stage — advance to Approved before sending to a swarm"
+        >
+          {#each STAGES as st (st)}<option value={st}>{st}</option>{/each}
+        </select>
         {#if story.issue_type}
           <span class="chip">{story.issue_type}</span>
         {/if}
@@ -1834,6 +1853,12 @@
     padding: 2px 8px;
     border-radius: 999px;
     flex-shrink: 0;
+  }
+  .stage-select {
+    border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+    cursor: pointer;
+    appearance: none;
+    padding-inline: 8px 8px;
   }
   .stage-draft {
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);

@@ -44,6 +44,7 @@
   import ProductPage from '../modules/product/ProductPage.svelte';
   import InsightsPage from '../modules/insights/InsightsPage.svelte';
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
+  import LoopsPage from '../modules/loops/LoopsPage.svelte';
   import VaultPage from '../modules/vault/VaultPage.svelte';
   import PluginFrame from '../modules/plugins/PluginFrame.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
@@ -384,6 +385,7 @@
       { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
       { id: 'core.go-insights', title: 'Go to Insights', group: 'Navigate', keywords: 'insights reports daily weekly monthly summary analytics activity', run: () => router.go('insights') },
       { id: 'core.go-swarm', title: 'Go to Swarm', group: 'Navigate', keywords: 'swarm agents team org orchestrator kanban board company', run: () => router.go('swarm') },
+      { id: 'core.go-loops', title: 'Go to Goal Loops', group: 'Navigate', keywords: 'goal loop iterate autonomous objective plan execute evaluate', run: () => router.go('loops') },
       { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle Right Panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
@@ -570,6 +572,8 @@
       <InsightsPage />
     {:else if moduleName === 'swarm'}
       <SwarmPage />
+    {:else if moduleName === 'loops'}
+      <LoopsPage />
     {:else if moduleName === 'vault'}
       <VaultPage />
     {:else if moduleName === 'plugin'}

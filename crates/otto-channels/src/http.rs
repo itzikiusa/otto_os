@@ -210,6 +210,33 @@ async fn test_integration<S: ChannelsCtx>(
         .await?
         .ok_or_else(|| Error::NotFound(format!("{channel_str} integration")))?;
 
+    // Webhook has no bot/chat — its "test" probes the configured callback URL
+    // (stored in channel_id) by POSTing the connected message to it. Use
+    // `send_formatted` because the webhook adapter intentionally no-ops `send`
+    // (the streaming activity feed is suppressed for webhooks).
+    if channel == Channel::Webhook {
+        let url = integ.channel_id.trim();
+        if url.is_empty() {
+            return Ok(Json(TestMessageResp {
+                ok: false,
+                error: Some(
+                    "No callback URL configured — set one in the webhook settings first.".into(),
+                ),
+            }));
+        }
+        let adapter = crate::webhook::WebhookAdapter::new(Some(url.to_string()));
+        return match adapter
+            .send_formatted("test", None, "Otto is connected \u{2705}")
+            .await
+        {
+            Ok(_) => Ok(Json(TestMessageResp { ok: true, error: None })),
+            Err(e) => Ok(Json(TestMessageResp {
+                ok: false,
+                error: Some(e.to_string()),
+            })),
+        };
+    }
+
     if integ.channel_id.trim().is_empty() {
         return Ok(Json(TestMessageResp {
             ok: false,
@@ -251,6 +278,8 @@ async fn test_integration<S: ChannelsCtx>(
                 }
             }
         }
+        // Handled by the dedicated branch above (callback-URL probe).
+        Channel::Webhook => unreachable!("webhook test handled before adapter resolution"),
     };
 
     let chat = integ.channel_id.trim();

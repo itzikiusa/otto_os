@@ -7,6 +7,7 @@ import { ws } from './stores/workspace.svelte';
 import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
 import { swarm } from './stores/swarm.svelte';
+import { loops } from './stores/loops.svelte';
 import { usage } from './api/usage.svelte';
 import { product } from './stores/product.svelte';
 
@@ -143,6 +144,31 @@ class EventsClient {
     this.state = 'offline';
   }
 
+  /** Force an immediate reconnect: cancel any pending backoff timer, drop the
+   *  current socket, reset backoff, and connect now. Used by the StatusBar
+   *  "reconnect" affordance so a wedged stream is recoverable without an app
+   *  restart. No-op while already connecting. */
+  reconnectNow(): void {
+    if (this.stopped) this.stopped = false;
+    if (this.state === 'connecting') return;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.backoff = 1000;
+    // Detach handlers first so the old socket's onclose can't schedule a
+    // competing reconnect after we've already started a fresh one.
+    if (this.sock) {
+      this.sock.onopen = null;
+      this.sock.onmessage = null;
+      this.sock.onclose = null;
+      this.sock.onerror = null;
+      this.sock.close();
+    }
+    this.sock = null;
+    this.connect();
+  }
+
   private connect(): void {
     if (this.stopped) return;
     this.state = 'connecting';
@@ -209,6 +235,9 @@ class EventsClient {
         } else if (parsed.type === 'budget_exceeded') {
           // Surface a budget cap crossing/recovery to any subscribed banner.
           budgetBus.apply(parsed.provider, parsed.spend_usd, parsed.cap_usd, parsed.direction);
+        } else if (parsed.type === 'goal_loop_updated') {
+          // Goal Loops: update the list row + bump the open detail's re-fetch tick.
+          loops.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

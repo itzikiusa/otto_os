@@ -13,19 +13,26 @@
     onruntask: (a: SwarmAgent) => void;
     /** Called when + button is clicked to add a new direct report to `parent`. */
     onadd?: (parent: SwarmAgent | null) => void;
+    /** Duplicate `a` as a new agent (e.g. same role on a different model). */
+    onduplicate?: (a: SwarmAgent) => void;
   }
-  let { onedit, onruntask, onadd }: Props = $props();
+  let { onedit, onruntask, onadd, onduplicate }: Props = $props();
 
   const agents = $derived(swarm.detail?.agents ?? []);
   const roots = $derived(agents.filter((a) => !a.reports_to));
   const childrenOf = (id: string) => agents.filter((a) => a.reports_to === id);
+
+  // Hide finished (exited) task sessions by default — show only active work.
+  let showCompleted = $state(false);
 
   // Sessions this agent holds (tagged at spawn with meta.swarm_id + meta.agent_id).
   function agentSessions(agentId: string) {
     const sid = swarm.detail?.id;
     return ws.sessions.filter((s) => {
       const m = (s.meta ?? {}) as Record<string, unknown>;
-      return !s.archived && m.swarm_id === sid && m.agent_id === agentId;
+      if (s.archived || m.swarm_id !== sid || m.agent_id !== agentId) return false;
+      const st = ws.statusMap[s.id] ?? s.status;
+      return showCompleted || st !== 'exited';
     });
   }
 
@@ -42,6 +49,7 @@
   function menu(e: MouseEvent, a: SwarmAgent) {
     ctxMenu.show(e, [
       { label: 'Edit agent', icon: 'edit', action: () => onedit(a) },
+      { label: 'Duplicate agent', icon: 'split', action: () => onduplicate?.(a) },
       { label: 'Run a task…', icon: 'play', action: () => onruntask(a) },
       { label: 'Add direct report', icon: 'plus', action: () => onadd?.(a) },
       { separator: true },
@@ -115,6 +123,11 @@
   ondragleave={() => onNodeDragLeave(null)}
   ondrop={(e) => onNodeDrop(e, null)}
 >
+  <div class="tree-bar">
+    <label class="show-done">
+      <input type="checkbox" bind:checked={showCompleted} /> Show completed
+    </label>
+  </div>
   {#if roots.length === 0}
     <p class="dim pad">No agents yet. Use <strong>Recruit</strong> to add one.</p>
   {:else if draggingAgentId}
@@ -206,6 +219,20 @@
   }
   .pad {
     padding: 12px;
+  }
+  .tree-bar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .show-done {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
   }
   .row {
     display: flex;

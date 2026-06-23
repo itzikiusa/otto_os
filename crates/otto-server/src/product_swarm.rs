@@ -195,7 +195,7 @@ async fn resolve_swarm(
 /// Seed tasks for the new project. Reuse the story's existing plan markdown when
 /// present; otherwise run the swarm planner over the goal to generate tasks.
 /// Returns the list of created tasks (already persisted).
-async fn seed_tasks(
+pub(crate) async fn seed_tasks(
     ctx: &ServerCtx,
     project: &SwarmProject,
     user_id: &Id,
@@ -228,7 +228,7 @@ async fn seed_tasks(
             specialization: a.specialization.clone(),
         })
         .collect();
-    let prompt = otto_swarm::recruiter::planner_prompt(&project.name, goal_md, &preset_agents);
+    let prompt = otto_swarm::recruiter::planner_prompt(&project.name, goal_md, &preset_agents, "");
     let cwd = project
         .repo_path
         .clone()

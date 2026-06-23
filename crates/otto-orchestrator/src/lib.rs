@@ -17,10 +17,12 @@ use serde::Serialize;
 
 use crate::claude_pty::ClaudePty;
 
-/// Total wait for one claude turn. Generous: a cold claude spawn can take
-/// 25-30s before its session JSONL even appears (hook init + MCP load run
-/// first), and only then does the model start answering.
-const CLAUDE_TIMEOUT: Duration = Duration::from_secs(120);
+/// "Stuck" window for a ⌘K planner turn — NOT a wall-clock cap. The turn may
+/// run as long as it keeps making progress; only a stall this long (no
+/// transcript growth and no PTY activity) is treated as wedged and retried.
+/// Generous because a cold claude spawn takes 25-30s (hook init + MCP load)
+/// before the session JSONL even appears.
+const CLAUDE_NO_PROGRESS: Duration = Duration::from_secs(120);
 
 /// Model for planning/optimizing turns — haiku keeps them fast and cheap.
 const PLANNER_MODEL: &str = "haiku";
@@ -79,7 +81,7 @@ impl Orchestrator {
             let prompt = build_plan_prompt(plan_input, &ctx);
             let text = self
                 .claude
-                .run_prompt(&prompt, &ctx.cwd, Some(PLANNER_MODEL), CLAUDE_TIMEOUT)
+                .run_prompt(&prompt, &ctx.cwd, Some(PLANNER_MODEL), CLAUDE_NO_PROGRESS)
                 .await?;
             let plan = parse::parse_plan(&text)?;
             parse::validate_plan(&plan, &ctx, &allowed)?;
@@ -111,15 +113,17 @@ impl Orchestrator {
     }
 
     /// Run a single headless agent turn with the given `prompt` in `cwd` and
-    /// return the assistant's full reply text. Used by the PR review workflow.
+    /// return the assistant's full reply text. Used by the PR review workflow
+    /// and the swarm planner/recruiter. `no_progress` is the stuck window, not a
+    /// wall-clock cap (see [`ClaudePty::run_prompt`]).
     pub async fn run_agent(
         &self,
         prompt: &str,
         cwd: &str,
         model: Option<&str>,
-        timeout: std::time::Duration,
+        no_progress: std::time::Duration,
     ) -> otto_core::Result<String> {
-        self.claude.run_prompt(prompt, cwd, model, timeout).await
+        self.claude.run_prompt(prompt, cwd, model, no_progress).await
     }
 
     /// Rewrite an instruction into a precise prompt (returns ONLY the rewrite).
@@ -130,7 +134,7 @@ impl Orchestrator {
         );
         let text = self
             .claude
-            .run_prompt(&prompt, cwd, Some(PLANNER_MODEL), CLAUDE_TIMEOUT)
+            .run_prompt(&prompt, cwd, Some(PLANNER_MODEL), CLAUDE_NO_PROGRESS)
             .await?;
         Ok(text.trim().to_string())
     }

@@ -24,10 +24,21 @@
       <span class="working-dot" class:on={ws.workingCount > 0}></span>
       {ws.workingCount} working
     </span>
-    <span class="sb-item dim" title="Event stream: {events.state}">
-      <span class="conn-dot {events.state}"></span>
-      {events.state === 'connected' ? 'live' : events.state}
-    </span>
+    {#if events.state === 'connected'}
+      <span class="sb-item dim" title="Event stream: live">
+        <span class="conn-dot connected"></span>
+        live
+      </span>
+    {:else}
+      <button
+        class="sb-item sb-btn dim"
+        onclick={() => events.reconnectNow()}
+        title="Event stream: {events.state} — click to reconnect now"
+      >
+        <span class="conn-dot {events.state}"></span>
+        {events.state} ↻
+      </button>
+    {/if}
   </div>
 
   <div class="sb-group">

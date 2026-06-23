@@ -160,13 +160,37 @@ class SwarmStore {
     await this.refreshDetail();
   }
 
-  async recruit(role: string, context?: string): Promise<RecruitedAgent> {
+  async recruit(
+    role: string,
+    context?: string,
+    namingTheme?: string,
+    signal?: AbortSignal,
+  ): Promise<RecruitedAgent> {
     if (!this.wsId) throw new Error('no workspace');
-    return api.post<RecruitedAgent>(`/workspaces/${this.wsId}/swarm/recruit`, {
-      swarm_id: this.detail?.id ?? null,
-      role,
-      context: context ?? null,
-    });
+    return api.post<RecruitedAgent>(
+      `/workspaces/${this.wsId}/swarm/recruit`,
+      {
+        swarm_id: this.detail?.id ?? null,
+        role,
+        context: context ?? null,
+        naming_theme: namingTheme || null,
+      },
+      signal,
+    );
+  }
+
+  /** Recruit run ids already hired from — hides their Runs-list "Hire" button. */
+  recruitHired = $state<Set<string>>(new Set());
+  markRecruitHired(runId: string): void {
+    const n = new Set(this.recruitHired);
+    n.add(runId);
+    this.recruitHired = n;
+  }
+
+  /** Persist the swarm's recruit naming theme (remembered across recruits). */
+  async setNamingTheme(sid: string, theme: string): Promise<void> {
+    const cfg = { ...(this.detail?.config ?? {}), naming_theme: theme };
+    await this.updateSwarm(sid, { config: cfg } as Partial<Swarm>);
   }
 
   // -- Projects -------------------------------------------------------------
@@ -195,11 +219,23 @@ class SwarmStore {
     }
   }
 
-  async plan(pid: string): Promise<void> {
+  /** Stop an in-flight plan/recruit for `sid`: kills the live agent session(s)
+   *  server-side and prevents retries. Best-effort. */
+  async stopAgentRun(sid: string): Promise<void> {
+    if (!this.wsId) return;
+    try {
+      await api.post(`/workspaces/${this.wsId}/swarm/swarms/${sid}/agent-stop`);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async plan(pid: string, signal?: AbortSignal): Promise<void> {
     if (!this.wsId) return;
     const tasks = await api.post<SwarmTask[]>(
       `/workspaces/${this.wsId}/swarm/projects/${pid}/plan`,
       {},
+      signal,
     );
     this.tasksByProject[pid] = tasks;
     this.tasksByProject = { ...this.tasksByProject };
@@ -231,17 +267,44 @@ class SwarmStore {
   ): Promise<SwarmTask> {
     const created = await api.post<SwarmTask>(`/swarm/projects/${pid}/tasks`, body);
     await this.loadTasks(pid);
+    await this.refreshGraph();
     return created;
   }
 
   async updateTask(task: SwarmTask, patch: Partial<SwarmTask>): Promise<void> {
     await api.patch<SwarmTask>(`/swarm/tasks/${task.id}`, patch);
     await this.loadTasks(task.project_id);
+    await this.refreshGraph();
   }
 
   async deleteTask(task: SwarmTask): Promise<void> {
     await api.del(`/swarm/tasks/${task.id}`);
     await this.loadTasks(task.project_id);
+    await this.refreshGraph();
+  }
+
+  /** Apply the same patch to many tasks (bulk move/assign), reloading once. */
+  async bulkUpdateTasks(tasks: SwarmTask[], patch: Partial<SwarmTask>): Promise<void> {
+    if (!tasks.length) return;
+    await Promise.all(
+      tasks.map((t) => api.patch<SwarmTask>(`/swarm/tasks/${t.id}`, patch).catch(() => null)),
+    );
+    await this.loadTasks(tasks[0].project_id);
+    await this.refreshGraph();
+  }
+
+  /** Delete many tasks (bulk delete / clear board), reloading once. */
+  async bulkDeleteTasks(tasks: SwarmTask[]): Promise<void> {
+    if (!tasks.length) return;
+    await Promise.all(tasks.map((t) => api.del(`/swarm/tasks/${t.id}`).catch(() => null)));
+    await this.loadTasks(tasks[0].project_id);
+    await this.refreshGraph();
+  }
+
+  /** Reload the dependency graph for the open swarm (the Graph tab reads it, so
+   *  task mutations must refresh it or deleted/moved tasks linger in the graph). */
+  private async refreshGraph(): Promise<void> {
+    if (this.detail) await this.loadGraph(this.detail.id);
   }
 
   async runTask(task: SwarmTask): Promise<void> {
@@ -350,6 +413,14 @@ class SwarmStore {
         if (this.detail?.id !== ev.swarm_id) return true;
         const run = ev.run as unknown as SwarmRun;
         const idx = this.runs.findIndex((r) => r.id === run.id);
+        if (idx < 0 && this.detail) {
+          // Keep the header's run-budget meter live: counts come from the detail
+          // load (not run events), so without this "N/300" looks frozen.
+          this.detail = {
+            ...this.detail,
+            counts: { ...this.detail.counts, total_runs: (this.detail.counts.total_runs ?? 0) + 1 },
+          };
+        }
         this.runs = idx >= 0 ? this.runs.map((r) => (r.id === run.id ? run : r)) : [run, ...this.runs];
         this.scheduleGraphRefresh();
         return true;

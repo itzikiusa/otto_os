@@ -456,6 +456,17 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Swarm, if get { View } else { Edit });
     }
 
+    // ---- Goal Loops -----------------------------------------------------------
+    // Workspace-axis feature: every handler enforces ws Viewer/Editor via the
+    // role check (`require_ws_role`), so the feature-capability axis is not gated
+    // here. (A dedicated GoalLoops capability is a possible future enhancement.)
+    if p.starts_with("/goal-loops/")
+        || p == "/goal-loops"
+        || p.starts_with("/workspaces/{id}/goal-loops")
+    {
+        return Exempt;
+    }
+
     // ---- ApiClient ("Postman") ------------------------------------------------
     // §3.2: read collections/history=View; create/edit/execute/grpc/oauth=Edit.
     if p.starts_with("/workspaces/{wid}/api-client/") || p == "/api-client/import-curl" {
@@ -481,8 +492,21 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Workflows, if get { View } else { Edit });
     }
 
-    // ---- Channels (Slack / Telegram integrations) -----------------------------
+    // ---- Channels (Slack / Telegram / Webhook integrations) -------------------
     // §3.2: view integrations=View; configure=Edit.
+    // Inbound channel webhook is PUBLIC-by-key (registered in public_routes); the
+    // handler validates the `X-Otto-Webhook-Key` against the keychain — exempt
+    // from the feature gate, like the workflow webhook trigger.
+    if p == "/webhooks/{workspace_id}" {
+        return Exempt;
+    }
+    // Inbound swarm-trigger webhook is PUBLIC-by-key too (registered in
+    // public_routes); the handler validates the same per-workspace webhook key
+    // via `X-Otto-Webhook-Key` / `Authorization: Bearer` — exempt from the
+    // feature gate, like the channel webhook above.
+    if p == "/webhooks/swarm/{workspace_id}/{swarm_id}" {
+        return Exempt;
+    }
     if p.starts_with("/workspaces/{id}/integrations") {
         return Require(Channels, if get { View } else { Edit });
     }
