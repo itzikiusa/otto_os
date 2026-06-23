@@ -56,6 +56,14 @@ pub fn public_routes() -> Router<ServerCtx> {
         .route("/ingest/swarm/board", post(swarm_ingest::board_ingest))
         // Swarm (PO) agents publish a feature draft to the Product page.
         .route("/ingest/swarm/product", post(swarm_ingest::product_ingest))
+        // Swarm discovery/design agents publish a generated mockup (HTML/Mermaid)
+        // for the story under discovery.
+        .route("/ingest/swarm/mockup", post(swarm_ingest::ingest_mockup))
+        // Swarm discovery agents publish the consolidated discovery report.
+        .route(
+            "/ingest/swarm/discovery-report",
+            post(swarm_ingest::ingest_discovery_report),
+        )
         // Runtime-plugin host API: sidecars call back here with their own
         // OTTO_PLUGIN_TOKEN (validated in each handler) — NOT a user bearer, so it
         // lives in public_routes (outside the user auth chokepoint), like /ingest/*.

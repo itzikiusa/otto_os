@@ -21,6 +21,8 @@ pub mod modules;
 pub mod monitor;
 pub mod plugins;
 pub mod policy;
+pub mod product_media;
+pub mod product_refine;
 pub mod product_run;
 pub mod product_swarm;
 pub mod product_watcher;

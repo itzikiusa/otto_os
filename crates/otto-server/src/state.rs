@@ -68,6 +68,14 @@ pub struct ServerCtx {
     pub usage: Arc<otto_usage::UsageEngine>,
     pub product: std::sync::Arc<otto_product::ProductService>,
     pub product_repo: otto_state::ProductRepo,
+    /// Story attachments (files/images) repo — backs `product_media.rs`.
+    pub attachment_repo: otto_state::ProductAttachmentRepo,
+    /// Discovery-run repo — repeatable discovery-swarm launches per story.
+    pub discovery_repo: otto_state::ProductDiscoveryRepo,
+    /// Refinement-thread repo — conversational agent refinement threads per story.
+    pub refinement_repo: otto_state::ProductRefinementRepo,
+    /// Mockup pinned-annotation repo.
+    pub mockup_repo: otto_state::ProductMockupRepo,
     /// Per-run cancellation flags for in-flight product analysis agents (manual
     /// Stop). Mirrors `skill_eval_cancels`.
     pub product_agent_cancels: crate::product_run::CancelRegistry,

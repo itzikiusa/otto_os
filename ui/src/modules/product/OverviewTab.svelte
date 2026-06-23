@@ -6,14 +6,18 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { product } from '../../lib/stores/product.svelte';
+  import { swarm } from '../../lib/stores/swarm.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { toasts } from '../../lib/toast.svelte';
   import { api, authedBlobUrl } from '../../lib/api/client';
   import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser, EditableField, FieldOption, DevStatus } from './types';
+  import type { ProductAttachment } from './types';
   import { confirmer } from '../../lib/confirm.svelte';
   import PublishDialog from './PublishDialog.svelte';
   import SwarmLinkCard from './SwarmLinkCard.svelte';
   import type { ProductTranscript } from './types';
+  import AttachmentsPanel from './AttachmentsPanel.svelte';
 
   // Version picker state — null means "show current (source) version".
   let viewingVersion = $state<ProductStoryVersion | null>(null);
@@ -21,6 +25,10 @@
   let versionLoading = $state(false);
   let refreshing = $state(false);
   let watchWorking = $state(false);
+
+  // ── Discovery launch state ────────────────────────────────────────────────
+  let discoverySwarmId = $state('');
+  let runningDiscovery = $state(false);
 
   // The detail object for the currently selected story.
   const detail = $derived(product.detail);
@@ -89,6 +97,28 @@
   let draftTitle = $state('');
   let draftBody = $state('');
   let draftSaving = $state(false);
+
+  // ── AttachmentsPanel ref + screenshot paste counter ───────────────────────
+  // panelRef exposes uploadBlob(blob, opts) for the textarea paste handler.
+  let panelRef = $state<{ uploadBlob: (blob: Blob, opts?: { filename?: string; kind?: string }) => Promise<ProductAttachment> } | null>(null);
+  // Session-local counter for unique screenshot filenames.
+  let bodyScreenshotIdx = $state(0);
+
+  // ── Body preview: attachment token resolution ─────────────────────────────
+  // Resolved authed blob URLs for `attachment:<id>` refs found in renderedBody.
+  // These are separate from Jira attachmentUrls to avoid naming collisions.
+  let bodyAttUrls = $state<Record<string, string>>({});
+  // Object URLs created for bodyAttUrls — revoked alongside createdObjectUrls.
+  let bodyAttObjectUrls: string[] = [];
+  // IDs currently being fetched — prevents duplicate in-flight requests across
+  // overlapping resolver runs (mirrors AttachmentsPanel.loadAttUrl guard).
+  const bodyAttFetching = new Set<string>();
+
+  // HTML of renderedBody with markdown image tokens rewritten to <img> tags with blob URLs.
+  let resolvedBody = $state('');
+
+  // Track the last rendered body to avoid redundant re-resolution.
+  let lastResolvedInput = $state('');
 
   // ── Transcript state ──────────────────────────────────────────────────────
   let transcriptsLoaded = $state(false);
@@ -187,13 +217,21 @@
     collapsed = { details: false, links: false, development: true, comments: false, history: true, attachments: false };
     newCommentBody = '';
     postingComment = false;
-    // Revoke old object URLs.
+    // Revoke old Jira attachment object URLs.
     for (const url of createdObjectUrls) {
       URL.revokeObjectURL(url);
     }
     createdObjectUrls = [];
     attachmentUrls = {};
     attachmentLoading = {};
+    // Revoke body-preview attachment token object URLs.
+    for (const url of bodyAttObjectUrls) {
+      URL.revokeObjectURL(url);
+    }
+    bodyAttObjectUrls = [];
+    bodyAttUrls = {};
+    resolvedBody = '';
+    lastResolvedInput = '';
   });
 
   $effect(() => {
@@ -215,6 +253,9 @@
   $effect(() => {
     return () => {
       for (const url of createdObjectUrls) {
+        URL.revokeObjectURL(url);
+      }
+      for (const url of bodyAttObjectUrls) {
         URL.revokeObjectURL(url);
       }
     };
@@ -239,6 +280,102 @@
       void product.loadTranscripts();
     }
   });
+
+  // Load swarms lazily so the discovery team picker is populated.
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (wsId && swarm.swarms.length === 0) {
+      void swarm.loadSwarms(wsId);
+    }
+  });
+
+  /** Launch a discovery swarm run and switch to the Discovery tab. */
+  async function runDiscovery(): Promise<void> {
+    if (runningDiscovery) return;
+    const targetSwarm = swarm.swarms.find((s) => s.id === discoverySwarmId);
+    const teamName = targetSwarm ? `"${targetSwarm.name}"` : 'a swarm';
+    const attCount = 0; // attachments listed in the panel; count not tracked here
+    const ok = await confirmer.ask(
+      `Run Discovery in ${teamName}? This will START the swarm and send the story info${attCount > 0 ? ` + ${attCount} attachments` : ''} as discovery context.`,
+      { title: 'Run Discovery', confirmLabel: 'Run Discovery' },
+    );
+    if (!ok) return;
+    runningDiscovery = true;
+    try {
+      await product.discover(discoverySwarmId ? { swarm_id: discoverySwarmId } : {});
+      toasts.success('Discovery started', 'The swarm is now analysing the story.');
+      product.tab = 'discovery';
+    } catch (e) {
+      toasts.error('Discovery failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      runningDiscovery = false;
+    }
+  }
+
+  // ── Body preview: resolve markdown image tokens in rendered HTML ────────
+  // renderMarkdown HTML-escapes `![alt](attachment:<id>)` literally — it never
+  // emits src="attachment:<id>". We scan the rendered HTML for those literal
+  // markdown image tokens, fetch authed blob URLs, and replace each token with
+  // an <img> tag so pasted screenshots appear inline. `draftBody` / source
+  // body_md keep the portable `attachment:<id>` form; blob URLs only exist here.
+  $effect(() => {
+    const html = renderedBody;
+    if (!html || html === lastResolvedInput) return;
+    lastResolvedInput = html;
+    void resolveAttachmentTokens(html);
+  });
+
+  function escapeHtmlAttr(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  async function resolveAttachmentTokens(html: string): Promise<void> {
+    // Match literal markdown image syntax `![alt](attachment:<id>)` in the HTML
+    // (renderMarkdown outputs these as-is since it doesn't handle image syntax).
+    const tokenRe = /!\[([^\]]*)\]\(attachment:([A-Za-z0-9]+)\)/g;
+    const matches: Array<{ full: string; alt: string; id: string }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = tokenRe.exec(html)) !== null) {
+      matches.push({ full: m[0], alt: m[1], id: m[2] });
+    }
+    if (matches.length === 0) {
+      resolvedBody = html;
+      return;
+    }
+    // Fetch any uncached URLs, guarding against concurrent duplicate fetches.
+    // Collect all results locally so one merged assignment updates the cache
+    // (avoids stale-snapshot overwrites from concurrent reactive spreads).
+    const uncached = matches.map(({ id }) => id).filter(
+      (id) => !bodyAttUrls[id] && !bodyAttFetching.has(id),
+    );
+    for (const id of uncached) bodyAttFetching.add(id);
+    const collected: Record<string, string> = {};
+    await Promise.all(
+      uncached.map(async (id) => {
+        try {
+          const url = await authedBlobUrl(`/product/attachments/${id}`);
+          bodyAttObjectUrls.push(url);
+          collected[id] = url;
+        } catch (e) {
+          console.warn('[OverviewTab] attachment token resolution failed', id, e);
+        } finally {
+          bodyAttFetching.delete(id);
+        }
+      }),
+    );
+    if (Object.keys(collected).length > 0) {
+      bodyAttUrls = { ...bodyAttUrls, ...collected };
+    }
+    // Replace each markdown image token with an <img> tag using the blob URL.
+    let out = html;
+    for (const { full, alt, id } of matches) {
+      const blobUrl = bodyAttUrls[id];
+      if (blobUrl) {
+        out = out.replace(full, `<img class="body-attachment" alt="${escapeHtmlAttr(alt)}" src="${blobUrl}">`);
+      }
+    }
+    resolvedBody = out;
+  }
 
   async function loadIssueFull(): Promise<void> {
     if (!story) return;
@@ -602,6 +739,40 @@
     }
   }
 
+  /**
+   * Paste handler for the draft body `<textarea>`. When the clipboard contains
+   * an image, upload it via the AttachmentsPanel's uploadBlob action, then
+   * splice `![filename](attachment:<id>)` at the caret so the markdown body
+   * references the attachment portably (not a blob URL).
+   */
+  async function handleBodyPaste(e: ClipboardEvent): Promise<void> {
+    if (!e.clipboardData) return;
+    for (const item of Array.from(e.clipboardData.items)) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        e.preventDefault();
+        const blob = item.getAsFile();
+        if (!blob || !panelRef) return;
+        const idx = ++bodyScreenshotIdx;
+        const filename = `screenshot-${idx}.png`;
+        try {
+          const textarea = e.currentTarget as HTMLTextAreaElement;
+          const caretPos = textarea.selectionStart ?? draftBody.length;
+          const att = await panelRef.uploadBlob(blob, { filename, kind: 'image' });
+          // Splice the markdown reference at the caret position.
+          const token = `![${att.filename}](attachment:${att.id})`;
+          draftBody =
+            draftBody.slice(0, caretPos) + token + draftBody.slice(caretPos);
+        } catch (ex) {
+          toasts.error(
+            'Screenshot upload failed',
+            ex instanceof Error ? ex.message : String(ex),
+          );
+        }
+        return; // only handle the first image item
+      }
+    }
+  }
+
   async function doAddTranscript(): Promise<void> {
     if (!newTranscriptBody.trim()) return;
     addingTranscript = true;
@@ -907,6 +1078,27 @@
         <Icon name="refresh" size={13} />
         {refreshing ? 'Refreshing…' : 'Refresh'}
       </button>
+
+      <!-- Discovery: team picker + launch button -->
+      {#if swarm.swarms.length > 1}
+        <select
+          class="disc-swarm-pick"
+          bind:value={discoverySwarmId}
+          title="Which swarm runs the discovery"
+        >
+          <option value="">First swarm</option>
+          {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+        </select>
+      {/if}
+      <button
+        class="toolbar-btn"
+        onclick={runDiscovery}
+        disabled={runningDiscovery}
+        title="Launch a discovery swarm run — agents analyse the story and report findings"
+        aria-label="Run Discovery"
+      >
+        {runningDiscovery ? 'Starting…' : '⚡ Run Discovery'}
+      </button>
     </div>
 
     <!-- ── Body area ──────────────────────────────────────────────── -->
@@ -940,6 +1132,7 @@
                 rows={14}
                 placeholder="Write your story or paste notes here…"
                 spellcheck="false"
+                onpaste={handleBodyPaste}
               ></textarea>
             </div>
 
@@ -971,7 +1164,7 @@
           </div>
         </div>
 
-        <!-- Right: Transcripts -->
+        <!-- Right: Transcripts + Attachments -->
         <div class="col-right">
           <div class="transcripts-section">
             <div class="transcripts-header">
@@ -1035,6 +1228,10 @@
               </button>
             </div>
           </div>
+
+          <!-- Attachments panel: paste/drag/file-picker with previews. -->
+          <!-- bind:this captures the exported uploadBlob action. -->
+          <AttachmentsPanel bind:this={panelRef} />
         </div>
       </div>
 
@@ -1055,8 +1252,9 @@
             {/if}
 
             {#if renderedBody}
-              <!-- renderMarkdown escapes all input before rendering — safe to inject. -->
-              <div class="md-body">{@html renderedBody}</div>
+              <!-- resolvedBody has attachment:<id> tokens rewritten to authed blob URLs;
+                   falls back to renderedBody while async resolution is in progress. -->
+              <div class="md-body">{@html resolvedBody || renderedBody}</div>
             {:else}
               <div class="muted">No content yet. Use Refresh to pull from source.</div>
             {/if}
@@ -1600,6 +1798,9 @@
 
             {/if}
           </div>
+
+          <!-- Attachments panel in Jira right column -->
+          <AttachmentsPanel bind:this={panelRef} />
         </div>
       </div>
 
@@ -1617,8 +1818,8 @@
         {/if}
 
         {#if renderedBody}
-          <!-- renderMarkdown escapes all input before rendering — safe to inject. -->
-          <div class="md-body">{@html renderedBody}</div>
+          <!-- resolvedBody has attachment:<id> tokens rewritten to authed blob URLs. -->
+          <div class="md-body">{@html resolvedBody || renderedBody}</div>
         {:else}
           <div class="muted">No content yet. Use Refresh to pull from source.</div>
         {/if}
@@ -1634,6 +1835,9 @@
           </button>
         </div>
       {/if}
+
+      <!-- Attachments panel for Confluence / other layouts -->
+      <AttachmentsPanel bind:this={panelRef} />
     {/if}
 
     <!-- ── Swarm link (cross-link back to the project this story spawned) ── -->
@@ -1984,6 +2188,17 @@
     border-color: var(--accent);
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  /* Discovery swarm picker (toolbar) — matches PlanTab .swarm-pick style */
+  .disc-swarm-pick {
+    height: 26px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
   }
 
   /* Body */

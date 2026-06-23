@@ -5,9 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use otto_connections::{ConnectionsService, Spawner};
 use otto_core::api::{
@@ -356,6 +356,67 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         .route(
             "/product/stories/{sid}/to-swarm",
             post(crate::product_swarm::story_to_swarm),
+        )
+        // Discovery: launch a repeatable INVESTIGATION swarm from a story (Editor),
+        // then list/read the runs (Viewer). Discovery projects are NOT story-linked
+        // (the unique story_id index is reserved for the implementation project);
+        // the run row carries the linkage.
+        .route(
+            "/product/stories/{sid}/discover",
+            post(crate::product_swarm::discover_story),
+        )
+        .route(
+            "/product/stories/{sid}/discovery-runs",
+            get(crate::product_swarm::list_discovery_runs),
+        )
+        .route(
+            "/product/discovery-runs/{rid}",
+            get(crate::product_swarm::get_discovery_run),
+        )
+        // Talk-to-agent refinement: a conversational thread on a story. Create +
+        // list its threads (story-scoped), then read/converse/archive a thread
+        // (resolves the workspace from the thread → its story). The converse turn
+        // runs the agent inline and may write a new `suggested` story version.
+        .route(
+            "/product/stories/{sid}/refinement-threads",
+            post(crate::product_refine::create_thread)
+                .get(crate::product_refine::list_threads),
+        )
+        .route(
+            "/product/refinement-threads/{tid}",
+            get(crate::product_refine::get_thread),
+        )
+        .route(
+            "/product/refinement-threads/{tid}/messages",
+            post(crate::product_refine::send_message),
+        )
+        .route(
+            "/product/refinement-threads/{tid}/archive",
+            post(crate::product_refine::archive_thread),
+        )
+        // Story attachments — upload route gets its own 40 MB body cap to bound
+        // the ~33 % base64 inflation (raw content cap is enforced at 25 MB).
+        .route(
+            "/product/stories/{sid}/attachments",
+            post(crate::product_media::upload_attachment)
+                .layer(DefaultBodyLimit::max(40 * 1024 * 1024))
+                .get(crate::product_media::list_attachments),
+        )
+        .route(
+            "/product/attachments/{aid}",
+            get(crate::product_media::serve_attachment)
+                .patch(crate::product_media::patch_attachment)
+                .delete(crate::product_media::delete_attachment),
+        )
+        .route(
+            "/product/attachments/{aid}/annotations",
+            get(crate::product_media::list_annotations)
+                .post(crate::product_media::create_annotation),
+        )
+        .route(
+            "/product/annotations/{id}",
+            patch(crate::product_media::patch_annotation)
+                .delete(crate::product_media::delete_annotation),
         )
         // Approve lives here (not in otto-product) so it can trigger self-improvement.
         .route(

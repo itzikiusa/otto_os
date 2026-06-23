@@ -36,6 +36,13 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       OTTO_PORT: PORT,
       // Keep the throwaway daemon lean / non-networked.
       OTTO_SELF_IMPROVE: '0',
+      // Point the agent runner at a binary that does not exist so any agent /
+      // planner invocation (e.g. the discovery-swarm planner) fails FAST and
+      // falls back to its fixed task set instead of waiting on a real `claude`
+      // CLI startup/retry budget. The throwaway daemon never runs agents
+      // meaningfully, so this only makes that already-doomed path quick + and
+      // deterministic; no other spec exercises agent execution.
+      CLAUDE_BIN: '/nonexistent/otto-e2e-no-claude',
     },
     stdio: ['ignore', 'inherit', 'inherit'],
     detached: false,

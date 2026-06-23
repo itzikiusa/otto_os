@@ -168,6 +168,8 @@ workspace from the row.
 | 86 | POST /api/v1/swarm/swarms/{sid}/board | ws editor | PostMessageReq | SwarmMessage |
 | — | POST /api/v1/ingest/swarm/board | session token | `{kind?,to_agent_id?,body}` | 204 |
 | — | POST /api/v1/ingest/swarm/product | session token | `{title?,body_md}` | 204 |
+| — | POST /api/v1/ingest/swarm/mockup | session token | `{title,format,content}` | 204 |
+| — | POST /api/v1/ingest/swarm/discovery-report | session token | `{report_md}` | 204 |
 | — | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/agent-stop | ws editor | — | `{ok:true}` |
 
 Notes:
@@ -206,6 +208,14 @@ Notes:
   swarm sessions (the session `meta` must carry `swarm_id`). A PO/feature-design agent
   publishes a feature **draft** (`body_md`, optional `title`) to the Product page via the
   materialized `otto-product` helper; the user/PO reviews it. Fire-and-forget (always 204).
+- `POST /ingest/swarm/mockup` and `POST /ingest/swarm/discovery-report` use the same
+  per-session ingest token. A discovery/design agent (via the materialized `otto-mockup` /
+  `otto-discovery-report` helpers) publishes a generated mockup (`{title,format,content}`,
+  `format` ∈ `html`|`mermaid` → stored as a `kind:"mockup"`, `source:"agent"` attachment) or
+  the consolidated discovery report (`{report_md}`). The target story/run is derived
+  server-side from the session's `meta.project_id` → its discovery run (the agent never
+  supplies a story/run id); if no discovery run resolves, nothing is written. Fire-and-forget
+  (always 204).
 - `POST /workspaces/{id}/swarm/swarms/{sid}/agent-stop` (ws editor) stops a single running
   swarm-agent turn for `{sid}` without pausing the whole swarm; returns `{ok:true}`.
 - Assigning a task to a *leader* (an agent with reports) triggers a delegation turn
@@ -649,6 +659,57 @@ the row. AI-producing actions (analyze/rewrite/generate/plan) live under
 | POST /workspaces/{id}/product/stories/{sid}/inject-session | ws editor | InjectSessionReq | inject story context into a session |
 | POST /product/analyses/{aid}/agents/{agent_id}/retry | ws editor | — | 202 (re-run one analysis lens agent) |
 | POST /product/analyses/{aid}/agents/{agent_id}/stop | ws editor | — | 202 (stop a running analysis agent) |
+
+### Product story attachments & mockups
+
+Local story attachments (paste/drag/file-picker) stored under
+`data_dir/product/attachments/<story_id>/`, served back as bytes; plus pinned
+mockup annotations. The story's workspace gates each route (Viewer reads, Editor
+mutations). The upload route carries a 40 MB body cap (raw content cap 25 MB).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /product/stories/{sid}/attachments | ws editor | UploadReq (base64) | ProductAttachment |
+| GET /product/stories/{sid}/attachments | ws viewer | — | ProductAttachment[] |
+| GET /product/attachments/{aid} | ws viewer | — | the file bytes (inline; nosniff) |
+| PATCH /product/attachments/{aid} | ws editor | AttachmentPatch | ProductAttachment (e.g. mark as mockup) |
+| DELETE /product/attachments/{aid} | ws editor | — | 204 (row + file) |
+| GET /product/attachments/{aid}/annotations | ws viewer | — | MockupAnnotation[] |
+| POST /product/attachments/{aid}/annotations | ws editor | AnnotationCreateReq | MockupAnnotation |
+| PATCH /product/annotations/{id} | ws editor | AnnotationPatchReq | MockupAnnotation |
+| DELETE /product/annotations/{id} | ws editor | — | 204 |
+
+### Product story refinement (talk-to-agent)
+
+A conversational refinement thread on a story. Each turn replays the full thread
+history into a one-shot agent run; the agent returns `{reply, updated_story_md?,
+summary?}`. When `updated_story_md` is present the backend writes a new
+`suggested` story version (which Publish-as-Jira/RFC then picks up). Each thread
+has its own working dir; a thread may link a discovery run to seed context. The
+story's workspace gates each route (Viewer reads, Editor converse/mutate).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /product/stories/{sid}/refinement-threads | ws editor | CreateThreadReq? ({discovery_run_id?, title?}) | RefinementThread |
+| GET /product/stories/{sid}/refinement-threads | ws viewer | — | RefinementThread[] (newest first) |
+| GET /product/refinement-threads/{tid} | ws viewer | — | {thread, messages} |
+| POST /product/refinement-threads/{tid}/messages | ws editor | {body} | {user_message, agent_message, story_updated, version_no?} (synchronous; agent turn runs inline) |
+| POST /product/refinement-threads/{tid}/archive | ws editor | — | RefinementThread |
+
+### Product discovery swarm
+
+Launch a repeatable INVESTIGATION swarm from a story (discovery before
+implementation). The discovery project is **not** story-linked (the unique
+`story_id` index is reserved for the single implementation project); the
+`product_discovery_runs` row carries the linkage. Launching auto-starts the
+swarm so the discovery agents run. Run status is derived on read from the
+discovery project's task statuses (all done → `done`; any error → `error`).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /product/stories/{sid}/discover | ws editor | DiscoverReq? | DiscoverResp (run + auto-started swarm + discovery project + seeded investigation tasks) |
+| GET /product/stories/{sid}/discovery-runs | ws viewer | — | DiscoveryRunSummary[] (newest first; derived status + done/total) |
+| GET /product/discovery-runs/{rid} | ws viewer | — | DiscoveryRunDetail (tasks, per-task run summaries, `kind=discovery` board messages, report_md) |
 
 ## Issue trackers (Jira / Confluence)
 
@@ -1194,10 +1255,12 @@ handler. Agent hooks (which have no user session) post to them.
 | POST /ingest/usage | session token | token-usage event | 204 |
 | POST /ingest/swarm/board | session token | `{kind?,to_agent_id?,body}` | 204 (also listed at #—, swarm) |
 | POST /ingest/swarm/product | session token | `{title?,body_md}` | 204 (also listed at #—, swarm) |
+| POST /ingest/swarm/mockup | session token | `{title,format,content}` | 204 (also listed at #—, swarm) |
+| POST /ingest/swarm/discovery-report | session token | `{report_md}` | 204 (also listed at #—, swarm) |
 
 Notes:
 - The `/api/v1` public exemptions (no bearer required) are exactly: `/health`, `/meta`,
-  `/onboarding/root`, `/auth/login`, and the five `/ingest/*` routes (session-token gated).
+  `/onboarding/root`, `/auth/login`, and the `/ingest/*` routes (session-token gated).
 - `kill_all_sessions` (`POST /app/kill-sessions`) is mounted in the sessions api_router, so
   its full path is `/api/v1/app/kill-sessions` and it requires a bearer token.
 - Several AI-producing routes (analyze/rewrite/generate/plan/review) return `202 Accepted`

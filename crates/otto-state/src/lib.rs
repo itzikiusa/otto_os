@@ -27,6 +27,10 @@ pub mod mcp_servers;
 pub mod memory;
 pub mod notifications;
 pub mod plugins;
+pub mod product_attachments;
+pub mod product_discovery;
+pub mod product_mockup;
+pub mod product_refinement;
 pub mod review_findings;
 pub mod reviews;
 pub mod saved_views;
@@ -73,6 +77,13 @@ pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
 pub use plugins::{NewPlugin, PluginRecord, PluginsRepo};
+pub use product_attachments::{AttachmentPatch, NewAttachment, ProductAttachment, ProductAttachmentRepo};
+pub use product_discovery::{DiscoveryRun, NewDiscoveryRun, ProductDiscoveryRepo};
+pub use product_mockup::{AnnotationPatch, MockupAnnotation, NewAnnotation, ProductMockupRepo};
+pub use product_refinement::{
+    NewRefinementMessage, NewRefinementThread, ProductRefinementRepo, RefinementMessage,
+    RefinementThread,
+};
 pub use review_findings::{
     compute_fingerprint, FindingState, NewFinding, ReviewFindingRow, ReviewFindingsRepo,
 };
