@@ -241,8 +241,67 @@ curl -s -X POST "$BASE/api/v1/ingest/swarm/product" \
   -d "$PAYLOAD" >/dev/null 2>&1
 "#;
 
+/// `otto-mockup` — a discovery/design agent publishes a generated mockup (an
+/// HTML page or a Mermaid diagram) to the story under discovery. Mirrors
+/// `otto-post`'s per-session auth; the target story is derived server-side from
+/// the session's project. Usage: otto-mockup --title "..." --format html|mermaid "content".
+const OTTO_MOCKUP: &str = r#"#!/bin/sh
+# otto-mockup — publish a generated mockup for the story under discovery.
+# Usage: otto-mockup --title "Title" --format html|mermaid "<content>"
+BASE="${OTTO_INGEST_BASE:-http://127.0.0.1:7700}"
+TITLE=""; FORMAT="html"; CONTENT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --title) TITLE="$2"; shift 2 ;;
+    --format) FORMAT="$2"; shift 2 ;;
+    --) shift; CONTENT="$*"; break ;;
+    *) if [ -z "$CONTENT" ]; then CONTENT="$1"; else CONTENT="$CONTENT $1"; fi; shift ;;
+  esac
+done
+if [ -z "$CONTENT" ]; then echo "usage: otto-mockup --title \"Title\" --format html|mermaid \"content\"" >&2; exit 1; fi
+PAYLOAD=$(TITLE="$TITLE" FORMAT="$FORMAT" CONTENT="$CONTENT" python3 - <<'PY'
+import json, os
+print(json.dumps({"title": os.environ.get("TITLE",""), "format": os.environ.get("FORMAT","html"), "content": os.environ.get("CONTENT","")}))
+PY
+)
+curl -s -X POST "$BASE/api/v1/ingest/swarm/mockup" \
+  -H "Content-Type: application/json" \
+  -H "X-Otto-Session: $OTTO_SESSION_ID" \
+  -H "X-Otto-Token: $OTTO_INGEST_TOKEN" \
+  -d "$PAYLOAD" >/dev/null 2>&1
+"#;
+
+/// `otto-discovery-report` — a discovery agent publishes the consolidated
+/// discovery report (markdown) for the story under discovery. Mirrors
+/// `otto-post`'s per-session auth; the target run is derived server-side from the
+/// session's project. Usage: otto-discovery-report "<markdown report>".
+const OTTO_DISCOVERY_REPORT: &str = r#"#!/bin/sh
+# otto-discovery-report — publish the consolidated discovery report (markdown).
+# Usage: otto-discovery-report "<markdown report>"
+BASE="${OTTO_INGEST_BASE:-http://127.0.0.1:7700}"
+REPORT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; REPORT="$*"; break ;;
+    *) if [ -z "$REPORT" ]; then REPORT="$1"; else REPORT="$REPORT $1"; fi; shift ;;
+  esac
+done
+if [ -z "$REPORT" ]; then echo "usage: otto-discovery-report \"<markdown report>\"" >&2; exit 1; fi
+PAYLOAD=$(REPORT="$REPORT" python3 - <<'PY'
+import json, os
+print(json.dumps({"report_md": os.environ.get("REPORT","")}))
+PY
+)
+curl -s -X POST "$BASE/api/v1/ingest/swarm/discovery-report" \
+  -H "Content-Type: application/json" \
+  -H "X-Otto-Session: $OTTO_SESSION_ID" \
+  -H "X-Otto-Token: $OTTO_INGEST_TOKEN" \
+  -d "$PAYLOAD" >/dev/null 2>&1
+"#;
+
 /// Materialize the agent's skills + soul + identity into `cwd`, and install the
-/// `otto-post` board helper + `otto-product` draft helper. Best-effort.
+/// `otto-post` board helper + `otto-product` draft helper + `otto-mockup` /
+/// `otto-discovery-report` discovery helpers. Best-effort.
 pub fn provision_agent(
     ctx: &ServerCtx,
     agent: &SwarmAgent,
@@ -258,6 +317,8 @@ pub fn provision_agent(
     let _ = otto_context::materialize::provision(&ctx.context_library, &cfg, cwd, &agent.provider);
     install_helper(cwd, "otto-post", OTTO_POST);
     install_helper(cwd, "otto-product", OTTO_PRODUCT);
+    install_helper(cwd, "otto-mockup", OTTO_MOCKUP);
+    install_helper(cwd, "otto-discovery-report", OTTO_DISCOVERY_REPORT);
 }
 
 /// Write a helper script into `cwd` and mark it executable (best-effort).

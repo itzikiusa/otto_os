@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use otto_core::event::Event;
 use otto_core::Id;
-use otto_state::NewMessage;
+use otto_state::{NewAttachment, NewMessage};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -155,4 +155,183 @@ pub async fn product_ingest(
         Err(e) => tracing::warn!("swarm product ingest: {e}"),
     }
     StatusCode::NO_CONTENT
+}
+
+/// Storage sub-path under `data_dir` for story attachments (mirrors
+/// `product_media::ATTACH_ROOT`).
+const ATTACH_ROOT: &str = "product/attachments";
+
+/// File extension for a generated mockup payload. Mermaid diagrams land as
+/// `.mmd`; everything else (HTML) as `.html`.
+fn mockup_ext(format: &str) -> &'static str {
+    match format {
+        "mermaid" => "mmd",
+        _ => "html",
+    }
+}
+
+/// MIME for a generated mockup payload, paired with `mockup_ext`.
+fn mockup_mime(format: &str) -> &'static str {
+    match format {
+        "mermaid" => "text/vnd.mermaid",
+        _ => "text/html",
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MockupIngestReq {
+    pub title: String,
+    /// `"html"` | `"mermaid"`.
+    pub format: String,
+    pub content: String,
+}
+
+/// `POST /ingest/swarm/mockup` — a swarm discovery/design agent publishes a
+/// generated mockup (HTML page or Mermaid diagram) for the story under
+/// discovery. Same per-session auth as the board ingest. The target story/run is
+/// derived from the session's `meta.project_id` → its discovery run; the agent
+/// never supplies a story/run id. Always 204 (fire-and-forget).
+pub async fn ingest_mockup(
+    State(ctx): State<ServerCtx>,
+    headers: HeaderMap,
+    Json(req): Json<MockupIngestReq>,
+) -> StatusCode {
+    let sid: Id = match headers.get("x-otto-session").and_then(|v| v.to_str().ok()) {
+        Some(s) => s.to_string(),
+        None => return StatusCode::NO_CONTENT,
+    };
+    let token = headers
+        .get("x-otto-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if !ctx.manager.verify_ingest_token(&sid, token) {
+        return StatusCode::NO_CONTENT;
+    }
+    let session = match ctx.manager.get(&sid).await {
+        Ok(s) => s,
+        Err(_) => return StatusCode::NO_CONTENT,
+    };
+    // Derive the target discovery run from the session's project — never trust
+    // the agent for a story/run id.
+    let project_id = match session.meta.get("project_id").and_then(Value::as_str) {
+        Some(p) => p.to_string(),
+        None => return StatusCode::NO_CONTENT, // not a discovery session
+    };
+    let run = match ctx.discovery_repo.get_by_project(&project_id).await {
+        Ok(Some(r)) => r,
+        _ => return StatusCode::NO_CONTENT, // no discovery run resolves
+    };
+
+    let title = req.title.trim();
+    if title.is_empty() || req.content.is_empty() {
+        return StatusCode::NO_CONTENT;
+    }
+    let ext = mockup_ext(&req.format);
+    let mime = mockup_mime(&req.format);
+
+    // Mirror `product_media::upload_attachment`'s storage-path convention:
+    // `data_dir/product/attachments/<story_id>/<id>.<ext>`, with `storage_path`
+    // stored RELATIVE to `data_dir`.
+    let id = otto_core::new_id();
+    let rel = format!("{ATTACH_ROOT}/{}/{}.{}", run.story_id, id, ext);
+    let dir = ctx.data_dir.join(ATTACH_ROOT).join(&run.story_id);
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        tracing::warn!("swarm mockup ingest: create dir: {e}");
+        return StatusCode::NO_CONTENT;
+    }
+    let full = ctx.data_dir.join(&rel);
+    if let Err(e) = tokio::fs::write(&full, req.content.as_bytes()).await {
+        tracing::warn!("swarm mockup ingest: write: {e}");
+        return StatusCode::NO_CONTENT;
+    }
+    let size_bytes = req.content.len() as i64;
+
+    if let Err(e) = ctx
+        .attachment_repo
+        .create(NewAttachment {
+            story_id: run.story_id.clone(),
+            workspace_id: run.workspace_id.clone(),
+            filename: format!("{title}.{ext}"),
+            mime: mime.into(),
+            size_bytes,
+            sha256: None,
+            storage_path: rel,
+            kind: "mockup".into(),
+            source: "agent".into(),
+            meta_json: None,
+            created_by: session.created_by.clone(),
+        })
+        .await
+    {
+        tracing::warn!("swarm mockup ingest: {e}");
+    }
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+pub struct DiscoveryReportIngestReq {
+    pub report_md: String,
+}
+
+/// `POST /ingest/swarm/discovery-report` — a swarm discovery agent publishes the
+/// consolidated discovery report for the story under discovery. Same per-session
+/// auth as the board ingest; the target run is derived from the session's
+/// `meta.project_id`. Always 204 (fire-and-forget).
+pub async fn ingest_discovery_report(
+    State(ctx): State<ServerCtx>,
+    headers: HeaderMap,
+    Json(req): Json<DiscoveryReportIngestReq>,
+) -> StatusCode {
+    let sid: Id = match headers.get("x-otto-session").and_then(|v| v.to_str().ok()) {
+        Some(s) => s.to_string(),
+        None => return StatusCode::NO_CONTENT,
+    };
+    let token = headers
+        .get("x-otto-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if !ctx.manager.verify_ingest_token(&sid, token) {
+        return StatusCode::NO_CONTENT;
+    }
+    let session = match ctx.manager.get(&sid).await {
+        Ok(s) => s,
+        Err(_) => return StatusCode::NO_CONTENT,
+    };
+    let project_id = match session.meta.get("project_id").and_then(Value::as_str) {
+        Some(p) => p.to_string(),
+        None => return StatusCode::NO_CONTENT,
+    };
+    let run = match ctx.discovery_repo.get_by_project(&project_id).await {
+        Ok(Some(r)) => r,
+        _ => return StatusCode::NO_CONTENT,
+    };
+
+    let report = req.report_md.trim();
+    if report.is_empty() {
+        return StatusCode::NO_CONTENT;
+    }
+    if let Err(e) = ctx.discovery_repo.set_report(&run.id, report).await {
+        tracing::warn!("swarm discovery report ingest: {e}");
+    }
+    StatusCode::NO_CONTENT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mockup_ext_maps_format() {
+        assert_eq!(mockup_ext("mermaid"), "mmd");
+        assert_eq!(mockup_ext("html"), "html");
+        // Unknown / anything-else falls back to html.
+        assert_eq!(mockup_ext("svg"), "html");
+    }
+
+    #[test]
+    fn mockup_mime_maps_format() {
+        assert_eq!(mockup_mime("mermaid"), "text/vnd.mermaid");
+        assert_eq!(mockup_mime("html"), "text/html");
+        assert_eq!(mockup_mime("other"), "text/html");
+    }
 }
