@@ -13,8 +13,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { QueryResult, DbExportFormat, ExportToPathResp } from '../../lib/api/types';
-  import { api, postForText } from '../../lib/api/client';
-  import { downloadText } from '../../lib/components/exporters';
+  import { api, postNdjsonStream } from '../../lib/api/client';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
@@ -983,28 +982,6 @@
     download(toJson(), 'result.json', 'application/json');
   }
 
-  // Server-side full export: runs the statement again without a row cap. The
-  // server replies with a `text/csv` body, so we fetch it via `postForText`
-  // (carries the auth header AND reads the body as text — the JSON-parsing
-  // `api.post` would choke on CSV), then trigger a download from the text.
-  let exporting = $state(false);
-
-  async function exportFullCsv(): Promise<void> {
-    if (!connectionId || !statement || exporting) return;
-    exporting = true;
-    try {
-      const text = await postForText(
-        `/connections/${connectionId}/db/export`,
-        { statement, format: 'csv', node: database.activeDb ?? undefined },
-      );
-      downloadText(text, 'export.csv', 'text/csv');
-    } catch (e) {
-      toasts.error('Export failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      exporting = false;
-    }
-  }
-
   // ── Large-batch streaming export to a local file ─────────────────────────────
   // Runs the statement uncapped on the daemon and STREAMS the result straight to
   // a file the user chooses on the daemon host — for result sets too big to pull
@@ -1046,6 +1023,9 @@
   let exportName = $state('');
   let exportLimit = $state('');
   let exportingPath = $state(false);
+  // Live progress for the streaming export (bytes written so far). Null when no
+  // export is running; drives the dialog's progress bar.
+  let exportProgress = $state<{ bytes: number } | null>(null);
 
   // Default a filename from the statement (a leading table-ish token) or 'result'.
   function defaultExportName(): string {
@@ -1089,8 +1069,14 @@
       return;
     }
     exportingPath = true;
+    exportProgress = { bytes: 0 };
+    let done: ExportToPathResp | null = null;
+    let failed: string | null = null;
     try {
-      const resp = await api.post<ExportToPathResp>(
+      // The endpoint streams NDJSON progress lines ({bytes:N}) and a final line
+      // ({done,local_path,rows,bytes,duration_ms} or {error}); read them live so
+      // the bar moves and a long export never idles out the browser fetch.
+      await postNdjsonStream(
         `/connections/${connectionId}/db/export-to-path`,
         {
           statement,
@@ -1099,20 +1085,31 @@
           local_path: localPath,
           max_rows: maxRows,
         },
+        (msg) => {
+          const m = msg as Record<string, unknown>;
+          if (typeof m.error === 'string') failed = m.error;
+          else if (m.done) done = m as unknown as ExportToPathResp;
+          else if (typeof m.bytes === 'number') exportProgress = { bytes: m.bytes };
+        },
       );
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(LS_FORMAT, exportFormat);
-        localStorage.setItem(LS_DIR, dir);
+      if (failed) throw new Error(failed);
+      if (done) {
+        const r: ExportToPathResp = done;
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(LS_FORMAT, exportFormat);
+          localStorage.setItem(LS_DIR, dir);
+        }
+        showExportDialog = false;
+        toasts.success(
+          'Exported',
+          `${r.rows.toLocaleString()} row${r.rows === 1 ? '' : 's'} · ${fmtBytes(r.bytes)} → ${r.local_path}`,
+        );
       }
-      showExportDialog = false;
-      toasts.success(
-        'Exported',
-        `${resp.rows.toLocaleString()} row${resp.rows === 1 ? '' : 's'} · ${fmtBytes(resp.bytes)} → ${resp.local_path}`,
-      );
     } catch (e) {
       toasts.error('Export failed', e instanceof Error ? e.message : String(e));
     } finally {
       exportingPath = false;
+      exportProgress = null;
     }
   }
 
@@ -1233,17 +1230,10 @@
         {#if connectionId && statement}
           <button
             class="tb-btn"
+            class:accent={result?.truncated}
             onclick={openExportDialog}
-            title="Save to a local file on the daemon host — streams a large/uncapped result in a selectable format"
-          ><Icon name="arrowDown" size={11} />Download…</button>
-        {/if}
-        {#if connectionId && statement && result?.truncated}
-          <button
-            class="tb-btn"
-            disabled={exporting}
-            onclick={() => void exportFullCsv()}
-            title="Server-side full export — re-runs the query without the row cap"
-          ><Icon name={exporting ? 'refresh' : 'fetch'} size={11} />{exporting ? 'Exporting…' : 'Full Export'}</button>
+            title="Export ALL rows — streams the full (uncapped) result to a file on the daemon host, in a selectable format, with live progress"
+          ><Icon name="arrowDown" size={11} />Export all rows…</button>
         {/if}
       </div>
     {/if}
@@ -1532,7 +1522,7 @@
 {/if}
 
 {#if showExportDialog}
-  <Modal title="Download / Export query result" width={520} onclose={() => (showExportDialog = false)}>
+  <Modal title="Export all rows" width={520} onclose={() => (showExportDialog = false)}>
     <div class="exp-form">
       <p class="exp-hint">
         Runs the statement on the daemon host and <strong>streams</strong> the full result to a local
@@ -1579,12 +1569,21 @@
       <div class="exp-dest mono" title="Resolved destination on the daemon host">
         → {joinPath(exportDir.trim() || '~/Downloads', exportName.trim() || defaultExportName())}
       </div>
+
+      {#if exportingPath}
+        <div class="exp-progress" role="status" aria-live="polite">
+          <div class="exp-bar"><div class="exp-bar-fill"></div></div>
+          <div class="exp-prog-text mono">
+            {exportProgress ? fmtBytes(exportProgress.bytes) : '0 B'} written…
+          </div>
+        </div>
+      {/if}
     </div>
 
     {#snippet footer()}
       <button class="btn" onclick={() => (showExportDialog = false)} disabled={exportingPath}>Cancel</button>
       <button class="btn primary" onclick={() => void runPathExport()} disabled={exportingPath}>
-        {exportingPath ? 'Exporting…' : 'Export'}
+        {exportingPath ? 'Exporting…' : 'Export all'}
       </button>
     {/snippet}
   </Modal>
@@ -1988,6 +1987,11 @@
   .tb-btn.active {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+  }
+  /* Nudge the user toward the full export when the shown result is capped. */
+  .tb-btn.accent {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
     color: var(--accent);
   }
   /* Server-side masking badge — shown in toolbar when result.masked is true. */
@@ -2566,6 +2570,46 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* Streaming-export progress: total size is unknown up front, so the bar is an
+     indeterminate sweep + a live bytes-written readout. */
+  .exp-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .exp-bar {
+    position: relative;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--surface-3, var(--surface-2));
+    overflow: hidden;
+  }
+  .exp-bar-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 35%;
+    border-radius: 999px;
+    background: var(--accent);
+    animation: exp-sweep 1.1s ease-in-out infinite;
+  }
+  @keyframes exp-sweep {
+    0% { left: -35%; }
+    100% { left: 100%; }
+  }
+  .exp-prog-text {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .exp-bar-fill {
+      animation: none;
+      left: 0;
+      width: 100%;
+      opacity: 0.5;
+    }
   }
 
   /* ───────────────── Phone (≤640px) ─────────────────

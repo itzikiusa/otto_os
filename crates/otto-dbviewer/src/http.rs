@@ -498,19 +498,6 @@ struct ExportToPathReq {
     max_rows: Option<usize>,
 }
 
-/// Response from the streaming local-file export endpoint.
-#[derive(Debug, serde::Serialize)]
-struct ExportToPathResp {
-    /// The absolute file path actually written.
-    local_path: String,
-    /// Rows written.
-    rows: u64,
-    /// Bytes written to the file.
-    bytes: u64,
-    /// Wall-clock duration of the export, in milliseconds.
-    duration_ms: u64,
-}
-
 /// Expand a leading `~` to the daemon user's `$HOME` (mirrors the SFTP handler).
 fn expand_home(path: &str) -> String {
     if let Some(rest) = path.strip_prefix('~') {
@@ -562,19 +549,93 @@ async fn export_to_path<S: DbViewerCtx>(
     }
     let dest = resolve_export_dest(&req.local_path, req.format)?;
 
-    let node = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let (counts, duration_ms) = ctx
-        .db()
-        .export_to_path(&id, &user.id, &req.statement, node, req.format, req.max_rows, &dest)
-        .await?;
+    // Stream progress as NDJSON so a large export never idles out the browser
+    // fetch, and the user gets a live byte counter instead of a frozen spinner.
+    // The export runs on a spawned task (the service is `Arc`-shared); a ticker
+    // polls the destination file's size for progress, and the final line carries
+    // the exact {rows, bytes, path}. No driver / ExportSink change — progress is
+    // observed via the on-disk file size, leaving the bounded-RAM path untouched.
+    let db = ctx.db().clone();
+    let node = req
+        .node
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let statement = req.statement.clone();
+    let format = req.format;
+    let max_rows = req.max_rows;
+    let uid = user.id.clone();
+    let conn_id = id.clone();
+    let dest_task = dest.clone();
 
-    Ok(Json(ExportToPathResp {
-        local_path: dest.to_string_lossy().into_owned(),
-        rows: counts.rows,
-        bytes: counts.bytes,
-        duration_ms,
-    })
-    .into_response())
+    // The producer only ever sends Ok — Infallible documents that the stream
+    // itself never errors (export failures arrive as a `{error}` data line).
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(16);
+
+    tokio::spawn(async move {
+        let export = db.export_to_path(
+            &conn_id,
+            &uid,
+            &statement,
+            node.as_deref(),
+            format,
+            max_rows,
+            &dest_task,
+        );
+        tokio::pin!(export);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(300));
+        // If the export stalls the task >300ms, don't fire a burst of catch-up
+        // ticks when it yields — one delayed tick is enough.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await; // consume the immediate first tick
+        loop {
+            tokio::select! {
+                res = &mut export => {
+                    let line = match res {
+                        Ok((counts, duration_ms)) => serde_json::json!({
+                            "done": true,
+                            "local_path": dest_task.to_string_lossy(),
+                            "rows": counts.rows,
+                            "bytes": counts.bytes,
+                            "duration_ms": duration_ms,
+                        }),
+                        Err(e) => serde_json::json!({ "error": e.to_string() }),
+                    };
+                    let _ = tx.send(Ok(ndjson_line(&line))).await;
+                    break;
+                }
+                _ = ticker.tick() => {
+                    let bytes = tokio::fs::metadata(&dest_task).await.map(|m| m.len()).unwrap_or(0);
+                    if tx.send(Ok(ndjson_line(&serde_json::json!({ "bytes": bytes })))).await.is_err() {
+                        // Client disconnected — stop reporting but still finish the
+                        // file (so a closed browser tab doesn't truncate the export).
+                        let _ = (&mut export).await;
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let stream =
+        futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|i| (i, rx)) });
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
+}
+
+/// Serialize one NDJSON progress line (`<json>\n`) as response bytes.
+fn ndjson_line(v: &serde_json::Value) -> axum::body::Bytes {
+    let mut s = serde_json::to_string(v).unwrap_or_default();
+    s.push('\n');
+    axum::body::Bytes::from(s)
 }
 
 async fn completion<S: DbViewerCtx>(
