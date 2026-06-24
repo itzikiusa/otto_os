@@ -492,7 +492,14 @@ class WorkspaceStore {
   }
 
   focusPane(idx: number): void {
-    if (idx >= 0 && idx < this.panes.length) this.focusedPane = idx;
+    if (idx < 0 || idx >= this.panes.length) return;
+    this.focusedPane = idx;
+    // Keep the route in sync with the focused pane so the URL + Back/Forward and
+    // the navigator highlight track the click. The route→store effect reads
+    // activeSessionId untracked, so this never clobbers; router.go dedupes a
+    // same-hash navigation, so re-focusing the current pane is a no-op.
+    const id = this.panes[idx];
+    if (id) this.navigateToSession(id);
   }
 
   setViewMode(mode: 'tabs' | 'tiled' | 'mission'): void {

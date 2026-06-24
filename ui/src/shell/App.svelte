@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   // Main shell (post-auth): rail/navigator + tab bar + module router +
   // right panel + status bar + palette + global keys.
   //
@@ -122,10 +123,15 @@
   // recursive hash changes during back/forward.
   $effect(() => {
     const sessionId = router.parts[1];
-    if (router.module === 'agents' && sessionId) {
-      // Only update if the store doesn't already reflect this session — avoids
-      // a spurious pane shuffle when the store and route are already in sync.
-      if (ws.activeSessionId !== sessionId) {
+    const module = router.module;
+    if (module === 'agents' && sessionId) {
+      // React ONLY to route changes. `activeSessionId` is read untracked: it
+      // changes whenever you focus a different pane (focusedPane moves), and if
+      // this effect tracked it, focusing pane B would re-fire here with the URL
+      // still on pane A and "restore" A into the focused pane — clobbering the
+      // click. Reading it untracked lets focusPane move the frame freely; a real
+      // route change (tab/navigator/back-forward) still falls through to sync.
+      if (untrack(() => ws.activeSessionId) !== sessionId) {
         ws.openSession(sessionId);
       }
     }
