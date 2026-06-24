@@ -29,6 +29,9 @@ class CanvasStore {
 
   currentId = $state<string | null>(null);
   scene = $state<Scene | null>(null);
+  /** Raw parsed doc for the open scene — Excalidraw `{elements,appState,files}`
+   *  (the embedded editor reads this for initialData and writes it back). */
+  rawDoc = $state<unknown>(null);
   /** A scene id to auto-open once the Canvas module mounts (deep-link from e.g.
    *  the Discovery-Chat "Open in Canvas" action). CanvasPage consumes + clears it. */
   pendingOpenId = $state<string | null>(null);
@@ -85,6 +88,11 @@ class CanvasStore {
       const row = await api.get<CanvasScene>(`/canvas/scenes/${id}`);
       this.currentId = row.id;
       this.scene = parseScene(row.doc_json, row.title);
+      try {
+        this.rawDoc = JSON.parse(row.doc_json);
+      } catch {
+        this.rawDoc = null;
+      }
       this.#history = [];
       this.#future = [];
       this.dirty = false;
@@ -112,6 +120,13 @@ class CanvasStore {
   }
 
   // -- edit / persist ----------------------------------------------------
+
+  /** ExcalidrawCanvas persisted the opaque doc itself — record it + mark saved. */
+  markSaved(doc: unknown): void {
+    this.rawDoc = doc;
+    this.dirty = false;
+    this.savedAt = Date.now();
+  }
 
   /** Editor → store: the canonical scene changed via direct manipulation. */
   commitFromEditor(next: Scene): void {
