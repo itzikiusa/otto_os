@@ -6,6 +6,7 @@
   // Double-click the title chip to rename the frame.
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
+  import Resizer from './Resizer.svelte';
 
   interface Props {
     id: string;
@@ -36,6 +37,7 @@
 </script>
 
 <div class="frame" class:selected>
+  <Resizer {id} visible={selected} minWidth={200} minHeight={140} />
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="chip" ondblclick={startEdit}>
     {#if editing}

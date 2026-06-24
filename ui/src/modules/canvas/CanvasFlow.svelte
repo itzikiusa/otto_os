@@ -257,6 +257,9 @@
   role="application"
   {onkeydown}
 >
+  <!-- Trackpad-native navigation: two-finger scroll PANS, pinch ZOOMS (like
+       Figma/Excalidraw). Wheel + double-click no longer zoom — only pinch and
+       the on-canvas zoom controls do — so a stray scroll never jumps the zoom. -->
   <SvelteFlow
     bind:nodes
     bind:edges
@@ -264,6 +267,10 @@
     fitView
     minZoom={0.1}
     maxZoom={4}
+    zoomOnScroll={false}
+    panOnScroll={true}
+    zoomOnPinch={true}
+    zoomOnDoubleClick={false}
     deleteKey={null}
     multiSelectionKey={['Meta', 'Control', 'Shift']}
     nodesDraggable={!readonly}

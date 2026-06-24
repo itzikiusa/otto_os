@@ -6,6 +6,7 @@
   import { Handle, Position } from '@xyflow/svelte';
   import type { CanvasNode, ShapeVariant } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
+  import Resizer from './Resizer.svelte';
 
   interface Props {
     id: string;
@@ -56,6 +57,7 @@
   aria-label={node.label || variant}
   ondblclick={startEdit}
 >
+  <Resizer {id} visible={selected} minWidth={60} minHeight={40} />
   <Handle type="target" position={Position.Left} />
   <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
     {#if variant === 'rect'}

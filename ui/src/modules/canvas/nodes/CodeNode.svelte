@@ -6,6 +6,7 @@
   import { Handle, Position } from '@xyflow/svelte';
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
+  import Resizer from './Resizer.svelte';
   import { ensureHljs, highlightLine } from '../../../lib/hl';
 
   interface Props {
@@ -55,6 +56,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="code" class:selected ondblclick={startEdit}>
+  <Resizer {id} visible={selected} minWidth={200} minHeight={120} />
   <Handle type="target" position={Position.Left} />
   <div class="bar">
     <span class="lang">{lang ?? 'text'}</span>

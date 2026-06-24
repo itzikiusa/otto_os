@@ -27,7 +27,7 @@ export function defaultSize(kind: NodeKind): { w: number; h: number } {
     case 'json':
       return { w: 320, h: 220 };
     case 'mermaid':
-      return { w: 520, h: 360 };
+      return { w: 560, h: 440 };
     case 'image':
       return { w: 280, h: 200 };
     case 'frame':

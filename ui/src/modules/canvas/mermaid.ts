@@ -21,7 +21,31 @@ async function load(): Promise<MermaidApi> {
     // `neutral` reads well on both light/dark surfaces; `loose` lets us render
     // the wider diagram set (sequence/flow/class/state/er) without HTML escaping
     // tripping over labels. startOnLoad:false — we drive render() manually.
-    api.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
+    //
+    // The per-diagram knobs below de-clutter the output (the chief complaint on
+    // dense sequence diagrams): a UI sans font, generous spacing, NO mirrored
+    // actors at the bottom, wrapped labels, and useMaxWidth so the SVG fits the
+    // node's width instead of overflowing.
+    api.initialize({
+      startOnLoad: false,
+      theme: 'neutral',
+      securityLevel: 'loose',
+      fontFamily: 'ui-sans-serif, -apple-system, system-ui, sans-serif',
+      flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis', padding: 16 },
+      sequence: {
+        useMaxWidth: true,
+        mirrorActors: false,
+        wrap: true,
+        boxMargin: 12,
+        actorMargin: 64,
+        messageMargin: 44,
+        noteMargin: 12,
+        bottomMarginAdj: 4,
+      },
+      class: { useMaxWidth: true },
+      state: { useMaxWidth: true },
+      er: { useMaxWidth: true },
+    });
     _mermaid = api;
     return api;
   });

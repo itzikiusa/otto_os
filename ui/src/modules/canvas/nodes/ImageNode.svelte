@@ -6,6 +6,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
+  import Resizer from './Resizer.svelte';
 
   interface Props {
     id: string;
@@ -41,6 +42,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="image" class:selected ondblclick={pick}>
+  <Resizer {id} visible={selected} minWidth={80} minHeight={60} />
   <Handle type="target" position={Position.Left} />
   {#if dataUrl}
     <img src={dataUrl} alt={node.label || 'image'} />

@@ -6,6 +6,7 @@
   import { Handle, Position } from '@xyflow/svelte';
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
+  import Resizer from './Resizer.svelte';
   import { ensureHljs, highlightLine } from '../../../lib/hl';
   import JsonTree from './JsonTree.svelte';
 
@@ -63,6 +64,7 @@
 </script>
 
 <div class="json" class:selected>
+  <Resizer {id} visible={selected} minWidth={180} minHeight={120} />
   <Handle type="target" position={Position.Left} />
   <div class="bar">
     <span class="title">JSON</span>

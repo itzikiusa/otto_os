@@ -4,6 +4,7 @@
   import { Handle, Position } from '@xyflow/svelte';
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
+  import Resizer from './Resizer.svelte';
 
   interface Props {
     id: string;
@@ -45,6 +46,7 @@
   style:font-size={`${size}px`}
   ondblclick={startEdit}
 >
+  <Resizer {id} visible={selected} minWidth={80} minHeight={28} />
   <Handle type="target" position={Position.Left} />
   {#if editing}
     <!-- svelte-ignore a11y_autofocus -->

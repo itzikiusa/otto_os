@@ -7,6 +7,7 @@
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import { renderMermaid } from '../mermaid';
+  import Resizer from './Resizer.svelte';
 
   interface Props {
     id: string;
@@ -77,6 +78,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="mermaid" class:selected ondblclick={startEdit}>
+  <Resizer {id} visible={selected} minWidth={240} minHeight={160} />
   <Handle type="target" position={Position.Left} />
   {#if error}
     <div class="err" title={error}>Diagram error: {error}</div>
@@ -127,14 +129,20 @@
   }
   .render {
     flex: 1 1 auto;
-    display: grid;
-    place-items: center;
+    /* Top-aligned + horizontally centred so tall diagrams (sequence/flow) read
+       from their first row and scroll down, instead of being vertically centred
+       with the top cut off. */
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
     overflow: auto;
-    padding: 8px;
+    padding: 12px;
     min-height: 0;
   }
-  /* Make the injected SVG scale within the node and read on dark schemes. */
+  /* Make the injected SVG fit the node width (no distortion) and read on dark
+     schemes. width:100% + height:auto keeps mermaid's own aspect ratio. */
   .render :global(svg) {
+    display: block;
     max-width: 100%;
     height: auto;
   }
