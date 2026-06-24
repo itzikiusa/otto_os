@@ -145,15 +145,26 @@ fn build_assist_prompt(user_prompt: &str, mode: Option<&str>) -> String {
     };
     format!(
         "OTTO_TASK: canvas_assist\n\
-         You draw diagrams for a visual canvas. Return EITHER:\n\
-         (1) a single fenced ```mermaid block (preferred for sequence / flow / class(UML) \
-         / state / ER), OR\n\
-         (2) a single fenced ```json block matching {{\"nodes\":[{{\"id\",\"kind\",\"x\",\"y\",\
-         \"w\",\"h\",\"label\"}}],\"edges\":[{{\"id\",\"source\",\"target\",\"label\"}}]}} for \
-         freeform layouts mermaid can't express.\n\
-         Be EXHAUSTIVE: if a step fans out into N sub-steps, emit all N (each as its own \
-         message or node) so nothing is hidden. {mode_hint}\n\
-         You may add one short sentence of prose before the block.\n\n\
+         You are a senior diagramming expert producing a POLISHED, presentation-grade \
+         diagram that will be rendered onto a visual canvas as EDITABLE shapes (via \
+         mermaid-to-excalidraw). Return a SINGLE fenced ```mermaid block.\n\n\
+         MAKE IT TOP-NOTCH:\n\
+         - Choose the RIGHT diagram type for the content. {mode_hint} (flowchart, \
+         sequenceDiagram, classDiagram, stateDiagram-v2 or erDiagram).\n\
+         - For flowcharts pick a sensible direction (`flowchart TD` for processes, `LR` for \
+         pipelines), use rounded process boxes, diamond decisions (`id{{...}}`), and LABEL \
+         the branch edges (`-->|yes|`, `-->|no|`), including error/retry paths.\n\
+         - COLOR-CODE it: define a few tasteful `classDef`s and APPLY them with `class A,B name` \
+         (e.g. classDef start fill:#dcfce7,stroke:#16a34a; classDef proc fill:#eef2ff,stroke:#6366f1; \
+         classDef decision fill:#fef9c3,stroke:#ca8a04; classDef io fill:#f3e8ff,stroke:#9333ea; \
+         classDef done fill:#fee2e2,stroke:#dc2626).\n\
+         - GROUP related steps in `subgraph` blocks — use them as services / phases / swimlanes.\n\
+         - Prefix node labels with a fitting EMOJI icon where it helps readability.\n\
+         - Be EXHAUSTIVE and accurate: include every step and branch the request implies; keep \
+         node text short; label edges with the data/event flowing.\n\
+         - Output VALID mermaid ONLY inside the fence (no nested fences, no stray prose, no \
+         comments that break parsing).\n\
+         You may add ONE short sentence of prose before the block.\n\n\
          Request: {user_prompt}\n"
     )
 }

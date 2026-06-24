@@ -120,6 +120,31 @@ test('handles multiple scenes — create, list, and switch between them', async 
   await expect(page.locator('.excali .excalidraw')).toBeVisible({ timeout: 30_000 });
 });
 
+test('Ask AI → generates editable Excalidraw shapes from the agent', async ({ page }) => {
+  test.setTimeout(90_000);
+  await openCanvas(page);
+  await newCanvas(page);
+
+  // The autosave PUT the generated shapes will trigger.
+  const saved = page.waitForResponse(
+    (r) => r.request().method() === 'PUT' && /\/canvas\/scenes\//.test(r.url()),
+    { timeout: 30_000 },
+  );
+
+  // Open the AI bar, describe a diagram, Draw. The isolated daemon's stub returns
+  // a deterministic Mermaid diagram, which mermaid-to-excalidraw converts to
+  // native editable shapes added to the scene.
+  await page.getByRole('button', { name: /ask ai to draw/i }).click();
+  await page.getByPlaceholder(/describe a diagram/i).fill('service A calls B; B does several things');
+  await page.getByRole('button', { name: 'Draw' }).click();
+
+  // Success toast confirms the diagram was generated + placed…
+  await expect(page.getByText(/drawn on canvas/i).first()).toBeVisible({ timeout: 30_000 });
+  // …and it autosaved to the server.
+  const resp = await saved;
+  expect(resp.ok()).toBeTruthy();
+});
+
 test.describe('canvas on a phone', () => {
   test.use({ viewport: { width: 390, height: 844 } });
 

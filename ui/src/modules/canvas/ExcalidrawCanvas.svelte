@@ -25,8 +25,57 @@
   let root: any = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let excaliApi: any = null;
+  // Excalidraw's `convertToExcalidrawElements`, captured once the module loads.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let convert: ((skeleton: any[]) => any[]) | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
+  let generating = $state(false);
+
+  /** Agent generation → editable shapes. Asks the agent for a diagram (Mermaid),
+   *  converts it to NATIVE Excalidraw elements (mermaid-to-excalidraw), drops them
+   *  to the right of any existing content, and auto-fits the view to them. */
+  export async function generate(prompt: string): Promise<void> {
+    const p = prompt.trim();
+    if (!p || generating || !excaliApi || !convert) return;
+    generating = true;
+    try {
+      const res = await canvas.assist(p, 'flow');
+      if (!res.mermaid) {
+        toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
+        return;
+      }
+      const { parseMermaidToExcalidraw } = await import('@excalidraw/mermaid-to-excalidraw');
+      const parsed = await parseMermaidToExcalidraw(res.mermaid);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fresh = convert(parsed.elements as any[]);
+      if (!fresh.length) {
+        toasts.info('Nothing to draw', 'The diagram came back empty.');
+        return;
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const existing = excaliApi.getSceneElements() as any[];
+      let dx = 0;
+      if (existing.length) {
+        const maxX = Math.max(...existing.map((e) => e.x + (e.width ?? 0)));
+        const minX = Math.min(...fresh.map((e) => e.x));
+        dx = maxX + 100 - minX;
+      }
+      const placed = dx ? fresh.map((e) => ({ ...e, x: e.x + dx })) : fresh;
+      excaliApi.updateScene({ elements: [...existing, ...placed] });
+      // Auto-fit: frame the freshly generated diagram so it fills the canvas.
+      excaliApi.scrollToContent(placed, { fitToContent: true, animate: true });
+      scheduleSave();
+      toasts.success('Drawn on canvas', res.note || 'Editable shapes added.');
+    } catch (e) {
+      toasts.error('Ask AI failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      generating = false;
+    }
+  }
+  export function isGenerating(): boolean {
+    return generating;
+  }
 
   function scheduleSave(): void {
     if (readonly) return;
@@ -88,6 +137,7 @@
     const { createRoot } = await import('react-dom/client');
     const Ex = await import('@excalidraw/excalidraw');
     await import('@excalidraw/excalidraw/index.css');
+    convert = Ex.convertToExcalidrawElements;
     if (destroyed || !host) return;
     root = createRoot(host);
     root.render(

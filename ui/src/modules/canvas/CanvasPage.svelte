@@ -14,6 +14,28 @@
   // Phone: Excalidraw opens in view mode (its editing chrome needs room).
   const readonly = $derived(viewport.isPhone);
 
+  // The embedded editor exposes generate() for agent drawing.
+  let editor = $state<{ generate: (p: string) => Promise<void> } | undefined>(undefined);
+  let aiOpen = $state(false);
+  let aiPrompt = $state('');
+  let aiBusy = $state(false);
+
+  async function runAi(): Promise<void> {
+    const p = aiPrompt.trim();
+    if (!p || aiBusy || !editor) return;
+    aiBusy = true;
+    try {
+      await editor.generate(p);
+      aiPrompt = '';
+    } finally {
+      aiBusy = false;
+    }
+  }
+  function onAiKey(e: KeyboardEvent): void {
+    if (e.key === 'Enter') void runAi();
+    else if (e.key === 'Escape') aiOpen = false;
+  }
+
   // Canvas is global — list the user's scenes across all workspaces.
   $effect(() => {
     void canvas.loadScenes().catch(() => {});
@@ -57,7 +79,35 @@
         <!-- Remount Excalidraw when switching scenes so each loads its own doc. -->
         {#key canvas.currentId}
           <div class="editor-host">
-            <ExcalidrawCanvas {readonly} />
+            <ExcalidrawCanvas bind:this={editor} {readonly} />
+            {#if !readonly}
+              <!-- Agent "draw it for me" overlay (top-center, above Excalidraw). -->
+              <div class="ai-bar">
+                {#if !aiOpen}
+                  <button class="ai-fab" onclick={() => (aiOpen = true)}>
+                    <Icon name="zap" size={15} /> Ask AI to draw
+                  </button>
+                {:else}
+                  <div class="ai-input" class:busy={aiBusy}>
+                    <Icon name="zap" size={15} />
+                    <!-- svelte-ignore a11y_autofocus -->
+                    <input
+                      bind:value={aiPrompt}
+                      placeholder="Describe a diagram… e.g. 'order flow across microservices'"
+                      onkeydown={onAiKey}
+                      disabled={aiBusy}
+                      autofocus
+                    />
+                    <button class="ai-draw" onclick={runAi} disabled={aiBusy || !aiPrompt.trim()}>
+                      {aiBusy ? 'Drawing…' : 'Draw'}
+                    </button>
+                    <button class="ai-close" onclick={() => (aiOpen = false)} aria-label="Close">
+                      <Icon name="x" size={14} />
+                    </button>
+                  </div>
+                {/if}
+              </div>
+            {/if}
           </div>
         {/key}
       {:else}
@@ -106,6 +156,78 @@
     position: relative;
     min-width: 0;
     min-height: 0;
+  }
+  /* Agent draw overlay — bottom-center so it clears Excalidraw's top toolbar. */
+  .ai-bar {
+    position: absolute;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 6;
+  }
+  .ai-fab {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 16px;
+    border: none;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.25));
+  }
+  .ai-fab:hover {
+    filter: brightness(1.08);
+  }
+  .ai-input {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: min(560px, 80vw);
+    padding: 7px 9px 7px 14px;
+    background: var(--surface);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    box-shadow: var(--shadow, 0 4px 20px rgba(0, 0, 0, 0.3));
+    color: var(--accent);
+  }
+  .ai-input.busy {
+    opacity: 0.9;
+  }
+  .ai-input input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: none;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+  }
+  .ai-draw {
+    padding: 6px 14px;
+    border: none;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ai-draw:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .ai-close {
+    display: inline-flex;
+    border: none;
+    background: none;
+    color: var(--text-dim, #888);
+    cursor: pointer;
+    padding: 4px;
   }
   .hero {
     flex: 1 1 auto;
