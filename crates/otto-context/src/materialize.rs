@@ -82,7 +82,56 @@ pub fn provision(
     provider: &str,
 ) -> MaterializeProviderResult {
     let plan = plan(library, cfg, cwd, provider);
-    execute(plan)
+    let result = execute(plan);
+    if !result.skipped {
+        // Keep the per-session context Otto injects into the working tree out of
+        // the user's git status (it's NOT theirs to commit).
+        ensure_git_excludes(cwd);
+    }
+    result
+}
+
+/// Best-effort: add the Otto-materialized artifacts to the repo's LOCAL
+/// `.git/info/exclude` so the per-session context Otto writes into the working
+/// tree (skills, `CLAUDE.md`/`AGENTS.md`, `settings.local.json`) never shows up
+/// as uncommitted changes. `info/exclude` is local-only — never committed, never
+/// touches the repo's tracked `.gitignore`. Idempotent (a marker guards re-adds);
+/// a no-op when `cwd` isn't a git repo. Tracked files are unaffected (git ignore
+/// rules only apply to untracked paths), so a repo that genuinely commits its own
+/// `CLAUDE.md` keeps showing its changes.
+fn ensure_git_excludes(cwd: &str) {
+    const MARKER: &str = "# Otto-managed: per-session injected context";
+    const BLOCK: &str = "\n# Otto-managed: per-session injected context (do not commit) — local-only.\n\
+.claude/skills/\n\
+.claude/settings.local.json\n\
+CLAUDE.md\n\
+AGENTS.md\n";
+
+    // Resolve the exact exclude file (handles worktrees / nested cwd correctly).
+    let out = match std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return, // not a git repo (or git unavailable) — nothing to exclude
+    };
+    let rel = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if rel.is_empty() {
+        return;
+    }
+    let exclude_path = Path::new(cwd).join(rel);
+    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
+    if existing.contains(MARKER) {
+        return; // already present
+    }
+    if let Some(parent) = exclude_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let content = format!("{existing}{BLOCK}");
+    if let Err(e) = fs::write(&exclude_path, content) {
+        tracing::warn!(path = %exclude_path.display(), error = %e, "write git exclude failed");
+    }
 }
 
 /// Dry-run: describe exactly what [`provision`] would write for `provider`,
@@ -665,6 +714,36 @@ mod tests {
         let cwd_dir = TempDir::new().unwrap();
         let library = Library::new(lib_dir.path());
         (lib_dir, cwd_dir, library)
+    }
+
+    #[test]
+    fn git_exclude_added_once_in_a_repo_noop_outside() {
+        // Outside a git repo → no-op (no panic, nothing written).
+        let plain = TempDir::new().unwrap();
+        ensure_git_excludes(plain.path().to_str().unwrap());
+        assert!(!plain.path().join(".git/info/exclude").exists());
+
+        // Inside a repo → the Otto block lands in .git/info/exclude, idempotently.
+        let repo = TempDir::new().unwrap();
+        let p = repo.path().to_str().unwrap();
+        let ok = std::process::Command::new("git")
+            .current_dir(p)
+            .arg("init")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            return; // git not available in this environment
+        }
+        ensure_git_excludes(p);
+        ensure_git_excludes(p); // second call must not duplicate
+        let excl = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+        assert!(excl.contains(".claude/skills/"));
+        assert!(excl.contains("CLAUDE.md"));
+        assert_eq!(
+            excl.matches("# Otto-managed: per-session injected context").count(),
+            1
+        );
     }
 
     #[test]
