@@ -104,6 +104,53 @@
   let remoteOpen = $state(true);
   let tagsOpen = $state(false);
   let stashesOpen = $state(false);
+  // Collapsed branch FOLDERS (e.g. "local:feature", "remote:release"). Default
+  // expanded; a folder key here is collapsed. See groupBranches()/folderKey().
+  let collapsedFolders = $state(new Set<string>());
+  function folderKey(section: 'local' | 'remote', name: string): string {
+    return `${section}:${name}`;
+  }
+  function toggleFolder(key: string): void {
+    const next = new Set(collapsedFolders);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    collapsedFolders = next;
+  }
+
+  // Group a flat branch list into top-level "folders" by first path segment, so
+  // feature/GRV-1, feature/GRV-2 nest under a single collapsible "feature" group.
+  // Remote refs are grouped by the path AFTER the remote name (origin/feature/X →
+  // folder "feature", leaf "X"); names with no slash stay loose at the top. The
+  // leaf `label` drops the folder prefix; `b.name` stays the full ref for actions.
+  interface BranchLeaf {
+    b: RefBranch;
+    label: string;
+  }
+  interface BranchFolder {
+    name: string;
+    leaves: BranchLeaf[];
+  }
+  function groupBranches(list: RefBranch[]): { loose: BranchLeaf[]; folders: BranchFolder[] } {
+    const loose: BranchLeaf[] = [];
+    const folderMap = new Map<string, BranchLeaf[]>();
+    for (const b of list) {
+      // Display path: strip the leading remote name for remote refs.
+      const display = b.remote ? b.name.replace(/^[^/]+\//, '') : b.name;
+      const slash = display.indexOf('/');
+      if (slash < 0) {
+        loose.push({ b, label: display });
+      } else {
+        const folder = display.slice(0, slash);
+        const leaf = display.slice(slash + 1);
+        (folderMap.get(folder) ?? folderMap.set(folder, []).get(folder)!).push({ b, label: leaf });
+      }
+    }
+    const folders = [...folderMap.entries()]
+      .map(([name, leaves]) => ({ name, leaves }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    loose.sort((a, b) => a.label.localeCompare(b.label));
+    return { loose, folders };
+  }
 
   let checkoutBusy = $state('');
 
@@ -361,7 +408,7 @@
 
   // ── Branch context menu (local + remote ref rows) ───────────────────────────
   function branchMenu(e: MouseEvent, b: RefBranch): void {
-    const { remoteNames, currentBranch } = refKnowledge;
+    const { remoteNames, localNames, currentBranch } = refKnowledge;
     const items: MenuItem[] = [];
 
     if (b.remote) {
@@ -385,6 +432,10 @@
       items.push({ separator: true });
       items.push({ label: 'GitFlow', disabled: true });
       items.push(...gitFlowItems(b.name));
+      // Delete options reflect what actually EXISTS: the remote ref always (this
+      // is a remote row); the local twin + "local + remote" only when a local
+      // branch of the same name exists and isn't the one checked out.
+      const localTwin = localNames.has(localName) && localName !== currentBranch;
       items.push({ separator: true });
       items.push({
         label: `Delete ${b.name}`,
@@ -392,6 +443,20 @@
         danger: true,
         action: () => void deleteRemoteBranch(localName),
       });
+      if (localTwin) {
+        items.push({
+          label: `Delete ${localName}`,
+          icon: 'trash',
+          danger: true,
+          action: () => void deleteLocalBranch(localName, false),
+        });
+        items.push({
+          label: 'Delete local + remote',
+          icon: 'trash',
+          danger: true,
+          action: () => void deleteLocalBranch(localName, true),
+        });
+      }
       items.push({ separator: true });
       items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(localName, localName) });
     } else {
@@ -928,6 +993,7 @@
     kind: ChipKind;
     label: string; // text shown on the chip
     current: boolean; // the checked-out branch (most prominent)
+    onRemote?: boolean; // local/head chip whose same-named origin twin lives on this commit
   }
 
   // Set of remote-branch names (e.g. "origin/main") from the refs response, used
@@ -971,13 +1037,35 @@
   // tidy column. `origin/HEAD` (and any `<remote>/HEAD` symbolic pointer) is
   // dropped — it's noise that never helps the reader.
   function chipsFor(c: CommitInfo): RefChip[] {
+    // Chips are right-aligned and CLIP ON THE LEFT (they butt against the graph
+    // node). So the RIGHTMOST chip is the one guaranteed visible — give that slot
+    // to the branch you actually care about (the checked-out/local branch) and
+    // let long tags clip first. Hence head/local sort LAST (rightmost), tag first.
     const order: Record<ChipKind, number> = {
-      head: 0, detached: 0, local: 1, remote: 2, tag: 3, stash: 4,
+      tag: 0, stash: 0, remote: 1, local: 2, detached: 3, head: 3,
     };
-    return c.refs
-      .filter((r) => !/\/HEAD$/.test(r))
-      .map(classifyRef)
-      .sort((a, b) => order[a.kind] - order[b.kind]);
+    const all = c.refs.filter((r) => !/\/HEAD$/.test(r)).map(classifyRef);
+    // Collapse a local/head branch and its same-named remote twin (origin/<name>)
+    // into ONE chip flagged `onRemote`: keeps the branch NAME, adds a small remote
+    // glyph to show it's pushed, and frees a whole chip in the narrow column.
+    const branchLabels = new Set(
+      all.filter((x) => x.kind === 'local' || x.kind === 'head').map((x) => x.label),
+    );
+    const merged: RefChip[] = [];
+    for (const chip of all) {
+      if (chip.kind === 'remote' && branchLabels.has(chip.label.replace(/^[^/]+\//, ''))) {
+        continue; // its local twin carries the remote flag instead
+      }
+      if (chip.kind === 'local' || chip.kind === 'head') {
+        const twin = all.some(
+          (o) => o.kind === 'remote' && o.label.replace(/^[^/]+\//, '') === chip.label,
+        );
+        merged.push({ ...chip, onRemote: twin });
+      } else {
+        merged.push(chip);
+      }
+    }
+    return merged.sort((a, b) => order[a.kind] - order[b.kind]);
   }
 
   // A commit is the HEAD ("you are here") when any decoration is HEAD-ish.
@@ -1048,6 +1136,87 @@
     {#if refsLoading}
       <div style="padding: 10px"><Skeleton rows={6} height={22} /></div>
     {:else if refs}
+      <!-- One branch row, reused for loose branches and folder children. `label`
+           is the short leaf name; `b.name` stays the full ref for every action. -->
+      {#snippet localRow(leaf: BranchLeaf, nested: boolean)}
+        {@const b = leaf.b}
+        <button
+          class="ref-row"
+          class:nested
+          class:current={b.is_current}
+          class:drag-target={dragOverTarget === b.name}
+          class:dragging={dragSource?.name === b.name && !dragSource.remote}
+          draggable={checkoutBusy === ''}
+          ondragstart={(e) => onRefDragStart(e, b.name, false)}
+          ondragend={onRefDragEnd}
+          ondragover={(e) => onTargetDragOver(e, b.name)}
+          ondragleave={() => onTargetDragLeave(b.name)}
+          ondrop={(e) => onTargetDrop(e, b.name)}
+          disabled={checkoutBusy !== ''}
+          onclick={() => !b.is_current && checkout(b.name, false)}
+          oncontextmenu={(e) => branchMenu(e, b)}
+          title={dragSource && isValidDropTarget(b.name)
+            ? `Merge ${dragSourceName()} → ${b.name}`
+            : b.name}
+        >
+          {#if b.is_current}
+            <span class="cur-pip" title="Checked out"><Icon name="check" size={9} /></span>
+          {:else}
+            <Icon name="dot" size={10} />
+          {/if}
+          <span class="mono ref-name">{leaf.label}</span>
+          {#if b.is_current && (status.ahead > 0 || status.behind > 0)}
+            <span class="ref-ab" title="{status.ahead} ahead · {status.behind} behind">
+              {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
+              {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
+            </span>
+          {/if}
+          {#if b.upstream}
+            {#if b.upstream.endsWith(`/${b.name}`)}
+              <!-- Default same-named tracking (e.g. origin/<branch>): redundant,
+                   so collapse to a small "tracked" glyph and leave the row's
+                   width for the branch NAME instead of a duplicate string. -->
+              <span class="ref-track" title={`tracks ${b.upstream}`}><Icon name="globe" size={10} /></span>
+            {:else}
+              <!-- Non-default upstream (tracks a differently-named branch) → show it. -->
+              <span class="ref-upstream mono dim" title={`upstream: ${b.upstream}`}>{b.upstream}</span>
+            {/if}
+          {/if}
+          {#if checkoutBusy === b.name}<span class="dim">…</span>{/if}
+        </button>
+      {/snippet}
+
+      {#snippet remoteRow(leaf: BranchLeaf, nested: boolean)}
+        {@const b = leaf.b}
+        <button
+          class="ref-row remote"
+          class:nested
+          class:dragging={dragSource?.name === b.name && dragSource.remote}
+          draggable={checkoutBusy === ''}
+          ondragstart={(e) => onRefDragStart(e, b.name, true)}
+          ondragend={onRefDragEnd}
+          disabled={checkoutBusy !== ''}
+          onclick={() => checkoutRemote(b)}
+          oncontextmenu={(e) => branchMenu(e, b)}
+          title="Drag onto a local branch to merge, or click to checkout as a local tracking branch"
+        >
+          <Icon name="dot" size={10} />
+          <span class="mono ref-name">{leaf.label}</span>
+          {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
+        </button>
+      {/snippet}
+
+      <!-- A collapsible branch FOLDER header (feature/, release/, …). -->
+      {#snippet folderHeader(section: 'local' | 'remote', folder: BranchFolder)}
+        {@const key = folderKey(section, folder.name)}
+        <button class="ref-folder" onclick={() => toggleFolder(key)} title={folder.name}>
+          <Icon name={collapsedFolders.has(key) ? 'chevronRight' : 'chevronDown'} size={10} />
+          <Icon name="branch" size={11} />
+          <span class="folder-name mono">{folder.name}/</span>
+          <span class="ref-count">{folder.leaves.length}</span>
+        </button>
+      {/snippet}
+
       <!-- LOCAL -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (localOpen = !localOpen)}>
@@ -1057,42 +1226,20 @@
           <span class="ref-count">{refs.local.length}</span>
         </button>
         {#if localOpen}
-          {#each refs.local as b (b.name)}
-            <button
-              class="ref-row"
-              class:current={b.is_current}
-              class:drag-target={dragOverTarget === b.name}
-              class:dragging={dragSource?.name === b.name && !dragSource.remote}
-              draggable={checkoutBusy === ''}
-              ondragstart={(e) => onRefDragStart(e, b.name, false)}
-              ondragend={onRefDragEnd}
-              ondragover={(e) => onTargetDragOver(e, b.name)}
-              ondragleave={() => onTargetDragLeave(b.name)}
-              ondrop={(e) => onTargetDrop(e, b.name)}
-              disabled={checkoutBusy !== ''}
-              onclick={() => !b.is_current && checkout(b.name, false)}
-              oncontextmenu={(e) => branchMenu(e, b)}
-              title={dragSource && isValidDropTarget(b.name)
-                ? `Merge ${dragSourceName()} → ${b.name}`
-                : b.name}
-            >
-              {#if b.is_current}
-                <span class="cur-pip" title="Checked out"><Icon name="check" size={9} /></span>
-              {:else}
-                <Icon name="dot" size={10} />
-              {/if}
-              <span class="mono ref-name">{b.name}</span>
-              {#if b.is_current && (status.ahead > 0 || status.behind > 0)}
-                <span class="ref-ab" title="{status.ahead} ahead · {status.behind} behind">
-                  {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
-                  {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
-                </span>
-              {/if}
-              {#if b.upstream}<span class="ref-upstream mono dim" title="upstream: {b.upstream}">{b.upstream}</span>{/if}
-              {#if checkoutBusy === b.name}<span class="dim">…</span>{/if}
-            </button>
-          {:else}
+          {@const grouped = groupBranches(refs.local)}
+          {#if refs.local.length === 0}
             <div class="dim ref-empty">No local branches</div>
+          {/if}
+          {#each grouped.loose as leaf (leaf.b.name)}
+            {@render localRow(leaf, false)}
+          {/each}
+          {#each grouped.folders as folder (folder.name)}
+            {@render folderHeader('local', folder)}
+            {#if !collapsedFolders.has(folderKey('local', folder.name))}
+              {#each folder.leaves as leaf (leaf.b.name)}
+                {@render localRow(leaf, true)}
+              {/each}
+            {/if}
           {/each}
         {/if}
       </div>
@@ -1106,24 +1253,20 @@
           <span class="ref-count">{refs.remote.length}</span>
         </button>
         {#if remoteOpen}
-          {#each refs.remote as b (b.name)}
-            <button
-              class="ref-row remote"
-              class:dragging={dragSource?.name === b.name && dragSource.remote}
-              draggable={checkoutBusy === ''}
-              ondragstart={(e) => onRefDragStart(e, b.name, true)}
-              ondragend={onRefDragEnd}
-              disabled={checkoutBusy !== ''}
-              onclick={() => checkoutRemote(b)}
-              oncontextmenu={(e) => branchMenu(e, b)}
-              title="Drag onto a local branch to merge, or click to checkout as a local tracking branch"
-            >
-              <Icon name="dot" size={10} />
-              <span class="mono ref-name">{b.name}</span>
-              {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
-            </button>
-          {:else}
+          {@const grouped = groupBranches(refs.remote)}
+          {#if refs.remote.length === 0}
             <div class="dim ref-empty">No remote branches</div>
+          {/if}
+          {#each grouped.loose as leaf (leaf.b.name)}
+            {@render remoteRow(leaf, false)}
+          {/each}
+          {#each grouped.folders as folder (folder.name)}
+            {@render folderHeader('remote', folder)}
+            {#if !collapsedFolders.has(folderKey('remote', folder.name))}
+              {#each folder.leaves as leaf (leaf.b.name)}
+                {@render remoteRow(leaf, true)}
+              {/each}
+            {/if}
           {/each}
         {/if}
       </div>
@@ -1257,7 +1400,7 @@
                       : chip.label}
                 >
                   {#if chip.current}<Icon name="check" size={8} />{/if}
-                  {#if chip.kind === 'remote'}<Icon name="globe" size={8} />{/if}
+                  {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
                   {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
                   {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
                   <span class="chip-label">{label}</span>
@@ -1387,7 +1530,7 @@
             {#each chipsFor(selectedCommit) as chip}
               <span class="ref-chip kind-{chip.kind}" class:current-chip={chip.current}>
                 {#if chip.current}<Icon name="check" size={8} />{/if}
-                {#if chip.kind === 'remote'}<Icon name="globe" size={8} />{/if}
+                {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
                 {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
                 {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
                 {chip.kind === 'stash' ? (stashMsgBySha.get(selectedCommit.sha) ?? 'stash') : chip.label}
@@ -1528,6 +1671,30 @@
     font-weight: 600;
     letter-spacing: 0;
   }
+  /* Collapsible branch-folder header (feature/, release/, …). */
+  .ref-folder {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 3px 10px 3px 22px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+    text-align: start;
+    transition: background 100ms ease-out, color 100ms ease-out;
+  }
+  .ref-folder:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .folder-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .ref-row {
     display: flex;
     align-items: center;
@@ -1551,6 +1718,10 @@
   }
   .ref-row:disabled {
     cursor: default;
+  }
+  /* Folder children indent under their folder header. */
+  .ref-row.nested {
+    padding-inline-start: 38px;
   }
   .ref-row.current {
     color: var(--accent);
@@ -1579,10 +1750,20 @@
   }
   .ref-name {
     flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 11.5px;
+  }
+  /* Compact "also tracked on remote" glyph that replaces a redundant
+     origin/<same-name> upstream string, so the branch NAME keeps the row width. */
+  .ref-track {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-dim);
+    opacity: 0.65;
   }
   /* Left-panel current-branch marker: a filled accent check pip. */
   .cur-pip {
