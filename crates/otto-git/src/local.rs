@@ -678,8 +678,18 @@ impl LocalGit {
     /// Delete branch `name` on `origin` (`git push origin --delete <name>`).
     /// Returns the combined push output.
     pub async fn delete_remote_branch(&self, name: &str, token: Option<String>) -> Result<String> {
-        self.run_remote(&["push", "origin", "--delete", name], token)
-            .await
+        let out = self
+            .run_remote(&["push", "origin", "--delete", name], token)
+            .await?;
+        // `git push --delete` doesn't reliably prune the LOCAL remote-tracking ref
+        // (`refs/remotes/origin/<name>`), so the branch lingers in the UI's REMOTE
+        // list until the next `fetch --prune`. Remove it explicitly so the deletion
+        // shows up immediately. Best-effort: if push already pruned it (or it never
+        // existed), the delete is a no-op error we ignore.
+        let _ = self
+            .run(&["update-ref", "-d", &format!("refs/remotes/origin/{name}")])
+            .await;
+        Ok(out)
     }
 
     /// Rename local branch `from` → `to` (`git branch -m`).
@@ -1772,6 +1782,40 @@ mod tests {
         assert!(
             git.status().await.unwrap().changes.is_empty(),
             "working tree stays clean"
+        );
+    }
+
+    /// Deleting a branch on the remote must also drop the LOCAL remote-tracking
+    /// ref, so the UI's REMOTE list reflects it immediately (no pull needed).
+    #[tokio::test]
+    async fn delete_remote_branch_prunes_local_tracking_ref() {
+        let (_tmp, dir) = fixture();
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "tidy"]);
+        // A bare repo plays the role of `origin`.
+        let parent = dir.parent().unwrap();
+        sh_git(parent, &["init", "--bare", "origin.git"]);
+        let bare = parent.join("origin.git");
+        sh_git(&dir, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        sh_git(&dir, &["push", "origin", "main"]);
+        sh_git(&dir, &["branch", "tmp"]);
+        sh_git(&dir, &["push", "origin", "tmp"]);
+        sh_git(&dir, &["fetch", "origin"]);
+
+        let git = LocalGit::new(&dir);
+        let before = git.refs().await.unwrap().remote;
+        assert!(
+            before.iter().any(|b| b.name == "origin/tmp"),
+            "origin/tmp present before delete"
+        );
+
+        git.delete_remote_branch("tmp", None).await.unwrap();
+
+        // Pruned locally → gone from /refs WITHOUT a fetch.
+        let after = git.refs().await.unwrap().remote;
+        assert!(
+            !after.iter().any(|b| b.name == "origin/tmp"),
+            "origin/tmp pruned from local tracking refs after delete"
         );
     }
 }
