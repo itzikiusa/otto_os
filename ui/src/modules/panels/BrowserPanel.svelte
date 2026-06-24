@@ -1,14 +1,17 @@
 <script lang="ts">
-  // Browser tab: a real inline browser. The app CSP is null, so an <iframe>
-  // can load external pages directly in the panel. Some sites (Jira, Google,
-  // GitHub) send X-Frame-Options/frame-ancestors and refuse to be framed — for
-  // those we offer "Open externally". A start page lists the attached issue and
-  // quick links until you navigate somewhere.
+  // Browser tab: a real inline browser with TABS. Each tab is its own native
+  // child webview (Tauri), so switching tabs is instant and preserves the page's
+  // scroll/form/login state. A `window.open()` / `target=_blank` inside a tab is
+  // intercepted natively (no OS popup) and surfaced as `otto://browser-new-tab`,
+  // which opens a real in-app tab here and focuses it.
   //
-  // "Take over" mode: reloads the page via the daemon's proxy endpoint so a
-  // picker script is injected. Clicking elements captures a CSS-selector
-  // description; the user adds a comment; all comments are sent as one message
-  // to the active agent session's input.
+  // On the plain web build (no native webview) each tab falls back to a single
+  // <iframe>; sites that send X-Frame-Options refuse to frame — use "Open
+  // externally" for those.
+  //
+  // "Take over" mode reloads the active tab via the daemon's proxy endpoint so a
+  // picker script is injected; clicking elements captures a CSS-selector
+  // description, the user comments, and all comments are sent to the active agent.
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -24,9 +27,21 @@
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
   );
 
+  // ── Tabs ────────────────────────────────────────────────────────────────────
+  type Tab = { id: string; url: string; title: string };
+  let tabSeq = 0;
+  let tabs = $state<Tab[]>([{ id: 't0', url: '', title: 'New tab' }]);
+  let activeId = $state('t0');
+  // Per-tab last-navigated URL. The native webview is told to navigate ONLY when
+  // a tab's url actually changes; switching tabs just show/hides, so each tab's
+  // page stays live (state preserved). NOT reactive — bookkeeping only.
+  const openedUrl: Record<string, string> = {};
+
+  const activeTab = $derived(tabs.find((t) => t.id === activeId) ?? null);
+  const current = $derived(activeTab?.url ?? ''); // active tab's loaded URL
+
   let urlInput = $state('');
-  let current = $state(''); // the logical URL currently loaded
-  let reloadTick = $state(0); // bump to force the iframe to reload
+  let reloadTick = $state(0); // bump to force the iframe (web build / take-over) to reload
 
   // ── Take-over state ────────────────────────────────────────────────────────
   let takeover = $state(false);
@@ -37,13 +52,10 @@
   let popover = $state<Popover>({ open: false, x: 0, y: 0, desc: '', url: '' });
   let popoverComment = $state('');
 
-  // The iframe DOM node — bound below with bind:this
+  // The iframe DOM node — bound below with bind:this (web build / take-over only)
   let frame = $state<HTMLIFrameElement | null>(null);
 
-  // ── Native browser (Tauri child webview) ───────────────────────────────────
-  // A real webview ignores X-Frame-Options and loads http://localhost, so it
-  // behaves like an actual browser. Used for normal browsing; take-over still
-  // uses the iframe+proxy path so the element picker keeps working.
+  // ── Native browser (Tauri child webview, one per tab) ───────────────────────
   let hostEl = $state<HTMLDivElement | null>(null);
   let urlFocused = $state(false);
   const useNative = $derived(nativeBrowserAvailable && !takeover);
@@ -52,41 +64,99 @@
     if (!hostEl) return null;
     const r = hostEl.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return null;
-    return { x: r.left, y: r.top, width: r.width, height: r.height };
+    // The native WKWebView page-zoom magnifies the whole SPA from the window's
+    // top-left WITHOUT reflowing, so getBoundingClientRect() (CSS px) maps to
+    // window-logical points by × the zoom factor. The child webview is positioned
+    // in window-logical points, so scale the rect — otherwise it's mis-aligned
+    // (too small → desktop shows through; too big → spills over) at zoom ≠ 1.
+    const z = ui.zoom || 1;
+    return { x: r.left * z, y: r.top * z, width: r.width * z, height: r.height * z };
   }
 
-  let lastOpenedUrl: string | null = null;
+  // ── Tab helpers ─────────────────────────────────────────────────────────────
+  function makeTitle(url: string): string {
+    if (!url) return 'New tab';
+    try {
+      const u = new URL(url);
+      const tail = u.pathname.replace(/\/+$/, '').split('/').filter(Boolean).pop();
+      return tail || u.hostname;
+    } catch {
+      return url;
+    }
+  }
 
-  // Drive the native webview. It's shown only when browsing natively (not
-  // take-over / start page) AND no SPA overlay is open — a native webview always
-  // paints above the HTML, so it must hide for palette / modals / context menus.
-  // Same-URL re-shows don't re-navigate (no reload when an overlay closes).
-  $effect(() => {
-    if (!nativeBrowserAvailable) return;
-    const url = current; // reactive deps
-    const overlay = ui.overlayOpen || ctxMenu.open;
-    const shouldShow = useNative && !!url && !overlay;
-    if (!shouldShow) {
-      void nativeBrowser.hide();
+  function newTab(url = ''): string {
+    const id = `t${++tabSeq}`;
+    tabs = [...tabs, { id, url, title: makeTitle(url) }];
+    activeId = id;
+    urlInput = url;
+    takeover = false;
+    return id;
+  }
+
+  function setActiveTab(id: string): void {
+    if (id === activeId) return;
+    activeId = id;
+    const t = tabs.find((x) => x.id === id);
+    urlInput = t?.url ?? '';
+    takeover = false;
+    popover = { open: false, x: 0, y: 0, desc: '', url: '' };
+  }
+
+  function closeTab(id: string): void {
+    const idx = tabs.findIndex((t) => t.id === id);
+    if (idx < 0) return;
+    if (nativeBrowserAvailable) void nativeBrowser.close(id);
+    delete openedUrl[id];
+    const remaining = tabs.filter((t) => t.id !== id);
+    if (remaining.length === 0) {
+      // Never leave zero tabs — replace with a fresh blank one.
+      tabs = [];
+      newTab('');
       return;
     }
+    tabs = remaining;
+    if (activeId === id) {
+      const next = remaining[Math.min(idx, remaining.length - 1)];
+      activeId = next.id;
+      urlInput = next.url;
+      takeover = false;
+    }
+  }
+
+  // ── Native webview drivers ──────────────────────────────────────────────────
+  // Show the active tab's webview over the host rect; hide every other tab.
+  // A native webview always paints above the HTML, so it must also hide for SPA
+  // overlays (palette / modals / context menus) and take-over / start pages.
+  $effect(() => {
+    if (!nativeBrowserAvailable) return;
+    const list = tabs; // reactive dep
+    const tab = activeTab; // reactive dep
+    const overlay = ui.overlayOpen || ctxMenu.open;
+    const showActive = useNative && !!tab && !!tab.url && !overlay;
+    for (const t of list) {
+      if (!showActive || !tab || t.id !== tab.id) void nativeBrowser.hide(t.id);
+    }
+    if (!showActive || !tab) return;
     const r = hostRect();
     if (!r) return;
-    if (url !== lastOpenedUrl) {
-      lastOpenedUrl = url;
-      void nativeBrowser.open(url, r); // navigates + shows
+    if (openedUrl[tab.id] !== tab.url) {
+      openedUrl[tab.id] = tab.url;
+      void nativeBrowser.open(tab.id, tab.url, r); // create-or-navigate + show
     } else {
-      void nativeBrowser.bounds(r);
-      void nativeBrowser.show();
+      void nativeBrowser.bounds(tab.id, r);
+      void nativeBrowser.show(tab.id);
     }
   });
 
-  // Keep the webview aligned with the panel as it resizes / the window changes.
+  // Keep the active tab's webview aligned with the panel as it resizes / moves.
   $effect(() => {
-    if (!nativeBrowserAvailable || !useNative || !current || !hostEl) return;
+    if (!nativeBrowserAvailable || !useNative || !activeTab?.url || !hostEl) return;
+    const id = activeId;
+    const _z = ui.zoom; // re-align immediately when the page zoom changes
     const sync = (): void => {
       const r = hostRect();
-      if (r) void nativeBrowser.bounds(r);
+      if (r) void nativeBrowser.bounds(id, r);
     };
     const ro = new ResizeObserver(sync);
     ro.observe(hostEl);
@@ -100,24 +170,53 @@
     };
   });
 
-  // Reflect link navigations inside the webview into the address bar.
+  // Reflect a tab's in-page navigations into its stored URL + the address bar.
+  // Event-driven (wry on_navigation) — never polls url(), which panics on a
+  // webview that hasn't committed a load yet (and poisons a shared lock).
   $effect(() => {
-    if (!nativeBrowserAvailable || !useNative || !current) return;
-    const iv = setInterval(async () => {
-      const u = await nativeBrowser.currentUrl();
-      if (u && !urlFocused && u !== urlInput) urlInput = u;
-    }, 1200);
-    return () => clearInterval(iv);
+    if (!nativeBrowserAvailable) return;
+    let unlisten = (): void => {};
+    let disposed = false;
+    void nativeBrowser
+      .onUrlChange((id, url) => {
+        // Keep openedUrl in sync so the driver effect doesn't re-navigate (loop).
+        openedUrl[id] = url;
+        const t = tabs.find((x) => x.id === id);
+        if (t && t.url !== url) {
+          tabs = tabs.map((x) => (x.id === id ? { ...x, url, title: makeTitle(url) } : x));
+        }
+        if (!urlFocused && id === activeId && url !== urlInput) urlInput = url;
+      })
+      .then((un) => (disposed ? un() : (unlisten = un)));
+    return () => {
+      disposed = true;
+      unlisten();
+    };
   });
 
-  // Tear the webview down when the panel/tab unmounts.
+  // A page asked to open a new tab (window.open / target=_blank) — open + focus it.
+  $effect(() => {
+    if (!nativeBrowserAvailable) return;
+    let unlisten = (): void => {};
+    let disposed = false;
+    void nativeBrowser
+      .onNewTab((url) => newTab(url))
+      .then((un) => {
+        if (disposed) un();
+        else unlisten = un;
+      });
+    return () => {
+      disposed = true;
+      unlisten();
+    };
+  });
+
+  // Tear every tab's webview down when the panel/tab unmounts.
   $effect(() => () => {
-    if (nativeBrowserAvailable) void nativeBrowser.close();
+    if (nativeBrowserAvailable) void nativeBrowser.closeAll();
   });
 
-  // ── Derived iframe src ─────────────────────────────────────────────────────
-  // When take-over is active, route through the daemon proxy so the picker
-  // script is injected. Otherwise load the URL directly.
+  // ── Derived iframe src (web build / take-over) ──────────────────────────────
   const frameSrc = $derived(
     current
       ? takeover
@@ -133,27 +232,38 @@
     return /^[a-z]+:\/\//i.test(t) ? t : `https://${t}`;
   }
 
+  // Load a URL into the ACTIVE tab.
   function load(u: string): void {
     const href = normalize(u);
     if (!href) return;
+    if (!activeTab) {
+      newTab(href);
+      reloadTick++;
+      return;
+    }
     urlInput = href;
-    current = href;
+    tabs = tabs.map((t) =>
+      t.id === activeId ? { ...t, url: href, title: makeTitle(href) } : t,
+    );
     reloadTick++;
   }
 
   function reload(): void {
     if (!current) return;
-    if (useNative) void nativeBrowser.reload();
+    if (useNative) void nativeBrowser.reload(activeId);
     else reloadTick++;
   }
 
+  // Reset the ACTIVE tab to its start page.
   function home(): void {
-    current = '';
     takeover = false;
     annotations = [];
     popover = { open: false, x: 0, y: 0, desc: '', url: '' };
-    lastOpenedUrl = null;
-    if (nativeBrowserAvailable) void nativeBrowser.hide();
+    if (!activeTab) return;
+    delete openedUrl[activeId];
+    tabs = tabs.map((t) => (t.id === activeId ? { ...t, url: '', title: 'New tab' } : t));
+    urlInput = '';
+    if (nativeBrowserAvailable) void nativeBrowser.hide(activeId);
   }
 
   function openExternal(u: string): void {
@@ -162,25 +272,24 @@
     void openExternalUrl(normalize(u));
   }
 
+  // Toggle the web inspector (console / network / elements) for the active tab.
+  function toggleDevtools(): void {
+    if (nativeBrowserAvailable && activeTab?.url) void nativeBrowser.devtools(activeId);
+  }
+
   function onEnter(e: KeyboardEvent): void {
     if (e.key === 'Enter') load(urlInput);
   }
 
   // ── Take-over toggle ───────────────────────────────────────────────────────
   function toggleTakeover(): void {
-    if (takeover) {
-      releaseTakeover();
-    } else {
-      takeover = true;
-      // frameSrc is now the proxy URL; the iframe will reload.
-      // After load we postMessage in the onload handler below.
-    }
+    if (takeover) releaseTakeover();
+    else takeover = true;
   }
 
   function releaseTakeover(): void {
     takeover = false;
     popover = { open: false, x: 0, y: 0, desc: '', url: '' };
-    // frameSrc reverts to direct URL; browser reloads the original.
   }
 
   // Tell the iframe's injected picker to enable/disable the crosshair.
@@ -188,7 +297,6 @@
     frame?.contentWindow?.postMessage({ type: 'otto-takeover', enabled: takeover }, '*');
   }
 
-  // Called on iframe's onload event.
   function onFrameLoad(): void {
     syncTakeoverMessage();
   }
@@ -206,10 +314,6 @@
           url: string;
         };
 
-        // Clamp the popover within the browser panel container.
-        // The iframe fills the parent, so x/y are relative to the iframe
-        // which is positioned inside .browser. We keep the popover inside
-        // the panel by clamping to reasonable bounds.
         const maxX = Math.max(0, (frame?.clientWidth ?? 400) - 320);
         const maxY = Math.max(0, (frame?.clientHeight ?? 600) - 200);
 
@@ -228,10 +332,8 @@
     return () => window.removeEventListener('message', onMessage);
   });
 
-  // Whenever takeover changes, re-sync the message (for the case where the
-  // frame was already loaded and we just toggled the mode).
+  // Re-sync the take-over message whenever the mode changes.
   $effect(() => {
-    // Access takeover so the effect re-runs when it changes.
     const _t = takeover;
     syncTakeoverMessage();
   });
@@ -240,11 +342,8 @@
   $effect(() => {
     function onKeydown(e: KeyboardEvent): void {
       if (e.key === 'Escape') {
-        if (popover.open) {
-          popover = { ...popover, open: false };
-        } else if (takeover) {
-          releaseTakeover();
-        }
+        if (popover.open) popover = { ...popover, open: false };
+        else if (takeover) releaseTakeover();
       }
     }
     window.addEventListener('keydown', onKeydown);
@@ -295,6 +394,45 @@
 </script>
 
 <div class="browser">
+  <!-- ── Tab strip ─────────────────────────────────────────────────────────── -->
+  <div class="tabstrip" role="tablist">
+    {#each tabs as t (t.id)}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="btab"
+        class:active={t.id === activeId}
+        role="tab"
+        tabindex="0"
+        aria-selected={t.id === activeId}
+        title={t.url || 'New tab'}
+        onclick={() => setActiveTab(t.id)}
+        onkeydown={(e) => e.key === 'Enter' && setActiveTab(t.id)}
+        onauxclick={(e) => {
+          if (e.button === 1) {
+            e.preventDefault();
+            closeTab(t.id);
+          }
+        }}
+      >
+        <span class="btab-title">{t.title}</span>
+        <button
+          class="btab-close"
+          title="Close tab"
+          aria-label="Close tab"
+          onclick={(e) => {
+            e.stopPropagation();
+            closeTab(t.id);
+          }}
+        >
+          <Icon name="x" size={9} />
+        </button>
+      </div>
+    {/each}
+    <button class="btab-new" title="New tab" aria-label="New tab" onclick={() => newTab('')}>
+      <Icon name="plus" size={12} />
+    </button>
+  </div>
+
   <!-- ── Toolbar ──────────────────────────────────────────────────────────── -->
   <div class="toolbar">
     <button class="tb-btn" title="Reload" aria-label="Reload" disabled={!current} onclick={reload}>
@@ -309,6 +447,8 @@
       placeholder="Search or enter URL…"
       spellcheck="false"
       autocomplete="off"
+      onfocus={() => (urlFocused = true)}
+      onblur={() => (urlFocused = false)}
       onkeydown={onEnter}
     />
     <button class="tb-btn" title="Go" aria-label="Go" disabled={!urlInput.trim()} onclick={() => load(urlInput)}>
@@ -327,12 +467,20 @@
       disabled={!current}
       onclick={toggleTakeover}
     >
-      {#if takeover}
-        <Icon name="cursor" size={13} />
-      {:else}
-        <Icon name="cursor" size={13} />
-      {/if}
+      <Icon name="cursor" size={13} />
     </button>
+
+    {#if nativeBrowserAvailable}
+      <button
+        class="tb-btn"
+        title="DevTools — console, network, elements"
+        aria-label="DevTools"
+        disabled={!current}
+        onclick={toggleDevtools}
+      >
+        <Icon name="terminal" size={13} />
+      </button>
+    {/if}
 
     <button
       class="tb-btn"
@@ -347,8 +495,7 @@
 
   {#if current}
     {#if useNative}
-      <!-- A native child webview is positioned over this host element (it loads
-           any site — google, localhost — unlike an iframe). -->
+      <!-- A native child webview (the active tab) is positioned over this host. -->
       <div class="frame native-host" bind:this={hostEl}></div>
     {:else}
       <!-- key forces a full iframe reload when frameSrc changes (proxy ↔ direct) -->
@@ -400,10 +547,7 @@
     {#if annotations.length > 0}
       <div class="annot-badge">
         <span class="annot-count">{annotations.length} marked</span>
-        <button
-          class="btn-accent btn-small"
-          onclick={sendToAgent}
-        >
+        <button class="btn-accent btn-small" onclick={sendToAgent}>
           Send {annotations.length} to agent
         </button>
         <button
@@ -425,8 +569,8 @@
       <p class="hint">
         {#if nativeBrowserAvailable}
           Enter a URL above to browse any site here — including ones that block
-          embedding (Google, Jira, GitHub) and local dev servers. Use ↗ to open
-          in your system browser.
+          embedding (Google, Jira, GitHub) and local dev servers. Links that open
+          in a new tab open here as a new tab. Use ↗ to open in your system browser.
         {:else}
           Enter a URL above to browse it here. Sites that block embedding (Jira,
           Google, GitHub) open in your system browser with ↗.
@@ -470,12 +614,94 @@
     min-height: 0;
     position: relative; /* anchor for the popover */
   }
+
+  /* ── Tab strip ───────────────────────────────────────────────────────────── */
+  .tabstrip {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 6px 0 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    flex-shrink: 0;
+  }
+  .tabstrip::-webkit-scrollbar {
+    display: none;
+  }
+  .btab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 160px;
+    height: 26px;
+    padding: 0 4px 0 10px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: var(--radius-s) var(--radius-s) 0 0;
+    color: var(--text-dim);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 120ms ease-out, color 120ms ease-out;
+  }
+  .btab:hover {
+    background: var(--surface-2);
+  }
+  .btab.active {
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--text);
+  }
+  .btab-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .btab-close {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 120ms ease-out, background 120ms ease-out;
+  }
+  .btab:hover .btab-close,
+  .btab.active .btab-close {
+    opacity: 1;
+  }
+  .btab-close:hover {
+    background: color-mix(in srgb, var(--text-dim) 22%, transparent);
+    color: var(--text);
+  }
+  .btab-new {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .btab-new:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+
   .toolbar {
     display: flex;
     align-items: center;
     gap: 5px;
     padding: 8px 8px;
     border-bottom: 1px solid var(--border);
+    border-top: 1px solid var(--border);
     flex-shrink: 0;
   }
   .url-input {

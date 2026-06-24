@@ -11,11 +11,14 @@ license = "MIT"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api", "tray-icon", "unstable"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "unstable", "devtools"] }
 tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-opener = "2"
 window-vibrancy = "0.6"
+# Used only to open the browser's Web Inspector DETACHED (its own window) via the
+# private WKWebView `_inspector` API — same objc2 version wry uses.
+objc2 = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

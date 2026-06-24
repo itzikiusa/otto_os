@@ -36,8 +36,10 @@ fn main() {
             browser::browser_reload,
             browser::browser_show,
             browser::browser_hide,
+            browser::browser_hide_all,
             browser::browser_close,
-            browser::browser_current_url,
+            browser::browser_close_all,
+            browser::browser_devtools,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
