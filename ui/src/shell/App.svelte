@@ -51,6 +51,7 @@
   import { plugins } from '../lib/stores/plugins.svelte';
   import { router } from '../lib/router.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
+  import { startWindowDrag } from '../lib/windowDrag';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { git } from '../lib/stores/git.svelte';
@@ -611,7 +612,8 @@
            hidden by `titleBarStyle: Overlay`). The empty 26px inset has no
            interactive content, so this never steals clicks. -->
       {#if isTauri}
-        <div class="titlebar-drag" data-tauri-drag-region></div>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="titlebar-drag" data-tauri-drag-region onmousedown={startWindowDrag}></div>
       {/if}
       {#if ui.railExpanded}
         <Navigator />

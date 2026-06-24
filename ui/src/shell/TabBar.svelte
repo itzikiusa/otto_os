@@ -5,6 +5,7 @@
   import StatusDot from '../lib/components/StatusDot.svelte';
   import { ws, DB_PANE_ID } from '../lib/stores/workspace.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
+  import { startWindowDrag } from '../lib/windowDrag';
   import { router } from '../lib/router.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import ShareModal from '../modules/agents/ShareModal.svelte';
@@ -100,11 +101,13 @@
   }
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="tabbar"
   class:tauri-pad={isTauri && !ui.railExpanded}
   class:bell-gutter={bellGutter}
   data-tauri-drag-region
+  onmousedown={startWindowDrag}
 >
   <div class="tabs">
     {#each ws.openTabs as id (id)}
