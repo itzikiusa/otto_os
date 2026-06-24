@@ -1497,3 +1497,48 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 | 99 | POST /api/v1/goal-loops/{id}/stop | ws editor | — | GoalLoop |
 | 100 | POST /api/v1/goal-loops/{id}/iterations/{idx}/agents/{agent}/retry | ws editor | — | 202 (re-run a stuck executor) |
 | 101 | DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (stops + removes worktree; **keeps the branch**) |
+
+## Canvas Studio
+
+Visual scenes (sketches, UML, sequence/flow diagrams, code/JSON blocks, shapes)
+stored as ONE portable JSON document (`doc_json`). Workspace-scoped; optionally
+linked to a product story. CRUD lives in the `otto-canvas` crate; the
+agent-assist endpoints (prompt → diagram blocks) live in `otto-server` because
+they need the orchestrator. Gated by `Feature::Canvas` (read=View, write=Edit).
+Item routes resolve the workspace from the scene row.
+
+Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The rich
+`Scene` schema (nodes/edges/slides) is owned by the UI (`ui/src/modules/canvas/types.ts`).
+
+| # | Method & path | Auth | Request | Response |
+|---|---|---|---|---|
+| 102 | GET /api/v1/workspaces/{ws}/canvas/scenes | ws viewer | — | `CanvasSceneSummary[]` (newest-updated first) |
+| 103 | POST /api/v1/workspaces/{ws}/canvas/scenes | ws editor | `{title, doc?, story_id?}` | CanvasScene (201; `doc` defaults to an empty scene) |
+| 104 | GET /api/v1/canvas/scenes/{id} | ws viewer | — | CanvasScene (full `doc_json`) |
+| 105 | PUT /api/v1/canvas/scenes/{id} | ws editor | `{title?, doc?, thumbnail?}` | CanvasScene (partial; omitted fields unchanged) |
+| 106 | DELETE /api/v1/canvas/scenes/{id} | ws editor | — | 204 |
+| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, nodes, edges, note}` (one agent turn; does not mutate the scene) |
+| 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
+
+## Discovery Chat
+
+A lightweight, interactive conversation with an agent attached to a product
+story (works from an empty/Untitled draft) for EARLY discovery and research —
+distinct from the swarm discovery run (heavyweight report) and refinement threads
+(edit an existing version). Each turn assembles a relevance-bounded context bundle
+(latest relevant version + mockups/attachments with text inlined + the most recent
+discovery report + open questions + notes) and replays history into one
+`run_agent` turn. The agent replies in markdown and may emit an `actions` JSON
+array; actions are NEVER auto-applied — the UI applies them via `/apply`. Covered
+by the existing `/product/` policy prefix (read=View, write=Edit).
+
+Persistence: `otto_state::product_chat` (`DiscoveryChat`, `DiscoveryChatMessage`).
+
+| # | Method & path | Auth | Request | Response |
+|---|---|---|---|---|
+| 109 | POST /api/v1/product/stories/{sid}/discovery-chats | ws editor | `{title?}` | DiscoveryChat |
+| 110 | GET /api/v1/product/stories/{sid}/discovery-chats | ws viewer | — | `DiscoveryChat[]` (newest first) |
+| 111 | GET /api/v1/product/discovery-chats/{cid} | ws viewer | — | `{chat, messages}` |
+| 112 | POST /api/v1/product/discovery-chats/{cid}/messages | ws editor | `{body}` | `{user_message, agent_message}` (one turn; agent_message carries `actions_json`) |
+| 113 | POST /api/v1/product/discovery-chats/{cid}/archive | ws editor | — | DiscoveryChat |
+| 114 | POST /api/v1/product/discovery-chats/{cid}/apply | ws editor | `{action}` | ApplyResult `{story_updated, created_question_ids, created_note_ids, canvas_id}` |

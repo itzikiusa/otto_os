@@ -236,6 +236,15 @@ impl otto_memory::MemoryCtx for ServerCtx {
     }
 }
 
+impl otto_canvas::CanvasCtx for ServerCtx {
+    fn canvas_repo(&self) -> &otto_state::CanvasRepo {
+        &self.canvas_repo
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+}
+
 impl otto_swarm::SwarmCtx for ServerCtx {
     fn swarm(&self) -> &Arc<otto_swarm::SwarmService> {
         &self.swarm
@@ -393,6 +402,40 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         .route(
             "/product/refinement-threads/{tid}/archive",
             post(crate::product_refine::archive_thread),
+        )
+        // Discovery Chat: a lightweight conversational agent on a story (works
+        // from an empty draft) for early discovery/research. Each turn assembles
+        // a relevance-bounded context bundle and may propose actions the user
+        // applies explicitly. Covered by the `/product/` policy prefix.
+        .route(
+            "/product/stories/{sid}/discovery-chats",
+            post(crate::product_chat::create_chat).get(crate::product_chat::list_chats),
+        )
+        .route(
+            "/product/discovery-chats/{cid}",
+            get(crate::product_chat::get_chat),
+        )
+        .route(
+            "/product/discovery-chats/{cid}/messages",
+            post(crate::product_chat::send_message),
+        )
+        .route(
+            "/product/discovery-chats/{cid}/archive",
+            post(crate::product_chat::archive_chat),
+        )
+        .route(
+            "/product/discovery-chats/{cid}/apply",
+            post(crate::product_chat::apply_action),
+        )
+        // Canvas agent-assist: turn a prompt into diagram blocks (needs the
+        // orchestrator, so it lives here rather than in the otto-canvas crate).
+        .route(
+            "/canvas/scenes/{id}/assist",
+            post(crate::canvas_assist::assist_scene),
+        )
+        .route(
+            "/canvas/assist/preview",
+            post(crate::canvas_assist::assist_preview),
         )
         // Story attachments — upload route gets its own 40 MB body cap to bound
         // the ~33 % base64 inflation (raw content cap is enforced at 25 MB).
@@ -3676,6 +3719,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_dbviewer::api_router::<ServerCtx>(),
         otto_brokers::api_router::<ServerCtx>(),
         otto_product::router::<ServerCtx>(),
+        otto_canvas::router::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
         crate::memory_gov::memory_gov_routes(),
         otto_git::router::<ServerCtx>(),

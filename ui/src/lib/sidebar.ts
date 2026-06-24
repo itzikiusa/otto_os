@@ -43,6 +43,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'loops', icon: 'refresh', label: 'Goal Loops' },
   { id: 'git', icon: 'branch', label: 'Git', feature: 'git' },
   { id: 'product', icon: 'note', label: 'Product', feature: 'product' },
+  { id: 'canvas', icon: 'shapes', label: 'Canvas', feature: 'canvas' },
   { id: 'vault', icon: 'globe', label: 'Vault' },
   { id: 'api', icon: 'send', label: 'API', feature: 'api_client' },
   { id: 'database', icon: 'db', label: 'Database', feature: 'database' },

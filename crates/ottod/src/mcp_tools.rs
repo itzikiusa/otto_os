@@ -200,6 +200,28 @@ fn tool_catalog() -> Value {
                     },
                     "required": ["story_id"]
                 }
+            },
+            {
+                "name": "canvas_list_scenes",
+                "description": "Read-only: list the Canvas Studio scenes (id/title/timestamps) in a workspace. To CREATE or EDIT a scene, use the otto-canvas skill's HTTP scripts (writes are not exposed as MCP tools).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace_id": { "type": "string", "description": "Otto workspace id." }
+                    },
+                    "required": ["workspace_id"]
+                }
+            },
+            {
+                "name": "canvas_get_scene",
+                "description": "Read-only: a Canvas Studio scene by id, including its full Scene JSON document (nodes/edges/slides).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scene_id": { "type": "string", "description": "Otto canvas scene id." }
+                    },
+                    "required": ["scene_id"]
+                }
             }
         ]
     })
@@ -282,6 +304,20 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 "story": story_rec,
                 "inject": inject,
             })))
+        }
+        "canvas_list_scenes" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let scenes = ctx
+                .get_json(&format!("/workspaces/{}/canvas/scenes", seg(&ws)))
+                .await?;
+            Ok(finalize(json!({ "workspace_id": ws, "scenes": scenes })))
+        }
+        "canvas_get_scene" => {
+            let scene = arg_str(args, "scene_id")?;
+            let raw = ctx
+                .get_json(&format!("/canvas/scenes/{}", seg(&scene)))
+                .await?;
+            Ok(finalize(json!({ "scene_id": scene, "scene": raw })))
         }
         other => Err(format!("unknown tool `{other}`")),
     }

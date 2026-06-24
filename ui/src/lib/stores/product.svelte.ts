@@ -53,6 +53,12 @@ import type {
   RefinementThreadDetail,
   CreateThreadReq,
   RefineTurnResp,
+  DiscoveryChat,
+  DiscoveryChatDetail,
+  CreateDiscoveryChatReq,
+  DiscoveryChatTurn,
+  DiscoveryAction,
+  ApplyResult,
 } from '../../modules/product/types';
 
 function errMsg(e: unknown): string {
@@ -489,6 +495,37 @@ class ProductStore {
 
   async archiveRefinementThread(tid: string): Promise<RefinementThread> {
     return api.post<RefinementThread>(`/product/refinement-threads/${tid}/archive`, {});
+  }
+
+  // ── Discovery chats ────────────────────────────────────────────────────────
+  // Conversational agent that works from an EMPTY/Untitled draft to help with
+  // early discovery & research, proposing Apply-able action cards. Story-scoped
+  // mirror of the refinement-thread methods above.
+
+  async listDiscoveryChats(): Promise<DiscoveryChat[]> {
+    const id = this.storyId();
+    return api.get<DiscoveryChat[]>(`/product/stories/${id}/discovery-chats`);
+  }
+
+  async createDiscoveryChat(req: CreateDiscoveryChatReq = {}): Promise<DiscoveryChat> {
+    const id = this.storyId();
+    return api.post<DiscoveryChat>(`/product/stories/${id}/discovery-chats`, req);
+  }
+
+  async getDiscoveryChat(cid: string): Promise<DiscoveryChatDetail> {
+    return api.get<DiscoveryChatDetail>(`/product/discovery-chats/${cid}`);
+  }
+
+  async sendDiscoveryMessage(cid: string, body: string): Promise<DiscoveryChatTurn> {
+    return api.post<DiscoveryChatTurn>(`/product/discovery-chats/${cid}/messages`, { body });
+  }
+
+  async archiveDiscoveryChat(cid: string): Promise<DiscoveryChat> {
+    return api.post<DiscoveryChat>(`/product/discovery-chats/${cid}/archive`, {});
+  }
+
+  async applyDiscoveryAction(cid: string, action: DiscoveryAction): Promise<ApplyResult> {
+    return api.post<ApplyResult>(`/product/discovery-chats/${cid}/apply`, { action });
   }
 
   // ── Mockup Annotations ─────────────────────────────────────────────────────

@@ -642,6 +642,50 @@ export interface RefineTurnResp {
 }
 
 // ---------------------------------------------------------------------------
+// Discovery Chat types  (talk-to-agent from an empty draft — early discovery)
+// ---------------------------------------------------------------------------
+
+export interface DiscoveryChat {
+  id: string; story_id: string; workspace_id: string;
+  cwd: string; title: string; status: string;
+  model: string | null;
+  created_by: string; created_at: string; updated_at: string;
+}
+
+export interface DiscoveryChatMessage {
+  id: string; chat_id: string; role: string; body: string;
+  /** Agent-proposed actions, as a JSON-array string (see DiscoveryAction). */
+  actions_json: string | null;
+  meta_json: string | null;
+  created_at: string;
+}
+
+export interface DiscoveryChatDetail { chat: DiscoveryChat; messages: DiscoveryChatMessage[] }
+
+export interface CreateDiscoveryChatReq { title?: string | null }
+
+export interface DiscoveryChatTurn {
+  user_message: DiscoveryChatMessage;
+  agent_message: DiscoveryChatMessage;
+}
+
+/** A structured proposal the agent may emit (rendered as an Apply-able card). */
+export type DiscoveryAction =
+  | { type: 'apply_draft'; title: string; body_md: string }
+  | { type: 'add_questions'; questions: { text: string; rationale?: string; category?: string }[] }
+  | { type: 'add_notes'; notes: { body: string }[] }
+  | { type: 'create_canvas'; title: string; mermaid?: string; nodes?: unknown[]; edges?: unknown[] };
+
+export interface ApplyActionReq { action: DiscoveryAction }
+
+export interface ApplyResult {
+  story_updated: boolean;
+  created_question_ids: string[];
+  created_note_ids: string[];
+  canvas_id: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Product↔Swarm closure types  (GET /product/stories/{sid}/swarm)
 // ---------------------------------------------------------------------------
 

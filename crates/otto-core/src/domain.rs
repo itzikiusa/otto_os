@@ -1856,7 +1856,7 @@ impl Capability {
     }
 }
 
-/// The 18 independently-gatable product features.
+/// The 19 independently-gatable product features.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -1878,6 +1878,7 @@ pub enum Feature {
     Context,
     Settings,
     Users,
+    Canvas,
 }
 
 impl Feature {
@@ -1902,6 +1903,7 @@ impl Feature {
             "context" => Some(Self::Context),
             "settings" => Some(Self::Settings),
             "users" => Some(Self::Users),
+            "canvas" => Some(Self::Canvas),
             _ => None,
         }
     }
@@ -1927,6 +1929,7 @@ impl Feature {
             Self::Context => "context",
             Self::Settings => "settings",
             Self::Users => "users",
+            Self::Canvas => "canvas",
         }
     }
 }

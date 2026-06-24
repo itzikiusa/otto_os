@@ -76,6 +76,10 @@ pub struct ServerCtx {
     pub refinement_repo: otto_state::ProductRefinementRepo,
     /// Mockup pinned-annotation repo.
     pub mockup_repo: otto_state::ProductMockupRepo,
+    /// Discovery-chat repo — lightweight conversational discovery threads per story.
+    pub discovery_chat_repo: otto_state::DiscoveryChatRepo,
+    /// Canvas Studio scene repo — visual JSON-node scenes (workspace-scoped).
+    pub canvas_repo: otto_state::CanvasRepo,
     /// Per-run cancellation flags for in-flight product analysis agents (manual
     /// Stop). Mirrors `skill_eval_cancels`.
     pub product_agent_cancels: crate::product_run::CancelRegistry,

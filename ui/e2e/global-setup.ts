@@ -36,6 +36,12 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       OTTO_PORT: PORT,
       // Keep the throwaway daemon lean / non-networked.
       OTTO_SELF_IMPROVE: '0',
+      // Route agent turns (Discovery Chat, Canvas assist) through the orchestrator's
+      // deterministic offline E2E stub instead of spawning a real `claude` PTY, so
+      // those feature flows are reproducible + network-free. The stub branches on an
+      // `OTTO_TASK:` sentinel embedded in each feature's prompt. See
+      // crates/otto-orchestrator/src/e2e_stub.rs.
+      OTTO_E2E: '1',
       // Point the agent runner at a binary that does not exist so any agent /
       // planner invocation (e.g. the discovery-swarm planner) fails FAST and
       // falls back to its fixed task set instead of waiting on a real `claude`

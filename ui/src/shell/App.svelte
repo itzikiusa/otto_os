@@ -42,6 +42,7 @@
   import Settings from '../modules/settings/Settings.svelte';
   import Walkthroughs from '../modules/help/Walkthroughs.svelte';
   import ProductPage from '../modules/product/ProductPage.svelte';
+  import CanvasPage from '../modules/canvas/CanvasPage.svelte';
   import InsightsPage from '../modules/insights/InsightsPage.svelte';
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
   import LoopsPage from '../modules/loops/LoopsPage.svelte';
@@ -383,6 +384,7 @@
       { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
       { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
       { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
+      { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', keywords: 'canvas studio diagram sketch mockup uml sequence flowchart whiteboard excalidraw mermaid', run: () => router.go('canvas') },
       { id: 'core.go-insights', title: 'Go to Insights', group: 'Navigate', keywords: 'insights reports daily weekly monthly summary analytics activity', run: () => router.go('insights') },
       { id: 'core.go-swarm', title: 'Go to Swarm', group: 'Navigate', keywords: 'swarm agents team org orchestrator kanban board company', run: () => router.go('swarm') },
       { id: 'core.go-loops', title: 'Go to Goal Loops', group: 'Navigate', keywords: 'goal loop iterate autonomous objective plan execute evaluate', run: () => router.go('loops') },
@@ -568,6 +570,8 @@
       <Walkthroughs />
     {:else if moduleName === 'product'}
       <ProductPage />
+    {:else if moduleName === 'canvas'}
+      <CanvasPage />
     {:else if moduleName === 'insights'}
       <InsightsPage />
     {:else if moduleName === 'swarm'}

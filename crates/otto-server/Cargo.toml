@@ -40,6 +40,7 @@ otto-context.workspace = true
 otto-skills.workspace = true
 otto-usage.workspace = true
 otto-product.workspace = true
+otto-canvas.workspace = true
 otto-swarm.workspace = true
 otto-memory.workspace = true
 otto-pty.workspace = true

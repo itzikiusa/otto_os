@@ -420,6 +420,16 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Product, if get { View } else { Edit });
     }
 
+    // ---- Canvas (visual scenes: CRUD + agent assist) --------------------------
+    // §3.2 analogue: read scenes=View; create/edit/delete/assist=Edit. Item
+    // routes (`/canvas/scenes/{id}`, `/canvas/scenes/{id}/assist`, `/canvas/assist/
+    // preview`) are covered by the `/canvas/` prefix; the collection route uses
+    // the `{ws}` placeholder (see otto-canvas router) so it matches here. Root
+    // bypasses.
+    if p.starts_with("/canvas/") || p.starts_with("/workspaces/{ws}/canvas/") {
+        return Require(Canvas, if get { View } else { Edit });
+    }
+
     // ---- Memory (knowledge vault: memories / graph / recall / ingest) ---------
     // The memory layer has no dedicated Feature key; it is workspace knowledge
     // produced and consumed by the Product workflows (the per-story ingest route

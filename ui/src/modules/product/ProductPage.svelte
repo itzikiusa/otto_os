@@ -18,6 +18,7 @@
   import DiscoveryTab from './DiscoveryTab.svelte';
   import MockupsTab from './MockupsTab.svelte';
   import RefineTab from './RefineTab.svelte';
+  import ChatTab from './ChatTab.svelte';
   import LearningsView from './LearningsView.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory } from './types';
@@ -81,6 +82,7 @@
 
   const TABS: { id: string; label: string }[] = [
     { id: 'overview', label: 'Overview' },
+    { id: 'chat', label: 'Chat' },
     { id: 'analysis', label: 'Analysis' },
     { id: 'questions', label: 'Questions' },
     { id: 'notes', label: 'Notes' },
@@ -372,6 +374,8 @@
         </div>
       {:else if product.tab === 'overview'}
         <OverviewTab />
+      {:else if product.tab === 'chat'}
+        <ChatTab />
       {:else if product.tab === 'analysis'}
         <AnalysisTab />
       {:else if product.tab === 'questions'}

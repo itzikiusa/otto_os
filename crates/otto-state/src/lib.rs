@@ -5,6 +5,7 @@
 pub mod activity;
 pub mod api_client;
 pub mod audit;
+pub mod canvas;
 pub mod broker_audit;
 pub mod broker_cluster_sections;
 pub mod broker_ops;
@@ -28,6 +29,7 @@ pub mod memory;
 pub mod notifications;
 pub mod plugins;
 pub mod product_attachments;
+pub mod product_chat;
 pub mod product_discovery;
 pub mod product_mockup;
 pub mod product_refinement;
@@ -77,7 +79,12 @@ pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
 pub use plugins::{NewPlugin, PluginRecord, PluginsRepo};
+pub use canvas::{CanvasRepo, CanvasScene, CanvasSceneSummary, NewScene, SceneUpdate};
 pub use product_attachments::{AttachmentPatch, NewAttachment, ProductAttachment, ProductAttachmentRepo};
+pub use product_chat::{
+    DiscoveryChat, DiscoveryChatMessage, DiscoveryChatRepo, NewDiscoveryChat,
+    NewDiscoveryChatMessage,
+};
 pub use product_discovery::{DiscoveryRun, NewDiscoveryRun, ProductDiscoveryRepo};
 pub use product_mockup::{AnnotationPatch, MockupAnnotation, NewAnnotation, ProductMockupRepo};
 pub use product_refinement::{
