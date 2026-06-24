@@ -1209,10 +1209,11 @@
       <!-- A collapsible branch FOLDER header (feature/, release/, …). -->
       {#snippet folderHeader(section: 'local' | 'remote', folder: BranchFolder)}
         {@const key = folderKey(section, folder.name)}
-        <button class="ref-folder" onclick={() => toggleFolder(key)} title={folder.name}>
-          <Icon name={collapsedFolders.has(key) ? 'chevronRight' : 'chevronDown'} size={10} />
-          <Icon name="branch" size={11} />
-          <span class="folder-name mono">{folder.name}/</span>
+        {@const collapsed = collapsedFolders.has(key)}
+        <button class="ref-folder" class:collapsed onclick={() => toggleFolder(key)} title={folder.name}>
+          <Icon name={collapsed ? 'chevronRight' : 'chevronDown'} size={11} />
+          <Icon name="folder" size={12} />
+          <span class="folder-name">{folder.name}</span>
           <span class="ref-count">{folder.leaves.length}</span>
         </button>
       {/snippet}
@@ -1236,9 +1237,11 @@
           {#each grouped.folders as folder (folder.name)}
             {@render folderHeader('local', folder)}
             {#if !collapsedFolders.has(folderKey('local', folder.name))}
-              {#each folder.leaves as leaf (leaf.b.name)}
-                {@render localRow(leaf, true)}
-              {/each}
+              <div class="folder-children">
+                {#each folder.leaves as leaf (leaf.b.name)}
+                  {@render localRow(leaf, true)}
+                {/each}
+              </div>
             {/if}
           {/each}
         {/if}
@@ -1263,9 +1266,11 @@
           {#each grouped.folders as folder (folder.name)}
             {@render folderHeader('remote', folder)}
             {#if !collapsedFolders.has(folderKey('remote', folder.name))}
-              {#each folder.leaves as leaf (leaf.b.name)}
-                {@render remoteRow(leaf, true)}
-              {/each}
+              <div class="folder-children">
+                {#each folder.leaves as leaf (leaf.b.name)}
+                  {@render remoteRow(leaf, true)}
+                {/each}
+              </div>
             {/if}
           {/each}
         {/if}
@@ -1671,29 +1676,42 @@
     font-weight: 600;
     letter-spacing: 0;
   }
-  /* Collapsible branch-folder header (feature/, release/, …). */
+  /* Collapsible branch-folder header (feature/, release/, …). The folder icon +
+     twisty + medium-weight name set it apart from the leaf branch rows so the
+     nesting reads as a hierarchy, not a flat sibling list. */
   .ref-folder {
     display: flex;
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 3px 10px 3px 22px;
+    padding: 4px 10px 4px 11px;
     border: none;
     background: transparent;
-    color: var(--text-dim);
-    font-size: 11px;
+    color: var(--text);
+    font-size: 11.5px;
     cursor: pointer;
     text-align: start;
     transition: background 100ms ease-out, color 100ms ease-out;
   }
   .ref-folder:hover {
     background: var(--surface-2);
-    color: var(--text);
+  }
+  /* The folder glyph picks up the accent so the grouping is obvious at a glance. */
+  .ref-folder :global(svg:nth-of-type(2)) {
+    color: var(--accent);
+    opacity: 0.8;
   }
   .folder-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-weight: 600;
+  }
+  /* Children of a folder: indented under a vertical tree guide so the nesting is
+     visually unmistakable. */
+  .folder-children {
+    margin-inline-start: 21px;
+    border-inline-start: 1.5px solid var(--border);
   }
   .ref-row {
     display: flex;
@@ -1719,9 +1737,9 @@
   .ref-row:disabled {
     cursor: default;
   }
-  /* Folder children indent under their folder header. */
+  /* Folder children sit just inside the tree guide of `.folder-children`. */
   .ref-row.nested {
-    padding-inline-start: 38px;
+    padding-inline-start: 14px;
   }
   .ref-row.current {
     color: var(--accent);
