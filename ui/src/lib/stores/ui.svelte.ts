@@ -49,7 +49,12 @@ const LS = {
 };
 
 export const RIGHT_MIN = 260;
-export const RIGHT_MAX = 760;
+// Absolute safety cap; the real cap is viewport-aware (see clampRight) so the
+// panel can take most of the window for a proper in-app browser, while always
+// leaving room for the rail + a session pane.
+export const RIGHT_MAX = 2000;
+/** Min width always reserved for the rail + left content when the panel widens. */
+const RIGHT_LEAVE = 360;
 export const RAIL_MIN = 190;
 export const RAIL_MAX = 420;
 
@@ -97,7 +102,11 @@ export function clientId(): string {
 }
 
 function clampRight(px: number): number {
-  return Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, Math.round(px)));
+  // Viewport-aware upper bound: allow the panel to grow until only RIGHT_LEAVE
+  // px remain for the rail + left content, capped at the absolute RIGHT_MAX.
+  const vw = typeof window !== 'undefined' ? window.innerWidth : RIGHT_MAX;
+  const max = Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, vw - RIGHT_LEAVE));
+  return Math.max(RIGHT_MIN, Math.min(max, Math.round(px)));
 }
 function clampRail(px: number): number {
   return Math.max(RAIL_MIN, Math.min(RAIL_MAX, Math.round(px)));
@@ -277,6 +286,26 @@ class UiStore {
   setRightWidth(px: number): void {
     this.rightWidth = clampRight(px);
     lsSet(LS.rightWidth, String(this.rightWidth));
+  }
+
+  /** Width to restore to when un-expanding the right panel. */
+  private rightRestore = 0;
+  /** True when the panel is (near) its viewport-max width. */
+  get rightWide(): boolean {
+    const vw = typeof window !== 'undefined' ? window.innerWidth : RIGHT_MAX;
+    return this.rightWidth >= clampRight(vw - RIGHT_LEAVE) - 20;
+  }
+  /** Toggle the right panel between its current width and a wide (viewport-max)
+   *  width — a one-click "give the in-app browser a proper-sized view". */
+  toggleRightWide(): void {
+    const vw = typeof window !== 'undefined' ? window.innerWidth : RIGHT_MAX;
+    const wide = clampRight(vw - RIGHT_LEAVE);
+    if (this.rightWidth >= wide - 20) {
+      this.setRightWidth(this.rightRestore || 360);
+    } else {
+      this.rightRestore = this.rightWidth;
+      this.setRightWidth(wide);
+    }
   }
 
   setRailWidth(px: number): void {

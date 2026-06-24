@@ -111,6 +111,17 @@
           </button>
         {/each}
       </div>
+      {#if !forceOpen}
+        <button
+          class="icon-btn"
+          onclick={() => ui.toggleRightWide()}
+          title={ui.rightWide ? 'Restore panel width' : 'Expand panel — wider view'}
+          aria-label={ui.rightWide ? 'Restore panel width' : 'Expand panel'}
+          aria-pressed={ui.rightWide}
+        >
+          <Icon name={ui.rightWide ? 'minimize' : 'maximize'} size={13} />
+        </button>
+      {/if}
       <button
         class="icon-btn"
         onclick={() => ui.toggleRight()}
