@@ -24,6 +24,7 @@ import type {
 } from '../api/types';
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
+import { format as formatSql } from 'sql-formatter';
 
 /** Connection kinds the explorer can browse (the four DB engines). */
 export const DB_KINDS = ['mysql', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -283,6 +284,12 @@ export interface QueryTab {
    * so the toggle survives statement changes.
    */
   mask: boolean;
+  /**
+   * Query-level variable values (`:name` / `{name}`) the editor substitutes into
+   * the statement before running. Per-tab (not global); persisted so values
+   * survive reloads.
+   */
+  vars: Record<string, string>;
 }
 
 let nextTabId = 1;
@@ -297,6 +304,7 @@ function blankTab(statement = ''): QueryTab {
     filters: [],
     timeout_ms: null,
     mask: false,
+    vars: {},
   };
 }
 
@@ -509,6 +517,28 @@ class DatabaseStore {
     this.persistTabs();
   }
 
+  /** Set + persist a query-level variable value on the active tab. */
+  setVar(name: string, value: string): void {
+    const t = this.tab;
+    if (!t) return;
+    t.vars = { ...t.vars, [name]: value };
+    this.persistTabs();
+  }
+
+  /** Beautify the active tab's statement with sql-formatter. Applies to the SQL
+   *  engines + the Mongo SQL-subset; redis (one-line commands) has nothing to
+   *  format. Leaves the editor untouched on a parse error. */
+  formatStatement(): void {
+    const t = this.tab;
+    if (!t || !t.statement.trim() || this.queryLanguage === 'redis') return;
+    const dialect: 'mysql' | 'sql' = this.selectedConn?.kind === 'mysql' ? 'mysql' : 'sql';
+    try {
+      this.setStatement(formatSql(t.statement, { language: dialect, keywordCase: 'upper' }));
+    } catch (e) {
+      toasts.error('Format failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   // ── Tab persistence (survive reload / a cut-off session) ──────────────────
   // Open query tabs (statement + name, NOT results) are saved per
   // (workspace, connection) so reopening a connection restores in-progress work.
@@ -523,7 +553,7 @@ class DatabaseStore {
       localStorage.setItem(
         key,
         JSON.stringify({
-          tabs: this.tabs.map((t) => ({ name: t.name, statement: t.statement })),
+          tabs: this.tabs.map((t) => ({ name: t.name, statement: t.statement, vars: t.vars })),
           activeTab: this.activeTab,
           activeDb: this.activeDb,
         }),
@@ -542,13 +572,14 @@ class DatabaseStore {
     if (!raw) return null;
     try {
       const p = JSON.parse(raw) as {
-        tabs?: { name?: string; statement?: string }[];
+        tabs?: { name?: string; statement?: string; vars?: Record<string, string> }[];
         activeTab?: number;
         activeDb?: string | null;
       };
       const tabs = (p.tabs ?? []).map((t) => ({
         ...blankTab(t.statement ?? ''),
         name: t.name || 'Query',
+        vars: t.vars && typeof t.vars === 'object' ? t.vars : {},
       }));
       if (!tabs.length) return null;
       const activeTab = Math.min(Math.max(0, p.activeTab ?? 0), tabs.length - 1);
@@ -1059,7 +1090,11 @@ class DatabaseStore {
   // ── Query ─────────────────────────────────────────────────────────────────
 
   /** Run the active tab's statement (or a given one) and store the result. */
-  async runQuery(statement?: string, node?: string): Promise<QueryResult | null> {
+  async runQuery(
+    statement?: string,
+    node?: string,
+    opts?: { transient?: boolean },
+  ): Promise<QueryResult | null> {
     const id = this.selectedConnId;
     const t = this.tab;
     if (!id) {
@@ -1071,7 +1106,9 @@ class DatabaseStore {
       toasts.error('Statement is empty');
       return null;
     }
-    if (statement !== undefined) t.statement = statement;
+    // A transient run (the selected / current statement, variable-substituted)
+    // must NOT clobber the editor's full multi-statement buffer.
+    if (statement !== undefined && !opts?.transient) t.statement = statement;
     // Cancel any prior in-flight run for this tab before starting a new one
     // (server-side too, so a previous heavy query stops on the DB).
     this.abortQuery(t.id);

@@ -59,6 +59,7 @@
     "marked": "^18.0.5",
     "mermaid": "^11.15.0",
     "perfect-freehand": "^1.2.3",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "sql-formatter": "^15.8.2"
   }
 }
