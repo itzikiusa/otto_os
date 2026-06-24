@@ -629,6 +629,23 @@ impl LocalGit {
         Ok(combined)
     }
 
+    /// Like [`run_remote`] but DON'T error on a non-zero exit — return the raw
+    /// outcome `(success, stdout, stderr, code)` so the caller can interpret an
+    /// *expected* failure (e.g. deleting a remote ref that's already absent)
+    /// instead of bubbling it up. Mirrors [`run_remote`]'s askpass setup.
+    async fn run_remote_raw(
+        &self,
+        args: &[&str],
+        token: Option<String>,
+    ) -> Result<(bool, String, String, Option<i32>)> {
+        let askpass = match token {
+            Some(t) => Some(AskPass::new(&t)?),
+            None => None,
+        };
+        let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
+        self.run_raw(args, &envs).await
+    }
+
     // -- graph context-menu ops (commit / branch / tag) ---------------------
 
     /// Cherry-pick a single commit onto the current branch. A conflicting pick
@@ -677,10 +694,24 @@ impl LocalGit {
 
     /// Delete branch `name` on `origin` (`git push origin --delete <name>`).
     /// Returns the combined push output.
+    ///
+    /// Idempotent: a stale local remote-tracking ref (`refs/remotes/origin/
+    /// <name>`) can outlive the real branch when it was deleted elsewhere
+    /// without a local `fetch --prune`. The UI trusts that tracking ref and
+    /// offers a remote delete, which git then rejects with "remote ref does not
+    /// exist". That isn't a real failure — the desired end state (no such branch
+    /// on origin) already holds — so we swallow it and fall through to prune the
+    /// stale ref, which is what actually clears the phantom from the UI. Without
+    /// this the request errored *before* the prune ran, so the bad menu entry
+    /// persisted and every retry failed.
     pub async fn delete_remote_branch(&self, name: &str, token: Option<String>) -> Result<String> {
-        let out = self
-            .run_remote(&["push", "origin", "--delete", name], token)
+        let (ok, stdout, stderr, code) = self
+            .run_remote_raw(&["push", "origin", "--delete", name], token)
             .await?;
+        let already_gone = !ok && remote_ref_absent(&stderr);
+        if !ok && !already_gone {
+            return Err(upstream_err(&stderr, &stdout, code));
+        }
         // `git push --delete` doesn't reliably prune the LOCAL remote-tracking ref
         // (`refs/remotes/origin/<name>`), so the branch lingers in the UI's REMOTE
         // list until the next `fetch --prune`. Remove it explicitly so the deletion
@@ -689,7 +720,22 @@ impl LocalGit {
         let _ = self
             .run(&["update-ref", "-d", &format!("refs/remotes/origin/{name}")])
             .await;
-        Ok(out)
+        if already_gone {
+            return Ok(format!(
+                "origin/{name} was already absent on origin; pruned the stale local tracking ref"
+            ));
+        }
+        // Happy path: surface git's own summary (stdout + stderr, minus noise),
+        // mirroring `run_remote`.
+        let mut combined = strip_noise(&stdout);
+        let err = strip_noise(&stderr);
+        if !err.is_empty() {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(&err);
+        }
+        Ok(combined)
     }
 
     /// Rename local branch `from` → `to` (`git branch -m`).
@@ -1219,6 +1265,14 @@ fn strip_noise(s: &str) -> String {
         .join("\n")
         .trim_end()
         .to_string()
+}
+
+/// True when `git push origin --delete <ref>` failed only because the ref is
+/// already gone on origin. Git's wording is stable: "remote ref does not
+/// exist". Lets [`LocalGit::delete_remote_branch`] treat that as a no-op
+/// success (the branch is absent either way) rather than a hard error.
+fn remote_ref_absent(stderr: &str) -> bool {
+    stderr.contains("remote ref does not exist")
 }
 
 fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
@@ -1816,6 +1870,60 @@ mod tests {
         assert!(
             !after.iter().any(|b| b.name == "origin/tmp"),
             "origin/tmp pruned from local tracking refs after delete"
+        );
+    }
+
+    /// A stale local remote-tracking ref — the branch was deleted on origin
+    /// elsewhere, without a local `fetch --prune` — must not make a remote
+    /// delete fail. The UI trusts that tracking ref and offers the delete, but
+    /// `git push --delete` rejects an already-absent ref ("remote ref does not
+    /// exist"). The desired end state (no such branch on origin) already holds,
+    /// so the op must succeed AND prune the phantom ref so the REMOTE list
+    /// clears it instead of looping on a doomed delete.
+    #[tokio::test]
+    async fn delete_remote_branch_tolerates_already_absent_ref() {
+        let (_tmp, dir) = fixture();
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "tidy"]);
+        let parent = dir.parent().unwrap();
+        sh_git(parent, &["init", "--bare", "origin.git"]);
+        let bare = parent.join("origin.git");
+        sh_git(&dir, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        sh_git(&dir, &["push", "origin", "main"]);
+        sh_git(&dir, &["branch", "tmp"]);
+        sh_git(&dir, &["push", "origin", "tmp"]);
+        sh_git(&dir, &["fetch", "origin"]);
+
+        // Someone else deletes `tmp` on origin WITHOUT pruning our tracking ref:
+        // origin no longer has it, but `origin/tmp` lingers locally (stale).
+        sh_git(&bare, &["update-ref", "-d", "refs/heads/tmp"]);
+
+        let git = LocalGit::new(&dir);
+        assert!(
+            git.refs()
+                .await
+                .unwrap()
+                .remote
+                .iter()
+                .any(|b| b.name == "origin/tmp"),
+            "stale origin/tmp present before delete"
+        );
+
+        // Must NOT error even though origin has no such ref anymore.
+        git.delete_remote_branch("tmp", None)
+            .await
+            .expect("deleting an already-absent remote branch is a no-op success");
+
+        // …and the stale tracking ref is pruned, clearing the UI.
+        assert!(
+            !git
+                .refs()
+                .await
+                .unwrap()
+                .remote
+                .iter()
+                .any(|b| b.name == "origin/tmp"),
+            "stale origin/tmp pruned after no-op remote delete"
         );
     }
 }
