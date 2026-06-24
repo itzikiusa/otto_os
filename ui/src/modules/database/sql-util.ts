@@ -179,3 +179,39 @@ export function substituteVars(
   for (const r of reps) out = out.slice(0, r.start) + values[r.name] + out.slice(r.end);
   return out;
 }
+
+// ── Variable typing + rendering ─────────────────────────────────────────────
+// Each query variable has a value plus a TYPE (default `string` → quoted) and an
+// `escape` flag. This turns the user's plain input (e.g. `JDBC_USER_NAME`) into a
+// correct SQL literal (`'JDBC_USER_NAME'`) instead of a bare identifier.
+
+export type VarType = 'string' | 'number' | 'raw';
+
+export interface VarSpec {
+  value: string;
+  type: VarType;
+  /** Escape special chars inside a string literal (doubled `'` for SQL, `\` for redis). */
+  escape: boolean;
+}
+
+export function defaultVarSpec(value = ''): VarSpec {
+  return { value, type: 'string', escape: true };
+}
+
+/**
+ * Render a variable as a literal for substitution:
+ * - `number` → the value verbatim (unquoted),
+ * - `raw`    → exactly as typed (no quoting/escaping — for expressions/lists),
+ * - `string` → a quoted literal (`'…'` for SQL, `"…"` for redis), with embedded
+ *   quotes escaped when `escape` is on.
+ */
+export function renderVar(spec: VarSpec, mode: SplitMode = 'sql'): string {
+  if (spec.type === 'number') return spec.value.trim();
+  if (spec.type === 'raw') return spec.value;
+  const quote = mode === 'line' ? '"' : "'";
+  let inner = spec.value;
+  if (spec.escape) {
+    inner = mode === 'line' ? inner.replace(/(["\\])/g, '\\$1') : inner.replace(/'/g, "''");
+  }
+  return `${quote}${inner}${quote}`;
+}

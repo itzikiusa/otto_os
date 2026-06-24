@@ -149,20 +149,36 @@ test.describe('DB Explorer · query editor', () => {
       .toContain('SELECT');
   });
 
-  test('query variables are substituted before running', async ({ page }) => {
+  test('string variable (default) is auto-quoted before running', async ({ page }) => {
     test.skip(connId == null, 'mysql unavailable');
     await openMysql(page);
     await setEditor(page, 'SELECT * FROM customers WHERE email = :em');
-    // The variables bar appears for :em.
+    // The variables bar appears for :em, defaulting to type=string.
     const bar = page.locator('.qe-vars');
     await expect(bar).toBeVisible({ timeout: 10_000 });
     await expect(bar.locator('.qe-var-name', { hasText: 'em' })).toBeVisible();
-    // Fill it with a quoted value (raw textual substitution — user controls quoting).
-    await bar.locator('.qe-var-input').first().fill("'ada@example.com'");
+    await expect(bar.locator('.qe-var-type').first()).toHaveValue('string');
+    // Type the RAW value (no quotes) — default string type auto-quotes it, so
+    // `email = ada@example.com` becomes `email = 'ada@example.com'`.
+    await bar.locator('.qe-var-input').first().fill('ada@example.com');
     await clickRun(page);
     await expect(page.locator('.grid tbody').getByText('ada@example.com').first()).toBeVisible({
       timeout: 15_000,
     });
+  });
+
+  test('number variable is substituted RAW (unquoted)', async ({ page }) => {
+    test.skip(connId == null, 'mysql unavailable');
+    await openMysql(page);
+    // LIMIT requires an unquoted integer — `LIMIT '1'` is a syntax error, so this
+    // only succeeds if the number type substitutes raw (not as a string literal).
+    await setEditor(page, 'SELECT email FROM customers LIMIT :lim');
+    const bar = page.locator('.qe-vars');
+    await expect(bar).toBeVisible({ timeout: 10_000 });
+    await bar.locator('.qe-var-type').first().selectOption('number');
+    await bar.locator('.qe-var-input').first().fill('1');
+    await clickRun(page);
+    await expect(page.locator('.grid tbody tr:not(.spacer)')).toHaveCount(1, { timeout: 15_000 });
   });
 
   test('SQL syntax highlighting is active (token spans rendered)', async ({ page }) => {
