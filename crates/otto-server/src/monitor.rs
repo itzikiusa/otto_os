@@ -324,25 +324,36 @@ enum AgentHealth {
 }
 
 /// Claude stores its OAuth credentials in the macOS Keychain under the generic
-/// password item service `Claude Code-credentials`, account = the login name.
-/// Present + parseable `claudeAiOauth` ⇒ healthy; absent item ⇒ missing; any
-/// other error ⇒ unknown.
+/// password item service `Claude Code-credentials`. We only ever need to know
+/// whether that item EXISTS — its decoded contents were never used (a present
+/// but unparseable item was already treated as healthy).
+///
+/// Crucially we DON'T read the secret value: that pops a Keychain authorization
+/// prompt ("ottod wants to use … Claude Code-credentials") on every fresh
+/// install. ottod isn't on the item's ACL (the `claude` CLI created it), and
+/// our self-signed dev cert's designated requirement changes each rebuild, so a
+/// prior "Always Allow" never matches the new binary. `security
+/// find-generic-password` WITHOUT `-w`/`-g` returns only item METADATA, which
+/// needs no ACL approval and therefore never prompts. Found ⇒ healthy;
+/// errSecItemNotFound (exit 44) ⇒ missing; anything else ⇒ unknown (skip, so we
+/// never false-alarm on a transient error).
+#[cfg(target_os = "macos")]
 fn claude_credentials_present() -> AgentHealth {
-    let account = std::env::var("USER").unwrap_or_default();
-    let entry = match keyring::Entry::new("Claude Code-credentials", &account) {
-        Ok(e) => e,
-        Err(_) => return AgentHealth::Unknown,
-    };
-    match entry.get_password() {
-        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
-            Ok(v) if v.get("claudeAiOauth").is_some() => AgentHealth::Healthy,
-            // Item exists but is unparseable / wrong shape → treat as present
-            // (don't nag); only a truly absent item is "missing".
-            _ => AgentHealth::Healthy,
-        },
-        Err(keyring::Error::NoEntry) => AgentHealth::Missing,
-        Err(_) => AgentHealth::Unknown,
+    let status = std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => AgentHealth::Healthy,
+        Ok(s) if s.code() == Some(44) => AgentHealth::Missing,
+        _ => AgentHealth::Unknown,
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn claude_credentials_present() -> AgentHealth {
+    AgentHealth::Unknown
 }
 
 /// Codex stores credentials in `~/.codex/auth.json` (`tokens.access_token`

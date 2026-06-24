@@ -47,7 +47,6 @@ otto-pty.workspace = true
 reqwest.workspace = true
 chrono.workspace = true
 base64.workspace = true
-keyring.workspace = true
 tokio-tungstenite.workspace = true
 protox.workspace = true
 prost.workspace = true
