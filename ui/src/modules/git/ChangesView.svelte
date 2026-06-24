@@ -1,5 +1,7 @@
 <script lang="ts">
-  // Working-tree changes: stage checkboxes, per-file diff, commit composer.
+  // Working-tree changes: a collapsible folder tree of changed files (stage
+  // checkboxes per file + per folder), per-file diff, and a commit composer with
+  // a separate Summary (title) + Description, like the PR dialog.
   import { api } from '../../lib/api/client';
   import type {
     DiffResp,
@@ -25,7 +27,10 @@
   let selectedPath: string | null = $state(null);
   let diff: DiffResp | null = $state(null);
   let diffLoading = $state(false);
-  let message = $state('');
+  // Commit message is split into a Summary (subject line) + Description (body),
+  // mirroring the PR dialog. They're joined as "subject\n\nbody" on commit.
+  let subject = $state('');
+  let body = $state('');
   let amend = $state(false);
   let committing = $state(false);
   let drafting = $state(false);
@@ -44,7 +49,9 @@
       else next.add(path);
       selected = next;
     } else if (e.shiftKey && lastClicked) {
-      const paths = status.changes.map((x) => x.path);
+      // Range over the tree's VISIBLE order (DFS, skipping collapsed folders),
+      // not the raw status order, so Shift-click selects what looks contiguous.
+      const paths = visibleFiles;
       const a = paths.indexOf(lastClicked);
       const b = paths.indexOf(path);
       if (a >= 0 && b >= 0) {
@@ -116,6 +123,110 @@
   const draftable = $derived(
     status.changes.some((c) => c.staged || c.kind !== 'untracked'),
   );
+
+  // ── Folder tree ─────────────────────────────────────────────────────────────
+  type TFile = { type: 'file'; name: string; change: FileChange };
+  type TFolder = {
+    type: 'folder';
+    name: string;
+    path: string;
+    children: TNode[];
+    files: FileChange[]; // every descendant file (for folder-level stage/discard)
+  };
+  type TNode = TFile | TFolder;
+
+  function sortLevel(nodes: TNode[]): void {
+    nodes.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1; // folders first
+      return a.name.localeCompare(b.name);
+    });
+    for (const n of nodes) if (n.type === 'folder') sortLevel(n.children);
+  }
+
+  function buildTree(changes: FileChange[]): TNode[] {
+    const rootChildren: TNode[] = [];
+    const folders = new Map<string, TFolder>();
+    for (const c of changes) {
+      const parts = c.path.split('/');
+      let children = rootChildren;
+      let prefix = '';
+      for (let i = 0; i < parts.length - 1; i++) {
+        prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
+        let folder = folders.get(prefix);
+        if (!folder) {
+          folder = { type: 'folder', name: parts[i], path: prefix, children: [], files: [] };
+          folders.set(prefix, folder);
+          children.push(folder);
+        }
+        folder.files.push(c);
+        children = folder.children;
+      }
+      children.push({ type: 'file', name: parts[parts.length - 1], change: c });
+    }
+    sortLevel(rootChildren);
+    return rootChildren;
+  }
+
+  const tree = $derived.by(() => buildTree(status.changes));
+
+  // Folders collapse by path. Default expanded — the tree mirrors the flat list
+  // but grouped, so everything is visible until the user folds a folder.
+  let collapsed = $state<Set<string>>(new Set());
+  function toggleFolder(path: string): void {
+    const next = new Set(collapsed);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    collapsed = next;
+  }
+
+  // Visible file paths in DFS order (skipping collapsed folders) — drives the
+  // Shift-click range above.
+  const visibleFiles = $derived.by(() => {
+    const out: string[] = [];
+    const walk = (nodes: TNode[]): void => {
+      for (const n of nodes) {
+        if (n.type === 'file') out.push(n.change.path);
+        else if (!collapsed.has(n.path)) walk(n.children);
+      }
+    };
+    walk(tree);
+    return out;
+  });
+
+  function folderState(node: TFolder): 'all' | 'some' | 'none' {
+    let staged = 0;
+    for (const f of node.files) if (f.staged) staged++;
+    if (staged === 0) return 'none';
+    return staged === node.files.length ? 'all' : 'some';
+  }
+
+  function toggleFolderStage(node: TFolder): void {
+    const allStaged = node.files.every((f) => f.staged);
+    void stagePaths(node.files.map((f) => f.path), !allStaged);
+  }
+
+  function folderMenu(e: MouseEvent, node: TFolder): void {
+    e.preventDefault();
+    const paths = node.files.map((f) => f.path);
+    ctxMenu.show(e, [
+      { label: `Stage folder (${paths.length})`, action: () => void stagePaths(paths, true) },
+      { label: `Unstage folder (${paths.length})`, action: () => void stagePaths(paths, false) },
+      { separator: true },
+      {
+        label: `Discard folder (${paths.length})`,
+        icon: 'trash',
+        danger: true,
+        action: () => void discardPaths(paths, `${node.path}/ — ${paths.length} file${paths.length === 1 ? '' : 's'}`),
+      },
+    ]);
+  }
+
+  // Set a checkbox's (property-only) indeterminate state — for the tri-state
+  // folder checkbox (some-but-not-all descendants staged).
+  function indeterminate(node: HTMLInputElement, value: boolean) {
+    node.indeterminate = value;
+    return { update: (v: boolean) => (node.indeterminate = v) };
+  }
 
   $effect(() => {
     // (re)load the diff whenever a file is selected
@@ -195,8 +306,8 @@
   }
 
   // Ask an agent to draft a Conventional Commits message from the staged diff
-  // (falls back to the working diff when nothing is staged). Fills the box; the
-  // user reviews/edits before committing.
+  // (falls back to the working diff when nothing is staged). The first line fills
+  // Summary, the rest fills Description; the user reviews/edits before committing.
   async function draftMessage(): Promise<void> {
     if (drafting || committing) return;
     drafting = true;
@@ -205,10 +316,20 @@
         `/repos/${repoId}/draft-commit-message`,
         {},
       );
-      message = d.message;
+      const text = d.message.trim();
+      const nl = text.indexOf('\n');
+      if (nl === -1) {
+        subject = text;
+        body = '';
+      } else {
+        subject = text.slice(0, nl).trim();
+        body = text.slice(nl + 1).replace(/^\s*\n/, '').trimEnd();
+      }
       toasts.info(
         'Draft ready',
-        d.from_staged ? 'From staged changes — review and edit.' : 'From working changes (nothing staged) — review and edit.',
+        d.from_staged
+          ? 'From staged changes — review the summary & description.'
+          : 'From working changes (nothing staged) — review & edit.',
       );
     } catch (e) {
       toasts.error('Draft failed', e instanceof Error ? e.message : String(e));
@@ -218,9 +339,6 @@
   }
 
   // ── Mobile (phone) accordion ──────────────────────────────────────────────
-  // Stack the file list + composer over the diff as collapsible, independently-
-  // scrollable sections. Selecting a file collapses the list so the diff gets
-  // the screen; the composer is reachable from its own section header.
   let isMobile = $state(false);
   $effect(() => {
     const mq = window.matchMedia('(max-width: 1024px)');
@@ -237,7 +355,7 @@
   }
 
   // On phones the soft keyboard slides up over the bottom of the page and can
-  // hide the Commit button. When the message box gains focus, pull the whole
+  // hide the Commit button. When a composer field gains focus, pull the whole
   // composer into view so the button stays reachable above the keyboard.
   function scrollComposerIntoView(e: FocusEvent): void {
     if (!isMobile) return;
@@ -251,12 +369,14 @@
     if (committing) return;
     committing = true;
     try {
+      const message = subject.trim() + (body.trim() ? `\n\n${body.trim()}` : '');
       const r = await api.post<{ sha: string }>(`/repos/${repoId}/commit`, {
         message,
         amend,
       });
       toasts.success('Committed', r.sha.slice(0, 8));
-      message = '';
+      subject = '';
+      body = '';
       amend = false;
       const s = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
       onstatus(s);
@@ -269,6 +389,67 @@
     }
   }
 </script>
+
+<!-- ── Recursive tree rows ───────────────────────────────────────────────────-->
+{#snippet fileRow(file: TFile, depth: number)}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="cs-file"
+    class:selected={selectedPath === file.change.path}
+    class:multi={selected.has(file.change.path)}
+    style="padding-inline-start:{6 + depth * 14}px"
+    oncontextmenu={(e) => rowMenu(e, file.change)}
+  >
+    <input
+      type="checkbox"
+      checked={file.change.staged}
+      onchange={() => toggleStage(file.change)}
+      title={file.change.staged ? 'Unstage' : 'Stage'}
+    />
+    <button class="cs-name" onclick={(e) => selectFileMobile(file.change, e)} title={file.change.path}>
+      <span class="kind k-{file.change.kind}">{kindBadge[file.change.kind]}</span>
+      <span class="mono cs-fname">{file.name}</span>
+    </button>
+    <button
+      class="cs-discard"
+      title="Discard changes to this file"
+      aria-label="Discard {file.change.path}"
+      onclick={() => discardOne(file.change)}
+    >
+      <Icon name="trash" size={12} />
+    </button>
+  </div>
+{/snippet}
+
+{#snippet treeNode(node: TNode, depth: number)}
+  {#if node.type === 'folder'}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="cs-folder" style="padding-inline-start:{6 + depth * 14}px" oncontextmenu={(e) => folderMenu(e, node)}>
+      <button class="cs-fold-toggle" onclick={() => toggleFolder(node.path)} aria-label="Toggle folder" aria-expanded={!collapsed.has(node.path)}>
+        <Icon name={collapsed.has(node.path) ? 'chevronRight' : 'chevronDown'} size={12} />
+      </button>
+      <input
+        type="checkbox"
+        use:indeterminate={folderState(node) === 'some'}
+        checked={folderState(node) === 'all'}
+        onchange={() => toggleFolderStage(node)}
+        title="Stage / unstage this folder"
+      />
+      <button class="cs-fold-name" onclick={() => toggleFolder(node.path)} title={node.path}>
+        <Icon name="folder" size={12} />
+        <span class="cs-fold-label">{node.name}</span>
+        <span class="cs-fold-count">{node.files.length}</span>
+      </button>
+    </div>
+    {#if !collapsed.has(node.path)}
+      {#each node.children as child (child.type === 'folder' ? `d:${child.path}` : `f:${child.change.path}`)}
+        {@render treeNode(child, depth + 1)}
+      {/each}
+    {/if}
+  {:else}
+    {@render fileRow(node, depth)}
+  {/if}
+{/snippet}
 
 <div class="changes" class:mobile={isMobile}>
   {#if isMobile}
@@ -310,36 +491,11 @@
     {/if}
 
     <div class="cs-list">
-      <button class="cs-file" class:selected={selectedPath === null} onclick={() => { selectedPath = null; clearSelection(); }}>
+      <button class="cs-file cs-all" class:selected={selectedPath === null} onclick={() => { selectedPath = null; clearSelection(); }}>
         <span class="grow">All changes</span>
       </button>
-      {#each status.changes as c (c.path)}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-          class="cs-file"
-          class:selected={selectedPath === c.path}
-          class:multi={selected.has(c.path)}
-          oncontextmenu={(e) => rowMenu(e, c)}
-        >
-          <input
-            type="checkbox"
-            checked={c.staged}
-            onchange={() => toggleStage(c)}
-            title={c.staged ? 'Unstage' : 'Stage'}
-          />
-          <button class="cs-name" onclick={(e) => selectFileMobile(c, e)} title={c.path}>
-            <span class="kind k-{c.kind}">{kindBadge[c.kind]}</span>
-            <span class="mono cs-path">{c.path}</span>
-          </button>
-          <button
-            class="cs-discard"
-            title="Discard changes to this file"
-            aria-label="Discard {c.path}"
-            onclick={() => discardOne(c)}
-          >
-            <Icon name="trash" size={12} />
-          </button>
-        </div>
+      {#each tree as node (node.type === 'folder' ? `d:${node.path}` : `f:${node.change.path}`)}
+        {@render treeNode(node, 0)}
       {:else}
         <div class="dim" style="padding: 14px 10px; font-size: 12px">Working tree clean.</div>
       {/each}
@@ -347,20 +503,19 @@
 
     <div class="composer">
       <div class="msg-box">
-        <textarea
-          class="input"
-          rows="3"
-          bind:value={message}
-          placeholder="Commit message"
+        <input
+          class="input subject-input"
+          bind:value={subject}
+          placeholder="Summary"
           spellcheck="false"
           onfocus={scrollComposerIntoView}
-        ></textarea>
+        />
         <button
           class="btn small ghost draft-btn"
           disabled={drafting || committing || !draftable}
           onclick={draftMessage}
           title={draftable
-            ? 'Draft a commit message from your staged changes'
+            ? 'Draft a summary + description from your staged changes'
             : 'Stage a file first — drafting can’t see untracked files'}
         >
           {#if drafting}
@@ -370,6 +525,14 @@
           {/if}
         </button>
       </div>
+      <textarea
+        class="input body-input"
+        rows="3"
+        bind:value={body}
+        placeholder="Description (optional)"
+        spellcheck="false"
+        onfocus={scrollComposerIntoView}
+      ></textarea>
       <div class="row">
         <label class="checkbox-row">
           <input type="checkbox" bind:checked={amend} />
@@ -378,7 +541,7 @@
         <span class="grow"></span>
         <button
           class="btn primary"
-          disabled={committing || drafting || (message.trim() === '' && !amend) || (stagedCount === 0 && !amend)}
+          disabled={committing || drafting || (subject.trim() === '' && !amend) || (stagedCount === 0 && !amend)}
           onclick={commit}
         >
           {committing ? 'Committing…' : `Commit${stagedCount > 0 ? ` (${stagedCount})` : ''}`}
@@ -448,11 +611,69 @@
     text-align: start;
     cursor: pointer;
   }
+  .cs-all {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    height: 26px;
+  }
   .cs-file.selected {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .cs-file.multi {
     background: color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+  /* ── Folder rows ─────────────────────────────────────────────────────────── */
+  .cs-folder {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    height: 26px;
+    border-radius: var(--radius-s);
+    padding-inline-end: 6px;
+  }
+  .cs-folder:hover {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  }
+  .cs-fold-toggle {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .cs-fold-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+    height: 26px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    color: var(--text);
+    text-align: start;
+  }
+  .cs-fold-label {
+    font-size: 12px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cs-fold-count {
+    font-size: 10px;
+    color: var(--text-dim);
+    background: var(--surface-2);
+    border-radius: 999px;
+    padding: 0 6px;
+    line-height: 15px;
+    flex-shrink: 0;
   }
   .cs-selbar {
     display: flex;
@@ -476,7 +697,7 @@
     color: var(--text);
     text-align: start;
   }
-  .cs-path {
+  .cs-fname {
     font-size: 11.5px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -544,13 +765,19 @@
   .msg-box {
     position: relative;
   }
-  .msg-box textarea {
+  .subject-input {
     width: 100%;
+    height: 30px;
     padding-inline-end: 78px;
+    font-weight: 600;
+  }
+  .body-input {
+    width: 100%;
+    resize: vertical;
   }
   .draft-btn {
     position: absolute;
-    top: 6px;
+    top: 4px;
     inset-inline-end: 6px;
   }
   .spinner-xs {
@@ -625,10 +852,6 @@
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
     }
-    /* The file list scrolls within a capped height; the composer stays visible
-       below it. When collapsed, only the list hides — head + composer remain.
-       Cap at min(40vh, 260px) so on a short landscape screen the list doesn't
-       eat the whole height and squeeze the composer/diff off-screen. */
     .mobile .cs-list { max-height: min(40vh, 260px); overscroll-behavior: contain; }
     .mobile .changes-side.mob-files-collapsed .cs-list { display: none; }
     .mobile .changes-diff {
@@ -638,23 +861,22 @@
       min-height: 45vh;
       overscroll-behavior: contain;
     }
-    /* Bigger touch targets + legible text. */
     .mobile .cs-head { font-size: 13px; gap: 6px; flex-wrap: wrap; }
     .mobile .cs-name { height: 34px; }
-    .mobile .cs-path { font-size: 13px; }
-    .mobile .cs-file input[type='checkbox'] { width: 17px; height: 17px; }
-    /* Stage/Unstage/Discard pills (head + selection bar) are 22px .btn.small on
-       desktop — too small to tap reliably; give them a finger-sized hit area. */
+    .mobile .cs-fname { font-size: 13px; }
+    .mobile .cs-fold-name { height: 34px; }
+    .mobile .cs-fold-label { font-size: 13px; }
+    .mobile .cs-file input[type='checkbox'],
+    .mobile .cs-folder input[type='checkbox'] { width: 17px; height: 17px; }
     .mobile .cs-head .btn,
     .mobile .cs-selbar .btn { height: 32px; padding: 0 11px; font-size: 12.5px; }
     .mobile .cs-selbar { gap: 6px; padding: 7px 10px; flex-wrap: wrap; }
-    /* The composer textarea drives the keyboard — 16px stops iOS Safari from
-       auto-zooming the page on focus; the commit/draft buttons get full height. */
+    /* 16px stops iOS Safari auto-zoom on focus; full-height commit/draft buttons. */
+    .mobile .composer .subject-input { font-size: 16px; height: 38px; }
     .mobile .composer textarea { font-size: 16px; line-height: 1.45; }
     .mobile .composer .draft-btn { height: 28px; }
     .mobile .composer .btn.primary { height: 36px; padding: 0 16px; font-size: 14px; }
     .mobile .composer .checkbox-row input[type='checkbox'] { width: 17px; height: 17px; }
-    /* Discard button always visible on touch (no hover). */
     .mobile .cs-discard { opacity: 1; padding: 6px 7px; }
   }
 </style>
