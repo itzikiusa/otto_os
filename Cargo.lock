@@ -3123,7 +3123,6 @@ dependencies = [
  "dirs",
  "futures-util",
  "http-body-util",
- "keyring",
  "mime_guess",
  "otto-brokers",
  "otto-canvas",
