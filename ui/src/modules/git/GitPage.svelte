@@ -101,6 +101,13 @@
     }
   });
 
+  // Run the background auto-fetch loop while the Git page is mounted; it polls
+  // only OPEN tabs (reading the live set each round) and stops on unmount.
+  $effect(() => {
+    git.startAutoFetch();
+    return () => git.stopAutoFetch();
+  });
+
   function openRepo(repoId: string): void {
     git.openRepoTab(repoId);
     // Drop any lingering deep-link route so the tab UI fully owns navigation.

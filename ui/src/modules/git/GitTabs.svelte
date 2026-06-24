@@ -5,8 +5,8 @@
   // trailing + button opens a picker of repos not already open. Styled like
   // ApiPage's `.req-tabs`. Workspace-independent — driven entirely by the git
   // store's open-tabs state, which persists across restarts.
-  import { api } from '../../lib/api/client';
-  import type { Repo, RepoStatusResp } from '../../lib/api/types';
+  import { untrack } from 'svelte';
+  import type { Repo } from '../../lib/api/types';
   import { git } from '../../lib/stores/git.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -26,26 +26,23 @@
   const closedRepos = $derived(git.allRepos.filter((r) => !git.openRepoIds.includes(r.id)));
 
   // ── Per-repo status (branch + dirty dot) ─────────────────────────────────
-  // Fetched lazily once per open repo, cached here so the strip shows the live
-  // branch + a clean/dirty indicator without re-querying on every render.
-  let statusCache = $state<Record<string, RepoStatusResp | null>>({});
-
+  // Status is owned by the git store (shared with RepoView + the auto-fetch
+  // loop). Lazily load it once per open repo so the strip shows the live branch
+  // + a clean/dirty indicator; the auto-fetch loop keeps it fresh thereafter.
+  // `untrack` the loads so this effect re-runs only when the OPEN set changes,
+  // not on every status write the loop makes.
   $effect(() => {
-    for (const id of git.openRepoIds) {
-      if (id in statusCache) continue;
-      statusCache[id] = null; // mark in-flight so we don't refetch
-      void api
-        .get<RepoStatusResp>(`/repos/${id}/status`)
-        .then((s) => (statusCache[id] = s))
-        .catch(() => (statusCache[id] = null));
-    }
+    const ids = git.openRepoIds;
+    untrack(() => {
+      for (const id of ids) git.ensureStatus(id);
+    });
   });
 
   function branchOf(id: string): string | null {
-    return statusCache[id]?.branch ?? null;
+    return git.statusById[id]?.branch ?? null;
   }
   function isDirty(id: string): boolean {
-    return (statusCache[id]?.changes.length ?? 0) > 0;
+    return (git.statusById[id]?.changes.length ?? 0) > 0;
   }
 
   function openPicker(e: MouseEvent): void {
@@ -145,6 +142,18 @@
     </div>
   {/each}
   </div>
+  <button
+    class="git-autofetch"
+    class:on={git.autoFetchEnabled}
+    title={git.autoFetchEnabled
+      ? `Auto-fetch on — every ${git.autoFetchIntervalSec}s for open repos. Click to pause.`
+      : 'Auto-fetch paused. Click to fetch open repos automatically.'}
+    aria-label="Toggle auto-fetch for open repositories"
+    aria-pressed={git.autoFetchEnabled}
+    onclick={() => git.setAutoFetch(!git.autoFetchEnabled)}
+  >
+    <Icon name="fetch" size={13} />
+  </button>
   <button class="git-tab-new" title="Open a repository" aria-label="Open a repository" onclick={openPicker}>
     +
   </button>
@@ -260,6 +269,29 @@
     background: var(--surface-2);
     color: var(--accent);
   }
+  /* Auto-fetch toggle: dim when paused, accent when on. */
+  .git-autofetch {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0 8px;
+    border-radius: var(--radius-s);
+    flex-shrink: 0;
+    opacity: 0.55;
+  }
+  .git-autofetch:hover {
+    background: var(--surface-2);
+    color: var(--text);
+    opacity: 1;
+  }
+  .git-autofetch.on {
+    color: var(--accent);
+    opacity: 1;
+  }
   .mono {
     font-family: var(--font-mono);
   }
@@ -294,6 +326,10 @@
     }
     /* Keep the new-repo affordance glued to the end of the scroller so it never
        disappears off-screen behind a long row of tabs. */
+    .git-autofetch {
+      min-width: 40px;
+      min-height: 40px;
+    }
     .git-tab-new {
       position: sticky;
       inset-inline-end: 0;

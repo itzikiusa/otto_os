@@ -1,6 +1,5 @@
 <script lang="ts">
   // One repo: toolbar header + tabs (Graph / Changes / History / Pull Requests).
-  import { api } from '../../lib/api/client';
   import type { MergeResult, Repo, RepoStatusResp } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
@@ -26,7 +25,9 @@
   }
   let { repo, tab, embedded = false, onTab }: Props = $props();
 
-  let status: RepoStatusResp | null = $state(null);
+  // Status is owned by the git store (single source of truth) so the auto-fetch
+  // loop, the tab strip and this toolbar all stay in sync from one fetch.
+  const status = $derived(git.statusById[repo.id] ?? null);
 
   // ── Merge / conflict-resolution state ──────────────────────────────────────
   // The pending merge approval (set when a branch is dropped onto another).
@@ -40,14 +41,12 @@
 
   $effect(() => {
     const id = repo.id;
-    status = null;
     resolving = false;
     merging = false;
     mergeReq = null;
-    void api
-      .get<RepoStatusResp>(`/repos/${id}/status`)
-      .then((s) => (status = s))
-      .catch(() => (status = null));
+    // Status lives in the store; (re)load it for this repo. The auto-fetch loop
+    // keeps it fresh thereafter, and the tab strip shares the same value.
+    void git.refreshStatus(id);
     // Detect an in-progress merge (e.g. left mid-resolution) so we can offer to
     // resume it via a banner.
     void git
@@ -62,8 +61,7 @@
   });
 
   function setStatus(s: RepoStatusResp): void {
-    status = s;
-    if (git.primary?.id === repo.id) git.primaryStatus = s;
+    git.setStatus(repo.id, s);
   }
 
   function requestMerge(source: string, target: string): void {
@@ -104,10 +102,7 @@
   }
 
   function setStatusFromDaemon(): void {
-    void api
-      .get<RepoStatusResp>(`/repos/${repo.id}/status`)
-      .then((s) => setStatus(s))
-      .catch(() => {});
+    void git.refreshStatus(repo.id);
   }
 
   // Bumping this key re-mounts GraphView so its refs/commits effect re-runs
