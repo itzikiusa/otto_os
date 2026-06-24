@@ -2127,6 +2127,29 @@ fn jira_key_from_branch(branch: &str) -> Option<String> {
     None
 }
 
+/// Guarantee the Jira `key` appears in `subject` (a PR title or a commit subject
+/// line). If it's already present anywhere in the subject, return it unchanged;
+/// otherwise prefix `"{key} "`. Deterministic — the drafting agent is *asked* to
+/// include the key, but LLMs forget (especially under the Conventional-Commits
+/// format), so this makes the reference always present, identically for PRs and
+/// commits.
+fn ensure_jira_in_subject(subject: &str, key: &str) -> String {
+    if subject.contains(key) {
+        subject.to_string()
+    } else {
+        format!("{key} {subject}")
+    }
+}
+
+/// Apply [`ensure_jira_in_subject`] to the FIRST LINE of a (possibly multi-line)
+/// commit message, leaving the body untouched.
+fn ensure_jira_in_commit(message: &str, key: &str) -> String {
+    match message.split_once('\n') {
+        Some((subject, rest)) => format!("{}\n{}", ensure_jira_in_subject(subject, key), rest),
+        None => ensure_jira_in_subject(message, key),
+    }
+}
+
 /// Prepend an installed skill (its body + `references/`, via `resolve_skill_inline`)
 /// ahead of a built-in draft prompt — the same shape `run_review_core` uses to
 /// inline its review lenses, so the method travels in the prompt on any provider.
@@ -2159,6 +2182,31 @@ mod commit_pr_draft_tests {
         assert_eq!(jira_key_from_branch("hotfix/no-key-here"), None);
         // An uppercase run without a numeric suffix is not a key.
         assert_eq!(jira_key_from_branch("release/NOTES-final"), None);
+    }
+
+    #[test]
+    fn jira_prefixed_when_missing_left_alone_when_present() {
+        use super::{ensure_jira_in_commit, ensure_jira_in_subject};
+        // Subject: prefix when absent, untouched when already referenced anywhere.
+        assert_eq!(
+            ensure_jira_in_subject("feat(bonus): add id column", "GS-16519"),
+            "GS-16519 feat(bonus): add id column"
+        );
+        assert_eq!(
+            ensure_jira_in_subject("GS-16519 feat: add id", "GS-16519"),
+            "GS-16519 feat: add id"
+        );
+        assert_eq!(
+            ensure_jira_in_subject("feat: add id (GS-16519)", "GS-16519"),
+            "feat: add id (GS-16519)"
+        );
+        // Commit: only the subject line is touched; the body is preserved verbatim.
+        assert_eq!(
+            ensure_jira_in_commit("fix: thing\n\n- detail one\n- detail two", "PROJ-7"),
+            "PROJ-7 fix: thing\n\n- detail one\n- detail two"
+        );
+        // Single-line commit message.
+        assert_eq!(ensure_jira_in_commit("chore: bump", "AB-1"), "AB-1 chore: bump");
     }
 
     #[test]
@@ -2288,7 +2336,12 @@ async fn draft_pr(
         )
         .await
         .map_err(crate::error::ApiError)?;
-    let (title, description) = parse_pr_draft(&reply, &source);
+    let (mut title, description) = parse_pr_draft(&reply, &source);
+    // Deterministically guarantee the Jira key prefixes the title (the agent is
+    // asked to, but may omit it) — the reference must always be present.
+    if let Some(key) = jira_key_from_branch(&source) {
+        title = ensure_jira_in_subject(&title, &key);
+    }
 
     Ok(Json(otto_core::api::DraftPrResp {
         title,
@@ -2375,7 +2428,10 @@ async fn draft_commit_message(
     // carries it. Enrichment (issue summary) is left to the installed skill.
     let branch = git.current_branch().await.unwrap_or_default();
     let jira = match jira_key_from_branch(&branch) {
-        Some(key) => format!("This change is for Jira issue {key}; include `{key}` in the subject line. "),
+        Some(key) => format!(
+            "This change is for Jira issue {key}. Prefix the subject line with `{key}` \
+             (e.g. `{key} type(scope): summary`); do NOT repeat the key in the body. "
+        ),
         None => String::new(),
     };
     let base_prompt = format!(
@@ -2413,6 +2469,12 @@ async fn draft_commit_message(
         .await
         .map_err(crate::error::ApiError)?;
     let message = parse_commit_draft(&reply);
+    // Always carry the Jira key in the subject line (the agent is asked to, but
+    // forgets under the Conventional-Commits format) — same guarantee as the PR.
+    let message = match jira_key_from_branch(&branch) {
+        Some(key) => ensure_jira_in_commit(&message, &key),
+        None => message,
+    };
 
     Ok(Json(otto_core::api::DraftCommitMessageResp {
         message,
