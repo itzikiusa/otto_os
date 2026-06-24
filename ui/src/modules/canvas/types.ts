@@ -188,7 +188,10 @@ export interface AssistReq {
 }
 
 export interface AssistResult {
-  /** A mermaid diagram source (the common path). */
+  /** Excalidraw element SKELETON the agent authored directly (preferred — true
+   *  code blocks, icons, frames). Either an array or `{ elements: [...] }`. */
+  excalidraw?: unknown;
+  /** A mermaid diagram source (fallback — clean auto-layout flowcharts). */
   mermaid: string | null;
   /** Freeform nodes when the agent produced tier-2 JSON instead of mermaid. */
   nodes: Partial<CanvasNode>[];

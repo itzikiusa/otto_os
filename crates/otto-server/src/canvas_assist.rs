@@ -40,7 +40,11 @@ pub struct AssistReq {
 
 #[derive(Debug, Default, Serialize)]
 pub struct AssistResult {
-    /// A mermaid diagram source, when the agent produced one (the common path).
+    /// Excalidraw element SKELETON the agent authored directly (preferred — true
+    /// code blocks, icons, frames). `{ "elements": [...] }` or a bare array.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excalidraw: Option<Value>,
+    /// A mermaid diagram source (fallback — clean auto-layout flowcharts).
     pub mermaid: Option<String>,
     /// Freeform nodes, when the agent produced tier-2 JSON instead of mermaid.
     pub nodes: Vec<Value>,
@@ -137,33 +141,46 @@ pub async fn assist_preview(
 /// the deterministic E2E stub; the rest instructs the real agent.
 fn build_assist_prompt(user_prompt: &str, mode: Option<&str>) -> String {
     let mode_hint = match mode.unwrap_or("auto") {
-        "sequence" => "Prefer a `sequenceDiagram`.",
-        "flow" => "Prefer a `flowchart TD`.",
-        "uml" => "Prefer a `classDiagram`.",
-        "nodes" => "Prefer the tier-2 JSON `{nodes,edges}` form.",
-        _ => "Pick the clearest diagram type for the request.",
+        "sequence" => {
+            "This is a SEQUENCE — emit a ```mermaid `sequenceDiagram` instead of JSON (cleaner)."
+        }
+        "uml" => "This is a CLASS diagram — emit a ```mermaid `classDiagram` instead of JSON.",
+        "flow" | "nodes" => "Emit the Excalidraw JSON (a flowchart / architecture diagram).",
+        _ => {
+            "Pick the best fit: Excalidraw JSON for flowcharts / architecture (richer — code \
+             blocks, icons), or a ```mermaid `sequenceDiagram` / `classDiagram` / `erDiagram`."
+        }
     };
     format!(
         "OTTO_TASK: canvas_assist\n\
-         You are a senior diagramming expert producing a POLISHED, presentation-grade \
-         diagram that will be rendered onto a visual canvas as EDITABLE shapes (via \
-         mermaid-to-excalidraw). Return a SINGLE fenced ```mermaid block.\n\n\
-         MAKE IT TOP-NOTCH:\n\
-         - Choose the RIGHT diagram type for the content. {mode_hint} (flowchart, \
-         sequenceDiagram, classDiagram, stateDiagram-v2 or erDiagram).\n\
-         - For flowcharts pick a sensible direction (`flowchart TD` for processes, `LR` for \
-         pipelines), use rounded process boxes, diamond decisions (`id{{...}}`), and LABEL \
-         the branch edges (`-->|yes|`, `-->|no|`), including error/retry paths.\n\
-         - COLOR-CODE it: define a few tasteful `classDef`s and APPLY them with `class A,B name` \
-         (e.g. classDef start fill:#dcfce7,stroke:#16a34a; classDef proc fill:#eef2ff,stroke:#6366f1; \
-         classDef decision fill:#fef9c3,stroke:#ca8a04; classDef io fill:#f3e8ff,stroke:#9333ea; \
-         classDef done fill:#fee2e2,stroke:#dc2626).\n\
-         - GROUP related steps in `subgraph` blocks — use them as services / phases / swimlanes.\n\
-         - Prefix node labels with a fitting EMOJI icon where it helps readability.\n\
-         - Be EXHAUSTIVE and accurate: include every step and branch the request implies; keep \
-         node text short; label edges with the data/event flowing.\n\
-         - Output VALID mermaid ONLY inside the fence (no nested fences, no stray prose, no \
-         comments that break parsing).\n\
+         You are an expert diagrammer drawing onto an EXCALIDRAW canvas. PREFER a single fenced \
+         ```json block of the form {{\"elements\": [ ...element skeletons... ]}} — the app turns \
+         it into real, EDITABLE Excalidraw shapes. {mode_hint}\n\n\
+         ELEMENT SKELETON (use exactly this shape):\n\
+         - Shape: {{\"type\":\"rectangle\"|\"ellipse\"|\"diamond\",\"id\":\"n1\",\"x\":int,\"y\":int,\
+         \"width\":int,\"height\":int,\"backgroundColor\":\"#hex\",\"strokeColor\":\"#hex\",\
+         \"fillStyle\":\"solid\",\"roundness\":{{\"type\":3}},\
+         \"label\":{{\"text\":\"...\",\"fontSize\":16,\"fontFamily\":2,\"strokeColor\":\"#hex\"}}}}\n\
+         - Arrow (connect by node id; the app routes it): {{\"type\":\"arrow\",\"x\":int,\"y\":int,\
+         \"start\":{{\"id\":\"n1\"}},\"end\":{{\"id\":\"n2\"}},\"strokeColor\":\"#94a3b8\",\
+         \"label\":{{\"text\":\"yes\"}}}}\n\
+         - fontFamily: 2 = normal, 3 = CODE (monospace).\n\n\
+         LAYOUT — you own the coordinates, make it clean:\n\
+         - Lay out left→right (pipelines) or top→down (processes); space nodes ~80px apart with \
+         NO overlaps. Unique id per node; connect everything with arrows.\n\
+         - SIZE EVERY BOX TO ITS TEXT so nothing clips: width >= 28 + ~9*chars-of-longest-line, \
+         height >= 28 + ~22*number-of-lines.\n\n\
+         STYLE — top-notch, presentation-grade:\n\
+         - Colour-code by role: start fill #dcfce7 stroke #16a34a; process fill #eef2ff stroke \
+         #6366f1; decision (DIAMOND) fill #fef9c3 stroke #ca8a04; io fill #f3e8ff stroke #9333ea; \
+         data fill #ecfeff stroke #0891b2; done/error fill #fee2e2 stroke #dc2626. Dark readable text.\n\
+         - Decisions are DIAMONDS with labeled out-arrows (yes/no), including error/retry paths.\n\
+         - CODE BLOCK: a rectangle, backgroundColor #0f172a, strokeColor #334155, label fontFamily:3 \
+         strokeColor #e2e8f0 with the REAL code (\\n between lines) — make it WIDE + TALL enough for \
+         every line (size to the longest line).\n\
+         - Prefix labels with a fitting EMOJI icon; label arrows with the data/event flowing.\n\
+         - Be exhaustive + accurate; keep node text short (except code blocks). VALID JSON only \
+         inside the fence (no trailing commas, no comments).\n\
          You may add ONE short sentence of prose before the block.\n\n\
          Request: {user_prompt}\n"
     )
@@ -172,6 +189,22 @@ fn build_assist_prompt(user_prompt: &str, mode: Option<&str>) -> String {
 /// Parse an assist reply: a ```mermaid fence wins; otherwise a ```json (or bare)
 /// `{nodes,edges}` object; otherwise the raw text becomes the note. Never panics.
 fn parse_assist(raw: &str) -> AssistResult {
+    // Excalidraw element SKELETON (preferred): a ```json (or bare) object with a
+    // non-empty `elements` array.
+    if let Some(v) = otto_swarm::recruiter::extract_json(raw) {
+        let has_elements = v
+            .get("elements")
+            .and_then(|e| e.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if has_elements {
+            return AssistResult {
+                excalidraw: Some(v),
+                note: prose_before_fence(raw),
+                ..Default::default()
+            };
+        }
+    }
     if let Some(src) = extract_fenced(raw, "mermaid") {
         return AssistResult {
             mermaid: Some(src),
@@ -249,10 +282,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_prefers_excalidraw_elements() {
+        let raw = "Here.\n\n```json\n{\"elements\":[{\"type\":\"rectangle\",\"id\":\"a\",\"x\":0,\"y\":0}]}\n```";
+        let r = parse_assist(raw);
+        assert!(r.excalidraw.is_some(), "an elements payload → excalidraw");
+        assert!(r.mermaid.is_none());
+        assert!(r.nodes.is_empty());
+        assert_eq!(r.note, "Here.");
+    }
+
+    #[test]
     fn parse_prefers_mermaid_fence() {
         let raw = "Here you go.\n\n```mermaid\nsequenceDiagram\n  A->>B: hi\n```";
         let r = parse_assist(raw);
         assert_eq!(r.mermaid.as_deref(), Some("sequenceDiagram\n  A->>B: hi"));
+        assert!(r.excalidraw.is_none());
         assert!(r.nodes.is_empty());
         assert_eq!(r.note, "Here you go.");
     }

@@ -58,14 +58,28 @@
         toasts.error('Canvas was reloaded', 'Open the canvas and try the draw again.');
         return;
       }
-      if (!res.mermaid) {
+      // Prefer the agent's Excalidraw element JSON (true code blocks, icons,
+      // frames); fall back to Mermaid → mermaid-to-excalidraw for clean
+      // auto-layout flowcharts. Both end as an Excalidraw element SKELETON that
+      // convertToExcalidrawElements turns into real, editable elements.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const xd = (res as any).excalidraw;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let skeleton: any[] | null = null;
+      if (xd) {
+        skeleton = Array.isArray(xd) ? xd : Array.isArray(xd.elements) ? xd.elements : null;
+      }
+      if (!skeleton && res.mermaid) {
+        const { parseMermaidToExcalidraw } = await import('@excalidraw/mermaid-to-excalidraw');
+        const parsed = await parseMermaidToExcalidraw(res.mermaid);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        skeleton = parsed.elements as any[];
+      }
+      if (!skeleton || !skeleton.length) {
         toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
         return;
       }
-      const { parseMermaidToExcalidraw } = await import('@excalidraw/mermaid-to-excalidraw');
-      const parsed = await parseMermaidToExcalidraw(res.mermaid);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const fresh = convert(parsed.elements as any[]);
+      const fresh = convert(skeleton);
       if (!fresh.length) {
         toasts.info('Nothing to draw', 'The diagram came back empty.');
         return;
@@ -142,59 +156,6 @@
     }
   }
 
-  // A curated starter LIBRARY of reusable blocks — including a CODE BLOCK (dark,
-  // monospace) and service / database / queue / decision / note / actor blocks.
-  // They show in Excalidraw's library panel so you can drag them onto the canvas.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function buildStarterLibrary(): any[] {
-    if (!convert) return [];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mk = (id: string, skeleton: any[]) => ({
-      id: `otto-${id}`,
-      status: 'unpublished' as const,
-      created: 1,
-      elements: convert!(skeleton),
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const box = (o: any) => ({
-      type: o.shape ?? 'rectangle',
-      x: 0,
-      y: 0,
-      width: o.w,
-      height: o.h,
-      backgroundColor: o.bg,
-      strokeColor: o.stroke,
-      fillStyle: 'solid',
-      ...(o.shape === 'diamond' ? {} : { roundness: { type: 3 } }),
-      label: {
-        text: o.text,
-        fontSize: o.fs ?? 16,
-        fontFamily: o.mono ? 3 : 2,
-        strokeColor: o.fg,
-        ...(o.mono || o.left ? { textAlign: 'left', verticalAlign: 'top' } : {}),
-      },
-    });
-    try {
-      return [
-        mk('code', [
-          box({
-            w: 360, h: 170, bg: '#0f172a', stroke: '#334155', fg: '#e2e8f0', mono: true, fs: 16,
-            text: '// code\nfunction example(x) {\n  return x * 2;\n}',
-          }),
-        ]),
-        mk('service', [box({ w: 200, h: 92, bg: '#eef2ff', stroke: '#6366f1', fg: '#312e81', fs: 18, text: '⚙️ Service' })]),
-        mk('database', [box({ shape: 'ellipse', w: 168, h: 104, bg: '#ecfeff', stroke: '#0891b2', fg: '#155e75', text: '🗄️ Database' })]),
-        mk('queue', [box({ w: 200, h: 82, bg: '#fff7ed', stroke: '#ea580c', fg: '#7c2d12', fs: 18, text: '🛞 Queue' })]),
-        mk('decision', [box({ shape: 'diamond', w: 190, h: 124, bg: '#fef9c3', stroke: '#ca8a04', fg: '#713f12', text: 'Decision?' })]),
-        mk('note', [box({ w: 200, h: 120, bg: '#fef9c3', stroke: '#eab308', fg: '#713f12', left: true, text: '📝 Note…' })]),
-        mk('actor', [box({ shape: 'ellipse', w: 122, h: 122, bg: '#f0fdf4', stroke: '#16a34a', fg: '#14532d', text: '👤 User' })]),
-        mk('start', [box({ shape: 'ellipse', w: 144, h: 72, bg: '#dcfce7', stroke: '#16a34a', fg: '#14532d', text: '▶ Start' })]),
-      ];
-    } catch {
-      return [];
-    }
-  }
-
   // Build Excalidraw initialData from the opaque doc. Tolerates our older
   // Scene-shaped docs (no `elements`) by starting empty.
   function initialData() {
@@ -207,7 +168,6 @@
         viewBackgroundColor: raw?.appState?.viewBackgroundColor ?? '#ffffff',
       },
       files: raw?.files ?? {},
-      libraryItems: buildStarterLibrary(),
       scrollToContent: elements.length > 0,
     };
   }
