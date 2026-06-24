@@ -949,6 +949,37 @@ impl LocalGit {
             // Distinguish "nothing to do" from a real merge.
             let up_to_date =
                 combined.contains("Already up to date") || combined.contains("Already up-to-date");
+            // The MergeCommit strategy promises "always create a merge commit".
+            // git's `merge --no-ff` still refuses when <source> is already an
+            // ancestor of <target> ("Already up to date") — but the user may want
+            // to RECORD the integration anyway (e.g. closing a GitFlow release
+            // into develop after develop already contains it). Build an explicit
+            // 2-parent merge commit by hand and fast-forward onto it: its tree is
+            // target's current tree, so the working tree is left untouched.
+            if up_to_date && matches!(strategy, LocalMergeStrategy::MergeCommit) {
+                let target_head = self.run(&["rev-parse", "HEAD"]).await?.trim().to_string();
+                let source_head = self.run(&["rev-parse", source]).await?.trim().to_string();
+                let tree = self.run(&["rev-parse", "HEAD^{tree}"]).await?.trim().to_string();
+                let msg = format!("Merge branch '{source}' into {target}");
+                let new_commit = self
+                    .run(&[
+                        "commit-tree", &tree, "-p", &target_head, "-p", &source_head, "-m", &msg,
+                    ])
+                    .await?
+                    .trim()
+                    .to_string();
+                // Advance the checked-out target branch onto the new merge commit
+                // (it descends from target_head, so this is a clean fast-forward).
+                self.run(&["merge", "--ff-only", &new_commit]).await?;
+                let note = if stashed { self.pop_after_merge().await } else { None };
+                return Ok(MergeResult {
+                    status: "merged".into(),
+                    commit: Some(new_commit),
+                    conflicted_files: Vec::new(),
+                    repo_status: self.status().await?,
+                    note,
+                });
+            }
             // `--squash` leaves changes staged but creates NO commit; the caller
             // must still run merge/commit, so report commit = None.
             let commit = if up_to_date || matches!(strategy, LocalMergeStrategy::Squash) {
@@ -1701,5 +1732,46 @@ mod tests {
         assert!(DiffTarget::parse("bogus").is_err());
         assert!(DiffTarget::parse("range:onlyone").is_err());
         assert!(DiffTarget::parse("commit:").is_err());
+    }
+
+    /// MergeCommit must "always create a merge commit" — even when <source> is an
+    /// ancestor of <target> (the "close the already-merged release into develop"
+    /// case), where plain `merge --no-ff` would just say "Already up to date".
+    #[tokio::test]
+    async fn merge_commit_forces_a_commit_when_up_to_date() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        // Commit the fixture's dirty state so the working tree is clean to merge.
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "tidy"]);
+        let main_head = git.run(&["rev-parse", "HEAD"]).await.unwrap().trim().to_string();
+        // `rel` points at an ANCESTOR of main's tip → already contained, so a
+        // plain merge would be "Already up to date" with no commit.
+        let ancestor = git.run(&["rev-parse", "HEAD~1"]).await.unwrap().trim().to_string();
+        sh_git(&dir, &["branch", "rel", &ancestor]);
+
+        let res = git
+            .merge_branch("rel", "main", LocalMergeStrategy::MergeCommit, false)
+            .await
+            .unwrap();
+
+        assert_eq!(res.status, "merged", "forced a merge even though up to date");
+        let new_head = res.commit.expect("a merge commit sha");
+        assert_ne!(new_head, main_head, "main advanced onto the new merge commit");
+        // …a real 2-parent merge (target tip + the source).
+        let parents = git
+            .run(&["rev-list", "--parents", "-n", "1", "HEAD"])
+            .await
+            .unwrap();
+        assert_eq!(
+            parents.split_whitespace().count() - 1,
+            2,
+            "forced merge commit has two parents"
+        );
+        // No working-tree churn — the merge tree equals main's tree.
+        assert!(
+            git.status().await.unwrap().changes.is_empty(),
+            "working tree stays clean"
+        );
     }
 }
