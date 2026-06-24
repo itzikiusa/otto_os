@@ -42,9 +42,46 @@
   let destroyed = false;
   let generating = $state(false);
 
-  /** Agent generation → editable shapes. Asks the agent for a diagram (Mermaid),
-   *  converts it to NATIVE Excalidraw elements (mermaid-to-excalidraw), drops them
-   *  to the right of any existing content, and auto-fits the view to them. */
+  // Make an agent's element skeleton safe for convertToExcalidrawElements (which
+  // throws on the first bad element): keep only known shape types with unique ids,
+  // coerce geometry to numbers, strip `roundness` from non-rectangles, and drop
+  // arrows whose start/end id doesn't resolve (or that carry no geometry at all).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function sanitizeSkeleton(raw: any[]): any[] {
+    const SHAPES = new Set(['rectangle', 'ellipse', 'diamond', 'text', 'frame', 'image']);
+    const seen = new Set<string>();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const shapes: any[] = [];
+    for (const e of raw) {
+      if (!e || typeof e.type !== 'string' || !SHAPES.has(e.type)) continue;
+      if (typeof e.id === 'string') {
+        if (seen.has(e.id)) continue;
+        seen.add(e.id);
+      }
+      const el = { ...e };
+      el.x = Number(el.x) || 0;
+      el.y = Number(el.y) || 0;
+      if (el.width != null) el.width = Number(el.width) || undefined;
+      if (el.height != null) el.height = Number(el.height) || undefined;
+      if (el.type !== 'rectangle' && el.roundness) delete el.roundness;
+      shapes.push(el);
+    }
+    const ids = new Set(shapes.filter((e) => typeof e.id === 'string').map((e) => e.id));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const arrows: any[] = [];
+    for (const e of raw) {
+      if (!e || (e.type !== 'arrow' && e.type !== 'line')) continue;
+      if (e.start && !ids.has(e.start.id)) continue; // dangling start
+      if (e.end && !ids.has(e.end.id)) continue; // dangling end
+      if (!e.start && !e.end && !Array.isArray(e.points)) continue; // no geometry
+      arrows.push({ ...e, x: Number(e.x) || 0, y: Number(e.y) || 0 });
+    }
+    return [...shapes, ...arrows];
+  }
+
+  /** Agent generation → editable shapes. Asks the agent for a diagram, converts
+   *  the returned Excalidraw skeleton (or Mermaid) to NATIVE elements, drops them
+   *  near existing content, and auto-fits the view. */
   export async function generate(prompt: string): Promise<void> {
     const p = prompt.trim();
     if (!p || generating || !liveApi || !convert) return;
@@ -79,7 +116,22 @@
         toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
         return;
       }
-      const fresh = convert(skeleton);
+      // convertToExcalidrawElements THROWS on the first bad element (a dangling
+      // arrow id, roundness on a non-rectangle, a NaN field) — which would kill a
+      // whole 40-node diagram. Sanitize first, then convert defensively.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let fresh: any[];
+      try {
+        fresh = convert(sanitizeSkeleton(skeleton));
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[canvas] convertToExcalidrawElements failed:', err);
+        toasts.error(
+          'Could not render the diagram',
+          err instanceof Error ? err.message : String(err),
+        );
+        return;
+      }
       if (!fresh.length) {
         toasts.info('Nothing to draw', 'The diagram came back empty.');
         return;
