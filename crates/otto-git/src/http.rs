@@ -785,6 +785,10 @@ async fn repo_log<S: GitCtx>(
 #[derive(Deserialize)]
 struct DiffQuery {
     target: Option<String>,
+    /// Scope the diff to a single file (`-- <path>`). The Changes view passes
+    /// this when a file is selected so it computes only that file's diff instead
+    /// of the whole working tree.
+    path: Option<String>,
 }
 
 async fn repo_diff<S: GitCtx>(
@@ -798,7 +802,7 @@ async fn repo_diff<S: GitCtx>(
         None => DiffTarget::Worktree,
         Some(t) => DiffTarget::parse(t)?,
     };
-    Ok(Json(git.diff(target).await?))
+    Ok(Json(git.diff(target, q.path.as_deref()).await?))
 }
 
 async fn repo_stage<S: GitCtx>(

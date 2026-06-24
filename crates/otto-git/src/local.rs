@@ -168,7 +168,13 @@ impl LocalGit {
     }
 
     pub async fn status(&self) -> Result<RepoStatusResp> {
-        let out = self.run(&["status", "--porcelain=v2", "--branch"]).await?;
+        // `--untracked-files=all` lists every untracked FILE individually instead
+        // of collapsing an entirely-new directory (e.g. `.claude/skills/` with
+        // 80+ files) into a single entry — so the Changes view can show/stage
+        // them per-file. Gitignored paths are still excluded.
+        let out = self
+            .run(&["status", "--porcelain=v2", "--branch", "--untracked-files=all"])
+            .await?;
         Ok(crate::parse::parse_status(&out))
     }
 
@@ -382,32 +388,58 @@ impl LocalGit {
         })
     }
 
-    pub async fn diff(&self, target: DiffTarget) -> Result<DiffResp> {
+    /// Compute a diff for `target`. When `pathspec` is `Some(path)`, every git
+    /// invocation is scoped to that single file (`-- <path>`) — so selecting one
+    /// file in the UI computes ONLY that file's diff instead of the entire
+    /// working tree (which, for the `Working` target, also runs a `--no-index`
+    /// diff per untracked file — seconds of work on a large changeset). `None`
+    /// returns the full diff (the "All changes" view, commit/range views).
+    pub async fn diff(&self, target: DiffTarget, pathspec: Option<&str>) -> Result<DiffResp> {
+        // Trailing `-- <path>` appended to each command when a pathspec is given.
+        let path_args: Vec<&str> = match pathspec {
+            Some(p) if !p.is_empty() => vec!["--", p],
+            _ => Vec::new(),
+        };
+        let with_path = |base: &[&str]| -> Vec<String> {
+            base.iter()
+                .chain(path_args.iter())
+                .map(|s| s.to_string())
+                .collect()
+        };
+        let run_v = |args: Vec<String>| async move {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.run(&refs).await
+        };
+        let run_raw_v = |args: Vec<String>| async move {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.run_raw(&refs, &[]).await
+        };
         let out = match &target {
-            DiffTarget::Worktree => self.run(&["diff", "--no-color", "-U3", "-M"]).await?,
+            DiffTarget::Worktree => run_v(with_path(&["diff", "--no-color", "-U3", "-M"])).await?,
             DiffTarget::Working => {
                 // Staged + unstaged tracked changes vs HEAD (a staged-new file
                 // shows as fully added). Falls back to cached+worktree when HEAD
                 // is unborn (no commits yet).
-                let (head_ok, head_out, _, _) = self
-                    .run_raw(&["diff", "--no-color", "-U3", "-M", "HEAD"], &[])
-                    .await?;
+                let (head_ok, head_out, _, _) =
+                    run_raw_v(with_path(&["diff", "--no-color", "-U3", "-M", "HEAD"])).await?;
                 let mut out = if head_ok {
                     head_out
                 } else {
-                    let mut s = self
-                        .run(&["diff", "--no-color", "-U3", "-M", "--cached"])
+                    let mut s = run_v(with_path(&["diff", "--no-color", "-U3", "-M", "--cached"]))
                         .await
                         .unwrap_or_default();
-                    s.push_str(&self.run(&["diff", "--no-color", "-U3", "-M"]).await.unwrap_or_default());
+                    s.push_str(
+                        &run_v(with_path(&["diff", "--no-color", "-U3", "-M"]))
+                            .await
+                            .unwrap_or_default(),
+                    );
                     s
                 };
-                // Untracked files: render each as a fully-added diff. `git diff
-                // --no-index` exits non-zero when content differs — run_raw is
-                // tolerant of that.
-                let (_, untracked, _, _) = self
-                    .run_raw(&["ls-files", "--others", "--exclude-standard"], &[])
-                    .await?;
+                // Untracked files: render each as a fully-added diff. Scope the
+                // `ls-files` to the pathspec so a single-file request only checks
+                // that one path (and runs at most one `--no-index` diff).
+                let (_, untracked, _, _) =
+                    run_raw_v(with_path(&["ls-files", "--others", "--exclude-standard"])).await?;
                 for f in untracked.lines().filter(|l| !l.trim().is_empty()) {
                     let (_, stdout, _, _) = self
                         .run_raw(
@@ -420,17 +452,14 @@ impl LocalGit {
                 out
             }
             DiffTarget::Staged => {
-                self.run(&["diff", "--no-color", "-U3", "-M", "--cached"])
-                    .await?
+                run_v(with_path(&["diff", "--no-color", "-U3", "-M", "--cached"])).await?
             }
             DiffTarget::Commit(sha) => {
-                self.run(&["show", "--no-color", "-U3", "-M", "--format=", sha])
-                    .await?
+                run_v(with_path(&["show", "--no-color", "-U3", "-M", "--format=", sha])).await?
             }
             DiffTarget::Range(a, b) => {
                 let range = format!("{a}..{b}");
-                self.run(&["diff", "--no-color", "-U3", "-M", &range])
-                    .await?
+                run_v(with_path(&["diff", "--no-color", "-U3", "-M", &range])).await?
             }
         };
         Ok(crate::parse::parse_diff(&out))
@@ -1560,13 +1589,13 @@ mod tests {
         assert_eq!(one[0].subject, "first commit");
 
         // staged diff: rename detected, new file present
-        let staged = git.diff(DiffTarget::Staged).await.unwrap();
+        let staged = git.diff(DiffTarget::Staged, None).await.unwrap();
         let dren = staged.files.iter().find(|f| f.path == "d.txt").unwrap();
         assert_eq!(dren.old_path.as_deref(), Some("c.txt"));
         assert!(staged.files.iter().any(|f| f.path == "f.txt"));
 
         // worktree diff: a.txt with one added line numbered 4 (untracked excluded)
-        let wt = git.diff(DiffTarget::Worktree).await.unwrap();
+        let wt = git.diff(DiffTarget::Worktree, None).await.unwrap();
         assert!(!wt.files.iter().any(|f| f.path == "e.txt"));
         let fa = wt.files.iter().find(|f| f.path == "a.txt").unwrap();
         let adds: Vec<_> = fa.hunks[0]
@@ -1580,14 +1609,14 @@ mod tests {
 
         // commit diff of HEAD (the a.txt change)
         let head = git.log(1, 0, false).await.unwrap()[0].sha.clone();
-        let cd = git.diff(DiffTarget::Commit(head.clone())).await.unwrap();
+        let cd = git.diff(DiffTarget::Commit(head.clone()), None).await.unwrap();
         assert_eq!(cd.files.len(), 1);
         assert_eq!(cd.files[0].path, "a.txt");
 
         // range diff
         let first = git.log(1, 1, false).await.unwrap()[0].sha.clone();
         let rd = git
-            .diff(DiffTarget::Range(first.clone(), head.clone()))
+            .diff(DiffTarget::Range(first.clone(), head.clone()), None)
             .await
             .unwrap();
         assert_eq!(rd.files.len(), 1);

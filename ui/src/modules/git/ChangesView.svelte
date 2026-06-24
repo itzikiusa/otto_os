@@ -241,8 +241,13 @@
   async function loadDiff(target: string, focusPath?: string): Promise<void> {
     diffLoading = true;
     try {
-      const d = await api.get<DiffResp>(`/repos/${repoId}/diff?target=${encodeURIComponent(target)}`);
-      diff = focusPath ? { files: d.files.filter((f) => f.path === focusPath) } : d;
+      // Scope to the selected file SERVER-SIDE (`&path=`) so we don't recompute
+      // the whole working diff on every click and filter it down here.
+      const scope = focusPath ? `&path=${encodeURIComponent(focusPath)}` : '';
+      const d = await api.get<DiffResp>(
+        `/repos/${repoId}/diff?target=${encodeURIComponent(target)}${scope}`,
+      );
+      diff = d;
     } catch {
       diff = { files: [] };
     } finally {
