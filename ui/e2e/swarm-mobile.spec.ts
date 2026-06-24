@@ -128,7 +128,7 @@ test('all five tabs are reachable (switcher scrolls on a phone) and each fits', 
   // Switch through every view; each must render its root and keep the page fitting.
   const cases: { tab: string; root: string }[] = [
     { tab: 'Org', root: '.tree' },
-    { tab: 'Graph', root: '.graph-wrap' },
+    { tab: 'Graph', root: '.agent-graph' },
     { tab: 'Board', root: '.kanban' },
     { tab: 'Runs', root: '.runs' },
     { tab: 'Feed', root: '.board' },
@@ -187,25 +187,30 @@ test('Kanban view: columns scroll horizontally, each column body scrolls', async
   await expectFitsWidth(page);
 });
 
-test('Graph view: the DAG renders and the canvas pans/fits on a phone', async ({ page }) => {
+test('Graph view: the agent org graph renders + the task rail; canvas pans/fits', async ({
+  page,
+}) => {
   await openSwarm(page);
   await switchView(page, 'Graph');
-  await expect(page.locator('.graph-wrap')).toBeVisible();
+  await expect(page.locator('.agent-graph')).toBeVisible();
 
-  // Seeded tasks + dependency edges → nodes render.
-  await expect(page.locator('.graph-wrap .node').first()).toBeVisible({ timeout: 10_000 });
-  expect(await page.locator('.graph-wrap .node').count()).toBeGreaterThan(2);
+  // Nodes are TEAM MEMBERS now (seeded preset org tree → several agents).
+  await expect(page.locator('.agent-graph .node').first()).toBeVisible({ timeout: 10_000 });
+  expect(await page.locator('.agent-graph .node').count()).toBeGreaterThan(2);
 
-  // The canvas is the pan surface (touch-action:none so drag-to-pan works), and
-  // the graph fits the page width (auto-fit on a phone scales it down).
+  // The canvas is the pan surface (touch-action:none so drag-to-pan works).
   const touch = await page
-    .locator('.graph-wrap .canvas')
+    .locator('.agent-graph .canvas')
     .evaluate((el) => getComputedStyle(el).touchAction);
   expect(touch).toBe('none');
 
-  // The fit control re-centers without error.
-  await page.locator('.graph-wrap .controls [aria-label="fit"]').click();
-  await expect(page.locator('.graph-wrap .node').first()).toBeVisible();
+  // The recenter control re-centers without error.
+  await page.locator('.agent-graph .controls [aria-label="recenter"]').click();
+  await expect(page.locator('.agent-graph .node').first()).toBeVisible();
+
+  // The side rail shows the per-member brief + the searchable task list.
+  await expect(page.locator('.agent-graph .side .brief')).toBeVisible();
+  await expect(page.locator('.agent-graph .side .tasks .search-input')).toBeVisible();
 
   // The page never overflows horizontally — the graph canvas clips/pans inside
   // its own bounds at every width.

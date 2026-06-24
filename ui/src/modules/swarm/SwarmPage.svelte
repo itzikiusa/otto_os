@@ -6,7 +6,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import SessionView from '../agents/SessionView.svelte';
   import OrgTree from './OrgTree.svelte';
-  import RunGraph from './RunGraph.svelte';
+  import AgentGraph from './AgentGraph.svelte';
   import KanbanBoard from './KanbanBoard.svelte';
   import RunsList from './RunsList.svelte';
   import BoardFeed from './BoardFeed.svelte';
@@ -351,7 +351,7 @@
           {#if view === 'tree'}
             <OrgTree onedit={(a) => openEditor(a)} onruntask={runForAgent} onadd={openEditorWithParent} onduplicate={duplicateAgent} />
           {:else if view === 'graph'}
-            <RunGraph />
+            <AgentGraph />
           {:else if view === 'kanban'}
             <KanbanBoard onrecruit={() => (showRecruit = true)} />
           {:else if view === 'runs'}
