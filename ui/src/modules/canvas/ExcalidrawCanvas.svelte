@@ -1,3 +1,13 @@
+<script module lang="ts">
+  // The currently-mounted Excalidraw API. Held at MODULE scope (only one canvas
+  // is open at a time) so an IN-FLIGHT generate() survives a component remount
+  // during the possibly-long agent call — otherwise the instance `excaliApi` is
+  // nulled by onDestroy and the resumed generate hits a dead reference (the
+  // "null is not an object (s.getSceneElements)" crash).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let liveApi: any = null;
+</script>
+
 <script lang="ts">
   // The real Excalidraw editor, embedded. Excalidraw is React, so we mount it
   // React-in-Svelte: a host div + `createRoot` + `createElement(Excalidraw)`.
@@ -37,10 +47,17 @@
    *  to the right of any existing content, and auto-fits the view to them. */
   export async function generate(prompt: string): Promise<void> {
     const p = prompt.trim();
-    if (!p || generating || !excaliApi || !convert) return;
+    if (!p || generating || !liveApi || !convert) return;
     generating = true;
     try {
       const res = await canvas.assist(p, 'flow');
+      // Re-read the LIVE Excalidraw API after the (possibly long) agent call — the
+      // component may have remounted while we waited; draw to whatever's mounted.
+      const ex = liveApi;
+      if (!ex) {
+        toasts.error('Canvas was reloaded', 'Open the canvas and try the draw again.');
+        return;
+      }
       if (!res.mermaid) {
         toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
         return;
@@ -54,7 +71,7 @@
         return;
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const existing = excaliApi.getSceneElements() as any[];
+      const existing = ex.getSceneElements() as any[];
       let dx = 0;
       if (existing.length) {
         const maxX = Math.max(...existing.map((e) => e.x + (e.width ?? 0)));
@@ -70,15 +87,15 @@
       const arrows = placed.filter((e) => e.type === 'arrow' || e.type === 'line');
       const shapes = placed.filter((e) => e.type !== 'arrow' && e.type !== 'line');
       const ordered = [...shapes, ...arrows];
-      excaliApi.updateScene({ elements: [...existing, ordered[0]] });
-      excaliApi.scrollToContent(placed, { fitToContent: true, animate: true });
+      ex.updateScene({ elements: [...existing, ordered[0]] });
+      ex.scrollToContent(placed, { fitToContent: true, animate: true });
       const step = Math.max(1, Math.ceil(ordered.length / 22));
       for (let i = 1; i < ordered.length; i += step) {
-        if (destroyed) break;
-        excaliApi.updateScene({ elements: [...existing, ...ordered.slice(0, i + step)] });
+        if (liveApi !== ex) break; // the canvas changed under us
+        ex.updateScene({ elements: [...existing, ...ordered.slice(0, i + step)] });
         await new Promise((r) => setTimeout(r, 55));
       }
-      excaliApi.updateScene({ elements: [...existing, ...ordered] });
+      ex.updateScene({ elements: [...existing, ...ordered] });
       scheduleSave();
       // Surface the agent's session so "View conversation" can show its work.
       void canvas.refreshSession();
@@ -213,7 +230,10 @@
     root.render(
       React.createElement(Ex.Excalidraw, {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        excalidrawAPI: (a: any) => (excaliApi = a),
+        excalidrawAPI: (a: any) => {
+          excaliApi = a;
+          liveApi = a;
+        },
         initialData: initialData(),
         onChange: scheduleSave,
         theme: ui.resolvedScheme,
@@ -236,6 +256,7 @@
       /* ignore */
     }
     root = null;
+    if (liveApi === excaliApi) liveApi = null;
     excaliApi = null;
   });
 </script>
