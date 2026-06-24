@@ -113,7 +113,13 @@ impl ClaudePty {
                 Ok(text) => return Ok(text),
                 Err(e) => {
                     tracing::warn!("claude turn attempt {attempt}/{MAX_ATTEMPTS} failed: {e}");
+                    // A claude API error (wrong model, auth, rate-limit) is terminal
+                    // — retrying just re-hits the same error. Surface it now.
+                    let is_api_error = matches!(&e, Error::Upstream(m) if m.starts_with("agent error:"));
                     last_err = Some(e);
+                    if is_api_error {
+                        break;
+                    }
                     if attempt < MAX_ATTEMPTS {
                         tokio::time::sleep(RETRY_BACKOFF).await;
                     }
@@ -177,6 +183,13 @@ async fn drive(
         if let Ok(content) = tokio::fs::read_to_string(&path).await {
             if let Some(text) = completed_turn_text(&content) {
                 return Ok(text);
+            }
+            // FAIL FAST on a claude API error (wrong model, auth, rate-limit): it
+            // carries stop_reason "stop_sequence", so completed_turn_text never
+            // accepts it — without this we'd wait out the whole no-progress window
+            // on an instant, terminal error and surface a misleading "stuck".
+            if let Some(apierr) = transcript_api_error(&content) {
+                return Err(Error::Upstream(format!("agent error: {apierr}")));
             }
             if content.len() > last_len {
                 last_len = content.len();
@@ -296,6 +309,75 @@ pub fn completed_turn_text(jsonl: &str) -> Option<String> {
     result
 }
 
+/// Count assistant messages whose `stop_reason == "end_turn"` AND that carry
+/// non-empty text — i.e. completed turns, mirroring [`completed_turn_text`]'s
+/// filter. Used to BASELINE a transcript before submitting a new turn to a
+/// *resumed* session, so the prior turn's reply isn't mistaken for the new one.
+pub fn completed_turn_count(jsonl: &str) -> usize {
+    let mut n = 0;
+    for line in jsonl.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let Some(msg) = v.get("message") else { continue };
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        if msg.get("stop_reason").and_then(|r| r.as_str()) != Some("end_turn") {
+            continue;
+        }
+        let has_text = msg
+            .get("content")
+            .and_then(|c| c.as_array())
+            .is_some_and(|bs| {
+                bs.iter().any(|b| {
+                    b.get("type").and_then(|t| t.as_str()) == Some("text")
+                        && b.get("text")
+                            .and_then(|t| t.as_str())
+                            .is_some_and(|t| !t.trim().is_empty())
+                })
+            });
+        if has_text {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The text of an assistant message claude flagged with `isApiErrorMessage:
+/// true` — claude's own error surface (wrong/unknown `--model`, auth, rate-limit,
+/// overload). These carry `stop_reason: "stop_sequence"` (NOT `end_turn`), so
+/// [`completed_turn_text`] never accepts them; a watcher that only waits for
+/// `end_turn` would burn the whole no-progress window on what is actually an
+/// instant, terminal error. Detecting it lets callers FAIL FAST with the real
+/// message instead of a generic "stuck" timeout.
+pub fn transcript_api_error(jsonl: &str) -> Option<String> {
+    for line in jsonl.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("isApiErrorMessage").and_then(|b| b.as_bool()) != Some(true) {
+            continue;
+        }
+        let Some(msg) = v.get("message") else { continue };
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        if let Some(bs) = msg.get("content").and_then(|c| c.as_array()) {
+            for b in bs {
+                if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                        if !t.trim().is_empty() {
+                            return Some(t.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +431,28 @@ mod tests {
             r#"{"message":{"role":"assistant","stop_re"#,
         );
         assert_eq!(completed_turn_text(jsonl).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn completed_turn_count_baselines_resumed_transcripts() {
+        let one = r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"a"}]}}"#;
+        let mid = r#"{"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"x"}]}}"#;
+        assert_eq!(completed_turn_count(""), 0);
+        assert_eq!(completed_turn_count(one), 1);
+        assert_eq!(completed_turn_count(&format!("{one}\n{mid}\n{one}")), 2); // mid_turn not counted
+    }
+
+    #[test]
+    fn transcript_api_error_is_detected() {
+        // The real shape from the live "wrong model" hang: isApiErrorMessage +
+        // stop_reason "stop_sequence" (so completed_turn_text wouldn't see it).
+        let jsonl = r#"{"isApiErrorMessage":true,"message":{"role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"There's an issue with the selected model (claude)."}]}}"#;
+        assert_eq!(
+            transcript_api_error(jsonl).as_deref(),
+            Some("There's an issue with the selected model (claude).")
+        );
+        // A normal completed turn is NOT an api error.
+        let ok = r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(transcript_api_error(ok), None);
     }
 }

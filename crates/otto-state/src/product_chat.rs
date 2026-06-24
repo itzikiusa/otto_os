@@ -26,6 +26,9 @@ pub struct DiscoveryChat {
     pub title: String,
     pub status: String,
     pub model: Option<String>,
+    /// The managed Otto session backing this chat (visible/resumable in Agents).
+    /// `None` until the first turn creates it.
+    pub session_id: Option<Id>,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -76,6 +79,7 @@ fn row_to_chat(r: &sqlx::sqlite::SqliteRow) -> Result<DiscoveryChat> {
         title: r.get("title"),
         status: r.get("status"),
         model: r.get("model"),
+        session_id: r.get("session_id"),
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
@@ -225,6 +229,24 @@ impl DiscoveryChatRepo {
             return Err(Error::NotFound(format!("discovery chat {id}")));
         }
         self.get_chat_required(id).await
+    }
+
+    /// Link the managed session backing this chat (set once, on the first turn).
+    pub async fn set_session(&self, id: &Id, session_id: &Id) -> Result<()> {
+        let now = fmt(Utc::now());
+        let result = sqlx::query(
+            "UPDATE product_discovery_chats SET session_id = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(session_id)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set discovery chat session"))?;
+        if result.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("discovery chat {id}")));
+        }
+        Ok(())
     }
 }
 

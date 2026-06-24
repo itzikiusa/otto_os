@@ -92,7 +92,11 @@ test('discovery: Run Discovery → confirm → run appears with status badge + V
   await page.reload();
   await expect(page.locator('.product-page')).toBeVisible({ timeout: 30_000 });
   await openStoryOverview(page);
-  await page.locator('.tab-strip .st', { hasText: 'Discovery' }).first().click();
+  // Discovery lives under the "Discover" workflow group: pick the group first,
+  // then the Discovery sub-tab. Use exact match on the group so the substring
+  // 'Discover' doesn't also grab the 'Discovery' sub.
+  await page.getByRole('tab', { name: 'Discover', exact: true }).click();
+  await page.locator('.sub-tab-strip .st', { hasText: 'Discovery' }).first().click();
   await expect(page.locator('.discovery-tab')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.run-card').first()).toBeVisible({ timeout: 30_000 });
 });

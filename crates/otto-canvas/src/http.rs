@@ -81,6 +81,10 @@ struct SceneIdPath {
 /// policy rule (`/workspaces/{ws}/canvas/`) matches in `policy_coverage`.
 pub fn router<S: CanvasCtx>() -> Router<S> {
     Router::new()
+        // Global list — Canvas is a workspace-independent tool, so you see your
+        // scenes regardless of the active workspace. (Covered by the `/canvas/`
+        // policy prefix; the per-ws route below is kept for creating scenes.)
+        .route("/canvas/scenes", get(list_scenes_global::<S>))
         .route(
             "/workspaces/{ws}/canvas/scenes",
             get(list_scenes::<S>).post(create_scene::<S>),
@@ -123,6 +127,17 @@ async fn list_scenes<S: CanvasCtx>(
 ) -> ApiResult<Response> {
     ctx.roles().check(&user, &ws, WorkspaceRole::Viewer).await?;
     let scenes = ctx.canvas_repo().list_for_workspace(&ws).await?;
+    Ok(Json(scenes).into_response())
+}
+
+/// Global list: the caller's own scenes across every workspace (Canvas is a
+/// workspace-independent tool). The `Feature::Canvas` capability is enforced
+/// upstream by the policy middleware.
+async fn list_scenes_global<S: CanvasCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+) -> ApiResult<Response> {
+    let scenes = ctx.canvas_repo().list_for_user(&user.id).await?;
     Ok(Json(scenes).into_response())
 }
 

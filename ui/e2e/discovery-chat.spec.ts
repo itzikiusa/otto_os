@@ -43,6 +43,8 @@ async function openChatTab(page: Page): Promise<void> {
   await expect(row).toBeVisible({ timeout: 20_000 });
   await row.click();
   await expect(page.locator('.overview')).toBeVisible({ timeout: 20_000 });
+  // Chat lives under the "Discover" workflow group: pick the group, then the sub.
+  await page.getByRole('tab', { name: 'Discover', exact: true }).click();
   await page.getByRole('tab', { name: 'Chat' }).click();
   await expect(page.locator('.chat-tab')).toBeVisible({ timeout: 15_000 });
 }

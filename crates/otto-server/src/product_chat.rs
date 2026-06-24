@@ -18,7 +18,6 @@
 //!   POST /api/v1/product/discovery-chats/{cid}/archive   (ws editor) → DiscoveryChat
 //!   POST /api/v1/product/discovery-chats/{cid}/apply     (ws editor) → ApplyResult
 
-use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -30,14 +29,11 @@ use otto_state::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tracing::warn;
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
-const CHAT_NO_PROGRESS: Duration = Duration::from_secs(150);
-const HISTORY_TURN_CAP: usize = 40;
 /// Total context-bundle char budget (oldest/least-relevant trimmed first).
 const CTX_BUDGET: usize = 24_000;
 /// Per-attachment inline cap for text mockups.
@@ -226,31 +222,32 @@ pub async fn send_message(
         .await
         .map_err(ApiError)?;
 
-    // History (last N, chronological).
-    let all_history = ctx
-        .discovery_chat_repo
-        .get_messages(&cid)
-        .await
-        .unwrap_or_default();
-    let history: Vec<DiscoveryChatMessage> = all_history
-        .iter()
-        .rev()
-        .take(HISTORY_TURN_CAP)
-        .rev()
-        .cloned()
-        .collect();
-
-    let prompt = build_chat_prompt(&context, &history, &req.body);
-
-    if let Err(e) = std::fs::create_dir_all(&chat.cwd) {
-        warn!("product_chat: create_dir_all({}) failed: {e}", chat.cwd);
-    }
-
-    let raw = ctx
-        .orchestrator
-        .run_agent(&prompt, &chat.cwd, chat.model.as_deref(), CHAT_NO_PROGRESS)
+    // The chat runs as ONE persistent, resumable Otto session (visible in
+    // Agents, MCP-wired), so the agent RETAINS the conversation itself — we send
+    // framing + the refreshed context + the new message, NOT a replayed history.
+    let prompt = build_chat_prompt(&context, &[], &req.body);
+    let ws = ctx
+        .workspaces
+        .get(&chat.workspace_id)
         .await
         .map_err(ApiError)?;
+    let meta = json!({ "source": "discovery_chat", "story_id": chat.story_id, "chat_id": cid });
+    let (raw, sid) = crate::agent_session::run_session_turn(
+        &ctx,
+        &ws,
+        &user,
+        chat.session_id.as_ref(),
+        &format!("Discovery: {}", chat.title),
+        &chat.cwd,
+        "claude",
+        meta,
+        &prompt,
+    )
+    .await?;
+    // Link the session on the first turn so later turns resume it.
+    if chat.session_id.is_none() {
+        let _ = ctx.discovery_chat_repo.set_session(&cid, &sid).await;
+    }
 
     let (markdown, actions_json) = split_actions(&raw);
 

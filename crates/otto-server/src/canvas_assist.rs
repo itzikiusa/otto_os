@@ -11,8 +11,6 @@
 //!   POST /api/v1/canvas/scenes/{id}/assist   (ws editor) → AssistResult
 //!   POST /api/v1/canvas/assist/preview       (canvas edit) → AssistResult
 
-use std::time::Duration;
-
 use axum::extract::{Path, State};
 use axum::Json;
 use otto_core::domain::WorkspaceRole;
@@ -24,9 +22,6 @@ use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
-/// Stuck window for an assist turn — matches the discovery planner / refine.
-const ASSIST_NO_PROGRESS: Duration = Duration::from_secs(150);
-
 // ---------------------------------------------------------------------------
 // Request / response bodies
 // ---------------------------------------------------------------------------
@@ -37,6 +32,10 @@ pub struct AssistReq {
     /// Optional hint: `auto` (default) | `sequence` | `flow` | `uml` | `nodes`.
     #[serde(default)]
     pub mode: Option<String>,
+    /// Required only by `/canvas/assist/preview` (no scene → no workspace in the
+    /// path): which workspace to run the throwaway session in.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -71,41 +70,63 @@ pub async fn assist_scene(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("canvas scene {id}"))))?;
     crate::auth::require_ws_role(&ctx, &user, &scene.workspace_id, WorkspaceRole::Editor).await?;
-    Ok(Json(run_assist(&ctx, &req).await?))
+    let ws = ctx.workspaces.get(&scene.workspace_id).await.map_err(ApiError)?;
+
+    let prompt = build_assist_prompt(&req.prompt, req.mode.as_deref());
+    let meta = serde_json::json!({ "source": "canvas_assist", "scene_id": scene.id });
+    // Resume the scene's session across Ask-AI calls (visible/resumable in Agents).
+    let (raw, sid) = crate::agent_session::run_session_turn(
+        &ctx,
+        &ws,
+        &user,
+        scene.session_id.as_ref(),
+        &format!("Canvas: {}", scene.title),
+        &ws.root_path,
+        "claude",
+        meta,
+        &prompt,
+    )
+    .await?;
+    if scene.session_id.is_none() {
+        let _ = ctx.canvas_repo.set_session(&scene.id, &sid).await;
+    }
+    Ok(Json(parse_assist(&raw)))
 }
 
-/// `POST /canvas/assist/preview` — generate blocks with no scene (used by the
-/// Discovery-Chat "Open in Canvas" action and the empty-canvas hero). Gated by
-/// the `Feature::Canvas` edit capability (enforced upstream); any authenticated
-/// member may preview.
+/// `POST /canvas/assist/preview` — generate blocks with no scene (the
+/// empty-canvas hero / Discovery-Chat bridge). Runs a THROWAWAY session in the
+/// given workspace and archives it after (no scene to reuse it). Gated by the
+/// `Feature::Canvas` edit capability (enforced upstream).
 pub async fn assist_preview(
     State(ctx): State<ServerCtx>,
-    CurrentUser(_user): CurrentUser,
+    CurrentUser(user): CurrentUser,
     Json(req): Json<AssistReq>,
 ) -> ApiResult<Json<AssistResult>> {
-    Ok(Json(run_assist(&ctx, &req).await?))
-}
+    let ws_id = req
+        .workspace_id
+        .clone()
+        .ok_or_else(|| ApiError(Error::Invalid("workspace_id is required for preview".into())))?;
+    crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id.clone()), WorkspaceRole::Editor)
+        .await?;
+    let ws = ctx.workspaces.get(&Id::from(ws_id)).await.map_err(ApiError)?;
 
-// ---------------------------------------------------------------------------
-// Engine
-// ---------------------------------------------------------------------------
-
-async fn run_assist(ctx: &ServerCtx, req: &AssistReq) -> ApiResult<AssistResult> {
     let prompt = build_assist_prompt(&req.prompt, req.mode.as_deref());
-    // A single fixed scratch cwd — diagram generation needs no repo context, so
-    // we reuse one dir rather than leaking a fresh one per call.
-    let cwd = ctx
-        .data_dir
-        .join("canvas/assist")
-        .to_string_lossy()
-        .to_string();
-    let _ = std::fs::create_dir_all(&cwd);
-    let raw = ctx
-        .orchestrator
-        .run_agent(&prompt, &cwd, Some("claude"), ASSIST_NO_PROGRESS)
-        .await
-        .map_err(ApiError)?;
-    Ok(parse_assist(&raw))
+    let meta = serde_json::json!({ "source": "canvas_assist_preview" });
+    let (raw, sid) = crate::agent_session::run_session_turn(
+        &ctx,
+        &ws,
+        &user,
+        None,
+        "Canvas: preview",
+        &ws.root_path,
+        "claude",
+        meta,
+        &prompt,
+    )
+    .await?;
+    // No scene to reuse the session — archive it so it doesn't clutter Agents.
+    let _ = ctx.manager.kill_session(&sid).await;
+    Ok(Json(parse_assist(&raw)))
 }
 
 // ---------------------------------------------------------------------------

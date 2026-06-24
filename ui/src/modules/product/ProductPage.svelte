@@ -80,21 +80,65 @@
     }
   });
 
-  const TABS: { id: string; label: string }[] = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'chat', label: 'Chat' },
-    { id: 'analysis', label: 'Analysis' },
-    { id: 'questions', label: 'Questions' },
-    { id: 'notes', label: 'Notes' },
-    { id: 'rewrite', label: 'Rewrite' },
-    { id: 'testcases', label: 'Test Cases' },
-    { id: 'plan', label: 'Plan' },
-    { id: 'history', label: 'History' },
-    { id: 'inject', label: 'Inject' },
-    { id: 'discovery', label: 'Discovery' },
-    { id: 'refine', label: 'Refine' },
-    { id: 'mockups', label: 'Mockups' },
+  // ── Workflow groups ───────────────────────────────────────────────────────
+  // The 13 per-story sub-views are bucketed into 4 workflow groups. The top bar
+  // shows the 4 group labels; below it a secondary sub-nav lists the active
+  // group's sub-views (only when the group has more than one). The render
+  // cascade below stays keyed on the flat `product.tab` (the sub id), so every
+  // existing tab component renders unchanged — only the navigation is regrouped.
+  type Sub = { id: string; label: string };
+  type Group = { id: string; label: string; subs: Sub[] };
+  const GROUPS: Group[] = [
+    {
+      id: 'story',
+      label: 'Story',
+      subs: [
+        { id: 'overview', label: 'Overview' },
+        { id: 'rewrite', label: 'Rewrite' },
+        { id: 'mockups', label: 'Mockups' },
+      ],
+    },
+    {
+      id: 'discover',
+      label: 'Discover',
+      subs: [
+        { id: 'chat', label: 'Chat' },
+        { id: 'analysis', label: 'Analysis' },
+        { id: 'questions', label: 'Questions' },
+        { id: 'notes', label: 'Notes' },
+        { id: 'discovery', label: 'Discovery' },
+        { id: 'refine', label: 'Refine' },
+      ],
+    },
+    {
+      id: 'deliver',
+      label: 'Deliver',
+      subs: [
+        { id: 'plan', label: 'Plan' },
+        { id: 'testcases', label: 'Test Cases' },
+        { id: 'inject', label: 'Inject' },
+      ],
+    },
+    {
+      id: 'log',
+      label: 'Log',
+      subs: [{ id: 'history', label: 'History' }],
+    },
   ];
+
+  /** The group that owns the currently-active sub (`product.tab`). Falls back to
+   *  the first group if the tab is somehow unknown (keeps the top bar coherent). */
+  const activeGroup = $derived(
+    GROUPS.find((g) => g.subs.some((s) => s.id === product.tab)) ?? GROUPS[0],
+  );
+
+  /** Click a group: if the current sub isn't already inside it, land on the
+   *  group's first sub (otherwise keep the current sub so re-clicking is a no-op). */
+  function selectGroup(g: Group): void {
+    if (!g.subs.some((s) => s.id === product.tab)) {
+      product.tab = g.subs[0].id;
+    }
+  }
 
   function stageColor(stage: string): string {
     switch (stage) {
@@ -333,21 +377,38 @@
       </div>
     </div>
 
-    <!-- Header row 2: per-story tab strip (only when a story is selected in Stories view) -->
+    <!-- Header row 2: per-story navigation (only when a story is selected in
+         Stories view). The TOP strip picks one of the 4 workflow groups; the
+         SECONDARY strip below it picks a sub-view within the active group. -->
     {#if product.view === 'stories' && product.selectedId}
       <div class="product-header-row2">
         <div class="tab-strip" role="tablist" aria-label="Story tabs">
-          {#each TABS as t (t.id)}
+          {#each GROUPS as g (g.id)}
             <button
               class="st"
-              class:active={product.tab === t.id}
+              class:active={activeGroup.id === g.id}
               role="tab"
-              aria-selected={product.tab === t.id}
-              onclick={() => (product.tab = t.id)}
-            >{t.label}</button>
+              aria-selected={activeGroup.id === g.id}
+              onclick={() => selectGroup(g)}
+            >{g.label}</button>
           {/each}
         </div>
       </div>
+      {#if activeGroup.subs.length > 1}
+        <div class="product-header-row3">
+          <div class="tab-strip sub-tab-strip" role="tablist" aria-label="{activeGroup.label} sub-tabs">
+            {#each activeGroup.subs as s (s.id)}
+              <button
+                class="st"
+                class:active={product.tab === s.id}
+                role="tab"
+                aria-selected={product.tab === s.id}
+                onclick={() => (product.tab = s.id)}
+              >{s.label}</button>
+            {/each}
+          </div>
+        </div>
+      {/if}
     {/if}
 
     <!-- Content -->
@@ -711,13 +772,23 @@
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
-  /* Row 2: per-story tab strip */
+  /* Row 2: per-story group strip (the 4 workflow groups) */
   .product-header-row2 {
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
     padding: 0 14px;
     /* The inner .tab-strip scrolls horizontally; overflow:hidden here clipped it
        so tabs past the first few were unreachable on a narrow screen. */
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  /* Row 3: secondary sub-nav for the active group — visually subordinate to
+     row 2 (smaller, dimmer, slightly indented, a lighter divider). */
+  .product-header-row3 {
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    background: color-mix(in srgb, var(--text-dim) 4%, transparent);
+    flex-shrink: 0;
+    padding: 0 14px 0 22px;
     overflow-x: auto;
     scrollbar-width: none;
   }
@@ -778,6 +849,21 @@
   .st.active {
     color: var(--accent);
     border-bottom-color: var(--accent);
+  }
+  /* Secondary sub-nav: a sub-level reading — shorter, smaller, dimmer than the
+     group strip, with a thinner active underline. */
+  .sub-tab-strip .st {
+    height: 26px;
+    padding: 0 9px;
+    font-size: 11px;
+    color: color-mix(in srgb, var(--text-dim) 85%, transparent);
+  }
+  .sub-tab-strip .st:hover {
+    color: var(--text);
+  }
+  .sub-tab-strip .st.active {
+    color: var(--accent);
+    border-bottom-width: 1.5px;
   }
   .product-body {
     flex: 1;
@@ -1027,6 +1113,12 @@
       height: 38px;
       font-size: 14px;
       padding: 0 13px;
+    }
+    /* Keep the sub-nav touch-friendly but still a notch smaller than the groups. */
+    .sub-tab-strip .st {
+      height: 34px;
+      font-size: 13px;
+      padding: 0 11px;
     }
     .learn-filter-btn {
       font-size: 14.5px;

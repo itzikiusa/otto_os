@@ -28,7 +28,8 @@
 
   // Load the workspace's scenes when the workspace is known / changes.
   $effect(() => {
-    if (ws.currentId) void canvas.loadScenes().catch(() => {});
+    // Canvas is global — list the user's scenes across all workspaces.
+    void canvas.loadScenes().catch(() => {});
   });
 
   // Honor a deep-link request (e.g. Discovery-Chat "Open in Canvas").
