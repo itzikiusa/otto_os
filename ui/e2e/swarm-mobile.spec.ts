@@ -204,8 +204,8 @@ test('Graph view: the agent org graph renders + the task rail; canvas pans/fits'
     .evaluate((el) => getComputedStyle(el).touchAction);
   expect(touch).toBe('none');
 
-  // The recenter control re-centers without error.
-  await page.locator('.agent-graph .controls [aria-label="recenter"]').click();
+  // The fit-to-view control re-fits without error.
+  await page.locator('.agent-graph .controls [aria-label="fit to view"]').click();
   await expect(page.locator('.agent-graph .node').first()).toBeVisible();
 
   // The side rail shows the per-member brief + the searchable task list.

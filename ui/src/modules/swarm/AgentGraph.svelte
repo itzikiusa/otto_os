@@ -15,10 +15,13 @@
   const agents = $derived(swarm.detail?.agents ?? []);
   const allTasks = $derived(Object.values(swarm.tasksByProject).flat());
 
-  // ── Radial layout: root (coordinator) centered, reports fanned around it ────
-  const RING = 232;
+  // ── Tidy top-down TREE: root (coordinator) at the top, reports branching down
+  //    level by level. x = tidy leaf packing (parents centered over children),
+  //    y = depth row. Positions are node CENTERS. ─────────────────────────────
   const NODE_W = 178;
   const NODE_H = 64;
+  const GAP_X = 206; // horizontal spacing per leaf
+  const LEVEL_H = 142; // vertical spacing per depth
 
   interface Pos {
     x: number;
@@ -31,53 +34,41 @@
     if (ags.length === 0) return pos;
     const childrenOf = (id: string | null) =>
       ags.filter((a) => (a.reports_to ?? null) === id).sort((a, b) => a.order_idx - b.order_idx);
-    const leafCache = new Map<string, number>();
-    const leaves = (id: string): number => {
-      const cached = leafCache.get(id);
-      if (cached != null) return cached;
+    const seen = new Set<string>();
+    let cursor = 0;
+    const assign = (id: string, depth: number): number => {
+      if (seen.has(id)) return cursor * GAP_X; // reports_to cycle guard
+      seen.add(id);
       const kids = childrenOf(id);
-      const n = kids.length === 0 ? 1 : kids.reduce((s, k) => s + leaves(k.id), 0);
-      leafCache.set(id, n);
-      return n;
-    };
-    const TWO_PI = Math.PI * 2;
-    const place = (id: string, depth: number, a0: number, a1: number): void => {
-      const angle = (a0 + a1) / 2;
-      const r = depth * RING;
-      pos.set(id, { x: Math.cos(angle) * r, y: Math.sin(angle) * r, depth });
-      const kids = childrenOf(id);
-      const total = kids.reduce((s, k) => s + leaves(k.id), 0) || 1;
-      let cur = a0;
-      for (const k of kids) {
-        const span = (a1 - a0) * (leaves(k.id) / total);
-        place(k.id, depth + 1, cur, cur + span);
-        cur += span;
+      let x: number;
+      if (kids.length === 0) {
+        x = cursor * GAP_X;
+        cursor += 1;
+      } else {
+        const xs = kids.map((k) => assign(k.id, depth + 1));
+        x = (xs[0] + xs[xs.length - 1]) / 2; // centre the parent over its span
       }
+      pos.set(id, { x, y: depth * LEVEL_H, depth });
+      return x;
     };
-    const roots = childrenOf(null);
-    const START = -Math.PI / 2; // first child points up
-    if (roots.length === 1) {
-      place(roots[0].id, 0, START, START + TWO_PI);
-    } else {
-      // Multiple roots → hub layout: each root subtree gets an angular slice at
-      // ring 1, leaving the hub center empty.
-      const total = roots.reduce((s, r) => s + leaves(r.id), 0) || 1;
-      let cur = START;
-      for (const r of roots) {
-        const span = TWO_PI * (leaves(r.id) / total);
-        place(r.id, 1, cur, cur + span);
-        cur += span;
-      }
-    }
+    for (const r of childrenOf(null)) assign(r.id, 0);
+    // Orphans (reports_to points at a missing agent) → lay out as extra roots.
+    for (const a of ags) if (!pos.has(a.id)) assign(a.id, 0);
     return pos;
   });
 
-  // Edges: parent → child (reports_to).
+  // Edges: parent (bottom) → child (top), a vertical S-curve.
   const edges = $derived(
     agents
       .filter((a) => a.reports_to && positions.has(a.reports_to) && positions.has(a.id))
       .map((a) => ({ from: a.reports_to as string, to: a.id })),
   );
+  function edgePath(p: Pos, c: Pos): string {
+    const y1 = p.y + NODE_H / 2;
+    const y2 = c.y - NODE_H / 2;
+    const my = (y1 + y2) / 2;
+    return `M ${p.x} ${y1} C ${p.x} ${my}, ${c.x} ${my}, ${c.x} ${y2}`;
+  }
 
   // ── Per-agent derivations (sessions / activity / counts) ────────────────────
   function agentSessions(agentId: string) {
@@ -229,22 +220,54 @@
   let scale = $state(1);
   let drag: { sx: number; sy: number; ox: number; oy: number } | null = null;
   let wrapEl = $state<HTMLDivElement | null>(null);
-  let centered = $state(false);
+  // While false, the graph auto-fits (initial layout + container resize). Any
+  // manual pan/zoom sets it true so we stop fighting the user's gesture.
+  let userTouched = $state(false);
 
+  // Fit ALL nodes into view (with padding); never zoom IN past 1:1.
+  function fit(): void {
+    if (!wrapEl || positions.size === 0) return;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of positions.values()) {
+      minX = Math.min(minX, p.x - NODE_W / 2);
+      maxX = Math.max(maxX, p.x + NODE_W / 2);
+      minY = Math.min(minY, p.y - NODE_H / 2);
+      maxY = Math.max(maxY, p.y + NODE_H / 2);
+    }
+    const bw = Math.max(1, maxX - minX);
+    const bh = Math.max(1, maxY - minY);
+    const w = wrapEl.clientWidth;
+    const h = wrapEl.clientHeight;
+    if (w === 0 || h === 0) return;
+    const pad = 44;
+    const s = Math.min(1, Math.max(0.2, Math.min((w - pad * 2) / bw, (h - pad * 2) / bh)));
+    scale = s;
+    tx = w / 2 - ((minX + maxX) / 2) * s;
+    ty = h / 2 - ((minY + maxY) / 2) * s;
+  }
+
+  // Auto-fit on first layout, when the node set changes, and on container resize
+  // — until the user manually pans/zooms.
   $effect(() => {
-    if (!wrapEl || centered || positions.size === 0) return;
-    tx = wrapEl.clientWidth / 2;
-    ty = wrapEl.clientHeight / 2;
-    centered = true;
+    if (!wrapEl) return;
+    void positions.size; // re-run when the graph changes
+    if (!userTouched) fit();
+    const ro = new ResizeObserver(() => {
+      if (!userTouched) fit();
+    });
+    ro.observe(wrapEl);
+    return () => ro.disconnect();
   });
 
   function onWheel(e: WheelEvent) {
     e.preventDefault();
-    scale = Math.min(2, Math.max(0.3, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
+    userTouched = true;
+    scale = Math.min(2, Math.max(0.2, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
   }
   function startPan(e: PointerEvent) {
     const t = e.target as HTMLElement;
     if (t.closest('.node') || t.closest('.tooltip')) return;
+    userTouched = true;
     drag = { sx: e.clientX, sy: e.clientY, ox: tx, oy: ty };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   }
@@ -256,18 +279,22 @@
   function endPan() {
     drag = null;
   }
+  function zoomBy(f: number) {
+    userTouched = true;
+    scale = Math.min(2, Math.max(0.2, scale * f));
+  }
   function recenter() {
-    scale = 1;
-    centered = false;
+    userTouched = false;
+    fit();
   }
 </script>
 
 <div class="agent-graph">
   <div class="graph-col">
     <div class="controls">
-      <button class="icon-btn" onclick={() => (scale = Math.min(2, scale * 1.1))} aria-label="zoom in"><Icon name="plus" size={14} /></button>
-      <button class="icon-btn" onclick={() => (scale = Math.max(0.3, scale * 0.9))} aria-label="zoom out"><Icon name="minimize" size={14} /></button>
-      <button class="icon-btn" onclick={recenter} aria-label="recenter"><Icon name="maximize" size={14} /></button>
+      <button class="icon-btn" onclick={() => zoomBy(1.15)} aria-label="zoom in"><Icon name="plus" size={14} /></button>
+      <button class="icon-btn" onclick={() => zoomBy(0.87)} aria-label="zoom out"><Icon name="minimize" size={14} /></button>
+      <button class="icon-btn" onclick={recenter} aria-label="fit to view"><Icon name="maximize" size={14} /></button>
     </div>
 
     {#if agents.length === 0}
@@ -290,7 +317,7 @@
               {@const p = positions.get(e.from)}
               {@const c = positions.get(e.to)}
               {#if p && c}
-                <path d="M {p.x} {p.y} C {(p.x + c.x) / 2} {p.y}, {(p.x + c.x) / 2} {c.y}, {c.x} {c.y}" class="edge" />
+                <path d={edgePath(p, c)} class="edge" />
               {/if}
             {/each}
           </svg>
