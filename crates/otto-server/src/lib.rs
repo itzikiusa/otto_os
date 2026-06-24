@@ -4,6 +4,7 @@
 //! integration time.
 
 pub mod agent_run;
+pub mod agent_session;
 pub mod api_helpers;
 pub mod auth;
 pub mod canvas_assist;

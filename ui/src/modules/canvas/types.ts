@@ -151,6 +151,8 @@ export interface CanvasScene {
   /** The Scene JSON as a string (parse with `JSON.parse`). */
   doc_json: string;
   thumbnail: string | null;
+  /** The managed Otto session backing this scene's Ask-AI (open it in Agents). */
+  session_id: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;

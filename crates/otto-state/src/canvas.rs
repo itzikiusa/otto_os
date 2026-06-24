@@ -24,6 +24,9 @@ pub struct CanvasScene {
     pub title: String,
     pub doc_json: String,
     pub thumbnail: Option<String>,
+    /// The managed Otto session backing this scene's "Ask AI" (resumable in
+    /// Agents). `None` until the first assist turn creates it.
+    pub session_id: Option<Id>,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -73,6 +76,7 @@ fn row_to_scene(r: &sqlx::sqlite::SqliteRow) -> Result<CanvasScene> {
         title: r.get("title"),
         doc_json: r.get("doc_json"),
         thumbnail: r.get("thumbnail"),
+        session_id: r.get("session_id"),
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
@@ -200,6 +204,24 @@ impl CanvasRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("delete canvas scene"))?;
+        if result.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("canvas scene {id}")));
+        }
+        Ok(())
+    }
+
+    /// Link the managed session backing this scene's Ask-AI (set on first use).
+    pub async fn set_session(&self, id: &Id, session_id: &Id) -> Result<()> {
+        let now = fmt(Utc::now());
+        let result = sqlx::query(
+            "UPDATE canvas_scenes SET session_id = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(session_id)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set canvas scene session"))?;
         if result.rows_affected() == 0 {
             return Err(Error::NotFound(format!("canvas scene {id}")));
         }
