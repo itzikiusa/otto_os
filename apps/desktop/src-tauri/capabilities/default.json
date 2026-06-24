@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Core capability for the main window. Notably grants `core:event` so the SPA can `listen()` for native menu-bar events forwarded from Rust (`otto://menu`). Without this, menu clicks are silently dropped while keyboard shortcuts (handled purely in JS) still work.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:webview:allow-set-webview-zoom", "shell:allow-open", "opener:allow-open-url", "notification:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "core:webview:allow-set-webview-zoom", "shell:allow-open", "opener:allow-open-url", "notification:default"]
 }
