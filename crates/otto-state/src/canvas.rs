@@ -173,6 +173,20 @@ impl CanvasRepo {
         rows.iter().map(row_to_summary).collect()
     }
 
+    /// List a user's scenes across ALL workspaces — Canvas is a global tool, so
+    /// you see your scenes regardless of the active workspace.
+    pub async fn list_for_user(&self, user_id: &Id) -> Result<Vec<CanvasSceneSummary>> {
+        let rows = sqlx::query(
+            "SELECT id, workspace_id, story_id, title, thumbnail, created_at, updated_at
+             FROM canvas_scenes WHERE created_by = ? ORDER BY updated_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list canvas scenes for user"))?;
+        rows.iter().map(row_to_summary).collect()
+    }
+
     /// Partial update — `None` fields keep their current value via COALESCE.
     pub async fn update(&self, id: &Id, patch: SceneUpdate) -> Result<CanvasScene> {
         let now = fmt(Utc::now());

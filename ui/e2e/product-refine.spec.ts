@@ -81,8 +81,11 @@ async function openStoryOverview(page: Page): Promise<void> {
 }
 
 async function openRefineTab(page: Page): Promise<void> {
-  // The tab strip is horizontally scrollable; Playwright auto-scrolls the tab
-  // into view before clicking. The accessible name is the tab label.
+  // Refine lives under the "Discover" workflow group: pick the group first, then
+  // the Refine sub-tab. The tab strips are horizontally scrollable; Playwright
+  // auto-scrolls the tab into view before clicking. The accessible name is the
+  // tab label.
+  await page.getByRole('tab', { name: 'Discover', exact: true }).click();
   const refineTab = page.getByRole('tab', { name: 'Refine' });
   await expect(refineTab).toBeVisible({ timeout: 15_000 });
   await refineTab.click();

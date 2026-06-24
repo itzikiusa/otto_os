@@ -52,13 +52,13 @@ class CanvasStore {
   }
 
   // -- list --------------------------------------------------------------
+  // Canvas is a GLOBAL tool: list the user's scenes across all workspaces (no
+  // active-workspace requirement). Creating a scene still uses the current ws.
   async loadScenes(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) throw new Error('No workspace selected');
     this.listLoading = true;
     this.listError = null;
     try {
-      this.scenes = await api.get<CanvasSceneSummary[]>(`/workspaces/${wsId}/canvas/scenes`);
+      this.scenes = await api.get<CanvasSceneSummary[]>(`/canvas/scenes`);
     } catch (e) {
       this.listError = e instanceof Error ? e.message : String(e);
       throw e;

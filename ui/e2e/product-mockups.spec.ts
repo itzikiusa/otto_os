@@ -54,8 +54,10 @@ async function selectStory(page: Page): Promise<void> {
   await expect(page.locator('.overview')).toBeVisible({ timeout: 20_000 });
 }
 
-/** Switch to one of the per-story tabs by its visible label. */
+/** Switch to one of the per-story tabs by its visible label. Mockups lives under
+ *  the "Story" workflow group, so pick the group first, then the sub-view. */
 async function openTab(page: Page, label: string): Promise<void> {
+  await page.getByRole('tab', { name: 'Story', exact: true }).click();
   await page.locator('.tab-strip .st', { hasText: label }).first().click();
 }
 

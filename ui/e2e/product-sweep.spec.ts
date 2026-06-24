@@ -115,11 +115,43 @@ async function selectStory(page: Page, info: TestInfo): Promise<void> {
   await ensureContentOpen(page, info);
 }
 
+// The 13 per-story sub-views are bucketed into 4 workflow groups; navigation is
+// two-step (pick the group, then the sub). Map each sub label → its group label
+// so openTab() can resolve the group strip before clicking the sub.
+const GROUP_OF: Record<string, string> = {
+  Overview: 'Story',
+  Rewrite: 'Story',
+  Mockups: 'Story',
+  Chat: 'Discover',
+  Analysis: 'Discover',
+  Questions: 'Discover',
+  Notes: 'Discover',
+  Discovery: 'Discover',
+  Refine: 'Discover',
+  Plan: 'Deliver',
+  'Test Cases': 'Deliver',
+  Inject: 'Deliver',
+  History: 'Log',
+};
+
 async function openTab(page: Page, info: TestInfo, label: string): Promise<void> {
   await ensureContentOpen(page, info);
-  const tab = page.locator('.tab-strip .st', { hasText: label }).first();
-  await tab.scrollIntoViewIfNeeded();
-  await tab.click();
+  // Pick the owning workflow group first (top strip), then the sub-view.
+  const group = GROUP_OF[label];
+  if (group) {
+    const groupTab = page
+      .locator('.product-header-row2 .tab-strip .st', { hasText: group })
+      .first();
+    await groupTab.scrollIntoViewIfNeeded();
+    await groupTab.click();
+  }
+  // Single-sub groups (e.g. Log → History) render NO secondary sub-nav — the
+  // group click already navigates. Only click a sub-tab when one is shown.
+  const sub = page.locator('.sub-tab-strip .st', { hasText: label }).first();
+  if ((await sub.count()) > 0) {
+    await sub.scrollIntoViewIfNeeded();
+    await sub.click();
+  }
 }
 
 /** Wait for a flow's real content (data-dependent) to render before snapping,
