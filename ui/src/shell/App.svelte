@@ -643,7 +643,13 @@
      and (phone only) a bottom nav. Tablet keeps a persistent narrow Navigator
      column instead of the left drawer. -->
 <div class="shell mobile" class:tablet={viewport.isTablet}>
-  <header class="mtopbar" class:tauri-top={isTauri}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <header
+    class="mtopbar"
+    class:tauri-top={isTauri}
+    data-tauri-drag-region
+    onmousedown={isTauri ? startWindowDrag : undefined}
+  >
     {#if viewport.isPhone}
       <button
         class="mtop-btn"
