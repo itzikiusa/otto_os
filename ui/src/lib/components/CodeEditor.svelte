@@ -9,7 +9,14 @@
   import { autocompletion, completionKeymap } from '@codemirror/autocomplete';
   import type { CompletionSource } from '@codemirror/autocomplete';
   import { lintGutter, lintKeymap } from '@codemirror/lint';
-  import { indentOnInput, bracketMatching, foldGutter, foldKeymap } from '@codemirror/language';
+  import {
+    indentOnInput,
+    bracketMatching,
+    foldGutter,
+    foldKeymap,
+    defaultHighlightStyle,
+    syntaxHighlighting,
+  } from '@codemirror/language';
   import { oneDark } from '@codemirror/theme-one-dark';
   import type { Extension } from '@codemirror/state';
 
@@ -24,6 +31,7 @@
   import { markdown } from '@codemirror/lang-markdown';
   import { java } from '@codemirror/lang-java';
   import { sql } from '@codemirror/lang-sql';
+  import { redisLang } from './redis-lang';
 
   // LSP — use the all-in-one factory that manages the WS transport internally
   import { languageServer } from '@marimo-team/codemirror-languageserver';
@@ -55,7 +63,10 @@
     { dark: false },
   );
   function themeExt(scheme: 'light' | 'dark'): Extension {
-    return scheme === 'dark' ? oneDark : lightTheme;
+    // Dark: oneDark already bundles a syntax highlight style. Light: pair the
+    // light theme with the default (light-oriented) highlight style so SQL — and
+    // every language — is actually COLORED in light mode (previously it wasn't).
+    return scheme === 'dark' ? oneDark : [lightTheme, syntaxHighlighting(defaultHighlightStyle)];
   }
 
   // ── Props ──────────────────────────────────────────────────────────────────
@@ -80,6 +91,12 @@
     /** Run handler bound to Cmd/Ctrl+Enter (e.g. execute the query). */
     onsubmit?: () => void;
     /**
+     * Fired on every selection / cursor change with the selected text (empty
+     * string when there's no selection) and the cursor offset. Lets the DB query
+     * editor run only the selected — or current — statement.
+     */
+    onselect?: (s: { text: string; cursor: number }) => void;
+    /**
      * Optional 1-based line to scroll to and select on mount (and whenever this
      * value changes for the same doc) — used to jump to a `file:line` reference
      * clicked in the terminal. `gotoCol` (1-based) refines the cursor column.
@@ -98,6 +115,7 @@
     completionSource = null,
     minimal = false,
     onsubmit,
+    onselect,
     gotoLine = null,
     gotoCol = null,
   }: Props = $props();
@@ -137,6 +155,7 @@
     mdx:  () => markdown(),
     java: () => java(),
     sql:  () => sql(),
+    redis: () => redisLang() as AnyLangExtension,
   };
 
   // LSP language IDs (maps file extension → LSP lang id)
@@ -179,7 +198,7 @@
   /** CodeMirror update listener that tracks the current text selection. */
   const selectionListener = EditorView.updateListener.of((update) => {
     if (!update.selectionSet && !update.docChanged) return;
-    const { from, to } = update.state.selection.main;
+    const { from, to, head } = update.state.selection.main;
     if (from === to) {
       sel = null;
     } else {
@@ -188,6 +207,9 @@
       const endLine = update.state.doc.lineAt(to).number;
       sel = { text, startLine, endLine };
     }
+    // Surface selection + cursor so callers can run only the selected/current
+    // statement (text is '' when there's no selection).
+    onselect?.({ text: from === to ? '' : update.state.sliceDoc(from, to), cursor: head });
   });
 
   // Last value we emitted via onchange — lets the rebuild effect ignore the

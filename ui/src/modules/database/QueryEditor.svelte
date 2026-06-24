@@ -10,7 +10,9 @@
   import { database, ROW_LIMIT_ALL, type QueryTab } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import type { DbCompletionKind } from '../../lib/api/types';
+  import { statementAtCursor, extractVars, substituteVars, type SplitMode } from './sql-util';
 
   const tab = $derived(database.tab);
 
@@ -25,10 +27,26 @@
     { label: 'All', value: ROW_LIMIT_ALL },
   ];
 
-  // Editor language: SQL for sql engines; plain text (no lang) otherwise.
-  const lang = $derived(database.queryLanguage === 'sql' ? 'sql' : 'txt');
+  // Editor language: a small Redis highlighter for redis; SQL for everything else
+  // (mysql, clickhouse, and Mongo's SQL subset).
+  const lang = $derived(database.queryLanguage === 'redis' ? 'redis' : 'sql');
   // Re-key the editor on tab id + engine so it rebuilds cleanly per query tab.
   const editorPath = $derived(`query-${tab.id}.${lang}`);
+  // Statement separator: redis is one command per line; others use `;`.
+  const splitMode = $derived<SplitMode>(database.queryLanguage === 'redis' ? 'line' : 'sql');
+  // Live selection + cursor (from CodeEditor) → run only the selected/current
+  // statement instead of the whole buffer.
+  let editorSel = $state<{ text: string; cursor: number }>({ text: '', cursor: 0 });
+  // Variables the current tab's statement references (:name / {name}).
+  const queryVars = $derived(extractVars(tab.statement, splitMode));
+  let varsBarEl = $state<HTMLElement | null>(null);
+
+  // Reset the tracked selection/cursor when switching query tabs, so a stale
+  // selection from another tab can never run against the newly-active one.
+  $effect(() => {
+    void tab.id;
+    editorSel = { text: '', cursor: 0 };
+  });
 
   // ── Tab labels ────────────────────────────────────────────────────────────
   // Derive a short, human label from a tab's SQL: prefer an explicit user name,
@@ -122,7 +140,32 @@
   }
 
   function run(): void {
-    void database.runQuery();
+    const whole = tab.statement;
+    // Run the selection if there is one, else the statement under the cursor.
+    const base = editorSel.text.trim()
+      ? editorSel.text
+      : statementAtCursor(whole, editorSel.cursor, splitMode);
+    if (!base.trim()) {
+      void database.runQuery();
+      return;
+    }
+    // Query-level variables: every :name / {name} in the chosen statement needs
+    // a value before it can run.
+    const names = extractVars(base, splitMode);
+    const missing = names.filter((n) => !(tab.vars[n] ?? '').trim());
+    if (missing.length > 0) {
+      toasts.error(
+        'Missing variable value',
+        `Set a value for ${missing.map((n) => ':' + n).join(', ')}`,
+      );
+      void tick().then(() => {
+        const inputs = varsBarEl ? Array.from(varsBarEl.querySelectorAll('input')) : [];
+        (inputs.find((i) => !i.value.trim()) ?? inputs[0])?.focus();
+      });
+      return;
+    }
+    const finalSql = names.length > 0 ? substituteVars(base, tab.vars, splitMode) : base;
+    void database.runQuery(finalSql, undefined, { transient: true });
   }
 
   // Draggable split between the editor and the results (persisted px height).
@@ -314,6 +357,19 @@
     <button class="btn small ghost" onclick={explain} disabled={!tab.statement.trim()} title="Ask an agent to explain this query">
       <Icon name="comment" size={11} />Ask AI
     </button>
+    {#if database.queryLanguage !== 'redis'}
+      <button
+        class="btn small ghost"
+        onclick={() => {
+          database.formatStatement();
+          editorSel = { text: '', cursor: 0 };
+        }}
+        disabled={!tab.statement.trim() || tab.running}
+        title="Format / beautify the SQL"
+      >
+        <Icon name="command" size={11} />Format
+      </button>
+    {/if}
     <span class="grow"></span>
     {#if database.capabilities?.sql && database.databaseNames.length > 0}
       <label class="qe-db" title="Active database — queries run scoped to it, so you don't need a db. prefix">
@@ -387,6 +443,28 @@
     <span class="qe-lang mono">{database.queryLanguage}</span>
   </div>
 
+  {#if queryVars.length > 0}
+    <div class="qe-vars" bind:this={varsBarEl}>
+      <Icon name="tag" size={11} />
+      <span class="qe-vars-label">Variables</span>
+      {#each queryVars as name (name)}
+        <label class="qe-var" title="Value for :{name}">
+          <span class="qe-var-name mono">{name}</span>
+          <input
+            class="input qe-var-input"
+            value={tab.vars[name] ?? ''}
+            placeholder="value"
+            spellcheck="false"
+            oninput={(e) => database.setVar(name, (e.currentTarget as HTMLInputElement).value)}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') run();
+            }}
+          />
+        </label>
+      {/each}
+    </div>
+  {/if}
+
   {#if saving}
     <div class="save-bar">
       <!-- svelte-ignore a11y_autofocus -->
@@ -422,6 +500,7 @@
       completionSource={database.selectedConnId ? completionSource : null}
       onchange={(v) => database.setStatement(v)}
       onsubmit={run}
+      onselect={(s) => (editorSel = s)}
     />
   </div>
 
@@ -586,6 +665,42 @@
     align-items: center;
     gap: 8px;
     padding: 0 0 8px;
+  }
+  /* Query-level variables bar — shown only when the statement references
+     :name / {name}. One labelled input per variable, values remembered per tab. */
+  .qe-vars {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 0 8px;
+    color: var(--text-dim);
+  }
+  .qe-vars-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .qe-var {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--surface-2);
+    border-radius: var(--radius-s);
+    padding: 2px 6px;
+  }
+  .qe-var-name {
+    font-size: 11.5px;
+    color: var(--accent);
+  }
+  .qe-var-name::before {
+    content: ':';
+    opacity: 0.6;
+  }
+  .qe-var-input {
+    height: 22px;
+    width: 120px;
+    font-size: 12px;
   }
   .btn.stop {
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
