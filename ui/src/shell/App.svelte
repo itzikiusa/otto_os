@@ -606,6 +606,13 @@
 <div class="shell">
   <div class="shell-main">
     <div class="sidebar" class:tauri-top={isTauri}>
+      <!-- Draggable titlebar strip over the overlaid traffic-lights inset, so the
+           window can be moved by dragging the top-left (the native title bar is
+           hidden by `titleBarStyle: Overlay`). The empty 26px inset has no
+           interactive content, so this never steals clicks. -->
+      {#if isTauri}
+        <div class="titlebar-drag" data-tauri-drag-region></div>
+      {/if}
       {#if ui.railExpanded}
         <Navigator />
       {:else}
@@ -763,10 +770,21 @@
     height: 100%;
     flex-shrink: 0;
     display: flex;
+    position: relative;
   }
   .sidebar.tauri-top {
     /* room for overlaid traffic lights in the Tauri window */
     padding-top: 26px;
+  }
+  /* Window-drag handle filling the empty 26px traffic-lights inset (Tauri only).
+     The sidebar's content is padded below it, so this overlays nothing
+     interactive — it just lets you move the window from the top-left titlebar. */
+  .titlebar-drag {
+    position: absolute;
+    top: 0;
+    inset-inline: 0;
+    height: 26px;
+    z-index: 5;
   }
   .center {
     flex: 1;
