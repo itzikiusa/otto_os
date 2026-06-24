@@ -25,6 +25,7 @@ import type {
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
 import { format as formatSql } from 'sql-formatter';
+import { defaultVarSpec, type VarSpec } from '../../modules/database/sql-util';
 
 /** Connection kinds the explorer can browse (the four DB engines). */
 export const DB_KINDS = ['mysql', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -285,11 +286,32 @@ export interface QueryTab {
    */
   mask: boolean;
   /**
-   * Query-level variable values (`:name` / `{name}`) the editor substitutes into
-   * the statement before running. Per-tab (not global); persisted so values
-   * survive reloads.
+   * Query-level variables (`:name` / `{name}`) the editor substitutes into the
+   * statement before running. Each holds a value + type (`string` default →
+   * quoted, `number` → raw, `raw` → verbatim) + an escape flag. Per-tab (not
+   * global); persisted so values survive reloads.
    */
-  vars: Record<string, string>;
+  vars: Record<string, VarSpec>;
+}
+
+/** Normalize a persisted vars blob — legacy `Record<string,string>` (bare value)
+ *  or the new `Record<string,VarSpec>` — into VarSpecs. */
+function normalizeVars(raw: unknown): Record<string, VarSpec> {
+  const out: Record<string, VarSpec> = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string') {
+      out[k] = defaultVarSpec(v);
+    } else if (v && typeof v === 'object') {
+      const o = v as Record<string, unknown>;
+      out[k] = {
+        value: typeof o.value === 'string' ? o.value : '',
+        type: o.type === 'number' || o.type === 'raw' ? o.type : 'string',
+        escape: typeof o.escape === 'boolean' ? o.escape : true,
+      };
+    }
+  }
+  return out;
 }
 
 let nextTabId = 1;
@@ -518,10 +540,12 @@ class DatabaseStore {
   }
 
   /** Set + persist a query-level variable value on the active tab. */
-  setVar(name: string, value: string): void {
+  /** Patch a query-level variable (value / type / escape) on the active tab. */
+  setVar(name: string, patch: Partial<VarSpec>): void {
     const t = this.tab;
     if (!t) return;
-    t.vars = { ...t.vars, [name]: value };
+    const cur = t.vars[name] ?? defaultVarSpec();
+    t.vars = { ...t.vars, [name]: { ...cur, ...patch } };
     this.persistTabs();
   }
 
@@ -572,14 +596,14 @@ class DatabaseStore {
     if (!raw) return null;
     try {
       const p = JSON.parse(raw) as {
-        tabs?: { name?: string; statement?: string; vars?: Record<string, string> }[];
+        tabs?: { name?: string; statement?: string; vars?: unknown }[];
         activeTab?: number;
         activeDb?: string | null;
       };
       const tabs = (p.tabs ?? []).map((t) => ({
         ...blankTab(t.statement ?? ''),
         name: t.name || 'Query',
-        vars: t.vars && typeof t.vars === 'object' ? t.vars : {},
+        vars: normalizeVars(t.vars),
       }));
       if (!tabs.length) return null;
       const activeTab = Math.min(Math.max(0, p.activeTab ?? 0), tabs.length - 1);

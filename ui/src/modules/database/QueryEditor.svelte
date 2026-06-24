@@ -12,7 +12,15 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { DbCompletionKind } from '../../lib/api/types';
-  import { statementAtCursor, extractVars, substituteVars, type SplitMode } from './sql-util';
+  import {
+    statementAtCursor,
+    extractVars,
+    substituteVars,
+    renderVar,
+    defaultVarSpec,
+    type SplitMode,
+    type VarSpec,
+  } from './sql-util';
 
   const tab = $derived(database.tab);
 
@@ -152,7 +160,7 @@
     // Query-level variables: every :name / {name} in the chosen statement needs
     // a value before it can run.
     const names = extractVars(base, splitMode);
-    const missing = names.filter((n) => !(tab.vars[n] ?? '').trim());
+    const missing = names.filter((n) => !(tab.vars[n]?.value ?? '').trim());
     if (missing.length > 0) {
       toasts.error(
         'Missing variable value',
@@ -164,7 +172,12 @@
       });
       return;
     }
-    const finalSql = names.length > 0 ? substituteVars(base, tab.vars, splitMode) : base;
+    // Render each variable per its type/escape (string → quoted+escaped, number →
+    // raw, raw → verbatim), then substitute.
+    const rendered = Object.fromEntries(
+      names.map((n) => [n, renderVar(tab.vars[n] ?? defaultVarSpec(), splitMode)]),
+    );
+    const finalSql = names.length > 0 ? substituteVars(base, rendered, splitMode) : base;
     void database.runQuery(finalSql, undefined, { transient: true });
   }
 
@@ -448,19 +461,45 @@
       <Icon name="tag" size={11} />
       <span class="qe-vars-label">Variables</span>
       {#each queryVars as name (name)}
-        <label class="qe-var" title="Value for :{name}">
+        {@const spec = tab.vars[name] ?? defaultVarSpec()}
+        <div class="qe-var">
           <span class="qe-var-name mono">{name}</span>
           <input
             class="input qe-var-input"
-            value={tab.vars[name] ?? ''}
-            placeholder="value"
+            value={spec.value}
+            placeholder={spec.type === 'number' ? '123' : 'value'}
             spellcheck="false"
-            oninput={(e) => database.setVar(name, (e.currentTarget as HTMLInputElement).value)}
+            oninput={(e) =>
+              database.setVar(name, { value: (e.currentTarget as HTMLInputElement).value })}
             onkeydown={(e) => {
               if (e.key === 'Enter') run();
             }}
           />
-        </label>
+          <select
+            class="input qe-var-type"
+            value={spec.type}
+            title="How to substitute this variable: string (quoted), number (raw), or raw (verbatim)"
+            onchange={(e) =>
+              database.setVar(name, {
+                type: (e.currentTarget as HTMLSelectElement).value as VarSpec['type'],
+              })}
+          >
+            <option value="string">string</option>
+            <option value="number">number</option>
+            <option value="raw">raw</option>
+          </select>
+          {#if spec.type === 'string'}
+            <label class="qe-var-esc" title="Escape quotes inside the value">
+              <input
+                type="checkbox"
+                checked={spec.escape}
+                onchange={(e) =>
+                  database.setVar(name, { escape: (e.currentTarget as HTMLInputElement).checked })}
+              />
+              esc
+            </label>
+          {/if}
+        </div>
       {/each}
     </div>
   {/if}
@@ -701,6 +740,21 @@
     height: 22px;
     width: 120px;
     font-size: 12px;
+  }
+  .qe-var-type {
+    height: 22px;
+    font-size: 11px;
+    padding: 0 2px;
+  }
+  .qe-var-esc {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    cursor: pointer;
   }
   .btn.stop {
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
