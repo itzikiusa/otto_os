@@ -10,6 +10,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import SceneList from './SceneList.svelte';
   import ExcalidrawCanvas from './ExcalidrawCanvas.svelte';
+  import SessionView from '../agents/SessionView.svelte';
 
   // Phone: Excalidraw opens in view mode (its editing chrome needs room).
   const readonly = $derived(viewport.isPhone);
@@ -19,6 +20,7 @@
   let aiOpen = $state(false);
   let aiPrompt = $state('');
   let aiBusy = $state(false);
+  let showConvo = $state(false);
 
   async function runAi(): Promise<void> {
     const p = aiPrompt.trim();
@@ -78,35 +80,60 @@
       {#if canvas.scene && canvas.currentId}
         <!-- Remount Excalidraw when switching scenes so each loads its own doc. -->
         {#key canvas.currentId}
-          <div class="editor-host">
-            <ExcalidrawCanvas bind:this={editor} {readonly} />
-            {#if !readonly}
-              <!-- Agent "draw it for me" overlay (top-center, above Excalidraw). -->
-              <div class="ai-bar">
-                {#if !aiOpen}
-                  <button class="ai-fab" onclick={() => (aiOpen = true)}>
-                    <Icon name="zap" size={15} /> Ask AI to draw
-                  </button>
-                {:else}
-                  <div class="ai-input" class:busy={aiBusy}>
-                    <Icon name="zap" size={15} />
-                    <!-- svelte-ignore a11y_autofocus -->
-                    <input
-                      bind:value={aiPrompt}
-                      placeholder="Describe a diagram… e.g. 'order flow across microservices'"
-                      onkeydown={onAiKey}
-                      disabled={aiBusy}
-                      autofocus
-                    />
-                    <button class="ai-draw" onclick={runAi} disabled={aiBusy || !aiPrompt.trim()}>
-                      {aiBusy ? 'Drawing…' : 'Draw'}
+          <div class="editor-split" class:with-convo={showConvo && canvas.sessionId}>
+            <div class="editor-host">
+              <ExcalidrawCanvas bind:this={editor} {readonly} />
+              {#if !readonly}
+                <!-- Agent "draw it for me" overlay (bottom-center, above Excalidraw). -->
+                <div class="ai-bar">
+                  {#if !aiOpen}
+                    <button class="ai-fab" onclick={() => (aiOpen = true)}>
+                      <Icon name="zap" size={15} /> Ask AI to draw
                     </button>
-                    <button class="ai-close" onclick={() => (aiOpen = false)} aria-label="Close">
-                      <Icon name="x" size={14} />
+                  {:else}
+                    <div class="ai-input" class:busy={aiBusy}>
+                      <Icon name="zap" size={15} />
+                      <!-- svelte-ignore a11y_autofocus -->
+                      <input
+                        bind:value={aiPrompt}
+                        placeholder="Describe a diagram… e.g. 'order flow across microservices'"
+                        onkeydown={onAiKey}
+                        disabled={aiBusy}
+                        autofocus
+                      />
+                      <button class="ai-draw" onclick={runAi} disabled={aiBusy || !aiPrompt.trim()}>
+                        {aiBusy ? 'Drawing…' : 'Draw'}
+                      </button>
+                      <button class="ai-close" onclick={() => (aiOpen = false)} aria-label="Close">
+                        <Icon name="x" size={14} />
+                      </button>
+                    </div>
+                  {/if}
+                  {#if canvas.sessionId}
+                    <button
+                      class="convo-toggle"
+                      class:active={showConvo}
+                      onclick={() => (showConvo = !showConvo)}
+                      title="See the agent's conversation"
+                    >
+                      <Icon name="comment" size={15} /> Conversation
                     </button>
-                  </div>
-                {/if}
-              </div>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+            {#if showConvo && canvas.sessionId}
+              <aside class="convo-panel">
+                {#key canvas.sessionId}
+                  <SessionView
+                    sessionId={canvas.sessionId}
+                    focused={true}
+                    showClose={true}
+                    onfocus={() => {}}
+                    onclosepane={() => (showConvo = false)}
+                  />
+                {/key}
+              </aside>
             {/if}
           </div>
         {/key}
@@ -151,11 +178,26 @@
     display: flex;
     flex-direction: column;
   }
+  /* Editor + optional conversation side panel. */
+  .editor-split {
+    flex: 1 1 auto;
+    display: flex;
+    min-height: 0;
+    min-width: 0;
+  }
   .editor-host {
     flex: 1 1 auto;
     position: relative;
     min-width: 0;
     min-height: 0;
+  }
+  .convo-panel {
+    width: 380px;
+    flex: none;
+    border-inline-start: 1px solid var(--border);
+    display: flex;
+    min-height: 0;
+    min-width: 0;
   }
   /* Agent draw overlay — bottom-center so it clears Excalidraw's top toolbar. */
   .ai-bar {
@@ -164,6 +206,28 @@
     left: 50%;
     transform: translateX(-50%);
     z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .convo-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 14px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.2));
+  }
+  .convo-toggle.active {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .ai-fab {
     display: inline-flex;

@@ -62,10 +62,26 @@
         dx = maxX + 100 - minX;
       }
       const placed = dx ? fresh.map((e) => ({ ...e, x: e.x + dx })) : fresh;
-      excaliApi.updateScene({ elements: [...existing, ...placed] });
-      // Auto-fit: frame the freshly generated diagram so it fills the canvas.
+
+      // LIVE BUILD-IN: reveal shapes first (so arrows have something to bind to),
+      // then arrows — a few per frame, so the diagram "draws itself" instead of
+      // popping in all at once. Frame the FINAL bounds up front so the camera
+      // doesn't jump while it builds.
+      const arrows = placed.filter((e) => e.type === 'arrow' || e.type === 'line');
+      const shapes = placed.filter((e) => e.type !== 'arrow' && e.type !== 'line');
+      const ordered = [...shapes, ...arrows];
+      excaliApi.updateScene({ elements: [...existing, ordered[0]] });
       excaliApi.scrollToContent(placed, { fitToContent: true, animate: true });
+      const step = Math.max(1, Math.ceil(ordered.length / 22));
+      for (let i = 1; i < ordered.length; i += step) {
+        if (destroyed) break;
+        excaliApi.updateScene({ elements: [...existing, ...ordered.slice(0, i + step)] });
+        await new Promise((r) => setTimeout(r, 55));
+      }
+      excaliApi.updateScene({ elements: [...existing, ...ordered] });
       scheduleSave();
+      // Surface the agent's session so "View conversation" can show its work.
+      void canvas.refreshSession();
       toasts.success('Drawn on canvas', res.note || 'Editable shapes added.');
     } catch (e) {
       toasts.error('Ask AI failed', e instanceof Error ? e.message : String(e));

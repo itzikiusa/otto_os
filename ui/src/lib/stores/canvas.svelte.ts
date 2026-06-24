@@ -32,6 +32,9 @@ class CanvasStore {
   /** Raw parsed doc for the open scene — Excalidraw `{elements,appState,files}`
    *  (the embedded editor reads this for initialData and writes it back). */
   rawDoc = $state<unknown>(null);
+  /** The managed Otto session backing this scene's agent generation — open it in
+   *  the "View conversation" panel to watch the agent work. */
+  sessionId = $state<string | null>(null);
   /** A scene id to auto-open once the Canvas module mounts (deep-link from e.g.
    *  the Discovery-Chat "Open in Canvas" action). CanvasPage consumes + clears it. */
   pendingOpenId = $state<string | null>(null);
@@ -93,6 +96,7 @@ class CanvasStore {
       } catch {
         this.rawDoc = null;
       }
+      this.sessionId = row.session_id;
       this.#history = [];
       this.#future = [];
       this.dirty = false;
@@ -120,6 +124,18 @@ class CanvasStore {
   }
 
   // -- edit / persist ----------------------------------------------------
+
+  /** Re-read the open scene's `session_id` (set server-side on the first agent
+   *  generation) so the conversation panel can open it. */
+  async refreshSession(): Promise<void> {
+    if (!this.currentId) return;
+    try {
+      const row = await api.get<CanvasScene>(`/canvas/scenes/${this.currentId}`);
+      this.sessionId = row.session_id;
+    } catch {
+      /* best-effort */
+    }
+  }
 
   /** ExcalidrawCanvas persisted the opaque doc itself — record it + mark saved. */
   markSaved(doc: unknown): void {
