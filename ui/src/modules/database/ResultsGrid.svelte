@@ -1242,6 +1242,24 @@
     sendToAgentOpen = true;
   }
 
+  // ── Examine with AI (investigate) ────────────────────────────────────────────
+  // Open the embedded DB Assistant in investigate mode, seeded with the current
+  // statement + a small sample of the result columns/rows. The agent runs in its
+  // own live shell beside the editor and can sample more data read-only.
+  function examineWithAi(): void {
+    if (!result) return;
+    const cols = result.columns.map((c) => c.name).join(', ');
+    const sample = (result.rows ?? []).slice(0, 8);
+    const lines: string[] = [];
+    if (statement) lines.push(`Statement:\n${statement}`);
+    lines.push(`Columns: ${cols}`);
+    lines.push(
+      `Rows returned: ${result.stats.row_count} in ${result.stats.duration_ms} ms`,
+    );
+    if (sample.length) lines.push(`Sample rows:\n${JSON.stringify(sample, null, 2)}`);
+    database.openAssist('investigate', lines.join('\n\n'));
+  }
+
   // Autofocus + select the inline editor input on open. Svelte actions can't be
   // async, so defer the focus/select to a microtask after mount.
   function focusEditor(node: HTMLInputElement): void {
@@ -1323,6 +1341,9 @@
           </span>
         {/if}
         <button class="tb-btn" onclick={sendToRunningAgent} title="Paste this query + result into your running agent (so it sees the real DB state)"><Icon name="comment" size={11} />→ Agent</button>
+        {#if connectionId}
+          <button class="tb-btn" onclick={examineWithAi} title="Investigate this result with the DB Assistant agent (read-only, side-by-side)"><Icon name="zap" size={11} />Examine with AI</button>
+        {/if}
         <button class="tb-btn" onclick={copyTsv} title="Copy as TSV{exportScope}"><Icon name="file" size={11} />Copy</button>
         <button class="tb-btn" onclick={exportCsv} title="Export CSV{exportScope}"><Icon name="arrowDown" size={11} />CSV</button>
         <button class="tb-btn" onclick={exportJson} title="Export JSON{exportScope}"><Icon name="arrowDown" size={11} />JSON</button>

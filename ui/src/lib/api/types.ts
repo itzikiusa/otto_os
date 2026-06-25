@@ -577,6 +577,28 @@ export type OttoEvent =
       story_id: Id;
       attachment_id: Id;
       session_id: Id;
+    }
+  | {
+      /** The DB Assistant agent session became live (turn start) — the embedded
+       *  DB Assistant panel (beside the query editor) attaches its live shell for
+       *  the matching `assist_id`. The session is hidden from the Agents list
+       *  (meta.source = 'db_assist'). */
+      type: 'db_assist_session_started';
+      workspace_id: Id;
+      connection_id: Id;
+      assist_id: Id;
+      session_id: Id;
+    }
+  | {
+      /** The DB Assistant's proposed SQL/note changed — pushed LIVE while the agent
+       *  writes its ANSWER.sql, and once with the committed result. The panel shows
+       *  `sql` in a read-only block with Insert/Run for the matching `assist_id`. */
+      type: 'db_assist_updated';
+      workspace_id: Id;
+      connection_id: Id;
+      assist_id: Id;
+      sql: string;
+      note: string;
     };
 
 // ---------------------------------------------------------------------------
@@ -2772,6 +2794,53 @@ export interface NlToSqlOutcome {
   plan: string;
   attempts: number;
   warnings: string[];
+}
+
+/** Entry mode for the embedded DB Assistant panel:
+ *  - `nl`          — "Ask in English": produce a runnable query for the question.
+ *  - `ask`         — "Ask AI": free-form question about the data/schema.
+ *  - `investigate` — examine a result/object (seeded with the statement + a small
+ *                    sample of the result columns/rows via `result_context`). */
+export type DbAssistMode = 'nl' | 'ask' | 'investigate';
+
+/**
+ * `POST /connections/{id}/db/assist` — run ONE turn of the file-backed, embedded
+ * DB Assistant. The agent runs as a managed Otto session in an ephemeral, trusted
+ * working dir seeded with the full schema + a read-only `q` tool; it never touches
+ * the DB directly. Returns the assist id (resume key), the live agent session id
+ * (the panel mounts a `<Terminal>` on it), and the agent's proposed SQL + note.
+ */
+export interface DbAssistReq {
+  /** The user's question / instruction for this turn. */
+  question: string;
+  /** Entry mode (defaults to `ask` server-side). */
+  mode?: DbAssistMode;
+  /** Active-database node to scope the schema/queries (same as a query's `node`). */
+  node?: string;
+  /** Agent CLI to run (claude/codex/…); defaults to the workspace/global default. */
+  provider?: string;
+  /** investigate-mode seed: the current statement + a small result sample. */
+  result_context?: string;
+  /** Resume an existing assist (its session) instead of starting a new one. */
+  assist_id?: string;
+}
+
+/** The result of one DB Assistant turn. */
+export interface DbAssistResp {
+  /** Stable id for this assist (resume key; also the DELETE/summary path segment). */
+  assist_id: Id;
+  /** The live agent session id — the panel binds `<Terminal>` to `/ws/term/{id}`. */
+  session_id: Id;
+  /** The agent's current proposed SQL (its ANSWER.sql), or empty. */
+  sql: string;
+  /** A one-line explanation/note from the agent, or empty. */
+  note: string;
+}
+
+/** `POST /connections/{id}/db/assist/{aid}/summary` — the rendered investigation
+ *  summary (the panel downloads it as a `.md` file). */
+export interface DbAssistSummaryResp {
+  markdown: string;
 }
 
 export type DbCompletionKind =

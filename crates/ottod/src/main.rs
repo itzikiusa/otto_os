@@ -336,6 +336,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         workspaces: workspaces.clone(),
         connections,
         db_explorer,
+        db_assist: otto_server::db_assist::new_registry(),
         brokers,
         spawner,
         git_store: GitStore::new(pool.clone()),

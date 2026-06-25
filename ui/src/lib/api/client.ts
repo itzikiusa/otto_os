@@ -6,6 +6,9 @@ import type {
   ImportResult,
   NlToSqlReq,
   NlToSqlOutcome,
+  DbAssistReq,
+  DbAssistResp,
+  DbAssistSummaryResp,
   ImportSource,
   SourceStatus,
   ImportScanResult,
@@ -253,6 +256,30 @@ export async function dbImport(
  */
 export function dbNlToSql(connId: string, body: NlToSqlReq): Promise<NlToSqlOutcome> {
   return api.post<NlToSqlOutcome>(`/connections/${connId}/db/nl-to-sql`, body);
+}
+
+// --- DB Assistant (file-backed, embedded agent panel) -----------------------
+//
+// The embedded DB Assistant runs an agent as a managed Otto session in an
+// ephemeral, trusted working dir seeded with the full schema + a read-only `q`
+// tool. Each turn POSTs a question; the live session shows up via the
+// `db_assist_session_started` WS event (and is mirrored in the response), and the
+// agent's proposed SQL streams in via `db_assist_updated`. See db_assist.rs.
+
+/** Run ONE DB Assistant turn (start a new assist, or resume one via `assist_id`). */
+export function dbAssistStart(connId: string, body: DbAssistReq): Promise<DbAssistResp> {
+  return api.post<DbAssistResp>(`/connections/${connId}/db/assist`, body);
+}
+
+/** Ask the assist agent to write SUMMARY.md and return its rendered markdown
+ *  (the panel triggers a browser download of it). */
+export function dbAssistSummary(connId: string, assistId: string): Promise<DbAssistSummaryResp> {
+  return api.post<DbAssistSummaryResp>(`/connections/${connId}/db/assist/${assistId}/summary`, {});
+}
+
+/** Close an assist: kill its session + discard its working dir (Close = discard). */
+export function dbAssistClose(connId: string, assistId: string): Promise<void> {
+  return api.del<void>(`/connections/${connId}/db/assist/${assistId}`);
 }
 
 // --- Import connections from other DB tools ---------------------------------

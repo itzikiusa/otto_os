@@ -48,6 +48,12 @@ pub const WRITE_BLOCKED_PREFIX: &str = "write_blocked: ";
 /// next `resolve` — dropping them kills the `ssh` child via `SshTunnel::Drop`.
 const TUNNEL_IDLE_TTL: Duration = Duration::from_secs(600);
 
+/// Table cap for [`DbViewerService::schema_context`] — the COMPLETE schema fed to
+/// the DB Assistant agent. Generous (a model wants the whole picture) but bounded:
+/// each table is one `object_detail` round-trip, so a runaway schema with tens of
+/// thousands of tables can't stall the assist's seed step.
+const SCHEMA_CONTEXT_MAX_TABLES: usize = 300;
+
 /// A cached SSH tunnel kept alive between operations.
 struct CachedTunnel {
     tunnel: Arc<SshTunnel>,
@@ -743,9 +749,7 @@ impl DbViewerService {
         node: Option<&str>,
         max_tables: usize,
     ) -> Result<String> {
-        let schema = node
-            .and_then(|n| NodePath::parse(n).get("db").map(str::to_string))
-            .unwrap_or_default();
+        let schema = node_to_schema(node);
         let graph = self.schema_graph(conn_id, &schema, max_tables).await?;
         let mut out = String::new();
         for t in &graph.tables {
@@ -760,6 +764,23 @@ impl DbViewerService {
             out.push_str("(no tables introspected)");
         }
         Ok(out)
+    }
+
+    /// A COMPLETE, model-grounding markdown schema for the active database — the
+    /// context the DB Assistant agent reads from `SCHEMA.md` before drafting SQL.
+    ///
+    /// Unlike [`Self::schema_summary`] (one terse line per table) this renders one
+    /// block per table with every column (`name type` + PK/FK/NOT-NULL flags) and
+    /// a foreign-key section, so the agent can write correct JOINs without probing.
+    /// Built from [`Self::schema_graph`] (engine-agnostic introspection) with a
+    /// generous table cap; engines without FK metadata (Redis/Mongo) yield tables
+    /// with no edges. See [`format_schema_context`] for the (unit-tested) layout.
+    pub async fn schema_context(&self, conn_id: &Id, node: Option<&str>) -> Result<String> {
+        let schema = node_to_schema(node);
+        let graph = self
+            .schema_graph(conn_id, &schema, SCHEMA_CONTEXT_MAX_TABLES)
+            .await?;
+        Ok(format_schema_context(&graph))
     }
 
     /// Cancel an in-flight query (issued via [`Self::run`] with the same
@@ -930,6 +951,89 @@ fn render_plan_text(res: &crate::types::QueryResult) -> String {
     out
 }
 
+/// Derive the schema/database name to introspect from a UI node id.
+///
+/// RC2 fix: the Database tree passes the *active database* node — sometimes a
+/// `db:`-tagged [`NodePath`] (`db:shop/table:orders`), sometimes the bare schema
+/// name (`player_details`). The old code only handled the first form and silently
+/// produced `""` for the second, so the assistant got `(no tables introspected)`.
+/// Now an un-tagged node falls back to its raw name. `None` → the connection's
+/// default schema (empty string, resolved downstream).
+fn node_to_schema(node: Option<&str>) -> String {
+    node.map(|n| {
+        NodePath::parse(n)
+            .get("db")
+            .map(str::to_string)
+            .unwrap_or_else(|| n.to_string())
+    })
+    .unwrap_or_default()
+}
+
+/// Render a [`SchemaGraph`] as a COMPLETE markdown schema for the DB Assistant —
+/// one block per table (every column as `name type` with PK/FK/NOT-NULL flags)
+/// plus a foreign-key section. Pure + unit-tested; never panics on an empty graph.
+fn format_schema_context(graph: &SchemaGraph) -> String {
+    let schema_label = if graph.schema.trim().is_empty() {
+        "(default)"
+    } else {
+        graph.schema.as_str()
+    };
+    let mut out = format!(
+        "# Database schema: {schema_label}\n{} table(s)/collection(s).",
+        graph.tables.len()
+    );
+    if graph.truncated {
+        out.push_str(" (list truncated — more tables exist than shown)");
+    }
+    if !graph.relationships {
+        out.push_str(" (this engine exposes no foreign-key relationships)");
+    }
+    out.push_str("\n\n");
+
+    for t in &graph.tables {
+        out.push_str(&format!("## {}\n", t.name));
+        if t.columns.is_empty() {
+            out.push_str("(no columns introspected)\n\n");
+            continue;
+        }
+        for c in &t.columns {
+            let mut flags: Vec<&str> = Vec::new();
+            if c.primary_key {
+                flags.push("PK");
+            }
+            if c.foreign_key {
+                flags.push("FK");
+            }
+            if !c.nullable {
+                flags.push("NOT NULL");
+            }
+            let suffix = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", flags.join(", "))
+            };
+            out.push_str(&format!("- {} {}{}\n", c.name, c.data_type, suffix));
+        }
+        out.push('\n');
+    }
+
+    if !graph.edges.is_empty() {
+        out.push_str("## Foreign keys\n");
+        for e in &graph.edges {
+            out.push_str(&format!(
+                "- {}({}) -> {}.{}({})\n",
+                e.from_table,
+                e.from_columns.join(", "),
+                e.to_schema,
+                e.to_table,
+                e.to_columns.join(", "),
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Adapts `DbViewerService::explain_validate` to the `nl::SqlValidator` trait so
 /// the NL loop can validate candidates without knowing about the service.
 pub struct ServiceValidator<'a> {
@@ -1006,6 +1110,98 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("q1".to_string(), entry("conn-A", None));
         assert!(cancel_handle_for(&map, &"conn-A".to_string(), "q1").is_none());
+    }
+
+    // ---- RC2: node → schema derivation -----------------------------------
+
+    #[test]
+    fn node_to_schema_handles_tagged_bare_and_none() {
+        // A `db:`-tagged NodePath → the db segment.
+        assert_eq!(node_to_schema(Some("db:shop/table:orders")), "shop");
+        assert_eq!(node_to_schema(Some("db:player_details")), "player_details");
+        // RC2: a bare active-db node (no `db:` tag) → its raw name (was "" before).
+        assert_eq!(node_to_schema(Some("player_details")), "player_details");
+        // No node → the connection default (empty schema, resolved downstream).
+        assert_eq!(node_to_schema(None), "");
+    }
+
+    // ---- schema_context formatting ---------------------------------------
+
+    fn graph_col(name: &str, ty: &str, pk: bool, fk: bool, nullable: bool) -> GraphColumn {
+        GraphColumn {
+            name: name.into(),
+            data_type: ty.into(),
+            nullable,
+            primary_key: pk,
+            foreign_key: fk,
+        }
+    }
+
+    #[test]
+    fn format_schema_context_renders_tables_columns_flags_and_fks() {
+        let graph = SchemaGraph {
+            schema: "shop".into(),
+            tables: vec![
+                GraphTable {
+                    id: "db:shop/table:orders".into(),
+                    schema: "shop".into(),
+                    name: "orders".into(),
+                    kind: NodeKind::Table,
+                    columns: vec![
+                        graph_col("id", "int", true, false, false),
+                        graph_col("customer_id", "int", false, true, false),
+                        graph_col("note", "text", false, false, true),
+                    ],
+                },
+                GraphTable {
+                    id: "db:shop/table:customers".into(),
+                    schema: "shop".into(),
+                    name: "customers".into(),
+                    kind: NodeKind::Table,
+                    columns: vec![graph_col("id", "int", true, false, false)],
+                },
+            ],
+            edges: vec![GraphEdge {
+                name: "fk_customer".into(),
+                from_table: "orders".into(),
+                from_columns: vec!["customer_id".into()],
+                to_schema: "shop".into(),
+                to_table: "customers".into(),
+                to_columns: vec!["id".into()],
+            }],
+            relationships: true,
+            truncated: false,
+        };
+        let md = format_schema_context(&graph);
+        assert!(md.contains("# Database schema: shop"));
+        assert!(md.contains("2 table(s)"));
+        assert!(md.contains("## orders"));
+        assert!(md.contains("## customers"));
+        // Column lines carry type + the right flags.
+        assert!(md.contains("- id int [PK, NOT NULL]"));
+        assert!(md.contains("- customer_id int [FK, NOT NULL]"));
+        assert!(md.contains("- note text\n")); // nullable, no flags
+        // FK section resolves to schema.table(cols).
+        assert!(md.contains("## Foreign keys"));
+        assert!(md.contains("orders(customer_id) -> shop.customers(id)"));
+    }
+
+    #[test]
+    fn format_schema_context_empty_and_no_relationships() {
+        let graph = SchemaGraph {
+            schema: String::new(),
+            tables: Vec::new(),
+            edges: Vec::new(),
+            relationships: false,
+            truncated: true,
+        };
+        let md = format_schema_context(&graph);
+        assert!(md.contains("# Database schema: (default)"));
+        assert!(md.contains("0 table(s)"));
+        assert!(md.contains("truncated"));
+        assert!(md.contains("no foreign-key relationships"));
+        // No FK section when there are no edges.
+        assert!(!md.contains("## Foreign keys"));
     }
 
     #[test]

@@ -239,4 +239,24 @@ pub enum Event {
         attachment_id: Id,
         session_id: Id,
     },
+    /// A DB Explorer "assistant" agent session just became live (at the START of a
+    /// turn). Lets the Database page attach the agent's live shell/Terminal
+    /// immediately. The session is hidden from the Agents list via `meta.source`.
+    DbAssistSessionStarted {
+        workspace_id: Id,
+        connection_id: Id,
+        assist_id: Id,
+        session_id: Id,
+    },
+    /// The DB assistant's working answer changed — emitted LIVE while the agent
+    /// writes its `ANSWER.sql` (per-poll, mid-turn) and once with the final result.
+    /// `sql` is the current proposed query; `note` is a short status line. The
+    /// Database page renders this in the assistant panel as the agent works.
+    DbAssistUpdated {
+        workspace_id: Id,
+        connection_id: Id,
+        assist_id: Id,
+        sql: String,
+        note: String,
+    },
 }

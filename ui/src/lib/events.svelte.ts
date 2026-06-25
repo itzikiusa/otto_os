@@ -12,6 +12,7 @@ import { usage } from './api/usage.svelte';
 import { product } from './stores/product.svelte';
 import { canvas } from './stores/canvas.svelte';
 import { mockupAssist } from './stores/mockup-assist.svelte';
+import { database } from './stores/database.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -281,6 +282,19 @@ class EventsClient {
         } else if (parsed.type === 'mockup_session_started') {
           // The mockup agent session is live (turn start) → attach its shell.
           mockupAssist.setSession(parsed.attachment_id, parsed.story_id, parsed.session_id);
+        } else if (parsed.type === 'db_assist_session_started') {
+          // The DB Assistant agent session is live (turn start) → attach its shell
+          // in the embedded DB Assistant panel (beside the query editor).
+          database.setAssistSession(parsed.assist_id, parsed.connection_id, parsed.session_id);
+        } else if (parsed.type === 'db_assist_updated') {
+          // Live proposed SQL/note from the DB Assistant agent → the panel's
+          // read-only SQL block (Insert into editor / Run).
+          database.applyAssistUpdate(
+            parsed.assist_id,
+            parsed.connection_id,
+            parsed.sql,
+            parsed.note,
+          );
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

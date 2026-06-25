@@ -44,6 +44,9 @@ pub struct ServerCtx {
     pub connections: Arc<ConnectionsService>,
     /// Native data-access layer for the DB Explorer (browse/query/schema).
     pub db_explorer: Arc<DbViewerService>,
+    /// In-memory registry of live DB Assistant sessions (`assist_id → entry`).
+    /// Ephemeral by design — discarded on close/restart; backs `db_assist.rs`.
+    pub db_assist: crate::db_assist::DbAssistRegistry,
     /// Message Brokers (Kafka) viewer engine — cluster CRUD + rdkafka client pool.
     pub brokers: Arc<otto_brokers::BrokersService>,
     pub spawner: Arc<dyn Spawner>,

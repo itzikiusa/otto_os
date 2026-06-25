@@ -127,6 +127,9 @@ fn app(pool: SqlitePool, user: User) -> Router {
         // Database feature
         .route("/connections/{id}/db/tables", get(ok))
         .route("/connections/{id}/db/query", post(ok))
+        // DB Assistant — gated on Connections:Edit (NOT Database), so it must win
+        // over the generic `/connections/{id}/db/` Database prefix.
+        .route("/connections/{id}/db/assist", post(ok))
         // Connections feature
         .route("/connections", post(ok))
         .route("/connections/{id}/open", post(ok))
@@ -225,6 +228,27 @@ async fn db_view_user_cannot_write_db() {
     // Denial must be a JSON `Problem` with a `forbidden` code.
     assert_eq!(body["code"], "forbidden", "body: {body}");
     assert!(body["message"].is_string());
+}
+
+#[tokio::test]
+async fn db_assist_route_is_connections_edit_not_database() {
+    // The DB Assistant start route is gated on Connections:Edit — and that rule
+    // must win over the `/connections/{id}/db/` Database prefix.
+    // A Connections:Edit user is allowed.
+    let app = app_for(&[(Feature::Connections, Capability::Edit)], false).await;
+    assert_eq!(
+        status(&app, Method::POST, "/api/v1/connections/c1/db/assist").await,
+        StatusCode::OK,
+        "Connections:Edit must allow starting a DB Assistant turn"
+    );
+    // A Database:Edit user (who CAN run queries) is DENIED — proving the route is
+    // Connections-gated, not Database-gated.
+    let app = app_for(&[(Feature::Database, Capability::Edit)], false).await;
+    assert_eq!(
+        status(&app, Method::POST, "/api/v1/connections/c1/db/assist").await,
+        StatusCode::FORBIDDEN,
+        "DB Assistant is Connections:Edit, not Database:Edit"
+    );
 }
 
 #[tokio::test]

@@ -597,6 +597,38 @@ connection, not just the client's HTTP wait. Cancel is gated at the same role as
 already-finished query, a query on a different connection, or one on an engine
 without a native per-query cancel (Redis/MongoDB) is a no-op success (`204`).
 
+## DB Assistant — file-backed agent (`/connections/{id}/db/assist`, `/db-assist/{aid}/query`)
+
+A managed, resumable, **file-backed** database agent that replaces the old
+"Ask in English" / "Ask AI" drafter (which ran `claude` in an untrusted temp dir →
+hung → 502, and seeded an empty schema). Each assist runs the chosen agent as a
+real Otto **session** (resumable; hidden from the Agents list via
+`meta.source = "db_assist"`) in an Otto-owned **trusted** directory seeded with the
+COMPLETE schema (`SCHEMA.md`), the question + working rules (`CONTEXT.md`), an
+optional `RESULT.md` (investigate mode), and an executable `q` tool. The agent
+cannot reach any DB directly: it runs `./q '<read-only SQL>'`, which POSTs to the
+loopback query route below; Otto executes it READ-ONLY and prints the rows. The
+agent writes its FINAL query to `ANSWER.sql` and a one-line note to `NOTE.txt`.
+
+Live signals: `db_assist_session_started` (turn start → attach the live terminal)
+and `db_assist_updated` (each `ANSWER.sql` change → proposed `sql` + `note`); both
+are workspace-scoped WS events (see `ws.md`).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /connections/{id}/db/assist | ws editor (Connections:Edit) | `{ question, mode?("nl"\|"ask"\|"investigate"), node?, provider?, result_context?, assist_id?, workspace_id? }` | `{ assist_id, session_id, sql, note }` — runs ONE agent turn. First call mints the assist (dir + key + session); pass the returned `assist_id` to RESUME the conversation. `provider` is sticky after the first turn. `workspace_id` only needed for global connections. |
+| POST /connections/{id}/db/assist/{aid}/summary | ws editor (Connections:Edit) | — | `{ markdown }` — resumes the session, asks it to write `SUMMARY.md`, returns it (the UI downloads it). |
+| DELETE /connections/{id}/db/assist/{aid} | ws editor (Connections:Edit) | — | `{ ok: true }` — kills the session, removes the working dir, drops the registry entry (close = discard). |
+| POST /db-assist/{aid}/query | **assist-key** (`x-assist-key` header; NOT a user bearer — public route, like `/ingest/*`) | `{ sql }` | `{ columns[], rows[][], error? }` — the `q` tool's backend. Runs the SQL READ-ONLY against the assist's connection (writes/DDL refused → `error`; rows capped at 200). A rejected statement or engine error is returned in `error` (not an HTTP error) so the agent can correct course. |
+
+The per-assist record (dir, key, session id, connection, workspace, provider, node)
+lives in an in-memory registry on the daemon — ephemeral by design (discarded on
+close or restart). `mode`: `nl` produces a runnable query; `ask` answers a free-form
+question; `investigate` is additionally seeded with the current statement + a sample
+of its result (`result_context` → `RESULT.md`). The relevant per-engine DB skill
+(`db-mysql` / `db-redis` / `db-mongodb` / `db-clickhouse`) is injected into the
+prompt when installed (no-op otherwise).
+
 ## DB Explorer — saved queries, dashboards, widgets
 
 Saved queries/dashboards/widgets are workspace-scoped (list/create under

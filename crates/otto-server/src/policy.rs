@@ -87,6 +87,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/ingest/") {
         return Exempt;
     }
+    // DB Assistant `q` tool — the file-backed agent posts read-only SQL here with
+    // its per-assist `x-assist-key` (validated in the handler), NOT a user bearer
+    // token (the agent's PTY has no user session). Mounted in public_routes, like
+    // `/ingest/*`; exempt from the feature gate. The connection-scoped assist
+    // routes (`/connections/{id}/db/assist…`) are user-bearer gated below.
+    if p.starts_with("/db-assist/") {
+        return Exempt;
+    }
     // Runtime custom plugins. The host API (`/plugin-host/*`) is sidecar-token
     // authed (like `/ingest/*`); the enabled-plugins list (`/plugins`) is a
     // self-scoped read any authed user may make for their sidebar. The reverse-
@@ -236,6 +244,17 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // ----------------------------------------------------------------------
     // 3. Per-feature prefix families. Reads=View, writes=Edit, management=Admin.
     // ----------------------------------------------------------------------
+
+    // ---- DB Assistant (file-backed agent over a connection) -------------------
+    // The connection-scoped assist turns (start/summary/close) are gated on the
+    // *Connections* feature at Edit — they spawn/resume a managed agent session
+    // bound to the connection. (The `q`-tool query route is the assist-key-authed
+    // PUBLIC `/db-assist/{id}/query` above, Exempt.) Checked BEFORE the generic
+    // `/connections/{id}/db/` Database prefix so it wins. POST (start/summary) +
+    // DELETE (close) are all writes ⇒ Edit.
+    if p.starts_with("/connections/{id}/db/assist") {
+        return Require(Connections, Edit);
+    }
 
     // ---- Database (DB Explorer over a connection + saved queries/dashboards) --
     // Note: `/connections/{id}/db/...` is the *Database* feature, distinct from
@@ -658,6 +677,31 @@ mod tests {
             pol(Method::POST, "/api/v1/connections/{id}/db/query"),
             Require(Database, Edit),
             "running SQL is Edit"
+        );
+    }
+
+    #[test]
+    fn db_assist_routes_are_connections_edit_query_is_exempt() {
+        // Connection-scoped assist turns (start / summary / close) = Connections:Edit,
+        // and must win over the generic `/connections/{id}/db/` Database prefix.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/connections/{id}/db/assist"),
+            Require(Connections, Edit),
+            "starting a DB Assistant turn is Connections:Edit"
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/connections/{id}/db/assist/{aid}/summary"),
+            Require(Connections, Edit)
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/connections/{id}/db/assist/{aid}"),
+            Require(Connections, Edit)
+        );
+        // The `q`-tool query route is assist-key authed (NOT user bearer), like
+        // `/ingest/*` — Exempt from the feature gate.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/db-assist/{aid}/query"),
+            Exempt
         );
     }
 

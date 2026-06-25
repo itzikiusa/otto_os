@@ -10,6 +10,7 @@
   import StructureView from './StructureView.svelte';
   import DiagramView from './DiagramView.svelte';
   import Dashboards from './Dashboards.svelte';
+  import DbAssistantPanel from './DbAssistantPanel.svelte';
   import ConnectionForm from '../connections/ConnectionForm.svelte';
   import ConnectionImportDialog from '../connections/ConnectionImportDialog.svelte';
   import ImportDialog from './ImportDialog.svelte';
@@ -330,6 +331,41 @@
   ];
   const visibleTabs = $derived(mainTabs.filter((t) => t.show()));
 
+  // ── DB Assistant split (resizable, persisted) ────────────────────────────────
+  // When open, the DB Assistant panel sits BESIDE the editor/results, separated by
+  // a draggable divider so the user can enlarge the agent's shell. Mirrors the
+  // query-editor's own resizable-pane idiom (pointer drag + localStorage px).
+  let assistW = $state(loadAssistW());
+  function loadAssistW(): number {
+    if (typeof localStorage === 'undefined') return 460;
+    const v = Number(localStorage.getItem('db.assistW'));
+    return Number.isFinite(v) && v > 280 ? v : 460;
+  }
+  function persistAssistW(): void {
+    try {
+      localStorage.setItem('db.assistW', String(Math.round(assistW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startAssistResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = assistW;
+    const maxW = Math.max(320, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 360);
+    const onMove = (ev: PointerEvent): void => {
+      // The panel is pinned to the right edge, so dragging LEFT widens it.
+      assistW = Math.max(300, Math.min(maxW, startW + (startX - ev.clientX)));
+    };
+    const onUp = (): void => {
+      persistAssistW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
   // Open connections as top-level tabs (Workbench-style), resolved to their
   // Connection records for name + engine glyph.
   const openConns = $derived(
@@ -510,17 +546,35 @@
         </div>
       </div>
 
-      <div class="main-body">
-        {#if database.mainTab === 'query'}
-          <QueryEditor />
-        {:else if database.mainTab === 'builder'}
-          <QueryBuilder />
-        {:else if database.mainTab === 'structure'}
-          <StructureView />
-        {:else if database.mainTab === 'diagram'}
-          <DiagramView />
-        {:else}
-          <Dashboards />
+      <!-- The active view (editor/results/…) and, when open, the DB Assistant
+           agent panel side-by-side, separated by a draggable, persisted divider. -->
+      <div class="main-split" class:assist-open={database.assistOpen}>
+        <div class="main-body">
+          {#if database.mainTab === 'query'}
+            <QueryEditor />
+          {:else if database.mainTab === 'builder'}
+            <QueryBuilder />
+          {:else if database.mainTab === 'structure'}
+            <StructureView />
+          {:else if database.mainTab === 'diagram'}
+            <DiagramView />
+          {:else}
+            <Dashboards />
+          {/if}
+        </div>
+        {#if database.assistOpen}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="assist-divider"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Drag to resize the assistant"
+            title="Drag to resize the assistant"
+            onpointerdown={startAssistResize}
+          ></div>
+          <aside class="assist-pane" style="width:{assistW}px">
+            <DbAssistantPanel />
+          </aside>
         {/if}
       </div>
     {/if}
@@ -1335,12 +1389,41 @@
       transform: rotate(360deg);
     }
   }
+  /* Horizontal split holding the active view + (optionally) the DB Assistant. */
+  .main-split {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: row;
+  }
   .main-body {
     flex: 1;
     min-height: 0;
+    min-width: 0;
     padding: 12px 16px 16px;
     display: flex;
     flex-direction: column;
+  }
+  /* Draggable divider between the view and the assistant pane. */
+  .assist-divider {
+    flex: none;
+    width: 6px;
+    cursor: col-resize;
+    background: var(--border);
+    position: relative;
+    touch-action: none;
+  }
+  .assist-divider:hover {
+    background: var(--accent);
+  }
+  /* The DB Assistant pane — fixed (resizable) width, pinned to the right edge. */
+  .assist-pane {
+    flex: none;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    border-inline-start: 1px solid var(--border);
   }
   .grow {
     flex: 1;
@@ -1461,6 +1544,21 @@
     .main-body {
       flex: 0 0 auto;
       padding: 10px 12px 16px;
+    }
+    /* On a phone the split stacks: the assistant drops BELOW the view as a
+       full-width, fixed-height block; the vertical divider is hidden (there's
+       no side-by-side to drag). */
+    .main-split {
+      flex-direction: column;
+    }
+    .assist-divider {
+      display: none;
+    }
+    .assist-pane {
+      width: 100% !important;
+      height: 60vh;
+      border-inline-start: none;
+      border-top: 1px solid var(--border);
     }
     /* Bigger tap targets + readable text for the tab strips. */
     .conn-tabs {

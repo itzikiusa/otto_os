@@ -244,6 +244,10 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // story's workspace members (same delivery as canvas).
         | Event::MockupUpdated { workspace_id, .. }
         | Event::MockupSessionStarted { workspace_id, .. }
+        // Live DB-Assistant answer edits + the assist-agent-started signal go to the
+        // connection's workspace members (same delivery as canvas/mockup).
+        | Event::DbAssistUpdated { workspace_id, .. }
+        | Event::DbAssistSessionStarted { workspace_id, .. }
         // Budget-exceeded alerts are scoped to the workspace that crossed the cap
         // (it carries `workspace_id`), so they go to that workspace's members.
         | Event::BudgetExceeded { workspace_id, .. } => Scope::Workspace(workspace_id),

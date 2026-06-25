@@ -21,12 +21,13 @@ static PRODUCT_SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/skills");
 
 /// Version that governs the seeded skill dirs. Increment this when the bundled
 /// skill content changes and existing installs need to be upgraded. A future
-/// version bump will re-seed (overwrite) all skill dirs. Bumped to 4 to seed the
-/// new `grill` skill.
-const PRODUCT_SKILLS_SEED_VERSION: u32 = 4;
+/// version bump will re-seed (overwrite) all skill dirs. Bumped to 5 to seed the
+/// per-engine DB Assistant skills (`db-mysql` / `db-mongodb` / `db-clickhouse` /
+/// `db-redis`).
+const PRODUCT_SKILLS_SEED_VERSION: u32 = 5;
 
 /// The skills this feature owns, by library name.
-pub const SKILL_NAMES: [&str; 8] = [
+pub const SKILL_NAMES: [&str; 12] = [
     "po-story-overview",
     "story-clarifying-questions",
     "story-architecture-overview",
@@ -35,6 +36,13 @@ pub const SKILL_NAMES: [&str; 8] = [
     "rfc-writer",
     "story-task-breakdown",
     "grill",
+    // Per-engine DB Assistant skills — injected into the agent prompt by the DB
+    // Assistant via `resolve_skill_inline(..., "db-<engine>")`. Seeded here (not
+    // only in `otto-skills`) so they resolve without a manual install.
+    "db-mysql",
+    "db-mongodb",
+    "db-clickhouse",
+    "db-redis",
 ];
 
 /// The bundled body of a product skill's `SKILL.md`, or `None` if the name is

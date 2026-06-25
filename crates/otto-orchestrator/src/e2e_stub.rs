@@ -16,8 +16,20 @@ pub fn canned_reply(prompt: &str) -> String {
     if prompt.contains("OTTO_TASK: mockup_assist") {
         return mockup_assist_reply(prompt);
     }
+    if prompt.contains("OTTO_TASK: db_assist") {
+        return db_assist_reply();
+    }
     // Generic fallback for any other agent call under E2E.
     "OK".to_string()
+}
+
+/// E2E stub for the DB Assistant. The real agent writes its query to `ANSWER.sql`;
+/// offline we can't, so we return a one-line note + a fenced read-only query that
+/// the db_assist handler extracts as the proposed SQL.
+fn db_assist_reply() -> String {
+    "Grouped player counts by brand.\n\n```sql\nSELECT brand_id, COUNT(*) AS players \
+     FROM player_details GROUP BY brand_id ORDER BY players DESC\n```"
+        .to_string()
 }
 
 fn mockup_assist_reply(prompt: &str) -> String {
@@ -124,6 +136,9 @@ mod tests {
         assert!(mh.contains("```html") && mh.contains("E2E mockup"));
         // Mockup: Mermaid mode (edits mockup.mmd) → a mermaid fence.
         assert!(canned_reply("OTTO_TASK: mockup_assist edit `mockup.mmd`").contains("```mermaid"));
+        // DB Assistant → a read-only SQL fence the handler extracts as the query.
+        let db = canned_reply("OTTO_TASK: db_assist read SCHEMA.md");
+        assert!(db.contains("```sql") && db.to_uppercase().contains("SELECT"));
         assert_eq!(canned_reply("no sentinel"), "OK");
     }
 

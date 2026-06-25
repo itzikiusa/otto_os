@@ -98,6 +98,12 @@ pub fn public_routes() -> Router<ServerCtx> {
         // External trigger that auto-plans + starts a specific swarm (worktree
         // isolation). Same per-workspace webhook key as the channel webhook.
         .route("/webhooks/swarm/{workspace_id}/{swarm_id}", post(swarm_webhook::trigger))
+        // DB Assistant `q` tool: the file-backed agent runs `./q '<read-only SQL>'`,
+        // which POSTs here with its per-assist `x-assist-key` (NOT a user bearer —
+        // the agent's PTY has no user session). Lives in public_routes (outside the
+        // bearer chokepoint), like `/ingest/*`; the handler validates the key and
+        // refuses writes. POLICY EXEMPTION: classified `Exempt` in policy.rs.
+        .route("/db-assist/{aid}/query", post(crate::db_assist::query_tool))
 }
 
 /// Routes that require a bearer token (the auth middleware is layered on top

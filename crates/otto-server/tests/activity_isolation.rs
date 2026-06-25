@@ -256,6 +256,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         workspaces: WorkspacesRepo::new(pool.clone()),
         connections,
         db_explorer,
+        db_assist: otto_server::db_assist::new_registry(),
         brokers,
         spawner: Arc::new(NoopSpawner),
         git_store: GitStore::new(pool.clone()),

@@ -2,10 +2,18 @@
 // query tabs, saved queries, history, and Superset-style dashboards/widgets.
 // Reads `ws.currentId` only (never mutates it), mirroring apiClient.svelte.ts.
 
-import { api, ApiError, isAbortError } from '../api/client';
+import {
+  api,
+  ApiError,
+  isAbortError,
+  dbAssistStart,
+  dbAssistSummary,
+  dbAssistClose,
+} from '../api/client';
 import { confirmer } from '../confirm.svelte';
 import type {
   Connection,
+  DbAssistMode,
   DbCapabilities,
   DbCompletionItem,
   DbDashboard,
@@ -24,6 +32,7 @@ import type {
 } from '../api/types';
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
+import { downloadText } from '../components/exporters';
 import { format as formatSql } from 'sql-formatter';
 import { defaultVarSpec, type VarSpec } from '../../modules/database/sql-util';
 
@@ -498,6 +507,180 @@ class DatabaseStore {
   selectedDashboard: DbDashboard | null = $derived(
     this.dashboards.find((d) => d.id === this.selectedDashboardId) ?? null,
   );
+
+  // ── DB Assistant (embedded, file-backed agent panel) ─────────────────────
+  // The DB Assistant runs an agent as a managed Otto session beside the query
+  // editor/results. The panel binds a live `<Terminal>` to its session (the user
+  // talks to the agent IN the shell), shows the agent's proposed SQL, and can
+  // summarize → download or close → discard. The session is hidden from Agents
+  // (meta.source = 'db_assist'). State is ephemeral (no persistence) — Close
+  // (DELETE) kills the session + discards the working dir.
+  /** The DB Assistant panel is open (split beside the editor/results). */
+  assistOpen = $state(false);
+  /** Connection the current assist targets (captured at open). */
+  assistConnId: Id | null = $state(null);
+  /** Server assist id (minted by the first turn; the resume + DELETE key). */
+  assistId: string | null = $state(null);
+  /** Live agent session id — the panel mounts `<Terminal>` on it. */
+  assistSessionId: string | null = $state(null);
+  /** Entry mode (nl/ask/investigate) — drives the prompt + the panel hint. */
+  assistMode: DbAssistMode = $state('nl');
+  /** Chosen agent CLI (claude/codex/…) — picked before the first turn. */
+  assistProvider = $state('');
+  /** The agent's proposed SQL (start response + live `db_assist_updated`). */
+  assistProposedSql = $state('');
+  /** A one-line explanation/note from the agent. */
+  assistNote = $state('');
+  /** A turn (the first POST) is in flight. */
+  assistBusy = $state(false);
+  /** investigate-mode seed (statement + a small result sample); non-reactive. */
+  private assistResultContext: string | null = null;
+
+  /**
+   * Open the DB Assistant panel in `mode`. For `investigate`, pass a compact
+   * `resultContext` (statement + result sample). Targets the active connection.
+   * Does NOT start a session — the user picks the agent and types the first
+   * question (which POSTs the first turn). Reopening resets the local view; the
+   * previous session (if any) was already discarded on Close.
+   */
+  openAssist(mode: DbAssistMode, resultContext?: string | null): void {
+    if (!this.selectedConnId) {
+      toasts.error('No connection selected');
+      return;
+    }
+    this.assistOpen = true;
+    this.assistMode = mode;
+    this.assistConnId = this.selectedConnId;
+    this.assistResultContext = resultContext ?? null;
+    this.assistId = null;
+    this.assistSessionId = null;
+    this.assistProposedSql = '';
+    this.assistNote = '';
+    this.assistBusy = false;
+  }
+
+  /** Set the chosen agent CLI for the assist (before the first turn). */
+  setAssistProvider(provider: string): void {
+    this.assistProvider = provider;
+  }
+
+  /**
+   * Run ONE agent turn — the first question (or a resume). POSTs to
+   * `…/db/assist`; the live session appears via the `db_assist_session_started`
+   * event (mirrored in the response as a fallback) and the proposed SQL streams
+   * in via `db_assist_updated`. After the first turn the user continues the
+   * conversation by typing directly in the embedded terminal.
+   */
+  async startAssist(question: string): Promise<void> {
+    const id = this.assistConnId ?? this.selectedConnId;
+    if (!id) {
+      toasts.error('No connection selected');
+      return;
+    }
+    const q = question.trim();
+    if (!q || this.assistBusy) return;
+    this.assistBusy = true;
+    try {
+      const resp = await dbAssistStart(id, {
+        question: q,
+        mode: this.assistMode,
+        ...(this.activeDb ? { node: this.activeDb } : {}),
+        ...(this.assistProvider ? { provider: this.assistProvider } : {}),
+        ...(this.assistId ? { assist_id: this.assistId } : {}),
+        ...(this.assistResultContext && this.assistMode === 'investigate'
+          ? { result_context: this.assistResultContext }
+          : {}),
+      });
+      this.assistId = resp.assist_id;
+      // The session usually arrives first (turn START) via the event; set it from
+      // the response too in case it didn't (idempotent — same id).
+      if (resp.session_id) this.assistSessionId = resp.session_id;
+      if (resp.sql) this.assistProposedSql = resp.sql;
+      if (resp.note) this.assistNote = resp.note;
+    } catch (e) {
+      toasts.error('DB assistant failed', errMsg(e));
+    } finally {
+      this.assistBusy = false;
+    }
+  }
+
+  /** `db_assist_session_started` → attach the live shell. */
+  setAssistSession(assistId: string, connId: Id, sessionId: string): void {
+    if (this.adoptAssist(assistId, connId)) this.assistSessionId = sessionId;
+  }
+
+  /** `db_assist_updated` → live proposed SQL + note. */
+  applyAssistUpdate(assistId: string, connId: Id, sql: string, note: string): void {
+    if (!this.adoptAssist(assistId, connId)) return;
+    if (sql) this.assistProposedSql = sql;
+    if (note) this.assistNote = note;
+  }
+
+  /** True when an event's `assist_id` belongs to this open panel — either it
+   *  already IS our assist, or a turn is IN FLIGHT for this connection with no id
+   *  yet (the server minted the id mid-POST) and we adopt it. */
+  private adoptAssist(assistId: string, connId: Id): boolean {
+    if (!this.assistOpen) return false;
+    if (assistId === this.assistId) return true;
+    if (this.assistBusy && this.assistId === null && connId === this.assistConnId) {
+      this.assistId = assistId;
+      return true;
+    }
+    return false;
+  }
+
+  /** Insert the agent's proposed SQL into the active query tab. */
+  insertAssistSql(): void {
+    if (!this.assistProposedSql.trim()) return;
+    this.mainTab = 'query';
+    this.setStatement(this.assistProposedSql);
+  }
+
+  /** Insert the agent's proposed SQL and run it via the normal run path. */
+  async runAssistSql(): Promise<void> {
+    if (!this.assistProposedSql.trim()) return;
+    this.mainTab = 'query';
+    this.setStatement(this.assistProposedSql);
+    await this.runQuery();
+  }
+
+  /** Summarize the investigation → download the returned markdown. */
+  async summarizeAssist(): Promise<void> {
+    const id = this.assistConnId ?? this.selectedConnId;
+    if (!id || !this.assistId) {
+      toasts.error('Nothing to summarize yet');
+      return;
+    }
+    this.assistBusy = true;
+    try {
+      const resp = await dbAssistSummary(id, this.assistId);
+      downloadText(resp.markdown, `db-assist-${this.assistId}.md`, 'text/markdown');
+      toasts.success('Summary downloaded');
+    } catch (e) {
+      toasts.error('Summarize failed', errMsg(e));
+    } finally {
+      this.assistBusy = false;
+    }
+  }
+
+  /** Close the panel — DELETE the assist (kills the session, discards the dir). */
+  async closeAssist(): Promise<void> {
+    const id = this.assistConnId ?? this.selectedConnId;
+    const aid = this.assistId;
+    this.assistOpen = false;
+    this.assistSessionId = null;
+    this.assistProposedSql = '';
+    this.assistNote = '';
+    this.assistId = null;
+    this.assistResultContext = null;
+    if (id && aid) {
+      try {
+        await dbAssistClose(id, aid);
+      } catch {
+        /* best-effort discard — the session is reaped on daemon restart anyway */
+      }
+    }
+  }
 
   // ── Path helpers ────────────────────────────────────────────────────────
   private connBase(id: Id): string {

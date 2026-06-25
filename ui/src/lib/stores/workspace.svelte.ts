@@ -90,7 +90,8 @@ class WorkspaceStore {
           s.meta.source !== 'review' &&
           s.meta.source !== 'skilleval' &&
           s.meta.source !== 'product-analysis' &&
-          s.meta.source !== 'swarm') ||
+          s.meta.source !== 'swarm' &&
+          s.meta.source !== 'db_assist') ||
         this.openTabs.includes(s.id),
     ),
   );
@@ -133,7 +134,8 @@ class WorkspaceStore {
         s.meta.source !== 'product-analysis' &&
         s.meta.source !== 'swarm' &&
         s.meta.source !== 'canvas_assist' &&
-        s.meta.source !== 'mockup_assist',
+        s.meta.source !== 'mockup_assist' &&
+        s.meta.source !== 'db_assist',
     ),
   );
 
@@ -154,7 +156,8 @@ class WorkspaceStore {
         s.meta.source !== 'product-analysis' &&
         s.meta.source !== 'swarm' &&
         s.meta.source !== 'canvas_assist' &&
-        s.meta.source !== 'mockup_assist',
+        s.meta.source !== 'mockup_assist' &&
+        s.meta.source !== 'db_assist',
     ).length,
   );
 
@@ -171,7 +174,8 @@ class WorkspaceStore {
         s.meta.source !== 'product-analysis' &&
         s.meta.source !== 'swarm' &&
         s.meta.source !== 'canvas_assist' &&
-        s.meta.source !== 'mockup_assist',
+        s.meta.source !== 'mockup_assist' &&
+        s.meta.source !== 'db_assist',
     ).length,
   );
 
@@ -224,9 +228,12 @@ class WorkspaceStore {
       // Canvas "Ask AI" also spawns a managed agent session (meta.source =
       // 'canvas_assist'); it lives in the Canvas Assistant panel (its own shell),
       // not the Agents list — same treatment as insights/review.
+      // The DB Assistant ('db_assist') also spawns a managed agent session; it
+      // lives in the embedded DB Assistant panel (its own shell beside the query
+      // editor), NOT the Agents list — same treatment as insights/canvas_assist.
       let kept = all.filter((s) => {
         const src = (s.meta as { source?: string } | null)?.source;
-        return src !== 'insights' && src !== 'canvas_assist';
+        return src !== 'insights' && src !== 'canvas_assist' && src !== 'db_assist';
       });
       // Per-device session isolation (opt-in, default off): show only sessions
       // this device started (stamped meta.client_id on create). When off, leave

@@ -1384,7 +1384,7 @@ fn append_skill_references(out: &mut String, skill_md: &std::path::Path) {
 /// compiled-in bundled skills (body only), then the operator's global Claude
 /// skills dir (`~/.claude/skills/<name>/`) so skills authored there — e.g.
 /// `golang-feature-implementation` — work too. Empty/unknown → empty string.
-fn resolve_skill_inline(library: &otto_context::Library, name: &str) -> String {
+pub(crate) fn resolve_skill_inline(library: &otto_context::Library, name: &str) -> String {
     if name.is_empty() {
         return String::new();
     }
@@ -2206,7 +2206,7 @@ fn ensure_jira_in_commit(message: &str, key: &str) -> String {
 /// inline its review lenses, so the method travels in the prompt on any provider.
 /// An empty skill string ⇒ the prompt is returned byte-for-byte unchanged, so an
 /// un-installed skill is a no-op (identical to the prior drafting behaviour).
-fn compose_draft_prompt(skill_text: &str, base_prompt: &str) -> String {
+pub(crate) fn compose_draft_prompt(skill_text: &str, base_prompt: &str) -> String {
     if skill_text.is_empty() {
         base_prompt.to_string()
     } else {
@@ -3558,12 +3558,27 @@ struct DbExplainReq {
     workspace_id: Option<Id>,
 }
 
-/// Route: spawn an agent to explain/analyze a database schema or query result.
+/// Route: spawn an agent to explain/analyze a database schema or query result,
+/// plus the file-backed **DB Assistant** turns (the connection-scoped half — the
+/// `q`-tool query route is a PUBLIC route in `routes/mod.rs`, assist-key authed).
 pub fn db_explorer_routes() -> Router<ServerCtx> {
-    Router::new().route(
-        "/connections/{id}/db/explain-with-agent",
-        post(db_explain_with_agent),
-    )
+    Router::new()
+        .route(
+            "/connections/{id}/db/explain-with-agent",
+            post(db_explain_with_agent),
+        )
+        .route(
+            "/connections/{id}/db/assist",
+            post(crate::db_assist::assist),
+        )
+        .route(
+            "/connections/{id}/db/assist/{aid}/summary",
+            post(crate::db_assist::summary),
+        )
+        .route(
+            "/connections/{id}/db/assist/{aid}",
+            axum::routing::delete(crate::db_assist::close),
+        )
 }
 
 async fn db_explain_with_agent(
