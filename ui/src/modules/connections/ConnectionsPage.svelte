@@ -19,6 +19,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ConnectionForm from './ConnectionForm.svelte';
   import SftpBrowser from './SftpBrowser.svelte';
+  import ConnectionImportDialog from './ConnectionImportDialog.svelte';
 
   interface TreeNode {
     sec: ConnectionSection;
@@ -34,6 +35,7 @@
   let sections: ConnectionSection[] = $state([]);
   let loading = $state(true);
   let formOpen = $state(false);
+  let importOpen = $state(false);
   let editing: Connection | null = $state(null);
   // The SSH connection whose SFTP file browser is open (null = none).
   let sftpFor: Connection | null = $state(null);
@@ -46,6 +48,25 @@
   let draggedSectionId: string | null = $state(null);
   // Which connection's "open in workspace…" menu is showing (null = none).
   let openMenuFor: string | null = $state(null);
+  // Which connection's SSH-key-permissions fix popover is open (null = none).
+  let keyPermsOpenFor: string | null = $state(null);
+
+  // The exact `chmod 600 <path>` command from a key-perms warning, or '' if
+  // the message can't be parsed (popover then just shows the message text).
+  function keyPermsFix(msg: string | null | undefined): string {
+    if (!msg) return '';
+    const m = msg.match(/chmod 600 (.+)$/);
+    return m ? `chmod 600 ${m[1].trim()}` : '';
+  }
+
+  async function copyKeyPermsFix(cmd: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      toasts.success('Copied', cmd);
+    } catch {
+      toasts.error('Copy failed', 'Clipboard is not available');
+    }
+  }
 
   // Free-text search across all connections. When non-empty the page shows a
   // flat result list (by name / host-user / kind / section) instead of the tree.
@@ -116,17 +137,26 @@
     return [...pinned, ...byRecent].slice(0, RECENT_CAP);
   });
 
+  // Load (or reload) the connection list for a workspace. Extracted so the import
+  // dialog can refresh the list after creating connections. DB connections
+  // (mysql/redis/mongodb/clickhouse) live in the Database section now — keep this
+  // page to SSH / custom clients only.
+  async function loadConns(wsId: string): Promise<void> {
+    loading = true;
+    try {
+      const c = await api.get<Connection[]>(`/workspaces/${wsId}/connections`);
+      conns = c.filter((x) => !DB_CONN_KINDS.includes(x.kind));
+    } catch (e) {
+      toasts.error('Could not load connections', e instanceof Error ? e.message : '');
+    } finally {
+      loading = false;
+    }
+  }
+
   $effect(() => {
     const wsId = ws.currentId;
     if (!wsId) return;
-    loading = true;
-    void api
-      .get<Connection[]>(`/workspaces/${wsId}/connections`)
-      // DB connections (mysql/redis/mongodb/clickhouse) live in the Database
-      // section now — keep this page to SSH / custom clients only.
-      .then((c) => (conns = c.filter((x) => !DB_CONN_KINDS.includes(x.kind))))
-      .catch((e) => toasts.error('Could not load connections', e instanceof Error ? e.message : ''))
-      .finally(() => (loading = false));
+    void loadConns(wsId);
     void api
       .get<ConnectionSection[]>(`/workspaces/${wsId}/connection-sections`)
       .then((s) => (sections = s))
@@ -405,6 +435,13 @@
     <div class="header-actions">
       <button class="btn" onclick={() => createSection(null)}>New Section</button>
       <button
+        class="btn"
+        title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"
+        onclick={() => (importOpen = true)}
+      >
+        <Icon name="plug" size={12} /> Import
+      </button>
+      <button
         class="btn primary"
         onclick={() => {
           editing = null;
@@ -605,6 +642,63 @@
           {r.ok ? `ok · ${r.latency_ms}ms` : 'failed'}
         </span>
       {/if}
+      {#if r?.warn_key_perms}
+        <!-- SSH key file is group/other-readable; ssh may refuse it. Click to
+             see the message + the exact `chmod 600 <path>` fix with a copy. -->
+        <div class="keyperms-wrap">
+          <button
+            type="button"
+            class="chip warn keyperms-chip"
+            title={r.warn_key_perms}
+            aria-label="SSH key permissions warning — click for the fix"
+            aria-expanded={keyPermsOpenFor === c.id}
+            onclick={(e) => {
+              e.stopPropagation();
+              keyPermsOpenFor = keyPermsOpenFor === c.id ? null : c.id;
+            }}
+          >
+            <Icon name="key" size={11} />
+            key perms
+          </button>
+          {#if keyPermsOpenFor === c.id}
+            <!-- Lightweight popover: message + copyable fix command. -->
+            <div class="keyperms-pop" role="dialog" aria-label="SSH key permissions">
+              <div class="keyperms-pop-head">
+                <Icon name="key" size={12} />
+                <span>Insecure SSH key permissions</span>
+                <button
+                  type="button"
+                  class="btn small icon-only keyperms-close"
+                  aria-label="Close"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    keyPermsOpenFor = null;
+                  }}
+                >
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+              <p class="keyperms-msg">{r.warn_key_perms}</p>
+              {#if keyPermsFix(r.warn_key_perms)}
+                {@const fix = keyPermsFix(r.warn_key_perms)}
+                <div class="keyperms-fix">
+                  <code class="mono ellipsis">{fix}</code>
+                  <button
+                    type="button"
+                    class="btn small"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      copyKeyPermsFix(fix);
+                    }}
+                  >
+                    <Icon name="file" size={11} /> Copy
+                  </button>
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
     <!-- Actions strip. `display:contents` on desktop (no visual change); on phone
          it becomes its own wrapping row so every action stays reachable. -->
@@ -696,6 +790,16 @@
 
 {#if sftpFor}
   <SftpBrowser conn={sftpFor} onclose={() => (sftpFor = null)} />
+{/if}
+
+{#if importOpen && ws.currentId}
+  <ConnectionImportDialog
+    wsId={ws.currentId}
+    onclose={() => (importOpen = false)}
+    onimported={() => {
+      if (ws.currentId) void loadConns(ws.currentId);
+    }}
+  />
 {/if}
 
 <style>
@@ -859,6 +963,70 @@
   .chip.warn {
     color: #b8860b;
     background: color-mix(in srgb, #b8860b 14%, transparent);
+  }
+  /* Clickable amber chip + the fix popover it anchors. */
+  .keyperms-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+  .chip.warn.keyperms-chip {
+    cursor: pointer;
+    border-color: color-mix(in srgb, #b8860b 35%, transparent);
+  }
+  .chip.warn.keyperms-chip:hover {
+    background: color-mix(in srgb, #b8860b 22%, transparent);
+  }
+  .keyperms-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 30;
+    width: min(360px, 78vw);
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-1, var(--surface-2));
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    text-align: start;
+    white-space: normal;
+  }
+  .keyperms-pop-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #b8860b;
+  }
+  .keyperms-pop-head span {
+    flex: 1;
+  }
+  .keyperms-close {
+    color: var(--text-dim);
+  }
+  .keyperms-msg {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-dim);
+  }
+  .keyperms-fix {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+  }
+  .keyperms-fix code {
+    flex: 1;
+    min-width: 0;
+    font-size: 11.5px;
+    color: var(--text);
   }
   .header-actions {
     display: flex;

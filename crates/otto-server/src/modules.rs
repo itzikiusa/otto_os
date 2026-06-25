@@ -95,6 +95,10 @@ impl otto_connections::DbTester for DbViewerTester {
                 },
                 // Driver-backed probes never pass a secret through argv.
                 warn_argv: false,
+                // The SSH key-permission warning is filled by the `test_connection`
+                // handler (it has the Connection + covers both this cached-tunnel
+                // path and the CLI path uniformly), so leave it None here.
+                warn_key_perms: None,
             })
         })
     }
@@ -106,6 +110,16 @@ impl otto_dbviewer::DbViewerCtx for ServerCtx {
     }
     fn roles(&self) -> &Arc<dyn RoleChecker> {
         &self.roles
+    }
+    fn drafter(&self) -> Option<std::sync::Arc<dyn otto_dbviewer::nl::SqlDrafter>> {
+        // Wire the verified NL→SQL loop to the real agent/LLM via the same
+        // one-shot orchestrator path the commit-/PR-draft endpoints use. The
+        // planner turn needs no repo files (it's grounded by the schema
+        // summary), so a neutral temp dir is the working directory.
+        Some(std::sync::Arc::new(crate::db_drafter::AgentSqlDrafter {
+            orchestrator: std::sync::Arc::clone(&self.orchestrator),
+            cwd: std::env::temp_dir().to_string_lossy().to_string(),
+        }))
     }
     fn on_confirmed_write(
         &self,

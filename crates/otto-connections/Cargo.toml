@@ -16,6 +16,8 @@ serde_json = { workspace = true }
 shell-words = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+# Read-only XML parser for importing MySQL Workbench / DataGrip configs.
+roxmltree = "0.20"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

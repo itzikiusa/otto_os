@@ -266,6 +266,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // `POST /connections` (workspace-less create) and section management are
     // treated as Admin (global / management); `/workspaces/{id}/connections`
     // create is the per-workspace create = Edit.
+    if p.starts_with("/workspaces/{id}/connections/import/") {
+        // Import connection profiles from other DB tools (MySQL Workbench /
+        // DBeaver / DataGrip / NoSQLBooster): detect/preview = View; scan reads
+        // the local tool config + create creates connections = Edit. Matches the
+        // per-workspace connection-create tier. (Must precede the exact-match
+        // `/workspaces/{id}/connections` rule below.)
+        return Require(Connections, if get { View } else { Edit });
+    }
     if p == "/workspaces/{id}/connections" {
         // GET list = View, POST create = Edit.
         return Require(Connections, if get { View } else { Edit });
@@ -677,6 +685,19 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{id}/connections"),
+            Require(Connections, Edit)
+        );
+        // Import connections from other DB tools: detect=View, scan/create=Edit.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{id}/connections/import/sources"),
+            Require(Connections, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{id}/connections/import/scan"),
+            Require(Connections, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{id}/connections/import/create"),
             Require(Connections, Edit)
         );
     }

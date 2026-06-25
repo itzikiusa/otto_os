@@ -155,6 +155,15 @@
         icon: 'send',
         action: () => void database.sendSelectToEditor(node),
       });
+      // Import a local file (CSV/TSV/NDJSON/JSON) into this table, prefilling its
+      // name. Routes through the same guarded write path as a query.
+      if (node.kind === 'table') {
+        items.push({
+          label: 'Import into…',
+          icon: 'arrowDown',
+          action: () => database.openImportDialog(node),
+        });
+      }
       items.push({ separator: true });
     }
 

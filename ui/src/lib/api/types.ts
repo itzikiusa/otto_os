@@ -1033,6 +1033,76 @@ export interface TestConnectionResp {
   latency_ms: number | null;
   message: string;
   warn_argv: boolean;
+  /** Set when the connection's SSH private key file has insecure (group/other-
+   *  readable) permissions; carries the full message incl. the `chmod 600 <path>`
+   *  fix. Independent of `ok`. */
+  warn_key_perms?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Import connections from other DB tools
+// ---------------------------------------------------------------------------
+
+/** A DB tool Otto can import saved connections from. The daemon runs locally
+ *  and reads each tool's config from its default macOS location — the user
+ *  picks a tool, never a file. */
+export type ImportSource = 'mysql_workbench' | 'dbeaver' | 'datagrip' | 'nosqlbooster';
+
+/** One tool's availability (GET …/connections/import/sources). */
+export interface SourceStatus {
+  source: ImportSource;
+  label: string;
+  /** True when a config file was found at the default location. */
+  present: boolean;
+  /** The resolved config path (first match), if any. */
+  path?: string | null;
+  /** How many connections were parsed out, when present (may be 0). */
+  count?: number | null;
+}
+
+/** A single connection parsed from a tool's config. When `supported`, `params`
+ *  is the ready-to-create Otto shape; otherwise `kind` is null and `note`
+ *  explains why the engine was skipped. */
+export interface ParsedConnection {
+  source: ImportSource;
+  name: string;
+  /** null for an engine Otto doesn't support (still listed so the user sees why). */
+  kind?: ConnectionKind | null;
+  params: Record<string, unknown>;
+  supported: boolean;
+  /** True when the source had a username but no recoverable password — the user
+   *  must add it after import (MongoDB uses a `{secret}` placeholder). */
+  needs_password: boolean;
+  note?: string | null;
+}
+
+/** Result of scanning a single tool (POST …/connections/import/scan). */
+export interface ImportScanResult {
+  source: ImportSource;
+  path?: string | null;
+  connections: ParsedConnection[];
+  warnings: string[];
+}
+
+/** One connection the user chose to create. */
+export interface ImportCreateItem {
+  name: string;
+  kind: ConnectionKind;
+  params: Record<string, unknown>;
+  environment?: Environment;
+  read_only?: boolean;
+}
+
+/** POST …/connections/import/create body. */
+export interface ImportCreateReq {
+  connections: ImportCreateItem[];
+  section_id?: Id | null;
+}
+
+/** Result of an import create batch (best-effort — partial success is fine). */
+export interface ImportCreateResult {
+  created: Connection[];
+  failed: { name: string; error: string }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -2643,6 +2713,65 @@ export interface ExportToPathResp {
   bytes: number;
   /** Wall-clock duration of the export, in milliseconds. */
   duration_ms: number;
+}
+
+/** Supported import file formats (the mirror of the export). Delimited formats
+ *  take the first row as the header; JSON/NDJSON carry keys per object. */
+export type ImportFormat = 'csv' | 'tsv' | 'ndjson' | 'json';
+
+/**
+ * `POST /connections/{id}/db/import` — import a local file (on the daemon host)
+ * into an existing SQL table. Each batch runs through the same guarded write
+ * path as a query, so a Prod/read-only connection refuses the import unless
+ * `confirm_write` is set (the typed-confirmation flow re-sends it). v1 is
+ * SQL-only (MySQL/ClickHouse); Mongo/Redis are explicit follow-ups.
+ */
+export interface ImportReq {
+  /** Source file on the daemon host (a leading `~` expands to the daemon home). */
+  local_path: string;
+  /** File format. */
+  format: ImportFormat;
+  /** Destination table (must already exist). */
+  table: string;
+  /** Rows per INSERT; clamped 1..=5000 server-side (default 500). */
+  batch_size?: number;
+  /** Typed-confirmation acknowledgement for a guarded (Prod/read-only) connection. */
+  confirm_write?: boolean;
+}
+
+/** One streamed NDJSON line from `POST …/db/import`. The final line carries
+ *  `done` (with `rows`/`batches`) or `error` (text starting `write_blocked:`
+ *  means a guarded connection needs the typed confirmation). */
+export interface ImportResult {
+  done?: boolean;
+  rows?: number;
+  batches?: number;
+  error?: string;
+}
+
+/**
+ * `POST /connections/{id}/db/nl-to-sql` — draft a read query from plain English,
+ * validated with `EXPLAIN` against the live schema before it's returned. Never
+ * emits a write/DDL. A 400 starting "NL-to-SQL is not configured" means no
+ * drafter is wired; a 400 starting "could not produce a valid read query" means
+ * the bounded retry loop was exhausted (its message carries the last engine error).
+ */
+export interface NlToSqlReq {
+  /** The user's plain-English question. */
+  question: string;
+  /** Optional active-database node (same semantics as a query's `node`). */
+  node?: string;
+  /** Draft/validate retries; clamped 1..=4 server-side (default 3). */
+  max_attempts?: number;
+}
+
+/** A validated read query: the SQL, its plan text (from EXPLAIN), how many
+ *  drafting attempts it took, and any non-fatal notes. */
+export interface NlToSqlOutcome {
+  sql: string;
+  plan: string;
+  attempts: number;
+  warnings: string[];
 }
 
 export type DbCompletionKind =

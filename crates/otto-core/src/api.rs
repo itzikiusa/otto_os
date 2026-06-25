@@ -751,7 +751,7 @@ pub struct UpdateMcpServerReq {
 }
 
 /// `POST /api/v1/connections/{id}/test`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TestConnectionResp {
     pub ok: bool,
     pub latency_ms: Option<u64>,
@@ -759,6 +759,12 @@ pub struct TestConnectionResp {
     /// True when the built command unavoidably exposes the secret in argv
     /// (clickhouse-client) — UI shows a warning banner.
     pub warn_argv: bool,
+    /// Set when the SSH private key file used by this connection has insecure
+    /// (group/other-readable) permissions — OpenSSH may refuse it. Carries a
+    /// human-readable message including the exact `chmod 600 <path>` fix. This
+    /// warning is independent of whether the test itself succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warn_key_perms: Option<String>,
 }
 
 /// Connection responses use the domain type (secret_ref is opaque).

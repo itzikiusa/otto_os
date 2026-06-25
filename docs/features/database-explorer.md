@@ -369,7 +369,26 @@ clipboard), **CSV**, and **JSON** (browser downloads of the in-memory rows).
 When a result was capped, a **Full Export** button re-runs the statement
 uncapped server-side and downloads it. **Download…** opens the streaming
 local-file export (see §10). A **→ Agent** button pastes the query + result into
-a running agent.
+a running agent. **Import file…** opens the file→table import dialog (see §10b).
+
+### Foreign-key navigation
+
+When a result is a single-table SELECT (the same detection that gates inline
+editing), cells in a **foreign-key column** get a right-click **"→ Go to
+`<ref_table>`"** action. It opens a new query tab running
+`SELECT * FROM <ref_table> WHERE <ref_col> = <value> LIMIT 1` (every column of a
+**composite** FK is ANDed using that row's values), so the grid feels relational
+instead of flat — the DataGrip/DBeaver staple. It reuses the foreign-key metadata
+already fetched for edit-ability (no extra round-trip); a `NULL` foreign-key value
+has no navigable target.
+
+### Generate SQL from selected rows
+
+With one or more rows selected in an editable single-table result, the selection
+bar offers **Copy as INSERT** (opens `INSERT INTO <table> (cols) VALUES (…)` for
+every selected row in a new tab — **not** run) and **WHERE pk IN (…)** (copies a
+primary-key predicate to the clipboard; composite keys become an OR of per-row
+ANDs). Both reuse the same identifier/literal escaping as inline edits.
 
 ---
 
@@ -475,6 +494,30 @@ normalization, possible issues, then suggest useful queries"), and the
 **`content`** the UI already had — so **no extra DB round-trip** is made just to
 build the prompt. Requires workspace **Editor**.
 
+### Ask in English (verified NL→SQL)
+
+The Query toolbar's **Ask in English** button opens an input where you describe
+what you want in plain language; **Generate** drafts a query and returns it only
+**after it has been validated with `EXPLAIN`** against the live schema — never a
+hallucinated, unrunnable guess. The server-side loop (`POST …/db/nl-to-sql`):
+
+1. Asks the configured drafter (the agent/LLM) for a candidate, grounding it in a
+   compact schema summary.
+2. **Rejects any write/DDL before it touches the engine** — this feature is
+   **read-only by contract**; a non-read draft is discarded and retried.
+3. Validates the candidate with `EXPLAIN` (a read, so it's guard-safe even on a
+   Prod/read-only connection) and, on an engine error, feeds that error back to
+   the drafter for a **bounded retry** (default 3, max 4 attempts).
+
+On success the panel shows the read-only **SQL**, a collapsible **"Validated with
+EXPLAIN"** plan, the attempt count, and any warnings, plus **Insert into editor**
+(places the SQL without running) and **Run** (inserts + runs via the normal
+path). **No draft ever reaches the editor until it has a valid plan.** It is
+**Editor**-gated (validation runs `EXPLAIN` live) and **unavailable for Redis**
+(no plan surface). If the server has no drafter wired the panel shows "Ask AI is
+not set up on this server"; if the retry loop is exhausted it shows the last
+engine error verbatim.
+
 ---
 
 ## 10. Export
@@ -525,6 +568,38 @@ names (`CSV`, `CSVWithNames`, `TabSeparated`, `TabSeparatedWithNames`,
 Only **row-returning reads** are exportable — a write/DDL is rejected, and a
 write on a guarded connection is blocked outright (export has no confirmation
 path). The response reports `{local_path, rows, bytes, duration_ms}`.
+
+---
+
+## 10b. Import
+
+The mirror of the export: import a **local file on the daemon host** into an
+existing SQL table (`POST …/db/import`). Launch it from a table node's
+right-click **"Import into…"** (prefills the table name) or the results-grid
+toolbar **Import file…**. The dialog picks a **format**, a **file** (via the
+shared file picker — the extension auto-selects the format), the **target
+table**, and a **batch size** (default 500, clamped 1..=5000), then streams the
+result.
+
+- **Formats.** `csv` / `tsv` take the **first row as the header** (column names);
+  `ndjson` (one JSON object per line) and `json` (an array of objects) carry keys
+  per record — columns are the **union of keys** in first-seen order, and a
+  missing key becomes `NULL`.
+- **Batched INSERTs.** Rows are parsed and inserted as
+  `INSERT INTO <table> (cols) VALUES (…),(…)` of `batch_size` rows each, with
+  backtick-quoted identifiers and single-quote-escaped literals (`'` → `''`), so
+  no single statement is unbounded and nothing is injection-prone.
+- **Same write guard.** Every batch runs **through the normal guarded `run`
+  path** — there is no parallel guard — so masking/history apply and a
+  **Prod/read-only connection refuses the import** until you type the connection
+  name (the identical typed-confirmation flow a write query uses); the client
+  then retries with `confirm_write`. The dialog streams an `application/x-ndjson`
+  line and ends with **"Imported N rows in B batches"** (then re-runs the active
+  query / refreshes the table's structure) or the error.
+- **Role gate.** Workspace **Editor** (global connections: root), the same as
+  running a query / exporting.
+- **v1 scope: SQL engines only** (MySQL/ClickHouse). Mongo `insertMany` and Redis
+  are explicit follow-ups (see §12).
 
 ---
 
@@ -588,6 +663,14 @@ max_rows?}` → `ExportToPathResp` = `{local_path, rows, bytes, duration_ms}`.
   are not translated.
 - **`approx_row_count`** (MySQL `information_schema.table_rows`) is an InnoDB
   estimate (can be wildly off) and is opt-in because it costs an extra query.
+- **File import** (§10b) targets **SQL engines only** in v1 (MySQL/ClickHouse);
+  Mongo `insertMany` and Redis import are follow-ups. The file is buffered before
+  parsing (fine for typical imports; the INSERT batching already bounds per-
+  statement size) — a streaming line-by-line parser for very large files is a
+  follow-up.
+- **Ask in English (NL→SQL)** (§9) is **read-only by contract** and
+  **unavailable for Redis** (no `EXPLAIN`/plan surface); it requires a drafter
+  wired on the server (otherwise the panel says so).
 
 ---
 

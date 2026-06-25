@@ -12,7 +12,7 @@
   import { database } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import type { QueryResult, DbExportFormat, ExportToPathResp } from '../../lib/api/types';
+  import type { QueryResult, DbExportFormat, ExportToPathResp, DbForeignKey } from '../../lib/api/types';
   import { api, postNdjsonStream } from '../../lib/api/client';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
@@ -357,6 +357,34 @@
     const s = v === null || v === undefined ? 'NULL' : isComplex(v) ? compactJson(v) : String(v);
     return s.length > 28 ? s.slice(0, 28) + '…' : s;
   }
+  /** The FK (if any) whose `columns` include `col` — drives in-grid FK nav. */
+  function fkForColumn(col: string): DbForeignKey | null {
+    return editFks.find((fk) => fk.columns.includes(col)) ?? null;
+  }
+
+  /** Build `SELECT * FROM <ref_table> WHERE <ref_col> = <val> [AND …] LIMIT 1`
+   *  targeting the row a single-table FK points at. Every FK column is matched
+   *  to its referenced column using THIS row's values (composite-FK safe). A
+   *  NULL local value short-circuits to null (no navigable target). */
+  function fkTargetSql(fk: DbForeignKey, rowIdx: number): string | null {
+    if (!result) return null;
+    const conds: string[] = [];
+    for (let i = 0; i < fk.columns.length; i++) {
+      const localCol = fk.columns[i];
+      const refCol = fk.ref_columns[i] ?? fk.ref_columns[0];
+      const ci = result.columns.findIndex((c) => c.name === localCol);
+      if (ci < 0) return null;
+      const v = liveRows[rowIdx][ci];
+      if (v === null || v === undefined) return null; // no row referenced
+      conds.push(`\`${refCol}\` = ${valueLiteral(v)}`);
+    }
+    if (conds.length === 0) return null;
+    const ref = fk.ref_schema
+      ? `\`${fk.ref_schema}\`.\`${fk.ref_table}\``
+      : `\`${fk.ref_table}\``;
+    return `SELECT * FROM ${ref} WHERE ${conds.join(' AND ')} LIMIT 1`;
+  }
+
   function cellMenu(e: MouseEvent, ci: number, v: unknown, rowIdx: number): void {
     if (mini) return;
     const col = result?.columns[ci]?.name;
@@ -369,6 +397,24 @@
       { label: 'Expand value', icon: 'maximize', action: () => openCell(v) },
       { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : isComplex(v) ? compactJson(v) : String(v)) },
     ];
+    // In-grid foreign-key navigation (0003a): a cell in an FK column gets a
+    // "→ Go to <ref_table>" jump opening a new tab with the referenced row.
+    const fk = fkForColumn(col);
+    if (fk) {
+      const sql = fkTargetSql(fk, rowIdx);
+      if (sql) {
+        items.splice(2, 0, {
+          label: `→ Go to ${fk.ref_table}`,
+          icon: 'external',
+          action: () =>
+            void database.openInNewTab(sql, {
+              run: true,
+              name: fk.ref_table,
+              node: database.activeDb ?? undefined,
+            }),
+        });
+      }
+    }
     // Delete actions — only for editable results (single table/collection with a
     // resolved key). Builds a statement and opens the review modal; never runs
     // immediately.
@@ -496,6 +542,9 @@
   let editTable = $state<string | null>(null);
   let editPkCols = $state<string[]>([]); // pk column name(s) (when editable)
   let editReason = $state<string | null>(null); // why editing is unavailable
+  // Foreign keys of the resolved single-table result (0003a in-grid FK nav).
+  // Populated alongside the PK in the editability $effect; reused (no extra fetch).
+  let editFks = $state<DbForeignKey[]>([]);
 
   const editable = $derived(editPkCols.length > 0 && editTable !== null);
 
@@ -564,6 +613,7 @@
     editTable = null;
     editPkCols = [];
     editReason = null;
+    editFks = [];
     if (!sql || !conn || !cols || cols.length === 0) return;
 
     // Mongo: a single-collection find/SELECT is editable by `_id` — no
@@ -620,6 +670,7 @@
       editDb = dbName;
       editTable = parsed.table;
       editPkCols = detail.primary_key;
+      editFks = detail.foreign_keys ?? [];
       editReason = null;
     })();
     return () => {
@@ -904,6 +955,54 @@
   }
   function deleteSelected(): void {
     deleteRows([...selected].filter((i) => i >= 0 && i < liveRows.length));
+  }
+
+  // ── Generate SQL from selected rows (0003b) ──────────────────────────────────
+  // For an editable single-table result, turn the selection into reusable SQL
+  // using the same escaping as inline edits/deletes (`valueLiteral`). One opens a
+  // new tab (INSERTs); the other copies a `pk IN (…)` predicate to the clipboard.
+
+  /** Selected liveRows indices, in the current visible order, bounds-checked. */
+  function selectedIndices(): number[] {
+    const order = viewRows.map((r) => r.idx).filter((i) => selected.has(i));
+    return order.filter((i) => i >= 0 && i < liveRows.length);
+  }
+
+  /** Build `INSERT INTO <table> (cols) VALUES (…)` lines for the selected rows
+   *  (all result columns), then open them in a new tab — NOT run. */
+  function copySelectedAsInsert(): void {
+    if (!editable || !editTable) return;
+    const idxs = selectedIndices();
+    if (idxs.length === 0) return;
+    const cols = result!.columns.map((c) => `\`${c.name}\``).join(', ');
+    const lines = idxs.map((i) => {
+      const vals = result!.columns.map((_, ci) => valueLiteral(liveRows[i][ci])).join(', ');
+      return `INSERT INTO ${tableRef()} (${cols}) VALUES (${vals});`;
+    });
+    void database.openInNewTab(lines.join('\n'), {
+      name: `INSERT ${editTable}`,
+      node: database.activeDb ?? undefined,
+    });
+    toasts.success('Generated', `${idxs.length} INSERT statement${idxs.length === 1 ? '' : 's'}`);
+  }
+
+  /** Build a `pk IN (…)` (single-PK) or OR-of-ANDs (composite) predicate for the
+   *  selected rows and copy it to the clipboard. */
+  function copySelectedWhere(): void {
+    if (!editable || editPkCols.length === 0) return;
+    const idxs = selectedIndices();
+    if (idxs.length === 0) return;
+    let where: string;
+    if (editPkCols.length === 1) {
+      const pk = editPkCols[0];
+      const ci = result!.columns.findIndex((c) => c.name === pk);
+      const list = idxs.map((i) => valueLiteral(liveRows[i][ci])).join(', ');
+      where = `\`${pk}\` IN (${list})`;
+    } else {
+      where = idxs.map((i) => `(${whereByPk(i)})`).join(' OR ');
+    }
+    void copyText(where);
+    toasts.success('Copied', `WHERE for ${idxs.length} row${idxs.length === 1 ? '' : 's'}`);
   }
 
   // ── Export / copy (reflect the current filtered + sorted view) ───────────────
@@ -1235,12 +1334,35 @@
             title="Export ALL rows — streams the full (uncapped) result to a file on the daemon host, in a selectable format, with live progress"
           ><Icon name="arrowDown" size={11} />Export all rows…</button>
         {/if}
+        {#if connectionId && database.capabilities?.sql}
+          <button
+            class="tb-btn"
+            onclick={() => database.openImportDialog()}
+            title="Import a local file (CSV/TSV/NDJSON/JSON) into a table — batched INSERTs through the same write guard"
+          ><Icon name="arrowDown" size={11} />Import file…</button>
+        {/if}
       </div>
     {/if}
 
     {#if !mini && selected.size > 0}
       <div class="sel-bar">
         <span class="sel-count">{selected.size} selected</span>
+        {#if editable}
+          <button
+            class="sel-gen"
+            onclick={copySelectedAsInsert}
+            title="Open the selected rows as INSERT statements in a new tab (not run)"
+          >
+            <Icon name="file" size={11} />Copy as INSERT
+          </button>
+          <button
+            class="sel-gen"
+            onclick={copySelectedWhere}
+            title="Copy a `pk IN (…)` predicate for the selected rows to the clipboard"
+          >
+            <Icon name="file" size={11} />WHERE pk IN (…)
+          </button>
+        {/if}
         <button class="sel-del" onclick={deleteSelected} title="Delete selected rows (you review before it runs)">
           <Icon name="trash" size={11} />Delete…
         </button>
@@ -2263,6 +2385,22 @@
   }
   .sel-del:hover {
     background: color-mix(in srgb, var(--danger, #e5484d) 24%, transparent);
+  }
+  /* Generate-SQL-from-selection actions (0003b) — neutral chips next to Delete. */
+  .sel-gen {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .sel-gen:hover {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
   }
   .sel-clear {
     padding: 3px 8px;

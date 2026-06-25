@@ -10,6 +10,7 @@ pub mod auth;
 pub mod canvas_assist;
 pub mod mockup_assist;
 pub mod context_packet;
+pub mod db_drafter;
 pub mod memory_gov;
 pub mod cli_update;
 pub mod error;

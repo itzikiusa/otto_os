@@ -33,6 +33,14 @@ pub trait DbViewerCtx: Clone + Send + Sync + 'static {
     /// overrides it to append a `db.write_confirmed` entry. Best-effort — it
     /// must not block or fail the query.
     fn on_confirmed_write(&self, _user: &User, _conn: &Connection, _statement: &str) {}
+
+    /// The natural-language→SQL drafter, when the server has configured one
+    /// (it wires this to the agent/LLM). Default `None` keeps this crate free of
+    /// any agent dependency; the `nl-to-sql` route returns a clear 400 when it's
+    /// unset. Mirrors the `db()`/`roles()` accessor style.
+    fn drafter(&self) -> Option<std::sync::Arc<dyn crate::nl::SqlDrafter>> {
+        None
+    }
 }
 
 /// Local problem-details mapper (orphan rule: can't impl IntoResponse for
@@ -176,6 +184,8 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         )
         .route("/connections/{id}/db/cancel", post(cancel_query::<S>))
         .route("/connections/{id}/db/completion", post(completion::<S>))
+        .route("/connections/{id}/db/import", post(import_query::<S>))
+        .route("/connections/{id}/db/nl-to-sql", post(nl_to_sql::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
         // Saved queries.
         .route(
@@ -638,6 +648,137 @@ fn ndjson_line(v: &serde_json::Value) -> axum::body::Bytes {
     axum::body::Bytes::from(s)
 }
 
+/// Request body for the local-file → table import endpoint.
+#[derive(Debug, Deserialize)]
+struct ImportReq {
+    /// Source file on the daemon host (leading `~` expands to the daemon home).
+    local_path: String,
+    /// File format.
+    format: crate::import::ImportFormat,
+    /// Destination table (must already exist).
+    table: String,
+    /// Rows per INSERT; clamped 1..=5000 server-side (default 500).
+    #[serde(default)]
+    batch_size: Option<usize>,
+    /// Typed-confirmation acknowledgement for a guarded (Prod/read-only) connection.
+    #[serde(default)]
+    confirm_write: bool,
+}
+
+/// Import a local file into a SQL table. Gated at `Editor` (global: root). Streams
+/// a single NDJSON result line (`{done,rows,batches}` or `{error}`) so the client
+/// uses the same reader as export. A write on a guarded connection without
+/// `confirm_write` returns the standard `write_blocked:` error in the `{error}`
+/// line. Each INSERT batch routes through `DbViewerService::run` → `guard_write`,
+/// so no parallel safety code is added here.
+async fn import_query<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<ImportReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    if req.local_path.trim().is_empty() || req.table.trim().is_empty() {
+        return Err(ApiErr(Error::Invalid(
+            "local_path and table are required".into(),
+        )));
+    }
+    let path = expand_home(&req.local_path);
+    let batch_size = req.batch_size.unwrap_or(500).clamp(1, 5000);
+
+    let db = ctx.db().clone();
+    let uid = user.id.clone();
+    let conn_id = id.clone();
+    let (table, format, confirm) = (req.table.clone(), req.format, req.confirm_write);
+
+    // The producer only ever sends Ok — Infallible documents that the stream
+    // itself never errors (import failures arrive as an `{error}` data line). v1
+    // runs the import to completion and emits one final line (no progress ticker
+    // — there's no on-disk file to size as with export).
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(4);
+    tokio::spawn(async move {
+        let line = match db
+            .import_from_path(&conn_id, &uid, &path, format, &table, batch_size, confirm)
+            .await
+        {
+            Ok(c) => serde_json::json!({ "done": true, "rows": c.rows, "batches": c.batches }),
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        };
+        let _ = tx.send(Ok(ndjson_line(&line))).await;
+    });
+
+    let stream =
+        futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|i| (i, rx)) });
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
+}
+
+/// Request body for the verified NL→SQL endpoint.
+#[derive(Debug, Deserialize)]
+struct NlToSqlReq {
+    /// The user's plain-English question.
+    question: String,
+    /// Optional active-database node (same semantics as `QueryRequest.node`).
+    #[serde(default)]
+    node: Option<String>,
+    /// Draft/validate retries; clamped 1..=4 server-side (default 3).
+    #[serde(default)]
+    max_attempts: Option<u32>,
+}
+
+/// Draft a **read** query from natural language and return it only after it has
+/// been validated with `EXPLAIN` against the live schema. Gated at `Editor`
+/// (global connections: root) — it runs `EXPLAIN` against the database. Returns
+/// 400 when no drafter is configured.
+async fn nl_to_sql<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<NlToSqlReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+
+    let engine = Engine::from_kind(conn.kind)
+        .ok_or_else(|| Error::Invalid("connection is not a browsable database".into()))?;
+    let drafter = ctx
+        .drafter()
+        .ok_or_else(|| Error::Invalid("NL-to-SQL is not configured on this server".into()))?;
+
+    let summary = ctx
+        .db()
+        .schema_summary(&id, req.node.as_deref(), 40)
+        .await
+        .unwrap_or_default();
+
+    let validator = crate::service::ServiceValidator {
+        db: ctx.db(),
+        conn_id: id.clone(),
+        user_id: user.id.clone(),
+        node: req.node.clone(),
+    };
+
+    let outcome = crate::nl::drive_nl_to_sql(
+        engine,
+        &req.question,
+        &summary,
+        drafter.as_ref(),
+        &validator,
+        req.max_attempts.unwrap_or(3),
+    )
+    .await?;
+
+    Ok(Json(outcome).into_response())
+}
+
 async fn completion<S: DbViewerCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -1063,6 +1204,32 @@ mod tests {
         check_conn_role(&ctx, &user(true), &global, WorkspaceRole::Editor)
             .await
             .expect("root passes on global conn");
+    }
+
+    #[tokio::test]
+    async fn import_gate_requires_editor() {
+        // File import is a write path — a Viewer is denied the Editor gate.
+        let stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
+        let ctx = TestCtx { roles: stub.clone() };
+        let c = conn(Some(new_id()));
+        let err = check_conn_role(&ctx, &user(false), &c, WorkspaceRole::Editor)
+            .await
+            .expect_err("viewer denied");
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert_eq!(*stub.last_min.lock().unwrap(), Some(WorkspaceRole::Editor));
+    }
+
+    #[tokio::test]
+    async fn nl_to_sql_gate_requires_editor() {
+        // The NL→SQL route shares run_query's gate: a Viewer is denied Editor.
+        let stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
+        let ctx = TestCtx { roles: stub.clone() };
+        let c = conn(Some(new_id()));
+        let err = check_conn_role(&ctx, &user(false), &c, WorkspaceRole::Editor)
+            .await
+            .expect_err("viewer denied");
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert_eq!(*stub.last_min.lock().unwrap(), Some(WorkspaceRole::Editor));
     }
 
     // -- Per-user ownership gate (by-id IDOR fix) ----------------------------

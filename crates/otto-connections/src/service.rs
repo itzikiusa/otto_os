@@ -58,6 +58,35 @@ fn redact_secrets(s: &str) -> String {
     out.join(" ")
 }
 
+/// Resolve the SSH private-key path a connection authenticates with, if any.
+/// Direct SSH / Custom (and CLI-built `jump` tunnels) store it at the top level
+/// (`params["identity_file"]`); DB connections tunneled over SSH nest it under
+/// `params["ssh"]["identity_file"]`. We check both and return the first
+/// non-empty value so the perms check works regardless of connection shape.
+fn ssh_key_path(params: &serde_json::Value) -> Option<String> {
+    let direct = params.get("identity_file").and_then(|v| v.as_str());
+    let nested = params
+        .get("ssh")
+        .and_then(|s| s.get("identity_file"))
+        .and_then(|v| v.as_str());
+    direct
+        .or(nested)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The SSH key-permission warning for a connection's params, if its private key
+/// file is group/other-readable. Reusable across the two `test` code paths so
+/// the warning fires uniformly (the CLI subprocess path here AND the DB-driver
+/// path the server routes DB-kind connections through). Independent of the
+/// probe outcome.
+pub(crate) fn key_perms_warning_for(params: &serde_json::Value) -> Option<String> {
+    ssh_key_path(params)
+        .as_deref()
+        .and_then(crate::keyperms::check_key_permissions)
+}
+
 /// Optional hook that lets the server layer route a connection's test probe
 /// through the DB Explorer's warm-tunnel path (which reuses a cached `ssh -L`
 /// forward) instead of spawning a fresh `ssh -J` child each time.
@@ -337,6 +366,10 @@ impl ConnectionsService {
     /// 10s timeout, report ok/latency/first stderr line.
     pub async fn test(&self, conn: &Connection) -> Result<TestConnectionResp> {
         let secret = self.fetch_secret(conn)?;
+        // NOTE: `warn_key_perms` is filled by the `test_connection` HTTP handler
+        // (the single spot that covers both this CLI path and the cached-tunnel
+        // DB-driver path uniformly), so it stays `None` on every return here.
+        let warn_key_perms = None;
         let (spec, warn_argv) = build_command(conn, secret.as_deref())?;
         let (spec, probe) = probe_spec(conn.kind, spec);
 
@@ -357,6 +390,7 @@ impl ConnectionsService {
                     latency_ms: None,
                     message: format!("failed to start {}: {e}", spec.program),
                     warn_argv,
+                    warn_key_perms,
                 });
             }
         };
@@ -374,12 +408,14 @@ impl ConnectionsService {
                 latency_ms: Some(TEST_TIMEOUT.as_millis() as u64),
                 message: "timed out after 10s".into(),
                 warn_argv,
+                warn_key_perms,
             }),
             Ok(Err(e)) => Ok(TestConnectionResp {
                 ok: false,
                 latency_ms: None,
                 message: format!("process error: {e}"),
                 warn_argv,
+                warn_key_perms,
             }),
             Ok(Ok(output)) => {
                 let latency_ms = started.elapsed().as_millis() as u64;
@@ -389,6 +425,7 @@ impl ConnectionsService {
                         latency_ms: Some(latency_ms),
                         message: "ok".into(),
                         warn_argv,
+                        warn_key_perms,
                     })
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -410,6 +447,7 @@ impl ConnectionsService {
                         latency_ms: Some(latency_ms),
                         message,
                         warn_argv,
+                        warn_key_perms,
                     })
                 }
             }

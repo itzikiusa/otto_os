@@ -11,7 +11,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { DbCompletionKind } from '../../lib/api/types';
+  import { dbNlToSql, ApiError } from '../../lib/api/client';
+  import type { DbCompletionKind, NlToSqlOutcome } from '../../lib/api/types';
   import {
     statementAtCursor,
     extractVars,
@@ -274,6 +275,61 @@
 
   const canEdit = $derived(ws.myRole !== 'viewer');
 
+  // ── Ask in English — verified NL→SQL (0001) ──────────────────────────────────
+  // Available for SQL engines + Mongo (EXPLAIN-validation backs both); hidden for
+  // Redis. The drafter loop only ever returns an EXPLAIN-validated READ query, so
+  // nothing reaches the editor until it has a valid plan.
+  const nlAvailable = $derived(
+    database.queryLanguage === 'sql' || database.queryLanguage === 'mongo',
+  );
+  let nlOpen = $state(false); // the input row is toggled by the toolbar button
+  let nlQuestion = $state('');
+  let nlBusy = $state(false);
+  let nlOutcome = $state<NlToSqlOutcome | null>(null);
+  let nlError = $state<string | null>(null); // verbatim hint / message
+  let nlPlanOpen = $state(false);
+
+  async function askEnglish(): Promise<void> {
+    const q = nlQuestion.trim();
+    if (!q || nlBusy || !database.selectedConnId) return;
+    nlBusy = true;
+    nlOutcome = null;
+    nlError = null;
+    try {
+      const out = await dbNlToSql(database.selectedConnId, {
+        question: q,
+        node: database.activeDb ?? undefined,
+        max_attempts: 3,
+      });
+      nlOutcome = out;
+      nlPlanOpen = false;
+    } catch (e) {
+      // Two expected 400s: no drafter configured, or the loop was exhausted
+      // (its message carries the last engine error — show it verbatim).
+      if (e instanceof ApiError && e.message.startsWith('NL-to-SQL is not configured')) {
+        nlError = 'Ask AI is not set up on this server.';
+      } else if (e instanceof ApiError) {
+        nlError = e.message;
+      } else {
+        nlError = e instanceof Error ? e.message : String(e);
+      }
+    } finally {
+      nlBusy = false;
+    }
+  }
+
+  /** Put the validated SQL into the active tab; optionally run it via the normal
+   *  run path. Closes the NL panel afterward. */
+  function useNlSql(opts: { run: boolean }): void {
+    if (!nlOutcome) return;
+    database.setStatement(nlOutcome.sql);
+    editorSel = { text: '', cursor: 0 };
+    if (opts.run) void database.runQuery();
+    nlOutcome = null;
+    nlOpen = false;
+    nlQuestion = '';
+  }
+
   // ── Phone accordion ────────────────────────────────────────────────────────
   // On a phone the editor and the results are each collapsible, independently
   // scrolling blocks (tap a header to expand/minimise). Default: editor open,
@@ -370,6 +426,17 @@
     <button class="btn small ghost" onclick={explain} disabled={!tab.statement.trim()} title="Ask an agent to explain this query">
       <Icon name="comment" size={11} />Ask AI
     </button>
+    {#if nlAvailable}
+      <button
+        class="btn small ghost"
+        class:on={nlOpen}
+        onclick={() => (nlOpen = !nlOpen)}
+        disabled={!database.selectedConnId}
+        title="Describe what you want in plain English — the agent drafts a query and validates it with EXPLAIN before showing it"
+      >
+        <Icon name="comment" size={11} />Ask in English
+      </button>
+    {/if}
     {#if database.queryLanguage !== 'redis'}
       <button
         class="btn small ghost"
@@ -455,6 +522,70 @@
     </label>
     <span class="qe-lang mono">{database.queryLanguage}</span>
   </div>
+
+  {#if nlAvailable && nlOpen}
+    <div class="qe-nl">
+      <div class="qe-nl-ask">
+        <Icon name="comment" size={12} />
+        <input
+          class="input grow"
+          placeholder="Ask in English — e.g. “top 10 customers by total order value last month”"
+          bind:value={nlQuestion}
+          spellcheck="false"
+          disabled={nlBusy}
+          onkeydown={(e) => {
+            if (e.key === 'Enter') askEnglish();
+            else if (e.key === 'Escape') nlOpen = false;
+          }}
+        />
+        <button
+          class="btn small primary"
+          onclick={askEnglish}
+          disabled={nlBusy || !nlQuestion.trim()}
+        >
+          {#if nlBusy}<span class="qe-nl-dot"></span>Generating…{:else}<Icon name="zap" size={11} />Generate{/if}
+        </button>
+        <button class="btn small ghost" onclick={() => (nlOpen = false)} title="Close" aria-label="Close">
+          <Icon name="x" size={11} />
+        </button>
+      </div>
+
+      {#if nlError}
+        <div class="qe-nl-err mono">{nlError}</div>
+      {/if}
+
+      {#if nlOutcome}
+        <div class="qe-nl-result">
+          <pre class="qe-nl-sql mono">{nlOutcome.sql}</pre>
+          {#if nlOutcome.warnings.length > 0}
+            <div class="qe-nl-warn">{nlOutcome.warnings.join(' · ')}</div>
+          {/if}
+          <div class="qe-nl-actions">
+            <button class="btn small primary" onclick={() => useNlSql({ run: true })}>
+              <Icon name="play" size={11} />Run
+            </button>
+            <button class="btn small" onclick={() => useNlSql({ run: false })}>
+              <Icon name="send" size={11} />Insert into editor
+            </button>
+            <span class="grow"></span>
+            <button
+              class="qe-nl-plan-toggle"
+              onclick={() => (nlPlanOpen = !nlPlanOpen)}
+              aria-expanded={nlPlanOpen}
+              title="The EXPLAIN plan that proved this query runs as a read"
+            >
+              <Icon name={nlPlanOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+              Validated with EXPLAIN
+              <span class="qe-nl-attempts">· {nlOutcome.attempts} attempt{nlOutcome.attempts === 1 ? '' : 's'}</span>
+            </button>
+          </div>
+          {#if nlPlanOpen}
+            <pre class="qe-nl-plan mono">{nlOutcome.plan}</pre>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
 
   {#if queryVars.length > 0}
     <div class="qe-vars" bind:this={varsBarEl}>
@@ -755,6 +886,98 @@
     text-transform: uppercase;
     letter-spacing: 0.03em;
     cursor: pointer;
+  }
+  /* Ask-in-English (verified NL→SQL) panel — sits between toolbar and editor. */
+  .qe-nl {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 10px;
+    margin: 0 0 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--accent) 5%, var(--surface-2));
+  }
+  .qe-nl-ask {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-dim);
+  }
+  .qe-nl-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: qe-pulse 1s ease-in-out infinite;
+  }
+  .qe-nl-err {
+    font-size: 11.5px;
+    color: var(--status-exited);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .qe-nl-result {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .qe-nl-sql {
+    margin: 0;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    color: var(--text);
+  }
+  .qe-nl-warn {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .qe-nl-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .qe-nl-plan-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .qe-nl-plan-toggle:hover {
+    color: var(--text);
+  }
+  .qe-nl-attempts {
+    opacity: 0.7;
+  }
+  .qe-nl-plan {
+    margin: 0;
+    padding: 8px 10px;
+    max-height: 180px;
+    overflow: auto;
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    color: var(--text-dim);
+  }
+  /* Toggle highlight for the toolbar "Ask in English" button when its panel is open. */
+  .btn.small.ghost.on {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .btn.stop {
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);

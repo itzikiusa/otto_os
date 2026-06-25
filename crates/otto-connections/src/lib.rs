@@ -3,7 +3,9 @@
 //! test-connect, plus the REST router.
 
 pub mod builders;
+pub mod conn_import;
 pub mod http;
+mod keyperms;
 pub mod service;
 
 pub use builders::build_command;

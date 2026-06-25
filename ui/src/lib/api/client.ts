@@ -1,6 +1,17 @@
 // Minimal fetch wrapper for /api/v1 + WS URL helper.
 
-import type { Problem } from './types';
+import type {
+  Problem,
+  ImportReq,
+  ImportResult,
+  NlToSqlReq,
+  NlToSqlOutcome,
+  ImportSource,
+  SourceStatus,
+  ImportScanResult,
+  ImportCreateReq,
+  ImportCreateResult,
+} from './types';
 import { serviceHealth } from '../stores/serviceHealth.svelte';
 
 export class ApiError extends Error {
@@ -210,6 +221,61 @@ export async function postNdjsonStream(
   }
   const tail = buf.trim();
   if (tail) onLine(JSON.parse(tail) as unknown);
+}
+
+/**
+ * Import a local file into a SQL table (`POST …/db/import`). Reads the same
+ * streamed NDJSON the export uses; `onLine` fires for each line and the promise
+ * resolves with the final `{done…}` / `{error}` line so the caller can drive a
+ * progress UI and handle the guarded-write retry. The server emits one final
+ * line in v1 (run-to-completion), but the streaming reader is future-proof.
+ */
+export async function dbImport(
+  connId: string,
+  body: ImportReq,
+  onLine?: (line: ImportResult) => void,
+): Promise<ImportResult> {
+  let last: ImportResult = {};
+  await postNdjsonStream(`/connections/${connId}/db/import`, body, (msg) => {
+    const line = msg as ImportResult;
+    last = line;
+    onLine?.(line);
+  });
+  return last;
+}
+
+/**
+ * Draft a verified read query from natural language (`POST …/db/nl-to-sql`).
+ * Plain JSON in/out; the server returns only an `EXPLAIN`-validated read. A 400
+ * Problem surfaces as an {@link ApiError} the caller inspects (`.message` starts
+ * with "NL-to-SQL is not configured" when no drafter is wired, or "could not
+ * produce a valid read query" when the loop was exhausted).
+ */
+export function dbNlToSql(connId: string, body: NlToSqlReq): Promise<NlToSqlOutcome> {
+  return api.post<NlToSqlOutcome>(`/connections/${connId}/db/nl-to-sql`, body);
+}
+
+// --- Import connections from other DB tools ---------------------------------
+//
+// The daemon runs locally and reads each tool's config from its default macOS
+// location — the user picks a tool, never a file. Editor-gated; created
+// connections always use `secret:null` (passwords are unrecoverable from the
+// source tools — the user adds them later via edit). `wsId` authorizes the
+// caller; created connections are global.
+
+/** Detect which DB tools have importable configs (GET …/import/sources). */
+export function importSources(wsId: string): Promise<SourceStatus[]> {
+  return api.get<SourceStatus[]>(`/workspaces/${wsId}/connections/import/sources`);
+}
+
+/** Read + parse one tool's default config into ParsedConnections (POST …/import/scan). */
+export function importScan(wsId: string, source: ImportSource): Promise<ImportScanResult> {
+  return api.post<ImportScanResult>(`/workspaces/${wsId}/connections/import/scan`, { source });
+}
+
+/** Best-effort batch-create the chosen connections (POST …/import/create). */
+export function importCreate(wsId: string, body: ImportCreateReq): Promise<ImportCreateResult> {
+  return api.post<ImportCreateResult>(`/workspaces/${wsId}/connections/import/create`, body);
 }
 
 /** Build a WS URL with the auth token, e.g. wsUrl('/ws/term/SESSION_ID'). */

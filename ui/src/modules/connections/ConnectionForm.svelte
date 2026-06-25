@@ -640,6 +640,7 @@
             <input id="cf-tun-identity" class="input mono grow" bind:value={tunIdentity} placeholder="~/.ssh/id_rsa" spellcheck="false" />
             <button class="btn browse-btn" onclick={() => (showTunnelFilePicker = true)}>Browse…</button>
           </div>
+          <span class="hint">Key file must be private (<span class="mono">chmod 600</span>) or ssh ignores it.</span>
         </div>
       </div>
     {/if}
@@ -684,7 +685,7 @@
           />
           <button class="btn browse-btn" onclick={() => (showFilePicker = true)}>Browse…</button>
         </div>
-        <span class="hint">Identity OR password — both optional.</span>
+        <span class="hint">Identity OR password — both optional. Key file must be private (<span class="mono">chmod 600</span>) or ssh ignores it.</span>
       </div>
     </div>
   {/if}

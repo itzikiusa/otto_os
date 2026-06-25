@@ -115,6 +115,13 @@ fn cancel_handle_for(
     target.token.handle()
 }
 
+/// What an import produced — returned to the HTTP handler for its final line.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct ImportCounts {
+    pub rows: u64,
+    pub batches: u64,
+}
+
 /// A driver + endpoint resolved for one operation. The `_tunnel` clone, when
 /// present, keeps a reference to the (cached) SSH forward alive for at least
 /// the lifetime of this struct; the cache holds the other reference, so the
@@ -634,6 +641,127 @@ impl DbViewerService {
         result.map(|counts| (counts, elapsed))
     }
 
+    /// Import a local file into an existing SQL table. Parses the file, builds
+    /// batched `INSERT`s, and runs each batch **through the guarded `run` path**
+    /// — so a Prod/read-only connection refuses the import unless `confirm_write`
+    /// is set (no new guard here), and history records each batch. v1 supports
+    /// SQL engines (MySQL/ClickHouse); Mongo/Redis return a clear error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn import_from_path(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        local_path: &str,
+        format: crate::import::ImportFormat,
+        table: &str,
+        batch_size: usize,
+        confirm_write: bool,
+    ) -> Result<ImportCounts> {
+        let conn = self.connections.get(conn_id).await?;
+        match Engine::from_kind(conn.kind) {
+            Some(Engine::Mysql) | Some(Engine::Clickhouse) => {}
+            Some(other) => {
+                return Err(Error::Invalid(format!(
+                    "file import is not supported for {} yet (SQL engines only in v1)",
+                    other.as_str()
+                )))
+            }
+            None => return Err(Error::Invalid("connection is not a browsable database".into())),
+        }
+
+        let bytes = tokio::fs::read(local_path)
+            .await
+            .map_err(|e| Error::Invalid(format!("read import file: {e}")))?;
+        let parsed = crate::import::parse_rows(format, &bytes)?;
+        let statements =
+            crate::import::build_insert_statements(table, &parsed.columns, &parsed.rows, batch_size);
+
+        let mut counts = ImportCounts::default();
+        for stmt in statements {
+            let req = QueryRequest {
+                statement: stmt,
+                confirm_write,
+                ..QueryRequest::default()
+            };
+            // Routes through guard_write + history. A guarded connection without
+            // confirm_write fails here with the standard write_blocked: 409.
+            let res = self.run(conn_id, user_id, &req).await?;
+            counts.rows += res.rows_affected.unwrap_or(0);
+            counts.batches += 1;
+        }
+        Ok(counts)
+    }
+
+    /// Validate a candidate **read** query by asking the engine for its plan,
+    /// without returning rows. SQL engines run `EXPLAIN <sql>`; Mongo runs with
+    /// the `explain` flag. Returns the plan rendered as text on success, or the
+    /// engine's error message on failure (so the NL loop can feed it back to the
+    /// drafter). The caller has already classified `sql` as a read.
+    pub async fn explain_validate(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        node: Option<&str>,
+        sql: &str,
+    ) -> std::result::Result<String, String> {
+        let conn = self
+            .connections
+            .get(conn_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let engine = Engine::from_kind(conn.kind)
+            .ok_or_else(|| "connection is not a browsable database".to_string())?;
+        let req = match engine {
+            Engine::Mysql | Engine::Clickhouse => QueryRequest {
+                statement: format!("EXPLAIN {sql}"),
+                node: node.map(str::to_string),
+                ..QueryRequest::default()
+            },
+            Engine::Mongodb => QueryRequest {
+                statement: sql.to_string(),
+                explain: true,
+                node: node.map(str::to_string),
+                ..QueryRequest::default()
+            },
+            // Redis has no SQL/plan surface; NL→SQL is gated off for it in the UI.
+            Engine::Redis => return Err("EXPLAIN is not supported for Redis".to_string()),
+        };
+        match self.run(conn_id, user_id, &req).await {
+            Ok(res) => Ok(render_plan_text(&res)),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// A compact, model-grounding summary of the schema under `node` (or the
+    /// connection's default): up to `max_tables` tables, each as
+    /// `table(col type, col type, …)`. Built from the same lazy tree the UI
+    /// browses, so it's engine-agnostic. Best-effort — an object that fails to
+    /// introspect is skipped.
+    pub async fn schema_summary(
+        &self,
+        conn_id: &Id,
+        node: Option<&str>,
+        max_tables: usize,
+    ) -> Result<String> {
+        let schema = node
+            .and_then(|n| NodePath::parse(n).get("db").map(str::to_string))
+            .unwrap_or_default();
+        let graph = self.schema_graph(conn_id, &schema, max_tables).await?;
+        let mut out = String::new();
+        for t in &graph.tables {
+            let cols: Vec<String> = t
+                .columns
+                .iter()
+                .map(|c| format!("{} {}", c.name, c.data_type))
+                .collect();
+            out.push_str(&format!("{}({})\n", t.name, cols.join(", ")));
+        }
+        if out.is_empty() {
+            out.push_str("(no tables introspected)");
+        }
+        Ok(out)
+    }
+
     /// Cancel an in-flight query (issued via [`Self::run`] with the same
     /// `query_id`) using engine-native cancellation. The cancel runs on a FRESH
     /// connection re-resolved to the query's endpoint — you can't `KILL` on the
@@ -779,6 +907,44 @@ impl DbViewerService {
             ..Default::default()
         };
         self.run(&widget.connection_id, user_id, &req).await
+    }
+}
+
+/// Render a plan `QueryResult` as compact text for display + drafter feedback.
+fn render_plan_text(res: &crate::types::QueryResult) -> String {
+    let mut out = String::new();
+    for row in &res.rows {
+        let line: Vec<String> = row
+            .iter()
+            .map(|c| match c {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect();
+        out.push_str(&line.join(" | "));
+        out.push('\n');
+    }
+    if out.is_empty() {
+        out.push_str("(empty plan)");
+    }
+    out
+}
+
+/// Adapts `DbViewerService::explain_validate` to the `nl::SqlValidator` trait so
+/// the NL loop can validate candidates without knowing about the service.
+pub struct ServiceValidator<'a> {
+    pub db: &'a DbViewerService,
+    pub conn_id: Id,
+    pub user_id: Id,
+    pub node: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl crate::nl::SqlValidator for ServiceValidator<'_> {
+    async fn validate(&self, sql: &str) -> std::result::Result<String, String> {
+        self.db
+            .explain_validate(&self.conn_id, &self.user_id, self.node.as_deref(), sql)
+            .await
     }
 }
 

@@ -445,6 +445,13 @@ class DatabaseStore {
   objectDetail: ObjectDetail | null = $state(null);
   objectLoading = $state(false);
 
+  // ── File→table import dialog (0002) ──────────────────────────────────────
+  // Open state + the table to prefill, set when launched from the schema-tree
+  // "Import into…" action. The dialog component (mounted in DatabasePage) reads
+  // these and clears `importDialogOpen` on close.
+  importDialogOpen = $state(false);
+  importTable = $state('');
+
   // ── Builder catalog cache (palette table lists, keyed by db path) ─────────
   // The schema tree is lazy/partial; the visual builder needs the full catalog
   // on demand. Cached so re-opening the palette is instant.
@@ -1035,6 +1042,15 @@ class DatabaseStore {
     }
   }
 
+  /** Re-fetch the currently-open object's detail (e.g. after an import changes
+   *  its row count). No-op when no object is open. */
+  async refreshObject(): Promise<void> {
+    const path = this.selectedObjectPath;
+    if (!path) return;
+    const detail = await this.fetchObject(path);
+    if (detail) this.objectDetail = detail;
+  }
+
   /**
    * Fetch the relationship graph (ERD) for a schema/database: tables (with
    * columns + PK/FK flags) and the FK edges between them. Read-only; backed by
@@ -1418,6 +1434,13 @@ class DatabaseStore {
     const r = this.tableRefFromNode(node);
     if (!r) return;
     await this.openInNewTab(`SELECT * FROM ${r.ref}`, { name: r.table });
+  }
+
+  /** Open the file→table Import dialog, prefilling the target table from a
+   *  schema-tree node (the raw, unquoted table name the INSERT needs). */
+  openImportDialog(node?: SchemaNode): void {
+    this.importTable = node ? this.tableRefFromNode(node)?.table ?? '' : '';
+    this.importDialogOpen = true;
   }
 
   /** Resolve a Mongo collection node to its `{ db, coll }`. */

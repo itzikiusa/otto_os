@@ -41,7 +41,10 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 27a | PATCH /api/v1/connections/{id}/pin | ws editor (global: root) | `{pinned: bool}` | Toggle pinned/frecency flag; returns updated Connection |
 | 28 | DELETE /api/v1/connections/{id} | ws editor (global: root) | — | 204 (deletes Keychain secret too) |
 | 29 | POST /api/v1/connections/{id}/open | ws editor | `{"title":null}` optional | Session |
-| 30 | POST /api/v1/connections/{id}/test | ws editor | — | TestConnectionResp |
+| 30 | POST /api/v1/connections/{id}/test | ws editor | — | TestConnectionResp (`warn_key_perms?: string` — set when the connection's SSH private key file is group/other-readable; carries the `chmod 600 <path>` fix, independent of `ok`) |
+| 30a | GET /api/v1/workspaces/{id}/connections/import/sources | ws editor | — | `SourceStatus[]` — detects MySQL Workbench / DBeaver / DataGrip / NoSQLBooster at their default macOS config paths (the daemon runs locally and reads the files itself; the user picks a tool, never a file) |
+| 30b | POST /api/v1/workspaces/{id}/connections/import/scan | ws editor | `{source: ImportSource}` | ImportScanResult — locates + reads + parses the chosen tool's default config into `ParsedConnection[]` (ready-to-create Otto params; unsupported engines listed with `supported:false`) |
+| 30c | POST /api/v1/workspaces/{id}/connections/import/create | ws editor | ImportCreateReq | ImportCreateResult `{created: Connection[], failed: {name,error}[]}` — best-effort batch create through the normal create path with `secret:null` (tools keep passwords encrypted/in an OS keychain — unrecoverable; the user adds them later via edit) |
 | 31 | GET /api/v1/git/accounts | member | — | `GitAccount[]` (own accounts only; token never present) |
 | 32 | POST /api/v1/git/accounts | member | CreateGitAccountReq | GitAccount |
 | 33 | DELETE /api/v1/git/accounts/{id} | member (owner) | — | 204 |
@@ -416,6 +419,45 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 | DELETE /connection-sections/{id} | ws editor | — | 204 |
 | POST /connection-sections/{id}/move | ws editor | MoveSectionReq | 204 |
 
+## Import connections from other DB tools (`/connections/import/*`)
+
+The daemon runs locally, so it reads each supported tool's config file from its
+default macOS location — the user picks a *tool*, never a file. Editor-gated
+(the path workspace authorizes; created connections are global, like the normal
+create path). Created connections always use `secret: null` because every tool
+keeps passwords encrypted or in an OS keychain — unrecoverable here. For
+MongoDB, when a username is known the generated `conn_string` carries Otto's
+`{secret}` placeholder so the password substitutes in once the user supplies it
+via the connection editor.
+
+Endpoints: see rows 30a–30c in the main table.
+
+- `ImportSource` (string enum): `"mysql_workbench" | "dbeaver" | "datagrip" | "nosqlbooster"`.
+- `SourceStatus` = `{source: ImportSource, label, present: bool, path?: string, count?: number}` —
+  `present`/`count` reflect a stat + cheap parse of the default config path.
+- `ParsedConnection` = `{source, name, kind?: ConnectionKind, params, supported: bool,
+  needs_password: bool, note?: string}`. For a supported engine, `params` is the ready-to-create
+  Otto shape (mysql/clickhouse `{host,port,user,db}`, redis `{host,port,db?}`, mongodb
+  `{conn_string}`; plus nested `ssh{host,port,user,identity_file}` when the source had an SSH
+  tunnel, and `tls{mode:"require"}` when SSL was enabled). For an unsupported engine
+  `kind=null, supported=false`, `params={}`, and `note` explains the skip (e.g. "PostgreSQL is not
+  supported by Otto") — still listed so the user sees why it wasn't importable.
+- `ImportScanResult` = `{source, path?: string, connections: ParsedConnection[], warnings: string[]}`.
+- `ImportCreateReq` = `{connections: ImportCreateItem[], section_id?: id}` where
+  `ImportCreateItem` = `{name, kind: ConnectionKind, params, environment?, read_only?}`.
+- `ImportCreateResult` = `{created: Connection[], failed: {name, error}[]}` — best-effort; one
+  failure never aborts the batch.
+
+Default macOS config paths probed (all under `~/Library`):
+- MySQL Workbench: `Application Support/MySQL/Workbench/connections.xml` (always MySQL).
+- DBeaver: `DBeaverData/workspace*/<project>/.dbeaver/data-sources.json` (all workspaces merged,
+  deduped by name+params).
+- DataGrip: IDE-global `Application Support/JetBrains/DataGrip*/options/dataSources.xml` (+ the
+  sibling `dataSources.local.xml` for username/SSL, joined by data-source `uuid`), plus a bounded
+  `$HOME` walk (depth ≤4, heavy/system dirs skipped, ≤50 files) for project-level
+  `**/.idea/dataSources.xml`.
+- NoSQLBooster: `Application Support/NoSQLBooster for MongoDB/app.json` (always MongoDB).
+
 ## Workspace MCP servers (user-managed `.mcp.json` entries)
 
 User-configured MCP (Model Context Protocol) servers, per workspace. *Enabled* servers are
@@ -489,6 +531,8 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/explain-with-agent | ws editor | `{sql}` | AI explanation of a query (spawns an agent) |
 | POST /connections/{id}/db/export | ws editor | `{statement, format?, node?}` | Buffered CSV/JSON browser download. NOTE: routes through the interactive `run` path, so it is capped at the driver's default row limit — **not** a true full export. Superseded in the UI by export-to-path; kept for compatibility. |
 | POST /connections/{id}/db/export-to-path | ws editor | ExportToPathReq | Stream an uncapped result to a **local file** on the daemon host, selectable format. Response is a **streamed `application/x-ndjson`** progress feed (see below). |
+| POST /connections/{id}/db/import | ws editor | ImportReq | Import a **local file** (CSV/TSV/NDJSON/JSON) into an existing SQL table as batched INSERTs **through the same guarded `run` path** (a Prod/read-only connection refuses it without `confirm_write`). Response is a **streamed `application/x-ndjson`** line: `{ done, rows, batches }` or `{ error }` (text starting `write_blocked:` ⇒ typed confirmation needed). v1: MySQL/ClickHouse only. |
+| POST /connections/{id}/db/nl-to-sql | ws editor | NlToSqlReq | Draft a **read** query from natural language, **validated with `EXPLAIN`** against the live schema before returning. Plain JSON → `NlToSqlOutcome`. Never emits a write/DDL. 400 starting "NL-to-SQL is not configured" ⇒ no drafter wired; 400 starting "could not produce a valid read query" ⇒ retry loop exhausted (message carries the last engine error). Unavailable for Redis. |
 
 `ExportToPathReq` = `{ statement, node?, format?, local_path, max_rows? }`. `format`
 is one of `csv` (no header), `csv_with_names` (header row), `tsv`, `tsv_with_names`,
@@ -514,6 +558,34 @@ server-side `INTO OUTFILE` on the tunnel host). Only row-returning statements ar
 exportable; a write/DDL is rejected (and a write on a guarded production/read-only
 connection is blocked as elsewhere). Gated at the same role as `query` (`ws
 editor`; global connections: root).
+
+`ImportReq` = `{ local_path, format, table, batch_size?, confirm_write? }`.
+`format` is one of `csv`/`tsv` (first row = header) or `ndjson`/`json` (objects;
+columns are the union of keys, missing keys → `null`). `local_path` is a file on
+the daemon host (leading `~` expands to the daemon home). `table` must already
+exist. `batch_size` is rows per `INSERT` (default 500, clamped 1..=5000). The
+import parses the file, builds batched `INSERT … VALUES (…),(…)` with
+backtick-quoted identifiers and single-quote-escaped literals, and runs each
+batch **through the guarded `run` path** — so masking/history apply and a
+Prod/read-only connection refuses it unless `confirm_write` is set. The
+**response is a streamed `application/x-ndjson` body** with a single terminal
+line: `{ done: true, rows, batches }` (rows inserted, batches run) or `{ error }`
+— a guarded connection without `confirm_write` yields `{ error }` whose text
+starts `write_blocked:` (the client re-sends with `confirm_write: true` after a
+typed confirmation). v1 supports SQL engines only (MySQL/ClickHouse); Mongo
+`insertMany` / Redis are follow-ups. Gated `ws editor` (global connections: root).
+
+`NlToSqlReq` = `{ question, node?, max_attempts? }`. `max_attempts` is the
+draft→validate retry budget (default 3, clamped 1..=4). The server asks the
+configured drafter (the agent/LLM, grounded in a compact schema summary) for a
+candidate query, **rejects any write/DDL before it touches the engine**,
+validates the candidate with `EXPLAIN` (a read — guard-safe even on a
+Prod/read-only connection), and feeds any engine error back to the drafter for a
+bounded retry. On success it returns `NlToSqlOutcome` =
+`{ sql, plan, attempts, warnings[] }` — an `EXPLAIN`-validated **read** query,
+its plan text, the attempt count, and any non-fatal notes. Gated `ws editor`
+(global connections: root) because validation runs `EXPLAIN` live; unavailable
+for Redis (no plan surface).
 
 `RunQueryReq` may include an optional client-generated `query_id` (string). When
 present, the server registers the in-flight query under it; `POST …/db/cancel`

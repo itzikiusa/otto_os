@@ -11,6 +11,7 @@
   import DiagramView from './DiagramView.svelte';
   import Dashboards from './Dashboards.svelte';
   import ConnectionForm from '../connections/ConnectionForm.svelte';
+  import ImportDialog from './ImportDialog.svelte';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -715,6 +716,14 @@
     onclose={() => (connFormOpen = false)}
     onsaved={onConnSaved}
   />
+{/if}
+
+<!-- File → table import dialog (launched from the schema-tree "Import into…"
+     action or the results-grid toolbar). Keyed so it remounts fresh each open. -->
+{#if database.importDialogOpen && database.selectedConnId}
+  {#key database.importTable}
+    <ImportDialog />
+  {/key}
 {/if}
 
 <style>

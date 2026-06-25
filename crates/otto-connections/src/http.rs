@@ -19,7 +19,11 @@ use otto_ssh::{SftpParams, SftpSession};
 use otto_state::SqlitePool;
 use serde::Deserialize;
 
-use crate::service::{ConnectionsService, DbTester, Spawner};
+use crate::conn_import::{
+    self, ImportCreateReq, ImportCreateResult, ImportFailure, ImportScanResult, ImportSource,
+    SourceStatus,
+};
+use crate::service::{key_perms_warning_for, ConnectionsService, DbTester, Spawner};
 
 /// Server-side context required by the connections routes.
 pub trait ConnectionsCtx: Clone + Send + Sync + 'static {
@@ -113,6 +117,19 @@ pub fn api_router<S: ConnectionsCtx>() -> Router<S> {
             "/workspaces/{id}/connections",
             get(list_connections::<S>).post(create_connection::<S>),
         )
+        // --- Import connections from other DB tools ---
+        .route(
+            "/workspaces/{id}/connections/import/sources",
+            get(import_sources::<S>),
+        )
+        .route(
+            "/workspaces/{id}/connections/import/scan",
+            post(import_scan::<S>),
+        )
+        .route(
+            "/workspaces/{id}/connections/import/create",
+            post(import_create::<S>),
+        )
         .route(
             "/connections/{id}",
             axum::routing::patch(update_connection::<S>).delete(delete_connection::<S>),
@@ -195,6 +212,100 @@ async fn create_connection<S: ConnectionsCtx>(
     // path workspace is used only to authorize the caller.
     let conn = ctx.connections().create(None, &user.id, req).await?;
     Ok(Json(conn))
+}
+
+// --- Import connections from other DB tools ---------------------------------
+//
+// The daemon runs locally, so it reads each tool's config from its default
+// macOS location — the user picks a *tool*, never a file. Editor-gated like the
+// create endpoint (the path workspace authorizes; created connections are
+// global). Imported connections always create with `secret: None` (every tool
+// keeps passwords encrypted / in an OS keychain — unrecoverable here).
+
+/// Body of `POST …/connections/import/scan`.
+#[derive(Debug, Deserialize)]
+struct ImportScanBody {
+    source: ImportSource,
+}
+
+/// GET /workspaces/{id}/connections/import/sources — editor.
+/// Detects all four tools at their default macOS paths (stat + parse-count).
+async fn import_sources<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+) -> ApiResult<Json<Vec<SourceStatus>>> {
+    ctx.roles()
+        .check(&user, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    // Each `source_status` touches disk; offload off the async runtime worker.
+    let statuses = tokio::task::spawn_blocking(|| {
+        ImportSource::ALL
+            .iter()
+            .map(|s| conn_import::source_status(*s))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| ApiErr(Error::Internal(format!("import scan task failed: {e}"))))?;
+    Ok(Json(statuses))
+}
+
+/// POST /workspaces/{id}/connections/import/scan — editor.
+/// Locates the chosen tool's default config, reads it, and parses it.
+async fn import_scan<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+    Json(body): Json<ImportScanBody>,
+) -> ApiResult<Json<ImportScanResult>> {
+    ctx.roles()
+        .check(&user, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    let source = body.source;
+    let result = tokio::task::spawn_blocking(move || conn_import::scan_source(source))
+        .await
+        .map_err(|e| ApiErr(Error::Internal(format!("import scan task failed: {e}"))))?;
+    Ok(Json(result))
+}
+
+/// POST /workspaces/{id}/connections/import/create — editor.
+/// Best-effort batch create: each item goes through the normal create path with
+/// `secret: None`; one failure never aborts the batch.
+async fn import_create<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+    Json(req): Json<ImportCreateReq>,
+) -> ApiResult<Json<ImportCreateResult>> {
+    ctx.roles()
+        .check(&user, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    let mut created = Vec::new();
+    let mut failed = Vec::new();
+    for item in req.connections {
+        let name = item.name.clone();
+        let create_req = UpsertConnectionReq {
+            name: item.name,
+            kind: item.kind,
+            params: item.params,
+            // Tools keep passwords encrypted / in OS keychains — unrecoverable.
+            secret: None,
+            first_command: None,
+            section_id: req.section_id.clone(),
+            environment: item.environment,
+            read_only: item.read_only,
+        };
+        // Connections are a global library — created workspace-independent
+        // (mirrors `create_connection`; the path workspace only authorizes).
+        match ctx.connections().create(None, &user.id, create_req).await {
+            Ok(conn) => created.push(conn),
+            Err(e) => failed.push(ImportFailure {
+                name,
+                error: e.to_string(),
+            }),
+        }
+    }
+    Ok(Json(ImportCreateResult { created, failed }))
 }
 
 /// #27 PATCH /connections/{id} — ws editor (global: root)
@@ -283,12 +394,21 @@ async fn test_connection<S: ConnectionsCtx>(
             | ConnectionKind::Mongodb
             | ConnectionKind::Clickhouse
     );
-    if is_db_kind {
+    let mut resp = if is_db_kind {
         if let Some(tester) = ctx.db_tester() {
-            return Ok(Json(tester.test_db_connection(&id).await?));
+            tester.test_db_connection(&id).await?
+        } else {
+            ctx.connections().test(&conn).await?
         }
-    }
-    Ok(Json(ctx.connections().test(&conn).await?))
+    } else {
+        ctx.connections().test(&conn).await?
+    };
+    // Overlay the SSH key-permission warning here — this single spot covers both
+    // the driver path (which can't see the key file) and the CLI path uniformly,
+    // including DB-over-SSH-tunnel connections (params["ssh"]["identity_file"]).
+    // Independent of the probe outcome.
+    resp.warn_key_perms = key_perms_warning_for(&conn.params);
+    Ok(Json(resp))
 }
 
 /// PATCH /connections/{id}/pin — editor (global: root); toggle the pinned flag.
