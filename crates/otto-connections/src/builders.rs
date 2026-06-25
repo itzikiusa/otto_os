@@ -296,7 +296,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
 }
 
 /// Validate that `params` are sufficient for `kind` (used at create/update).
-pub fn validate_params(kind: ConnectionKind, params: &Value, has_secret: bool) -> Result<()> {
+pub fn validate_params(kind: ConnectionKind, params: &Value, _has_secret: bool) -> Result<()> {
     let conn = Connection {
         id: String::new(),
         workspace_id: None,
@@ -313,7 +313,16 @@ pub fn validate_params(kind: ConnectionKind, params: &Value, has_secret: bool) -
         last_opened_at: None,
         pinned: false,
     };
-    let secret = has_secret.then_some("x");
+    // Validate only the params SHAPE here. We deliberately pretend a secret is
+    // available (`Some`) regardless of `_has_secret`: a connection whose
+    // conn_string / command template references `{secret}` may legitimately be
+    // *created* before its password is stored — e.g. connection profiles
+    // imported from another tool (which never carry the password), or any
+    // "set it up now, add the credential later" flow. The authoritative check
+    // stays at OPEN time, where `build_command` runs with the real Keychain
+    // secret and returns the clear "references {secret} but no secret is stored"
+    // error if it is still missing.
+    let secret = Some("x");
     build_command(&conn, secret).map(|_| ())
 }
 
@@ -448,6 +457,18 @@ mod tests {
             json!({"conn_string":"mongodb://app:{secret}@m1/db"}),
         );
         assert!(matches!(build_command(&c, None), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn validate_allows_mongodb_secret_placeholder_without_secret() {
+        // Create-time validation tolerates a deferred `{secret}` (imported
+        // profiles never carry the password). The open-time guard
+        // (`mongodb_secret_placeholder_without_secret_fails`) still protects use.
+        let params = json!({"conn_string":"mongodb+srv://app:{secret}@m1/db?authSource=admin"});
+        assert!(validate_params(ConnectionKind::Mongodb, &params, false).is_ok());
+        // And a custom template referencing {secret} likewise validates pre-secret.
+        let custom = json!({"command_template":"psql -h h -U u {secret}"});
+        assert!(validate_params(ConnectionKind::Custom, &custom, false).is_ok());
     }
 
     #[test]

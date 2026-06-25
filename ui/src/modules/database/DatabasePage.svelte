@@ -11,6 +11,7 @@
   import DiagramView from './DiagramView.svelte';
   import Dashboards from './Dashboards.svelte';
   import ConnectionForm from '../connections/ConnectionForm.svelte';
+  import ConnectionImportDialog from '../connections/ConnectionImportDialog.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
@@ -26,6 +27,9 @@
   const DB_KINDS: ConnectionKind[] = ['mysql', 'redis', 'mongodb', 'clickhouse'];
   let connFormOpen = $state(false);
   let editingConn = $state<Connection | null>(null);
+  // Import connection profiles from other DB tools (MySQL Workbench / DBeaver /
+  // DataGrip / NoSQLBooster) — the daemon reads each tool's config from disk.
+  let connImportOpen = $state(false);
 
   // ── Phone accordion ────────────────────────────────────────────────────────
   // On a phone the whole page scrolls and each major section (Connections /
@@ -371,6 +375,7 @@
         <div class="head-btns">
           <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={13} /></button>
           <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection"><Icon name="plus" size={13} /></button>
+          <button class="icon-btn" onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={13} /></button>
         </div>
       </div>
       <div class="conn-list" class:acc-collapsed={!connOpen}>
@@ -623,6 +628,7 @@
            them in the accordion header), so the tab strip never overflows. -->
       <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={12} /></button>
       <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection"><Icon name="plus" size={12} /></button>
+      <button class="icon-btn" onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={12} /></button>
     {/if}
   </div>
 {/snippet}
@@ -715,6 +721,18 @@
     kinds={DB_KINDS}
     onclose={() => (connFormOpen = false)}
     onsaved={onConnSaved}
+  />
+{/if}
+
+<!-- Import connection profiles from another DB tool (MySQL Workbench / DBeaver /
+     DataGrip / NoSQLBooster). The daemon reads each tool's config from disk. -->
+{#if connImportOpen && ws.currentId}
+  <ConnectionImportDialog
+    wsId={ws.currentId}
+    onclose={() => (connImportOpen = false)}
+    onimported={() => {
+      void database.loadConnections();
+    }}
   />
 {/if}
 
