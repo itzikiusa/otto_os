@@ -456,6 +456,12 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
                 .patch(crate::product_media::patch_attachment)
                 .delete(crate::product_media::delete_attachment),
         )
+        // In-place mockup agent: generate / refine a mockup attachment with a live,
+        // file-backed agent session (hidden from the Agents list).
+        .route(
+            "/product/stories/{sid}/mockups/assist",
+            post(crate::mockup_assist::assist_mockup),
+        )
         .route(
             "/product/attachments/{aid}/annotations",
             get(crate::product_media::list_annotations)

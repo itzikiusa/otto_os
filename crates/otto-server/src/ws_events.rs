@@ -240,6 +240,10 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // scene's workspace members.
         | Event::CanvasUpdated { workspace_id, .. }
         | Event::CanvasSessionStarted { workspace_id, .. }
+        // Live mockup-source edits + the mockup-agent-started signal go to the
+        // story's workspace members (same delivery as canvas).
+        | Event::MockupUpdated { workspace_id, .. }
+        | Event::MockupSessionStarted { workspace_id, .. }
         // Budget-exceeded alerts are scoped to the workspace that crossed the cap
         // (it carries `workspace_id`), so they go to that workspace's members.
         | Event::BudgetExceeded { workspace_id, .. } => Scope::Workspace(workspace_id),

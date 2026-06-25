@@ -101,6 +101,7 @@ fn allowed_mime(mime: &str) -> bool {
             | "text/html"
             | "text/plain"
             | "text/markdown"
+            | "text/vnd.mermaid"
     )
 }
 
@@ -116,7 +117,7 @@ fn sniff_ok(declared: &str, bytes: &[u8]) -> bool {
         "image/webp" => bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
         "application/pdf" => bytes.starts_with(b"%PDF-"),
         // Text-ish formats: accept any valid UTF-8 payload.
-        "image/svg+xml" | "text/html" | "text/plain" | "text/markdown" => {
+        "image/svg+xml" | "text/html" | "text/plain" | "text/markdown" | "text/vnd.mermaid" => {
             std::str::from_utf8(bytes).is_ok()
         }
         _ => false,
@@ -134,6 +135,7 @@ fn ext_for_mime(mime: &str) -> &'static str {
         "application/pdf" => ".pdf",
         "text/html" => ".html",
         "text/markdown" => ".md",
+        "text/vnd.mermaid" => ".mmd",
         _ => ".bin",
     }
 }

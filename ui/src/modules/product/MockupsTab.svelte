@@ -4,10 +4,13 @@
   // a MockupViewer. The viewer isolates untrusted content in sandboxed iframes
   // (HTML and Mermaid) or renders images as <img> — never inlining markup into
   // the parent DOM (see §8 of the design spec).
+  import { onDestroy } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
+  import { mockupAssist } from '../../lib/stores/mockup-assist.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import MockupViewer from './MockupViewer.svelte';
+  import MockupAssistPanel from './MockupAssistPanel.svelte';
   import type { ProductAttachment } from './types';
 
   // ── State ─────────────────────────────────────────────────────────────────
@@ -15,6 +18,85 @@
   let loading = $state(false);
   let loadError = $state<string | null>(null);
   let selectedId = $state<string | null>(null);
+  let importing = $state(false);
+  let createMenu = $state(false);
+
+  /** Read a Blob → base64 (no data-URL prefix). */
+  function fileToB64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error);
+      reader.onload = () => {
+        const result = reader.result as string;
+        const idx = result.indexOf(',');
+        resolve(idx >= 0 ? result.slice(idx + 1) : result);
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  /** Map a picked file to an allow-listed mockup mime (best-effort by extension). */
+  function mimeForFile(f: File): string {
+    if (f.type) return f.type;
+    const n = f.name.toLowerCase();
+    if (n.endsWith('.mmd')) return 'text/vnd.mermaid';
+    if (n.endsWith('.html') || n.endsWith('.htm')) return 'text/html';
+    if (n.endsWith('.svg')) return 'image/svg+xml';
+    return 'application/octet-stream';
+  }
+
+  /** Manual import: upload picked file(s) as mockups, then select the first. */
+  async function importFiles(e: Event): Promise<void> {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = input.files ? Array.from(input.files) : [];
+    input.value = '';
+    if (!files.length) return;
+    importing = true;
+    let firstId: string | null = null;
+    try {
+      for (const f of files) {
+        try {
+          const att = await product.uploadAttachment({
+            filename: f.name,
+            mime: mimeForFile(f),
+            kind: 'mockup',
+            data_b64: await fileToB64(f),
+          });
+          firstId ??= att.id;
+        } catch (err) {
+          toasts.error(`Import failed: ${f.name}`, err instanceof Error ? err.message : String(err));
+        }
+      }
+      await loadMockups();
+      if (firstId) selectedId = firstId;
+    } finally {
+      importing = false;
+    }
+  }
+
+  /** Create with AI: open the in-place mockup agent for a NEW mockup. */
+  function createWithAi(format: 'html' | 'mermaid'): void {
+    createMenu = false;
+    const storyId = product.selectedId;
+    if (!storyId) return;
+    mockupAssist.openNew(storyId, format);
+  }
+
+  /** Refine an existing agent mockup with the in-place agent. */
+  function refine(m: ProductAttachment): void {
+    void mockupAssist.openRefine(m);
+  }
+
+  /** A turn committed — reload the list and select the committed mockup. */
+  async function onAssistCommit(att: ProductAttachment): Promise<void> {
+    await loadMockups();
+    selectedId = att.id;
+  }
+
+  function closeAssist(): void {
+    mockupAssist.close();
+    void loadMockups();
+  }
 
   /** True when an attachment should appear in the Mockups list. */
   function isMockup(a: ProductAttachment): boolean {
@@ -33,9 +115,16 @@
   // ── Load on mount / story change ────────────────────────────────────────────
   $effect(() => {
     // Re-run whenever the selected story changes.
-    product.selectedId;
+    const sid = product.selectedId;
+    // The Assistant is a global singleton — if it's still open for a DIFFERENT
+    // story (the user switched stories in the sidebar), close it so a turn can't
+    // target the wrong story.
+    if (mockupAssist.active && mockupAssist.storyId !== sid) mockupAssist.close();
     void loadMockups();
   });
+
+  // Leaving the Mockups tab resets the singleton so it never lingers elsewhere.
+  onDestroy(() => mockupAssist.close());
 
   async function loadMockups(): Promise<void> {
     loading = true;
@@ -78,41 +167,77 @@
         <Icon name="refresh" size={12} />
       </button>
     </div>
+    <div class="list-actions">
+      <label class="act-btn" title="Import a mockup file (HTML, image, SVG, .mmd)">
+        <Icon name="plus" size={12} />
+        {importing ? 'Importing…' : 'Import'}
+        <input
+          type="file"
+          multiple
+          accept="image/*,.svg,.html,.htm,.mmd,text/html,text/vnd.mermaid"
+          style="display:none"
+          onchange={importFiles}
+          disabled={importing}
+        />
+      </label>
+      <div class="create-wrap">
+        <button class="act-btn primary" onclick={() => (createMenu = !createMenu)} title="Generate a mockup with AI">
+          <Icon name="zap" size={12} /> Create with AI
+        </button>
+        {#if createMenu}
+          <button class="menu-backdrop" aria-label="Close menu" onclick={() => (createMenu = false)}></button>
+          <div class="create-menu">
+            <button onclick={() => createWithAi('html')}>
+              <strong>HTML screen</strong><small>A self-contained UI mockup</small>
+            </button>
+            <button onclick={() => createWithAi('mermaid')}>
+              <strong>Diagram</strong><small>A Mermaid flow / sequence / model</small>
+            </button>
+          </div>
+        {/if}
+      </div>
+    </div>
     {#if loading}
       <div class="list-empty">Loading…</div>
     {:else if loadError}
       <div class="list-empty err">{loadError}</div>
     {:else if mockups.length === 0}
       <div class="list-empty">
-        No mockups yet. Attach an HTML, image, SVG, or <code>.mmd</code> file on the Overview
-        tab (and "Mark as mockup"), or let a discovery agent generate one.
+        No mockups yet. <strong>Import</strong> a file, or <strong>Create with AI</strong> to have a
+        specialized agent build one — right here, no Agents detour.
       </div>
     {:else}
       {#each mockups as m (m.id)}
-        <button
-          class="mockup-row"
-          class:active={selectedId === m.id}
-          onclick={() => (selectedId = m.id)}
-          title={m.filename}
-        >
-          <span class="mockup-type">{typeLabel(m)}</span>
-          <span class="mockup-name">{m.filename}</span>
-          {#if m.source === 'agent'}<span class="agent-badge">agent</span>{/if}
-        </button>
+        <div class="mockup-row" class:active={selectedId === m.id}>
+          <button class="mockup-open" onclick={() => (selectedId = m.id)} title={m.filename}>
+            <span class="mockup-type">{typeLabel(m)}</span>
+            <span class="mockup-name">{m.filename}</span>
+            {#if m.source === 'agent'}<span class="agent-badge">agent</span>{/if}
+          </button>
+          {#if m.source === 'agent'}
+            <button class="refine-btn" onclick={() => refine(m)} title="Refine with AI" aria-label="Refine with AI">
+              <Icon name="zap" size={12} />
+            </button>
+          {/if}
+        </div>
       {/each}
     {/if}
   </aside>
 
-  <!-- Viewer -->
+  <!-- Stage: the in-place mockup agent (when active) else the viewer. -->
   <div class="mockup-stage">
-    {#if selected}
-      {#key selected.id}
+    {#if mockupAssist.active}
+      <MockupAssistPanel oncommit={onAssistCommit} onclose={closeAssist} />
+    {:else if selected}
+      <!-- Key by id+updated_at so a refine (same id, new bytes) remounts + refetches. -->
+      {#key `${selected.id}:${selected.updated_at}`}
         <MockupViewer attachment={selected} />
       {/key}
     {:else if !loading}
       <div class="stage-empty">
         <Icon name="box" size={28} />
-        <p>Select a mockup from the list to preview and annotate it.</p>
+        <p>Select a mockup to preview and annotate, or <strong>Create with AI</strong> to generate
+          one in place.</p>
       </div>
     {/if}
   </div>
@@ -174,18 +299,21 @@
   .list-empty.err {
     color: #ef4444;
   }
-  .list-empty code {
-    font-family: var(--font-mono, monospace);
-    font-size: 10.5px;
-  }
   .mockup-row {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 2px;
     width: 100%;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+  .mockup-open {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
     padding: 8px 10px;
     border: none;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     background: transparent;
     color: var(--text);
     cursor: pointer;
@@ -197,6 +325,96 @@
   .mockup-row.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     color: var(--accent);
+  }
+  .refine-btn {
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    margin-inline-end: 6px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .refine-btn:hover {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+  .list-actions {
+    display: flex;
+    gap: 6px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .act-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .act-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .act-btn.primary {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+  }
+  .create-wrap {
+    position: relative;
+    margin-inline-start: auto;
+  }
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 19;
+    border: none;
+    background: transparent;
+    cursor: default;
+  }
+  .create-menu {
+    position: absolute;
+    top: 30px;
+    right: 0;
+    z-index: 20;
+    min-width: 200px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m, 8px);
+    box-shadow: var(--shadow, 0 8px 28px rgba(0, 0, 0, 0.25));
+    overflow: hidden;
+  }
+  .create-menu button {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    width: 100%;
+    padding: 8px 11px;
+    border: none;
+    background: none;
+    color: var(--text);
+    cursor: pointer;
+    text-align: start;
+  }
+  .create-menu button:hover {
+    background: var(--surface-2, color-mix(in srgb, var(--text-dim) 10%, transparent));
+  }
+  .create-menu small {
+    color: var(--text-dim);
+    font-size: 10.5px;
   }
   .mockup-type {
     flex-shrink: 0;

@@ -685,6 +685,7 @@ mutations). The upload route carries a 40 MB body cap (raw content cap 25 MB).
 | POST /product/attachments/{aid}/annotations | ws editor | AnnotationCreateReq | MockupAnnotation |
 | PATCH /product/annotations/{id} | ws editor | AnnotationPatchReq | MockupAnnotation |
 | DELETE /product/annotations/{id} | ws editor | — | 204 |
+| POST /product/stories/{sid}/mockups/assist | ws editor | MockupAssistReq `{prompt, format?, mockup_id?}` | ProductAttachment — in-place mockup agent: generates (`format`: `html`\|`mermaid`) or refines (`mockup_id`) a `kind:mockup` attachment; streams `mockup_session_started` + `mockup_updated` WS events |
 
 ### Product story refinement (talk-to-agent)
 

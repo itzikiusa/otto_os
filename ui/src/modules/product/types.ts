@@ -545,6 +545,8 @@ export interface ProductAttachment {
   storage_path: string;
   kind: string;
   source: string;
+  /** Free-form JSON: for agent mockups, `{assist_session_id, format}`. */
+  meta_json: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -555,6 +557,15 @@ export interface UploadAttachmentReq {
   mime: string;
   kind?: string;
   data_b64: string;
+}
+
+/** Body for `POST /product/stories/{sid}/mockups/assist` (in-place mockup agent). */
+export interface ProductMockupAssistReq {
+  prompt: string;
+  /** `html` (default) | `mermaid`. Only honored when creating a NEW mockup. */
+  format?: 'html' | 'mermaid';
+  /** Refine an existing agent mockup (resume its session); omit to create one. */
+  mockup_id?: string;
 }
 
 export interface DiscoveryRun {

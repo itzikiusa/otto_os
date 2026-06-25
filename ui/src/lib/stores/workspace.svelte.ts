@@ -132,7 +132,8 @@ class WorkspaceStore {
         s.meta.source !== 'skilleval' &&
         s.meta.source !== 'product-analysis' &&
         s.meta.source !== 'swarm' &&
-        s.meta.source !== 'canvas_assist',
+        s.meta.source !== 'canvas_assist' &&
+        s.meta.source !== 'mockup_assist',
     ),
   );
 
@@ -152,7 +153,8 @@ class WorkspaceStore {
         s.meta.source !== 'skilleval' &&
         s.meta.source !== 'product-analysis' &&
         s.meta.source !== 'swarm' &&
-        s.meta.source !== 'canvas_assist',
+        s.meta.source !== 'canvas_assist' &&
+        s.meta.source !== 'mockup_assist',
     ).length,
   );
 
@@ -168,7 +170,8 @@ class WorkspaceStore {
         s.meta.source !== 'skilleval' &&
         s.meta.source !== 'product-analysis' &&
         s.meta.source !== 'swarm' &&
-        s.meta.source !== 'canvas_assist',
+        s.meta.source !== 'canvas_assist' &&
+        s.meta.source !== 'mockup_assist',
     ).length,
   );
 

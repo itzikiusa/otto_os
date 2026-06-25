@@ -8,6 +8,7 @@ pub mod agent_session;
 pub mod api_helpers;
 pub mod auth;
 pub mod canvas_assist;
+pub mod mockup_assist;
 pub mod context_packet;
 pub mod memory_gov;
 pub mod cli_update;

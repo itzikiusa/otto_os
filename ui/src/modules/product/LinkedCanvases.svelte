@@ -105,6 +105,11 @@
     </div>
   </div>
 
+  <p class="lc-sub">
+    Attach a Canvas diagram (architecture, flows, wireframes) to this story — <strong>New</strong> to
+    draw one, or <strong>Link existing</strong> to attach a canvas you already have.
+  </p>
+
   {#if picking}
     <div class="lc-picker">
       {#if !candidates.length}
@@ -145,6 +150,12 @@
     border-radius: var(--radius-m);
     background: var(--surface);
     padding: 10px 12px;
+  }
+  .lc-sub {
+    margin: 6px 0 2px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
   }
   .lc-head {
     display: flex;

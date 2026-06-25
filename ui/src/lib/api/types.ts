@@ -557,6 +557,26 @@ export type OttoEvent =
       workspace_id: Id;
       scene_id: Id;
       session_id: Id;
+    }
+  | {
+      /** A product mockup's source changed — pushed LIVE while the mockup agent
+       *  edits the backing file (per-poll) and once with the committed result. The
+       *  Mockups Assistant panel re-renders the live preview for `attachment_id`. */
+      type: 'mockup_updated';
+      workspace_id: Id;
+      story_id: Id;
+      attachment_id: Id;
+      format: string;
+      content: string;
+    }
+  | {
+      /** The mockup agent session became live (turn start) — the Mockups Assistant
+       *  panel attaches its shell immediately for the matching attachment. */
+      type: 'mockup_session_started';
+      workspace_id: Id;
+      story_id: Id;
+      attachment_id: Id;
+      session_id: Id;
     };
 
 // ---------------------------------------------------------------------------

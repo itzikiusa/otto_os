@@ -13,8 +13,37 @@ pub fn canned_reply(prompt: &str) -> String {
     if prompt.contains("OTTO_TASK: canvas_assist") {
         return canvas_assist_reply(prompt);
     }
+    if prompt.contains("OTTO_TASK: mockup_assist") {
+        return mockup_assist_reply(prompt);
+    }
     // Generic fallback for any other agent call under E2E.
     "OK".to_string()
+}
+
+fn mockup_assist_reply(prompt: &str) -> String {
+    // Format-aware: the HTML-mode prompt edits `mockup.html` → reply with a tiny
+    // self-contained page (marker `E2E mockup`). Otherwise (Mermaid mode) → a
+    // flowchart. The handler prefers the file edit and falls back to this fence.
+    if prompt.contains("mockup.html") || prompt.contains("HTML mockup") {
+        return "Built a settings-page mockup.\n\n\
+```html\n\
+<!doctype html><html><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>E2E mockup</title>\
+<style>body{font:15px/1.5 system-ui;padding:32px;color:#0f172a;background:#f8fafc}\
+.card{max-width:520px;margin:0 auto;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:24px}\
+h1{font-size:20px;margin:0 0 16px}</style></head>\
+<body><div class=\"card\"><h1>E2E mockup — Settings</h1>\
+<p>Notifications, security, and billing for the account.</p></div></body></html>\n\
+```"
+            .to_string();
+    }
+    "Drew the flow as a Mermaid diagram.\n\n\
+```mermaid\n\
+flowchart TD\n\
+  A([\"Open settings\"]) --> B[\"Edit profile\"]\n\
+  B --> C([\"Saved\"])\n\
+```"
+        .to_string()
 }
 
 fn discovery_chat_reply() -> String {
@@ -90,6 +119,11 @@ mod tests {
         assert!(canned_reply("foo OTTO_TASK: discovery_chat bar").contains("\"actions\""));
         // Mermaid mode (no canvas.json in the prompt) → a mermaid fence.
         assert!(canned_reply("x OTTO_TASK: canvas_assist y").contains("```mermaid"));
+        // Mockup: HTML mode (edits mockup.html) → an html fence with the marker.
+        let mh = canned_reply("OTTO_TASK: mockup_assist edit `mockup.html`");
+        assert!(mh.contains("```html") && mh.contains("E2E mockup"));
+        // Mockup: Mermaid mode (edits mockup.mmd) → a mermaid fence.
+        assert!(canned_reply("OTTO_TASK: mockup_assist edit `mockup.mmd`").contains("```mermaid"));
         assert_eq!(canned_reply("no sentinel"), "OK");
     }
 

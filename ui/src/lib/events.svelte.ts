@@ -11,6 +11,7 @@ import { loops } from './stores/loops.svelte';
 import { usage } from './api/usage.svelte';
 import { product } from './stores/product.svelte';
 import { canvas } from './stores/canvas.svelte';
+import { mockupAssist } from './stores/mockup-assist.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -269,6 +270,17 @@ class EventsClient {
           // The agent session is live (turn start) → attach its shell immediately
           // by setting the open scene's session id.
           if (parsed.scene_id === canvas.currentId) canvas.sessionId = parsed.session_id;
+        } else if (parsed.type === 'mockup_updated') {
+          // Live mockup edits: the Mockups Assistant panel re-renders the preview.
+          mockupAssist.ingestLive(
+            parsed.attachment_id,
+            parsed.story_id,
+            parsed.format,
+            parsed.content,
+          );
+        } else if (parsed.type === 'mockup_session_started') {
+          // The mockup agent session is live (turn start) → attach its shell.
+          mockupAssist.setSession(parsed.attachment_id, parsed.story_id, parsed.session_id);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);
