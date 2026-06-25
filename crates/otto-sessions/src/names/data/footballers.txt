@@ -1,0 +1,450 @@
+## HEAD
+Messi | Lionel Messi
+Ronaldo | Cristiano Ronaldo
+Pele | Pelé
+Maradona | Diego Maradona
+Mbappe | Kylian Mbappé
+Neymar | Neymar Jr
+Zidane | Zinedine Zidane
+Ronaldinho | Ronaldinho
+Beckham | David Beckham
+Cruyff | Johan Cruyff
+Haaland | Erling Haaland
+Iniesta | Andrés Iniesta
+Xavi | Xavi Hernández
+Suarez | Luis Suárez
+Henry | Thierry Henry
+Kaka | Kaká
+RonaldoN | Ronaldo Nazário
+Beckenbauer | Franz Beckenbauer
+Eusebio | Eusébio
+Modric | Luka Modrić
+Lewandowski | Robert Lewandowski
+Salah | Mohamed Salah
+DeBruyne | Kevin De Bruyne
+Benzema | Karim Benzema
+Ramos | Sergio Ramos
+Buffon | Gianluigi Buffon
+Maldini | Paolo Maldini
+Gerrard | Steven Gerrard
+Lampard | Frank Lampard
+Rooney | Wayne Rooney
+Kante | N'Golo Kanté
+Pirlo | Andrea Pirlo
+Totti | Francesco Totti
+Drogba | Didier Drogba
+Vieira | Patrick Vieira
+Cantona | Eric Cantona
+Baggio | Roberto Baggio
+VanBasten | Marco van Basten
+Gullit | Ruud Gullit
+Best | George Best
+Charlton | Bobby Charlton
+Muller | Gerd Müller
+Platini | Michel Platini
+Garrincha | Garrincha
+Yashin | Lev Yashin
+Cafu | Cafu
+Carlos | Roberto Carlos
+Figo | Luís Figo
+Raul | Raúl González
+Casillas | Iker Casillas
+Pique | Gerard Piqué
+Alonso | Xabi Alonso
+Torres | Fernando Torres
+Villa | David Villa
+Aguero | Sergio Agüero
+Tevez | Carlos Tevez
+DiMaria | Ángel Di María
+Mascherano | Javier Mascherano
+Robben | Arjen Robben
+Sneijder | Wesley Sneijder
+VanPersie | Robin van Persie
+Nistelrooy | Ruud van Nistelrooy
+Scholes | Paul Scholes
+Giggs | Ryan Giggs
+Keane | Roy Keane
+Terry | John Terry
+Ferdinand | Rio Ferdinand
+Cole | Ashley Cole
+Owen | Michael Owen
+Shearer | Alan Shearer
+Kane | Harry Kane
+Son | Heung-min Son
+Sterling | Raheem Sterling
+Foden | Phil Foden
+Bellingham | Jude Bellingham
+Saka | Bukayo Saka
+Rashford | Marcus Rashford
+Grealish | Jack Grealish
+Vinicius | Vinícius Júnior
+Rodrygo | Rodrygo
+Pedri | Pedri
+Gavi | Gavi
+Griezmann | Antoine Griezmann
+Pogba | Paul Pogba
+Dembele | Ousmane Dembélé
+Kimmich | Joshua Kimmich
+Goretzka | Leon Goretzka
+Neuer | Manuel Neuer
+Muller2 | Thomas Müller
+Kroos | Toni Kroos
+Ozil | Mesut Özil
+Klose | Miroslav Klose
+Ballack | Michael Ballack
+Kahn | Oliver Kahn
+Matthaus | Lothar Matthäus
+Sammer | Matthias Sammer
+Effenberg | Stefan Effenberg
+Bierhoff | Oliver Bierhoff
+Forlan | Diego Forlán
+Cavani | Edinson Cavani
+Godin | Diego Godín
+Falcao | Radamel Falcao
+James | James Rodríguez
+Valderrama | Carlos Valderrama
+Higuita | René Higuita
+Sanchez | Alexis Sánchez
+Vidal | Arturo Vidal
+Bravo | Claudio Bravo
+Zamorano | Iván Zamorano
+Salas | Marcelo Salas
+Chilavert | José Luis Chilavert
+Stoichkov | Hristo Stoichkov
+Hagi | Gheorghe Hagi
+Shevchenko | Andriy Shevchenko
+Nedved | Pavel Nedvěd
+Boban | Zvonimir Boban
+Suker | Davor Šuker
+Prosinecki | Robert Prosinečki
+Mihajlovic | Siniša Mihajlović
+Stankovic | Dejan Stanković
+Dzeko | Edin Džeko
+Kovacic | Mateo Kovačić
+Rakitic | Ivan Rakitić
+Mandzukic | Mario Mandžukić
+Lukaku | Romelu Lukaku
+Hazard | Eden Hazard
+Courtois | Thibaut Courtois
+Fellaini | Marouane Fellaini
+Kompany | Vincent Kompany
+Witsel | Axel Witsel
+Mertens | Dries Mertens
+Eto | Samuel Eto'o
+Weah | George Weah
+Toure | Yaya Touré
+Mane | Sadio Mané
+Koulibaly | Kalidou Koulibaly
+Mahrez | Riyad Mahrez
+Ziyech | Hakim Ziyech
+Hakimi | Achraf Hakimi
+Aubameyang | Pierre-Emerick Aubameyang
+Osimhen | Victor Osimhen
+Okocha | Jay-Jay Okocha
+Kanu | Nwankwo Kanu
+Yekini | Rashidi Yekini
+Milla | Roger Milla
+Eboue | Emmanuel Eboué
+Adebayor | Emmanuel Adebayor
+Nakata | Hidetoshi Nakata
+Honda | Keisuke Honda
+Kagawa | Shinji Kagawa
+Park | Park Ji-sung
+Ki | Ki Sung-yueng
+Neuville | Oliver Neuville
+Inzaghi | Filippo Inzaghi
+DelPiero | Alessandro Del Piero
+Nesta | Alessandro Nesta
+Cannavaro | Fabio Cannavaro
+Gattuso | Gennaro Gattuso
+Zambrotta | Gianluca Zambrotta
+Materazzi | Marco Materazzi
+Bonucci | Leonardo Bonucci
+Chiellini | Giorgio Chiellini
+Verratti | Marco Verratti
+Insigne | Lorenzo Insigne
+Chiesa | Federico Chiesa
+Donnarumma | Gianluigi Donnarumma
+## FIRST
+Lionel
+Cristiano
+Diego
+Kylian
+Neymar
+Zinedine
+David
+Johan
+Erling
+Andres
+Xavi
+Luis
+Thierry
+Robert
+Mohamed
+Kevin
+Karim
+Sergio
+Gianluigi
+Paolo
+Steven
+Frank
+Wayne
+Andrea
+Francesco
+Didier
+Patrick
+Eric
+Roberto
+Marco
+Ruud
+George
+Bobby
+Gerd
+Michel
+Lev
+Cafu
+Gerard
+Raul
+Iker
+Xabi
+Fernando
+Carlos
+Angel
+Javier
+Arjen
+Wesley
+Robin
+Paul
+Ryan
+Roy
+John
+Rio
+Ashley
+Michael
+Alan
+Harry
+Heung
+Raheem
+Phil
+Jude
+Bukayo
+Marcus
+Jack
+Vinicius
+Rodrygo
+Pedri
+Antoine
+Ousmane
+Joshua
+Leon
+Manuel
+Thomas
+Toni
+Mesut
+Miroslav
+Oliver
+Lothar
+Matthias
+Stefan
+Edinson
+Radamel
+James
+Rene
+Alexis
+Arturo
+Claudio
+Ivan
+Marcelo
+Jose
+Hristo
+Gheorghe
+Andriy
+Pavel
+Zvonimir
+Davor
+Dejan
+Edin
+Mateo
+Mario
+Romelu
+Eden
+Thibaut
+Vincent
+Axel
+Dries
+Samuel
+Yaya
+Sadio
+Kalidou
+Riyad
+Hakim
+Achraf
+Pierre
+Victor
+Jay
+Nwankwo
+Rashidi
+Roger
+Emmanuel
+Hidetoshi
+Keisuke
+Shinji
+Sung
+Filippo
+Alessandro
+Leonardo
+Giorgio
+Lorenzo
+Federico
+Joao
+Bernardo
+Ruben
+Diogo
+Goncalo
+Andre
+Nuno
+Pepe
+## LAST
+Messi
+Ronaldo
+Maradona
+Mbappe
+Neymar
+Zidane
+Beckham
+Cruyff
+Haaland
+Iniesta
+Hernandez
+Suarez
+Henry
+Lewandowski
+Salah
+DeBruyne
+Benzema
+Ramos
+Buffon
+Maldini
+Gerrard
+Lampard
+Rooney
+Pirlo
+Totti
+Drogba
+Vieira
+Cantona
+Baggio
+Gullit
+Best
+Charlton
+Muller
+Platini
+Garrincha
+Yashin
+Cafu
+Carlos
+Figo
+Casillas
+Pique
+Alonso
+Torres
+Villa
+Aguero
+Tevez
+DiMaria
+Mascherano
+Robben
+Sneijder
+Persie
+Nistelrooy
+Scholes
+Giggs
+Keane
+Terry
+Ferdinand
+Cole
+Owen
+Shearer
+Kane
+Sterling
+Foden
+Bellingham
+Saka
+Rashford
+Grealish
+Vinicius
+Rodrygo
+Griezmann
+Pogba
+Dembele
+Kimmich
+Goretzka
+Neuer
+Kroos
+Ozil
+Klose
+Ballack
+Kahn
+Matthaus
+Sammer
+Effenberg
+Bierhoff
+Forlan
+Cavani
+Godin
+Falcao
+Valderrama
+Higuita
+Sanchez
+Vidal
+Bravo
+Zamorano
+Salas
+Chilavert
+Stoichkov
+Hagi
+Shevchenko
+Nedved
+Boban
+Suker
+Mihajlovic
+Stankovic
+Dzeko
+Rakitic
+Mandzukic
+Lukaku
+Hazard
+Courtois
+Fellaini
+Kompany
+Witsel
+Mertens
+Weah
+Toure
+Mane
+Koulibaly
+Mahrez
+Ziyech
+Hakimi
+Aubameyang
+Osimhen
+Okocha
+Kanu
+Milla
+Adebayor
+Nakata
+Honda
+Kagawa
+Inzaghi
+DelPiero
+Nesta
+Cannavaro
+Gattuso
+Zambrotta
+Materazzi
+Bonucci
+Chiellini
+Verratti
+Insigne
+Chiesa
+Donnarumma

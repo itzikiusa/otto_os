@@ -502,6 +502,92 @@ pub struct BroadcastResp {
 }
 
 // ---------------------------------------------------------------------------
+// Relay (name-addressed send: "ronaldo: do X", "all: stand down")
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/workspaces/{id}/relay` — deliver a message addressed to live
+/// sessions BY NAME. The leading token(s) of `text` may name session handles
+/// (e.g. `ronaldo: …`, `ronaldo, messi: …`, bare `ronaldo do X`) or the
+/// broadcast keyword `all`/`everyone`. When no leading token matches a session,
+/// the call is a no-op with `unaddressed = true` so the UI can fall back to its
+/// normal handling (e.g. the AI orchestrator).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayReq {
+    pub text: String,
+}
+
+/// Result of a relay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayResp {
+    /// Sessions the message was delivered to (empty when unaddressed).
+    pub session_ids: Vec<Id>,
+    /// True when the address was a broadcast keyword.
+    pub broadcast: bool,
+    /// True when `text` named no session — caller should fall back.
+    pub unaddressed: bool,
+    /// The message actually sent (address prefix stripped).
+    pub text: String,
+}
+
+// ---------------------------------------------------------------------------
+// Session name themes (auto-naming new sessions: "Ronaldo", "Messi", …)
+// ---------------------------------------------------------------------------
+
+/// One selectable name theme (built-in or a user's custom list).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NameThemeInfo {
+    /// Built-in id ("footballers") or a custom theme's id.
+    pub id: String,
+    pub label: String,
+    /// `"builtin"` or `"custom"`.
+    pub kind: String,
+    /// How many distinct names the theme can yield (custom = list length).
+    pub capacity: usize,
+    /// A few example names for the picker preview.
+    pub sample: Vec<String>,
+}
+
+/// `GET /api/v1/name-themes` — built-in themes + the caller's custom themes,
+/// plus the caller's active selection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NameThemesResp {
+    pub themes: Vec<NameThemeInfo>,
+    /// The caller's active theme id: a built-in id, a custom id, or `"none"`
+    /// (the legacy "{provider} #N" numbering).
+    pub active: String,
+}
+
+/// `PUT /api/v1/name-themes/active` — set the caller's active theme.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetActiveThemeReq {
+    pub theme_id: String,
+}
+
+/// `POST /api/v1/name-themes` — create a custom name theme owned by the caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateNameThemeReq {
+    pub label: String,
+    /// Ordered list of names (e.g. family names). Empty entries are ignored at
+    /// allocation time.
+    pub names: Vec<String>,
+}
+
+/// `PUT /api/v1/name-themes/{id}` — replace a custom theme's label/names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateNameThemeReq {
+    pub label: String,
+    pub names: Vec<String>,
+}
+
+/// A custom name theme as returned to the owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomThemeResp {
+    pub id: Id,
+    pub label: String,
+    pub names: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Connections
 // ---------------------------------------------------------------------------
 

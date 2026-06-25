@@ -1,0 +1,442 @@
+## HEAD
+DiCaprio | Leonardo DiCaprio
+Pitt | Brad Pitt
+Hanks | Tom Hanks
+Cruise | Tom Cruise
+Streep | Meryl Streep
+Depp | Johnny Depp
+Brando | Marlon Brando
+Pacino | Al Pacino
+DeNiro | Robert De Niro
+Nicholson | Jack Nicholson
+Washington | Denzel Washington
+Hepburn | Audrey Hepburn
+Roberts | Julia Roberts
+Jolie | Angelina Jolie
+Freeman | Morgan Freeman
+Hopkins | Anthony Hopkins
+Smith | Will Smith
+Clooney | George Clooney
+Damon | Matt Damon
+Crowe | Russell Crowe
+Bale | Christian Bale
+Phoenix | Joaquin Phoenix
+Hoffman | Dustin Hoffman
+Eastwood | Clint Eastwood
+Connery | Sean Connery
+Day | Daniel Day-Lewis
+Oldman | Gary Oldman
+Spacey | Kevin Spacey
+Foster | Jodie Foster
+Blanchett | Cate Blanchett
+Lawrence | Jennifer Lawrence
+Johansson | Scarlett Johansson
+Portman | Natalie Portman
+Kidman | Nicole Kidman
+Winslet | Kate Winslet
+Bullock | Sandra Bullock
+Theron | Charlize Theron
+Hathaway | Anne Hathaway
+Stone | Emma Stone
+Watson | Emma Watson
+Downey | Robert Downey Jr
+Hemsworth | Chris Hemsworth
+Evans | Chris Evans
+Ruffalo | Mark Ruffalo
+Renner | Jeremy Renner
+Cooper | Bradley Cooper
+Gosling | Ryan Gosling
+Reynolds | Ryan Reynolds
+Gyllenhaal | Jake Gyllenhaal
+Affleck | Ben Affleck
+Tatum | Channing Tatum
+Hardy | Tom Hardy
+Fassbender | Michael Fassbender
+McGregor | Ewan McGregor
+Firth | Colin Firth
+Neeson | Liam Neeson
+Wahlberg | Mark Wahlberg
+Carrey | Jim Carrey
+Murphy | Eddie Murphy
+Williams | Robin Williams
+Hackman | Gene Hackman
+Caine | Michael Caine
+Newman | Paul Newman
+Redford | Robert Redford
+McQueen | Steve McQueen
+Wayne | John Wayne
+Stewart | James Stewart
+Grant | Cary Grant
+Bogart | Humphrey Bogart
+Gable | Clark Gable
+Taylor | Elizabeth Taylor
+Monroe | Marilyn Monroe
+Bergman | Ingrid Bergman
+Davis | Bette Davis
+Garbo | Greta Garbo
+Dean | James Dean
+Poitier | Sidney Poitier
+Heston | Charlton Heston
+Lemmon | Jack Lemmon
+Curtis | Tony Curtis
+Lancaster | Burt Lancaster
+Douglas | Kirk Douglas
+DouglasM | Michael Douglas
+Fonda | Jane Fonda
+Sarandon | Susan Sarandon
+Close | Glenn Close
+Field | Sally Field
+Lange | Jessica Lange
+Spacek | Sissy Spacek
+Keaton | Diane Keaton
+Bates | Kathy Bates
+Mirren | Helen Mirren
+Dench | Judi Dench
+Smith2 | Maggie Smith
+Thompson | Emma Thompson
+Bonham | Helena Bonham Carter
+Knightley | Keira Knightley
+Mulligan | Carey Mulligan
+Cotillard | Marion Cotillard
+Bardem | Javier Bardem
+Banderas | Antonio Banderas
+Cruz | Penélope Cruz
+DelToro | Benicio del Toro
+Hayek | Salma Hayek
+Ferrell | Will Ferrell
+Stiller | Ben Stiller
+Sandler | Adam Sandler
+Rock | Chris Rock
+Black | Jack Black
+Galifianakis | Zach Galifianakis
+Rogen | Seth Rogen
+Hill | Jonah Hill
+Wilson | Owen Wilson
+Vaughn | Vince Vaughn
+Cera | Michael Cera
+Bana | Eric Bana
+Schwarzenegger | Arnold Schwarzenegger
+Stallone | Sylvester Stallone
+Willis | Bruce Willis
+Travolta | John Travolta
+Cage | Nicolas Cage
+Norton | Edward Norton
+Malkovich | John Malkovich
+Walken | Christopher Walken
+Plummer | Christopher Plummer
+Sheen | Martin Sheen
+Keitel | Harvey Keitel
+Pesci | Joe Pesci
+Liotta | Ray Liotta
+Gandolfini | James Gandolfini
+Hoffman2 | Philip Seymour Hoffman
+Reeves | Keanu Reeves
+Bridges | Jeff Bridges
+Goldblum | Jeff Goldblum
+Dafoe | Willem Dafoe
+Rickman | Alan Rickman
+Brody | Adrien Brody
+Whitaker | Forest Whitaker
+Jackson | Samuel L Jackson
+Cheadle | Don Cheadle
+Foxx | Jamie Foxx
+Elba | Idris Elba
+Oyelowo | David Oyelowo
+Boseman | Chadwick Boseman
+Kaluuya | Daniel Kaluuya
+Ejiofor | Chiwetel Ejiofor
+Nyongo | Lupita Nyong'o
+Davis2 | Viola Davis
+Spencer | Octavia Spencer
+Henson | Taraji P Henson
+Pinkett | Jada Pinkett Smith
+Bassett | Angela Bassett
+Berry | Halle Berry
+Zeta | Catherine Zeta-Jones
+Ryder | Winona Ryder
+Moore | Demi Moore
+Basinger | Kim Basinger
+## FIRST
+Leonardo
+Brad
+Tom
+Meryl
+Johnny
+Marlon
+Al
+Robert
+Jack
+Denzel
+Audrey
+Julia
+Angelina
+Morgan
+Anthony
+Will
+George
+Matt
+Russell
+Christian
+Joaquin
+Dustin
+Clint
+Sean
+Daniel
+Gary
+Kevin
+Jodie
+Cate
+Jennifer
+Scarlett
+Natalie
+Nicole
+Kate
+Sandra
+Charlize
+Anne
+Emma
+Chris
+Mark
+Jeremy
+Bradley
+Ryan
+Jake
+Ben
+Channing
+Michael
+Ewan
+Colin
+Liam
+Jim
+Eddie
+Robin
+Gene
+Paul
+Steve
+John
+James
+Cary
+Humphrey
+Clark
+Elizabeth
+Marilyn
+Ingrid
+Bette
+Greta
+Sidney
+Charlton
+Tony
+Burt
+Kirk
+Jane
+Susan
+Glenn
+Sally
+Jessica
+Sissy
+Diane
+Kathy
+Helen
+Judi
+Maggie
+Helena
+Keira
+Carey
+Marion
+Javier
+Antonio
+Penelope
+Benicio
+Salma
+Adam
+Seth
+Jonah
+Owen
+Vince
+Eric
+Arnold
+Sylvester
+Bruce
+Nicolas
+Edward
+Christopher
+Martin
+Harvey
+Joe
+Ray
+Keanu
+Jeff
+Willem
+Alan
+Adrien
+Forest
+Samuel
+Don
+Jamie
+Idris
+David
+Chadwick
+Chiwetel
+Lupita
+Viola
+Octavia
+Taraji
+Jada
+Angela
+Halle
+Catherine
+Winona
+Demi
+Kim
+Zach
+Henry
+Oscar
+Saoirse
+Florence
+Zendaya
+Timothee
+## LAST
+DiCaprio
+Pitt
+Hanks
+Cruise
+Streep
+Depp
+Brando
+Pacino
+DeNiro
+Nicholson
+Washington
+Hepburn
+Roberts
+Jolie
+Freeman
+Hopkins
+Smith
+Clooney
+Damon
+Crowe
+Bale
+Phoenix
+Hoffman
+Eastwood
+Connery
+Lewis
+Oldman
+Spacey
+Foster
+Blanchett
+Lawrence
+Johansson
+Portman
+Kidman
+Winslet
+Bullock
+Theron
+Hathaway
+Stone
+Watson
+Downey
+Hemsworth
+Evans
+Ruffalo
+Renner
+Cooper
+Gosling
+Reynolds
+Gyllenhaal
+Affleck
+Tatum
+Hardy
+Fassbender
+McGregor
+Firth
+Neeson
+Wahlberg
+Carrey
+Murphy
+Williams
+Hackman
+Caine
+Newman
+Redford
+McQueen
+Wayne
+Stewart
+Grant
+Bogart
+Gable
+Taylor
+Monroe
+Bergman
+Davis
+Garbo
+Dean
+Poitier
+Heston
+Lemmon
+Curtis
+Lancaster
+Douglas
+Fonda
+Sarandon
+Close
+Field
+Lange
+Spacek
+Keaton
+Bates
+Mirren
+Dench
+Thompson
+Knightley
+Mulligan
+Cotillard
+Bardem
+Banderas
+Cruz
+Hayek
+Ferrell
+Stiller
+Sandler
+Rock
+Black
+Rogen
+Hill
+Wilson
+Vaughn
+Cera
+Bana
+Schwarzenegger
+Stallone
+Willis
+Travolta
+Cage
+Norton
+Malkovich
+Walken
+Plummer
+Sheen
+Keitel
+Pesci
+Liotta
+Gandolfini
+Reeves
+Bridges
+Goldblum
+Dafoe
+Rickman
+Brody
+Whitaker
+Jackson
+Cheadle
+Foxx
+Elba
+Oyelowo
+Boseman
+Kaluuya
+Ejiofor
+Berry
+Ryder
+Moore
+Basinger

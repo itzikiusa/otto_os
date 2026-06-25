@@ -1,0 +1,424 @@
+## HEAD
+Beatles | The Beatles
+Elvis | Elvis Presley
+Michael | Michael Jackson
+Bowie | David Bowie
+Dylan | Bob Dylan
+Hendrix | Jimi Hendrix
+Mercury | Freddie Mercury
+Prince | Prince
+Madonna | Madonna
+Beyonce | Beyoncé
+Lennon | John Lennon
+McCartney | Paul McCartney
+Marley | Bob Marley
+Springsteen | Bruce Springsteen
+Aretha | Aretha Franklin
+Sinatra | Frank Sinatra
+Wonder | Stevie Wonder
+Cobain | Kurt Cobain
+Bono | Bono
+Jagger | Mick Jagger
+Clapton | Eric Clapton
+Page | Jimmy Page
+Plant | Robert Plant
+Young | Neil Young
+Cohen | Leonard Cohen
+Joel | Billy Joel
+John | Elton John
+Gaye | Marvin Gaye
+Charles | Ray Charles
+Cash | Johnny Cash
+Armstrong | Louis Armstrong
+Davis | Miles Davis
+Coltrane | John Coltrane
+Fitzgerald | Ella Fitzgerald
+Holiday | Billie Holiday
+Beethoven | Ludwig van Beethoven
+Mozart | Wolfgang Amadeus Mozart
+Bach | Johann Sebastian Bach
+Chopin | Frédéric Chopin
+Tchaikovsky | Pyotr Tchaikovsky
+Gaga | Lady Gaga
+Adele | Adele
+Swift | Taylor Swift
+Rihanna | Rihanna
+Drake | Drake
+Eminem | Eminem
+Jay | Jay-Z
+Kanye | Kanye West
+Tupac | Tupac Shakur
+Biggie | The Notorious B.I.G.
+Snoop | Snoop Dogg
+Kendrick | Kendrick Lamar
+Weeknd | The Weeknd
+Bieber | Justin Bieber
+Sheeran | Ed Sheeran
+Bruno | Bruno Mars
+Pharrell | Pharrell Williams
+Timberlake | Justin Timberlake
+Usher | Usher
+Knowles | Solange Knowles
+Carey | Mariah Carey
+Houston | Whitney Houston
+Turner | Tina Turner
+Ross | Diana Ross
+Dion | Celine Dion
+Streisand | Barbra Streisand
+Parton | Dolly Parton
+Twain | Shania Twain
+Spears | Britney Spears
+Aguilera | Christina Aguilera
+Pink | Pink
+Keys | Alicia Keys
+Lavigne | Avril Lavigne
+Cyrus | Miley Cyrus
+Perry | Katy Perry
+Grande | Ariana Grande
+Eilish | Billie Eilish
+Lipa | Dua Lipa
+Lorde | Lorde
+Sia | Sia
+Florence | Florence Welch
+Winehouse | Amy Winehouse
+Morrison | Jim Morrison
+Joplin | Janis Joplin
+Garcia | Jerry Garcia
+Richards | Keith Richards
+Townshend | Pete Townshend
+Daltrey | Roger Daltrey
+Waters | Roger Waters
+Gilmour | David Gilmour
+Petty | Tom Petty
+Henley | Don Henley
+Frey | Glenn Frey
+Walsh | Joe Walsh
+Knopfler | Mark Knopfler
+Santana | Carlos Santana
+Vaughan | Stevie Ray Vaughan
+King | B.B. King
+Hooker | John Lee Hooker
+Waters2 | Muddy Waters
+Berry | Chuck Berry
+Domino | Fats Domino
+Lewis | Jerry Lee Lewis
+Holly | Buddy Holly
+Cooke | Sam Cooke
+Redding | Otis Redding
+Brown | James Brown
+Khan | Chaka Khan
+Robinson | Smokey Robinson
+Gordy | Berry Gordy
+Womack | Bobby Womack
+Hayes | Isaac Hayes
+Mayfield | Curtis Mayfield
+White | Barry White
+Sledge | Percy Sledge
+Pickett | Wilson Pickett
+Hooker2 | Howlin Wolf
+Diddley | Bo Diddley
+Waits | Tom Waits
+Reed | Lou Reed
+Pop | Iggy Pop
+Smith | Patti Smith
+Byrne | David Byrne
+Costello | Elvis Costello
+Gabriel | Peter Gabriel
+Collins | Phil Collins
+Stewart | Rod Stewart
+Sting | Sting
+Ferry | Bryan Ferry
+Numan | Gary Numan
+Sumner | Bernard Sumner
+Curtis | Ian Curtis
+Marr | Johnny Marr
+Morrissey | Morrissey
+Albarn | Damon Albarn
+Gallagher | Noel Gallagher
+GallagherL | Liam Gallagher
+Yorke | Thom Yorke
+Vedder | Eddie Vedder
+Cornell | Chris Cornell
+Staley | Layne Staley
+Reznor | Trent Reznor
+Manson | Marilyn Manson
+Osbourne | Ozzy Osbourne
+Iommi | Tony Iommi
+Halford | Rob Halford
+Dickinson | Bruce Dickinson
+Hetfield | James Hetfield
+Mustaine | Dave Mustaine
+Slash | Slash
+Rose | Axl Rose
+Lee | Tommy Lee
+Sixx | Nikki Sixx
+## FIRST
+Elvis
+Michael
+David
+Bob
+Jimi
+Freddie
+Prince
+John
+Paul
+Bruce
+Aretha
+Frank
+Stevie
+Kurt
+Mick
+Eric
+Jimmy
+Robert
+Neil
+Leonard
+Billy
+Elton
+Marvin
+Ray
+Johnny
+Louis
+Miles
+Ella
+Billie
+Ludwig
+Wolfgang
+Johann
+Frederic
+Pyotr
+Taylor
+Justin
+Ed
+Bruno
+Pharrell
+Solange
+Mariah
+Whitney
+Tina
+Diana
+Celine
+Barbra
+Dolly
+Shania
+Britney
+Christina
+Alicia
+Avril
+Miley
+Katy
+Ariana
+Dua
+Florence
+Amy
+Jim
+Janis
+Jerry
+Keith
+Pete
+Roger
+Tom
+Don
+Glenn
+Joe
+Mark
+Carlos
+Chuck
+Fats
+Buddy
+Sam
+Otis
+James
+Chaka
+Smokey
+Berry
+Bobby
+Isaac
+Curtis
+Barry
+Percy
+Wilson
+Bo
+Lou
+Iggy
+Patti
+Bryan
+Gary
+Bernard
+Ian
+Damon
+Noel
+Liam
+Thom
+Eddie
+Chris
+Layne
+Trent
+Ozzy
+Tony
+Rob
+Dave
+Axl
+Tommy
+Nikki
+Solomon
+Etta
+Nina
+Roberta
+Gladys
+Booker
+Carole
+Joni
+Dinah
+Kate
+Joan
+Bonnie
+Emmylou
+Loretta
+Tammy
+Reba
+Wynonna
+Trisha
+Faith
+Carrie
+Kacey
+Maren
+Brandi
+Norah
+Sade
+Sarah
+Erykah
+## LAST
+Presley
+Jackson
+Bowie
+Dylan
+Hendrix
+Mercury
+Lennon
+McCartney
+Marley
+Springsteen
+Franklin
+Sinatra
+Wonder
+Cobain
+Jagger
+Clapton
+Page
+Plant
+Young
+Cohen
+Joel
+Gaye
+Charles
+Cash
+Armstrong
+Davis
+Coltrane
+Fitzgerald
+Holiday
+Beethoven
+Mozart
+Bach
+Chopin
+Tchaikovsky
+Swift
+Bieber
+Sheeran
+Mars
+Williams
+Knowles
+Carey
+Houston
+Turner
+Ross
+Dion
+Streisand
+Parton
+Twain
+Spears
+Aguilera
+Keys
+Lavigne
+Cyrus
+Perry
+Grande
+Eilish
+Lipa
+Welch
+Winehouse
+Morrison
+Joplin
+Garcia
+Richards
+Townshend
+Daltrey
+Waters
+Gilmour
+Petty
+Henley
+Frey
+Walsh
+Knopfler
+Santana
+Vaughan
+King
+Hooker
+Berry
+Domino
+Lewis
+Holly
+Cooke
+Redding
+Brown
+Khan
+Robinson
+Gordy
+Womack
+Hayes
+Mayfield
+White
+Sledge
+Pickett
+Diddley
+Waits
+Reed
+Pop
+Smith
+Byrne
+Costello
+Gabriel
+Collins
+Stewart
+Ferry
+Numan
+Sumner
+Curtis
+Marr
+Morrissey
+Albarn
+Gallagher
+Yorke
+Vedder
+Cornell
+Staley
+Reznor
+Manson
+Osbourne
+Iommi
+Halford
+Dickinson
+Hetfield
+Mustaine
+Rose
+Lee
+Sixx
+Hammett
+Ulrich
+Bonham
+Entwistle
+Moon
+Watts
+Wyman
+Wood

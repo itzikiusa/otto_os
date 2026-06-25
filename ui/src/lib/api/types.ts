@@ -923,6 +923,69 @@ export interface BroadcastResp {
   session_ids: Id[];
 }
 
+/** POST /workspaces/{id}/relay — deliver a NAME-ADDRESSED message
+ *  ("ronaldo: do X", "ronaldo, messi: ship it", "all: stand down"). */
+export interface RelayReq {
+  text: string;
+}
+
+export interface RelayResp {
+  /** Sessions the message was delivered to (empty when unaddressed). */
+  session_ids: Id[];
+  /** True when the address was a broadcast keyword (all/everyone). */
+  broadcast: boolean;
+  /** True when no session was named — the caller should fall back. */
+  unaddressed: boolean;
+  /** The message actually sent (address prefix stripped). */
+  text: string;
+}
+
+// --- Session name themes (auto-naming new sessions: "Ronaldo", "Messi", …) ----
+
+/** One selectable name theme (built-in or a user's custom list). */
+export interface NameThemeInfo {
+  /** Built-in id ("footballers") or a custom theme's id. */
+  id: string;
+  label: string;
+  /** "builtin" | "custom". */
+  kind: string;
+  /** How many distinct names the theme can yield. */
+  capacity: number;
+  /** A few example names for the picker preview. */
+  sample: string[];
+}
+
+/** GET /name-themes */
+export interface NameThemesResp {
+  themes: NameThemeInfo[];
+  /** Active theme id: a built-in id, a custom id, or "none" (legacy numbering). */
+  active: string;
+}
+
+/** PUT /name-themes/active */
+export interface SetActiveThemeReq {
+  theme_id: string;
+}
+
+/** POST /name-themes */
+export interface CreateNameThemeReq {
+  label: string;
+  names: string[];
+}
+
+/** PUT /name-themes/{id} */
+export interface UpdateNameThemeReq {
+  label: string;
+  names: string[];
+}
+
+/** A custom name theme as returned to its owner. */
+export interface CustomThemeResp {
+  id: Id;
+  label: string;
+  names: string[];
+}
+
 export interface OrchestrateReq {
   text: string;
   optimize: boolean;

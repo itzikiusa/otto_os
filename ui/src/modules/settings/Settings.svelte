@@ -1,6 +1,7 @@
 <script lang="ts">
   // Settings layout: subnav + routed page (#/settings/<page>).
   import Appearance from './Appearance.svelte';
+  import SessionNames from './SessionNames.svelte';
   import AdminSessions from './AdminSessions.svelte';
   import Daemon from './Daemon.svelte';
   import PluginsSettings from './PluginsSettings.svelte';
@@ -39,6 +40,7 @@
 
   const items = $derived([
     { id: 'appearance', label: 'Appearance' },
+    { id: 'session-names', label: 'Session Names' },
     { id: 'git-accounts', label: 'Git Accounts' },
     { id: 'jira', label: 'Jira' },
     { id: 'channels', label: 'Channels' },
@@ -94,7 +96,9 @@
   </nav>
 
   <div class="settings-body">
-    {#if page === 'appearance'}
+    {#if page === 'session-names'}
+      <SessionNames />
+    {:else if page === 'appearance'}
       <Appearance />
     {:else if page === 'git-accounts'}
       <GitAccounts />

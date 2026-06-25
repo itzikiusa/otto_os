@@ -1,0 +1,440 @@
+## HEAD
+Einstein | Albert Einstein
+Newton | Isaac Newton
+Darwin | Charles Darwin
+Curie | Marie Curie
+Tesla | Nikola Tesla
+Galileo | Galileo Galilei
+Hawking | Stephen Hawking
+Edison | Thomas Edison
+Faraday | Michael Faraday
+Bohr | Niels Bohr
+Feynman | Richard Feynman
+Heisenberg | Werner Heisenberg
+Schrodinger | Erwin Schrödinger
+Planck | Max Planck
+Maxwell | James Clerk Maxwell
+Pasteur | Louis Pasteur
+Mendel | Gregor Mendel
+Copernicus | Nicolaus Copernicus
+Kepler | Johannes Kepler
+Fermi | Enrico Fermi
+Oppenheimer | Robert Oppenheimer
+Turing | Alan Turing
+Lovelace | Ada Lovelace
+Franklin | Benjamin Franklin
+FranklinR | Rosalind Franklin
+Watson | James Watson
+Crick | Francis Crick
+Dirac | Paul Dirac
+Pauli | Wolfgang Pauli
+Rutherford | Ernest Rutherford
+Thomson | J J Thomson
+Boyle | Robert Boyle
+Hooke | Robert Hooke
+Lavoisier | Antoine Lavoisier
+Dalton | John Dalton
+Mendeleev | Dmitri Mendeleev
+Avogadro | Amedeo Avogadro
+Pauling | Linus Pauling
+Bohm | David Bohm
+Born | Max Born
+Hubble | Edwin Hubble
+Sagan | Carl Sagan
+Hertz | Heinrich Hertz
+Ohm | Georg Ohm
+Ampere | André-Marie Ampère
+Volta | Alessandro Volta
+Coulomb | Charles-Augustin de Coulomb
+Joule | James Prescott Joule
+Kelvin | Lord Kelvin
+Carnot | Sadi Carnot
+Boltzmann | Ludwig Boltzmann
+Gibbs | Josiah Willard Gibbs
+Pascal | Blaise Pascal
+Fourier | Joseph Fourier
+Laplace | Pierre-Simon Laplace
+Lagrange | Joseph-Louis Lagrange
+Euler | Leonhard Euler
+Gauss | Carl Friedrich Gauss
+Riemann | Bernhard Riemann
+Hilbert | David Hilbert
+Poincare | Henri Poincaré
+Cantor | Georg Cantor
+Godel | Kurt Gödel
+Noether | Emmy Noether
+Ramanujan | Srinivasa Ramanujan
+Erdos | Paul Erdős
+Nash | John Nash
+Neumann | John von Neumann
+Shannon | Claude Shannon
+Babbage | Charles Babbage
+Hopper | Grace Hopper
+Berners | Tim Berners-Lee
+Knuth | Donald Knuth
+Dijkstra | Edsger Dijkstra
+Mendelev | Lise Meitner
+Hahn | Otto Hahn
+Roentgen | Wilhelm Röntgen
+Becquerel | Henri Becquerel
+Chadwick | James Chadwick
+Compton | Arthur Compton
+Millikan | Robert Millikan
+Lorentz | Hendrik Lorentz
+Michelson | Albert Michelson
+Doppler | Christian Doppler
+Bernoulli | Daniel Bernoulli
+Galvani | Luigi Galvani
+Cavendish | Henry Cavendish
+Priestley | Joseph Priestley
+Faraday2 | Humphry Davy
+Berzelius | Jöns Jacob Berzelius
+Kekule | August Kekulé
+Arrhenius | Svante Arrhenius
+Nernst | Walther Nernst
+Haber | Fritz Haber
+Curie2 | Pierre Curie
+Joliot | Frédéric Joliot-Curie
+Rontgen | Marie Goeppert Mayer
+Yukawa | Hideki Yukawa
+Feynman2 | Murray Gell-Mann
+Weinberg | Steven Weinberg
+Higgs | Peter Higgs
+Penrose | Roger Penrose
+Wheeler | John Wheeler
+Bethe | Hans Bethe
+Teller | Edward Teller
+Bardeen | John Bardeen
+Shockley | William Shockley
+Townes | Charles Townes
+Glaser | Donald Glaser
+Anderson | Carl Anderson
+Lawrence | Ernest Lawrence
+Mott | Nevill Mott
+Wilson | Robert Wilson
+Penzias | Arno Penzias
+Chandrasekhar | Subrahmanyan Chandrasekhar
+Bose | Satyendra Bose
+Raman | C V Raman
+Salam | Abdus Salam
+Bell | Jocelyn Bell Burnell
+Rubin | Vera Rubin
+Hodgkin | Dorothy Hodgkin
+McClintock | Barbara McClintock
+Goodall | Jane Goodall
+Carson | Rachel Carson
+Anning | Mary Anning
+Wallace | Alfred Russel Wallace
+Linnaeus | Carl Linnaeus
+Humboldt | Alexander von Humboldt
+Lyell | Charles Lyell
+Hutton | James Hutton
+Wegener | Alfred Wegener
+Lamarck | Jean-Baptiste Lamarck
+Cuvier | Georges Cuvier
+Harvey | William Harvey
+Vesalius | Andreas Vesalius
+Jenner | Edward Jenner
+Lister | Joseph Lister
+Koch | Robert Koch
+Fleming | Alexander Fleming
+Salk | Jonas Salk
+Sabin | Albert Sabin
+Ehrlich | Paul Ehrlich
+Banting | Frederick Banting
+Florey | Howard Florey
+Chain | Ernst Chain
+Hippocrates | Hippocrates
+Galen | Galen of Pergamon
+Avicenna | Avicenna
+Archimedes | Archimedes
+Pythagoras | Pythagoras
+Euclid | Euclid of Alexandria
+Aristotle | Aristotle
+Ptolemy | Claudius Ptolemy
+Brahe | Tycho Brahe
+Halley | Edmond Halley
+Cassini | Giovanni Cassini
+Herschel | William Herschel
+Laplace2 | Urbain Le Verrier
+## FIRST
+Albert
+Isaac
+Charles
+Marie
+Nikola
+Galileo
+Stephen
+Thomas
+Michael
+Niels
+Richard
+Werner
+Erwin
+Max
+James
+Louis
+Gregor
+Nicolaus
+Johannes
+Enrico
+Robert
+Alan
+Ada
+Benjamin
+Rosalind
+Francis
+Paul
+Wolfgang
+Ernest
+Antoine
+John
+Dmitri
+Amedeo
+Linus
+David
+Edwin
+Carl
+Heinrich
+Georg
+Andre
+Alessandro
+Blaise
+Joseph
+Pierre
+Leonhard
+Bernhard
+Henri
+Kurt
+Emmy
+Srinivasa
+Claude
+Grace
+Tim
+Donald
+Edsger
+Lise
+Otto
+Wilhelm
+Arthur
+Hendrik
+Christian
+Daniel
+Luigi
+Henry
+Humphry
+Jons
+August
+Svante
+Walther
+Fritz
+Frederic
+Hideki
+Murray
+Steven
+Peter
+Roger
+Hans
+Edward
+William
+Ludwig
+Nevill
+Arno
+Subrahmanyan
+Satyendra
+Abdus
+Jocelyn
+Vera
+Dorothy
+Barbara
+Jane
+Rachel
+Mary
+Alfred
+Cesare
+Alexander
+Georges
+Andreas
+Jonas
+Frederick
+Howard
+Ernst
+Tycho
+Edmond
+Giovanni
+Urbain
+Dmitry
+Gottfried
+Marin
+Christiaan
+Antonie
+Jan
+Evangelista
+Sadi
+Sofya
+Felix
+Augustin
+Simeon
+Johann
+Friedrich
+Gustav
+Hypatia
+Hermann
+Rudolf
+Theodor
+Konrad
+Ilya
+Boris
+Lev
+Pyotr
+Sergei
+Yuri
+Andrei
+Mikhail
+Vladimir
+## LAST
+Einstein
+Newton
+Darwin
+Curie
+Tesla
+Galilei
+Hawking
+Edison
+Faraday
+Bohr
+Feynman
+Heisenberg
+Schrodinger
+Planck
+Maxwell
+Pasteur
+Mendel
+Copernicus
+Kepler
+Fermi
+Oppenheimer
+Turing
+Lovelace
+Franklin
+Watson
+Crick
+Dirac
+Pauli
+Rutherford
+Thomson
+Boyle
+Hooke
+Lavoisier
+Dalton
+Mendeleev
+Avogadro
+Pauling
+Born
+Hubble
+Sagan
+Hertz
+Ohm
+Ampere
+Volta
+Coulomb
+Joule
+Kelvin
+Carnot
+Boltzmann
+Gibbs
+Pascal
+Fourier
+Laplace
+Lagrange
+Euler
+Gauss
+Riemann
+Hilbert
+Poincare
+Cantor
+Godel
+Noether
+Ramanujan
+Erdos
+Nash
+Neumann
+Shannon
+Babbage
+Hopper
+Knuth
+Dijkstra
+Meitner
+Hahn
+Rontgen
+Becquerel
+Chadwick
+Compton
+Millikan
+Lorentz
+Michelson
+Doppler
+Bernoulli
+Galvani
+Cavendish
+Priestley
+Davy
+Berzelius
+Kekule
+Arrhenius
+Nernst
+Haber
+Yukawa
+Weinberg
+Higgs
+Penrose
+Wheeler
+Bethe
+Teller
+Bardeen
+Shockley
+Townes
+Anderson
+Lawrence
+Mott
+Wilson
+Penzias
+Chandrasekhar
+Bose
+Raman
+Salam
+Rubin
+Hodgkin
+McClintock
+Goodall
+Carson
+Anning
+Wallace
+Linnaeus
+Humboldt
+Lyell
+Hutton
+Wegener
+Lamarck
+Cuvier
+Harvey
+Vesalius
+Jenner
+Lister
+Koch
+Fleming
+Salk
+Sabin
+Ehrlich
+Banting
+Florey
+Chain
+Archimedes
+Pythagoras
+Euclid
+Aristotle
+Ptolemy
+Brahe
+Halley
+Cassini
+Herschel

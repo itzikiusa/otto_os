@@ -86,12 +86,33 @@ pub fn claude_transcript_exists(
     Resumability::Gone
 }
 
+/// Does an agy (Antigravity Gemini CLI) conversation for `provider_session_id`
+/// exist under `home`? agy stores each conversation as
+/// `~/.gemini/antigravity-cli/conversations/<id>.db` (or `.pb`). Returns
+/// `Exists`/`Gone`; never `Unknown` (the caller decides `Unknown` when it has no
+/// home/session id).
+pub fn agy_conversation_exists(home: &Path, provider_session_id: &str) -> Resumability {
+    let dir = home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("conversations");
+    if ["db", "pb"]
+        .iter()
+        .any(|ext| dir.join(format!("{provider_session_id}.{ext}")).is_file())
+    {
+        Resumability::Exists
+    } else {
+        Resumability::Gone
+    }
+}
+
 /// Decide whether a non-live agent session's conversation can still be resumed
 /// by its provider, by checking the on-disk transcript.
 ///
 /// - `claude`: existence of `<sid>.jsonl` under `~/.claude/projects`.
-/// - any other provider (incl. `codex`, which Otto doesn't resume so never
-///   stores a `provider_session_id`): `Unknown` — we can't verify, so keep.
+/// - `agy`: existence of `<sid>.db|.pb` under `~/.gemini/antigravity-cli/conversations`.
+/// - any other provider (incl. `codex`, whose rollout path isn't checked here):
+///   `Unknown` — we can't verify, so keep.
 ///
 /// `home` is the user's home dir (`$HOME`); `provider_session_id` is the
 /// provider-side id used for resume.
@@ -103,6 +124,7 @@ pub fn check_resumability(
 ) -> Resumability {
     match provider {
         "claude" => claude_transcript_exists(home, cwd, provider_session_id),
+        "agy" => agy_conversation_exists(home, provider_session_id),
         _ => Resumability::Unknown,
     }
 }

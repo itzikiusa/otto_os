@@ -10,10 +10,16 @@
     Action,
     ExecuteResult,
     OrchestrateResp,
+    RelayResp,
     SearchHit,
   } from '../lib/api/types';
   import { registry, type Command } from '../lib/commands.svelte';
-  import { parseCommand, parseClose, type CloseRequest } from '../lib/commandParser';
+  import {
+    parseCommand,
+    parseClose,
+    startsWithCloseVerb,
+    type CloseRequest,
+  } from '../lib/commandParser';
   import { fuzzyMatch } from '../lib/fuzzy';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -306,13 +312,38 @@
       return;
     }
 
-    // Close-by-position is purely client-side (it needs the on-screen layout),
-    // so handle it before anything else: "close sessions 1,2" → close the panes
-    // in place 1 and place 2.
+    // Close commands are handled before anything else: "close sessions 1,2"
+    // (by position), "close all claude sessions" (by provider), "close claude
+    // session 1" (provider + index), and "close ronaldo" (by name). Anchored on a
+    // leading close verb so a relay like "ronaldo: stop X" isn't mistaken for one.
     const closeReq = parseClose(englishText);
-    if (closeReq) {
-      await closeByPosition(closeReq);
+    if (closeReq || startsWithCloseVerb(englishText)) {
+      await handleClose(englishText, closeReq);
       return;
+    }
+
+    // Name-addressed fast-path: "ronaldo: do X", "ronaldo, messi: ship it",
+    // "all: stand down" deliver straight to the named live session(s) with no
+    // AI. When the text names no live session, the daemon returns `unaddressed`
+    // and we fall through to deterministic/AI parsing.
+    try {
+      const relay = await api.post<RelayResp>(`/workspaces/${ws.currentId}/relay`, {
+        text: englishText,
+      });
+      if (!relay.unaddressed) {
+        const n = relay.session_ids.length;
+        toasts.success(
+          relay.broadcast
+            ? `Broadcast to ${n} session${n === 1 ? '' : 's'}`
+            : `Sent to ${n} session${n === 1 ? '' : 's'}`,
+          relay.text,
+        );
+        close();
+        return;
+      }
+    } catch (e) {
+      // Non-fatal — fall through to deterministic/AI parsing.
+      console.warn('relay fast-path failed', e);
     }
 
     // Deterministic first: common intents ("open 2 claude sessions",
@@ -352,36 +383,96 @@
     }
   }
 
-  /** Close sessions by their on-screen position (place 1, 2, …). The visible
-   *  layout order is how the user counts: the tiled grid when tiled, else the
-   *  side-by-side panes. "close" archives (recoverable); "kill/delete" removes. */
-  async function closeByPosition(req: CloseRequest): Promise<void> {
+  // Words that must never be treated as a session NAME when resolving a
+  // "close <name>" command (verbs, fillers, nouns, providers, numbers).
+  const CLOSE_SKIP = new Set([
+    'please', 'pls', 'kindly', 'close', 'kill', 'end', 'stop', 'terminate',
+    'quit', 'remove', 'exit', 'shut', 'down', 'and', 'the', 'all', 'every',
+    'everything', 'everyone', 'them', 'session', 'sessions', 'pane', 'panes',
+    'tab', 'tabs', 'terminal', 'terminals', 'window', 'windows', 'agent', 'agents',
+    'claude', 'codex', 'agy', 'shell', 'gemini', 'antigravity', 'gpt', 'bash', 'zsh',
+  ]);
+
+  /** Resolve the open agent sessions a "close <name>" command names, matching
+   *  each token against a session's handle / title / full-name words (the same
+   *  fields the backend resolver uses). Returns the matched session ids. */
+  function resolveCloseNames(text: string): string[] {
+    const toks = text
+      .toLowerCase()
+      .replace(/[:,]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length >= 2 && !CLOSE_SKIP.has(t) && !/^\d+$/.test(t));
+    if (toks.length === 0) return [];
+    const ids = new Set<string>();
+    for (const s of ws.sessions) {
+      if (s.archived || s.kind !== 'agent') continue;
+      const meta = s.meta as Record<string, unknown> | undefined;
+      const handle = String(meta?.name_handle ?? s.title).toLowerCase();
+      const full = String(meta?.name_full ?? '').toLowerCase();
+      const sessTokens = new Set(
+        [handle, s.title.toLowerCase(), ...full.split(/\s+/), ...s.title.toLowerCase().split(/\s+/)]
+          .filter(Boolean),
+      );
+      if (toks.some((t) => sessTokens.has(t))) ids.add(s.id);
+    }
+    return [...ids];
+  }
+
+  /** Handle a close command from the ⌘I box: by name, by provider (+ optional
+   *  index), by on-screen position, or all. "close/end" archives (recoverable);
+   *  "kill/delete/destroy" removes. */
+  async function handleClose(text: string, req: CloseRequest | null): Promise<void> {
+    const permanent = req?.permanent ?? /\b(kill|delete|destroy)\b/.test(text.toLowerCase());
+    // On-screen order (how the user counts positions): the tiled grid when tiled,
+    // else the side-by-side panes.
     const order: string[] =
       ws.viewMode === 'tiled' && !ws.maximizedId
         ? ws.mainSessions.map((s) => s.id)
         : ws.panes.filter((id) => ws.sessions.some((s) => s.id === id));
 
-    const ids = req.all
-      ? order.slice()
-      : req.positions.map((p) => order[p - 1]).filter((id): id is string => !!id);
+    let ids: string[] = [];
+    if (req && (req.provider || req.all)) {
+      // Provider-scoped or all — structured path wins over name matching so
+      // "close all claude sessions" closes EVERY claude, not one named "claude #3".
+      if (req.provider) {
+        const provSessions = ws.sessions.filter(
+          (s) => !s.archived && s.kind === 'agent' && s.provider === req.provider,
+        );
+        ids =
+          req.positions.length > 0
+            ? req.positions
+                .map((p) => provSessions[p - 1]?.id)
+                .filter((x): x is string => !!x)
+            : provSessions.map((s) => s.id);
+      } else {
+        ids = order.slice(); // all visible
+      }
+    } else {
+      // By name first ("close ronaldo", "close ronaldo and messi"), else by
+      // on-screen position ("close session 1,2").
+      const nameIds = resolveCloseNames(text);
+      if (nameIds.length > 0) ids = nameIds;
+      else if (req && req.positions.length > 0)
+        ids = req.positions.map((p) => order[p - 1]).filter((x): x is string => !!x);
+    }
 
     if (ids.length === 0) {
-      toasts.warn(
-        'Nothing to close',
-        req.all ? 'No open sessions.' : `No session at position ${req.positions.join(', ')}.`,
-      );
+      toasts.warn('Nothing to close', 'No matching open session.');
+      close();
+      englishText = '';
       return;
     }
 
     busy = true;
     try {
       for (const id of ids) {
-        if (req.permanent) await ws.killSession(id);
+        if (permanent) await ws.killSession(id);
         else await ws.archiveSession(id);
       }
-      if (req.permanent) {
-        toasts.success('Sessions killed', `${ids.length} session${ids.length === 1 ? '' : 's'} removed`);
-      }
+      toasts.success(
+        permanent ? 'Sessions killed' : 'Sessions closed',
+        `${ids.length} session${ids.length === 1 ? '' : 's'} ${permanent ? 'removed' : 'archived'}`,
+      );
       close();
       englishText = '';
     } catch (e) {

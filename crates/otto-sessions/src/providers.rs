@@ -152,9 +152,26 @@ impl ProviderRegistry {
                     a.extend(home_add_dir.iter().cloned());
                     a
                 },
-                resume_args: None,
+                // agy (Antigravity Gemini CLI) mints its OWN conversation id and
+                // records it under `~/.gemini/antigravity-cli` (the conversation
+                // file `conversations/<id>.db|.pb` plus a `cache/last_conversations.json`
+                // map of cwd -> most-recent conversation id). Like codex, Otto can't
+                // pass the id at launch, so it captures it from disk after spawn (see
+                // `capture_agy_session_id`) and resumes the exact conversation with
+                // `agy --conversation <id>`. The skip-permissions/add-dir flags stay
+                // on resume so resumed sessions remain unattended-safe.
+                resume_args: Some({
+                    let mut a = vec![
+                        "--conversation".into(),
+                        "{sid}".into(),
+                        "--dangerously-skip-permissions".into(),
+                        "--add-dir={cwd}".into(),
+                    ];
+                    a.extend(home_add_dir.iter().cloned());
+                    a
+                }),
                 update_command: Some("agy update".into()),
-                captures_session_id: false,
+                captures_session_id: true,
             },
         );
         map.insert(

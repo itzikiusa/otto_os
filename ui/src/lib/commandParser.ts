@@ -144,19 +144,43 @@ export function parseCommand(input: string): ActionPlan | null {
 
 // ── Close sessions by on-screen position ─────────────────────────────────────
 
-const CLOSE_VERBS = /\b(close|kill|end|stop|terminate|quit|remove|exit|shut)\b/;
 const SESSION_NOUN =
   /\b(session|sessions|pane|panes|tab|tabs|terminal|terminals|window|windows|agent|agents)\b/;
 const PERMANENT_VERBS = /\b(kill|delete|destroy)\b/;
 const PLACE_WORDS = /\b(place|places|position|positions|slot|slots|number|no)\b/;
 
 export interface CloseRequest {
-  /** 1-based positions in the current layout (empty when `all`). */
+  /** 1-based positions (in the current layout, or — when `provider` is set —
+   *  among that provider's open sessions). Empty when `all`. */
   positions: number[];
-  /** Close every visible session. */
+  /** Close every (matching) session. */
   all: boolean;
   /** Permanently delete (kill) instead of archive (recoverable). */
   permanent: boolean;
+  /** Restrict the close to one provider, e.g. "close all claude sessions" or
+   *  "close claude session 1". Undefined = any provider. */
+  provider?: string;
+}
+
+// A close command is an imperative that STARTS with a close verb (optionally
+// "please"/"pls"/"kindly" first). Anchoring at the start keeps a name-addressed
+// relay like "ronaldo: stop the build" from being mistaken for a close command.
+const START_CLOSE =
+  /^\s*(?:please|pls|kindly)?\s*(?:close|kill|end|stop|terminate|quit|remove|exit|shut(?:\s*down)?)\b/;
+
+/** True when `input` reads as a close command (starts with a close verb). */
+export function startsWithCloseVerb(input: string): boolean {
+  return START_CLOSE.test(normalize(input));
+}
+
+/** The first provider named anywhere in `input` (claude/codex/agy/shell, with
+ *  alias + typo tolerance), or undefined. */
+export function firstProvider(input: string): string | undefined {
+  for (const tok of normalize(input).split(/[\s,]+/)) {
+    const p = resolveProvider(tok.replace(/[^a-z0-9-]/g, ''));
+    if (p) return p;
+  }
+  return undefined;
 }
 
 /** Collect 1-based positions from text: standalone numbers + ranges ("1-3"). */
@@ -185,19 +209,27 @@ function extractPositions(text: string): number[] {
  */
 export function parseClose(input: string): CloseRequest | null {
   const text = normalize(input);
-  if (!CLOSE_VERBS.test(text)) return null;
+  // Only treat as a close command when it STARTS with a close verb — otherwise a
+  // relayed message that merely contains "stop"/"close" would be hijacked.
+  if (!START_CLOSE.test(text)) return null;
   const hasNoun = SESSION_NOUN.test(text);
   const permanent = PERMANENT_VERBS.test(text);
-
-  if (/\b(all|every|everything|everyone)\b/.test(text) && hasNoun) {
-    return { positions: [], all: true, permanent };
-  }
-
+  const provider = firstProvider(text);
+  const isAll = /\b(all|every|everything|everyone)\b/.test(text);
   const positions = extractPositions(text);
-  // Require a session noun (so "close the modal"/"stop the build" don't match)
-  // or an explicit place/position keyword.
-  if (positions.length > 0 && (hasNoun || PLACE_WORDS.test(text))) {
-    return { positions, all: false, permanent };
+
+  // "close all claude sessions" / "close all sessions"
+  if (isAll && (hasNoun || provider)) {
+    return { positions: [], all: true, permanent, provider };
+  }
+  // "close claude session 1" / "close session 1,2" / "kill pane 3"
+  if (positions.length > 0 && (hasNoun || provider || PLACE_WORDS.test(text))) {
+    return { positions, all: false, permanent, provider };
+  }
+  // "close all claude sessions" handled above; "close the claude sessions"
+  // (provider, plural noun, no number/all) → every session of that provider.
+  if (provider && hasNoun) {
+    return { positions: [], all: true, permanent, provider };
   }
   return null;
 }

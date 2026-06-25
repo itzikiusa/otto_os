@@ -337,6 +337,7 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             post(orchestrate_execute),
         )
         .route("/workspaces/{id}/broadcast", post(workspace_broadcast))
+        .route("/workspaces/{id}/relay", post(workspace_relay))
         .route(
             "/workspaces/{id}/product/stories/{sid}/analyze",
             post(analyze),
@@ -571,6 +572,31 @@ async fn workspace_broadcast(
         .await
         .map_err(ApiError)?;
     Ok(Json(otto_core::api::BroadcastResp { session_ids }))
+}
+
+/// `POST /workspaces/{id}/relay` — deliver a name-addressed message ("ronaldo:
+/// do X", "ronaldo, messi: ship it", "all: stand down"). Resolves the leading
+/// address against the workspace's live agent sessions; when nothing matches,
+/// returns `unaddressed = true` (delivers nothing) so the caller can fall back.
+/// Editor role.
+async fn workspace_relay(
+    Path(ws_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<otto_core::api::RelayReq>,
+) -> ApiResult<Json<otto_core::api::RelayResp>> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(ApiError(Error::Invalid("relay text is empty".into())));
+    }
+    let out = ctx.manager.relay(&ws_id, text).await.map_err(ApiError)?;
+    Ok(Json(otto_core::api::RelayResp {
+        session_ids: out.session_ids,
+        broadcast: out.broadcast,
+        unaddressed: out.unaddressed,
+        text: out.text,
+    }))
 }
 
 /// `GET /workspaces/{id}/product/lenses` — the curated analysis-lens catalog

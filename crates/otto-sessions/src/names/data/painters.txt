@@ -1,0 +1,442 @@
+## HEAD
+Picasso | Pablo Picasso
+VanGogh | Vincent van Gogh
+DaVinci | Leonardo da Vinci
+Monet | Claude Monet
+Rembrandt | Rembrandt van Rijn
+Michelangelo | Michelangelo Buonarroti
+Dali | Salvador Dalí
+Warhol | Andy Warhol
+Vermeer | Johannes Vermeer
+Matisse | Henri Matisse
+Klimt | Gustav Klimt
+Cezanne | Paul Cézanne
+Renoir | Pierre-Auguste Renoir
+Pollock | Jackson Pollock
+Kahlo | Frida Kahlo
+Munch | Edvard Munch
+Goya | Francisco Goya
+Raphael | Raphael
+Botticelli | Sandro Botticelli
+Caravaggio | Caravaggio
+Titian | Titian
+Rubens | Peter Paul Rubens
+Velazquez | Diego Velázquez
+Turner | J M W Turner
+Manet | Édouard Manet
+Degas | Edgar Degas
+Gauguin | Paul Gauguin
+Seurat | Georges Seurat
+Toulouse | Henri de Toulouse-Lautrec
+Kandinsky | Wassily Kandinsky
+Mondrian | Piet Mondrian
+Miro | Joan Miró
+Magritte | René Magritte
+Chagall | Marc Chagall
+Modigliani | Amedeo Modigliani
+Rothko | Mark Rothko
+Pollock2 | Willem de Kooning
+Basquiat | Jean-Michel Basquiat
+Hopper | Edward Hopper
+Wood | Grant Wood
+Wyeth | Andrew Wyeth
+OKeeffe | Georgia O'Keeffe
+Hockney | David Hockney
+Bacon | Francis Bacon
+Freud | Lucian Freud
+Klee | Paul Klee
+Schiele | Egon Schiele
+Bosch | Hieronymus Bosch
+Bruegel | Pieter Bruegel
+Durer | Albrecht Dürer
+Holbein | Hans Holbein
+ElGreco | El Greco
+Vermeer2 | Frans Hals
+Constable | John Constable
+Gainsborough | Thomas Gainsborough
+Reynolds | Joshua Reynolds
+Blake | William Blake
+Friedrich | Caspar David Friedrich
+Delacroix | Eugène Delacroix
+Gericault | Théodore Géricault
+Ingres | Jean-Auguste-Dominique Ingres
+David | Jacques-Louis David
+Courbet | Gustave Courbet
+Millet | Jean-François Millet
+Corot | Camille Corot
+Pissarro | Camille Pissarro
+Sisley | Alfred Sisley
+Caillebotte | Gustave Caillebotte
+Morisot | Berthe Morisot
+Cassatt | Mary Cassatt
+Rousseau | Henri Rousseau
+Bonnard | Pierre Bonnard
+Vuillard | Édouard Vuillard
+Signac | Paul Signac
+Redon | Odilon Redon
+Moreau | Gustave Moreau
+Sargent | John Singer Sargent
+Whistler | James McNeill Whistler
+Homer | Winslow Homer
+Eakins | Thomas Eakins
+Cole | Thomas Cole
+Church | Frederic Edwin Church
+Bierstadt | Albert Bierstadt
+Remington | Frederic Remington
+Rockwell | Norman Rockwell
+Lichtenstein | Roy Lichtenstein
+Johns | Jasper Johns
+Rauschenberg | Robert Rauschenberg
+Hirst | Damien Hirst
+Banksy | Banksy
+Koons | Jeff Koons
+Twombly | Cy Twombly
+Newman | Barnett Newman
+Still | Clyfford Still
+Motherwell | Robert Motherwell
+Kline | Franz Kline
+Gorky | Arshile Gorky
+Diebenkorn | Richard Diebenkorn
+Albers | Josef Albers
+Mucha | Alphonse Mucha
+Klinger | Max Klinger
+Beckmann | Max Beckmann
+Kirchner | Ernst Ludwig Kirchner
+Nolde | Emil Nolde
+Marc | Franz Marc
+Macke | August Macke
+Ernst | Max Ernst
+Arp | Jean Arp
+Duchamp | Marcel Duchamp
+Leger | Fernand Léger
+Braque | Georges Braque
+Gris | Juan Gris
+Soutine | Chaim Soutine
+Utrillo | Maurice Utrillo
+Derain | André Derain
+Vlaminck | Maurice de Vlaminck
+Dufy | Raoul Dufy
+Rivera | Diego Rivera
+Orozco | José Clemente Orozco
+Siqueiros | David Alfaro Siqueiros
+Tamayo | Rufino Tamayo
+Lam | Wifredo Lam
+Matta | Roberto Matta
+Botero | Fernando Botero
+Hokusai | Katsushika Hokusai
+Hiroshige | Utagawa Hiroshige
+Utamaro | Kitagawa Utamaro
+Sesshu | Sesshū Tōyō
+Giotto | Giotto di Bondone
+Masaccio | Masaccio
+Donatello | Donatello
+Mantegna | Andrea Mantegna
+Bellini | Giovanni Bellini
+Giorgione | Giorgione
+Tintoretto | Tintoretto
+Veronese | Paolo Veronese
+Correggio | Antonio da Correggio
+Parmigianino | Parmigianino
+Tiepolo | Giovanni Battista Tiepolo
+Canaletto | Canaletto
+Watteau | Antoine Watteau
+Fragonard | Jean-Honoré Fragonard
+Boucher | François Boucher
+Chardin | Jean-Baptiste-Siméon Chardin
+Poussin | Nicolas Poussin
+Lorrain | Claude Lorrain
+Watteau2 | Georges de La Tour
+Zurbaran | Francisco de Zurbarán
+Murillo | Bartolomé Esteban Murillo
+Ribera | Jusepe de Ribera
+Sorolla | Joaquín Sorolla
+Tapies | Antoni Tàpies
+Miro2 | Eduardo Chillida
+Gris2 | Julio González
+Anguissola | Sofonisba Anguissola
+Gentileschi | Artemisia Gentileschi
+Vigee | Élisabeth Vigée Le Brun
+Bonheur | Rosa Bonheur
+## FIRST
+Pablo
+Vincent
+Leonardo
+Claude
+Rembrandt
+Michelangelo
+Salvador
+Andy
+Johannes
+Henri
+Gustav
+Paul
+Pierre
+Jackson
+Frida
+Edvard
+Francisco
+Raphael
+Sandro
+Titian
+Peter
+Diego
+Edouard
+Edgar
+Georges
+Wassily
+Piet
+Joan
+Rene
+Marc
+Amedeo
+Mark
+Willem
+Jean
+Edward
+Grant
+Andrew
+Georgia
+David
+Francis
+Lucian
+Egon
+Hieronymus
+Pieter
+Albrecht
+Hans
+Frans
+John
+Thomas
+Joshua
+William
+Caspar
+Eugene
+Theodore
+Jacques
+Gustave
+Camille
+Alfred
+Berthe
+Mary
+Odilon
+Winslow
+Frederic
+Albert
+Norman
+Roy
+Jasper
+Robert
+Damien
+Jeff
+Cy
+Barnett
+Clyfford
+Franz
+Arshile
+Richard
+Josef
+Alphonse
+Max
+Ernst
+Emil
+August
+Fernand
+Juan
+Chaim
+Maurice
+Andre
+Raoul
+Jose
+Rufino
+Wifredo
+Roberto
+Fernando
+Katsushika
+Utagawa
+Kitagawa
+Giotto
+Masaccio
+Donatello
+Andrea
+Giovanni
+Giorgione
+Paolo
+Antonio
+Battista
+Antoine
+Honore
+Francois
+Nicolas
+Bartolome
+Jusepe
+Joaquin
+Antoni
+Eduardo
+Julio
+Sofonisba
+Artemisia
+Elisabeth
+Rosa
+Pietro
+Cimabue
+Cosimo
+Filippo
+Luca
+Piero
+Domenico
+Fra
+Jan
+Gerrit
+Duccio
+Hendrick
+Aelbert
+Jacob
+Meindert
+## LAST
+Picasso
+VanGogh
+DaVinci
+Monet
+Rembrandt
+Michelangelo
+Dali
+Warhol
+Vermeer
+Matisse
+Klimt
+Cezanne
+Renoir
+Pollock
+Kahlo
+Munch
+Goya
+Raphael
+Botticelli
+Caravaggio
+Titian
+Rubens
+Velazquez
+Turner
+Manet
+Degas
+Gauguin
+Seurat
+Kandinsky
+Mondrian
+Miro
+Magritte
+Chagall
+Modigliani
+Rothko
+Kooning
+Basquiat
+Hopper
+Wood
+Wyeth
+OKeeffe
+Hockney
+Bacon
+Freud
+Klee
+Schiele
+Bosch
+Bruegel
+Durer
+Holbein
+Greco
+Hals
+Constable
+Gainsborough
+Reynolds
+Blake
+Friedrich
+Delacroix
+Gericault
+Ingres
+David
+Courbet
+Millet
+Corot
+Pissarro
+Sisley
+Caillebotte
+Morisot
+Cassatt
+Rousseau
+Bonnard
+Vuillard
+Signac
+Redon
+Moreau
+Sargent
+Whistler
+Homer
+Eakins
+Cole
+Church
+Bierstadt
+Remington
+Rockwell
+Lichtenstein
+Johns
+Rauschenberg
+Hirst
+Koons
+Twombly
+Newman
+Still
+Motherwell
+Kline
+Gorky
+Diebenkorn
+Albers
+Mucha
+Beckmann
+Kirchner
+Nolde
+Marc
+Macke
+Ernst
+Arp
+Duchamp
+Leger
+Braque
+Gris
+Soutine
+Utrillo
+Derain
+Vlaminck
+Dufy
+Rivera
+Orozco
+Siqueiros
+Tamayo
+Lam
+Matta
+Botero
+Hokusai
+Hiroshige
+Utamaro
+Giotto
+Masaccio
+Donatello
+Mantegna
+Bellini
+Tintoretto
+Veronese
+Correggio
+Tiepolo
+Canaletto
+Watteau
+Fragonard
+Boucher
+Chardin
+Poussin
+Lorrain
+Zurbaran
+Murillo
+Ribera
+Sorolla
+Tapies
+Gentileschi
+Bonheur

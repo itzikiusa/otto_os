@@ -51,6 +51,45 @@
     }
   }
 
+  // Provider picker keyboard nav: the cards are an ARIA radiogroup with a roving
+  // tabindex, so Tab moves to the next FIELD (Title) while Left/Right (and
+  // Up/Down) move the selection between providers — like a native radio group.
+  let cardEls = $state<HTMLButtonElement[]>([]);
+
+  function selectProvider(p: string, focus = false): void {
+    provider = p;
+    if (focus) {
+      const idx = providers.indexOf(p);
+      queueMicrotask(() => cardEls[idx]?.focus());
+    }
+  }
+
+  function onProviderKeydown(e: KeyboardEvent): void {
+    const idx = providers.indexOf(provider);
+    if (idx < 0 || providers.length === 0) return;
+    let next = idx;
+    switch (e.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = (idx + 1) % providers.length;
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = (idx - 1 + providers.length) % providers.length;
+        break;
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = providers.length - 1;
+        break;
+      default:
+        return; // let other keys (Tab, Enter, Space) behave normally
+    }
+    e.preventDefault();
+    selectProvider(providers[next], true);
+  }
+
   // Browser tools wire an MCP server into the workspace .mcp.json; only
   // claude/codex load MCP servers, so the toggle is hidden for plain shells.
   const supportsBrowser = $derived(provider === 'claude' || provider === 'codex');
@@ -104,10 +143,24 @@
 
 <Modal title="New Session" {onclose}>
   <div class="field">
-    <label for="ns-provider">Provider</label>
-    <div class="provider-grid" id="ns-provider">
-      {#each providers as p (p)}
-        <button class="provider-card" class:selected={provider === p} onclick={() => (provider = p)}>
+    <div id="ns-provider-label" class="provider-label">Provider <span class="dim">(← → to switch)</span></div>
+    <div
+      class="provider-grid"
+      role="radiogroup"
+      tabindex="-1"
+      aria-labelledby="ns-provider-label"
+      onkeydown={onProviderKeydown}
+    >
+      {#each providers as p, i (p)}
+        <button
+          bind:this={cardEls[i]}
+          class="provider-card"
+          class:selected={provider === p}
+          role="radio"
+          aria-checked={provider === p}
+          tabindex={provider === p ? 0 : -1}
+          onclick={() => selectProvider(p)}
+        >
           <span class="provider-name">
             {p}
             {#if p === defaultProvider}<span class="default-badge">default</span>{/if}
@@ -122,7 +175,7 @@
 
   <div class="field">
     <label for="ns-title">Title <span class="dim">(optional)</span></label>
-    <input id="ns-title" class="input" bind:value={title} placeholder="{provider} #{ws.sessions.length + 1}" />
+    <input id="ns-title" class="input" bind:value={title} placeholder="Auto-named from your theme (Settings → Session Names)" />
   </div>
 
   <div class="field">
@@ -205,10 +258,19 @@
 </Modal>
 
 <style>
+  .provider-label {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
   .provider-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
     gap: 8px;
+  }
+  .provider-grid:focus {
+    outline: none;
   }
   .provider-card {
     display: flex;

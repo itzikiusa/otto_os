@@ -67,9 +67,17 @@
   const resumable = $derived(
     session?.kind === 'agent' && session?.provider_session_id != null,
   );
+  /** Full display name for a themed session (e.g. "Cristiano Ronaldo"), shown
+   *  beside the short handle ("Ronaldo") when the two differ. */
+  const nameFull = $derived(
+    ((session?.meta?.name_full as string | undefined) ?? '').trim(),
+  );
 
   let menuOpen = $state(false);
   let renaming = $state(false);
+  // Bumped after a successful restart so the embedded <Terminal> drops its
+  // exited overlay and reconnects to the freshly respawned/resumed PTY.
+  let restartNonce = $state(0);
   let draftTitle = $state('');
   let attachIssueOpen = $state(false);
   let attachProductOpen = $state(false);
@@ -179,6 +187,9 @@
   async function restart(): Promise<void> {
     try {
       await ws.restartSession(sessionId);
+      // Nudge the embedded Terminal to drop its exited overlay and reconnect to
+      // the now-live PTY (the session id is unchanged, so this is the only signal).
+      restartNonce++;
     } catch (e) {
       toasts.error('Restart failed', e instanceof Error ? e.message : String(e));
     }
@@ -288,6 +299,9 @@
         ]) : undefined}
       >{session?.title ?? sessionId}</span>
     {/if}
+    {#if nameFull && nameFull !== session?.title}
+      <span class="pane-fullname" title="Themed name — address this session by “{session?.meta?.name_handle ?? session?.title}”">({nameFull})</span>
+    {/if}
     <span class="chip provider-chip">{session?.provider ?? '?'}</span>
     {#if needsYou}
       <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
@@ -333,8 +347,10 @@
         <Icon name={maximized ? 'minimize' : 'maximize'} size={13} />
       </button>
     {/if}
-    {#if !readOnly}
+    {#if !readOnly && isAgent}
       <button class="icon-btn" onclick={restart} title="Restart session"><Icon name="refresh" size={13} /></button>
+    {/if}
+    {#if !readOnly}
       <div class="menu-wrap" onmousedown={(e) => e.stopPropagation()} role="presentation">
         <button
           class="icon-btn"
@@ -371,7 +387,7 @@
     {/if}
   </header>
   <div class="pane-term">
-    <Terminal {sessionId} {readOnly} {resumable} onstatus={onTermStatus} />
+    <Terminal {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} />
   </div>
 </section>
 
@@ -457,6 +473,15 @@
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
+  }
+  .pane-fullname {
+    font-size: 11px;
+    color: var(--text-muted, var(--muted));
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+    flex-shrink: 1;
   }
   .pane-title {
     font-size: 12px;

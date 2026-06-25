@@ -1,0 +1,439 @@
+## HEAD
+Jordan | Michael Jordan
+LeBron | LeBron James
+Kobe | Kobe Bryant
+Magic | Magic Johnson
+Bird | Larry Bird
+Shaq | Shaquille O'Neal
+Curry | Stephen Curry
+Kareem | Kareem Abdul-Jabbar
+Wilt | Wilt Chamberlain
+Duncan | Tim Duncan
+Durant | Kevin Durant
+Russell | Bill Russell
+Hakeem | Hakeem Olajuwon
+Iverson | Allen Iverson
+Nowitzki | Dirk Nowitzki
+Garnett | Kevin Garnett
+Pippen | Scottie Pippen
+Giannis | Giannis Antetokounmpo
+Westbrook | Russell Westbrook
+Harden | James Harden
+Wade | Dwyane Wade
+Nash | Steve Nash
+Paul | Chris Paul
+Ewing | Patrick Ewing
+Barkley | Charles Barkley
+Malone | Karl Malone
+Stockton | John Stockton
+Robinson | David Robinson
+Doncic | Luka Dončić
+Jokic | Nikola Jokić
+Embiid | Joel Embiid
+Kawhi | Kawhi Leonard
+Tatum | Jayson Tatum
+McGrady | Tracy McGrady
+Carter | Vince Carter
+Pierce | Paul Pierce
+Allen | Ray Allen
+Nash2 | Steve Francis
+Kidd | Jason Kidd
+Wilkins | Dominique Wilkins
+Drexler | Clyde Drexler
+Thomas | Isiah Thomas
+Stoudemire | Amar'e Stoudemire
+Anthony | Carmelo Anthony
+Howard | Dwight Howard
+Bosh | Chris Bosh
+Lillard | Damian Lillard
+Thompson | Klay Thompson
+Green | Draymond Green
+Davis | Anthony Davis
+George | Paul George
+Butler | Jimmy Butler
+Irving | Kyrie Irving
+Booker | Devin Booker
+Mitchell | Donovan Mitchell
+Morant | Ja Morant
+Williamson | Zion Williamson
+Edwards | Anthony Edwards
+Brown | Jaylen Brown
+Sabonis | Domantas Sabonis
+Towns | Karl-Anthony Towns
+Gobert | Rudy Gobert
+Adebayo | Bam Adebayo
+Murray | Jamal Murray
+Fox | De'Aaron Fox
+Young | Trae Young
+Ball | LaMelo Ball
+Banchero | Paolo Banchero
+Wembanyama | Victor Wembanyama
+Haliburton | Tyrese Haliburton
+Maravich | Pete Maravich
+West | Jerry West
+Baylor | Elgin Baylor
+Robertson | Oscar Robertson
+Erving | Julius Erving
+Frazier | Walt Frazier
+Havlicek | John Havlicek
+Cousy | Bob Cousy
+Mikan | George Mikan
+McHale | Kevin McHale
+Parish | Robert Parish
+Worthy | James Worthy
+Rodman | Dennis Rodman
+Mourning | Alonzo Mourning
+Mutombo | Dikembe Mutombo
+Webber | Chris Webber
+Hill | Grant Hill
+Marbury | Stephon Marbury
+Payton | Gary Payton
+Kemp | Shawn Kemp
+Miller | Reggie Miller
+Mullin | Chris Mullin
+Hardaway | Tim Hardaway
+Penny | Penny Hardaway
+Sprewell | Latrell Sprewell
+Pippen2 | Horace Grant
+Rice | Glen Rice
+Mashburn | Jamal Mashburn
+Walker | Antoine Walker
+Sheed | Rasheed Wallace
+Billups | Chauncey Billups
+Hamilton | Richard Hamilton
+Wallace | Ben Wallace
+Ginobili | Manu Ginóbili
+Parker | Tony Parker
+Diaw | Boris Diaw
+Splitter | Tiago Splitter
+Gasol | Pau Gasol
+GasolM | Marc Gasol
+Calderon | José Calderón
+Navarro | Juan Carlos Navarro
+Rubio | Ricky Rubio
+Belinelli | Marco Belinelli
+Gallinari | Danilo Gallinari
+Bargnani | Andrea Bargnani
+Schroder | Dennis Schröder
+Theis | Daniel Theis
+Porzingis | Kristaps Porziņģis
+Valanciunas | Jonas Valančiūnas
+Sabonis2 | Arvydas Sabonis
+Petrovic | Dražen Petrović
+Kukoc | Toni Kukoč
+Divac | Vlade Divac
+Stojakovic | Peja Stojaković
+Bogdanovic | Bojan Bogdanović
+Jokic2 | Boban Marjanović
+Vucevic | Nikola Vučević
+Saric | Dario Šarić
+Nurkic | Jusuf Nurkić
+Markkanen | Lauri Markkanen
+Antetokounmpo | Thanasis Antetokounmpo
+Bridges | Mikal Bridges
+Ingram | Brandon Ingram
+Siakam | Pascal Siakam
+Vanvleet | Fred VanVleet
+LaVine | Zach LaVine
+DeRozan | DeMar DeRozan
+Beal | Bradley Beal
+Wiggins | Andrew Wiggins
+Williams | Jalen Williams
+Holiday | Jrue Holiday
+Middleton | Khris Middleton
+Lopez | Brook Lopez
+Capela | Clint Capela
+Turner | Myles Turner
+Allen2 | Jarrett Allen
+Garland | Darius Garland
+Maxey | Tyrese Maxey
+Cunningham | Cade Cunningham
+Mobley | Evan Mobley
+Barnes | Scottie Barnes
+Sengun | Alperen Şengün
+Brunson | Jalen Brunson
+Reaves | Austin Reaves
+## FIRST
+Michael
+LeBron
+Kobe
+Earvin
+Larry
+Shaquille
+Stephen
+Kareem
+Wilt
+Tim
+Kevin
+Bill
+Hakeem
+Allen
+Dirk
+Scottie
+Giannis
+Russell
+James
+Dwyane
+Steve
+Chris
+Patrick
+Charles
+Karl
+John
+David
+Luka
+Nikola
+Joel
+Kawhi
+Jayson
+Tracy
+Vince
+Paul
+Ray
+Jason
+Dominique
+Clyde
+Isiah
+Amare
+Carmelo
+Dwight
+Damian
+Klay
+Draymond
+Anthony
+Jimmy
+Kyrie
+Devin
+Donovan
+Ja
+Zion
+Jaylen
+Domantas
+Rudy
+Bam
+Jamal
+DeAaron
+Trae
+LaMelo
+Paolo
+Victor
+Tyrese
+Pete
+Jerry
+Elgin
+Oscar
+Julius
+Walt
+George
+Robert
+Dennis
+Alonzo
+Dikembe
+Grant
+Stephon
+Gary
+Shawn
+Reggie
+Spencer
+Penny
+Latrell
+Horace
+Glen
+Antoine
+Rasheed
+Chauncey
+Richard
+Ben
+Manu
+Tony
+Boris
+Tiago
+Pau
+Marc
+Jose
+Juan
+Ricky
+Marco
+Danilo
+Andrea
+Daniel
+Kristaps
+Jonas
+Arvydas
+Drazen
+Toni
+Vlade
+Peja
+Bojan
+Boban
+Dario
+Jusuf
+Lauri
+Thanasis
+Mikal
+Brandon
+Pascal
+Fred
+Zach
+DeMar
+Bradley
+Andrew
+Jalen
+Jrue
+Khris
+Brook
+Clint
+Myles
+Jarrett
+Darius
+Cade
+Evan
+Alperen
+Austin
+## LAST
+Jordan
+James
+Bryant
+Johnson
+Bird
+ONeal
+Curry
+Chamberlain
+Duncan
+Durant
+Russell
+Olajuwon
+Iverson
+Nowitzki
+Garnett
+Pippen
+Antetokounmpo
+Westbrook
+Harden
+Wade
+Nash
+Paul
+Ewing
+Barkley
+Malone
+Stockton
+Robinson
+Doncic
+Jokic
+Embiid
+Leonard
+Tatum
+McGrady
+Carter
+Pierce
+Allen
+Kidd
+Wilkins
+Drexler
+Thomas
+Stoudemire
+Anthony
+Howard
+Bosh
+Lillard
+Thompson
+Green
+Davis
+George
+Butler
+Irving
+Booker
+Mitchell
+Morant
+Williamson
+Edwards
+Brown
+Sabonis
+Towns
+Gobert
+Adebayo
+Murray
+Fox
+Young
+Ball
+Banchero
+Wembanyama
+Haliburton
+Maravich
+West
+Baylor
+Robertson
+Erving
+Frazier
+Havlicek
+Cousy
+Mikan
+McHale
+Parish
+Worthy
+Rodman
+Mourning
+Mutombo
+Webber
+Hill
+Marbury
+Payton
+Kemp
+Miller
+Mullin
+Hardaway
+Sprewell
+Grant
+Rice
+Mashburn
+Walker
+Wallace
+Billups
+Hamilton
+Ginobili
+Parker
+Diaw
+Splitter
+Gasol
+Calderon
+Navarro
+Rubio
+Belinelli
+Gallinari
+Bargnani
+Schroder
+Theis
+Porzingis
+Valanciunas
+Petrovic
+Kukoc
+Divac
+Stojakovic
+Bogdanovic
+Marjanovic
+Vucevic
+Saric
+Nurkic
+Markkanen
+Bridges
+Ingram
+Siakam
+VanVleet
+LaVine
+DeRozan
+Beal
+Wiggins
+Williams
+Holiday
+Middleton
+Lopez
+Capela
+Turner
+Garland
+Maxey
+Cunningham
+Mobley
+Barnes
+Sengun
+Brunson
+Reaves

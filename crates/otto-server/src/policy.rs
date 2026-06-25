@@ -355,10 +355,17 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         "/workspaces/{id}/orchestrate"
             | "/workspaces/{id}/orchestrate/execute"
             | "/workspaces/{id}/broadcast"
+            | "/workspaces/{id}/relay"
             | "/workspaces/{id}/providers/update"
             | "/workspaces/{id}/lsp/install"
     ) {
         return Require(Agents, Edit);
+    }
+    // Session name themes (auto-naming new sessions). Per-user library: reading
+    // the theme list = Agents View; creating/editing/selecting a theme = Agents
+    // Edit. The handlers add the per-theme owner guard.
+    if p == "/name-themes" || p.starts_with("/name-themes/") {
+        return Require(Agents, if get { View } else { Edit });
     }
 
     // ---- Git (repos, status/diff/log/PRs, commit/push/pull, accounts) ---------

@@ -28,6 +28,17 @@
     /** When true a "Resume" button is shown on the exited overlay; clicking it
      *  reconnects the WS — the daemon's ensure_live will resume the session. */
     resumable?: boolean;
+    /** When true the exited overlay shows a "Reconnect" button even when the
+     *  session isn't WS-resumable (e.g. a plain shell, which is respawned via
+     *  the parent's `onrestart` callback rather than a bare WS re-attach). */
+    restartable?: boolean;
+    /** Invoked by the overlay "Reconnect" button (and reused by the header
+     *  restart). When set, takes precedence over the bare WS re-attach so an
+     *  exited shell is actually respawned server-side. */
+    onrestart?: () => void;
+    /** Bumped by the parent after a successful restart so the Terminal drops the
+     *  exited overlay and reconnects to the now-live PTY. */
+    restartNonce?: number;
     /** When true, force the xterm palette and host background to dark regardless
      *  of the app's current light/dark scheme. Use for embedded agent CLIs
      *  (claude, codex) that render their own dark TUI canvas. */
@@ -43,7 +54,7 @@
      *  The parent can surface results in a search-result panel. */
     onsearchresult?: (frame: WsSearchResultFrame) => void;
   }
-  let { sessionId, readOnly = false, resumable = false, forceDark = false, shareToken, onstatus, onsearchresult }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, shareToken, onstatus, onsearchresult }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -278,14 +289,16 @@
       connected = true;
       reconnecting = false;
       reconnectAttempts = 0;
-      // Sync the PTY to our size first, then request a history-inclusive
-      // snapshot. Ask for as many lines as xterm is configured to retain
-      // (scrollback option, default 10 000) so reconnect never silently loses
-      // scrollback that the server ring still holds. Clamped server-side to
-      // the actual retained history depth, so this is safe to over-request.
+      // Re-measure against the CURRENT container box before syncing the PTY: the
+      // earlier first-fit may have run while the pane was briefly narrow, and a
+      // plain shell can't reflow stale output later — so fit here (forced resize
+      // guarantees the freshly-(re)attached PTY gets our real grid, not the
+      // server's spawn-time 80×24), then verify again as layout settles.
+      safeFit();
       sendResize(true);
       const want = term?.options.scrollback ?? 10_000;
       sendJson({ type: 'scrollback', lines: want });
+      verifyFitSoon();
     };
 
     sock.onmessage = (ev: MessageEvent) => {
@@ -348,10 +361,32 @@
   function sendResize(force = false): void {
     if (!term) return;
     const { cols, rows } = term;
+    // Reflect the live grid on the host element — handy for debugging the
+    // shell-wrapping bug (a stale-narrow grid shows up as a too-small data-cols)
+    // and asserted by the resize E2E.
+    container?.setAttribute('data-cols', String(cols));
     if (!force && cols === lastCols && rows === lastRows) return;
     lastCols = cols;
     lastRows = rows;
     sendJson({ type: 'resize', cols, rows });
+  }
+
+  // Belt-and-suspenders for PLAIN SHELLS: re-fit a couple of times shortly after
+  // the socket opens. The first fit can run while the pane is briefly narrow (a
+  // split/tab open animation), and a shell's scrollback can't reflow to a later
+  // resize the way an alt-screen TUI repaints — so a stale narrow grid would
+  // stick and wrap every line. Re-measuring once layout settles corrects xterm
+  // (which reflows) and pushes the real grid to the PTY (only when it changed,
+  // so claude/codex don't get spurious SIGWINCH flicker).
+  let verifyTimers: ReturnType<typeof setTimeout>[] = [];
+  function verifyFitSoon(): void {
+    for (const t of verifyTimers) clearTimeout(t);
+    verifyTimers = [200, 650].map((ms) =>
+      setTimeout(() => {
+        if (!term || !connected) return;
+        if (safeFit()) sendResize();
+      }, ms),
+    );
   }
 
   // Guarded fit: only run when the container is actually visible and has real
@@ -728,6 +763,7 @@
     return () => {
       ro.disconnect();
       linkProvider.dispose();
+      for (const t of verifyTimers) clearTimeout(t);
       if (refitTimer) clearTimeout(refitTimer);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
@@ -835,6 +871,20 @@
       term.options.fontFamily = family;
       if (safeFit()) sendResize();
     }
+  });
+
+  // React to a parent restart: the session was respawned/resumed server-side, so
+  // drop the exited overlay and reconnect to the now-live PTY. Guarded on nonce>0
+  // so it never fires on initial mount; the connect() is untracked so this effect
+  // only re-runs on a real restart, not when sessionId churns (Effect 2 owns that).
+  $effect(() => {
+    const n = restartNonce;
+    if (!n || !term) return;
+    untrack(() => {
+      exitCode = null;
+      disconnected = false;
+      connect();
+    });
   });
 
   // react to theme + light/dark scheme switches (respects forceDark override)
@@ -970,8 +1020,14 @@
     {#if exitCode !== null}
       <div class="term-overlay">
         <span class="badge {exitCode === 0 ? 'ok' : 'bad'}">exited ({exitCode})</span>
-        {#if resumable && !readOnly}
-          <button class="btn" onclick={() => { exitCode = null; connect(); }}>Resume</button>
+        {#if (restartable || resumable) && !readOnly}
+          <button
+            class="btn"
+            onclick={() => {
+              if (onrestart) onrestart();
+              else { exitCode = null; connect(); }
+            }}
+          >{resumable ? 'Resume' : 'Reconnect'}</button>
         {/if}
       </div>
     {:else if reconnecting}

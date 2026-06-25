@@ -601,6 +601,30 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /workspaces/{id}/broadcast | ws editor | BroadcastReq `{text, session_ids?}` | BroadcastResp `{session_ids}` |
+| POST /workspaces/{id}/relay | ws editor | RelayReq `{text}` | RelayResp `{session_ids, broadcast, unaddressed, text}` |
+
+Relay delivers a **name-addressed** message: the leading token(s) of `text` may
+name session handles (`ronaldo: …`, `ronaldo, messi: …`, bare `ronaldo do X`) or
+the broadcast keyword `all`/`everyone`. When nothing matches, the call is a no-op
+with `unaddressed:true` so the caller falls back (e.g. AI orchestrate).
+
+## Session name themes (auto-naming new sessions)
+
+New agent sessions are auto-named from the creating user's active **name theme**
+(e.g. "Ronaldo", "Messi") instead of `claude #3`, unique among the workspace's
+open sessions. Built-in themes are compiled into the daemon; users may add custom
+name lists. Per-user library; the handlers add the per-theme owner guard.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /name-themes | agents view | — | NameThemesResp `{themes:[NameThemeInfo], active}` |
+| PUT /name-themes/active | agents edit | SetActiveThemeReq `{theme_id}` | NameThemesResp |
+| POST /name-themes | agents edit | CreateNameThemeReq `{label, names}` | CustomThemeResp `{id, label, names}` |
+| PUT /name-themes/{id} | agents edit | UpdateNameThemeReq `{label, names}` | CustomThemeResp |
+| DELETE /name-themes/{id} | agents edit | — | 204 |
+
+`active` is a built-in id (`footballers`), a custom theme id, or `none` (the
+legacy `{provider} #N` numbering). `NameThemeInfo` = `{id, label, kind, capacity, sample}`.
 
 ## Product (stories, versions, analyses, test cases, learnings)
 

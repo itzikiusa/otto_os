@@ -192,6 +192,90 @@ fn codex_rollout_match(path: &std::path::Path, cwd: &str) -> Option<(String, std
     Some((session_id, mtime))
 }
 
+/// Root directory agy (Antigravity Gemini CLI) writes conversations to:
+/// `~/.gemini/antigravity-cli`. Holds `conversations/<id>.db|.pb` (one per
+/// conversation, named by its UUID) plus a `cache/last_conversations.json`
+/// map of `cwd -> most-recent conversation id`.
+fn agy_cli_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".gemini")
+        .join("antigravity-cli")
+}
+
+/// Capture the agy conversation UUID for a just-spawned session. agy mints its
+/// own conversation id (like codex) and records the most-recent conversation per
+/// cwd in `cache/last_conversations.json`; the id names a `conversations/<id>.db`
+/// (or `.pb`) file. We poll that map for OUR cwd and accept the mapped id once its
+/// conversation file is FRESH (mtime at/after `spawn_time`) and not already
+/// `claimed` by another Otto session — so we never capture a stale pre-existing
+/// conversation for the same cwd. Polls because agy writes the conversation a
+/// moment after launch. `None` if nothing matches in the window — the session
+/// stays non-resumable rather than resuming the wrong conversation.
+async fn capture_agy_session_id(
+    cli_root: &std::path::Path,
+    cwd: &str,
+    spawn_time: std::time::SystemTime,
+    claimed: &[String],
+) -> Option<String> {
+    use std::collections::HashSet;
+    let claimed: HashSet<&str> = claimed.iter().map(String::as_str).collect();
+    // A touch before spawn to tolerate clock/fs skew; a prior session's
+    // conversation in this cwd is either older than this floor or already claimed.
+    let floor = spawn_time
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    // agy may only persist the conversation after the first turn, so poll a touch
+    // longer than codex (≈20s) before giving up.
+    for _ in 0..40 {
+        if let Some(sid) = scan_agy_conversation(cli_root, cwd, floor, &claimed) {
+            return Some(sid);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    None
+}
+
+/// One scan-and-pick pass: read `cache/last_conversations.json`, look up `cwd`,
+/// and accept the mapped conversation id when its `conversations/<id>.{db,pb}`
+/// file exists, is modified at/after `floor`, and isn't already `claimed`. Split
+/// out from the polling loop so it's synchronously testable.
+/// See [`capture_agy_session_id`].
+fn scan_agy_conversation(
+    cli_root: &std::path::Path,
+    cwd: &str,
+    floor: std::time::SystemTime,
+    claimed: &std::collections::HashSet<&str>,
+) -> Option<String> {
+    let map_path = cli_root.join("cache").join("last_conversations.json");
+    let raw = std::fs::read_to_string(&map_path).ok()?;
+    let map: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let id = map.get(cwd).and_then(|v| v.as_str())?;
+    if claimed.contains(id) {
+        return None;
+    }
+    if !agy_conversation_fresh(cli_root, id, floor) {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// True when agy's conversation file `conversations/<id>.db|.pb` exists and was
+/// modified at/after `floor` — i.e. created/touched by THIS launch, not a stale
+/// pre-existing conversation that happened to share the same cwd.
+fn agy_conversation_fresh(
+    cli_root: &std::path::Path,
+    id: &str,
+    floor: std::time::SystemTime,
+) -> bool {
+    let dir = cli_root.join("conversations");
+    ["db", "pb"].iter().any(|ext| {
+        std::fs::metadata(dir.join(format!("{id}.{ext}")))
+            .and_then(|m| m.modified())
+            .map(|m| m >= floor)
+            .unwrap_or(false)
+    })
+}
+
 /// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
 /// Used for one-line trail summaries.
 fn trail_clip(s: &str, max: usize) -> String {
@@ -258,7 +342,25 @@ impl Drop for AttachGuard {
 /// [`SessionManager::with_ingest_base`] (ottod sets it from its bind port).
 const DEFAULT_INGEST_BASE: &str = "http://127.0.0.1:7700";
 
+/// The name theme applied to new agent sessions when a user hasn't chosen one.
+/// Single source of truth lives in [`crate::names::DEFAULT_THEME`].
+const DEFAULT_NAME_THEME: &str = crate::names::DEFAULT_THEME;
+
 /// Owns live sessions: PTY handles keyed by session id plus persistence.
+/// Outcome of a name-addressed [`SessionManager::relay`].
+#[derive(Debug, Clone)]
+pub struct RelayOutcome {
+    /// Sessions the message was delivered to (empty when unaddressed).
+    pub session_ids: Vec<Id>,
+    /// True when the address was an explicit broadcast keyword ("all"/"everyone").
+    pub broadcast: bool,
+    /// True when `text` contained no recognizable session address — the caller
+    /// should fall back to its normal handling.
+    pub unaddressed: bool,
+    /// The message actually sent (address prefix stripped).
+    pub text: String,
+}
+
 pub struct SessionManager {
     /// Shared so the per-session status task can evict an exited handle
     /// (otherwise dead PtyHandles — and their emulator + ring buffer — leak).
@@ -323,6 +425,11 @@ pub struct SessionManager {
     /// runs under this lock and persists its claim before releasing, so the next
     /// one sees it in the claimed set. See `spawn_session_id_capture`.
     codex_capture_lock: Arc<Mutex<()>>,
+    /// Optional name-themes store. When set, a new agent session whose title is
+    /// not explicitly provided is auto-named from the creating user's active
+    /// theme (e.g. "Ronaldo"), unique among the workspace's open sessions.
+    /// Absent ⇒ the legacy "{provider} #N" numbering.
+    name_themes: Option<otto_state::NameThemesRepo>,
 }
 
 impl SessionManager {
@@ -357,7 +464,16 @@ impl SessionManager {
                 .unwrap_or_else(|| "ottod".to_string()),
             mcp_tokens: Arc::new(DashMap::new()),
             codex_capture_lock: Arc::new(Mutex::new(())),
+            name_themes: None,
         }
+    }
+
+    /// Attach the name-themes store so new agent sessions are auto-named from the
+    /// creating user's active theme. Builder-style; without it sessions fall back
+    /// to "{provider} #N" numbering.
+    pub fn with_name_themes_repo(mut self, repo: otto_state::NameThemesRepo) -> Self {
+        self.name_themes = Some(repo);
+        self
     }
 
     /// Attach the activity store so lifecycle + user actions are recorded to the
@@ -561,6 +677,77 @@ impl SessionManager {
             }
         }
         Ok(hit)
+    }
+
+    /// Resolve a leading **name address** in `text` against this workspace's
+    /// live agent sessions and deliver the (address-stripped) message to the
+    /// matched session(s) — or broadcast it when addressed to "all".
+    ///
+    /// Examples: `"ronaldo: do X"` → the session named Ronaldo;
+    /// `"ronaldo, messi: ship it"` → both; `"all: stand down"` → broadcast.
+    /// When `text` carries no recognizable session address, returns
+    /// `unaddressed = true` and delivers nothing, so the caller can fall back to
+    /// its normal handling (e.g. AI orchestration). Only LIVE sessions are
+    /// addressable (a suspended one has no PTY to receive input).
+    pub async fn relay(&self, ws: &Id, text: &str) -> Result<RelayOutcome> {
+        let sessions = self.list_by_workspace(ws).await?;
+        let addressable: Vec<crate::names::Addressable> = sessions
+            .iter()
+            .filter(|s| {
+                s.kind == SessionKind::Agent
+                    && matches!(
+                        s.status,
+                        SessionStatus::Running | SessionStatus::Working | SessionStatus::Idle
+                    )
+            })
+            .map(|s| {
+                let handle = s
+                    .meta
+                    .get("name_handle")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&s.title)
+                    .to_string();
+                let full = s
+                    .meta
+                    .get("name_full")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&s.title)
+                    .to_string();
+                crate::names::Addressable {
+                    id: s.id.clone(),
+                    handle,
+                    title: s.title.clone(),
+                    full,
+                }
+            })
+            .collect();
+
+        let resolved = crate::names::resolve_address(text, &addressable);
+        if resolved.targets.is_empty() {
+            return Ok(RelayOutcome {
+                session_ids: vec![],
+                broadcast: false,
+                unaddressed: true,
+                text: text.to_string(),
+            });
+        }
+
+        let msg = resolved.text.trim();
+        let mut delivered = Vec::new();
+        for id in &resolved.targets {
+            if let Err(e) = self.submit_text(id, msg).await {
+                tracing::warn!(session = %id, "relay failed: {e}");
+                continue;
+            }
+            self.record_user_message(id, msg).await;
+            delivered.push(id.clone());
+        }
+        Ok(RelayOutcome {
+            session_ids: delivered,
+            broadcast: resolved.broadcast,
+            unaddressed: false,
+            text: msg.to_string(),
+        })
     }
 
     /// Prune the activity trail to the newest `keep_per_session` rows per
@@ -781,13 +968,39 @@ impl SessionManager {
             }
         };
 
+        // Auto-name from the creating user's active name theme when no explicit
+        // title was given (themed agent sessions only). Falls back to the legacy
+        // "{provider} #N" numbering when no theme is active or the store is absent.
+        let mut name_alloc: Option<crate::names::Allocated> = None;
         let title = match req.title.clone() {
             Some(t) if !t.is_empty() => t,
             _ => {
-                let n = self.repo.count_by_provider(&ws.id, &provider).await? + 1;
-                format!("{provider} #{n}")
+                if req.kind == SessionKind::Agent {
+                    if let Some(alloc) =
+                        self.allocate_session_name(&ws.id, user_id, &provider).await
+                    {
+                        let t = alloc.title.clone();
+                        name_alloc = Some(alloc);
+                        t
+                    } else {
+                        let n = self.repo.count_by_provider(&ws.id, &provider).await? + 1;
+                        format!("{provider} #{n}")
+                    }
+                } else {
+                    let n = self.repo.count_by_provider(&ws.id, &provider).await? + 1;
+                    format!("{provider} #{n}")
+                }
             }
         };
+
+        // Record the callable handle + full display name in meta so the address
+        // resolver ("ronaldo: do X") and the UI can use them. Explicitly-titled
+        // sessions stay addressable by their title (resolver falls back to it).
+        let mut meta = req.meta.clone().unwrap_or_else(|| serde_json::json!({}));
+        if let (Some(alloc), Some(obj)) = (&name_alloc, meta.as_object_mut()) {
+            obj.insert("name_handle".into(), alloc.handle.clone().into());
+            obj.insert("name_full".into(), alloc.full.clone().into());
+        }
 
         let session = self
             .repo
@@ -800,7 +1013,7 @@ impl SessionManager {
                 provider_session_id,
                 connection_id: req.connection_id.clone(),
                 created_by: user_id.clone(),
-                meta: req.meta.clone().unwrap_or_else(|| serde_json::json!({})),
+                meta,
             })
             .await?;
 
@@ -906,13 +1119,16 @@ impl SessionManager {
         Ok(session)
     }
 
-    /// Spawn a background task that captures a codex session's own UUID from its
-    /// on-disk rollout and records it as the `provider_session_id`, making the
-    /// session resumable after a daemon restart (`codex resume <uuid>`).
+    /// Spawn a background task that captures a self-id-minting provider's own
+    /// session id from disk and records it as the `provider_session_id`, making
+    /// the session resumable after a daemon restart. Handles both providers that
+    /// mint their own id: codex (`codex resume <uuid>`, scanned from its rollout)
+    /// and agy (`agy --conversation <uuid>`, read from its `last_conversations`
+    /// cache).
     ///
-    /// Runs under `codex_capture_lock` so two codex sessions launched in the same
-    /// cwd claim DISTINCT rollouts (each persists its claim before the next runs).
-    /// Best-effort: if no matching rollout appears within the window the session
+    /// Runs under `codex_capture_lock` so two such sessions launched in the same
+    /// cwd claim DISTINCT ids (each persists its claim before the next runs).
+    /// Best-effort: if no matching session appears within the window the session
     /// simply stays non-resumable (safe — we never guess and resume the wrong
     /// conversation). Never blocks the spawn.
     fn spawn_session_id_capture(&self, session: &Session) {
@@ -920,28 +1136,78 @@ impl SessionManager {
         let lock = Arc::clone(&self.codex_capture_lock);
         let id = session.id.clone();
         let cwd = session.cwd.clone();
-        // codex writes rollouts under $CODEX_HOME/sessions (defaults to ~/.codex).
-        let sessions_root = codex_sessions_root();
-        // Captured at the spawn moment so we match THIS launch's rollout, not a
-        // later concurrent same-cwd spawn's (whose mtime is newer).
+        let provider = session.provider.clone();
+        // Captured at the spawn moment so we match THIS launch's session, not a
+        // later concurrent same-cwd spawn's (whose file mtime is newer).
         let spawn_time = std::time::SystemTime::now();
         tokio::spawn(async move {
             let _guard = lock.lock().await;
             let claimed = repo.provider_session_ids().await.unwrap_or_default();
-            match capture_codex_session_id(&sessions_root, &cwd, spawn_time, &claimed).await {
+            let captured = match provider.as_str() {
+                "codex" => {
+                    capture_codex_session_id(&codex_sessions_root(), &cwd, spawn_time, &claimed).await
+                }
+                "agy" => capture_agy_session_id(&agy_cli_root(), &cwd, spawn_time, &claimed).await,
+                _ => None,
+            };
+            match captured {
                 Some(psid) => match repo.set_provider_session(&id, &psid).await {
                     Ok(()) => tracing::info!(
-                        session = %id, codex_session = %psid,
-                        "captured codex session id — session is now resumable"
+                        session = %id, provider = %provider, provider_session = %psid,
+                        "captured provider session id — session is now resumable"
                     ),
-                    Err(e) => tracing::warn!(session = %id, "codex id capture: persist failed: {e}"),
+                    Err(e) => {
+                        tracing::warn!(session = %id, "provider id capture: persist failed: {e}")
+                    }
                 },
                 None => tracing::warn!(
-                    session = %id,
-                    "codex id capture: no matching rollout found; session won't auto-resume"
+                    session = %id, provider = %provider,
+                    "provider id capture: no matching session found; won't auto-resume"
                 ),
             }
         });
+    }
+
+    /// Pick a unique display name for a new agent session from the creating
+    /// user's active name theme. Returns `None` (caller uses "{provider} #N")
+    /// when the themes store is absent or the active theme is the "none"
+    /// sentinel. The name is unique among the workspace's OPEN (non-archived)
+    /// agent sessions, so addressing it by name is unambiguous.
+    async fn allocate_session_name(
+        &self,
+        ws_id: &Id,
+        user_id: &Id,
+        _provider: &str,
+    ) -> Option<crate::names::Allocated> {
+        let repo = self.name_themes.as_ref()?;
+        let active = repo
+            .active(user_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| DEFAULT_NAME_THEME.to_string());
+        if active == crate::names::THEME_NONE {
+            return None;
+        }
+        let used: std::collections::HashSet<String> = self
+            .repo
+            .list_by_workspace(ws_id)
+            .await
+            .ok()?
+            .into_iter()
+            .filter(|s| !s.archived && s.kind == SessionKind::Agent)
+            .map(|s| s.title.to_lowercase())
+            .collect();
+        if crate::names::is_builtin(&active) {
+            crate::names::allocate_builtin(&active, &used)
+        } else {
+            // A custom theme id: load the user's list; if it vanished, fall back
+            // to the default builtin rather than the bare numbering.
+            match repo.get(&active).await {
+                Ok(theme) => Some(crate::names::allocate_custom(&theme.names, &used)),
+                Err(_) => crate::names::allocate_builtin(DEFAULT_NAME_THEME, &used),
+            }
+        }
     }
 
     /// Load one session from the DB.
@@ -1221,7 +1487,8 @@ impl SessionManager {
                 continue;
             }
             // Only resumable agent sessions — never lose work for a provider
-            // that can't be resumed (codex/agy/shell).
+            // that can't be resumed (shell, or a self-id provider whose id we
+            // never captured). claude/codex/agy all qualify once resumable.
             let resumable = session.kind == SessionKind::Agent
                 && session.provider_session_id.is_some()
                 && self.providers.supports_resume(&session.provider);
@@ -1706,6 +1973,38 @@ mod tests {
         // Once AAA is claimed by another session, there's nothing left to claim.
         let claimed: HashSet<&str> = ["AAA"].into_iter().collect();
         assert_eq!(scan_codex_rollout(tmp.path(), "/work/proj", floor, &claimed), None);
+    }
+
+    #[test]
+    fn scan_agy_conversation_matches_fresh_unclaimed_cwd() {
+        use std::collections::HashSet;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        std::fs::create_dir_all(root.join("conversations")).unwrap();
+        // cwd -> most-recent conversation id (agy's last_conversations cache).
+        std::fs::write(
+            root.join("cache/last_conversations.json"),
+            r#"{"/work/proj":"AAA","/other":"BBB"}"#,
+        )
+        .unwrap();
+        // Only AAA has a conversation file on disk (fresh).
+        std::fs::write(root.join("conversations/AAA.db"), b"x").unwrap();
+        let floor = std::time::SystemTime::UNIX_EPOCH;
+        let none: HashSet<&str> = HashSet::new();
+
+        // The cwd maps to AAA and its file is fresh + unclaimed → captured.
+        assert_eq!(
+            scan_agy_conversation(root, "/work/proj", floor, &none),
+            Some("AAA".to_string())
+        );
+        // /other maps to BBB but there is no conversation file → not captured.
+        assert_eq!(scan_agy_conversation(root, "/other", floor, &none), None);
+        // Already claimed by another session → skip.
+        let claimed: HashSet<&str> = ["AAA"].into_iter().collect();
+        assert_eq!(scan_agy_conversation(root, "/work/proj", floor, &claimed), None);
+        // Unknown cwd → nothing.
+        assert_eq!(scan_agy_conversation(root, "/nope", floor, &none), None);
     }
 
     async fn seed_session(repo: &SessionsRepo, ws: &Workspace, user: &Id, psid: Option<&str>) -> Id {

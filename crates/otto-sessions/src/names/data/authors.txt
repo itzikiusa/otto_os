@@ -1,0 +1,448 @@
+## HEAD
+Shakespeare | William Shakespeare
+Tolkien | J R R Tolkien
+Rowling | J K Rowling
+Dickens | Charles Dickens
+Austen | Jane Austen
+Hemingway | Ernest Hemingway
+Twain | Mark Twain
+Orwell | George Orwell
+Poe | Edgar Allan Poe
+Tolstoy | Leo Tolstoy
+Dostoevsky | Fyodor Dostoevsky
+Kafka | Franz Kafka
+Joyce | James Joyce
+Fitzgerald | F Scott Fitzgerald
+Wilde | Oscar Wilde
+Bronte | Charlotte Brontë
+BronteE | Emily Brontë
+Hugo | Victor Hugo
+Verne | Jules Verne
+Dumas | Alexandre Dumas
+Marquez | Gabriel García Márquez
+Borges | Jorge Luis Borges
+Nabokov | Vladimir Nabokov
+Steinbeck | John Steinbeck
+Faulkner | William Faulkner
+Woolf | Virginia Woolf
+Salinger | J D Salinger
+Vonnegut | Kurt Vonnegut
+Bradbury | Ray Bradbury
+Asimov | Isaac Asimov
+King | Stephen King
+Christie | Agatha Christie
+Doyle | Arthur Conan Doyle
+Chekhov | Anton Chekhov
+Gogol | Nikolai Gogol
+Turgenev | Ivan Turgenev
+Pushkin | Alexander Pushkin
+Goethe | Johann Wolfgang von Goethe
+Cervantes | Miguel de Cervantes
+Dante | Dante Alighieri
+Homer | Homer
+Virgil | Virgil
+Ovid | Ovid
+Chaucer | Geoffrey Chaucer
+Milton | John Milton
+Melville | Herman Melville
+Hawthorne | Nathaniel Hawthorne
+Thoreau | Henry David Thoreau
+Whitman | Walt Whitman
+Dickinson | Emily Dickinson
+Frost | Robert Frost
+Eliot | T S Eliot
+Pound | Ezra Pound
+Yeats | William Butler Yeats
+Auden | W H Auden
+Plath | Sylvia Plath
+Angelou | Maya Angelou
+Morrison | Toni Morrison
+Walker | Alice Walker
+Atwood | Margaret Atwood
+Munro | Alice Munro
+Lessing | Doris Lessing
+Woolf2 | Edith Wharton
+Cather | Willa Cather
+Wharton | Henry James
+Conrad | Joseph Conrad
+Forster | E M Forster
+Lawrence | D H Lawrence
+Huxley | Aldous Huxley
+Greene | Graham Greene
+Waugh | Evelyn Waugh
+Amis | Kingsley Amis
+McEwan | Ian McEwan
+Ishiguro | Kazuo Ishiguro
+Rushdie | Salman Rushdie
+Naipaul | V S Naipaul
+Coetzee | J M Coetzee
+Achebe | Chinua Achebe
+Soyinka | Wole Soyinka
+Adichie | Chimamanda Adichie
+Pamuk | Orhan Pamuk
+Mahfouz | Naguib Mahfouz
+Llosa | Mario Vargas Llosa
+Cortazar | Julio Cortázar
+Neruda | Pablo Neruda
+Allende | Isabel Allende
+Calvino | Italo Calvino
+Eco | Umberto Eco
+Pirandello | Luigi Pirandello
+Camus | Albert Camus
+Sartre | Jean-Paul Sartre
+Proust | Marcel Proust
+Flaubert | Gustave Flaubert
+Balzac | Honoré de Balzac
+Zola | Émile Zola
+Stendhal | Stendhal
+Maupassant | Guy de Maupassant
+Rimbaud | Arthur Rimbaud
+Baudelaire | Charles Baudelaire
+Mann | Thomas Mann
+Hesse | Hermann Hesse
+Brecht | Bertolt Brecht
+Rilke | Rainer Maria Rilke
+Grass | Günter Grass
+Solzhenitsyn | Aleksandr Solzhenitsyn
+Bulgakov | Mikhail Bulgakov
+Pasternak | Boris Pasternak
+Nabokov2 | Anton Makarenko
+Wolfe | Thomas Wolfe
+Capote | Truman Capote
+Mailer | Norman Mailer
+Roth | Philip Roth
+Bellow | Saul Bellow
+Updike | John Updike
+DeLillo | Don DeLillo
+Pynchon | Thomas Pynchon
+Wallace | David Foster Wallace
+Franzen | Jonathan Franzen
+Chabon | Michael Chabon
+McCarthy | Cormac McCarthy
+Irving | John Irving
+Tartt | Donna Tartt
+Lee | Harper Lee
+Plath2 | Flannery O'Connor
+Welty | Eudora Welty
+Hurston | Zora Neale Hurston
+Baldwin | James Baldwin
+Ellison | Ralph Ellison
+Wright | Richard Wright
+Hughes | Langston Hughes
+Coates | Ta-Nehisi Coates
+Gaiman | Neil Gaiman
+Pratchett | Terry Pratchett
+Martin | George R R Martin
+LeGuin | Ursula K Le Guin
+Herbert | Frank Herbert
+Card | Orson Scott Card
+Gibson | William Gibson
+Clarke | Arthur C Clarke
+Heinlein | Robert Heinlein
+Dick | Philip K Dick
+Lovecraft | H P Lovecraft
+Stoker | Bram Stoker
+Shelley | Mary Shelley
+Wells | H G Wells
+Carroll | Lewis Carroll
+Kipling | Rudyard Kipling
+Stevenson | Robert Louis Stevenson
+Defoe | Daniel Defoe
+Swift | Jonathan Swift
+Fielding | Henry Fielding
+Eliot2 | George Eliot
+Hardy | Thomas Hardy
+Trollope | Anthony Trollope
+Gaskell | Elizabeth Gaskell
+Forster2 | Wilkie Collins
+## FIRST
+William
+John
+Charles
+Jane
+Ernest
+Mark
+George
+Edgar
+Leo
+Fyodor
+Franz
+James
+Oscar
+Charlotte
+Emily
+Victor
+Jules
+Alexandre
+Gabriel
+Jorge
+Vladimir
+Virginia
+Kurt
+Ray
+Isaac
+Stephen
+Agatha
+Arthur
+Anton
+Nikolai
+Ivan
+Alexander
+Johann
+Miguel
+Dante
+Geoffrey
+Herman
+Nathaniel
+Henry
+Walt
+Robert
+Ezra
+Sylvia
+Maya
+Toni
+Alice
+Margaret
+Doris
+Edith
+Willa
+Joseph
+Aldous
+Graham
+Evelyn
+Kingsley
+Ian
+Kazuo
+Salman
+Chinua
+Wole
+Chimamanda
+Orhan
+Naguib
+Mario
+Julio
+Pablo
+Isabel
+Italo
+Umberto
+Luigi
+Albert
+Jean
+Marcel
+Gustave
+Honore
+Emile
+Guy
+Stendhal
+Thomas
+Hermann
+Bertolt
+Rainer
+Gunter
+Aleksandr
+Mikhail
+Boris
+Truman
+Norman
+Philip
+Saul
+Don
+David
+Jonathan
+Michael
+Cormac
+Donna
+Harper
+Flannery
+Eudora
+Zora
+Langston
+Neil
+Terry
+Ursula
+Frank
+Orson
+Bram
+Mary
+Lewis
+Rudyard
+Daniel
+Wilkie
+Anthony
+Elizabeth
+Beverly
+Marguerite
+Simone
+Colette
+Anais
+Carson
+Shirley
+Judy
+Octavia
+Madeleine
+Beatrix
+Louisa
+Lucy
+Roald
+Astrid
+Hans
+Antoine
+Frances
+Cesare
+Primo
+Stefan
+Patricia
+Heinrich
+## LAST
+Shakespeare
+Tolkien
+Rowling
+Dickens
+Austen
+Hemingway
+Twain
+Orwell
+Poe
+Tolstoy
+Dostoevsky
+Kafka
+Joyce
+Fitzgerald
+Wilde
+Bronte
+Hugo
+Verne
+Dumas
+Marquez
+Borges
+Nabokov
+Steinbeck
+Faulkner
+Woolf
+Salinger
+Vonnegut
+Bradbury
+Asimov
+King
+Christie
+Doyle
+Chekhov
+Gogol
+Turgenev
+Pushkin
+Goethe
+Cervantes
+Alighieri
+Homer
+Virgil
+Chaucer
+Milton
+Melville
+Hawthorne
+Thoreau
+Whitman
+Dickinson
+Frost
+Eliot
+Pound
+Yeats
+Auden
+Plath
+Angelou
+Morrison
+Walker
+Atwood
+Munro
+Lessing
+Wharton
+Cather
+James
+Conrad
+Forster
+Lawrence
+Huxley
+Greene
+Waugh
+Amis
+McEwan
+Ishiguro
+Rushdie
+Naipaul
+Coetzee
+Achebe
+Soyinka
+Adichie
+Pamuk
+Mahfouz
+Llosa
+Cortazar
+Neruda
+Allende
+Calvino
+Eco
+Pirandello
+Camus
+Sartre
+Proust
+Flaubert
+Balzac
+Zola
+Stendhal
+Maupassant
+Rimbaud
+Baudelaire
+Mann
+Hesse
+Brecht
+Rilke
+Grass
+Solzhenitsyn
+Bulgakov
+Pasternak
+Wolfe
+Capote
+Mailer
+Roth
+Bellow
+Updike
+DeLillo
+Pynchon
+Wallace
+Franzen
+Chabon
+McCarthy
+Irving
+Tartt
+Lee
+OConnor
+Welty
+Hurston
+Baldwin
+Ellison
+Wright
+Hughes
+Coates
+Gaiman
+Pratchett
+Martin
+LeGuin
+Herbert
+Card
+Gibson
+Clarke
+Heinlein
+Dick
+Lovecraft
+Stoker
+Shelley
+Wells
+Carroll
+Kipling
+Stevenson
+Defoe
+Swift
+Fielding
+Hardy
+Trollope
+Gaskell
+Collins

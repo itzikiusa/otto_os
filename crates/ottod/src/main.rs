@@ -163,6 +163,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         SessionManager::new(SessionsRepo::new(pool.clone()), events.clone(), providers)
             // Runtime-configurable idle-suspend grace + per-session keep-alive pin.
             .with_settings_repo(SettingsRepo::new(pool.clone()))
+            // Auto-name new agent sessions from the creating user's active theme.
+            .with_name_themes_repo(otto_state::NameThemesRepo::new(pool.clone()))
             .with_pre_spawn_hook(Arc::new(otto_context::Provisioner::new(
                 context_library.clone(),
             )))

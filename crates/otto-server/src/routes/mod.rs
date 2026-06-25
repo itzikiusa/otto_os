@@ -21,6 +21,7 @@ pub mod logs;
 pub mod mcp_servers;
 pub mod meta;
 pub mod mission;
+pub mod name_themes;
 pub mod notifications;
 pub mod onboarding;
 pub mod product_memory;
@@ -191,6 +192,16 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(workspaces::members).put(workspaces::set_members),
         )
         .route("/settings", get(settings::get_all).put(settings::put_all))
+        // --- Session name themes (auto-naming new sessions) --------------
+        .route(
+            "/name-themes",
+            get(name_themes::list).post(name_themes::create),
+        )
+        .route("/name-themes/active", put(name_themes::set_active))
+        .route(
+            "/name-themes/{id}",
+            put(name_themes::update).delete(name_themes::delete),
+        )
         // --- Trust & Safety Center (root only) ---------------------------
         .route("/audit-log", get(audit::list))
         .route("/security-posture", get(audit::posture))
