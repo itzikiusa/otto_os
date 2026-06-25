@@ -1,7 +1,7 @@
 // Global keyboard map (spec §7.4). One window-level keydown listener which
 // translates chords into named actions; App.svelte supplies the dispatcher.
 //
-// ⌘K palette · ⌘I ask Otto (plain English) · ⌘⇧B broadcast · ⌘1 rail ·
+// ⌘K palette · ⌘I ask Otto (plain English) · ⌘⇧B broadcast · ⌘⇧R hard reload · ⌘1 rail ·
 // ⌘J right panel · ⌘T new session · ⌘W close tab ·
 // ⌃Tab / ⌃⇧Tab cycle tabs · ⌘[ / ⌘] prev/next session · ⌃1…⌃9 jump to session N ·
 // ⌘D / ⌘⇧D splits · ⌘F find (terminal) ·
@@ -11,6 +11,7 @@ export type KeyAction =
   | 'palette'
   | 'askOtto'
   | 'broadcast'
+  | 'hardReload'
   | 'settings'
   | 'updateCLIs'
   | 'toggleRail'
@@ -139,6 +140,15 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
         e.preventDefault();
         dispatch('find', e);
         return;
+      case 'r':
+        // ⌘⇧R → hard-reload the UI (like a browser refresh). All sessions live
+        // in the daemon, so they survive — this just re-fetches fresh state and
+        // clears any stale in-memory UI. Requires Shift (plain ⌘R is left alone).
+        if (e.shiftKey) {
+          e.preventDefault();
+          dispatch('hardReload', e);
+        }
+        return;
     }
 
     // ⌘[ / ⌘] → previous / next session tab.
@@ -195,6 +205,7 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘I', label: 'Ask Otto (plain English)' },
       { keys: '⌘⇧B', label: 'Broadcast to sessions' },
       { keys: '⌘U', label: 'Update all agent CLIs' },
+      { keys: '⌘⇧R', label: 'Hard reload — refresh UI (sessions kept)' },
       { keys: '⌘,', label: 'Settings' },
       { keys: '?', label: 'Keyboard shortcuts (this sheet)' },
     ],

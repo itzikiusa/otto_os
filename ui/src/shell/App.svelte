@@ -287,6 +287,13 @@
         case 'broadcast':
           ui.openBroadcast();
           break;
+        case 'hardReload':
+          // Full UI refresh, like a browser hard reload. Sessions, workspaces,
+          // and everything else live in the daemon (the active workspace + open
+          // panes are restored from localStorage), so nothing is lost — this just
+          // re-fetches fresh state and clears any stale in-memory UI.
+          window.location.reload();
+          break;
         case 'toggleRail':
           ui.toggleRail();
           break;

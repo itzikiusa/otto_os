@@ -132,6 +132,28 @@ test('⌘T: arrow keys switch provider, Tab moves to the next field', async ({ p
   await page.keyboard.press('Escape');
 });
 
+test('⌘⇧R hard-reloads the UI and keeps sessions; plain ⌘R does not', async ({ page }) => {
+  await expect(page.getByText('Zlatan').first()).toBeVisible({ timeout: 20_000 });
+
+  // Plain ⌘R is left alone — stamp a sentinel on this window and confirm it
+  // survives a ⌘R (no reload).
+  await page.evaluate(() => ((window as unknown as { __otto?: number }).__otto = 1));
+  await page.keyboard.press('Meta+r');
+  await page.waitForTimeout(800);
+  expect(await page.evaluate(() => (window as unknown as { __otto?: number }).__otto)).toBe(1);
+
+  // ⌘⇧R reloads the page — the sentinel is destroyed with the old window.
+  await page.keyboard.press('Meta+Shift+r');
+  await page.waitForFunction(
+    () => (window as unknown as { __otto?: number }).__otto === undefined,
+    null,
+    { timeout: 15_000 },
+  );
+
+  // Sessions live in the daemon, so they're still listed after the reload.
+  await expect(page.getByText('Zlatan').first()).toBeVisible({ timeout: 20_000 });
+});
+
 test('shell reconnect: an exited shell offers Reconnect and comes back live', async ({ page }) => {
   const id = idByTitle.Buffon;
   await page.goto(`/#/agents/${id}`);
