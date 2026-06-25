@@ -166,7 +166,7 @@ export interface CloseRequest {
 // "please"/"pls"/"kindly" first). Anchoring at the start keeps a name-addressed
 // relay like "ronaldo: stop the build" from being mistaken for a close command.
 const START_CLOSE =
-  /^\s*(?:please|pls|kindly)?\s*(?:close|kill|end|stop|terminate|quit|remove|exit|shut(?:\s*down)?)\b/;
+  /^\s*(?:please|pls|kindly)?\s*(?:close|kill|delete|destroy|end|stop|terminate|quit|remove|exit|shut(?:\s*down)?)\b/;
 
 /** True when `input` reads as a close command (starts with a close verb). */
 export function startsWithCloseVerb(input: string): boolean {

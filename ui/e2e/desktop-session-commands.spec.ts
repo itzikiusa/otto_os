@@ -1,4 +1,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
+import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 
 // Desktop BROWSER: ⌘I close commands + ⌘T New-Session keyboard navigation.
@@ -29,6 +32,10 @@ async function isArchived(id: string): Promise<boolean> {
   const r = await ctx.get(`${base}/api/v1/sessions/${id}`);
   if (!r.ok()) return true; // gone (killed) counts as closed
   return ((await r.json()) as { archived?: boolean }).archived === true;
+}
+
+async function sessionExists(id: string): Promise<boolean> {
+  return (await ctx.get(`${base}/api/v1/sessions/${id}`)).ok();
 }
 
 /** Open the ⌘I plain-English palette and submit `text`. */
@@ -70,6 +77,33 @@ test('⌘I: close a session by NAME, then close ALL of a provider', async ({ pag
   await runOttoCommand(page, 'please close all shell sessions');
   await expect.poll(() => isArchived(idByTitle.Pirlo), { timeout: 15_000 }).toBe(true);
   await expect.poll(() => isArchived(idByTitle.Buffon), { timeout: 15_000 }).toBe(true);
+});
+
+test('⌘I: "delete <name>" removes the session permanently (not just archive)', async ({ page }) => {
+  await runOttoCommand(page, 'please delete pirlo');
+  // Gone entirely — a GET returns 404, unlike archive which keeps the row.
+  await expect.poll(() => sessionExists(idByTitle.Pirlo), { timeout: 15_000 }).toBe(false);
+  // The others are untouched.
+  expect(await sessionExists(idByTitle.Zlatan)).toBe(true);
+  expect(await sessionExists(idByTitle.Buffon)).toBe(true);
+});
+
+test('⌘I: "send to <name/session N> <msg>" delivers to the right session', async ({ page }) => {
+  // Open Zlatan as pane #1 so a positional address ("session 1") resolves.
+  await page.goto(`/#/agents/${idByTitle.Zlatan}`);
+  await expect(page.locator('.term-host')).toBeVisible({ timeout: 30_000 });
+
+  const posFile = join(tmpdir(), `otto-e2e-pos-${Date.now()}`);
+  const nameFile = join(tmpdir(), `otto-e2e-name-${Date.now()}`);
+
+  // "send to session 1 <cmd>" → the shell in pane 1 runs it (this is the exact
+  // form the user reported as broken — it must NOT fall through to the AI).
+  await runOttoCommand(page, `send to session 1 touch ${posFile}`);
+  await expect.poll(() => existsSync(posFile), { timeout: 15_000 }).toBe(true);
+
+  // "send to zlatan <cmd>" → addressed by name.
+  await runOttoCommand(page, `send to zlatan touch ${nameFile}`);
+  await expect.poll(() => existsSync(nameFile), { timeout: 15_000 }).toBe(true);
 });
 
 test('⌘T: arrow keys switch provider, Tab moves to the next field', async ({ page }) => {
@@ -134,6 +168,8 @@ test('shell terminal fits its pane (no stale-narrow PTY width)', async ({ page }
   // After the connect-time fit, the grid must reflect the wide desktop pane —
   // the wrapping bug pinned shells to ~46 cols regardless of width.
   await expect
-    .poll(() => host.getAttribute('data-cols').then((v) => Number(v ?? '0')), { timeout: 15_000 })
+    .poll(() => host.getAttribute('data-cols').then((v: string | null) => Number(v ?? '0')), {
+      timeout: 15_000,
+    })
     .toBeGreaterThan(100);
 });
