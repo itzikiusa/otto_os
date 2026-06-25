@@ -18,6 +18,7 @@
   import SwarmLinkCard from './SwarmLinkCard.svelte';
   import type { ProductTranscript } from './types';
   import AttachmentsPanel from './AttachmentsPanel.svelte';
+  import LinkedCanvases from './LinkedCanvases.svelte';
 
   // Version picker state — null means "show current (source) version".
   let viewingVersion = $state<ProductStoryVersion | null>(null);
@@ -1842,6 +1843,9 @@
 
     <!-- ── Swarm link (cross-link back to the project this story spawned) ── -->
     <SwarmLinkCard storyId={story.id} />
+
+    <!-- ── Canvases linked to this story ─────────────────────────── -->
+    <LinkedCanvases storyId={story.id} />
 
     <!-- ── Related by tag ───────────────────────────────────────── -->
     {#if relatedStories.length > 0}

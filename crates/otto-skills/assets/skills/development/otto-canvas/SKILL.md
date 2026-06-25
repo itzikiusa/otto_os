@@ -1,53 +1,75 @@
 ---
-description: Use when drawing/generating a diagram for the Otto Canvas (the embedded Excalidraw editor), creating or editing canvas scenes, or driving Discovery Chat on a Product story, from an agent session over HTTP. Covers the EXCALIDRAW element-skeleton output format (top-notch flowcharts with code blocks, emoji icons, a colour palette and clean layout), the OTTO_API_TOKEN auth model, the Canvas + Discovery-Chat endpoints, the canvas.mjs helper, and a mermaid fallback.
+description: Use when drawing/generating a diagram for the Otto Canvas, creating or editing canvas scenes, or driving Discovery Chat on a Product story, from an agent session over HTTP. Covers the FILE-BACKED canvas model with TWO modes — Mermaid (edit a per-scene `canvas.mermaid`; any diagram type) and Excalidraw (edit a per-scene `canvas.json`; fully editable shapes) — top-notch pretty-Mermaid styling, the Excalidraw simplified element format, the OTTO_API_TOKEN auth model, the Canvas + Discovery-Chat endpoints, and the canvas.mjs helper.
 category: development
-version: 2
+version: 4
 ---
 
-# Otto Canvas (Excalidraw) + Discovery Chat over HTTP
+# Otto Canvas (Mermaid + Excalidraw modes) + Discovery Chat over HTTP
 
-Otto's **Canvas** is the real **Excalidraw** editor embedded in the app. A scene
-is ONE JSON document (`doc_json`) the server stores opaquely; for the canvas it
-holds Excalidraw's `{ type:"excalidraw", elements, appState, files }`. **Discovery
-Chat** is a conversational product-discovery agent on a story that can *propose* a
-canvas you then apply. This skill teaches an agent to **generate a top-notch
-diagram** for the canvas and to drive the canvas/discovery HTTP API.
+Otto's **Canvas** is **file-backed** with TWO modes the user picks per scene; the
+agent edits the scene's file and the board re-renders (manual edits write back to
+the same file too):
+
+- **Mermaid mode** — the agent edits a per-scene **`canvas.mermaid`**. The UI renders
+  it with Mermaid's own renderer, so ANY diagram type works (flowchart, sequence,
+  class/UML, ER, state). Best for rich auto-laid-out diagrams.
+- **Excalidraw mode** — the agent edits a per-scene **`canvas.json`** (an Excalidraw
+  scene). The UI loads it in the real Excalidraw editor, so the user can also draw /
+  move / restyle shapes by hand. Best for freeform, hand-editable boards.
+
+The scene's `doc_json` stores `{ "type":"otto-canvas", "version":1, "format":"mermaid"|"excalidraw", "source":"…" }`
+(`source` is the file's text). The agent refines the SAME file across the conversation,
+so follow-ups *change* the diagram instead of regenerating it, and the work is never
+lost. **Discovery Chat** is a conversational product-discovery agent on a story that
+can *propose* a canvas you then apply.
+
+## Excalidraw mode — edit canvas.json
+
+In Excalidraw mode you EDIT `canvas.json`. Write the COMPLETE diagram as
+`{"type":"excalidraw","elements":[ … ]}` using the SIMPLIFIED element form (the app
+expands it into a real Excalidraw scene — do NOT include `seed`/`versionNonce`):
+- Shape: `{"type":"rectangle"|"ellipse"|"diamond","id":"n1","x":int,"y":int,"width":int,"height":int,"backgroundColor":"#hex","strokeColor":"#hex","fillStyle":"solid","label":{"text":"…","fontSize":16,"fontFamily":2}}`
+- Arrow (routed by id): `{"type":"arrow","start":{"id":"n1"},"end":{"id":"n2"},"label":{"text":"yes"}}`
+- Text: `{"type":"text","x":int,"y":int,"text":"…","fontSize":20}` · `fontFamily:3` = code.
+Lay nodes ~80px apart with no overlaps, size boxes to text, colour-code by role.
 
 Reach for this skill whenever you're asked to **draw/diagram something on the
 canvas** ("show how service A calls B", "sketch the auth flow", "diagram the
 order pipeline"), **create/edit a scene**, or **run a discovery chat** on a story.
 
-## Drawing a diagram — output the Excalidraw element SKELETON (preferred)
+## Drawing a diagram — edit the source (Mermaid is the default)
 
-When asked to draw, emit a SINGLE fenced ```json block `{"elements":[ … ]}`. The
-app converts the skeleton into real, EDITABLE Excalidraw shapes (auto-routing
-arrows). This is preferred over Mermaid because it gives **true code blocks,
-emoji icons, frames and full styling**.
+When the canvas "Ask AI" turn runs, you are placed in the scene's directory with
+the source file already there. **Read it, make the requested change by editing it
+in place, and save it** — keep it the COMPLETE, valid diagram (no ``` fences
+inside the file). Make minimal, additive edits across the conversation; don't
+rewrite from scratch unless asked. Driving the API directly instead? Return the
+diagram from `assist` (a ```mermaid block) and the server commits it for you.
 
-**Skeleton shape (use exactly this):**
-- Shape — `{"type":"rectangle"|"ellipse"|"diamond","id":"n1","x":int,"y":int,"width":int,"height":int,"backgroundColor":"#hex","strokeColor":"#hex","fillStyle":"solid","roundness":{"type":3},"label":{"text":"…","fontSize":16,"fontFamily":2,"strokeColor":"#hex"}}`
-- Arrow (connect by node id) — `{"type":"arrow","x":int,"y":int,"start":{"id":"n1"},"end":{"id":"n2"},"strokeColor":"#94a3b8","label":{"text":"yes"}}`
-- `fontFamily`: `2` = normal, `3` = **code (monospace)**.
+Mermaid is the default because you edit TEXT (the layout engine places nodes) —
+far faster and more reliable than hand-computing coordinates for dozens of shapes.
 
-**Make it top-notch:**
-- **Layout (you own coordinates):** left→right for pipelines, top→down for
-  processes; space nodes ~80px apart with NO overlaps; unique id per node; connect
-  everything with labeled arrows (label = the data/event flowing).
-- **Size every box to its text** so nothing clips: `width ≥ 28 + 9·chars-of-longest-line`,
-  `height ≥ 28 + 22·lines`.
-- **Colour palette by role:** start `#dcfce7`/`#16a34a` · process `#eef2ff`/`#6366f1`
-  · decision (DIAMOND) `#fef9c3`/`#ca8a04` · io `#f3e8ff`/`#9333ea` · data
-  `#ecfeff`/`#0891b2` · done/error `#fee2e2`/`#dc2626`. Dark readable text.
-- **Code blocks:** a rectangle, `backgroundColor:"#0f172a"`, `strokeColor:"#334155"`,
-  `label` with `fontFamily:3`, `strokeColor:"#e2e8f0"`, the REAL code (`\n` between
-  lines); make it wide + tall enough for every line.
-- **Icons:** prefix labels with a fitting emoji (🌐🔐📦💳🧾📣🗄️⚡🛞✅❌⏳).
-- **Decisions** are diamonds with labeled out-arrows (yes/no) + error/retry paths.
+**Make the Mermaid top-notch (pretty by default):**
+- `flowchart TD` (top-down) or `LR` (pipelines). Short labels, each with a leading
+  emoji icon, e.g. `A["🚀 Start"]` (🌐🔐📦💳🧾📣🗄️⚡✅❌⏳).
+- **Decisions** are rhombus nodes `B{"❓ Valid?"}` with LABELLED edges
+  `B -->|yes| C` / `B -->|no| E`; include error/retry paths, not just the happy one.
+- Group related steps with **`subgraph` lanes** (e.g. `Client` / `API` / `Data`).
+- **Colour-code by role** with `classDef` + `class` (put these at the END):
+  - `classDef start fill:#dcfce7,stroke:#16a34a,color:#064e3b;`
+  - `classDef process fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;`
+  - `classDef decision fill:#fef9c3,stroke:#ca8a04,color:#422006;`
+  - `classDef io fill:#f3e8ff,stroke:#9333ea,color:#3b0764;`
+  - `classDef data fill:#ecfeff,stroke:#0891b2,color:#083344;`
+  - `classDef error fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;`
+  then assign with `class A,B start;`. Code/commands go in a node label with
+  `<br/>` between lines.
+- Be accurate + reasonably complete, but keep node text short.
 
-> **Mermaid fallback:** for `sequenceDiagram` / `classDiagram` / `erDiagram`
-> (where auto-layout beats hand coordinates) emit a single ```mermaid block
-> instead — the app renders it through mermaid-to-excalidraw. See
-> `references/mermaid-cheatsheet.md`. Everything else: prefer the element skeleton.
+> **The board is editable.** Subgraph lanes, `classDef` colours, node shapes and
+> edge labels all parse into editable nodes (and round-trip back to Mermaid when
+> the user hand-edits), so keep the source clean flowchart Mermaid — that's what
+> the user actually sees and edits. Sequence/class/ER diagrams render read-only.
 
 ## Auth model (do this first)
 
@@ -85,12 +107,14 @@ node scripts/canvas.mjs assist        --preview  "<prompt>" [mode] # assist with
 `add-mermaid` / `add-slide` do a read-modify-write: GET the scene, `JSON.parse`
 its `doc_json`, append a node/slide per the schema, then `PUT` the whole doc back.
 
-## Canvas doc (Excalidraw) + legacy Scene schema
+## Canvas doc (file-backed) + legacy Scene schema
 
-The canvas now stores **Excalidraw JSON** in `doc_json`:
-`{ "type":"excalidraw", "elements":[…], "appState":{…}, "files":{…} }` — the UI
-owns it. To add to a canvas, generate the element skeleton (above) and let the UI
-apply it; you don't hand-edit `doc_json`.
+The canvas stores the **agent-edited source** in `doc_json`:
+`{ "type":"otto-canvas", "version":1, "format":"mermaid", "source":"…", "positions":{…} }`.
+The UI parses `source` into editable flow nodes (`positions` keeps the user's
+hand-arranged layout, which Mermaid itself can't carry). You don't hand-edit
+`doc_json` over the wire — call `assist` and the server commits the new source for
+you (the UI also writes it back when the user drags/adds nodes).
 
 The schema below is the **legacy non-Excalidraw Scene** form (still accepted by
 older scenes / `canvas.mjs add-mermaid`):
@@ -138,11 +162,12 @@ When asked to visualize a flow ("service A calls B, B does 10 things"):
 3. **Let the agent draft it for you** instead of writing mermaid by hand — call
    `assist`, then add the returned `mermaid` (or `nodes`/`edges`):
    ```bash
-   node scripts/canvas.mjs assist "$SID" "sequence: service A calls B, and B does 10 things" sequence
+   node scripts/canvas.mjs assist "$SID" "service A calls B, and B does 10 things"
    ```
-   `assist`/`assist --preview` return `{ excalidraw?, mermaid?, nodes, edges, note }`
-   and **do not mutate the scene** — the canvas UI applies the returned diagram.
-   Prefer `excalidraw` (the element skeleton above); `mermaid` is the fallback.
+   `assist` on a scene now EDITS the scene's source file and **commits it**
+   (updating `doc_json`), then returns `{ mermaid?, excalidraw?, format, note }`
+   and broadcasts the live update. `assist --preview` (no scene) just returns the
+   blocks without persisting. The default `format` is `mermaid`.
 
 ### 2) Present a scene as slides
 
@@ -207,8 +232,8 @@ expect an MCP tool to mutate a canvas; there isn't one and won't be.
 - Forgetting `OTTO_API_TOKEN` → every call 401. Check `node scripts/canvas.mjs whoami`.
 - Hiding fan-out: collapsing "B does 10 things" into one box. Emit all 10 as
   distinct messages/nodes — the assist prompt itself demands exhaustiveness.
-- Treating `assist` as a save: it only *returns* blocks. You must `add-mermaid`
-  (or PUT nodes/edges) to persist them.
+- For a SCENE, `assist` now commits the edited source server-side (and returns
+  it); only `assist --preview` (no scene) is non-persisting. Don't double-write.
 - Auto-applying discovery actions: they are proposals. `apply` exactly the one
   the user approves.
 - Using a session id where a workspace/story id is needed: `list`/`create` scenes

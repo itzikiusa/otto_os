@@ -156,6 +156,8 @@ async fn create_scene<S: CanvasCtx>(
             story_id: req.story_id,
             title: req.title,
             doc_json: doc.to_string(),
+            provider: req.provider.unwrap_or_else(|| "claude".into()),
+            section: req.section,
             created_by: user.id,
         })
         .await?;
@@ -190,6 +192,9 @@ async fn update_scene<S: CanvasCtx>(
                 title: req.title,
                 doc_json: req.doc.map(|v| v.to_string()),
                 thumbnail: req.thumbnail,
+                provider: req.provider,
+                section: req.section,
+                story_id: req.story_id,
             },
         )
         .await?;

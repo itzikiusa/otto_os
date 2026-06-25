@@ -1,7 +1,8 @@
 <script lang="ts">
-  // Canvas Studio entry. Left: scene list. Right: the embedded Excalidraw editor
-  // when a scene is open, or a hero to start a new canvas. (Agent generation +
-  // live streaming land on top of the embed in the next milestones.)
+  // Canvas Studio entry. Left: scene list. Right: an infinite Mermaid board that
+  // renders the scene's agent-edited `.mermaid` source (full rich diagrams), or a
+  // hero to start a new canvas. You never write Mermaid — you describe what you
+  // want in the Assistant and the agent edits the file; the board re-renders live.
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -10,33 +11,24 @@
   import { toasts } from '../../lib/toast.svelte';
   import SceneList from './SceneList.svelte';
   import ExcalidrawCanvas from './ExcalidrawCanvas.svelte';
-  import SessionView from '../agents/SessionView.svelte';
+  import MermaidCanvas from './MermaidCanvas.svelte';
+  import ConversationPanel from './ConversationPanel.svelte';
+  import type { CanvasFormat } from './types';
 
-  // Phone: Excalidraw opens in view mode (its editing chrome needs room).
+  // Two modes the user picks at creation: Excalidraw (a fully editable board, the
+  // agent writes canvas.json) or Mermaid (rich auto-rendered diagrams of any kind
+  // — flowchart / sequence / class — the agent writes canvas.mermaid).
+  const isExcalidraw = $derived(canvas.format === 'excalidraw');
+
+  // Phone collapses the scene list once a board is open (more room).
   const readonly = $derived(viewport.isPhone);
 
-  // The embedded editor exposes generate() for agent drawing.
-  let editor = $state<{ generate: (p: string) => Promise<void> } | undefined>(undefined);
-  let aiOpen = $state(false);
-  let aiPrompt = $state('');
-  let aiBusy = $state(false);
+  // The board exposes generate()/isGenerating() for agent drawing.
+  let editor = $state<
+    { generate: (p: string) => Promise<void>; isGenerating: () => boolean } | undefined
+  >(undefined);
+  // The Assistant panel (the agent shell + Ask-AI input) — opens on demand.
   let showConvo = $state(false);
-
-  async function runAi(): Promise<void> {
-    const p = aiPrompt.trim();
-    if (!p || aiBusy || !editor) return;
-    aiBusy = true;
-    try {
-      await editor.generate(p);
-      aiPrompt = '';
-    } finally {
-      aiBusy = false;
-    }
-  }
-  function onAiKey(e: KeyboardEvent): void {
-    if (e.key === 'Enter') void runAi();
-    else if (e.key === 'Escape') aiOpen = false;
-  }
 
   // Canvas is global — list the user's scenes across all workspaces.
   $effect(() => {
@@ -52,9 +44,20 @@
     }
   });
 
-  async function createBlank(): Promise<void> {
+  function blankDoc(format: CanvasFormat): unknown {
+    return format === 'excalidraw'
+      ? {
+          type: 'otto-canvas',
+          version: 1,
+          format: 'excalidraw',
+          source: JSON.stringify({ type: 'excalidraw', version: 2, source: 'otto', elements: [] }),
+        }
+      : { type: 'otto-canvas', version: 1, format: 'mermaid', source: '' };
+  }
+
+  async function createBlank(format: CanvasFormat = 'excalidraw'): Promise<void> {
     try {
-      const created = await canvas.create('Untitled canvas');
+      const created = await canvas.create('Untitled canvas', blankDoc(format));
       await canvas.open(created.id);
     } catch (e) {
       toasts.error('Could not create canvas', e instanceof Error ? e.message : String(e));
@@ -78,61 +81,27 @@
 
     <section class="main">
       {#if canvas.scene && canvas.currentId}
-        <!-- Remount Excalidraw when switching scenes so each loads its own doc. -->
+        <!-- Remount the board when switching scenes so each loads its own source. -->
         {#key canvas.currentId}
-          <div class="editor-split" class:with-convo={showConvo && canvas.sessionId}>
+          <div class="editor-split" class:with-convo={showConvo}>
             <div class="editor-host">
-              <ExcalidrawCanvas bind:this={editor} {readonly} />
-              {#if !readonly}
-                <!-- Agent "draw it for me" overlay (bottom-center, above Excalidraw). -->
+              {#if isExcalidraw}
+                <ExcalidrawCanvas bind:this={editor} {readonly} />
+              {:else}
+                <MermaidCanvas bind:this={editor} {readonly} />
+              {/if}
+              {#if !showConvo}
+                <!-- Open the Assistant (Ask-AI lives in the conversation panel). -->
                 <div class="ai-bar">
-                  {#if !aiOpen}
-                    <button class="ai-fab" onclick={() => (aiOpen = true)}>
-                      <Icon name="zap" size={15} /> Ask AI to draw
-                    </button>
-                  {:else}
-                    <div class="ai-input" class:busy={aiBusy}>
-                      <Icon name="zap" size={15} />
-                      <!-- svelte-ignore a11y_autofocus -->
-                      <input
-                        bind:value={aiPrompt}
-                        placeholder="Describe a diagram… e.g. 'order flow across microservices'"
-                        onkeydown={onAiKey}
-                        disabled={aiBusy}
-                        autofocus
-                      />
-                      <button class="ai-draw" onclick={runAi} disabled={aiBusy || !aiPrompt.trim()}>
-                        {aiBusy ? 'Drawing…' : 'Draw'}
-                      </button>
-                      <button class="ai-close" onclick={() => (aiOpen = false)} aria-label="Close">
-                        <Icon name="x" size={14} />
-                      </button>
-                    </div>
-                  {/if}
-                  {#if canvas.sessionId}
-                    <button
-                      class="convo-toggle"
-                      class:active={showConvo}
-                      onclick={() => (showConvo = !showConvo)}
-                      title="See the agent's conversation"
-                    >
-                      <Icon name="comment" size={15} /> Conversation
-                    </button>
-                  {/if}
+                  <button class="ai-fab" onclick={() => (showConvo = true)}>
+                    <Icon name="zap" size={15} /> Ask AI
+                  </button>
                 </div>
               {/if}
             </div>
-            {#if showConvo && canvas.sessionId}
-              <aside class="convo-panel">
-                {#key canvas.sessionId}
-                  <SessionView
-                    sessionId={canvas.sessionId}
-                    focused={true}
-                    showClose={true}
-                    onfocus={() => {}}
-                    onclosepane={() => (showConvo = false)}
-                  />
-                {/key}
+            {#if showConvo}
+              <aside class="convo-panel" class:overlay={readonly}>
+                <ConversationPanel {editor} onclose={() => (showConvo = false)} />
               </aside>
             {/if}
           </div>
@@ -140,10 +109,22 @@
       {:else}
         <div class="hero">
           <h2>Start a new canvas</h2>
-          <p class="sub">A full Excalidraw board — shapes, sketches, diagrams, images and more.</p>
-          <button class="hero-ai" onclick={createBlank}>
-            <Icon name="plus" /> New canvas
-          </button>
+          <p class="sub">
+            Describe a diagram in plain English — the agent draws it and keeps refining it as you
+            chat. Pick how it's drawn:
+          </p>
+          <div class="modes">
+            <button class="mode" onclick={() => createBlank('excalidraw')}>
+              <Icon name="shapes" size={20} />
+              <span class="m-title">Excalidraw board</span>
+              <span class="m-sub">Fully editable shapes — draw &amp; arrange by hand too</span>
+            </button>
+            <button class="mode" onclick={() => createBlank('mermaid')}>
+              <Icon name="branch" size={20} />
+              <span class="m-title">Mermaid diagram</span>
+              <span class="m-sub">Auto-rendered flowchart / sequence / class — rich &amp; clean</span>
+            </button>
+          </div>
         </div>
       {/if}
     </section>
@@ -199,7 +180,7 @@
     min-height: 0;
     min-width: 0;
   }
-  /* Agent draw overlay — bottom-center so it clears Excalidraw's top toolbar. */
+  /* Ask-AI launcher — bottom-center so it clears Excalidraw's top toolbar. */
   .ai-bar {
     position: absolute;
     bottom: 18px;
@@ -209,25 +190,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  .convo-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 9px 14px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--surface);
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.2));
-  }
-  .convo-toggle.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    border-color: var(--accent);
-    color: var(--accent);
   }
   .ai-fab {
     display: inline-flex;
@@ -245,53 +207,6 @@
   }
   .ai-fab:hover {
     filter: brightness(1.08);
-  }
-  .ai-input {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: min(560px, 80vw);
-    padding: 7px 9px 7px 14px;
-    background: var(--surface);
-    border: 1px solid var(--accent);
-    border-radius: 999px;
-    box-shadow: var(--shadow, 0 4px 20px rgba(0, 0, 0, 0.3));
-    color: var(--accent);
-  }
-  .ai-input.busy {
-    opacity: 0.9;
-  }
-  .ai-input input {
-    flex: 1;
-    min-width: 0;
-    border: none;
-    background: none;
-    color: var(--text);
-    font-size: 13px;
-    outline: none;
-  }
-  .ai-draw {
-    padding: 6px 14px;
-    border: none;
-    border-radius: 999px;
-    background: var(--accent);
-    color: #fff;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .ai-draw:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .ai-close {
-    display: inline-flex;
-    border: none;
-    background: none;
-    color: var(--text-dim, #888);
-    cursor: pointer;
-    padding: 4px;
   }
   .hero {
     flex: 1 1 auto;
@@ -314,21 +229,42 @@
     font-size: 13px;
     max-width: 420px;
   }
-  .hero-ai {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 14px 22px;
-    font-size: 16px;
-    font-weight: 600;
-    color: #fff;
-    background: var(--accent);
-    border: none;
-    border-radius: var(--radius-m);
-    cursor: pointer;
-    box-shadow: var(--shadow);
+  .modes {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 6px;
   }
-  .hero-ai:hover {
-    filter: brightness(1.08);
+  .mode {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    width: 220px;
+    padding: 20px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    text-align: center;
+    transition:
+      border-color 0.12s,
+      transform 0.12s;
+  }
+  .mode:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+  }
+  .mode .m-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-top: 2px;
+  }
+  .mode .m-sub {
+    font-size: 12px;
+    color: var(--text-dim, #888);
+    line-height: 1.4;
   }
 </style>

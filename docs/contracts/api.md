@@ -621,6 +621,7 @@ the row. AI-producing actions (analyze/rewrite/generate/plan) live under
 | GET /product/versions/{vid} | ws viewer | — | Version |
 | POST /product/versions/{vid}/publish | ws editor | — | publish a version back to the source |
 | GET /product/stories/{sid}/analyses | ws viewer | — | `Analysis[]` |
+| GET /product/stories/{sid}/linked-canvases | ws viewer | — | `CanvasSceneSummary[]` — Canvas scenes linked to this story (via `story_id`) |
 | GET /product/analyses/{aid} | ws viewer | — | Analysis (with per-agent state) |
 | GET /workspaces/{id}/product/lenses | ws viewer | — | `ProductLens[]` (curated analysis-lens catalog: `{skill,label,description,default_on}`) |
 | GET /product/stories/{sid}/questions | ws viewer | — | `Question[]` |

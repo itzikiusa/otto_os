@@ -24,6 +24,11 @@ pub struct CanvasScene {
     pub title: String,
     pub doc_json: String,
     pub thumbnail: Option<String>,
+    /// Which agent drives this scene's "Ask AI" turns (default `"claude"`).
+    pub provider: String,
+    /// Folder path used to group scenes in the UI (e.g. `"Platform/Staging"`).
+    /// `None` = root/ungrouped.
+    pub section: Option<String>,
     /// The managed Otto session backing this scene's "Ask AI" (resumable in
     /// Agents). `None` until the first assist turn creates it.
     pub session_id: Option<Id>,
@@ -40,6 +45,8 @@ pub struct CanvasSceneSummary {
     pub story_id: Option<Id>,
     pub title: String,
     pub thumbnail: Option<String>,
+    /// Folder path used to group scenes in the UI. `None` = root/ungrouped.
+    pub section: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -53,6 +60,10 @@ pub struct NewScene {
     pub story_id: Option<Id>,
     pub title: String,
     pub doc_json: String,
+    /// Which agent drives "Ask AI" for this scene (default `"claude"`).
+    pub provider: String,
+    /// Optional folder path used to group scenes in the UI.
+    pub section: Option<String>,
     pub created_by: Id,
 }
 
@@ -62,6 +73,10 @@ pub struct SceneUpdate {
     pub title: Option<String>,
     pub doc_json: Option<String>,
     pub thumbnail: Option<String>,
+    pub provider: Option<String>,
+    pub section: Option<String>,
+    /// Link/relink this scene to a product story (COALESCE — keeps prior on None).
+    pub story_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +91,8 @@ fn row_to_scene(r: &sqlx::sqlite::SqliteRow) -> Result<CanvasScene> {
         title: r.get("title"),
         doc_json: r.get("doc_json"),
         thumbnail: r.get("thumbnail"),
+        provider: r.get("provider"),
+        section: r.get("section"),
         session_id: r.get("session_id"),
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
@@ -90,6 +107,7 @@ fn row_to_summary(r: &sqlx::sqlite::SqliteRow) -> Result<CanvasSceneSummary> {
         story_id: r.get("story_id"),
         title: r.get("title"),
         thumbnail: r.get("thumbnail"),
+        section: r.get("section"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
     })
@@ -115,14 +133,16 @@ impl CanvasRepo {
         sqlx::query(
             "INSERT INTO canvas_scenes
              (id, workspace_id, story_id, title, doc_json, thumbnail,
-              created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+              provider, section, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&r.workspace_id)
         .bind(&r.story_id)
         .bind(&r.title)
         .bind(&r.doc_json)
+        .bind(&r.provider)
+        .bind(&r.section)
         .bind(&r.created_by)
         .bind(&now)
         .bind(&now)
@@ -150,7 +170,7 @@ impl CanvasRepo {
     /// List scenes for a workspace, most-recently-updated first.
     pub async fn list_for_workspace(&self, ws: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, story_id, title, thumbnail, created_at, updated_at
+            "SELECT id, workspace_id, story_id, title, thumbnail, section, created_at, updated_at
              FROM canvas_scenes WHERE workspace_id = ? ORDER BY updated_at DESC",
         )
         .bind(ws)
@@ -163,7 +183,7 @@ impl CanvasRepo {
     /// List scenes linked to a product story, most-recently-updated first.
     pub async fn list_for_story(&self, story_id: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, story_id, title, thumbnail, created_at, updated_at
+            "SELECT id, workspace_id, story_id, title, thumbnail, section, created_at, updated_at
              FROM canvas_scenes WHERE story_id = ? ORDER BY updated_at DESC",
         )
         .bind(story_id)
@@ -177,7 +197,7 @@ impl CanvasRepo {
     /// you see your scenes regardless of the active workspace.
     pub async fn list_for_user(&self, user_id: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, story_id, title, thumbnail, created_at, updated_at
+            "SELECT id, workspace_id, story_id, title, thumbnail, section, created_at, updated_at
              FROM canvas_scenes WHERE created_by = ? ORDER BY updated_at DESC",
         )
         .bind(user_id)
@@ -195,12 +215,18 @@ impl CanvasRepo {
              SET title = COALESCE(?, title),
                  doc_json = COALESCE(?, doc_json),
                  thumbnail = COALESCE(?, thumbnail),
+                 provider = COALESCE(?, provider),
+                 section = COALESCE(?, section),
+                 story_id = COALESCE(?, story_id),
                  updated_at = ?
              WHERE id = ?",
         )
         .bind(&patch.title)
         .bind(&patch.doc_json)
         .bind(&patch.thumbnail)
+        .bind(&patch.provider)
+        .bind(&patch.section)
+        .bind(&patch.story_id)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -275,12 +301,31 @@ mod tests {
                 story_id: Some("s1".into()),
                 title: "My Scene".into(),
                 doc_json: r#"{"schema":1,"nodes":[],"edges":[],"slides":[]}"#.into(),
+                provider: "claude".into(),
+                section: Some("Platform/Staging".into()),
                 created_by: "u1".into(),
             })
             .await
             .unwrap();
         assert_eq!(scene.title, "My Scene");
         assert!(scene.thumbnail.is_none());
+        assert_eq!(scene.provider, "claude");
+        assert_eq!(scene.section.as_deref(), Some("Platform/Staging"));
+
+        // summary carries the section so the list can group
+        let story_summaries = repo.list_for_story(&"s1".into()).await.unwrap();
+        assert_eq!(story_summaries[0].section.as_deref(), Some("Platform/Staging"));
+
+        // partial update of provider; section kept via COALESCE
+        let prov = repo
+            .update(
+                &scene.id,
+                SceneUpdate { provider: Some("codex".into()), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert_eq!(prov.provider, "codex");
+        assert_eq!(prov.section.as_deref(), Some("Platform/Staging"));
 
         // list_for_workspace / list_for_story see it
         let ws_list = repo.list_for_workspace(&"w1".into()).await.unwrap();
@@ -307,6 +352,7 @@ mod tests {
                     title: None,
                     doc_json: Some(r#"{"schema":1,"nodes":[{"id":"n1"}],"edges":[],"slides":[]}"#.into()),
                     thumbnail: Some("data:image/png;base64,AAAA".into()),
+                    ..Default::default()
                 },
             )
             .await

@@ -540,6 +540,23 @@ export type OttoEvent =
       spend_usd: number;
       cap_usd: number;
       direction: string;
+    }
+  | {
+      /** A canvas scene's source doc changed — pushed LIVE while an agent edits
+       *  the backing file (per-poll) and once with the committed result. The
+       *  Canvas page re-renders `doc` for the matching `scene_id`. */
+      type: 'canvas_updated';
+      workspace_id: Id;
+      scene_id: Id;
+      doc: unknown;
+    }
+  | {
+      /** The canvas Ask-AI agent session became live (turn start) — the Canvas
+       *  Assistant panel attaches its shell immediately for the matching scene. */
+      type: 'canvas_session_started';
+      workspace_id: Id;
+      scene_id: Id;
+      session_id: Id;
     };
 
 // ---------------------------------------------------------------------------

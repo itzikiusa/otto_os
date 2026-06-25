@@ -198,4 +198,23 @@ pub enum Event {
         cap_usd: f64,
         direction: String,
     },
+    /// A canvas scene's source document changed — emitted LIVE while an agent
+    /// edits the scene's backing file (per-poll, mid-turn) and once more with the
+    /// committed result. `doc` is the opaque canvas document
+    /// (`{type:"otto-canvas",format,source,...}`) so the open editor can re-render
+    /// in place without a refetch. The Canvas page subscribes and renders the
+    /// `doc` for the matching `scene_id`.
+    CanvasUpdated {
+        workspace_id: Id,
+        scene_id: Id,
+        doc: serde_json::Value,
+    },
+    /// A canvas scene's Ask-AI agent session just became live (at the START of a
+    /// turn). Lets the Canvas Assistant panel attach the agent's shell/Terminal
+    /// immediately, instead of only after the turn finishes.
+    CanvasSessionStarted {
+        workspace_id: Id,
+        scene_id: Id,
+        session_id: Id,
+    },
 }

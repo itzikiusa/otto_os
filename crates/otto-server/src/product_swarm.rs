@@ -927,6 +927,24 @@ pub async fn list_discovery_runs(
     Ok(Json(out))
 }
 
+/// `GET /api/v1/product/stories/{sid}/linked-canvases` — list the Canvas scenes
+/// linked to a story (newest first). Requires Viewer on the story's workspace.
+pub async fn list_linked_canvases(
+    Path(sid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<otto_state::CanvasSceneSummary>>> {
+    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Viewer).await?;
+
+    let scenes = ctx
+        .canvas_repo
+        .list_for_story(&story.id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(scenes))
+}
+
 /// `GET /api/v1/product/discovery-runs/{rid}` — full detail for one discovery run:
 /// tasks, per-task latest run summaries, discovery board messages, derived status
 /// (and `report_md` on the run itself).

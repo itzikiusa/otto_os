@@ -242,6 +242,7 @@ pub async fn send_message(
         "claude",
         meta,
         &prompt,
+        |_| {},
     )
     .await?;
     // Link the session on the first turn so later turns resume it.
@@ -373,6 +374,8 @@ pub async fn apply_action(
                     story_id: Some(chat.story_id.clone()),
                     title,
                     doc_json: doc.to_string(),
+                    provider: "claude".into(),
+                    section: None,
                     created_by: user.id.clone(),
                 })
                 .await

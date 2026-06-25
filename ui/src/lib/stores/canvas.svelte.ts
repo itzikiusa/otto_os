@@ -14,10 +14,19 @@ import { assistToNodes, emptyScene, parseScene } from '../../modules/canvas/scen
 import type {
   AssistMode,
   AssistResult,
+  CanvasDoc,
+  CanvasFormat,
   CanvasScene,
   CanvasSceneSummary,
   Scene,
 } from '../../modules/canvas/types';
+
+/** One inline conversation turn with the canvas agent (client-side). */
+export interface CanvasTurn {
+  role: 'user' | 'assistant';
+  text: string;
+  ts: number;
+}
 
 const AUTOSAVE_MS = 900;
 const HISTORY_CAP = 50;
@@ -32,9 +41,19 @@ class CanvasStore {
   /** Raw parsed doc for the open scene — Excalidraw `{elements,appState,files}`
    *  (the embedded editor reads this for initialData and writes it back). */
   rawDoc = $state<unknown>(null);
-  /** The managed Otto session backing this scene's agent generation — open it in
-   *  the "View conversation" panel to watch the agent work. */
+  /** The managed Otto session backing this scene's agent generation — resumed
+   *  across "Ask AI" turns so the agent keeps refining the SAME source file. */
   sessionId = $state<string | null>(null);
+  /** The file-backed source the agent edits (mermaid text or Excalidraw JSON).
+   *  Non-null ⇒ the scene is agent/file-backed and renders from `source`. */
+  source = $state<string | null>(null);
+  /** The scene's source format (drives the render path). */
+  format = $state<CanvasFormat>('mermaid');
+  /** Which agent/provider drives this scene's Ask-AI (single choice). */
+  provider = $state<string>('claude');
+  /** Lightweight inline conversation with the canvas agent (client-side; the
+   *  diagram is the durable artifact, persisted server-side). */
+  convo = $state<CanvasTurn[]>([]);
   /** A scene id to auto-open once the Canvas module mounts (deep-link from e.g.
    *  the Discovery-Chat "Open in Canvas" action). CanvasPage consumes + clears it. */
   pendingOpenId = $state<string | null>(null);
@@ -73,7 +92,7 @@ class CanvasStore {
     }
   }
 
-  async create(title: string, doc?: Scene, storyId?: string | null): Promise<CanvasScene> {
+  async create(title: string, doc?: unknown, storyId?: string | null): Promise<CanvasScene> {
     const wsId = ws.currentId;
     if (!wsId) throw new Error('No workspace selected');
     const created = await api.post<CanvasScene>(`/workspaces/${wsId}/canvas/scenes`, {
@@ -91,11 +110,17 @@ class CanvasStore {
       const row = await api.get<CanvasScene>(`/canvas/scenes/${id}`);
       this.currentId = row.id;
       this.scene = parseScene(row.doc_json, row.title);
+      let doc: CanvasDoc | null = null;
       try {
-        this.rawDoc = JSON.parse(row.doc_json);
+        doc = JSON.parse(row.doc_json) as CanvasDoc;
       } catch {
-        this.rawDoc = null;
+        doc = null;
       }
+      this.rawDoc = doc;
+      this.source = typeof doc?.source === 'string' ? doc.source : null;
+      this.format = doc?.format === 'excalidraw' ? 'excalidraw' : 'mermaid';
+      this.provider = (row as { provider?: string }).provider ?? 'claude';
+      this.convo = [];
       this.sessionId = row.session_id;
       this.#history = [];
       this.#future = [];
@@ -137,11 +162,69 @@ class CanvasStore {
     }
   }
 
-  /** ExcalidrawCanvas persisted the opaque doc itself — record it + mark saved. */
+  /** The board persisted the opaque doc itself — record it + mark saved. */
   markSaved(doc: unknown): void {
     this.rawDoc = doc;
     this.dirty = false;
     this.savedAt = Date.now();
+  }
+
+  /** Apply a canvas doc pushed from the server (a live agent edit or the final
+   *  commit). Updates `source`/`format`/`rawDoc` (all PURE writes — safe to call
+   *  from a render `$effect`). Ignores docs without a `source` (hand-drawn). */
+  ingestDoc(doc: CanvasDoc): void {
+    if (typeof doc.source !== 'string') return;
+    this.source = doc.source;
+    if (doc.format) this.format = doc.format;
+    this.rawDoc = doc;
+    this.savedAt = Date.now();
+  }
+
+  /** Append a turn to the inline conversation. */
+  pushConvo(role: 'user' | 'assistant', text: string): void {
+    this.convo = [...this.convo, { role, text, ts: Date.now() }];
+  }
+
+  /** Update a scene's metadata (title / section / provider) via PUT, then refresh
+   *  the list. Keeps the open scene's local state in sync. */
+  async updateMeta(
+    id: string,
+    patch: { title?: string; section?: string | null; provider?: string; story_id?: string },
+  ): Promise<void> {
+    await api.put(`/canvas/scenes/${id}`, patch);
+    if (this.currentId === id) {
+      if (patch.title != null && this.scene) this.scene = { ...this.scene, title: patch.title };
+      if (patch.provider != null) this.provider = patch.provider;
+    }
+    await this.loadScenes().catch(() => {});
+  }
+
+  /** Persist a freshly-serialized Mermaid SOURCE (from a MANUAL edit on the
+   *  board) as the scene's doc — same file the agent edits. `positions` carries
+   *  the hand-arranged node coordinates (Mermaid has none) so layout survives a
+   *  reload. */
+  async saveSource(
+    source: string,
+    positions?: Record<string, { x: number; y: number }>,
+  ): Promise<void> {
+    const id = this.currentId;
+    if (!id) return;
+    this.source = source;
+    const doc = {
+      type: 'otto-canvas',
+      version: 1,
+      format: this.format,
+      source,
+      ...(positions ? { positions } : {}),
+    };
+    this.rawDoc = doc;
+    try {
+      await api.put(`/canvas/scenes/${id}`, { doc });
+      this.savedAt = Date.now();
+      this.dirty = false;
+    } catch {
+      this.dirty = true; // a later edit reschedules
+    }
   }
 
   /** Editor → store: the canonical scene changed via direct manipulation. */

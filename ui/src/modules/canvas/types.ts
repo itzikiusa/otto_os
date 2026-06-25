@@ -151,8 +151,13 @@ export interface CanvasScene {
   /** The Scene JSON as a string (parse with `JSON.parse`). */
   doc_json: string;
   thumbnail: string | null;
-  /** The managed Otto session backing this scene's Ask-AI (open it in Agents). */
+  /** The managed Otto session backing this scene's Ask-AI (shown in the Canvas
+   *  Assistant panel — hidden from the Agents list). */
   session_id: string | null;
+  /** Which agent/provider drives Ask-AI for this scene. */
+  provider: string;
+  /** Folder path for grouping (e.g. "Platform/Staging"); null = root. */
+  section: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -164,6 +169,8 @@ export interface CanvasSceneSummary {
   story_id: string | null;
   title: string;
   thumbnail: string | null;
+  /** Folder path for grouping in the list (e.g. "Platform/Staging"); null = root. */
+  section: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -172,12 +179,16 @@ export interface CreateSceneReq {
   title: string;
   doc?: Scene;
   story_id?: string | null;
+  provider?: string;
+  section?: string | null;
 }
 
 export interface UpdateSceneReq {
   title?: string;
   doc?: Scene;
   thumbnail?: string;
+  provider?: string;
+  section?: string | null;
 }
 
 export type AssistMode = 'auto' | 'sequence' | 'flow' | 'uml' | 'nodes';
@@ -188,13 +199,38 @@ export interface AssistReq {
 }
 
 export interface AssistResult {
-  /** Excalidraw element SKELETON the agent authored directly (preferred — true
-   *  code blocks, icons, frames). Either an array or `{ elements: [...] }`. */
+  /** Excalidraw element SKELETON (when the scene's format is `excalidraw`):
+   *  `{ elements: [...] }` (or a bare array). */
   excalidraw?: unknown;
-  /** A mermaid diagram source (fallback — clean auto-layout flowcharts). */
+  /** A mermaid diagram source (the default format — clean auto-layout). */
   mermaid: string | null;
+  /** The scene's source format — `mermaid` (default) | `excalidraw`. */
+  format?: CanvasFormat;
   /** Freeform nodes when the agent produced tier-2 JSON instead of mermaid. */
   nodes: Partial<CanvasNode>[];
   edges: Partial<CanvasEdge>[];
   note: string;
+}
+
+// ---------------------------------------------------------------------------
+// File-backed canvas document — the agent EDITS a per-scene source file
+// (`canvas.mermaid` or `canvas.excalidraw.json`); the server stores its content
+// as the opaque `doc_json` and the UI renders it into editable Excalidraw shapes.
+// ---------------------------------------------------------------------------
+
+export type CanvasFormat = 'mermaid' | 'excalidraw';
+
+/** The opaque canvas doc shape the server + agent share (parsed from
+ *  `doc_json`). A `source` present marks the scene as agent/file-backed; a plain
+ *  Excalidraw `{elements,…}` doc (no `source`) is a hand-drawn board. */
+export interface CanvasDoc {
+  type?: 'otto-canvas' | 'excalidraw';
+  version?: number;
+  format?: CanvasFormat;
+  /** The mermaid text or Excalidraw-JSON the agent edits. */
+  source?: string;
+  /** Rendered element cache (best-effort) for instant first paint. */
+  elements?: unknown[];
+  appState?: { viewBackgroundColor?: string; gridSize?: number | null };
+  files?: Record<string, unknown>;
 }

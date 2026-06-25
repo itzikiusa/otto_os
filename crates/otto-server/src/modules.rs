@@ -378,6 +378,11 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             "/product/stories/{sid}/discovery-runs",
             get(crate::product_swarm::list_discovery_runs),
         )
+        // Product → Canvas: list the Canvas scenes linked to a story (Viewer).
+        .route(
+            "/product/stories/{sid}/linked-canvases",
+            get(crate::product_swarm::list_linked_canvases),
+        )
         .route(
             "/product/discovery-runs/{rid}",
             get(crate::product_swarm::get_discovery_run),

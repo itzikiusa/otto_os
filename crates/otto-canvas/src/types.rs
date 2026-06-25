@@ -12,6 +12,12 @@ pub struct CreateSceneReq {
     pub doc: Option<serde_json::Value>,
     #[serde(default)]
     pub story_id: Option<String>,
+    /// Which agent drives "Ask AI" for this scene (defaults to `"claude"`).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Optional folder path used to group scenes in the UI.
+    #[serde(default)]
+    pub section: Option<String>,
 }
 
 /// Partial update. Any omitted field is left unchanged.
@@ -23,6 +29,13 @@ pub struct UpdateSceneReq {
     pub doc: Option<serde_json::Value>,
     #[serde(default)]
     pub thumbnail: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub section: Option<String>,
+    /// Link/relink this scene to a product story.
+    #[serde(default)]
+    pub story_id: Option<String>,
 }
 
 /// The default empty Scene document stored when `CreateSceneReq.doc` is absent.

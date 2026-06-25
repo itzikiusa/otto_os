@@ -10,6 +10,7 @@ import { swarm } from './stores/swarm.svelte';
 import { loops } from './stores/loops.svelte';
 import { usage } from './api/usage.svelte';
 import { product } from './stores/product.svelte';
+import { canvas } from './stores/canvas.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -120,6 +121,29 @@ export class BudgetBus {
 }
 
 export const budgetBus = new BudgetBus();
+
+// ---------------------------------------------------------------------------
+// canvas_updated — live canvas-document push. The server broadcasts the scene's
+// source doc on every file change while an agent edits (and once committed); the
+// open Canvas editor subscribes and re-renders the matching scene in place.
+// ---------------------------------------------------------------------------
+
+/** Holds the most-recent canvas-document update. The Canvas editor subscribes,
+ *  renders `doc` when `sceneId` matches the open scene, and ignores the rest. */
+export class CanvasDocBus {
+  tick: number = $state(0);
+  sceneId: string = $state('');
+  /** The opaque canvas doc (`{type:'otto-canvas',format,source,…}`). */
+  doc: unknown = $state(null);
+
+  apply(sceneId: string, doc: unknown): void {
+    this.sceneId = sceneId;
+    this.doc = doc;
+    this.tick += 1;
+  }
+}
+
+export const canvasDocBus = new CanvasDocBus();
 
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
@@ -238,6 +262,13 @@ class EventsClient {
         } else if (parsed.type === 'goal_loop_updated') {
           // Goal Loops: update the list row + bump the open detail's re-fetch tick.
           loops.applyEvent(parsed);
+        } else if (parsed.type === 'canvas_updated') {
+          // Live canvas edits: the open Canvas editor re-renders the matching scene.
+          canvasDocBus.apply(parsed.scene_id, parsed.doc);
+        } else if (parsed.type === 'canvas_session_started') {
+          // The agent session is live (turn start) → attach its shell immediately
+          // by setting the open scene's session id.
+          if (parsed.scene_id === canvas.currentId) canvas.sessionId = parsed.session_id;
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

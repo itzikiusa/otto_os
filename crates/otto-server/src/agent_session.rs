@@ -43,13 +43,16 @@ pub async fn run_session_turn(
     provider: &str,
     meta: Value,
     prompt: &str,
+    on_ready: impl FnOnce(&Id),
 ) -> ApiResult<(String, Id)> {
     // 1. E2E short-circuit: the offline test daemon points CLAUDE_BIN at a
     //    nonexistent path, so a real session can't spawn. Return the deterministic
     //    canned reply (routed by an OTTO_TASK: sentinel in the prompt).
     if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
         let reply = otto_orchestrator::e2e_stub::canned_reply(prompt);
-        return Ok((reply, existing.cloned().unwrap_or_else(otto_core::new_id)));
+        let sid = existing.cloned().unwrap_or_else(otto_core::new_id);
+        on_ready(&sid);
+        return Ok((reply, sid));
     }
 
     // 2. Canonicalize cwd — claude symlink-resolves it for the transcript dir, so
@@ -83,6 +86,10 @@ pub async fn run_session_turn(
             (session.id.clone(), session.provider_session_id.clone())
         }
     };
+
+    // Session exists now — let the caller surface its id (e.g. attach the live
+    // shell in the Canvas panel) BEFORE the long turn runs.
+    on_ready(&sid);
 
     // 4. Baseline the transcript so a resumed session's PRIOR reply isn't
     //    mistaken for this turn (claude appends to the same <psid>.jsonl on resume).

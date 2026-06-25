@@ -131,7 +131,8 @@ class WorkspaceStore {
         s.meta.source !== 'review' &&
         s.meta.source !== 'skilleval' &&
         s.meta.source !== 'product-analysis' &&
-        s.meta.source !== 'swarm',
+        s.meta.source !== 'swarm' &&
+        s.meta.source !== 'canvas_assist',
     ),
   );
 
@@ -150,7 +151,8 @@ class WorkspaceStore {
         s.meta.source !== 'channel' &&
         s.meta.source !== 'skilleval' &&
         s.meta.source !== 'product-analysis' &&
-        s.meta.source !== 'swarm',
+        s.meta.source !== 'swarm' &&
+        s.meta.source !== 'canvas_assist',
     ).length,
   );
 
@@ -165,7 +167,8 @@ class WorkspaceStore {
         s.meta.source !== 'channel' &&
         s.meta.source !== 'skilleval' &&
         s.meta.source !== 'product-analysis' &&
-        s.meta.source !== 'swarm',
+        s.meta.source !== 'swarm' &&
+        s.meta.source !== 'canvas_assist',
     ).length,
   );
 
@@ -215,9 +218,13 @@ class WorkspaceStore {
       // 'insights') hosted on an arbitrary workspace just for the FK — it's a
       // background scheduled job, not a user session, so keep it out of the
       // Agents list (its report is viewable in the Insights module).
-      let kept = all.filter(
-        (s) => (s.meta as { source?: string } | null)?.source !== 'insights',
-      );
+      // Canvas "Ask AI" also spawns a managed agent session (meta.source =
+      // 'canvas_assist'); it lives in the Canvas Assistant panel (its own shell),
+      // not the Agents list — same treatment as insights/review.
+      let kept = all.filter((s) => {
+        const src = (s.meta as { source?: string } | null)?.source;
+        return src !== 'insights' && src !== 'canvas_assist';
+      });
       // Per-device session isolation (opt-in, default off): show only sessions
       // this device started (stamped meta.client_id on create). When off, leave
       // the list unchanged so every device sees every session (current behavior).

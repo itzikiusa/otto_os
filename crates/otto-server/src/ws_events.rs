@@ -236,6 +236,10 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::GoalLoopUpdated { workspace_id, .. }
         | Event::WorkflowRunUpdated { workspace_id, .. }
         | Event::SkillEvalUpdated { workspace_id, .. }
+        // Live canvas-document edits + the agent-session-started signal go to the
+        // scene's workspace members.
+        | Event::CanvasUpdated { workspace_id, .. }
+        | Event::CanvasSessionStarted { workspace_id, .. }
         // Budget-exceeded alerts are scoped to the workspace that crossed the cap
         // (it carries `workspace_id`), so they go to that workspace's members.
         | Event::BudgetExceeded { workspace_id, .. } => Scope::Workspace(workspace_id),
