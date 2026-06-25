@@ -236,6 +236,13 @@
       toasts.success(okTitle, okDetail);
     } catch (e) {
       toasts.error(`${okTitle} failed`, e instanceof Error ? e.message : String(e));
+      // A failed mutation can still have partially landed — most notably a
+      // "local + remote" delete whose LOCAL half succeeded before the remote
+      // push errored. Re-sync refs/log so the graph reflects what's actually
+      // there instead of showing a branch that's already gone (and offering to
+      // delete it again). Best-effort: the toast above already reported the
+      // failure, so a refresh error here must stay silent.
+      await refreshAfter().catch(() => {});
     }
   }
 
@@ -1068,6 +1075,98 @@
     return merged.sort((a, b) => order[a.kind] - order[b.kind]);
   }
 
+  // ── Multi-ref dropdown (collapse a commit row that carries 2+ refs) ──────────
+  // When a single commit holds several branches/tags the narrow column can't show
+  // them all, so we keep the most important one visible and tuck the rest behind a
+  // "▾ +N" expander that opens a grouped popover. Gated OFF stash/detached rows —
+  // those decorations are plumbing/state markers, not a list to collapse.
+  function shouldCollapseRow(chips: RefChip[]): boolean {
+    return chips.length >= 2 && chips.every((c) => c.kind !== 'stash' && c.kind !== 'detached');
+  }
+
+  // The one chip kept visible when a row collapses: checked-out branch first, then
+  // any local/head branch, then a remote, then a tag.
+  function primaryChip(chips: RefChip[]): RefChip {
+    return (
+      chips.find((c) => c.current) ??
+      chips.find((c) => c.kind === 'head' || c.kind === 'local') ??
+      chips.find((c) => c.kind === 'remote') ??
+      chips.find((c) => c.kind === 'tag') ??
+      chips[0]
+    );
+  }
+
+  // Split a row's chips into the popover's two groups — branches (current, then
+  // local/head, then remote) ahead of tags ("branch > tag").
+  function splitChips(chips: RefChip[]): { branches: RefChip[]; tags: RefChip[] } {
+    const rank = (c: RefChip): number =>
+      c.current ? 0 : c.kind === 'head' || c.kind === 'local' ? 1 : 2;
+    const branches = chips
+      .filter((c) => c.kind === 'head' || c.kind === 'local' || c.kind === 'remote')
+      .sort((a, b) => rank(a) - rank(b));
+    const tags = chips.filter((c) => c.kind === 'tag');
+    return { branches, tags };
+  }
+
+  // The open ref popover: which commit, its grouped refs, and where to anchor it
+  // (viewport coords from the expander's rect, so position:fixed clears the scroll).
+  let refMenu = $state<{
+    commit: CommitInfo;
+    branches: RefChip[];
+    tags: RefChip[];
+    x: number;
+    y: number;
+  } | null>(null);
+
+  function openRefMenu(e: MouseEvent, commit: CommitInfo, chips: RefChip[]): void {
+    e.stopPropagation(); // don't also select the commit (the row is a button)
+    e.preventDefault();
+    const { branches, tags } = splitChips(chips);
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    refMenu = { commit, branches, tags, x: r.left, y: r.bottom + 4 };
+  }
+
+  function closeRefMenu(): void {
+    refMenu = null;
+  }
+
+  // Single-click a popover row → select the commit (this lights up the branch's
+  // spine via highlightSpine). Idempotent and harmless as the lead click of a
+  // double-click, which is what actually checks out.
+  function refRowSelect(commit: CommitInfo): void {
+    if (selectedSha !== commit.sha) void selectCommit(commit);
+  }
+
+  // Double-click a popover row → check it out. Remote chips check out a local
+  // tracking branch (mirrors checkoutRemote); tags check out detached.
+  function refRowCheckout(chip: RefChip): void {
+    closeRefMenu();
+    if (chip.kind === 'remote') {
+      void checkout(chip.label.replace(/^[^/]+\//, ''), true);
+    } else {
+      // local/head branch, or a tag (detached) — both check out by their label.
+      void checkout(chip.label, false);
+    }
+  }
+
+  // Right-click a popover row → the full existing branch/tag context menu (rename,
+  // merge, PR, delete…), resolved from the refs response. Silent no-op if the ref
+  // can't be matched (e.g. refs changed underneath the open popover).
+  function refRowMenu(e: MouseEvent, chip: RefChip): void {
+    e.preventDefault();
+    e.stopPropagation();
+    const r: RefsResp | null = refs;
+    if (!r) return;
+    if (chip.kind === 'tag') {
+      const t = r.tags.find((x) => x.name === chip.label);
+      if (t) tagMenu(e, t);
+      return;
+    }
+    const list = chip.kind === 'remote' ? r.remote : r.local;
+    const b = list.find((x) => x.name === chip.label);
+    if (b) branchMenu(e, b);
+  }
+
   // A commit is the HEAD ("you are here") when any decoration is HEAD-ish.
   function isHeadCommit(c: CommitInfo): boolean {
     return c.refs.some((r) => r === 'HEAD' || /^HEAD\s*->/.test(r));
@@ -1114,6 +1213,36 @@
     return { add, del };
   });
 </script>
+
+<!-- Escape closes the open multi-ref popover (top-level: svelte:window can't sit
+     inside a block). No-op when nothing is open. -->
+<svelte:window onkeydown={(e) => e.key === 'Escape' && refMenu && closeRefMenu()} />
+
+<!-- One commit-row ref chip — shared by the inline (single ref) and collapsed
+     (primary ref) renderings so they never drift apart. -->
+{#snippet chipView(chip: RefChip, label: string)}
+  <span
+    class="ref-chip kind-{chip.kind}"
+    class:current-chip={chip.current}
+    title={chip.kind === 'stash'
+      ? `Stash · ${label}`
+      : chip.current
+        ? `Checked out · ${chip.label}`
+        : chip.label}
+  >
+    {#if chip.current}<Icon name="check" size={8} />{/if}
+    {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
+    {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
+    {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
+    <span class="chip-label">{label}</span>
+    {#if chip.current && (status.ahead > 0 || status.behind > 0)}
+      <span class="chip-ab">
+        {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
+        {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
+      </span>
+    {/if}
+  </span>
+{/snippet}
 
 <div class="graphview" class:mobile={isMobile}>
   <!-- ── LEFT: refs tree ───────────────────────────────────────────────────── -->
@@ -1391,32 +1520,30 @@
             <!-- BRANCH / TAG column: refs for this row, right-aligned so labels
                  line up vertically and butt against the graph node (GitKraken). -->
             <div class="branch-cell">
-              {#each chips as chip (chip.kind + chip.label)}
-                {@const label = chip.kind === 'stash'
-                  ? (stashMsgBySha.get(row.commit.sha) ?? 'stash')
-                  : chip.label}
+              {#if shouldCollapseRow(chips)}
+                <!-- 2+ refs: keep the primary one, tuck the rest behind ▾ +N. The
+                     expander is a role=button SPAN (the row itself is a <button>,
+                     so a nested real <button> would be invalid). -->
+                {@const primary = primaryChip(chips)}
+                {@render chipView(primary, primary.label)}
                 <span
-                  class="ref-chip kind-{chip.kind}"
-                  class:current-chip={chip.current}
-                  title={chip.kind === 'stash'
-                    ? `Stash · ${label}`
-                    : chip.current
-                      ? `Checked out · ${chip.label}`
-                      : chip.label}
-                >
-                  {#if chip.current}<Icon name="check" size={8} />{/if}
-                  {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
-                  {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
-                  {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
-                  <span class="chip-label">{label}</span>
-                  {#if chip.current && (status.ahead > 0 || status.behind > 0)}
-                    <span class="chip-ab">
-                      {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
-                      {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
-                    </span>
-                  {/if}
-                </span>
-              {/each}
+                  class="ref-expander"
+                  role="button"
+                  tabindex="-1"
+                  title="{chips.length} refs on this commit — click to list"
+                  onclick={(e) => openRefMenu(e, row.commit, chips)}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') openRefMenu(e as unknown as MouseEvent, row.commit, chips);
+                  }}
+                >▾ +{chips.length - 1}</span>
+              {:else}
+                {#each chips as chip (chip.kind + chip.label)}
+                  {@const label = chip.kind === 'stash'
+                    ? (stashMsgBySha.get(row.commit.sha) ?? 'stash')
+                    : chip.label}
+                  {@render chipView(chip, label)}
+                {/each}
+              {/if}
             </div>
 
             <!-- SVG gutter -->
@@ -1628,6 +1755,49 @@
     {/if}
   </div>
 </div>
+
+<!-- Collapsed-row ref popover: branches (then tags) for one commit. Rendered at
+     the component root (position:fixed) so it clears the scroll container. A
+     full-screen backdrop closes it on any outside click; Escape also closes. -->
+{#if refMenu}
+  <button type="button" class="ref-pop-backdrop" aria-label="Close" onclick={closeRefMenu}></button>
+  <div class="ref-popover" style="left: {refMenu.x}px; top: {refMenu.y}px;">
+    {#if refMenu.branches.length > 0}
+      <div class="ref-pop-group">Branches</div>
+      {#each refMenu.branches as chip (chip.kind + chip.label)}
+        <button
+          type="button"
+          class="ref-pop-row kind-{chip.kind}"
+          class:is-current={chip.current}
+          title={chip.current ? `Checked out · ${chip.label} — double-click to re-checkout` : `Double-click to checkout · ${chip.label}`}
+          onclick={() => refRowSelect(refMenu!.commit)}
+          ondblclick={() => refRowCheckout(chip)}
+          oncontextmenu={(e) => refRowMenu(e, chip)}
+        >
+          {#if chip.current}<Icon name="check" size={10} />{:else if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={10} />{:else}<Icon name="branch" size={10} />{/if}
+          <span class="ref-pop-label">{chip.label}</span>
+          {#if chip.current}<span class="ref-pop-tag">current</span>{/if}
+        </button>
+      {/each}
+    {/if}
+    {#if refMenu.tags.length > 0}
+      <div class="ref-pop-group">Tags</div>
+      {#each refMenu.tags as chip (chip.kind + chip.label)}
+        <button
+          type="button"
+          class="ref-pop-row kind-tag"
+          title={`Double-click to checkout tag (detached) · ${chip.label}`}
+          onclick={() => refRowSelect(refMenu!.commit)}
+          ondblclick={() => refRowCheckout(chip)}
+          oncontextmenu={(e) => refRowMenu(e, chip)}
+        >
+          <Icon name="tag" size={10} />
+          <span class="ref-pop-label">{chip.label}</span>
+        </button>
+      {/each}
+    {/if}
+  </div>
+{/if}
 
 <style>
   .graphview {
@@ -2023,6 +2193,102 @@
     background: transparent;
     color: var(--text-dim);
     border: 1px dashed var(--text-dim);
+  }
+
+  /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
+  .ref-expander {
+    flex-shrink: 0;
+    font-size: 9.5px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 3px;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .ref-expander:hover {
+    /* High-contrast active highlight (light-green + black), readable on dark. */
+    background: #7ee787;
+    color: #000;
+    border-color: #7ee787;
+  }
+  /* Full-screen click-catcher: any outside click closes the popover. */
+  .ref-pop-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    cursor: default;
+  }
+  .ref-popover {
+    position: fixed;
+    z-index: 61;
+    min-width: 200px;
+    max-width: 340px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  }
+  .ref-pop-group {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    padding: 5px 8px 2px;
+  }
+  .ref-pop-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    text-align: start;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .ref-pop-row:hover,
+  .ref-pop-row:focus-visible {
+    background: #7ee787;
+    color: #000;
+    outline: none;
+  }
+  .ref-pop-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .ref-pop-tag {
+    flex-shrink: 0;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    color: var(--accent);
+  }
+  .ref-pop-row:hover .ref-pop-tag,
+  .ref-pop-row:focus-visible .ref-pop-tag {
+    background: rgba(0, 0, 0, 0.18);
+    color: #000;
   }
 
   /* ── Branch-line highlight (press a commit → see its branch) ───────────────

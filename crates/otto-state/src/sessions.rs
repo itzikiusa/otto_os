@@ -183,6 +183,20 @@ impl SessionsRepo {
         Ok(())
     }
 
+    /// Every non-null `provider_session_id` currently recorded — the "claimed"
+    /// set. Used by the codex session-id capture task to avoid two sessions
+    /// grabbing the same on-disk rollout (a provider id is unique to one session).
+    pub async fn provider_session_ids(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT provider_session_id FROM sessions \
+             WHERE provider_session_id IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("sessions"))?;
+        Ok(rows.iter().map(|r| r.get("provider_session_id")).collect())
+    }
+
     pub async fn set_title(&self, id: &Id, title: &str) -> Result<()> {
         sqlx::query("UPDATE sessions SET title = ? WHERE id = ?")
             .bind(title)

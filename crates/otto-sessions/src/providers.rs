@@ -20,6 +20,12 @@ pub struct ProviderSpec {
     /// Shell command to run to update this provider's CLI, e.g. `"claude update"`.
     /// `None` means "no update command" (built-in shell provider, or unset custom).
     pub update_command: Option<String>,
+    /// True when the provider MINTS ITS OWN session id (so Otto can't pass it at
+    /// launch and must capture it from disk after spawn — `codex`). False when
+    /// Otto assigns the id via a launch flag (`claude --session-id {sid}`), or the
+    /// provider isn't resumable at all. Drives whether the `provider_session_id`
+    /// is recorded at spawn (assigned) or filled in by a post-spawn capture task.
+    pub captures_session_id: bool,
 }
 
 /// Shape accepted from the settings override JSON
@@ -105,6 +111,8 @@ impl ProviderRegistry {
                     a
                 }),
                 update_command: Some("claude update".into()),
+                // Otto assigns the id via `--session-id {sid}`.
+                captures_session_id: false,
             },
         );
         map.insert(
@@ -115,8 +123,21 @@ impl ProviderRegistry {
                     "--dangerously-bypass-approvals-and-sandbox".into(),
                     "--search".into(),
                 ],
-                resume_args: None,
+                // Codex doesn't accept a settable session id at launch — it mints
+                // its own UUID and records a rollout under `$CODEX_HOME/sessions`.
+                // Otto captures that UUID after spawn (see `capture_codex_session_id`)
+                // and resumes the exact conversation with `codex resume <uuid>`.
+                // The bypass/search flags are valid on the `resume` subcommand too
+                // (verified against codex-cli 0.142), so resumed sessions stay
+                // unattended-safe with live web search, like a fresh launch.
+                resume_args: Some(vec![
+                    "resume".into(),
+                    "--dangerously-bypass-approvals-and-sandbox".into(),
+                    "--search".into(),
+                    "{sid}".into(),
+                ]),
                 update_command: Some("codex update".into()),
+                captures_session_id: true,
             },
         );
         map.insert(
@@ -133,6 +154,7 @@ impl ProviderRegistry {
                 },
                 resume_args: None,
                 update_command: Some("agy update".into()),
+                captures_session_id: false,
             },
         );
         map.insert(
@@ -142,6 +164,7 @@ impl ProviderRegistry {
                 args: vec!["-l".into()],
                 resume_args: None,
                 update_command: None,
+                captures_session_id: false,
             },
         );
 
@@ -159,6 +182,9 @@ impl ProviderRegistry {
                             args: o.args,
                             resume_args: o.resume_args,
                             update_command,
+                            // Custom providers use Otto-assigned ids (the `{sid}`
+                            // template); rollout-style capture is built-in only.
+                            captures_session_id: false,
                         },
                     );
                 }
@@ -194,6 +220,17 @@ impl ProviderRegistry {
             .expect("provider registry lock")
             .get(name)
             .is_some_and(|p| p.resume_args.is_some())
+    }
+
+    /// True when the provider mints its OWN session id (codex) — so Otto records
+    /// no `provider_session_id` at spawn and instead captures it from disk after
+    /// launch. False for Otto-assigned providers (claude) and non-resumables.
+    pub fn captures_session_id(&self, name: &str) -> bool {
+        self.map
+            .read()
+            .expect("provider registry lock")
+            .get(name)
+            .is_some_and(|p| p.captures_session_id)
     }
 
     /// Provider names, sorted (for `/meta.providers`).

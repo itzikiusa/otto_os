@@ -15,7 +15,7 @@ use otto_core::{new_id, Error, Id, Result};
 use otto_pty::{resolve_grid, CommandSpec, PtyHandle};
 use otto_rbac::AuthRepo;
 use otto_state::{ActivityRepo, NewSession, NewTrail, SessionsRepo};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 
 use crate::providers::ProviderRegistry;
 
@@ -59,6 +59,137 @@ fn model_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
         return vec![];
     }
     vec!["--model".to_string(), model.to_string()]
+}
+
+/// Root directory codex writes session rollouts to: `$CODEX_HOME/sessions`,
+/// else `~/.codex/sessions`.
+fn codex_sessions_root() -> std::path::PathBuf {
+    let home = std::env::var("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex")
+        });
+    home.join("sessions")
+}
+
+/// Capture the codex session UUID for a just-spawned session by scanning its
+/// rollout files (`<root>/YYYY/MM/DD/rollout-*.jsonl`). Matches a TOP-LEVEL
+/// interactive session (`originator == "codex-tui"`, `thread_source == "user"`)
+/// whose recorded `cwd` equals ours, that isn't already `claimed`, and whose
+/// file is at/after `spawn_time`. Returns the OLDEST such match — the rollout
+/// THIS launch created (a later concurrent same-cwd spawn's rollout is newer and
+/// belongs to it). Polls briefly because codex writes the rollout a moment after
+/// launch. `None` if nothing matches in the window — caller leaves the session
+/// non-resumable rather than guessing and resuming the wrong conversation.
+async fn capture_codex_session_id(
+    sessions_root: &std::path::Path,
+    cwd: &str,
+    spawn_time: std::time::SystemTime,
+    claimed: &[String],
+) -> Option<String> {
+    use std::collections::HashSet;
+    let claimed: HashSet<&str> = claimed.iter().map(String::as_str).collect();
+    // A touch before spawn to tolerate clock/fs skew; a prior session's rollout
+    // in this cwd is either older than this floor or already in `claimed`.
+    let floor = spawn_time
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    for _ in 0..24 {
+        if let Some(sid) = scan_codex_rollout(sessions_root, cwd, floor, &claimed) {
+            return Some(sid);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    None
+}
+
+/// One scan-and-pick pass: the OLDEST unclaimed top-level codex rollout for `cwd`
+/// at/after `floor`. Split out from the polling loop so it's synchronously
+/// testable. See [`capture_codex_session_id`].
+fn scan_codex_rollout(
+    sessions_root: &std::path::Path,
+    cwd: &str,
+    floor: std::time::SystemTime,
+    claimed: &std::collections::HashSet<&str>,
+) -> Option<String> {
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    for path in recent_codex_rollouts(sessions_root, floor) {
+        let Some((session_id, mtime)) = codex_rollout_match(&path, cwd) else {
+            continue;
+        };
+        if claimed.contains(session_id.as_str()) {
+            continue;
+        }
+        let take = match &best {
+            Some((t, _)) => mtime < *t,
+            None => true,
+        };
+        if take {
+            best = Some((mtime, session_id));
+        }
+    }
+    best.map(|(_, sid)| sid)
+}
+
+/// Recursively collect `*.jsonl` rollout files under `root` modified at/after
+/// `cutoff`. Bounded depth (the layout is `YYYY/MM/DD/`); the cutoff keeps the
+/// scan cheap even with a deep history.
+fn recent_codex_rollouts(root: &std::path::Path, cutoff: std::time::SystemTime) -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, cutoff: std::time::SystemTime, out: &mut Vec<std::path::PathBuf>, depth: usize) {
+        if depth > 5 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => walk(&path, cutoff, out, depth + 1),
+                Ok(_)
+                    if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                        && entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .map(|m| m >= cutoff)
+                            .unwrap_or(false) =>
+                {
+                    out.push(path);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, cutoff, &mut out, 0);
+    out
+}
+
+/// If `path` is a TOP-LEVEL codex rollout whose recorded cwd == `cwd`, return its
+/// session UUID and file mtime. Reads only the first line (`session_meta`).
+fn codex_rollout_match(path: &std::path::Path, cwd: &str) -> Option<(String, std::time::SystemTime)> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    let mut first = String::new();
+    std::io::BufReader::new(file).read_line(&mut first).ok()?;
+    let v: serde_json::Value = serde_json::from_str(first.trim()).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let p = v.get("payload")?;
+    if p.get("cwd").and_then(|c| c.as_str()) != Some(cwd) {
+        return None;
+    }
+    // Top-level interactive session only — exclude subagent threads, which mint
+    // their own rollouts under the same cwd.
+    if p.get("originator").and_then(|o| o.as_str()) != Some("codex-tui")
+        || p.get("thread_source").and_then(|t| t.as_str()) != Some("user")
+    {
+        return None;
+    }
+    let session_id = p.get("session_id").and_then(|s| s.as_str())?.to_string();
+    let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some((session_id, mtime))
 }
 
 /// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
@@ -187,6 +318,11 @@ pub struct SessionManager {
     /// token minted for the `otto` server can be revoked when the session is
     /// removed. Keyed like `ingest_tokens`.
     mcp_tokens: Arc<DashMap<Id, String>>,
+    /// Serializes the post-spawn codex session-id capture so two codex sessions
+    /// launched in the SAME cwd claim DISTINCT on-disk rollouts: each capture
+    /// runs under this lock and persists its claim before releasing, so the next
+    /// one sees it in the claimed set. See `spawn_session_id_capture`.
+    codex_capture_lock: Arc<Mutex<()>>,
 }
 
 impl SessionManager {
@@ -220,6 +356,7 @@ impl SessionManager {
                 .and_then(|p| p.to_str().map(str::to_owned))
                 .unwrap_or_else(|| "ottod".to_string()),
             mcp_tokens: Arc::new(DashMap::new()),
+            codex_capture_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -633,7 +770,13 @@ impl SessionManager {
                     .unwrap_or(serde_json::json!({}));
                 spec.args.extend(add_dir_args(&provider, &meta_val));
                 spec.args.extend(model_args(&provider, &meta_val));
-                let psid = self.providers.supports_resume(&provider).then_some(sid);
+                // Record the provider_session_id NOW only when Otto assigns it
+                // (claude, via `--session-id {sid}`). Providers that mint their
+                // own id (codex) start with None and have it captured from disk
+                // after spawn — see the capture task below.
+                let psid = (self.providers.supports_resume(&provider)
+                    && !self.providers.captures_session_id(&provider))
+                .then_some(sid);
                 (provider, spec, psid)
             }
         };
@@ -747,11 +890,58 @@ impl SessionManager {
             session.provider.clone(),
             handle,
         );
+        // Providers that mint their own session id (codex): capture it from the
+        // on-disk rollout now that the CLI is running, so the session becomes
+        // resumable across daemon restarts (like claude's `--session-id`).
+        if session.kind == SessionKind::Agent
+            && session.provider_session_id.is_none()
+            && self.providers.captures_session_id(&session.provider)
+        {
+            self.spawn_session_id_capture(&session);
+        }
         let _ = self.events.send(Event::SessionCreated {
             session: session.clone(),
         });
         self.record_lifecycle(&session, format!("Session started · {}", session.provider));
         Ok(session)
+    }
+
+    /// Spawn a background task that captures a codex session's own UUID from its
+    /// on-disk rollout and records it as the `provider_session_id`, making the
+    /// session resumable after a daemon restart (`codex resume <uuid>`).
+    ///
+    /// Runs under `codex_capture_lock` so two codex sessions launched in the same
+    /// cwd claim DISTINCT rollouts (each persists its claim before the next runs).
+    /// Best-effort: if no matching rollout appears within the window the session
+    /// simply stays non-resumable (safe — we never guess and resume the wrong
+    /// conversation). Never blocks the spawn.
+    fn spawn_session_id_capture(&self, session: &Session) {
+        let repo = self.repo.clone();
+        let lock = Arc::clone(&self.codex_capture_lock);
+        let id = session.id.clone();
+        let cwd = session.cwd.clone();
+        // codex writes rollouts under $CODEX_HOME/sessions (defaults to ~/.codex).
+        let sessions_root = codex_sessions_root();
+        // Captured at the spawn moment so we match THIS launch's rollout, not a
+        // later concurrent same-cwd spawn's (whose mtime is newer).
+        let spawn_time = std::time::SystemTime::now();
+        tokio::spawn(async move {
+            let _guard = lock.lock().await;
+            let claimed = repo.provider_session_ids().await.unwrap_or_default();
+            match capture_codex_session_id(&sessions_root, &cwd, spawn_time, &claimed).await {
+                Some(psid) => match repo.set_provider_session(&id, &psid).await {
+                    Ok(()) => tracing::info!(
+                        session = %id, codex_session = %psid,
+                        "captured codex session id — session is now resumable"
+                    ),
+                    Err(e) => tracing::warn!(session = %id, "codex id capture: persist failed: {e}"),
+                },
+                None => tracing::warn!(
+                    session = %id,
+                    "codex id capture: no matching rollout found; session won't auto-resume"
+                ),
+            }
+        });
     }
 
     /// Load one session from the DB.
@@ -1452,6 +1642,70 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         (mgr, repo, ws, user)
+    }
+
+    /// Write a codex rollout file with a `session_meta` first line, returning its
+    /// path. `thread_source`/`originator` let tests forge subagent / non-codex rows.
+    fn write_rollout(
+        dir: &std::path::Path,
+        name: &str,
+        session_id: &str,
+        cwd: &str,
+        originator: &str,
+        thread_source: &str,
+    ) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        let meta = serde_json::json!({
+            "type": "session_meta",
+            "payload": {
+                "session_id": session_id,
+                "id": session_id,
+                "cwd": cwd,
+                "originator": originator,
+                "thread_source": thread_source,
+            }
+        });
+        std::fs::write(&path, format!("{meta}\n")).unwrap();
+        path
+    }
+
+    #[test]
+    fn codex_rollout_match_filters_to_top_level_in_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("2026/06/25");
+        let top = write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
+        let sub = write_rollout(&day, "b.jsonl", "BBB", "/work/proj", "codex-tui", "subagent");
+        let other = write_rollout(&day, "c.jsonl", "CCC", "/elsewhere", "codex-tui", "user");
+
+        assert_eq!(
+            codex_rollout_match(&top, "/work/proj").map(|(s, _)| s),
+            Some("AAA".to_string())
+        );
+        // Subagent thread and wrong-cwd rollouts are not matched.
+        assert_eq!(codex_rollout_match(&sub, "/work/proj").map(|(s, _)| s), None);
+        assert_eq!(codex_rollout_match(&other, "/work/proj").map(|(s, _)| s), None);
+    }
+
+    #[test]
+    fn scan_codex_rollout_picks_unclaimed_top_level_match() {
+        use std::collections::HashSet;
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("2026/06/25");
+        write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
+        write_rollout(&day, "b.jsonl", "BBB", "/work/proj", "codex-tui", "subagent");
+        write_rollout(&day, "c.jsonl", "CCC", "/elsewhere", "codex-tui", "user");
+        let floor = std::time::SystemTime::UNIX_EPOCH;
+
+        // Picks the only top-level rollout for this cwd.
+        let none_claimed: HashSet<&str> = HashSet::new();
+        assert_eq!(
+            scan_codex_rollout(tmp.path(), "/work/proj", floor, &none_claimed),
+            Some("AAA".to_string())
+        );
+        // Once AAA is claimed by another session, there's nothing left to claim.
+        let claimed: HashSet<&str> = ["AAA"].into_iter().collect();
+        assert_eq!(scan_codex_rollout(tmp.path(), "/work/proj", floor, &claimed), None);
     }
 
     async fn seed_session(repo: &SessionsRepo, ws: &Workspace, user: &Id, psid: Option<&str>) -> Id {
