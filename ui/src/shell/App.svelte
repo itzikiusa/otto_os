@@ -50,6 +50,7 @@
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
   import LoopsPage from '../modules/loops/LoopsPage.svelte';
   import ProofPage from '../modules/proof/ProofPage.svelte';
+  import ScheduledTasksPage from '../modules/scheduled-tasks/ScheduledTasksPage.svelte';
   import VaultPage from '../modules/vault/VaultPage.svelte';
   import PluginFrame from '../modules/plugins/PluginFrame.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
@@ -401,6 +402,7 @@
       { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
       { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
       { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
+      { id: 'core.go-scheduled-tasks', title: 'Go to Scheduled Tasks', group: 'Navigate', keywords: 'module scheduled task cron recurring job report cadence hourly daily', run: () => router.go('scheduled-tasks') },
       { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', keywords: 'canvas studio diagram sketch mockup uml sequence flowchart whiteboard excalidraw mermaid', run: () => router.go('canvas') },
       { id: 'core.go-insights', title: 'Go to Insights', group: 'Navigate', keywords: 'insights reports daily weekly monthly summary analytics activity', run: () => router.go('insights') },
       { id: 'core.go-swarm', title: 'Go to Swarm', group: 'Navigate', keywords: 'swarm agents team org orchestrator kanban board company', run: () => router.go('swarm') },
@@ -583,6 +585,8 @@
       <McpPage />
     {:else if moduleName === 'workflows'}
       <WorkflowsPage />
+    {:else if moduleName === 'scheduled-tasks'}
+      <ScheduledTasksPage />
     {:else if moduleName === 'skills-eval'}
       <SkillsEvalPage />
     {:else if moduleName === 'usage'}

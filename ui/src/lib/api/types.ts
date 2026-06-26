@@ -921,6 +921,15 @@ export type OttoEvent =
       status: string;
     }
   | {
+      /** A scheduled-task run started/finished/errored — the Scheduled Tasks page
+       *  re-fetches the task's run history on a matching tick. */
+      type: 'scheduled_task_run_updated';
+      workspace_id: Id;
+      task_id: Id;
+      run_id: Id;
+      status: string;
+    }
+  | {
       /** A canvas scene's source doc changed — pushed LIVE while an agent edits
        *  the backing file (per-poll) and once with the committed result. The
        *  Canvas page re-renders `doc` for the matching `scene_id`. */
@@ -1070,7 +1079,8 @@ export type Feature =
   | 'canvas'
   | 'proof_pack'
   | 'mcp'
-  | 'mission_control';
+  | 'mission_control'
+  | 'scheduled_tasks';
 
 /** Capability ladder (None < View < Edit < Admin). */
 export type Capability = 'none' | 'view' | 'edit' | 'admin';
@@ -4495,4 +4505,66 @@ export interface ProductLens {
   description: string;
   /** Whether the lens is checked by default in the Analysis tab. */
   default_on: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled Tasks (mirror of otto_core::domain::ScheduledTask* — keep in lockstep)
+// ---------------------------------------------------------------------------
+
+/** A scheduled task: a recurring agent job with a cadence + delivery. */
+export interface ScheduledTask {
+  id: Id;
+  workspace_id: Id;
+  name: string;
+  /** v1: `agent_prompt`. */
+  kind: string;
+  prompt: string;
+  skill?: string | null;
+  /** v1: `claude`. */
+  provider: string;
+  model: string;
+  /** Working dir; `''` => a per-task scratch dir. NOT a security boundary. */
+  cwd: string;
+  /** `{cadence:'interval'|'daily'|'weekly', every_min?, at?, weekday?}`. */
+  schedule: Record<string, unknown>;
+  /** `{type:'none'|'slack'|'telegram'|'email'|'webhook', ...}`. */
+  destination: Record<string, unknown>;
+  enabled: boolean;
+  last_run_at?: string | null;
+  last_status?: string | null;
+  next_run_at?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One execution of a scheduled task. */
+export interface ScheduledTaskRun {
+  id: Id;
+  task_id: Id;
+  workspace_id: Id;
+  status: 'running' | 'ok' | 'error';
+  trigger: 'schedule' | 'manual';
+  started_at: string;
+  finished_at?: string | null;
+  summary: string;
+  report_path?: string | null;
+  report_rel?: string | null;
+  delivered: boolean;
+  delivery_error?: string | null;
+  error?: string | null;
+  session_id?: string | null;
+  created_at: string;
+}
+
+/** A built-in template the create form can pre-fill from. */
+export interface ScheduledTaskPreset {
+  id: string;
+  name: string;
+  description: string;
+  kind: string;
+  prompt: string;
+  schedule: Record<string, unknown>;
+  suggested_destination: Record<string, unknown>;
+  skill?: string | null;
 }
