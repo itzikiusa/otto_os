@@ -1,0 +1,467 @@
+//! Proof-pack engine: evidence assembly, redaction-aware content ingestion,
+//! status/risk recompute, and the gate entry points the integration sites call.
+//!
+//! All persisted artifact content flows through [`upsert_content_artifact`] /
+//! [`add_content_artifact`], which redact (via `otto_core::redact`) and cap before
+//! storing — so the auto-gate paths (goal loop / review / workflow / session) and
+//! the artifact API share one trust boundary. [`recompute_and_emit`] is serialized
+//! per pack so concurrent mutations can't lose an update.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use otto_core::proof::{
+    compute_badges, compute_risk, derive_status, preview as core_preview, ProofArtifact,
+    ProofArtifactKind, ProofArtifactStatus, ProofBadge, ProofPack, WorkItemKind, STORE_CAP,
+};
+use otto_core::event::Event;
+use otto_core::{redact, Id, Result};
+use otto_git::local::{DiffTarget, LocalGit};
+use serde_json::{json, Value};
+
+use crate::state::ServerCtx;
+
+/// Per-pack async locks: the outer `std::Mutex` guards the map; each value is an
+/// async mutex held across the recompute read→derive→write.
+pub type ProofLocks = Arc<Mutex<HashMap<Id, Arc<tokio::sync::Mutex<()>>>>>;
+
+pub fn new_locks() -> ProofLocks {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Default bound for an assembled command (tests can be slow; keep generous but
+/// finite so a hang can't wedge a gate).
+const CMD_TIMEOUT_SECS: u64 = 600;
+
+// ---------------------------------------------------------------------------
+// Risky-file classification (D13 — path segments / extensions / basenames)
+// ---------------------------------------------------------------------------
+
+/// Whether a changed path is "risky" and should raise the risk score / badge.
+/// Matches by path SEGMENT, extension, or basename — not naive substring — so
+/// `author.rs` / `tokenizer.rs` aren't false-flagged.
+pub fn is_risky_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let segs: Vec<&str> = lower.split('/').collect();
+    let base = segs.last().copied().unwrap_or("");
+
+    // Migrations + CI config (path segments).
+    if segs.contains(&"migrations") || segs.contains(&".github") {
+        return true;
+    }
+    // SQL / lockfiles (extension / basename).
+    if lower.ends_with(".sql")
+        || base == "cargo.lock"
+        || base == "package-lock.json"
+        || base == "yarn.lock"
+        || base == "pnpm-lock.yaml"
+    {
+        return true;
+    }
+    // Security-sensitive areas: match a whole word in the basename (split on
+    // non-alphanumeric), so `auth.rs`/`policy.rs`/`oauth_config.ts` hit but
+    // `author.rs`/`tokenizer.rs` do not.
+    const RISKY_WORDS: &[&str] = &[
+        "auth", "rbac", "keychain", "netguard", "policy", "secret", "secrets", "password",
+        "passwords", "crypto", "token", "tokens", "credential", "credentials",
+    ];
+    let words: Vec<&str> = base
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().any(|w| RISKY_WORDS.contains(w))
+}
+
+/// Classify a command as `test | build | lint` for artifact metadata.
+pub fn classify_test_kind(cmd: &str) -> &'static str {
+    let c = cmd.to_lowercase();
+    if c.contains("clippy") || c.contains("vet") || c.contains("svelte-check") || c.contains("lint")
+    {
+        "lint"
+    } else if c.contains("build") || c.contains("compile") {
+        "build"
+    } else {
+        "test"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command execution (capture stdout+stderr+exit+duration)
+// ---------------------------------------------------------------------------
+
+pub struct CmdRun {
+    pub success: bool,
+    pub exit_code: i32,
+    pub output: String,
+    pub duration_ms: u64,
+}
+
+/// Run `sh -c <cmd>` in `cwd`, capturing combined output, exit code, and wall
+/// time. Bounded by `CMD_TIMEOUT_SECS`.
+pub async fn run_command(cwd: &str, cmd: &str) -> CmdRun {
+    let start = std::time::Instant::now();
+    let fut = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .output();
+    match tokio::time::timeout(Duration::from_secs(CMD_TIMEOUT_SECS), fut).await {
+        Ok(Ok(out)) => {
+            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+            let err = String::from_utf8_lossy(&out.stderr);
+            if !err.is_empty() {
+                s.push_str("\n--- stderr ---\n");
+                s.push_str(&err);
+            }
+            CmdRun {
+                success: out.status.success(),
+                exit_code: out.status.code().unwrap_or(-1),
+                output: s,
+                duration_ms: start.elapsed().as_millis() as u64,
+            }
+        }
+        Ok(Err(e)) => CmdRun {
+            success: false,
+            exit_code: -1,
+            output: format!("failed to spawn command: {e}"),
+            duration_ms: start.elapsed().as_millis() as u64,
+        },
+        Err(_) => CmdRun {
+            success: false,
+            exit_code: -1,
+            output: format!("command timed out after {CMD_TIMEOUT_SECS}s"),
+            duration_ms: start.elapsed().as_millis() as u64,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Content ingestion (the single redaction + cap boundary)
+// ---------------------------------------------------------------------------
+
+/// Redact and cap `content`, returning `(stored, extra_meta_patch)` where the
+/// patch carries `ref_kind`, `redactions`, and `truncated`.
+fn prepare_content(content: &str) -> (String, Value) {
+    let red = redact::redact_text(content);
+    let redactions: usize = red.hits.iter().map(|h| h.count).sum();
+    let mut value = red.value;
+    let mut truncated = false;
+    if value.len() > STORE_CAP {
+        let cut = value
+            .char_indices()
+            .take_while(|(i, _)| *i <= STORE_CAP)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(STORE_CAP);
+        value.truncate(cut);
+        value.push_str("\n…(truncated)");
+        truncated = true;
+    }
+    (
+        value,
+        json!({ "ref_kind": "inline", "redactions": redactions, "truncated": truncated }),
+    )
+}
+
+fn merge_meta(base: Value, patch: Value) -> Value {
+    let mut m = match base {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    if let Value::Object(p) = patch {
+        for (k, v) in p {
+            m.insert(k, v);
+        }
+    }
+    Value::Object(m)
+}
+
+/// Upsert an inline-content artifact by `(pack, kind, title)` — the canonical
+/// path for AUTO evidence (goal loop / review / workflow / session). Redacts +
+/// caps; merges `extra_meta` with the ref-kind patch.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_content_artifact(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    kind: ProofArtifactKind,
+    title: &str,
+    content: &str,
+    status: ProofArtifactStatus,
+    extra_meta: Value,
+    created_by: &str,
+) -> Result<ProofArtifact> {
+    let (stored, patch) = prepare_content(content);
+    let meta = merge_meta(extra_meta, patch);
+    ctx.proof_repo
+        .upsert_artifact_by_title(
+            &pack.id,
+            &pack.workspace_id,
+            kind,
+            title,
+            Some(&stored),
+            status,
+            &meta,
+            created_by,
+        )
+        .await
+}
+
+/// Add an inline/url artifact (the artifact API path). `url` is stored verbatim
+/// with `ref_kind=url`; inline content is redacted + capped. Appends a new row.
+#[allow(clippy::too_many_arguments)]
+pub async fn add_content_artifact(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    kind: ProofArtifactKind,
+    title: &str,
+    content: Option<&str>,
+    url: Option<&str>,
+    status: ProofArtifactStatus,
+    extra_meta: Value,
+    created_by: &str,
+) -> Result<ProofArtifact> {
+    let (content_ref, meta) = if let Some(u) = url {
+        (Some(u.to_string()), merge_meta(extra_meta, json!({"ref_kind": "url"})))
+    } else if let Some(c) = content {
+        let (stored, patch) = prepare_content(c);
+        (Some(stored), merge_meta(extra_meta, patch))
+    } else {
+        (None, merge_meta(extra_meta, json!({"ref_kind": "none"})))
+    };
+    ctx.proof_repo
+        .add_artifact(
+            &pack.id,
+            &pack.workspace_id,
+            kind,
+            title,
+            content_ref.as_deref(),
+            status,
+            &meta,
+            created_by,
+        )
+        .await
+}
+
+// ---------------------------------------------------------------------------
+// Auto-assembly
+// ---------------------------------------------------------------------------
+
+/// Assemble a `diff` artifact from `cwd` (vs `base`, or the working tree vs HEAD
+/// when `base` is None). Best-effort: returns Ok(()) without an artifact if the
+/// path isn't a git repo or the diff fails. Idempotent (upsert by title).
+pub async fn assemble_diff(ctx: &ServerCtx, pack: &ProofPack, cwd: &str, base: Option<&str>) -> Result<()> {
+    let git = LocalGit::new(cwd);
+    let (text, resp) = match base {
+        Some(b) => {
+            let t = git.diff_text_against(b).await;
+            let r = git.diff(DiffTarget::Commit(b.to_string()), None).await;
+            (t, r)
+        }
+        None => {
+            let t = git.working_diff_text().await;
+            let r = git.diff(DiffTarget::Working, None).await;
+            (t, r)
+        }
+    };
+    let (text, resp) = match (text, resp) {
+        (Ok(t), Ok(r)) => (t, r),
+        _ => return Ok(()), // not a git repo / diff failed — skip silently
+    };
+    if resp.files.is_empty() {
+        return Ok(());
+    }
+    let additions: u32 = resp.files.iter().filter_map(|f| f.added).sum();
+    let deletions: u32 = resp.files.iter().filter_map(|f| f.deleted).sum();
+    let risky_files: Vec<String> = resp
+        .files
+        .iter()
+        .map(|f| f.path.clone())
+        .filter(|p| is_risky_file(p))
+        .collect();
+    let meta = json!({
+        "files_changed": resp.files.len(),
+        "additions": additions,
+        "deletions": deletions,
+        "risky_files": risky_files,
+    });
+    upsert_content_artifact(
+        ctx,
+        pack,
+        ProofArtifactKind::Diff,
+        "Working tree diff",
+        &text,
+        ProofArtifactStatus::Info,
+        meta,
+        "otto",
+    )
+    .await?;
+    Ok(())
+}
+
+/// Run a command, capturing it as a `command` artifact (upsert by command).
+/// Returns the artifact status.
+pub async fn run_command_artifact(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    cwd: &str,
+    cmd: &str,
+    kind_hint: Option<&str>,
+) -> Result<ProofArtifactStatus> {
+    let run = run_command(cwd, cmd).await;
+    let test_kind = kind_hint.unwrap_or_else(|| classify_test_kind(cmd));
+    let status = if run.success {
+        ProofArtifactStatus::Passed
+    } else {
+        ProofArtifactStatus::Failed
+    };
+    let meta = json!({
+        "test_kind": test_kind,
+        "exit_code": run.exit_code,
+        "duration_ms": run.duration_ms,
+    });
+    upsert_content_artifact(ctx, pack, ProofArtifactKind::Command, cmd, &run.output, status, meta, "otto").await?;
+    Ok(status)
+}
+
+// ---------------------------------------------------------------------------
+// Gate + recompute
+// ---------------------------------------------------------------------------
+
+/// Ensure-or-create the pack for a work item (the gate entry point).
+pub async fn gate(
+    ctx: &ServerCtx,
+    kind: WorkItemKind,
+    work_item_id: &str,
+    workspace_id: &str,
+    title: &str,
+    created_by: &str,
+) -> Result<ProofPack> {
+    ctx.proof_repo
+        .ensure_pack(workspace_id, kind, work_item_id, title, created_by)
+        .await
+}
+
+fn lock_for(ctx: &ServerCtx, pack_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = ctx.proof_locks.lock().unwrap();
+    map.entry(pack_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Reload a pack's artifacts, derive its status + risk, persist, and broadcast
+/// `ProofPackUpdated`. Serialized per pack so concurrent callers can't lose an
+/// update. Returns the refreshed pack.
+pub async fn recompute_and_emit(ctx: &ServerCtx, pack_id: &str) -> Result<ProofPack> {
+    let lock = lock_for(ctx, pack_id);
+    let _guard = lock.lock().await;
+
+    let pack = ctx.proof_repo.get_pack(pack_id).await?;
+    let arts = ctx.proof_repo.list_artifacts(pack_id).await?;
+    let status = derive_status(&pack, &arts);
+    let risk = compute_risk(&arts);
+    ctx.proof_repo.set_status_risk(pack_id, status, risk).await?;
+
+    let _ = ctx.events.send(Event::ProofPackUpdated {
+        workspace_id: pack.workspace_id.clone(),
+        proof_pack_id: pack.id.clone(),
+        work_item_kind: pack.work_item_kind.as_str().to_string(),
+        work_item_id: pack.work_item_id.clone(),
+        status: status.as_str().to_string(),
+        risk_score: risk,
+    });
+
+    ctx.proof_repo.get_pack(pack_id).await
+}
+
+/// Badge strings for a pack (used by the route DTOs).
+pub fn badge_strings(pack: &ProofPack, arts: &[ProofArtifact]) -> Vec<String> {
+    compute_badges(pack, arts)
+        .into_iter()
+        .map(|b: ProofBadge| b.as_str().to_string())
+        .collect()
+}
+
+/// Preview helper re-exported for routes.
+pub fn preview(content: &str) -> (String, bool) {
+    core_preview(content)
+}
+
+/// Resolve the workspace a pack belongs to, erroring if not found.
+pub async fn pack_workspace(ctx: &ServerCtx, pack_id: &str) -> Result<String> {
+    Ok(ctx.proof_repo.get_pack(pack_id).await?.workspace_id)
+}
+
+/// Look up the proof pack for a work item, returning None if absent. Convenience
+/// for gates that should not create a pack (e.g. the PR gate read path).
+pub async fn pack_for_work_item(
+    ctx: &ServerCtx,
+    kind: WorkItemKind,
+    work_item_id: &str,
+) -> Result<Option<ProofPack>> {
+    ctx.proof_repo.find_by_work_item(kind, work_item_id).await
+}
+
+/// Map an error to a not-found-tolerant unit (used by best-effort gates).
+pub fn ignore_err<T>(r: Result<T>) -> Option<T> {
+    match r {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::debug!("proof gate best-effort error: {e}");
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests (pure helpers; DB-touching gate/recompute tested in tests/proof_engine.rs)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn risky_file_segments_not_substrings() {
+        assert!(is_risky_file("crates/otto-state/migrations/0077.sql"));
+        assert!(is_risky_file("crates/otto-server/src/policy.rs"));
+        assert!(is_risky_file("crates/otto-rbac/src/auth.rs"));
+        assert!(is_risky_file(".github/workflows/ci.yml"));
+        assert!(is_risky_file("ui/package-lock.json"));
+        assert!(is_risky_file("Cargo.lock"));
+        // false positives the naive substring approach would hit:
+        assert!(!is_risky_file("crates/otto-core/src/author.rs"));
+        assert!(!is_risky_file("ui/src/lib/tokenizer.ts"));
+        assert!(!is_risky_file("crates/otto-server/src/modules.rs"));
+    }
+
+    #[test]
+    fn classify_kinds() {
+        assert_eq!(classify_test_kind("cargo clippy --workspace"), "lint");
+        assert_eq!(classify_test_kind("go vet ./..."), "lint");
+        assert_eq!(classify_test_kind("npm run build"), "build");
+        assert_eq!(classify_test_kind("cargo test --workspace"), "test");
+    }
+
+    #[tokio::test]
+    async fn run_command_captures_success_and_failure() {
+        let here = ".";
+        let ok = run_command(here, "true").await;
+        assert!(ok.success && ok.exit_code == 0);
+        let bad = run_command(here, "exit 3").await;
+        assert!(!bad.success && bad.exit_code == 3);
+        let echo = run_command(here, "echo hello").await;
+        assert!(echo.output.contains("hello"));
+    }
+
+    #[test]
+    fn prepare_content_caps_and_reports() {
+        let (small, meta) = prepare_content("hello");
+        assert_eq!(small, "hello");
+        assert_eq!(meta["truncated"], json!(false));
+        let big = "x".repeat(STORE_CAP + 1000);
+        let (capped, meta) = prepare_content(&big);
+        assert!(capped.len() <= STORE_CAP + 32);
+        assert_eq!(meta["truncated"], json!(true));
+    }
+}

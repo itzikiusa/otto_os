@@ -99,6 +99,11 @@ pub struct ServerCtx {
     pub goal_loops_repo: otto_state::GoalLoopsRepo,
     /// Per-loop controller runtime handles (start/pause/resume/stop).
     pub goal_loops: crate::goal_loop::GoalLoopRegistry,
+    // -- Proof Packs -------------------------------------------------------
+    pub proof_repo: otto_state::ProofRepo,
+    /// Per-pack async locks serializing status/risk recompute so concurrent
+    /// artifact adds / gates can't interleave a stale read→write (no lost-update).
+    pub proof_locks: crate::proof::ProofLocks,
 }
 
 impl ServerCtx {

@@ -26,6 +26,7 @@ pub mod modules;
 pub mod monitor;
 pub mod plugins;
 pub mod policy;
+pub mod proof;
 pub mod product_chat;
 pub mod product_media;
 pub mod product_refine;
