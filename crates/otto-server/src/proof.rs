@@ -98,15 +98,15 @@ pub struct CmdRun {
 }
 
 /// Run `sh -c <cmd>` in `cwd`, capturing combined output, exit code, and wall
-/// time. Bounded by `CMD_TIMEOUT_SECS`.
-pub async fn run_command(cwd: &str, cmd: &str) -> CmdRun {
+/// time. Bounded by `timeout_secs`.
+pub async fn run_command(cwd: &str, cmd: &str, timeout_secs: u64) -> CmdRun {
     let start = std::time::Instant::now();
     let fut = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
         .output();
-    match tokio::time::timeout(Duration::from_secs(CMD_TIMEOUT_SECS), fut).await {
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), fut).await {
         Ok(Ok(out)) => {
             let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
             let err = String::from_utf8_lossy(&out.stderr);
@@ -130,7 +130,7 @@ pub async fn run_command(cwd: &str, cmd: &str) -> CmdRun {
         Err(_) => CmdRun {
             success: false,
             exit_code: -1,
-            output: format!("command timed out after {CMD_TIMEOUT_SECS}s"),
+            output: format!("command timed out after {timeout_secs}s"),
             duration_ms: start.elapsed().as_millis() as u64,
         },
     }
@@ -308,7 +308,7 @@ pub async fn run_command_artifact(
     cmd: &str,
     kind_hint: Option<&str>,
 ) -> Result<ProofArtifactStatus> {
-    let run = run_command(cwd, cmd).await;
+    let run = run_command(cwd, cmd, CMD_TIMEOUT_SECS).await;
     let test_kind = kind_hint.unwrap_or_else(|| classify_test_kind(cmd));
     let status = if run.success {
         ProofArtifactStatus::Passed
@@ -548,11 +548,11 @@ mod tests {
     #[tokio::test]
     async fn run_command_captures_success_and_failure() {
         let here = ".";
-        let ok = run_command(here, "true").await;
+        let ok = run_command(here, "true", 30).await;
         assert!(ok.success && ok.exit_code == 0);
-        let bad = run_command(here, "exit 3").await;
+        let bad = run_command(here, "exit 3", 30).await;
         assert!(!bad.success && bad.exit_code == 3);
-        let echo = run_command(here, "echo hello").await;
+        let echo = run_command(here, "echo hello", 30).await;
         assert!(echo.output.contains("hello"));
     }
 
