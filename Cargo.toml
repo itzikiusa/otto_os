@@ -26,6 +26,7 @@ members = [
     "crates/otto-netguard",
     "crates/otto-ssh",
     "crates/otto-canvas",
+    "crates/otto-workgraph",
 ]
 # Custom plugins are out-of-process sidecars installed at RUNTIME under
 # ~/otto-plugins (not workspace members, not compiled into the app). See
@@ -61,6 +62,7 @@ otto-brokers = { path = "crates/otto-brokers" }
 otto-netguard = { path = "crates/otto-netguard" }
 otto-ssh = { path = "crates/otto-ssh" }
 otto-canvas = { path = "crates/otto-canvas" }
+otto-workgraph = { path = "crates/otto-workgraph" }
 
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }

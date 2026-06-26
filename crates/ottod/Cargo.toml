@@ -33,6 +33,7 @@ otto-skills.workspace = true
 otto-usage.workspace = true
 otto-product.workspace = true
 otto-swarm.workspace = true
+otto-workgraph.workspace = true
 otto-memory.workspace = true
 # `ottod mcp-tools` (Task B2b): the first-party MCP tool server calls back into
 # the running daemon over loopback HTTP with a per-session read-only token.

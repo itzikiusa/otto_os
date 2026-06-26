@@ -150,7 +150,7 @@
             action: () => ws.setViewMode(ws.viewMode === 'tiled' ? 'tabs' : 'tiled'),
           },
           {
-            label: ws.viewMode === 'mission' ? 'Exit Mission Control' : 'Mission Control',
+            label: ws.viewMode === 'mission' ? 'Exit Work Queue' : 'Work Queue',
             icon: 'gauge',
             action: () => ws.setViewMode(ws.viewMode === 'mission' ? 'tabs' : 'mission'),
           },
@@ -223,8 +223,8 @@
     <button
       class:active={ws.viewMode === 'mission'}
       onclick={() => ws.setViewMode('mission')}
-      title="Mission Control — work queue"
-      aria-label="Mission Control"
+      title="Work Queue"
+      aria-label="Work Queue"
     >
       <Icon name="gauge" size={12} />
     </button>

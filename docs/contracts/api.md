@@ -1672,3 +1672,33 @@ Persistence: `otto_state::product_chat` (`DiscoveryChat`, `DiscoveryChatMessage`
 | 112 | POST /api/v1/product/discovery-chats/{cid}/messages | ws editor | `{body}` | `{user_message, agent_message}` (one turn; agent_message carries `actions_json`) |
 | 113 | POST /api/v1/product/discovery-chats/{cid}/archive | ws editor | — | DiscoveryChat |
 | 114 | POST /api/v1/product/discovery-chats/{cid}/apply | ws editor | `{action}` | ApplyResult `{story_updated, created_question_ids, created_note_ids, canvas_id}` |
+
+## Mission Control (work graph)
+
+The unified work graph: every agentic activity (sessions, swarm projects, goal
+loops, workflow runs, PR reviews, product stories, PRs, channel triggers)
+projected into one traceable model — `work_items` linked by `work_edges`, each
+carrying a `work_events` audit trail, `work_artifacts` (evidence/trace), and
+`work_approvals` (human gates). Items are materialized by the
+`workgraph_projector` (subscribes to the event bus + a 60 s reconcile/backfill;
+no module rewiring). The API is read-mostly; writes are human annotation
+(risk/goal/result), manual edges, approvals, and a re-derive backfill. Gated by
+`Feature::MissionControl` (read=View, write=Edit) plus the workspace-role axis.
+A `WorkItem` carries `{id, workspace_id, kind, source_id, title, goal, status,
+owner, owner_kind, repo_id, branch, cost_so_far, risk_level, result_summary,
+context_summary, last_event_at, created_at, updated_at}`.
+
+Persistence: `otto_state::workgraph` (`WorkGraphRepo`); live signal:
+`Event::WorkGraphUpdated` (see `ws.md`).
+
+| # | Method & path | Auth | Request | Response |
+|---|---|---|---|---|
+| 115 | GET /api/v1/workspaces/{wid}/workgraph/summary | mission_control view | — | MissionSummary `{total, active, needs_approval, total_cost, by_kind[], by_status[], by_risk[]}` |
+| 116 | GET /api/v1/workspaces/{wid}/workgraph/items | mission_control view | query `kind?,status?,risk?,q?,limit?` | `WorkItem[]` |
+| 117 | GET /api/v1/workspaces/{wid}/workgraph/graph | mission_control view | query `kind?,status?,risk?,limit?` | GraphView `{nodes[], edges[]}` |
+| 118 | GET /api/v1/workspaces/{wid}/workgraph/items/{id} | mission_control view | — | WorkItemDetail `{…WorkItem, edges[], events[], artifacts[], approvals[], pending_approvals, needs_approval}` |
+| 119 | PATCH /api/v1/workspaces/{wid}/workgraph/items/{id} | mission_control edit | `{risk_level?, goal?, result_summary?}` | WorkItem |
+| 120 | POST /api/v1/workspaces/{wid}/workgraph/items/{id}/edges | mission_control edit | `{to_item_id, relation}` | WorkEdge |
+| 121 | POST /api/v1/workspaces/{wid}/workgraph/items/{id}/approvals | mission_control edit | `{reason?}` | WorkApproval (pending) |
+| 122 | POST /api/v1/workspaces/{wid}/workgraph/approvals/{aid}/decide | mission_control edit | `{decision: approved\|rejected, note?}` | WorkApproval |
+| 123 | POST /api/v1/workspaces/{wid}/workgraph/backfill | mission_control edit | — | `{ok, summary: MissionSummary}` |

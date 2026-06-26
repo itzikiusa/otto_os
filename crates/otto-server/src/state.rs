@@ -99,6 +99,10 @@ pub struct ServerCtx {
     pub goal_loops_repo: otto_state::GoalLoopsRepo,
     /// Per-loop controller runtime handles (start/pause/resume/stop).
     pub goal_loops: crate::goal_loop::GoalLoopRegistry,
+    // -- Mission Control / work graph --------------------------------------
+    /// Unified work-graph service (persist + emit). The projector
+    /// (`workgraph_projector`) feeds it from the event bus; the routes read it.
+    pub workgraph: std::sync::Arc<otto_workgraph::WorkGraphService>,
 }
 
 impl ServerCtx {

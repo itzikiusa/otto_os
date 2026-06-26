@@ -259,4 +259,14 @@ pub enum Event {
         sql: String,
         note: String,
     },
+    /// A work-graph item was created or changed — Mission Control's live signal.
+    /// The Mission Control page re-fetches the matching workspace's summary/list
+    /// on a matching tick instead of polling. `kind`/`status` are the normalized
+    /// snake_case strings (otto-core stays free of otto-state types).
+    WorkGraphUpdated {
+        workspace_id: Id,
+        item_id: Id,
+        kind: String,
+        status: String,
+    },
 }

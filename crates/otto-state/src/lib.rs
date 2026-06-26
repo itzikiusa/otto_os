@@ -44,6 +44,7 @@ pub mod swarm;
 pub mod users;
 pub mod workflow_triggers;
 pub mod workflows;
+pub mod workgraph;
 pub mod workspaces;
 
 pub use activity::{ActivityRepo, NewTask, NewTrail};
@@ -110,5 +111,11 @@ pub use swarm::{
 };
 pub use workflow_triggers::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger};
 pub use workflows::WorkflowsRepo;
+pub use workgraph::{
+    ApprovalStatus, ArtifactKind, CountBucket, EdgeRelation, EdgeView, GraphEdge, GraphNode,
+    GraphView, MissionFilter, MissionSummary, NewArtifact, NewWorkEvent, RiskLevel, UpsertResult,
+    WorkActor, WorkApproval, WorkArtifact, WorkEdge, WorkEvent, WorkGraphRepo, WorkItem,
+    WorkItemDetail, WorkItemUpsert, WorkKind, WorkStatus,
+};
 pub use users::{UserRecord, UsersRepo};
 pub use workspaces::{Member, WorkspacesRepo};

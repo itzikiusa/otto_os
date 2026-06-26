@@ -38,6 +38,7 @@ export interface SidebarModule {
  */
 export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'agents', icon: 'terminal', label: 'Agents', feature: 'agents', special: true },
+  { id: 'mission-control', icon: 'radar', label: 'Mission Control', feature: 'mission_control' },
   { id: 'connections', icon: 'plug', label: 'Connections', feature: 'connections', special: true },
   { id: 'swarm', icon: 'grid', label: 'Swarm', feature: 'swarm' },
   { id: 'loops', icon: 'refresh', label: 'Goal Loops' },

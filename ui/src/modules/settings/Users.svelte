@@ -55,12 +55,12 @@
 
   // ---- feature grant matrix -----------------------------------------------
   const ALL_FEATURES: Feature[] = [
-    'agents', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
+    'agents', 'mission_control', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
     'api_client', 'workflows', 'channels', 'skill_eval', 'skills', 'insights',
-    'usage', 'self_improvement', 'context', 'settings', 'users',
+    'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas',
   ];
   const FEATURE_LABELS: Record<Feature, string> = {
-    agents: 'Agents', connections: 'Connections', database: 'Database',
+    agents: 'Agents', mission_control: 'Mission Control', connections: 'Connections', database: 'Database',
     git: 'Git', issues: 'Issues', product: 'Product', swarm: 'Swarm',
     api_client: 'API Client', workflows: 'Workflows', channels: 'Channels',
     skill_eval: 'Skills Evaluator', skills: 'Skills', insights: 'Insights',

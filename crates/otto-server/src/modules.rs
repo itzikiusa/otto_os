@@ -3873,6 +3873,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::lsp::api_router(),
         crate::routes::capabilities::capabilities_routes(),
         crate::routes::mission::mission_routes(),
+        crate::routes::workgraph::workgraph_routes(),
         crate::routes::search::search_routes(),
         crate::routes::backup::backup_routes(),
         // Runtime custom plugins: management + scoped host-API + reverse-proxy to

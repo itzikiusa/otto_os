@@ -367,6 +367,10 @@ async fn run(cfg: Config) -> Result<(), String> {
         swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
         goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
         goal_loops: otto_server::goal_loop::new_registry(),
+        workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
+            otto_state::WorkGraphRepo::new(pool.clone()),
+            events.clone(),
+        )),
     };
 
     // Spawn enabled runtime plugins (sidecar processes Otto supervises + proxies).
@@ -663,6 +667,13 @@ async fn run(cfg: Config) -> Result<(), String> {
     // inside the listener are logged and never propagate to the event producer.
     let _workflow_event_trigger_handle = spawn_workflow_event_trigger_listener(ctx.clone());
     tracing::info!("workflow event-trigger listener started");
+
+    // --- Mission Control / work-graph projector ---
+    // Subscribes to the daemon event bus and materializes every agentic activity
+    // into the unified work graph (live), plus a 60 s reconcile + boot backfill
+    // that re-derive from the authoritative repos and refresh per-session cost.
+    let _workgraph_projector_handle = otto_server::workgraph_projector::spawn(ctx.clone());
+    tracing::info!("workgraph projector started");
 
     // --- Usage tracking + system metrics (embedded ClickHouse) ---
     // The recorder mines usage from the activity-trail event stream; the

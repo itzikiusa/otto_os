@@ -406,3 +406,24 @@ blind timer.
 - `channels.notify_budget_exceeded` setting (default off) routes this to
   Slack / Telegram via `otto-channels/improve_notify.rs`.
 - TypeScript type: `{ type: 'budget_exceeded'; workspace_id: Id; provider: string; spend_usd: number; cap_usd: number; direction: string }`.
+
+### `work_graph_updated`
+
+```json
+{
+  "type": "work_graph_updated",
+  "workspace_id": "<workspace_id>",
+  "item_id": "<work_item_id>",
+  "kind": "session",
+  "status": "running"
+}
+```
+
+- Emitted by the `workgraph_projector` when a Mission Control work item is
+  created or its normalized status changes (cost/title-only refreshes stay
+  quiet). `kind` is the work kind (`session|swarm|goal_loop|workflow|review|
+  product_story|pr|external_trigger`); `status` is the normalized lifecycle.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- The Mission Control page re-fetches the workspace summary/list on a matching
+  tick instead of polling.
+- TypeScript type: `{ type: 'work_graph_updated'; workspace_id: Id; item_id: Id; kind: string; status: string }`.

@@ -644,6 +644,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Agents, View);
     }
 
+    // Mission Control / work graph — the unified cross-activity view. A single
+    // prefix covers every route (summary/items/graph/items/{id}/edges/approvals/
+    // approvals/{aid}/decide/backfill). Reads = View, writes/backfill = Edit.
+    // Placeholder MUST match the route templates (`{wid}`) verbatim.
+    if p.starts_with("/workspaces/{wid}/workgraph/") {
+        return Require(MissionControl, if get { View } else { Edit });
+    }
+
     // ----------------------------------------------------------------------
     // 4. Default — fail closed.
     // ----------------------------------------------------------------------

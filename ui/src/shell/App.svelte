@@ -45,6 +45,7 @@
   import ProductPage from '../modules/product/ProductPage.svelte';
   import CanvasPage from '../modules/canvas/CanvasPage.svelte';
   import InsightsPage from '../modules/insights/InsightsPage.svelte';
+  import MissionControlPage from '../modules/mission-control/MissionControlPage.svelte';
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
   import LoopsPage from '../modules/loops/LoopsPage.svelte';
   import VaultPage from '../modules/vault/VaultPage.svelte';
@@ -562,6 +563,8 @@
   <div class="content" class:bell-gutter={moduleName !== 'agents'}>
     {#if moduleName === 'agents'}
       <AgentsPage />
+    {:else if moduleName === 'mission-control'}
+      <MissionControlPage />
     {:else if moduleName === 'connections'}
       <ConnectionsPage />
     {:else if moduleName === 'git'}

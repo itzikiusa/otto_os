@@ -240,7 +240,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
     ServerCtx {
         pool: pool.clone(),
         secrets,
-        events,
+        events: events.clone(),
         authenticator: Arc::new(otto_rbac::RbacAuthenticator::new(pool.clone())),
         roles,
         auth_cache: otto_rbac::AuthCache::new(),
@@ -287,6 +287,10 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
         goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
         goal_loops: otto_server::goal_loop::new_registry(),
+        workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
+            otto_state::WorkGraphRepo::new(pool.clone()),
+            events.clone(),
+        )),
     }
 }
 

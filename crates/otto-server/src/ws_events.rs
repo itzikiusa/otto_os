@@ -250,7 +250,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::DbAssistSessionStarted { workspace_id, .. }
         // Budget-exceeded alerts are scoped to the workspace that crossed the cap
         // (it carries `workspace_id`), so they go to that workspace's members.
-        | Event::BudgetExceeded { workspace_id, .. } => Scope::Workspace(workspace_id),
+        | Event::BudgetExceeded { workspace_id, .. }
+        // Work-graph (Mission Control) updates go to the item's workspace members.
+        | Event::WorkGraphUpdated { workspace_id, .. } => Scope::Workspace(workspace_id),
         // Usage tick, self-improvement updates, and insight-ready are global
         // (no workspace axis — insights are a cross-workspace cadence report).
         // Deliver them to every authenticated client, matching the `Notice` pattern.

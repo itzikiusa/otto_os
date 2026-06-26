@@ -1856,7 +1856,7 @@ impl Capability {
     }
 }
 
-/// The 19 independently-gatable product features.
+/// The 20 independently-gatable product features.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -1879,6 +1879,8 @@ pub enum Feature {
     Settings,
     Users,
     Canvas,
+    /// Mission Control — the unified work graph across every activity.
+    MissionControl,
 }
 
 impl Feature {
@@ -1904,6 +1906,7 @@ impl Feature {
             "settings" => Some(Self::Settings),
             "users" => Some(Self::Users),
             "canvas" => Some(Self::Canvas),
+            "mission_control" => Some(Self::MissionControl),
             _ => None,
         }
     }
@@ -1930,6 +1933,7 @@ impl Feature {
             Self::Settings => "settings",
             Self::Users => "users",
             Self::Canvas => "canvas",
+            Self::MissionControl => "mission_control",
         }
     }
 }

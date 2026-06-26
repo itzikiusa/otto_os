@@ -42,6 +42,7 @@ otto-usage.workspace = true
 otto-product.workspace = true
 otto-canvas.workspace = true
 otto-swarm.workspace = true
+otto-workgraph.workspace = true
 otto-memory.workspace = true
 otto-pty.workspace = true
 async-trait.workspace = true

@@ -124,6 +124,25 @@ export class BudgetBus {
 
 export const budgetBus = new BudgetBus();
 
+/** Incremented each time a `work_graph_updated` WS event arrives. The Mission
+ *  Control page subscribes and re-fetches the workspace summary/list when the
+ *  event's workspace matches the open one — replacing any polling. */
+export class MissionControlBus {
+  tick: number = $state(0);
+  workspaceId: string = $state('');
+  itemId: string = $state('');
+  status: string = $state('');
+
+  apply(workspaceId: string, itemId: string, status: string): void {
+    this.workspaceId = workspaceId;
+    this.itemId = itemId;
+    this.status = status;
+    this.tick += 1;
+  }
+}
+
+export const missionControlBus = new MissionControlBus();
+
 // ---------------------------------------------------------------------------
 // canvas_updated — live canvas-document push. The server broadcasts the scene's
 // source doc on every file change while an agent edits (and once committed); the
@@ -261,6 +280,10 @@ class EventsClient {
         } else if (parsed.type === 'budget_exceeded') {
           // Surface a budget cap crossing/recovery to any subscribed banner.
           budgetBus.apply(parsed.provider, parsed.spend_usd, parsed.cap_usd, parsed.direction);
+        } else if (parsed.type === 'work_graph_updated') {
+          // Mission Control: a work item was created or changed status. The page
+          // re-fetches the matching workspace's summary/list on the event.
+          missionControlBus.apply(parsed.workspace_id, parsed.item_id, parsed.status);
         } else if (parsed.type === 'goal_loop_updated') {
           // Goal Loops: update the list row + bump the open detail's re-fetch tick.
           loops.applyEvent(parsed);

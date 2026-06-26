@@ -44,6 +44,7 @@ pub mod swarm_scheduler;
 pub mod swarm_workspace;
 pub mod workflow_engine;
 pub mod workflow_trigger_scheduler;
+pub mod workgraph_projector;
 pub mod ws_events;
 
 use axum::http::{header, HeaderValue, Method};

@@ -21,6 +21,7 @@ pub mod logs;
 pub mod mcp_servers;
 pub mod meta;
 pub mod mission;
+pub mod workgraph;
 pub mod name_themes;
 pub mod notifications;
 pub mod onboarding;
