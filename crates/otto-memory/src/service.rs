@@ -170,7 +170,7 @@ impl MemoryService {
                 .map(|m| format!("{}\n{}", m.title, m.body))
                 .collect();
             if let Ok(vecs) = e.embed(&texts).await {
-                for (m, v) in chunk.iter().zip(vecs.into_iter()) {
+                for (m, v) in chunk.iter().zip(vecs) {
                     if self
                         .repo
                         .put_vector(&m.id, e.model_id(), e.dim(), &v)
