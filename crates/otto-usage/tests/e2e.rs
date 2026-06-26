@@ -177,6 +177,7 @@ async fn usage_engine_end_to_end() {
     let reopened = engine2.summary(30, false).await.expect("summary after reopen");
     assert_eq!(reopened.total_events, 6, "data persisted across restart");
     assert_eq!(reopened.total_tokens, 5300);
+    engine2.shutdown().await; // stop the server (no orphan when the test exits)
 }
 
 #[tokio::test]
@@ -305,6 +306,7 @@ async fn attribution_groups_by_dimension() {
         by_repo.iter().all(|r| !r.key.is_empty()),
         "empty keys must be filtered"
     );
+    engine.shutdown().await; // stop the server (no orphan when the test exits)
 }
 
 /// Forecast returns a no-data response when the engine has no history for the
@@ -342,6 +344,7 @@ async fn forecast_no_history_returns_zero() {
         "basis explains no history: {}",
         resp.basis
     );
+    engine.shutdown().await; // stop the server (no orphan when the test exits)
 }
 
 /// Forecast with an explicit token estimate prices it directly (no ClickHouse needed).
