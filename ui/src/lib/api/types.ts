@@ -978,6 +978,36 @@ export type OttoEvent =
       assist_id: Id;
       sql: string;
       note: string;
+    }
+  | {
+      /** A review finding's workflow `status` (or a tracked field) changed —
+       *  emitted after every triage action / transition. The Findings board
+       *  subscribes and refetches the matching review's findings.
+       *  `status` is the new `FindingStatus` (snake_case). */
+      type: 'finding_updated';
+      workspace_id: Id;
+      review_id: Id;
+      finding_id: Id;
+      status: string;
+    }
+  | {
+      /** An agent-backed finding action spawned a live, openable session
+       *  (fix / verify / regression-test). `action` is
+       *  "fix" | "verify" | "regression_test". */
+      type: 'finding_action_started';
+      workspace_id: Id;
+      review_id: Id;
+      finding_id: Id;
+      action: string;
+      session_id?: Id | null;
+    }
+  | {
+      /** A review's Proof Pack was exported (snapshot persisted + verified
+       *  findings ingested into memory). */
+      type: 'proof_pack_exported';
+      workspace_id: Id;
+      review_id: Id;
+      proof_pack_id: Id;
     };
 
 // ---------------------------------------------------------------------------
@@ -2385,6 +2415,152 @@ export interface HandoverBriefResp {
   fallback: boolean;
   /** True when some source context (transcript/scrollback/git) was found. */
   had_context: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Review findings workflow (the 6-state finding lifecycle + Proof Pack)
+// ---------------------------------------------------------------------------
+// Mirrors `crates/otto-core/src/finding.rs`. A `Finding` is the tracked
+// workflow record produced by the multi-agent code review; the action endpoints
+// drive its `status` through six states and append an immutable `FindingEvent`
+// audit trail (the "closing the loop with evidence" spine). See
+// docs/superpowers/specs/2026-06-26-review-findings-workflow-design.md.
+
+/** The 6-value workflow disposition of a finding. */
+export type FindingStatus =
+  | 'open'
+  | 'accepted'
+  | 'false_positive'
+  | 'fixed'
+  | 'verified'
+  | 'waived';
+
+/** Normalized finding severity (5-level scale). */
+export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+/** A review finding as the workflow tracks it (`GET /reviews/{id}/findings`,
+ *  the per-action responses). `finding_id` = `id`. */
+export interface Finding {
+  id: Id;
+  review_id: Id;
+  workspace_id: Id;
+  repo_id: Id;
+  pr_number: number | null;
+  fingerprint: string;
+  // --- the 11 required fields ---
+  severity: FindingSeverity;
+  category: string | null;
+  path: string | null;
+  /** Range start line (the legacy `line`). */
+  line: number | null;
+  /** Range end line. */
+  line_end: number | null;
+  title: string;
+  body: string;
+  evidence: string;
+  agent_reasoning_summary: string;
+  suggested_fix: string | null;
+  status: FindingStatus;
+  linked_commit: string | null;
+  linked_test: string | null;
+  /** The current disposition owner (producing agent at creation, triaging actor after). */
+  reviewer: string;
+  // --- workflow state / gates / artifacts ---
+  /** Engine DETECTION lifecycle (read-only): open|fixing|resolved|regressed|declined. */
+  state: string;
+  /** Derived: the detection axis currently reads `regressed`. */
+  regressed: boolean;
+  requires_human_approval: boolean;
+  approval_decision: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  jira_key: string | null;
+  jira_url: string | null;
+  produced_by_agent: string | null;
+  repo_rule_id: Id | null;
+  fix_session_id: Id | null;
+  occurrence_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One immutable audit-trail entry for a finding. */
+export interface FindingEvent {
+  id: Id;
+  finding_id: Id;
+  kind: string;
+  actor: string;
+  from_status: string | null;
+  to_status: string | null;
+  /** Free-form JSON payload (`{session_id?, commit?, test?, jira_key?, reason?, …}`). */
+  detail: unknown;
+  created_at: string;
+}
+
+/** A finding plus its full event timeline (`GET /findings/{id}`). */
+export interface FindingDetail {
+  finding: Finding;
+  events: FindingEvent[];
+}
+
+/** The response of an action that may spawn a live agent session (fix / verify /
+ *  regression-test). `session_id` is present when an openable session started. */
+export interface FindingActionResp {
+  finding: Finding;
+  session_id?: Id | null;
+}
+
+/** A repo rule generalized from a finding, fed into the Context Engine. */
+export interface RepoRule {
+  id: Id;
+  workspace_id: Id;
+  title: string;
+  body: string;
+  category: string | null;
+  severity: string | null;
+  glob: string | null;
+  source_finding_id: Id | null;
+  enabled: boolean;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Aggregate counts for a Proof Pack. */
+export interface ReviewProofPackSummary {
+  total: number;
+  by_status: Record<string, number>;
+  by_severity: Record<string, number>;
+  verified: number;
+  fixed: number;
+  open: number;
+  with_commit: number;
+  with_test: number;
+}
+
+/** One finding + its event timeline inside a Proof Pack. */
+export interface ReviewProofPackEntry {
+  finding: Finding;
+  events: FindingEvent[];
+}
+
+/** The live-assembled evidence bundle for a review (`GET /reviews/{id}/proof-pack`). */
+export interface ReviewProofPack {
+  review_id: Id;
+  workspace_id: Id;
+  generated_at: string;
+  summary: ReviewProofPackSummary;
+  findings: ReviewProofPackEntry[];
+  repo_rules: RepoRule[];
+}
+
+/** The persisted-snapshot response of `POST /reviews/{id}/proof-pack/export`. */
+export interface ReviewProofPackExport {
+  id: Id;
+  review_id: Id;
+  format: string;
+  markdown: string;
+  created_at: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -23,7 +23,9 @@
   import JiraIssuePicker from '../agents/JiraIssuePicker.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
+  import FindingsBoard from './FindingsBoard.svelte';
   // Subscribe to the WS review_changed bus (populated by events.svelte.ts) to
   // re-fetch when the running review for this PR completes/errors, replacing the
   // fixed-interval visibility-gated poll for the running state.
@@ -868,6 +870,15 @@
       </div>
     {/if}
 
+    <!-- Findings workflow board: persisted Finding rows with the 6-state status,
+         the 7 triage actions, and the Proof Pack. Appears once the review is done. -->
+    {#if ws.currentId}
+      <div class="rp-findings-section">
+        <h3 class="rp-findings-title">Findings</h3>
+        <FindingsBoard reviewId={review.id} workspaceId={ws.currentId} />
+      </div>
+    {/if}
+
     <!-- Per-agent breakdown: open each agent's (archived) session + its own
          findings. Shared with the local review; excludes the summarizer. -->
     {#if review.agents.length > 1}
@@ -1139,6 +1150,18 @@
 <style>
   .rp {
     padding: 4px 0 32px;
+  }
+
+  /* Findings workflow board section */
+  .rp-findings-section {
+    margin: 12px 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .rp-findings-title {
+    font-size: 12.5px;
+    font-weight: 600;
+    margin: 0 0 4px;
   }
 
   .rp-merge-gate {

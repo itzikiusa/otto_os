@@ -447,6 +447,7 @@ pub fn provision_agent(
         soul: agent.soul_name.clone(),
         extra_context_md: identity_md,
         include_memory: true,
+        repo_rules_md: String::new(),
     };
     let _ = otto_context::materialize::provision(&ctx.context_library, &cfg, cwd, &agent.provider);
     install_helper(cwd, "otto-post", OTTO_POST);

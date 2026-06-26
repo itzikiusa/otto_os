@@ -247,6 +247,15 @@ fn build_block(
         sections.push(format!("## Context\n\n{extra}"));
     }
 
+    // Repo rules generalized from code-review findings (machine-managed, separate
+    // from the user-owned `extra_context_md`). This is the Context-Engine half of
+    // the review loop: a lesson learned in review is enforced as context on every
+    // subsequent agent run.
+    let rules = cfg.repo_rules_md.trim();
+    if !rules.is_empty() {
+        sections.push(format!("## Repo Rules (from code review)\n\n{rules}"));
+    }
+
     if cfg.include_memory {
         if let Some(mem) = read_memory(cwd) {
             let mem = mem.trim();
@@ -816,6 +825,7 @@ mod tests {
             soul: Some("otto".into()),
             extra_context_md: String::new(),
             include_memory: false,
+            repo_rules_md: String::new(),
         };
         let res = provision(&lib, &cfg, &cwd_path, "claude");
         assert!(!res.skipped);

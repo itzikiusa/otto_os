@@ -35,8 +35,11 @@ pub mod product_chat;
 pub mod product_discovery;
 pub mod product_mockup;
 pub mod product_refinement;
+pub mod finding_events;
 pub mod proof;
+pub mod repo_rules;
 pub mod review_findings;
+pub mod review_proof_packs;
 pub mod reviews;
 pub mod saved_views;
 pub mod sessions;
@@ -103,9 +106,13 @@ pub use product_refinement::{
     NewRefinementMessage, NewRefinementThread, ProductRefinementRepo, RefinementMessage,
     RefinementThread,
 };
+pub use finding_events::FindingEventsRepo;
+pub use repo_rules::RepoRulesRepo;
 pub use review_findings::{
-    compute_fingerprint, FindingState, NewFinding, ReviewFindingRow, ReviewFindingsRepo,
+    compute_fingerprint, FindingPatch, FindingState, NewFinding, ReviewFindingRow,
+    ReviewFindingsRepo,
 };
+pub use review_proof_packs::ReviewProofPacksRepo;
 pub use reviews::ReviewsRepo;
 pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};

@@ -68,6 +68,12 @@ pub struct ServerCtx {
     pub reviews_store: ReviewsRepo,
     /// Persistent review finding identity + lifecycle (A1 verified-review loop).
     pub findings_store: ReviewFindingsRepo,
+    /// Audit trail for the findings workflow (one row per triage action).
+    pub finding_events_store: otto_state::FindingEventsRepo,
+    /// Repo rules generalized from findings (fed into the Context Engine).
+    pub repo_rules_store: otto_state::RepoRulesRepo,
+    /// Persisted Proof Pack snapshots (review evidence bundles).
+    pub proof_packs_store: otto_state::ReviewProofPacksRepo,
     pub skill_evals_store: SkillEvalsRepo,
     /// Per-run cancellation flags for in-flight skill evaluations.
     pub skill_eval_cancels: crate::skill_eval::CancelRegistry,

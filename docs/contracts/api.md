@@ -696,9 +696,49 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent |
-| GET /reviews/{review_id}/findings | ws viewer | — | `ReviewFindingRow[]` (persistent findings keyed by fingerprint, with lifecycle state) |
-| POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated `ReviewFindingRow` (lifecycle transition) |
+| GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
+| POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |
 | GET /reviews/{review_id}/merge-readiness | ws viewer | — | `MergeReadiness` (open/total findings + approvals + ci_status + mergeable + conflicts + branch freshness) |
+
+## Review findings workflow
+
+The multi-agent review persists each finding as a tracked workflow record with a
+6-state `status` (`open · accepted · false_positive · fixed · verified · waived`)
+and an immutable `FindingEvent` audit trail. The action endpoints below are keyed
+by the stable finding `id`; each validates the status transition, appends a
+`finding_events` row, emits the `finding_updated` WS event, and returns the
+updated `Finding`. Agent-backed actions (fix / verify / regression-test) also
+return a `session_id` for the spawned, openable agent session. Findings reads are
+`Git` **viewer**; writes are `Git` **editor**; repo-rule routes are `Context`
+viewer/editor. See the design at
+`docs/superpowers/specs/2026-06-26-review-findings-workflow-design.md`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /findings/{id} | ws viewer (Git) | — | `FindingDetail` `{finding, events}` (the finding + its full event timeline) |
+| POST /findings/{id}/accept | ws editor (Git) | — | `Finding` (open → accepted) |
+| POST /findings/{id}/waive | ws editor (Git) | `{reason?}` | `Finding` (→ waived) |
+| POST /findings/{id}/false-positive | ws editor (Git) | `{reason?}` | `Finding` (→ false_positive) |
+| POST /findings/{id}/require-approval | ws editor (Git) | — | `Finding` (sets the human-approval gate; status unchanged) |
+| POST /findings/{id}/approve | ws editor (Git) | `{decision, note?}` | `Finding` — `decision` ∈ `approve`\|`reject`; approve clears the gate (open → accepted), reject → false_positive |
+| POST /findings/{id}/jira | ws editor (Git) | `{project_key, issue_type?, account_id?}` | `Finding` (creates a Jira issue, stores `jira_key`/`jira_url`). **400 `{code:"invalid"}`** when no Jira account is configured. |
+| POST /findings/{id}/repo-rule | ws editor (Context) | `{title?, body?, glob?}` | `RepoRule` (generalizes the finding into a durable rule fed into the Context Engine; links `repo_rule_id`) |
+| POST /findings/{id}/fix | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (spawns a fix agent; open\|accepted → accepted, then async → fixed on commit) |
+| POST /findings/{id}/verify | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (verifies resolution; accepted\|fixed\|verified → verified on pass) |
+| POST /findings/{id}/regression-test | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (spawns an agent to add a guard test; sets `linked_test`) |
+| GET /workspaces/{ws}/repo-rules | ws viewer (Context) | — | `RepoRule[]` (the workspace's repo rules) |
+| POST /repo-rules/{id}/toggle | ws editor (Context) | `{enabled}` | `RepoRule` (enable/disable; re-materializes the workspace's rules block) |
+| DELETE /repo-rules/{id} | ws editor (Context) | — | 204 |
+| GET /reviews/{review_id}/proof-pack | ws viewer (Git) | — | `ReviewProofPack` (live-assembled: summary counts + per-finding evidence/timeline/artifacts + the repo rules from this review) |
+| POST /reviews/{review_id}/proof-pack/export | ws editor (Git) | `{format?}` | `ReviewProofPackExport` `{id, review_id, format, markdown, created_at}` (persists a markdown snapshot + ingests verified findings into memory; emits `proof_pack_exported`) |
+
+`Finding` fields: `id, review_id, workspace_id, repo_id, pr_number, fingerprint,
+severity` (`critical`\|`high`\|`medium`\|`low`\|`info`)`, category, path, line,
+line_end, title, body, evidence, agent_reasoning_summary, suggested_fix, status`
+(the 6 values)`, linked_commit, linked_test, reviewer, state` (engine detection
+axis)`, regressed, requires_human_approval, approval_decision, approved_by,
+approved_at, jira_key, jira_url, produced_by_agent, repo_rule_id, fix_session_id,
+occurrence_count, created_at, updated_at`.
 
 ## Orchestrator & broadcast (beyond #23–#24)
 

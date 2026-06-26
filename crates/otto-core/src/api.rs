@@ -1843,6 +1843,13 @@ pub struct WorkspaceContextConfig {
     pub extra_context_md: String,
     #[serde(default = "default_include_memory")]
     pub include_memory: bool,
+    /// Machine-managed block of repo rules (from code review). Rendered from the
+    /// `repo_rules` table by the server on every rule change and injected into
+    /// agent instruction files at spawn. **Kept separate from `extra_context_md`
+    /// (which the user owns) so a user context edit never clobbers it**, and
+    /// preserved by the `PUT /workspaces/{id}/context` handler.
+    #[serde(default)]
+    pub repo_rules_md: String,
 }
 
 fn default_include_memory() -> bool {
@@ -1856,6 +1863,7 @@ impl Default for WorkspaceContextConfig {
             soul: None,
             extra_context_md: String::new(),
             include_memory: true,
+            repo_rules_md: String::new(),
         }
     }
 }

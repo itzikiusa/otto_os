@@ -16,6 +16,8 @@ pub mod memory_gov;
 pub mod cli_update;
 pub mod error;
 pub mod feature_guard;
+pub mod finding_agent;
+pub mod finding_context;
 pub mod goal_loop;
 pub mod goal_loop_parse;
 pub mod goal_loop_workspace;

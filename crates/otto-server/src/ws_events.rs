@@ -249,6 +249,11 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // connection's workspace members (same delivery as canvas/mockup).
         | Event::DbAssistUpdated { workspace_id, .. }
         | Event::DbAssistSessionStarted { workspace_id, .. }
+        // Findings-workflow events (status changes, agent-action started, proof-pack
+        // exported) are workspace-scoped, like reviews.
+        | Event::FindingUpdated { workspace_id, .. }
+        | Event::FindingActionStarted { workspace_id, .. }
+        | Event::ProofPackExported { workspace_id, .. }
         // Budget-exceeded alerts are scoped to the workspace that crossed the cap
         // (it carries `workspace_id`), so they go to that workspace's members.
         | Event::BudgetExceeded { workspace_id, .. }

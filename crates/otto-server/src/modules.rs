@@ -1485,7 +1485,12 @@ fn default_review_config(default_provider: &str) -> ReviewConfig {
             prompt: "You are deduplicating and prioritizing code review comments. Output ONLY \
                      a JSON array (no prose, no markdown fence) of objects \
                      {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\
-                     \"body\":string}. Drop trivial duplicates. Return at most 20 items ranked by \
+                     \"category\":string,\"title\":string,\"body\":string,\"evidence\":string,\
+                     \"reasoning\":string,\"suggested_fix\":string}. `title` is a short one-line \
+                     summary; `category` is one of security|correctness|performance|architecture|\
+                     devex|test|docs|style|other; `evidence` is the offending code excerpt or quote \
+                     that proves the issue; `reasoning` is why it is a problem; `suggested_fix` is a \
+                     concrete fix. Drop trivial duplicates. Return at most 20 items ranked by \
                      severity (bug first). Here are the batches of comments from each agent:"
                 .to_string(),
             skill: String::new(),
@@ -1852,6 +1857,17 @@ async fn run_review_core(
         #[serde(default = "default_severity")]
         severity: String,
         body: String,
+        // Enriched workflow fields (optional; derived from `body` when absent).
+        #[serde(default)]
+        category: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        evidence: Option<String>,
+        #[serde(default)]
+        reasoning: Option<String>,
+        #[serde(default)]
+        suggested_fix: Option<String>,
     }
     fn default_severity() -> String {
         "info".to_string()
@@ -1885,44 +1901,84 @@ async fn run_review_core(
         .set_agents(review_id, &agent_states)
         .await?;
 
-    // 6. Persist draft comments AND drive the persistent findings lifecycle.
-    //    Each summarized comment is BOTH a draft comment (for posting to the PR)
-    //    and a fingerprinted finding (for the cross-run open→fixing→resolved/
-    //    regressed lifecycle). Wiring the findings store here is what makes AI
-    //    review lifecycle-driven (R3.2). Working-tree/local reviews use pr=0.
+    // 6. Persist draft comments AND promote each into a tracked workflow Finding
+    //    (the board + Proof Pack read these). The summarized comment is the
+    //    PR-posting artifact; the Finding is the canonical workflow record. We
+    //    also track seen fingerprints to drive the cross-run DETECTION lifecycle
+    //    (absent findings flip `state`→resolved via resolve_absent below — the
+    //    engine owns the `state` axis; the workflow `status` is untouched).
     tracing::info!(review = %review_id, "storing {} draft comments", parsed.len());
+    // PR #0 is the local-review sentinel → dedup within the review, not across PRs.
+    let pr_opt = if pr_number == 0 { None } else { Some(pr_number) };
     let mut seen_fingerprints: Vec<String> = Vec::new();
     for c in parsed {
         let sev = CommentSeverity::parse(&c.severity).unwrap_or(CommentSeverity::Info);
-        ctx.reviews_store
+        let comment = ctx
+            .reviews_store
             .add_comment(review_id, c.path.as_deref(), c.line, sev, &c.body)
             .await?;
 
-        // Upsert the finding (lifecycle) keyed by a stable fingerprint.
-        let category = Some(c.severity.as_str());
+        // Derive the enriched fields from the comment when the summarizer didn't
+        // emit them (back-compat; §15.9).
+        let title = c
+            .title
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| c.body.lines().next().unwrap_or("").trim().to_string());
+        let evidence = c
+            .evidence
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| c.body.clone());
+        let reasoning = c.reasoning.clone().unwrap_or_default();
         let fp = otto_state::review_findings::compute_fingerprint(
             repo_id,
             pr_number,
             c.path.as_deref(),
-            category,
+            c.category.as_deref(),
             &c.body,
         );
-        let nf = otto_state::review_findings::NewFinding {
+        let nf = otto_state::NewFinding {
             review_id,
             workspace_id: &workspace.id,
             repo_id,
-            pr_number,
+            pr_number: pr_opt,
             path: c.path.as_deref(),
             line: c.line.map(|l| l as i64),
+            line_end: None,
             severity: &c.severity,
-            category,
+            category: c.category.as_deref(),
+            title: &title,
             body: &c.body,
+            evidence: &evidence,
+            agent_reasoning_summary: &reasoning,
+            suggested_fix: c.suggested_fix.as_deref(),
+            produced_by_agent: Some("review"),
+            reviewer: "review",
             fingerprint: &fp,
             run_id: review_id,
         };
-        if let Err(e) = ctx.findings_store.upsert(&nf).await {
-            tracing::warn!(review = %review_id, "finding upsert failed: {e}");
+        match ctx.findings_store.upsert(&nf).await {
+            Ok((f, created)) => {
+                if created {
+                    // Anchor the audit trail + link the originating comment id.
+                    let _ = ctx
+                        .finding_events_store
+                        .append(
+                            &f.id,
+                            &f.workspace_id,
+                            "created",
+                            "review",
+                            None,
+                            Some("open"),
+                            serde_json::json!({ "comment_id": comment.id }),
+                        )
+                        .await;
+                }
+            }
+            Err(e) => tracing::warn!(review = %review_id, "persist finding failed: {e}"),
         }
+        // Track for the cross-run detection lifecycle (resolve_absent below).
         seen_fingerprints.push(fp);
     }
 
@@ -2146,7 +2202,7 @@ async fn list_review_findings(
     Path(review_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<otto_state::ReviewFindingRow>>> {
+) -> ApiResult<Json<Vec<otto_core::finding::Finding>>> {
     // Resolve the review to check workspace access.
     let review = ctx
         .reviews_store
@@ -2160,9 +2216,11 @@ async fn list_review_findings(
         .map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
 
+    // Widened to the full workflow `Finding` (superset of the legacy row: all old
+    // fields retained + the workflow fields added). See docs/contracts/api.md.
     let findings = ctx
         .findings_store
-        .list_for_review(&review_id)
+        .list_full_for_review(&review_id)
         .await
         .map_err(ApiError)?;
     Ok(Json(findings))
@@ -2227,30 +2285,28 @@ async fn get_merge_readiness(
         .map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
 
-    // Findings aggregate from the persistent findings store.
+    // Findings aggregate from the persistent findings store, keyed on the
+    // WORKFLOW `status` axis (§15.1): unresolved = open|accepted|fixed; a
+    // blocker is an unresolved critical/high finding.
+    use otto_core::finding::{FindingSeverity, FindingStatus};
     let all_findings = ctx
         .findings_store
-        .list_for_review(&review_id)
+        .list_full_for_review(&review_id)
         .await
         .map_err(ApiError)?;
+    let is_unresolved = |s: FindingStatus| {
+        matches!(s, FindingStatus::Open | FindingStatus::Accepted | FindingStatus::Fixed)
+    };
     let total_findings = all_findings.len() as u64;
     let open_findings = all_findings
         .iter()
-        .filter(|f| {
-            matches!(
-                f.state,
-                otto_state::FindingState::Open | otto_state::FindingState::Regressed
-            )
-        })
+        .filter(|f| is_unresolved(f.status))
         .count() as u64;
     let blocker_count = all_findings
         .iter()
         .filter(|f| {
-            f.severity == "bug"
-                && matches!(
-                    f.state,
-                    otto_state::FindingState::Open | otto_state::FindingState::Regressed
-                )
+            is_unresolved(f.status)
+                && matches!(f.severity, FindingSeverity::Critical | FindingSeverity::High)
         })
         .count() as u64;
 
@@ -4017,6 +4073,9 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         orchestrator_routes(),
         db_explorer_routes(),
         pr_review_routes(),
+        crate::routes::findings::routes(),
+        crate::routes::repo_rules::routes(),
+        crate::routes::proof_pack::routes(),
         review_config_routes(),
         crate::skill_eval::routes(),
         provider_routes(),

@@ -105,6 +105,41 @@ export class ReviewBus {
 
 export const reviewBus = new ReviewBus();
 
+/** Incremented each time a `finding_updated` / `finding_action_started` WS event
+ *  arrives. The Findings board subscribes (keyed by review_id) and refetches the
+ *  matching review's findings — the same pattern reviewBus drives the panel. */
+export class FindingBus {
+  tick: number = $state(0);
+  reviewId: string = $state('');
+  workspaceId: string = $state('');
+  findingId: string = $state('');
+  /** New status (finding_updated) — empty for finding_action_started. */
+  status: string = $state('');
+  /** "fix" | "verify" | "regression_test" (finding_action_started) — empty otherwise. */
+  action: string = $state('');
+  /** The spawned agent session id (finding_action_started), if any. */
+  sessionId: string | null = $state(null);
+
+  apply(
+    workspaceId: string,
+    reviewId: string,
+    findingId: string,
+    status: string,
+    action: string,
+    sessionId?: string | null,
+  ): void {
+    this.workspaceId = workspaceId;
+    this.reviewId = reviewId;
+    this.findingId = findingId;
+    this.status = status;
+    this.action = action;
+    this.sessionId = sessionId ?? null;
+    this.tick += 1;
+  }
+}
+
+export const findingBus = new FindingBus();
+
 /** Incremented each time a `budget_exceeded` WS event arrives. A budget banner
  *  subscribes to surface the most-recent cap crossing (or recovery). */
 export class BudgetBus {
@@ -279,6 +314,32 @@ class EventsClient {
           // Review panel: refresh the matching review + findings + merge-readiness
           // on the event instead of waiting for its visibility-gated poll.
           reviewBus.apply(parsed.workspace_id, parsed.review_id, parsed.status);
+        } else if (parsed.type === 'finding_updated') {
+          // Findings board: refetch the matching review's findings on every triage
+          // action / transition (status changed).
+          findingBus.apply(
+            parsed.workspace_id,
+            parsed.review_id,
+            parsed.finding_id,
+            parsed.status,
+            '',
+            null,
+          );
+        } else if (parsed.type === 'finding_action_started') {
+          // An agent-backed action (fix/verify/regression-test) spawned a live
+          // session — let the board reflect the in-flight action.
+          findingBus.apply(
+            parsed.workspace_id,
+            parsed.review_id,
+            parsed.finding_id,
+            '',
+            parsed.action,
+            parsed.session_id,
+          );
+        } else if (parsed.type === 'proof_pack_exported') {
+          // A Proof Pack snapshot was exported; the board can refresh if open. We
+          // route it through the finding bus tick so subscribers re-render.
+          findingBus.apply(parsed.workspace_id, parsed.review_id, '', '', 'proof_pack_exported', null);
         } else if (parsed.type === 'budget_exceeded') {
           // Surface a budget cap crossing/recovery to any subscribed banner.
           budgetBus.apply(parsed.provider, parsed.spend_usd, parsed.cap_usd, parsed.direction);
