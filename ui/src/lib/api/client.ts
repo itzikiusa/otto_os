@@ -130,6 +130,22 @@ export function isAbortError(e: unknown): boolean {
 }
 
 /**
+ * Fetch a text resource (e.g. a `text/markdown` report) from /api/v1<path> with
+ * the stored Bearer token. Throws `ApiError` on a non-2xx response.
+ */
+export async function authedText(path: string): Promise<string> {
+  const token = getToken();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { headers });
+  if (!resp.ok) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try { problem = await resp.json(); } catch { /* non-JSON error body */ }
+    throw new ApiError(resp.status, problem);
+  }
+  return resp.text();
+}
+
+/**
  * Fetch a binary resource from /api/v1<path> with the stored Bearer token,
  * then return a revocable object URL. The caller is responsible for calling
  * URL.revokeObjectURL() when done (e.g. on component unmount).

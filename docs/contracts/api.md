@@ -1891,3 +1891,55 @@ enforce the entity's workspace role.
 | CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated}` |
 | CP30 | POST /api/v1/workspaces/{wid}/mcp/context-packet | mcp:edit + ws viewer | `{query?, story_id?, max_excerpts?}` | context packet |
 | CP31 | GET /api/v1/workspaces/{wid}/mcp/proof-pack | mcp:view + ws viewer | `?repo_id=&branch=&goal_loop_id=` | evidence bundle |
+
+---
+
+## Scheduled Tasks
+
+Recurring, workspace-scoped jobs. Each task runs an agent (`Orchestrator::run_agent`,
+the self-improvement primitive) with a configurable `prompt` on a cadence
+(`interval | daily | weekly`), captures the agent's final reply as a Markdown
+**report**, stores it, and delivers it to an optional **destination** (Slack /
+Telegram / email / webhook). v1 `kind` = `agent_prompt`, provider = `claude`.
+Driveable over MCP (see CP-S below). Gated by `Feature::ScheduledTasks`
+(read=View, write=Edit) plus the workspace-role axis; flat by-id routes load the
+task/run and enforce the role on its `workspace_id` (IDOR guard).
+
+`schedule` = `{cadence, every_min (≥5), at:"HH:MM", weekday:0..6}`. `destination` =
+`{type:"none"|"slack"|"telegram"|"email"|"webhook", chat_id?, to?, subject?, url?}`.
+A `ScheduledTask` carries `{id, workspace_id, name, kind, prompt, skill?, provider,
+model, cwd, schedule, destination, enabled, last_run_at?, last_status?, next_run_at?,
+created_by?, created_at, updated_at}`. A `ScheduledTaskRun` carries `{id, task_id,
+workspace_id, status:"running"|"ok"|"error", trigger:"schedule"|"manual", started_at,
+finished_at?, summary, report_path?, report_rel?, delivered, delivery_error?, error?,
+session_id?, created_at}`.
+
+Persistence: `otto_state::scheduled_tasks`; scheduler:
+`otto_server::scheduled_tasks_scheduler` (60s tick, in-flight-guard-first,
+advance-cursor-on-completion, startup reaper, global run semaphore); live signal:
+`Event::ScheduledTaskRunUpdated` (see `ws.md`). Delivered report bodies are redacted
+(`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard`).
+
+| # | Method & path | Auth | Request | Response |
+|---|---|---|---|---|
+| 135 | GET /api/v1/workspaces/{id}/scheduled-tasks | scheduled_tasks view + ws viewer | — | `ScheduledTask[]` |
+| 136 | POST /api/v1/workspaces/{id}/scheduled-tasks | scheduled_tasks edit + ws editor | `{name, prompt?, kind?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?}` | ScheduledTask |
+| 137 | GET /api/v1/scheduled-tasks/presets | scheduled_tasks view | — | `ScheduledTaskPreset[]` |
+| 138 | GET /api/v1/scheduled-tasks/{id} | scheduled_tasks view + ws viewer | — | ScheduledTask |
+| 139 | PATCH /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | `{name?, prompt?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?}` | ScheduledTask |
+| 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
+| 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun (the manual run; poll for status) |
+| 142 | GET /api/v1/scheduled-tasks/{id}/runs | scheduled_tasks view + ws viewer | — | `ScheduledTaskRun[]` |
+| 143 | GET /api/v1/scheduled-tasks/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report) |
+
+### Scheduled-task MCP tools (on the outward `otto.*` surface, CP25-tunable)
+
+| Tool | mutating | Default | Backing endpoint |
+|---|---|---|---|
+| `otto.list_scheduled_tasks` | no | on | #135 |
+| `otto.list_scheduled_task_runs` | no | on | #142 |
+| `otto.create_scheduled_task` | yes (DANGEROUS) | off | #136 |
+| `otto.update_scheduled_task` | yes (DANGEROUS) | off | #139 |
+| `otto.set_scheduled_task_enabled` | yes (DANGEROUS) | off | #139 |
+| `otto.run_scheduled_task` | yes (DANGEROUS) | off | #141 |
+| `otto.delete_scheduled_task` | yes (DANGEROUS) | off | #140 |

@@ -317,4 +317,13 @@ pub enum Event {
         status: String,
         risk_score: u8,
     },
+    /// A scheduled-task run started, finished, or errored. The Scheduled Tasks page
+    /// subscribes and re-fetches the task's run history on a matching tick instead
+    /// of polling. `status` is the snake_case run status ("running"|"ok"|"error").
+    ScheduledTaskRunUpdated {
+        workspace_id: Id,
+        task_id: Id,
+        run_id: Id,
+        status: String,
+    },
 }

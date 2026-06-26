@@ -42,6 +42,7 @@ pub mod review_findings;
 pub mod review_proof_packs;
 pub mod reviews;
 pub mod saved_views;
+pub mod scheduled_tasks;
 pub mod sessions;
 pub mod settings;
 pub mod skill_evals;
@@ -79,6 +80,9 @@ pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::GrantsRepo;
 pub use name_themes::{CustomTheme, NameThemesRepo};
 pub use proof::ProofRepo;
+pub use scheduled_tasks::{
+    NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
+};
 pub use product::*;
 pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;

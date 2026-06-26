@@ -24,8 +24,26 @@ use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
-const DEFAULT_ENABLED: &[&str] = &["get_context_packet", "get_proof_pack", "ask_human_approval"];
-const DANGEROUS: &[&str] = &["run_goal_loop", "create_work_item"];
+const DEFAULT_ENABLED: &[&str] = &[
+    "get_context_packet",
+    "get_proof_pack",
+    "ask_human_approval",
+    // Scheduled-tasks reads are safe to expose by default so an agent can inspect
+    // existing jobs; the write tools below stay off until an admin enables them.
+    "list_scheduled_tasks",
+    "list_scheduled_task_runs",
+];
+const DANGEROUS: &[&str] = &[
+    "run_goal_loop",
+    "create_work_item",
+    // Creating/altering/running a recurring autonomous job that triggers agents and
+    // posts to an external destination is approval-gated (off by default).
+    "create_scheduled_task",
+    "update_scheduled_task",
+    "delete_scheduled_task",
+    "run_scheduled_task",
+    "set_scheduled_task_enabled",
+];
 const MAX_WAIT_SECS: u64 = 30;
 
 /// Static catalog of the eight outward tools.
@@ -69,6 +87,39 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["title"],"properties":{
                 "workspace_id":{"type":"string"},"title":{"type":"string"},
                 "detail":{"type":"string"},"wait_seconds":{"type":"integer"}}}}),
+        // ---- Scheduled Tasks ----
+        json!({"name":"otto.list_scheduled_tasks","mutating":false,
+            "description":"List a workspace's scheduled tasks (recurring agent jobs). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
+                "workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.list_scheduled_task_runs","mutating":false,
+            "description":"List the recent run history (status + summary) of a scheduled task. Read-only.",
+            "inputSchema":{"type":"object","required":["task_id"],"properties":{
+                "task_id":{"type":"string"}}}}),
+        json!({"name":"otto.create_scheduled_task","mutating":true,
+            "description":"Create a scheduled task: a recurring job that runs an agent with `prompt` on a cadence, writes a Markdown report, and delivers it to a destination. DANGEROUS: an autonomous recurring capability — approval-gated. `schedule` = {cadence:'interval'|'daily'|'weekly', every_min, at:'HH:MM', weekday}. `destination` = {type:'none'|'slack'|'telegram'|'email'|'webhook', ...}.",
+            "inputSchema":{"type":"object","required":["workspace_id","name","prompt"],"properties":{
+                "workspace_id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},
+                "schedule":{"type":"object"},"destination":{"type":"object"},
+                "skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
+        json!({"name":"otto.update_scheduled_task","mutating":true,
+            "description":"Update a scheduled task's fields (name/prompt/schedule/destination/skill/enabled). DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["task_id"],"properties":{
+                "task_id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},
+                "schedule":{"type":"object"},"destination":{"type":"object"},
+                "skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
+        json!({"name":"otto.set_scheduled_task_enabled","mutating":true,
+            "description":"Enable or disable a scheduled task. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["task_id","enabled"],"properties":{
+                "task_id":{"type":"string"},"enabled":{"type":"boolean"}}}}),
+        json!({"name":"otto.run_scheduled_task","mutating":true,
+            "description":"Run a scheduled task once now (does not change its schedule). Returns the run. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["task_id"],"properties":{
+                "task_id":{"type":"string"}}}}),
+        json!({"name":"otto.delete_scheduled_task","mutating":true,
+            "description":"Delete a scheduled task and its run history. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["task_id"],"properties":{
+                "task_id":{"type":"string"}}}}),
     ]
 }
 
@@ -100,6 +151,43 @@ async fn require_approval_dangerous(ctx: &ServerCtx) -> bool {
         .flatten()
         .and_then(|v| v.as_bool())
         .unwrap_or(true)
+}
+
+/// Build the human-facing approval detail. For scheduled-task create/update it
+/// surfaces the prompt + cadence + destination so the approver knows exactly what
+/// recurring autonomous capability they are granting (security review fix).
+fn dangerous_detail(tool: &str, args: &Value) -> String {
+    let short = tool.strip_prefix("otto.").unwrap_or(tool);
+    match short {
+        "create_scheduled_task" | "update_scheduled_task" => {
+            let name = args.get("name").and_then(Value::as_str).unwrap_or("(unnamed)");
+            let sched = args.get("schedule");
+            let cadence = sched
+                .and_then(|s| s.get("cadence"))
+                .and_then(Value::as_str)
+                .unwrap_or("interval");
+            let cad = match sched.and_then(|s| s.get("every_min")).and_then(Value::as_i64) {
+                Some(m) => format!("{cadence} (every {m} min)"),
+                None => cadence.to_string(),
+            };
+            let dest = args
+                .get("destination")
+                .and_then(|d| d.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            let prompt: String = args
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(160)
+                .collect();
+            format!(
+                "Recurring agent job '{name}' — cadence: {cad}; destination: {dest}; prompt: {prompt}"
+            )
+        }
+        _ => format!("External agent requests the dangerous tool '{tool}'."),
+    }
 }
 
 // ===========================================================================
@@ -170,7 +258,7 @@ pub async fn otto_tools_invoke(
                         server_name: Some("otto".into()),
                         tool: Some(req.tool.clone()),
                         title: format!("otto MCP server → {}", req.tool),
-                        detail: Some(format!("External agent requests the dangerous tool '{}'.", req.tool)),
+                        detail: Some(dangerous_detail(&req.tool, &req.arguments)),
                         args_redacted_json: audit.args_redacted_json.clone(),
                         args_hash: Some(args_hash.clone()),
                         risk_label: Some("dangerous".into()),
@@ -397,6 +485,43 @@ async fn run_tool(
             });
             self_post(client, token, &format!("{base}/api/v1/swarm/projects/{}/tasks", seg(&project)), &body).await
         }
+        "list_scheduled_tasks" => {
+            let ws = arg_str(args, "workspace_id")?;
+            self_get(client, token, &format!("{base}/api/v1/workspaces/{}/scheduled-tasks", seg(&ws))).await
+        }
+        "list_scheduled_task_runs" => {
+            let id = arg_str(args, "task_id")?;
+            self_get(client, token, &format!("{base}/api/v1/scheduled-tasks/{}/runs", seg(&id))).await
+        }
+        "create_scheduled_task" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut body = args.clone();
+            if let Some(o) = body.as_object_mut() {
+                o.remove("workspace_id");
+            }
+            self_post(client, token, &format!("{base}/api/v1/workspaces/{}/scheduled-tasks", seg(&ws)), &body).await
+        }
+        "update_scheduled_task" => {
+            let id = arg_str(args, "task_id")?;
+            let mut body = args.clone();
+            if let Some(o) = body.as_object_mut() {
+                o.remove("task_id");
+            }
+            self_patch(client, token, &format!("{base}/api/v1/scheduled-tasks/{}", seg(&id)), &body).await
+        }
+        "set_scheduled_task_enabled" => {
+            let id = arg_str(args, "task_id")?;
+            let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            self_patch(client, token, &format!("{base}/api/v1/scheduled-tasks/{}", seg(&id)), &json!({"enabled": enabled})).await
+        }
+        "run_scheduled_task" => {
+            let id = arg_str(args, "task_id")?;
+            self_post(client, token, &format!("{base}/api/v1/scheduled-tasks/{}/run", seg(&id)), &json!({})).await
+        }
+        "delete_scheduled_task" => {
+            let id = arg_str(args, "task_id")?;
+            self_delete(client, token, &format!("{base}/api/v1/scheduled-tasks/{}", seg(&id))).await
+        }
         other => Err(Error::Invalid(format!("unknown otto tool '{other}'"))),
     }
 }
@@ -408,6 +533,16 @@ async fn self_get(client: &reqwest::Client, token: &str, url: &str) -> Result<Va
 }
 async fn self_post(client: &reqwest::Client, token: &str, url: &str, body: &Value) -> Result<Value, Error> {
     let resp = client.post(url).bearer_auth(token).json(body).send().await
+        .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
+    parse_self(resp).await
+}
+async fn self_patch(client: &reqwest::Client, token: &str, url: &str, body: &Value) -> Result<Value, Error> {
+    let resp = client.patch(url).bearer_auth(token).json(body).send().await
+        .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
+    parse_self(resp).await
+}
+async fn self_delete(client: &reqwest::Client, token: &str, url: &str) -> Result<Value, Error> {
+    let resp = client.delete(url).bearer_auth(token).send().await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
@@ -610,4 +745,73 @@ pub async fn gateway_invoke(
         });
     }
     Ok(Json(serde_json::to_value(resp).unwrap_or(Value::Null)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec_names() -> Vec<String> {
+        otto_tool_specs()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .collect()
+    }
+
+    #[test]
+    fn scheduled_task_tools_are_registered() {
+        let names = spec_names();
+        for n in [
+            "otto.list_scheduled_tasks",
+            "otto.list_scheduled_task_runs",
+            "otto.create_scheduled_task",
+            "otto.update_scheduled_task",
+            "otto.set_scheduled_task_enabled",
+            "otto.run_scheduled_task",
+            "otto.delete_scheduled_task",
+        ] {
+            assert!(names.contains(&n.to_string()), "missing spec {n}");
+        }
+    }
+
+    #[test]
+    fn write_tools_are_dangerous_reads_are_default_enabled() {
+        for w in [
+            "create_scheduled_task",
+            "update_scheduled_task",
+            "delete_scheduled_task",
+            "run_scheduled_task",
+            "set_scheduled_task_enabled",
+        ] {
+            assert!(DANGEROUS.contains(&w), "{w} must be DANGEROUS");
+            assert!(!DEFAULT_ENABLED.contains(&w), "{w} must be off by default");
+        }
+        assert!(DEFAULT_ENABLED.contains(&"list_scheduled_tasks"));
+        assert!(DEFAULT_ENABLED.contains(&"list_scheduled_task_runs"));
+    }
+
+    #[test]
+    fn create_tool_is_marked_mutating() {
+        let specs = otto_tool_specs();
+        let create = specs
+            .iter()
+            .find(|t| t["name"] == "otto.create_scheduled_task")
+            .unwrap();
+        assert_eq!(create["mutating"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn dangerous_detail_surfaces_cadence_and_destination() {
+        let args = serde_json::json!({
+            "name": "Nightly",
+            "schedule": {"cadence": "interval", "every_min": 60},
+            "destination": {"type": "slack"},
+            "prompt": "do the thing"
+        });
+        let d = dangerous_detail("otto.create_scheduled_task", &args);
+        assert!(d.contains("Nightly"));
+        assert!(d.contains("every 60 min"));
+        assert!(d.contains("slack"));
+        assert!(d.contains("do the thing"));
+    }
 }

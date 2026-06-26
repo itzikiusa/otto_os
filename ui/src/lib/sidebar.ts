@@ -52,6 +52,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'brokers', icon: 'box', label: 'Message Brokers' },
   { id: 'mcp', icon: 'plug', label: 'MCP Control Plane', feature: 'mcp' },
   { id: 'workflows', icon: 'split', label: 'Workflows', feature: 'workflows' },
+  { id: 'scheduled-tasks', icon: 'clock', label: 'Scheduled Tasks', feature: 'scheduled_tasks' },
   { id: 'skills-eval', icon: 'zap', label: 'Skills Evaluator', feature: 'skill_eval' },
   { id: 'insights', icon: 'gauge', label: 'Insights', feature: 'insights' },
   { id: 'usage', icon: 'chart', label: 'Usage', feature: 'usage' },
