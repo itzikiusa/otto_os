@@ -3044,7 +3044,7 @@ async fn cancel_review(
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
     if review.status != ReviewStatus::Running {
-        return Err(ApiError(Error::Invalid(format!(
+        return Err(ApiError(Error::Conflict(format!(
             "review is {} — only a running review can be cancelled",
             review.status.as_str()
         ))));

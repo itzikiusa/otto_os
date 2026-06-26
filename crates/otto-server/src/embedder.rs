@@ -38,7 +38,7 @@ const STUB_DIM: usize = 256;
 
 /// Persisted embedder config (the API key is NOT stored here — it is a Keychain
 /// reference resolved at build time).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbedderConfig {
     /// `"stub"` (default) | `"openai"` | `"voyage"`.
     #[serde(default = "default_provider")]
@@ -47,6 +47,14 @@ pub struct EmbedderConfig {
 
 fn default_provider() -> String {
     "stub".to_string()
+}
+
+impl Default for EmbedderConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_provider(),
+        }
+    }
 }
 
 /// Active embedder status returned by `GET /memory/embedder`.
