@@ -2388,6 +2388,12 @@ pub struct ProofPackDetailResp {
     pub badges: Vec<String>,
     pub artifacts: Vec<ProofArtifactView>,
     pub children: Vec<ProofPackResp>,
+    /// The done-contract, recomputed LIVE so the meter is accurate even before
+    /// the pack's next recompute.
+    pub done_contract: crate::proof::DoneContract,
+    /// Immutable snapshots taken of this pack (metadata only; newest first).
+    #[serde(default)]
+    pub snapshots: Vec<ProofSnapshotMeta>,
 }
 
 /// `POST /workspaces/{id}/proof-packs`
@@ -2449,6 +2455,8 @@ pub struct ProofSummaryRow {
     pub proof_pack_id: String,
     pub status: String,
     pub risk_score: u8,
+    #[serde(default)]
+    pub done_score: u8,
     pub badges: Vec<String>,
 }
 
@@ -2456,4 +2464,141 @@ pub struct ProofSummaryRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofSummaryResp {
     pub rows: Vec<ProofSummaryRow>,
+}
+
+// ---------------------------------------------------------------------------
+// Proof Packs v2 — snapshots, evidence capture, CI, PR-check, reports, config
+// ---------------------------------------------------------------------------
+
+/// Snapshot metadata (no bundle/reports) — list rows + detail embed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofSnapshotMeta {
+    pub id: String,
+    pub proof_pack_id: String,
+    pub seq: i64,
+    pub sha256: String,
+    pub status: String,
+    pub done_score: u8,
+    pub risk_score: u8,
+    pub note: String,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+/// A full immutable snapshot — `GET /proof-snapshots/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofSnapshotResp {
+    #[serde(flatten)]
+    pub meta: ProofSnapshotMeta,
+    /// The frozen, canonical evidence bundle (pack + capped artifacts + contract).
+    pub bundle: Value,
+    pub report_md: String,
+    pub report_html: String,
+}
+
+/// `POST /proof-packs/{id}/snapshot`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateSnapshotReq {
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `POST /proof-packs/{id}/media` — attach screenshot/video evidence (base64).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachMediaReq {
+    /// `screenshot | video`.
+    pub kind: String,
+    pub title: String,
+    /// MIME type (validated against an allow-list).
+    pub mime: String,
+    /// Base64-encoded bytes (capped at `MEDIA_CAP`).
+    pub data_base64: String,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+/// `POST /proof-packs/{id}/evidence/api` — record an HTTP request/response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiEvidenceReq {
+    pub title: String,
+    pub method: String,
+    pub url: String,
+    pub status: u16,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub request: Option<String>,
+    #[serde(default)]
+    pub response: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+/// `POST /proof-packs/{id}/evidence/db` — record a DB read result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbEvidenceReq {
+    pub title: String,
+    #[serde(default)]
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub row_count: Option<u64>,
+    #[serde(default)]
+    pub sample: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+/// `POST /proof-packs/{id}/evidence/kafka` — record a Kafka read result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KafkaEvidenceReq {
+    pub title: String,
+    pub topic: String,
+    #[serde(default)]
+    pub message_count: Option<u64>,
+    #[serde(default)]
+    pub sample: Option<String>,
+    #[serde(default)]
+    pub truncated: Option<bool>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+/// `POST /proof-packs/{id}/pr-check` — run the PR-description consistency check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrCheckReq {
+    pub title: String,
+    pub description: String,
+    /// Base ref for the diff (defaults to the working tree vs HEAD).
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Working dir to diff (defaults to the pack's repo path / cwd).
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+/// `POST /proof-packs/{id}/ci-refresh` — fetch live CI for the linked PR.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CiRefreshReq {
+    /// Override repo id (defaults to the pack's `repo_id`).
+    #[serde(default)]
+    pub repo_id: Option<String>,
+    /// Override PR number (defaults to the pack's `pr_number`).
+    #[serde(default)]
+    pub pr_number: Option<i64>,
+}
+
+/// `GET|PUT /repos/{id}/proof-config`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoProofConfigResp {
+    pub repo_id: String,
+    #[serde(flatten)]
+    pub config: crate::proof::RepoProofConfig,
 }

@@ -79,7 +79,7 @@ pub use git::{GitStore, NewGitAccount, NewRepo};
 pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::GrantsRepo;
 pub use name_themes::{CustomTheme, NameThemesRepo};
-pub use proof::ProofRepo;
+pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
 pub use scheduled_tasks::{
     NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
 };

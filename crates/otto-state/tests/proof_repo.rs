@@ -172,3 +172,140 @@ async fn list_filters_and_children() {
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].work_item_id, "sess-3");
 }
+
+// -- v2 --------------------------------------------------------------------
+
+#[tokio::test]
+async fn v2_columns_persist_repo_link_done_sha_waived_at() {
+    let repo = ProofRepo::new(mem_pool().await);
+    let p = repo
+        .create_pack("w1", WorkItemKind::Session, "sess-v2", "t", "u1", None)
+        .await
+        .unwrap();
+    assert_eq!(p.done_score, 0);
+    assert!(p.repo_id.is_none() && p.pr_number.is_none() && p.waived_at.is_none());
+
+    // repo link (idempotent COALESCE: learn PR number later)
+    repo.set_repo_link(&p.id, Some("repo-1"), None).await.unwrap();
+    repo.set_repo_link(&p.id, None, Some(42)).await.unwrap();
+    let linked = repo.get_pack(&p.id).await.unwrap();
+    assert_eq!(linked.repo_id.as_deref(), Some("repo-1"));
+    assert_eq!(linked.pr_number, Some(42));
+
+    // status/risk/done together
+    repo.set_status_risk_done(&p.id, ProofStatus::Partial, 30, 58)
+        .await
+        .unwrap();
+    let r = repo.get_pack(&p.id).await.unwrap();
+    assert_eq!(r.done_score, 58);
+    assert_eq!(r.risk_score, 30);
+
+    // content_sha256 stamped for inline content (ref_kind=inline/default)
+    let a = repo
+        .add_artifact(
+            &p.id,
+            "w1",
+            ProofArtifactKind::Log,
+            "log",
+            Some("hello world"),
+            ProofArtifactStatus::Info,
+            &json!({"ref_kind": "inline"}),
+            "otto",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        a.content_sha256.as_deref(),
+        Some(otto_core::proof::content_sha256("hello world").as_str())
+    );
+    // url refs get no content hash
+    let u = repo
+        .add_artifact(
+            &p.id,
+            "w1",
+            ProofArtifactKind::Ci,
+            "CI",
+            Some("https://ci.example/123"),
+            ProofArtifactStatus::Passed,
+            &json!({"ref_kind": "url"}),
+            "otto",
+        )
+        .await
+        .unwrap();
+    assert!(u.content_sha256.is_none());
+
+    // waived_at recorded
+    repo.waive(&p.id, "human-1", "reviewed end to end").await.unwrap();
+    let w = repo.get_pack(&p.id).await.unwrap();
+    assert!(w.waived_at.is_some());
+    assert_eq!(w.waived_by.as_deref(), Some("human-1"));
+}
+
+#[tokio::test]
+async fn snapshots_are_monotonic_and_roundtrip() {
+    let repo = ProofRepo::new(mem_pool().await);
+    let p = repo
+        .create_pack("w1", WorkItemKind::Session, "sess-snap", "t", "u1", None)
+        .await
+        .unwrap();
+
+    let s1 = repo
+        .create_snapshot(&p.id, "w1", "sha-a", "passed", 90, 10, "{}", "# md", "<html>", "first", "u1")
+        .await
+        .unwrap();
+    let s2 = repo
+        .create_snapshot(&p.id, "w1", "sha-b", "passed", 95, 8, "{}", "# md2", "<html2>", "second", "u1")
+        .await
+        .unwrap();
+    assert_eq!(s1.seq, 1);
+    assert_eq!(s2.seq, 2);
+
+    let list = repo.list_snapshots(&p.id).await.unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].seq, 2, "newest first");
+
+    let got = repo.get_snapshot(&s1.id).await.unwrap();
+    assert_eq!(got.sha256, "sha-a");
+    assert_eq!(got.report_md, "# md");
+    assert_eq!(got.note, "first");
+
+    // cascade: deleting the pack removes its snapshots
+    repo.delete_pack(&p.id).await.unwrap();
+    assert_eq!(repo.list_snapshots(&p.id).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn blob_roundtrip_and_cascade() {
+    let repo = ProofRepo::new(mem_pool().await);
+    let p = repo
+        .create_pack("w1", WorkItemKind::Manual, "sess-blob", "t", "u1", None)
+        .await
+        .unwrap();
+    let art = repo
+        .add_artifact(
+            &p.id,
+            "w1",
+            ProofArtifactKind::Screenshot,
+            "shot",
+            Some("blob:pending"),
+            ProofArtifactStatus::Info,
+            &json!({"ref_kind": "blob"}),
+            "u1",
+        )
+        .await
+        .unwrap();
+    let bytes = vec![0x89u8, 0x50, 0x4e, 0x47, 1, 2, 3];
+    let sha = otto_core::proof::bytes_sha256(&bytes);
+    repo.add_blob(&art.id, "w1", &sha, "image/png", &bytes)
+        .await
+        .unwrap();
+    let blob = repo.blob_for_artifact(&art.id).await.unwrap().unwrap();
+    assert_eq!(blob.data, bytes);
+    assert_eq!(blob.mime, "image/png");
+    assert_eq!(blob.size_bytes, bytes.len() as i64);
+    assert_eq!(blob.sha256, sha);
+
+    // cascade: deleting the artifact removes the blob
+    repo.delete_artifact(&art.id).await.unwrap();
+    assert!(repo.blob_for_artifact(&art.id).await.unwrap().is_none());
+}

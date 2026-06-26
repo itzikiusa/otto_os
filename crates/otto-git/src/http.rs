@@ -45,6 +45,20 @@ pub trait GitCtx: Clone + Send + Sync + 'static {
     async fn check_pr_allowed(&self, _workspace_id: &str, _req: &CreatePrReq) -> Result<()> {
         Ok(())
     }
+
+    /// Optional hook after a PR is successfully created. `otto-server` overrides
+    /// it to link the proof pack to the new PR and capture its CI status as a
+    /// `ci` evidence artifact (Proof Packs v2 — automatic CI integration).
+    /// Best-effort: the default does nothing and overrides must never fail PR
+    /// creation. `ci` is the freshly-fetched aggregate for the new PR.
+    async fn after_pr_created(
+        &self,
+        _repo: &Repo,
+        _pr_number: u64,
+        _proof_pack_id: Option<&str>,
+        _ci: &crate::types::CiStatus,
+    ) {
+    }
 }
 
 /// Build the git router. Paths are relative to the `/api/v1` mount point.
@@ -1384,7 +1398,14 @@ async fn pr_create<S: GitCtx>(
     // Proof gate: refuse to open a PR over an unproven linked proof pack.
     s.check_pr_allowed(&repo.workspace_id, &req).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
-    Ok(Json(provider.create_pr(&remote, &req).await?))
+    let proof_pack_id = req.proof_pack_id.clone();
+    let summary = provider.create_pr(&remote, &req).await?;
+    // Proof Packs v2: link the pack to the new PR and capture its CI status as a
+    // `ci` evidence artifact (best-effort; never fails the PR creation).
+    let ci = provider.ci_status(&remote, summary.number).await;
+    s.after_pr_created(&repo, summary.number, proof_pack_id.as_deref(), &ci)
+        .await;
+    Ok(Json(summary))
 }
 
 async fn pr_detail<S: GitCtx>(

@@ -722,6 +722,32 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/proof-artifacts/{id}" {
         return Require(ProofPack, Edit);
     }
+    // ---- Proof Packs v2 (snapshots, evidence, CI, PR-check, reports, config) --
+    if p == "/proof-packs/{id}/snapshots" || p == "/proof-snapshots/{id}" {
+        // List a pack's snapshots / fetch one — read.
+        return Require(ProofPack, View);
+    }
+    if p == "/proof-packs/{id}/report" {
+        return Require(ProofPack, View);
+    }
+    if p == "/proof-artifacts/{id}/blob" {
+        return Require(ProofPack, View);
+    }
+    if p == "/proof-packs/{id}/snapshot"
+        || p == "/proof-packs/{id}/media"
+        || p == "/proof-packs/{id}/evidence/api"
+        || p == "/proof-packs/{id}/evidence/db"
+        || p == "/proof-packs/{id}/evidence/kafka"
+        || p == "/proof-packs/{id}/pr-check"
+        || p == "/proof-packs/{id}/ci-refresh"
+    {
+        // All write evidence into a pack.
+        return Require(ProofPack, Edit);
+    }
+    if p == "/repos/{id}/proof-config" {
+        // GET = View, PUT = Edit. (Per-repo proof requirements, R3.)
+        return Require(ProofPack, if get { View } else { Edit });
+    }
 
     // ---- Scheduled Tasks -------------------------------------------------
     // Workspace-axis list/create; flat by-id read/mutate; the report + presets are

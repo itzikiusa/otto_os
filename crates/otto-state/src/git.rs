@@ -243,6 +243,43 @@ impl GitStore {
             .map_err(dberr("delete repo"))?;
         Ok(())
     }
+
+    // -- per-repo proof config (Proof Packs v2) ---------------------------
+
+    /// Read a repo's proof requirements. Missing/blank ⇒ defaults (all false).
+    pub async fn get_proof_config(&self, id: &str) -> Result<otto_core::proof::RepoProofConfig> {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT proof_config_json FROM repos WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("get repo proof config"))?;
+        let raw = raw.unwrap_or_default();
+        if raw.trim().is_empty() {
+            return Ok(Default::default());
+        }
+        serde_json::from_str(&raw).map_err(|e| Error::Internal(format!("bad proof_config_json: {e}")))
+    }
+
+    /// Write a repo's proof requirements.
+    pub async fn set_proof_config(
+        &self,
+        id: &str,
+        cfg: &otto_core::proof::RepoProofConfig,
+    ) -> Result<()> {
+        let json = serde_json::to_string(cfg)
+            .map_err(|e| Error::Internal(format!("serialize proof_config: {e}")))?;
+        let n = sqlx::query("UPDATE repos SET proof_config_json = ? WHERE id = ?")
+            .bind(&json)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set repo proof config"))?;
+        if n.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("repo {id}")));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -365,6 +402,51 @@ mod tests {
         assert_eq!(all[0].workspace_id, "ws-b");
         assert_eq!(all[1].name, "zebra");
         assert_eq!(all[1].workspace_id, "ws-a");
+    }
+
+    #[tokio::test]
+    async fn proof_config_defaults_and_roundtrips() {
+        let pool = mem_pool().await;
+        let store = GitStore::new(pool.clone());
+        let now = fmt(Utc::now());
+        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
+            .bind("ws-1")
+            .bind("ws")
+            .bind("/tmp")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let repo = store
+            .create_repo(NewRepo {
+                workspace_id: "ws-1".into(),
+                name: "r".into(),
+                path: "/tmp/r".into(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+
+        // default: all false
+        let cfg = store.get_proof_config(&repo.id).await.unwrap();
+        assert!(!cfg.require_test && !cfg.require_ci && cfg.test_cmd.is_none());
+
+        // set + read back
+        let want = otto_core::proof::RepoProofConfig {
+            require_test: true,
+            test_cmd: Some("cargo test --workspace".into()),
+            require_ci: true,
+            require_pr_consistency: false,
+            require_review: true,
+        };
+        store.set_proof_config(&repo.id, &want).await.unwrap();
+        let got = store.get_proof_config(&repo.id).await.unwrap();
+        assert_eq!(got, want);
+
+        // unknown repo errors
+        assert!(store.set_proof_config("nope", &want).await.is_err());
     }
 
     #[tokio::test]

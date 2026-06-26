@@ -316,6 +316,9 @@ pub enum Event {
         work_item_id: String,
         status: String,
         risk_score: u8,
+        /// Done-contract readiness 0..100 (see `proof::compute_done_contract`).
+        #[serde(default)]
+        done_score: u8,
     },
     /// A scheduled-task run started, finished, or errored. The Scheduled Tasks page
     /// subscribes and re-fetches the task's run history on a matching tick instead

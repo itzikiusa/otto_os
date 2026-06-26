@@ -585,6 +585,10 @@ impl super::GitProvider for Github {
         }
     }
 
+    async fn ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
+        self.fetch_ci_status(r, number).await
+    }
+
     /// GitHub returns `github-authentication-token-expiration` on any
     /// authenticated call for fine-grained PATs / GitHub-App tokens. We make a
     /// cheap `GET /user` and read the header; absent header ⇒ token does not

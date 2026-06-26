@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use otto_core::proof::{
-    compute_badges, compute_risk, derive_status, preview as core_preview, ProofArtifact,
-    ProofArtifactKind, ProofArtifactStatus, ProofBadge, ProofPack, ProofStatus, WorkItemKind,
-    STORE_CAP,
+    compute_badges, compute_done_contract, compute_risk, derive_status_with_policy,
+    preview as core_preview, CiSummary, DoneContractPolicy, ProofArtifact, ProofArtifactKind,
+    ProofArtifactStatus, ProofBadge, ProofPack, ProofStatus, WorkItemKind, STORE_CAP,
 };
 use otto_core::event::Event;
 use otto_core::{redact, Error, Id, Result};
@@ -350,18 +350,38 @@ fn lock_for(ctx: &ServerCtx, pack_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
-/// Reload a pack's artifacts, derive its status + risk, persist, and broadcast
-/// `ProofPackUpdated`. Serialized per pack so concurrent callers can't lose an
-/// update. Returns the refreshed pack.
+/// Resolve the done-contract policy for a pack: the work-item-kind defaults
+/// (which reproduce the legacy status) strengthened by any repo opt-ins. Repo
+/// lookup is best-effort — an unknown/unlinked repo yields the default policy, so
+/// a pack never gets *weaker* than v1 and a lookup failure can't wedge recompute.
+pub async fn policy_for_pack(ctx: &ServerCtx, pack: &ProofPack) -> DoneContractPolicy {
+    let base = DoneContractPolicy::for_kind(pack.work_item_kind);
+    let Some(repo_id) = pack.repo_id.as_deref() else {
+        return base;
+    };
+    match ctx.git_store.get_proof_config(repo_id).await {
+        Ok(cfg) => base.with_repo(&cfg),
+        Err(_) => base,
+    }
+}
+
+/// Reload a pack's artifacts, derive its status (policy-aware) + risk +
+/// done-contract score, persist, and broadcast `ProofPackUpdated`. Serialized
+/// per pack so concurrent callers can't lose an update. Returns the refreshed
+/// pack.
 pub async fn recompute_and_emit(ctx: &ServerCtx, pack_id: &str) -> Result<ProofPack> {
     let lock = lock_for(ctx, pack_id);
     let _guard = lock.lock().await;
 
     let pack = ctx.proof_repo.get_pack(pack_id).await?;
     let arts = ctx.proof_repo.list_artifacts(pack_id).await?;
-    let status = derive_status(&pack, &arts);
+    let policy = policy_for_pack(ctx, &pack).await;
+    let status = derive_status_with_policy(&pack, &arts, &policy);
     let risk = compute_risk(&arts);
-    ctx.proof_repo.set_status_risk(pack_id, status, risk).await?;
+    let done = compute_done_contract(&pack, &arts, &policy).score;
+    ctx.proof_repo
+        .set_status_risk_done(pack_id, status, risk, done)
+        .await?;
 
     let _ = ctx.events.send(Event::ProofPackUpdated {
         workspace_id: pack.workspace_id.clone(),
@@ -370,9 +390,442 @@ pub async fn recompute_and_emit(ctx: &ServerCtx, pack_id: &str) -> Result<ProofP
         work_item_id: pack.work_item_id.clone(),
         status: status.as_str().to_string(),
         risk_score: risk,
+        done_score: done,
     });
 
     ctx.proof_repo.get_pack(pack_id).await
+}
+
+// ---------------------------------------------------------------------------
+// v2 evidence capture — CI, API/DB/Kafka reads, media, PR-check, snapshots
+// ---------------------------------------------------------------------------
+
+/// Record a CI aggregate as a `ci` artifact (upsert) and recompute.
+pub async fn record_ci_artifact(ctx: &ServerCtx, pack: &ProofPack, ci: &CiSummary) -> Result<()> {
+    let status = otto_core::proof::ci_artifact_status(&ci.state);
+    let body = format!(
+        "CI state: {}\nchecks: {} total · {} passed · {} failed{}",
+        ci.state,
+        ci.total,
+        ci.passed,
+        ci.failed,
+        ci.url.as_deref().map(|u| format!("\nurl: {u}")).unwrap_or_default()
+    );
+    let meta = json!({
+        "evidence": "ci", "state": ci.state, "total": ci.total,
+        "passed": ci.passed, "failed": ci.failed, "url": ci.url
+    });
+    upsert_content_artifact(
+        ctx,
+        pack,
+        ProofArtifactKind::Ci,
+        "CI status",
+        &body,
+        status,
+        meta,
+        "otto",
+    )
+    .await?;
+    recompute_and_emit(ctx, &pack.id).await?;
+    Ok(())
+}
+
+/// Capture an HTTP request/response as an `api` artifact (redacted + capped).
+pub async fn attach_api_evidence(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    req: &otto_core::api::ApiEvidenceReq,
+    by: &str,
+) -> Result<ProofArtifact> {
+    let status = otto_core::proof::http_evidence_status(req.status);
+    let mut body = format!("{} {}\nstatus: {}", req.method.to_uppercase(), req.url, req.status);
+    if let Some(d) = req.duration_ms {
+        body.push_str(&format!("\nduration_ms: {d}"));
+    }
+    if let Some(rq) = &req.request {
+        body.push_str("\n\n--- request ---\n");
+        body.push_str(rq);
+    }
+    if let Some(rs) = &req.response {
+        body.push_str("\n\n--- response ---\n");
+        body.push_str(rs);
+    }
+    let meta = merge_meta(
+        json!({"evidence": "api", "method": req.method, "url": req.url,
+               "http_status": req.status, "duration_ms": req.duration_ms}),
+        req.metadata.clone().unwrap_or(Value::Null),
+    );
+    let art = add_content_artifact(
+        ctx,
+        pack,
+        ProofArtifactKind::Api,
+        &req.title,
+        Some(&body),
+        None,
+        status,
+        meta,
+        by,
+    )
+    .await?;
+    recompute_and_emit(ctx, &pack.id).await?;
+    Ok(art)
+}
+
+/// Capture a DB read result as a `db` artifact.
+pub async fn attach_db_evidence(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    req: &otto_core::api::DbEvidenceReq,
+    by: &str,
+) -> Result<ProofArtifact> {
+    let status = otto_core::proof::read_evidence_status(req.error.is_some());
+    let mut body = String::new();
+    if let Some(e) = &req.engine {
+        body.push_str(&format!("engine: {e}\n"));
+    }
+    if let Some(q) = &req.query {
+        body.push_str(&format!("query: {q}\n"));
+    }
+    if let Some(c) = &req.columns {
+        body.push_str(&format!("columns: {}\n", c.join(", ")));
+    }
+    if let Some(n) = req.row_count {
+        body.push_str(&format!("rows: {n}\n"));
+    }
+    if let Some(s) = &req.sample {
+        body.push_str("\n--- sample ---\n");
+        body.push_str(s);
+    }
+    if let Some(e) = &req.error {
+        body.push_str("\n--- error ---\n");
+        body.push_str(e);
+    }
+    let meta = merge_meta(
+        json!({"evidence": "db", "engine": req.engine, "row_count": req.row_count,
+               "columns": req.columns}),
+        req.metadata.clone().unwrap_or(Value::Null),
+    );
+    let art = add_content_artifact(
+        ctx,
+        pack,
+        ProofArtifactKind::Db,
+        &req.title,
+        Some(&body),
+        None,
+        status,
+        meta,
+        by,
+    )
+    .await?;
+    recompute_and_emit(ctx, &pack.id).await?;
+    Ok(art)
+}
+
+/// Capture a Kafka read result as a `kafka` artifact.
+pub async fn attach_kafka_evidence(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    req: &otto_core::api::KafkaEvidenceReq,
+    by: &str,
+) -> Result<ProofArtifact> {
+    let count = req.message_count.unwrap_or(0);
+    let status = if req.error.is_some() {
+        ProofArtifactStatus::Failed
+    } else if count > 0 {
+        ProofArtifactStatus::Passed
+    } else {
+        ProofArtifactStatus::Info
+    };
+    let mut body = format!("topic: {}\nmessages: {}\n", req.topic, count);
+    if req.truncated.unwrap_or(false) {
+        body.push_str("(truncated)\n");
+    }
+    if let Some(s) = &req.sample {
+        body.push_str("\n--- sample ---\n");
+        body.push_str(s);
+    }
+    if let Some(e) = &req.error {
+        body.push_str("\n--- error ---\n");
+        body.push_str(e);
+    }
+    let meta = merge_meta(
+        json!({"evidence": "kafka", "topic": req.topic, "message_count": count,
+               "truncated": req.truncated}),
+        req.metadata.clone().unwrap_or(Value::Null),
+    );
+    let art = add_content_artifact(
+        ctx,
+        pack,
+        ProofArtifactKind::Kafka,
+        &req.title,
+        Some(&body),
+        None,
+        status,
+        meta,
+        by,
+    )
+    .await?;
+    recompute_and_emit(ctx, &pack.id).await?;
+    Ok(art)
+}
+
+/// Allowed media MIME types (R4). Anything else is rejected (415).
+pub const ALLOWED_MEDIA_MIMES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/svg+xml",
+    "video/mp4",
+    "video/webm",
+];
+
+/// Store a media blob (screenshot/video) and create the owning artifact.
+#[allow(clippy::too_many_arguments)]
+pub async fn attach_media(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    kind: ProofArtifactKind,
+    title: &str,
+    mime: &str,
+    data: &[u8],
+    extra: Value,
+    by: &str,
+) -> Result<ProofArtifact> {
+    let sha = otto_core::proof::bytes_sha256(data);
+    let meta = merge_meta(
+        extra,
+        json!({"ref_kind": "blob", "mime": mime, "size_bytes": data.len(), "sha256": sha}),
+    );
+    let art = ctx
+        .proof_repo
+        .add_artifact(
+            &pack.id,
+            &pack.workspace_id,
+            kind,
+            title,
+            None,
+            ProofArtifactStatus::Info,
+            &meta,
+            by,
+        )
+        .await?;
+    ctx.proof_repo
+        .add_blob(&art.id, &pack.workspace_id, &sha, mime, data)
+        .await?;
+    ctx.proof_repo
+        .set_artifact_ref(&art.id, &format!("blob:{}", art.id))
+        .await?;
+    recompute_and_emit(ctx, &pack.id).await?;
+    ctx.proof_repo.get_artifact(&art.id).await
+}
+
+/// Run the PR-description consistency check against the pack's actual change and
+/// test evidence, storing a `pr_check` artifact. Returns the report.
+pub async fn run_pr_check(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    title: &str,
+    description: &str,
+    base: Option<&str>,
+    cwd: Option<&str>,
+    by: &str,
+) -> Result<otto_core::proof::PrConsistencyReport> {
+    // Files + LOC from the actual diff (best-effort).
+    let mut files_changed: Vec<String> = Vec::new();
+    let (mut additions, mut deletions) = (0u32, 0u32);
+    if let Some(c) = cwd {
+        let git = LocalGit::new(c);
+        let resp = match base {
+            Some(b) => git.diff(DiffTarget::Commit(b.to_string()), None).await,
+            None => git.diff(DiffTarget::Working, None).await,
+        };
+        if let Ok(r) = resp {
+            files_changed = r.files.iter().map(|f| f.path.clone()).collect();
+            additions = r.files.iter().filter_map(|f| f.added).sum();
+            deletions = r.files.iter().filter_map(|f| f.deleted).sum();
+        }
+    }
+    // Test evidence already on the pack.
+    let arts = ctx.proof_repo.list_artifacts(&pack.id).await?;
+    let has_passing_tests = arts
+        .iter()
+        .any(|a| otto_core::proof::is_test_artifact(a) && a.status == ProofArtifactStatus::Passed);
+    let has_failing_tests = arts
+        .iter()
+        .any(|a| otto_core::proof::is_test_artifact(a) && a.status == ProofArtifactStatus::Failed);
+
+    // Redact before the check (D6 — one trust boundary; heuristics still work).
+    let title_red = redact::redact_text(title).value;
+    let desc_red = redact::redact_text(description).value;
+
+    let report = otto_core::proof::check_pr_consistency(&otto_core::proof::PrConsistencyInput {
+        title: title_red.clone(),
+        description: desc_red.clone(),
+        files_changed,
+        additions,
+        deletions,
+        has_passing_tests,
+        has_failing_tests,
+    });
+
+    let status = if report.passed {
+        ProofArtifactStatus::Passed
+    } else {
+        ProofArtifactStatus::Failed
+    };
+    let mut body = format!(
+        "PR consistency: {}/100 ({})\n",
+        report.score,
+        if report.passed { "passed" } else { "FAILED" }
+    );
+    for c in &report.checks {
+        body.push_str(&format!(
+            "[{}] {} — {}\n",
+            if c.passed { "x" } else { " " },
+            c.label,
+            c.detail
+        ));
+    }
+    let meta = json!({
+        "evidence": "pr_check",
+        "score": report.score,
+        "hard_fail": report.hard_fail,
+        "report": serde_json::to_value(&report).unwrap_or(Value::Null),
+    });
+    upsert_content_artifact(
+        ctx,
+        pack,
+        ProofArtifactKind::PrCheck,
+        "PR consistency",
+        &body,
+        status,
+        meta,
+        by,
+    )
+    .await?;
+    recompute_and_emit(ctx, &pack.id).await?;
+    Ok(report)
+}
+
+/// Build + persist an immutable snapshot of the pack's current evidence with a
+/// frozen, tamper-evident bundle and rendered Markdown/HTML reports.
+pub async fn make_snapshot(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    note: &str,
+    by: &str,
+) -> Result<otto_state::ProofSnapshotRow> {
+    use otto_core::proof::SNAPSHOT_ARTIFACT_CAP;
+    let pack = ctx.proof_repo.get_pack(&pack.id).await?;
+    let arts = ctx.proof_repo.list_artifacts(&pack.id).await?;
+    let policy = policy_for_pack(ctx, &pack).await;
+    let contract = compute_done_contract(&pack, &arts, &policy);
+    let badges = badge_strings(&pack, &arts);
+    let generated_at = chrono::Utc::now().to_rfc3339();
+
+    // Frozen artifact list — content capped to SNAPSHOT_ARTIFACT_CAP; full
+    // content_sha256 preserved for tamper-evidence.
+    let arts_json: Vec<Value> = arts
+        .iter()
+        .map(|a| {
+            let capped = a.content_ref.as_ref().map(|c| {
+                if c.len() > SNAPSHOT_ARTIFACT_CAP {
+                    let mut s = c
+                        .char_indices()
+                        .take_while(|(i, _)| *i <= SNAPSHOT_ARTIFACT_CAP)
+                        .last()
+                        .map(|(i, _)| c[..i].to_string())
+                        .unwrap_or_default();
+                    s.push_str("\n…(truncated in snapshot)");
+                    s
+                } else {
+                    c.clone()
+                }
+            });
+            json!({
+                "id": a.id, "kind": a.kind.as_str(), "title": a.title,
+                "status": a.status.as_str(), "content": capped,
+                "content_sha256": a.content_sha256, "metadata": a.metadata,
+                "created_at": a.created_at,
+            })
+        })
+        .collect();
+
+    let bundle = json!({
+        "pack": &pack,
+        "badges": &badges,
+        "done_contract": &contract,
+        "artifacts": arts_json,
+        "generated_at": generated_at,
+    });
+    let sha256 = otto_core::proof::bundle_sha256(&bundle);
+
+    let view = otto_core::proof::ReportView {
+        pack: &pack,
+        artifacts: &arts,
+        contract: &contract,
+        badges: &badges,
+        generated_at: &generated_at,
+    };
+    let report_md = otto_core::proof::render_report_md(&view);
+    let report_html = otto_core::proof::render_report_html(&view);
+    let bundle_json = serde_json::to_string(&bundle)
+        .map_err(|e| Error::Internal(format!("serialize snapshot bundle: {e}")))?;
+
+    ctx.proof_repo
+        .create_snapshot(
+            &pack.id,
+            &pack.workspace_id,
+            &sha256,
+            pack.status.as_str(),
+            contract.score,
+            pack.risk_score,
+            &bundle_json,
+            &report_md,
+            &report_html,
+            note,
+            by,
+        )
+        .await
+}
+
+/// Render a live (non-frozen) Markdown/HTML report for a pack.
+pub async fn render_report(ctx: &ServerCtx, pack_id: &str, html: bool) -> Result<String> {
+    let pack = ctx.proof_repo.get_pack(pack_id).await?;
+    let arts = ctx.proof_repo.list_artifacts(pack_id).await?;
+    let policy = policy_for_pack(ctx, &pack).await;
+    let contract = compute_done_contract(&pack, &arts, &policy);
+    let badges = badge_strings(&pack, &arts);
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    let view = otto_core::proof::ReportView {
+        pack: &pack,
+        artifacts: &arts,
+        contract: &contract,
+        badges: &badges,
+        generated_at: &generated_at,
+    };
+    Ok(if html {
+        otto_core::proof::render_report_html(&view)
+    } else {
+        otto_core::proof::render_report_md(&view)
+    })
+}
+
+/// Resolve the registered repo whose path contains `cwd` (longest-prefix match).
+pub async fn resolve_repo_for_cwd(ctx: &ServerCtx, ws_id: &str, cwd: &str) -> Option<String> {
+    let repos = ctx.git_store.list_repos(&ws_id.to_string()).await.ok()?;
+    repos
+        .into_iter()
+        .filter(|r| cwd == r.path || cwd.starts_with(&format!("{}/", r.path)))
+        .max_by_key(|r| r.path.len())
+        .map(|r| r.id)
+}
+
+/// The done-contract for a pack, recomputed live (used by the detail route).
+pub async fn live_contract(ctx: &ServerCtx, pack: &ProofPack, arts: &[ProofArtifact]) -> otto_core::proof::DoneContract {
+    let policy = policy_for_pack(ctx, pack).await;
+    compute_done_contract(pack, arts, &policy)
 }
 
 /// Badge strings for a pack (used by the route DTOs).
@@ -471,12 +924,28 @@ pub async fn gate_session(ctx: &ServerCtx, session: &otto_core::domain::Session)
         }
     }
 
+    // Link the pack to a registered repo (best-effort) so per-repo proof policy
+    // (R3: "test command required") applies on recompute, and learn its
+    // configured test command.
+    let repo_test_cmd = match resolve_repo_for_cwd(ctx, &session.workspace_id, &session.cwd).await {
+        Some(repo_id) => {
+            let _ = ctx.proof_repo.set_repo_link(&pack.id, Some(&repo_id), None).await;
+            ctx.git_store
+                .get_proof_config(&repo_id)
+                .await
+                .ok()
+                .and_then(|c| c.test_cmd)
+        }
+        None => None,
+    };
+
     // Always assemble the diff (best-effort).
     let _ = assemble_diff(ctx, &pack, &session.cwd, None).await;
 
-    // Optionally auto-run the repo's tests.
+    // Optionally auto-run the repo's tests — prefer the repo's declared command.
     if auto_test_enabled() {
-        if let Some(cmd) = detect_test_command(&session.cwd) {
+        let cmd = repo_test_cmd.or_else(|| detect_test_command(&session.cwd));
+        if let Some(cmd) = cmd {
             let _ = run_command_artifact(ctx, &pack, &session.cwd, &cmd, Some("test")).await;
         }
     }

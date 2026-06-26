@@ -2151,12 +2151,15 @@ export type ProofArtifactKind =
   | 'command'
   | 'log'
   | 'screenshot'
+  | 'video'
   | 'diff'
   | 'ci'
   | 'api'
   | 'db'
+  | 'kafka'
   | 'review'
   | 'approval'
+  | 'pr_check'
   | 'self_review';
 export type ProofArtifactStatus = 'passed' | 'failed' | 'pending' | 'info';
 export type WorkItemKind = 'session' | 'goal_loop' | 'review' | 'workflow_run' | 'task' | 'manual';
@@ -2167,7 +2170,12 @@ export type ProofBadge =
   | 'human_approved'
   | 'risky_change'
   | 'ci_missing'
+  | 'ci_passed'
+  | 'ci_failed'
+  | 'ci_pending'
   | 'db_api_verified'
+  | 'ui_verified'
+  | 'pr_inconsistent'
   | 'review_unresolved'
   | 'waived';
 
@@ -2180,9 +2188,13 @@ export interface ProofPack {
   status: ProofStatus;
   summary: string;
   risk_score: number;
+  done_score: number;
   parent_pack_id?: string | null;
+  repo_id?: string | null;
+  pr_number?: number | null;
   waived_by?: string | null;
   waived_reason?: string | null;
+  waived_at?: string | null;
   created_by: Id;
   created_at: string;
   updated_at: string;
@@ -2197,6 +2209,7 @@ export interface ProofArtifact {
   content_ref?: string | null;
   status: ProofArtifactStatus;
   metadata: unknown;
+  content_sha256?: string | null;
   created_by: Id;
   created_at: string;
   updated_at: string;
@@ -2214,12 +2227,53 @@ export interface ProofArtifactView extends ProofArtifact {
   truncated: boolean;
 }
 
-/** `GET /proof-packs/{id}` — the pack, its badges, artifacts, and any children. */
+/** One line of the done-contract checklist. */
+export interface ContractItem {
+  key: string;
+  label: string;
+  required: boolean;
+  satisfied: boolean;
+  weight: number;
+  detail: string;
+}
+
+/** The "done contract": an explainable readiness score + itemized checklist. */
+export interface DoneContract {
+  score: number;
+  satisfied: number;
+  required: number;
+  items: ContractItem[];
+}
+
+/** Snapshot metadata (no bundle/reports). */
+export interface ProofSnapshotMeta {
+  id: string;
+  proof_pack_id: string;
+  seq: number;
+  sha256: string;
+  status: string;
+  done_score: number;
+  risk_score: number;
+  note: string;
+  created_by: string;
+  created_at: string;
+}
+
+/** A full immutable snapshot. */
+export interface ProofSnapshotResp extends ProofSnapshotMeta {
+  bundle: unknown;
+  report_md: string;
+  report_html: string;
+}
+
+/** `GET /proof-packs/{id}` — the pack, its badges, artifacts, children, contract. */
 export interface ProofPackDetail {
   pack: ProofPack;
   badges: string[];
   artifacts: ProofArtifactView[];
   children: ProofPackResp[];
+  done_contract: DoneContract;
+  snapshots: ProofSnapshotMeta[];
 }
 
 export interface ProofSummaryRow {
@@ -2228,6 +2282,7 @@ export interface ProofSummaryRow {
   proof_pack_id: string;
   status: string;
   risk_score: number;
+  done_score: number;
   badges: string[];
 }
 
@@ -2255,6 +2310,75 @@ export interface AssembleReq {
   cwd?: string;
   base?: string;
   commands?: { cmd: string; kind?: string }[];
+}
+
+/** Per-repository proof requirements (R3 — strengthen-only). */
+export interface RepoProofConfig {
+  require_test?: boolean;
+  test_cmd?: string | null;
+  require_ci?: boolean;
+  require_pr_consistency?: boolean;
+  require_review?: boolean;
+}
+
+export interface RepoProofConfigResp extends RepoProofConfig {
+  repo_id: string;
+}
+
+export interface CreateSnapshotReq {
+  note?: string;
+}
+
+export interface AttachMediaReq {
+  kind: 'screenshot' | 'video';
+  title: string;
+  mime: string;
+  data_base64: string;
+  metadata?: unknown;
+}
+
+export interface ApiEvidenceReq {
+  title: string;
+  method: string;
+  url: string;
+  status: number;
+  duration_ms?: number;
+  request?: string;
+  response?: string;
+  metadata?: unknown;
+}
+
+export interface DbEvidenceReq {
+  title: string;
+  engine?: string;
+  query?: string;
+  columns?: string[];
+  row_count?: number;
+  sample?: string;
+  error?: string;
+  metadata?: unknown;
+}
+
+export interface KafkaEvidenceReq {
+  title: string;
+  topic: string;
+  message_count?: number;
+  sample?: string;
+  truncated?: boolean;
+  error?: string;
+  metadata?: unknown;
+}
+
+export interface PrCheckReq {
+  title: string;
+  description: string;
+  base?: string;
+  cwd?: string;
+}
+
+export interface CiRefreshReq {
+  repo_id?: string;
+  pr_number?: number;
 }
 
 // ---------------------------------------------------------------------------

@@ -199,6 +199,35 @@ impl otto_git::GitCtx for ServerCtx {
     ) -> otto_core::Result<()> {
         crate::proof::gate_pr(self, workspace_id, req).await
     }
+
+    async fn after_pr_created(
+        &self,
+        repo: &otto_core::domain::Repo,
+        pr_number: u64,
+        proof_pack_id: Option<&str>,
+        ci: &otto_git::CiStatus,
+    ) {
+        // Only act when a proof pack is linked. Best-effort throughout — a CI
+        // capture failure must never surface to the PR caller.
+        let Some(pack_id) = proof_pack_id else {
+            return;
+        };
+        let Ok(pack) = self.proof_repo.get_pack(pack_id).await else {
+            return;
+        };
+        let _ = self
+            .proof_repo
+            .set_repo_link(&pack.id, Some(&repo.id), Some(pr_number as i64))
+            .await;
+        let summary = otto_core::proof::CiSummary {
+            state: ci.state.clone(),
+            total: ci.total,
+            passed: ci.passed,
+            failed: ci.failed,
+            url: ci.url.clone(),
+        };
+        let _ = crate::proof::record_ci_artifact(self, &pack, &summary).await;
+    }
 }
 
 impl otto_issues::IssuesCtx for ServerCtx {
@@ -1302,7 +1331,7 @@ impl PlanIo for ExecHelper {
 /// A workspace can have many members but a repo binds exactly one account, so the
 /// Editor role-check on the repo is not sufficient to stop user B from opening /
 /// drafting PRs through user A's hosting token — authorize the owner here.
-async fn resolve_provider_remote(
+pub(crate) async fn resolve_provider_remote(
     ctx: &ServerCtx,
     user: &otto_core::domain::User,
     repo: &otto_core::domain::Repo,

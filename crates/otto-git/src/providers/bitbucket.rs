@@ -514,6 +514,10 @@ impl super::GitProvider for Bitbucket {
             .collect();
         Ok(repos)
     }
+
+    async fn ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
+        self.fetch_ci_status(r, number).await
+    }
 }
 
 /// Parse a small inline build-statuses JSON fixture into a CiStatus aggregate.

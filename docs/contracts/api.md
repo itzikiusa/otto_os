@@ -1776,39 +1776,64 @@ Persistence: `otto_state::product_chat` (`DiscoveryChat`, `DiscoveryChatMessage`
 
 ---
 
-## Proof Packs (#115-125)
+## Proof Packs (#115-137)
 
-The evidence layer. Every meaningful unit of agent work carries a **proof pack**
-whose `status` (`missing | partial | passed | failed | waived`) is DERIVED from
-its evidence artifacts, not claimed by the agent. Otto auto-assembles what it can
-(diff, goal-loop verify commands, workflow node outputs, review findings, human
-approvals); agents and humans add the rest (build/lint, screenshots, api/db, ci,
-self-review) via the artifact endpoint. All persisted artifact content is redacted
-(`otto_core::redact`) and capped (2 MiB) before storage.
+The evidence layer ("the trust layer"). Every meaningful unit of agent work
+carries a **proof pack** whose `status` (`missing | partial | passed | failed |
+waived`) is DERIVED from its evidence artifacts, not claimed by the agent, plus a
+**done-contract** `done_score` (0..100) with an itemized checklist of what is
+present vs. missing. Otto auto-assembles what it can (diff, goal-loop verify
+commands, workflow node outputs, review findings, human approvals, **CI status on
+PR open**); agents and humans add the rest (build/lint, **screenshots/video**,
+**api/db/kafka reads**, **PR-consistency checks**, self-review) via the
+artifact/evidence endpoints. All persisted text content is redacted
+(`otto_core::redact`) and capped (2 MiB); media blobs are capped at 25 MiB.
+
+Per-repo policy (`repos.proof_config_json`, `RepoProofConfig`) can *strengthen*
+the requirement (require a passing test / green CI / resolved review / consistent
+PR) — never weaken it. Immutable, content-hashed **snapshots** freeze a pack's
+evidence + rendered Markdown/HTML report for audit. Waiving records the
+authenticated human approver + reason + timestamp and an immutable approval
+artifact (set `OTTO_PROOF_WAIVER_MIN_ROLE=admin` to require workspace Admin).
 
 Feature-gated by `Feature::ProofPack` (`policy.rs`): workspace-axis and flat
 routes alike require `ProofPack` View (reads) / Edit (writes); each handler also
 checks the caller's workspace role. Persistence: `otto_state::proof`
-(`ProofPack`, `ProofArtifact`); engine: `otto_server::proof`.
+(`ProofPack`, `ProofArtifact`, `proof_snapshots`, `proof_blobs`); engine:
+`otto_server::proof`.
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?` | `ProofPackResp[]` |
 | 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?}` | ProofPackResp |
-| 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | — | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, badges[]}]}` |
-| 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[]}` |
+| 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | — | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
+| 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract computed live) |
 | 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
-| 120 | DELETE /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts) |
+| 120 | DELETE /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |
 | 121 | POST /api/v1/proof-packs/{id}/artifacts | ws editor · ProofPack Edit | AddArtifactReq `{kind, title, content?, content_url?, status?, metadata?}` | ProofPackResp |
 | 122 | POST /api/v1/proof-packs/{id}/assemble | ws editor · ProofPack Edit | AssembleReq `{cwd?, base?, commands?:[{cmd, kind?}]}` | ProofPackResp |
-| 123 | POST /api/v1/proof-packs/{id}/waive | ws editor · ProofPack Edit | WaiveReq `{reason}` | ProofPackResp |
+| 123 | POST /api/v1/proof-packs/{id}/waive | ws editor (or Admin if `OTTO_PROOF_WAIVER_MIN_ROLE=admin`) · ProofPack Edit | WaiveReq `{reason}` (≥10 chars) | ProofPackResp |
 | 124 | DELETE /api/v1/proof-artifacts/{id} | ws editor · ProofPack Edit | — | `{ok:true}` |
 | 125 | GET /api/v1/proof-artifacts/{id}/content | ws viewer · ProofPack View | — | `{content, ref_kind, kind, status, metadata}` (full stored content) |
+| 126 | POST /api/v1/proof-packs/{id}/snapshot | ws editor · ProofPack Edit | CreateSnapshotReq `{note?}` | ProofSnapshotResp `{…meta, bundle, report_md, report_html}` (immutable) |
+| 127 | GET /api/v1/proof-packs/{id}/snapshots | ws viewer · ProofPack View | — | `ProofSnapshotMeta[]` (newest first) |
+| 128 | GET /api/v1/proof-snapshots/{id} | ws viewer · ProofPack View | — | ProofSnapshotResp |
+| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp |
+| 130 | GET /api/v1/proof-artifacts/{id}/blob | ws viewer · ProofPack View | — | raw bytes (`Content-Type` = blob mime, `Content-Disposition: inline`) |
+| 131 | POST /api/v1/proof-packs/{id}/evidence/api | ws editor · ProofPack Edit | ApiEvidenceReq `{title, method, url, status, duration_ms?, request?, response?, metadata?}` | ProofPackResp |
+| 132 | POST /api/v1/proof-packs/{id}/evidence/db | ws editor · ProofPack Edit | DbEvidenceReq `{title, engine?, query?, columns?, row_count?, sample?, error?, metadata?}` | ProofPackResp |
+| 133 | POST /api/v1/proof-packs/{id}/evidence/kafka | ws editor · ProofPack Edit | KafkaEvidenceReq `{title, topic, message_count?, sample?, truncated?, error?, metadata?}` | ProofPackResp |
+| 134 | POST /api/v1/proof-packs/{id}/pr-check | ws editor · ProofPack Edit | PrCheckReq `{title, description, base?, cwd?}` | ProofPackResp (stores a `pr_check` artifact) |
+| 135 | POST /api/v1/proof-packs/{id}/ci-refresh | ws editor · ProofPack Edit | CiRefreshReq `{repo_id?, pr_number?}` (default from pack) | ProofPackResp (fetches live CI → `ci` artifact) |
+| 136 | GET /api/v1/proof-packs/{id}/report | ws viewer · ProofPack View | query `format=md\|html` | rendered report (text/markdown or text/html) |
+| 137 | GET\|PUT /api/v1/repos/{id}/proof-config | ws viewer (GET) / editor (PUT) · ProofPack View/Edit | RepoProofConfig `{require_test?, test_cmd?, require_ci?, require_pr_consistency?, require_review?}` | RepoProofConfigResp |
 
-Artifact kinds: `command | log | screenshot | diff | ci | api | db | review |
-approval | self_review`. Badges (derived server-side): `no_proof`,
-`tests_passed`, `tests_failed`, `human_approved`, `risky_change`, `ci_missing`,
-`db_api_verified`, `review_unresolved`, `waived`.
+Artifact kinds: `command | log | screenshot | video | diff | ci | api | db |
+kafka | review | approval | pr_check | self_review`. Badges (derived
+server-side): `no_proof`, `tests_passed`, `tests_failed`, `human_approved`,
+`risky_change`, `ci_missing`, `ci_passed`, `ci_failed`, `ci_pending`,
+`db_api_verified`, `ui_verified`, `pr_inconsistent`, `review_unresolved`,
+`waived`.
 
 ---
 
