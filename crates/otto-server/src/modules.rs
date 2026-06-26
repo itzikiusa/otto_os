@@ -1783,9 +1783,17 @@ async fn run_review_core(
     //    progress; one stuck/failed agent never aborts the others.
     let states: crate::review_session::SharedStates =
         Arc::new(tokio::sync::Mutex::new(agent_states));
+    // Per-review cancel flag (set by POST /reviews/{id}/cancel). Threaded into
+    // each agent's recovery loop so a Cancel short-circuits in-flight retries.
+    let cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>> = ctx
+        .review_cancels
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&review_id.to_string()).cloned());
     let mut set = tokio::task::JoinSet::new();
     for (i, run) in agent_runs.into_iter().enumerate() {
         let manager = Arc::clone(&ctx.manager);
+        let cancel_flag = cancel_flag.clone();
         let reviews = ctx.reviews_store.clone();
         let states = Arc::clone(&states);
         let ws = workspace.clone();
@@ -1825,6 +1833,7 @@ async fn run_review_core(
                 &prompt,
                 timeout,
                 max_attempts,
+                cancel_flag.as_ref(),
             )
             .await;
             (i, res)
@@ -1841,6 +1850,17 @@ async fn run_review_core(
                     serde_json::to_string(&res.findings).unwrap_or_else(|_| "[]".to_string());
             }
         }
+    }
+
+    // If the review was cancelled while the agents ran, stop here: skip the
+    // (expensive) summarizer and do NOT persist findings. The cancel handler
+    // owns the terminal `cancelled` status + teardown.
+    if cancel_flag
+        .as_ref()
+        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        tracing::info!(review = %review_id, "review cancelled — skipping summarizer/persist");
+        return Ok(());
     }
 
     // Reclaim the live states (updated by the tasks) for the summarizer step.
@@ -1883,6 +1903,10 @@ async fn run_review_core(
         path: Option<String>,
         #[serde(default)]
         line: Option<u32>,
+        /// Optional end of a multi-line finding range. Anchors the finding to a
+        /// span, not just a single line, when the agent reports one.
+        #[serde(default)]
+        line_end: Option<u32>,
         #[serde(default = "default_severity")]
         severity: String,
         body: String,
@@ -1967,14 +1991,17 @@ async fn run_review_core(
             c.category.as_deref(),
             &c.body,
         );
+        // Anchor the finding to a sane (line, line_end) span — an end without a
+        // start, or an inverted/degenerate range, collapses appropriately.
+        let (line, line_end) = otto_core::finding::normalize_line_range(c.line, c.line_end);
         let nf = otto_state::NewFinding {
             review_id,
             workspace_id: &workspace.id,
             repo_id,
             pr_number: pr_opt,
             path: c.path.as_deref(),
-            line: c.line.map(|l| l as i64),
-            line_end: None,
+            line: line.map(|l| l as i64),
+            line_end: line_end.map(|l| l as i64),
             severity: &c.severity,
             category: c.category.as_deref(),
             title: &title,
@@ -2195,6 +2222,7 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
             post(start_local_review).get(get_local_review),
         )
         .route("/reviews/{review_id}/handoff", post(handoff_review))
+        .route("/reviews/{review_id}/cancel", post(cancel_review))
         .route(
             "/reviews/{review_id}/agents/{index}/retry",
             post(retry_review_agent),
@@ -2866,6 +2894,7 @@ async fn retry_review_agent(
             &prompt,
             timeout,
             None,
+            None, // single-agent retry has no review-level cancel flag
         )
         .await;
     });
@@ -2928,6 +2957,16 @@ async fn start_review(
         .await
         .map_err(crate::error::ApiError)?;
 
+    // Register a cancel flag for this run so POST /reviews/{id}/cancel can stop
+    // it. run_review_core looks this up by review_id and threads it into each
+    // agent's recovery loop.
+    if let Ok(mut map) = ctx.review_cancels.lock() {
+        map.insert(
+            review.id.to_string(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+    }
+
     // Spawn the background runner.
     let review_id = review.id.clone();
     let ctx_bg = ctx.clone();
@@ -2959,42 +2998,137 @@ async fn start_review(
             user_context,
         )
         .await;
-        match result {
-            Ok(()) => {
-                tracing::info!(review = %review_id, "PR review complete");
-                if let Err(e) = ctx_bg
-                    .reviews_store
-                    .set_status(&review_id, ReviewStatus::Done, None)
-                    .await
-                {
-                    tracing::error!(review = %review_id, "set status done: {e}");
+        // If a Cancel landed while we ran, the cancel handler already set the
+        // terminal `cancelled` status + tore everything down — don't overwrite it.
+        let was_cancelled = ctx_bg
+            .review_cancels
+            .lock()
+            .ok()
+            .and_then(|m| m.get(review_id.as_str()).cloned())
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst));
+        if was_cancelled {
+            tracing::info!(review = %review_id, "PR review ended after cancel — leaving cancelled status");
+        } else {
+            match result {
+                Ok(()) => {
+                    tracing::info!(review = %review_id, "PR review complete");
+                    if let Err(e) = ctx_bg
+                        .reviews_store
+                        .set_status(&review_id, ReviewStatus::Done, None)
+                        .await
+                    {
+                        tracing::error!(review = %review_id, "set status done: {e}");
+                    }
+                    let _ = ctx_bg.events.send(Event::ReviewChanged {
+                        workspace_id: ws_id.clone(),
+                        session_id: None,
+                        review_id: review_id.clone(),
+                        status: ReviewStatus::Done.as_str().to_string(),
+                    });
                 }
-                let _ = ctx_bg.events.send(Event::ReviewChanged {
-                    workspace_id: ws_id.clone(),
-                    session_id: None,
-                    review_id: review_id.clone(),
-                    status: ReviewStatus::Done.as_str().to_string(),
-                });
+                Err(e) => {
+                    tracing::warn!(review = %review_id, "PR review error: {e}");
+                    let msg = e.to_string();
+                    let _ = ctx_bg
+                        .reviews_store
+                        .set_status(&review_id, ReviewStatus::Error, Some(&msg))
+                        .await;
+                    let _ = ctx_bg.events.send(Event::ReviewChanged {
+                        workspace_id: ws_id.clone(),
+                        session_id: None,
+                        review_id: review_id.clone(),
+                        status: ReviewStatus::Error.as_str().to_string(),
+                    });
+                }
             }
-            Err(e) => {
-                tracing::warn!(review = %review_id, "PR review error: {e}");
-                let msg = e.to_string();
-                let _ = ctx_bg
-                    .reviews_store
-                    .set_status(&review_id, ReviewStatus::Error, Some(&msg))
-                    .await;
-                let _ = ctx_bg.events.send(Event::ReviewChanged {
-                    workspace_id: ws_id.clone(),
-                    session_id: None,
-                    review_id: review_id.clone(),
-                    status: ReviewStatus::Error.as_str().to_string(),
-                });
-            }
+        }
+        // Drop the cancel flag from the registry now the run is over.
+        if let Ok(mut map) = ctx_bg.review_cancels.lock() {
+            map.remove(review_id.as_str());
         }
         drop(repo_path); // keep bound
     });
 
     Ok(Json(review))
+}
+
+/// Cancel an in-flight review. Signals the run's cancel flag (short-circuiting
+/// the agent recovery loop), kills the live agent PTY sessions, marks the run
+/// `cancelled`, cleans up its temp files and broadcasts. 409 if not running.
+async fn cancel_review(
+    Path(review_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> crate::error::ApiResult<Json<Review>> {
+    let review = ctx
+        .reviews_store
+        .get_review(&review_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    let repo = ctx
+        .git_store
+        .get_repo(&review.repo_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+
+    if review.status != ReviewStatus::Running {
+        return Err(ApiError(Error::Conflict(format!(
+            "review is {} — only a running review can be cancelled",
+            review.status.as_str()
+        ))));
+    }
+
+    // 1. Signal the cancel flag so each agent's recovery loop short-circuits and
+    //    run_review_core skips the summarizer / finding persistence.
+    if let Ok(map) = ctx.review_cancels.lock() {
+        if let Some(flag) = map.get(review_id.as_str()) {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    // 2. Kill the live agent sessions — PtyHandle has no Drop-kill, so this
+    //    explicit reap is what actually stops the in-flight agents.
+    for agent in &review.agents {
+        if let Some(sid) = &agent.session_id {
+            let _ = ctx.manager.kill_session(sid).await;
+        }
+    }
+
+    // 3. Mark the run cancelled (the background task sees the flag and won't
+    //    overwrite this with done/error).
+    if let Err(e) = ctx
+        .reviews_store
+        .set_status(&review_id, ReviewStatus::Cancelled, None)
+        .await
+    {
+        tracing::error!(review = %review_id, "set status cancelled: {e}");
+    }
+
+    // 4. Best-effort temp-file cleanup (diff + per-agent prompt/json).
+    let prefix = format!("otto-review-{review_id}");
+    if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in rd.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    // 5. Broadcast the terminal status to subscribers.
+    let _ = ctx.events.send(Event::ReviewChanged {
+        workspace_id: repo.workspace_id.clone(),
+        session_id: None,
+        review_id: review_id.to_string(),
+        status: ReviewStatus::Cancelled.as_str().to_string(),
+    });
+
+    Ok(Json(
+        ctx.reviews_store
+            .get_review(&review_id)
+            .await
+            .map_err(crate::error::ApiError)?,
+    ))
 }
 
 async fn get_review(
@@ -4088,6 +4222,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_canvas::router::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
         crate::memory_gov::memory_gov_routes(),
+        crate::embedder::routes(),
         otto_git::router::<ServerCtx>(),
         otto_issues::router::<ServerCtx>(),
         otto_channels::router::<ServerCtx>(),

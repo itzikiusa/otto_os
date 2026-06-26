@@ -66,6 +66,10 @@ pub struct ServerCtx {
     /// (onboarding); the inbound handler then returns 503.
     pub channel_bridge: Option<Arc<otto_channels::Bridge>>,
     pub reviews_store: ReviewsRepo,
+    /// Per-review cancellation flags for in-flight PR/local reviews (the Cancel
+    /// button). A running review threads its flag into the agent recovery loop;
+    /// cancel sets it, kills the live agent sessions and marks the run cancelled.
+    pub review_cancels: crate::skill_eval::CancelRegistry,
     /// Persistent review finding identity + lifecycle (A1 verified-review loop).
     pub findings_store: ReviewFindingsRepo,
     /// Audit trail for the findings workflow (one row per triage action).

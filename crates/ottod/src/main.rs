@@ -299,6 +299,9 @@ async fn run(cfg: Config) -> Result<(), String> {
         }
         _ => memory,
     };
+    // Wire the configured real embedder (OpenAI/Voyage) from settings + Keychain;
+    // a misconfigured provider logs a warning and keeps the local stub default.
+    otto_server::embedder::apply_configured_embedder(&memory, &settings, &secrets).await;
 
     // One shared auth-lookup cache: the authenticator fills it, the grants route
     // (via ServerCtx.auth_cache) evicts from it on set_grants. Clones share the
@@ -377,6 +380,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         proof_packs_store: otto_state::ReviewProofPacksRepo::new(pool.clone()),
         skill_evals_store: SkillEvalsRepo::new(pool.clone()),
         skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         orchestrator: Arc::clone(&orchestrator),
         improve_engine: Arc::clone(&improve_engine),
         context_library: context_library.clone(),

@@ -2385,7 +2385,7 @@ export interface CiRefreshReq {
 // PR Review (AI agents)
 // ---------------------------------------------------------------------------
 
-export type ReviewStatus = 'running' | 'done' | 'error';
+export type ReviewStatus = 'running' | 'done' | 'error' | 'cancelled';
 export type ReviewCommentState = 'draft' | 'approved' | 'declined';
 export type ReviewAgentStatus = 'pending' | 'running' | 'waiting' | 'done' | 'error';
 
@@ -2953,6 +2953,8 @@ export interface WorkspaceContextConfig {
   soul: string | null; // null = global default
   extra_context_md: string;
   include_memory: boolean;
+  include_repo_map?: boolean; // opt-in tree-sitter repo map
+  repo_map_max_lines?: number | null;
 }
 
 export interface UpdateWorkspaceContextReq {
@@ -2960,6 +2962,7 @@ export interface UpdateWorkspaceContextReq {
   soul: string | null;
   extra_context_md: string;
   include_memory: boolean;
+  include_repo_map?: boolean;
 }
 
 export interface MaterializeProviderResult {
@@ -3051,6 +3054,8 @@ export interface ContextPreviewReq {
   extra_context_md?: string;
   /** Override the include-memory toggle (omit ⇒ use stored config). */
   include_memory?: boolean;
+  /** Override the include-repo-map toggle (omit ⇒ use stored config). */
+  include_repo_map?: boolean;
   /** Working directory the spawn would use (omit ⇒ the workspace root). */
   cwd?: string;
 }

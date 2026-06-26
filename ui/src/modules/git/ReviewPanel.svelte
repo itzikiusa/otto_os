@@ -62,6 +62,7 @@
   let history: Review[] = $state([]);
   let loading = $state(true);
   let starting = $state(false);
+  let cancelling = $state(false);
   // Fallback poll (visibility-gated) used only while the review is running and
   // no WS event has arrived yet — keeps the panel alive if the WS drops.
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -399,6 +400,23 @@
       toasts.error('Could not start review', e instanceof Error ? e.message : String(e));
     } finally {
       starting = false;
+    }
+  }
+
+  /** Cancel the in-flight review: tears down the agent sessions server-side and
+   *  marks the run cancelled. The WS reviewBus then refreshes this panel. */
+  async function cancelReview(): Promise<void> {
+    if (!review || review.status !== 'running') return;
+    cancelling = true;
+    try {
+      const updated = await api.post<Review>(`/reviews/${review.id}/cancel`, {});
+      review = updated;
+      history = history.map((r) => (r.id === updated.id ? updated : r));
+      toasts.info('Review cancelled');
+    } catch (e) {
+      toasts.error('Could not cancel review', e instanceof Error ? e.message : String(e));
+    } finally {
+      cancelling = false;
     }
   }
 
@@ -751,6 +769,14 @@
       <div class="spinner"></div>
       <span class="rp-running-title">Reviewing…</span>
       <span class="grow"></span>
+      <button
+        class="btn small ghost rp-cancel-btn"
+        disabled={cancelling}
+        onclick={cancelReview}
+        data-testid="review-cancel"
+      >
+        {cancelling ? 'Cancelling…' : 'Cancel'}
+      </button>
       <button class="btn small ghost" onclick={openConfig}>&#9881; Configure</button>
     </div>
     <!-- Live agent cards (shared with the local review) -->
@@ -759,6 +785,14 @@
     {:else}
       <p class="dim" style="font-size:12px;padding:8px 0">Agents starting…</p>
     {/if}
+  {:else if review.status === 'cancelled'}
+    <div class="rp-error card" data-testid="review-cancelled">
+      <Icon name="x" size={14} />
+      <span class="rp-error-msg">Review cancelled.</span>
+      <button class="btn small" disabled={starting} onclick={startReview}>
+        {starting ? 'Starting…' : 'Run again'}
+      </button>
+    </div>
   {:else if review.status === 'error'}
     <div class="rp-error card">
       <Icon name="zap" size={14} />
@@ -1374,6 +1408,10 @@
   .rp-status-error {
     background: color-mix(in srgb, var(--status-exited) 15%, transparent);
     color: var(--status-exited);
+  }
+  .rp-status-cancelled {
+    background: color-mix(in srgb, var(--text-dim) 15%, transparent);
+    color: var(--text-dim);
   }
   .rp-status-waiting {
     background: var(--status-warn-soft);

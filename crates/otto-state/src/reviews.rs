@@ -353,4 +353,22 @@ mod tests {
         assert_eq!(review.agents[1].status, "running");
         assert_eq!(review.agents[1].session_id.as_deref(), Some("s1"));
     }
+
+    /// A cancelled review persists and reads back as `ReviewStatus::Cancelled`
+    /// (the Cancel button's terminal state), distinct from done/error.
+    #[tokio::test]
+    async fn set_status_cancelled_round_trips() {
+        use otto_core::domain::ReviewStatus;
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        let review = repo.create_review(&"r".to_string(), 7).await.unwrap();
+        assert_eq!(review.status, ReviewStatus::Running);
+
+        repo.set_status(&review.id, ReviewStatus::Cancelled, None)
+            .await
+            .unwrap();
+
+        let after = repo.get_review(&review.id).await.unwrap();
+        assert_eq!(after.status, ReviewStatus::Cancelled);
+    }
 }

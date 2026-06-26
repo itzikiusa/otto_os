@@ -1,0 +1,14 @@
+[package]
+name = "otto-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# OS-level process confinement (macOS Apple Seatbelt / sandbox-exec). Pure
+# profile generation + command wrapping — no runtime deps. The actual exec
+# happens in the caller (otto-sessions) which spawns the wrapped CommandSpec.
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = { workspace = true }
