@@ -129,6 +129,16 @@ Notes:
   the daemon-written cursor `cli_auto_update_last_run` (RFC3339). The scheduler
   catches up a missed window on next boot and, when `reload_sessions`, restarts open
   agent sessions onto the new binary (resume-aware).
+- `process_sandbox` `{enabled:bool, network:"full"|"loopback"|"none", providers:str[]}`
+  — opt-in **OS-level confinement** for spawned agent/shell sessions (macOS Apple
+  Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, each
+  agent CLI runs under a Seatbelt profile that denies filesystem **writes** outside
+  the workspace cwd, the resolved git dir (so worktree commits still work), the
+  agent CLIs' own config/cache dirs and temp — while leaving reads global. `network`
+  defaults to `full` (agents still reach their model API; loopback always allowed);
+  `loopback`/`none` are stricter postures suited to non-model shells. `providers`
+  defaults to `["claude","codex","agy","shell"]`. Connection sessions are never
+  sandboxed. (Settings:Admin via `PUT /settings`.)
 
 ## Agent Swarm (#59–#86)
 

@@ -11,10 +11,18 @@
     port: number;
   }
 
+  interface ProcessSandbox {
+    enabled: boolean;
+    network: 'full' | 'loopback' | 'none';
+  }
+
   let loading = $state(true);
   let saving = $state(false);
   let enabled = $state(false);
   let port = $state(7700);
+  let sandboxEnabled = $state(false);
+  let sandboxNetwork = $state<'full' | 'loopback' | 'none'>('full');
+  let savingSandbox = $state(false);
   let allSettings: Record<string, unknown> = $state({});
 
   $effect(() => {
@@ -25,6 +33,11 @@
         if (nl) {
           enabled = nl.enabled;
           port = nl.port;
+        }
+        const sb = allSettings['process_sandbox'] as ProcessSandbox | undefined;
+        if (sb) {
+          sandboxEnabled = sb.enabled;
+          sandboxNetwork = sb.network ?? 'full';
         }
       } catch {
         toasts.error('Could not load daemon settings');
@@ -47,6 +60,24 @@
       toasts.error('Save failed', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
+    }
+  }
+
+  async function saveSandbox(): Promise<void> {
+    savingSandbox = true;
+    try {
+      allSettings = await api.put<Record<string, unknown>>('/settings', {
+        ...allSettings,
+        process_sandbox: { enabled: sandboxEnabled, network: sandboxNetwork },
+      });
+      toasts.success(
+        'Sandbox settings saved',
+        sandboxEnabled ? `Agents confined (network: ${sandboxNetwork})` : 'Sandbox off',
+      );
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      savingSandbox = false;
     }
   }
 </script>
@@ -85,6 +116,40 @@
       </div>
       <button class="btn primary" disabled={saving} onclick={save}>
         {saving ? 'Saving…' : 'Save'}
+      </button>
+    </div>
+
+    <div class="section-title">Process sandbox</div>
+    <div class="card pad">
+      <label class="checkbox-row">
+        <input type="checkbox" bind:checked={sandboxEnabled} data-testid="sandbox-enabled" />
+        Confine agent sessions with the OS sandbox (macOS Seatbelt)
+      </label>
+      <p class="hint-line">
+        When on, spawned agent CLIs (claude / codex / agy / shell) can only write to
+        the workspace, its git dir, the CLIs' own caches and temp — never the rest of
+        your disk. Reads are unaffected. macOS only; ignored on other systems.
+      </p>
+      <div class="field" style="max-width: 220px">
+        <label for="dm-sandbox-net">Network</label>
+        <select
+          id="dm-sandbox-net"
+          class="input"
+          bind:value={sandboxNetwork}
+          disabled={!sandboxEnabled}
+          data-testid="sandbox-network"
+        >
+          <option value="full">Full (agents reach their model API)</option>
+          <option value="loopback">Loopback only</option>
+          <option value="none">No network</option>
+        </select>
+      </div>
+      <p class="warn-note" class:visible={sandboxEnabled && sandboxNetwork !== 'full'}>
+        Non-`full` network blocks agent CLIs from reaching their model API — use only
+        for offline shells.
+      </p>
+      <button class="btn primary" disabled={savingSandbox} onclick={saveSandbox}>
+        {savingSandbox ? 'Saving…' : 'Save'}
       </button>
     </div>
 

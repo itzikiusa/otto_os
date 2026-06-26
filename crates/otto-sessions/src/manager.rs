@@ -827,6 +827,52 @@ impl SessionManager {
         ]
     }
 
+    /// Wrap `spec` in an OS-level sandbox when the `process_sandbox` setting is
+    /// enabled. Confines an agent CLI's filesystem **writes** to the workspace
+    /// (+ the resolved git dir so commits in a worktree still work + the agent
+    /// CLIs' own config/cache dirs + temp), while leaving reads global and
+    /// network at the configured posture (default `full`, so the agent still
+    /// reaches its model API). No-op for connection sessions, on non-macOS, or
+    /// when the setting is absent/disabled. Mirrors how Claude Code / Codex CLI
+    /// wrap their tools in Apple Seatbelt.
+    async fn apply_sandbox(&self, spec: &mut CommandSpec, session: &Session) {
+        if session.kind != SessionKind::Agent || session.cwd.trim().is_empty() {
+            return;
+        }
+        if !otto_sandbox::is_supported() {
+            return;
+        }
+        let Some(sr) = &self.settings else {
+            return;
+        };
+        let cfg = match sr.get("process_sandbox").await {
+            Ok(Some(v)) => v,
+            _ => return,
+        };
+        let Some(network) = sandbox_decision(&cfg, session.kind, &session.provider) else {
+            return;
+        };
+
+        let cwd = std::path::PathBuf::from(&session.cwd);
+        let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        let data_dir = home.join("Library/Application Support/Otto");
+        // Resolve the git dir so commits in a worktree (whose .git lives outside
+        // cwd) still work. Best-effort; absent for non-repos.
+        let mut extra: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(gitdir) = resolve_git_common_dir(&cwd).await {
+            extra.push(gitdir);
+        }
+        let policy = otto_sandbox::SandboxPolicy::for_agent(&cwd, &home, &data_dir, &extra, network);
+        let (program, args) = policy.wrap(&spec.program, &spec.args);
+        spec.program = program;
+        spec.args = args;
+        tracing::info!(
+            session = %session.id,
+            provider = %session.provider,
+            "process sandbox enabled (network={network:?})"
+        );
+    }
+
     /// Is Otto's first-party MCP tool server opted-in for `workspace_id`?
     /// Reads the `otto_mcp_enabled` setting and applies the shared precedence
     /// rules (see [`otto_state::otto_mcp_enabled_for`]); default OFF.
@@ -1093,6 +1139,10 @@ impl SessionManager {
         let saved_cols = session.meta.get("pty_cols").and_then(|v| v.as_u64()).map(|v| v as u16);
         let saved_rows = session.meta.get("pty_rows").and_then(|v| v.as_u64()).map(|v| v as u16);
         let (grid_cols, grid_rows) = resolve_grid(saved_cols, saved_rows);
+
+        // OS-level confinement (opt-in via the `process_sandbox` setting), applied
+        // as the very last step before spawn so it wraps the fully-injected spec.
+        self.apply_sandbox(&mut spec, &session).await;
 
         let handle = match PtyHandle::spawn_sized(&spec, grid_cols, grid_rows) {
             Ok(h) => Arc::new(h),
@@ -1768,6 +1818,8 @@ impl SessionManager {
         let saved_cols = session.meta.get("pty_cols").and_then(|v| v.as_u64()).map(|v| v as u16);
         let saved_rows = session.meta.get("pty_rows").and_then(|v| v.as_u64()).map(|v| v as u16);
         let (grid_cols, grid_rows) = resolve_grid(saved_cols, saved_rows);
+        // OS-level confinement on resume too (mirrors create()).
+        self.apply_sandbox(&mut spec, &session).await;
         let handle = Arc::new(PtyHandle::spawn_sized(&spec, grid_cols, grid_rows)?);
         self.live.insert(id.clone(), Arc::clone(&handle));
         self.repo.update_status(id, SessionStatus::Running).await?;
@@ -1884,6 +1936,64 @@ impl SessionManager {
             }
         });
     }
+}
+
+/// Decide whether a session should be sandboxed and with what network posture,
+/// from the `process_sandbox` setting JSON. `None` means "do not sandbox". Pure
+/// (no I/O) so the gating is unit-testable: only `Agent` sessions whose provider
+/// is in the configured set (default: all agent providers) when `enabled`.
+fn sandbox_decision(
+    cfg: &serde_json::Value,
+    kind: SessionKind,
+    provider: &str,
+) -> Option<otto_sandbox::NetworkPolicy> {
+    if kind != SessionKind::Agent {
+        return None;
+    }
+    if !cfg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    let providers: Vec<String> = cfg
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| {
+            ["claude", "codex", "agy", "shell"].iter().map(|s| s.to_string()).collect()
+        });
+    if !providers.iter().any(|p| p == provider) {
+        return None;
+    }
+    Some(match cfg.get("network").and_then(|v| v.as_str()).unwrap_or("full") {
+        "none" => otto_sandbox::NetworkPolicy::None,
+        "loopback" => otto_sandbox::NetworkPolicy::LoopbackOnly,
+        _ => otto_sandbox::NetworkPolicy::Full,
+    })
+}
+
+/// Resolve a repo's git **common dir** (absolute, canonicalized) for `cwd`, so
+/// the sandbox can grant write access to it. For a linked worktree this is the
+/// main repo's `.git` (which holds the objects + the worktree's gitdir), which
+/// lives OUTSIDE `cwd` — without it a sandboxed agent in a worktree couldn't
+/// commit. Best-effort: `None` when `cwd` isn't a git repo.
+async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let out = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--git-common-dir"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        return None;
+    }
+    let p = std::path::Path::new(&s);
+    let abs = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    Some(std::fs::canonicalize(&abs).unwrap_or(abs))
 }
 
 #[cfg(test)]
@@ -2264,5 +2374,43 @@ mod tests {
         let (rows, cols) = handle.screen_size();
         assert_eq!(cols, 132, "restored cols");
         assert_eq!(rows, 50, "restored rows");
+    }
+
+    #[test]
+    fn sandbox_decision_gates_correctly() {
+        use otto_sandbox::NetworkPolicy;
+        let on = serde_json::json!({"enabled": true, "network": "full"});
+        // Agent + a default provider → sandbox with the configured network.
+        assert_eq!(
+            sandbox_decision(&on, SessionKind::Agent, "claude"),
+            Some(NetworkPolicy::Full)
+        );
+        // Connection sessions are never sandboxed.
+        assert_eq!(sandbox_decision(&on, SessionKind::Connection, "ssh"), None);
+        // Disabled (or absent) → never.
+        assert_eq!(
+            sandbox_decision(&serde_json::json!({"enabled": false}), SessionKind::Agent, "claude"),
+            None
+        );
+        assert_eq!(
+            sandbox_decision(&serde_json::json!({}), SessionKind::Agent, "claude"),
+            None
+        );
+        // An explicit provider allowlist excludes others.
+        let only_codex = serde_json::json!({"enabled": true, "providers": ["codex"]});
+        assert_eq!(sandbox_decision(&only_codex, SessionKind::Agent, "claude"), None);
+        assert_eq!(
+            sandbox_decision(&only_codex, SessionKind::Agent, "codex"),
+            Some(NetworkPolicy::Full)
+        );
+        // Network posture parsing (default = full).
+        assert_eq!(
+            sandbox_decision(&serde_json::json!({"enabled": true, "network": "loopback"}), SessionKind::Agent, "shell"),
+            Some(NetworkPolicy::LoopbackOnly)
+        );
+        assert_eq!(
+            sandbox_decision(&serde_json::json!({"enabled": true, "network": "none"}), SessionKind::Agent, "shell"),
+            Some(NetworkPolicy::None)
+        );
     }
 }
