@@ -262,7 +262,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // Proof-pack updates are workspace-scoped (gated on viewer access).
         | Event::ProofPackUpdated { workspace_id, .. }
         // Scheduled-task run updates go to the task's workspace members.
-        | Event::ScheduledTaskRunUpdated { workspace_id, .. } => Scope::Workspace(workspace_id),
+        | Event::ScheduledTaskRunUpdated { workspace_id, .. }
+        // Run with Otto stage updates go to the run's workspace members.
+        | Event::OttoRunUpdated { workspace_id, .. } => Scope::Workspace(workspace_id),
         // Usage tick, self-improvement updates, and insight-ready are global
         // (no workspace axis — insights are a cross-workspace cadence report).
         // Deliver them to every authenticated client, matching the `Notice` pattern.

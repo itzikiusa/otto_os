@@ -326,4 +326,12 @@ pub enum Event {
         run_id: Id,
         status: String,
     },
+    /// A Run with Otto run advanced a stage, errored, or finished. The Run with
+    /// Otto page re-fetches the run + its timeline on a matching tick. `status` is
+    /// the snake_case `RunStatus`.
+    OttoRunUpdated {
+        workspace_id: Id,
+        run_id: Id,
+        status: String,
+    },
 }

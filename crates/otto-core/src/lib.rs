@@ -14,6 +14,7 @@ pub mod id;
 pub mod proof;
 pub mod provider;
 pub mod redact;
+pub mod run;
 pub mod secrets;
 pub mod workflows;
 pub mod workref;

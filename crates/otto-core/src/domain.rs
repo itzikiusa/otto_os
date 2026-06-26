@@ -1952,6 +1952,8 @@ pub enum Feature {
     MissionControl,
     /// Scheduled Tasks — recurring agent jobs with reports + delivery.
     ScheduledTasks,
+    /// Run with Otto — the one-button source→PR-draft pipeline.
+    RunWithOtto,
 }
 
 impl Feature {
@@ -1981,6 +1983,7 @@ impl Feature {
             "mcp" => Some(Self::Mcp),
             "mission_control" => Some(Self::MissionControl),
             "scheduled_tasks" => Some(Self::ScheduledTasks),
+            "run_with_otto" => Some(Self::RunWithOtto),
             _ => None,
         }
     }
@@ -2011,6 +2014,7 @@ impl Feature {
             Self::Mcp => "mcp",
             Self::MissionControl => "mission_control",
             Self::ScheduledTasks => "scheduled_tasks",
+            Self::RunWithOtto => "run_with_otto",
         }
     }
 }
@@ -2027,5 +2031,7 @@ mod tests {
         assert_eq!(Feature::Database.as_str(), "database");
         assert_eq!(Feature::parse("scheduled_tasks"), Some(Feature::ScheduledTasks));
         assert_eq!(Feature::ScheduledTasks.as_str(), "scheduled_tasks");
+        assert_eq!(Feature::parse("run_with_otto"), Some(Feature::RunWithOtto));
+        assert_eq!(Feature::RunWithOtto.as_str(), "run_with_otto");
     }
 }
