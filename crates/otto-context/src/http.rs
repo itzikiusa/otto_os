@@ -357,12 +357,13 @@ async fn materialize_ws<C: ContextCtx>(
 
     let providers: Vec<String> = match q.provider {
         Some(p) => vec![p],
-        None => vec!["claude".to_string(), "codex".to_string()],
+        None => vec!["claude".to_string(), "codex".to_string(), "agy".to_string()],
     };
 
+    let ctx_root = materialize::default_context_root();
     let provider_results: Vec<MaterializeProviderResult> = providers
         .iter()
-        .map(|p| materialize::provision(s.library(), &cfg, &ws.root_path, p))
+        .map(|p| materialize::provision(s.library(), &cfg, &ws.root_path, p, &ctx_root).0)
         .collect();
 
     Ok(Json(MaterializeResp { provider_results }))
@@ -397,7 +398,7 @@ async fn preview_ws<C: ContextCtx>(
 
     let providers: Vec<String> = match req.provider {
         Some(p) => vec![p],
-        None => vec!["claude".to_string(), "codex".to_string()],
+        None => vec!["claude".to_string(), "codex".to_string(), "agy".to_string()],
     };
 
     // The spawn provisions into the session's cwd, which defaults to — but may
@@ -408,9 +409,10 @@ async fn preview_ws<C: ContextCtx>(
     // for a Viewer. Confine the override to the workspace root.
     let cwd = resolve_preview_cwd(&ws.root_path, req.cwd.as_deref())?;
 
+    let ctx_root = materialize::default_context_root();
     let providers: Vec<ContextPreviewProvider> = providers
         .iter()
-        .map(|p| materialize::preview(s.library(), &cfg, &cwd, p))
+        .map(|p| materialize::preview(s.library(), &cfg, &cwd, p, &ctx_root))
         .collect();
 
     Ok(Json(ContextPreviewResp { providers }))

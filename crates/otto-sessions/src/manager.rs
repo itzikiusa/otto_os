@@ -1072,7 +1072,13 @@ impl SessionManager {
                 session.meta.get("source").and_then(|v| v.as_str()) == Some("review");
             if !is_review {
                 if let Some(hook) = &self.pre_spawn_hook {
-                    hook.before_spawn(ws, &session.cwd, &session.provider);
+                    // Materialize the workspace context into its out-of-tree
+                    // bundle and append the launch flags/env that load it
+                    // (--add-dir / --append-system-prompt-file / codex
+                    // developer_instructions). Nothing is written into the cwd.
+                    let injection = hook.before_spawn(ws, &session.cwd, &session.provider);
+                    spec.args.extend(injection.args);
+                    spec.env.extend(injection.env);
                 }
             }
             // Wire this session's injected hooks back to the daemon: the
@@ -1737,6 +1743,14 @@ impl SessionManager {
                 // Append --add-dir and --model args from session.meta.
                 spec.args.extend(add_dir_args(&session.provider, &session.meta));
                 spec.args.extend(model_args(&session.provider, &session.meta));
+                // Re-apply the out-of-tree context injection so a resumed session
+                // keeps its bundle (no Workspace here — the bundle persists and is
+                // read back). Mirrors the create() path's `before_spawn`.
+                if let Some(hook) = &self.pre_spawn_hook {
+                    let injection = hook.resume_injection(&session.cwd, &session.provider);
+                    spec.args.extend(injection.args);
+                    spec.env.extend(injection.env);
+                }
                 spec
             }
         };

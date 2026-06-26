@@ -449,7 +449,9 @@ pub fn provision_agent(
         include_memory: true,
         repo_rules_md: String::new(),
     };
-    let _ = otto_context::materialize::provision(&ctx.context_library, &cfg, cwd, &agent.provider);
+    let ctx_root = otto_context::materialize::default_context_root();
+    let _ =
+        otto_context::materialize::provision(&ctx.context_library, &cfg, cwd, &agent.provider, &ctx_root);
     install_helper(cwd, "otto-post", OTTO_POST);
     install_helper(cwd, "otto-product", OTTO_PRODUCT);
     install_helper(cwd, "otto-mockup", OTTO_MOCKUP);
