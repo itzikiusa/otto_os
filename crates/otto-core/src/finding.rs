@@ -135,6 +135,23 @@ impl FindingSeverity {
     }
 }
 
+/// Normalize a finding's `(line, line_end)` anchor into a sane range before it is
+/// persisted. Returns the cleaned `(line, line_end)`:
+/// - a `line_end` without a `line` is meaningless → both dropped;
+/// - a `line_end` that is missing, equal to, or before `line` collapses to a
+///   single-line anchor (`line_end = None`);
+/// - a genuine multi-line range (`line_end > line`) is preserved.
+///
+/// Keeps review findings honestly anchored so the board/Proof Pack never show an
+/// inverted or phantom line range.
+pub fn normalize_line_range(line: Option<u32>, line_end: Option<u32>) -> (Option<u32>, Option<u32>) {
+    match (line, line_end) {
+        (None, _) => (None, None),
+        (Some(start), Some(end)) if end > start => (Some(start), Some(end)),
+        (Some(start), _) => (Some(start), None),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Finding — the full workflow DTO (all 11 required fields + workflow state)
 // ---------------------------------------------------------------------------
@@ -334,6 +351,21 @@ mod tests {
         for (a, b) in illegal {
             assert!(!a.can_transition(b), "{a:?} -> {b:?} should be illegal");
         }
+    }
+
+    #[test]
+    fn line_range_anchoring_is_sane() {
+        // No start line → no range at all (an end without a start is meaningless).
+        assert_eq!(normalize_line_range(None, None), (None, None));
+        assert_eq!(normalize_line_range(None, Some(10)), (None, None));
+        // Start only → single-line anchor.
+        assert_eq!(normalize_line_range(Some(7), None), (Some(7), None));
+        // Proper multi-line range survives.
+        assert_eq!(normalize_line_range(Some(7), Some(12)), (Some(7), Some(12)));
+        // Degenerate range (end == start) collapses to a single line.
+        assert_eq!(normalize_line_range(Some(7), Some(7)), (Some(7), None));
+        // Inverted range (end < start) is dropped, keeping the start.
+        assert_eq!(normalize_line_range(Some(12), Some(7)), (Some(12), None));
     }
 
     #[test]

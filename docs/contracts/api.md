@@ -695,6 +695,7 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | POST /pr-review-comments/{cid}/approve | ws editor | — | post a draft review comment to the PR |
 | POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
+| POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
 | POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent |
 | GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
 | POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |

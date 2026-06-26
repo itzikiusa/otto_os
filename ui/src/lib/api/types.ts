@@ -2261,7 +2261,7 @@ export interface AssembleReq {
 // PR Review (AI agents)
 // ---------------------------------------------------------------------------
 
-export type ReviewStatus = 'running' | 'done' | 'error';
+export type ReviewStatus = 'running' | 'done' | 'error' | 'cancelled';
 export type ReviewCommentState = 'draft' | 'approved' | 'declined';
 export type ReviewAgentStatus = 'pending' | 'running' | 'waiting' | 'done' | 'error';
 
