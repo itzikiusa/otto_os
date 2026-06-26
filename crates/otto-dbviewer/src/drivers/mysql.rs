@@ -24,10 +24,9 @@ use crate::driver::Driver;
 use crate::export::{open_sink, ExportCounts, ExportFormat};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionItem,
-    CompletionKind, CompletionResponse, Engine, ForeignKey, IndexDef, NodeKind, NodePath,
-    ObjectDetail, QueryHandle, QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode,
-    TestResult,
+    self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
+    Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest,
+    QueryResult, QueryStats, ResolvedConfig, SchemaNode, TestResult,
 };
 
 const DEFAULT_MAX_ROWS: usize = 1000;
@@ -45,6 +44,8 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 #[derive(Default)]
 pub struct MysqlDriver {
     pools: Mutex<HashMap<String, sqlx::MySqlPool>>,
+    /// Per-connection schema snapshot cache backing smart completion.
+    completions: crate::complete::CompletionCache,
 }
 
 #[async_trait]
@@ -363,69 +364,24 @@ impl Driver for MysqlDriver {
         cfg: &ResolvedConfig,
         ctx: &CompletionContext,
     ) -> Result<CompletionResponse> {
-        let mut items: Vec<CompletionItem> = Vec::new();
+        let scope_db = ctx
+            .database
+            .clone()
+            .or_else(|| cfg.database.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
 
-        // (a) Keywords.
-        for kw in KEYWORDS {
-            items.push(CompletionItem::new(*kw, CompletionKind::Keyword));
-        }
-        // (b) Builtin functions with signatures.
-        for (name, sig) in FUNCTIONS {
-            items.push(CompletionItem::detailed(*name, CompletionKind::Function, *sig));
-        }
-
-        // (c) Live identifiers — best-effort; connection failures don't break
-        // the keyword/function list.
-        if let Ok(pool) = self.pool(cfg).await {
-            // Database names.
-            if let Ok(dbs) = sqlx::query_as::<_, (String,)>(
-                "SELECT CAST(schema_name AS CHAR) FROM information_schema.schemata ORDER BY schema_name",
-            )
-            .fetch_all(&pool)
-            .await
-            {
-                for (db,) in dbs {
-                    items.push(CompletionItem::new(db, CompletionKind::Database));
-                }
-            }
-
-            let scope_db = ctx
-                .database
-                .clone()
-                .or_else(|| cfg.database.clone())
-                .filter(|s| !s.is_empty());
-            if let Some(db) = scope_db {
-                // Table names in the scoped database.
-                if let Ok(tables) = sqlx::query_as::<_, (String,)>(
-                    "SELECT CAST(table_name AS CHAR) FROM information_schema.tables \
-                     WHERE table_schema = ? ORDER BY table_name",
-                )
-                .bind(&db)
-                .fetch_all(&pool)
-                .await
-                {
-                    for (t,) in tables {
-                        items.push(CompletionItem::new(t, CompletionKind::Table));
-                    }
-                }
-                // Column names across the scoped database (bounded).
-                if let Ok(cols) = sqlx::query_as::<_, (String, String)>(
-                    "SELECT CAST(column_name AS CHAR), CAST(column_type AS CHAR) \
-                     FROM information_schema.columns \
-                     WHERE table_schema = ? ORDER BY table_name, ordinal_position LIMIT 500",
-                )
-                .bind(&db)
-                .fetch_all(&pool)
-                .await
-                {
-                    for (name, ty) in cols {
-                        items.push(CompletionItem::detailed(name, CompletionKind::Column, ty));
-                    }
-                }
-            }
-        }
-
+        // Cached, context-aware completion. The snapshot (databases + tables +
+        // index-ranked columns) is built once per (connection, db) and reused
+        // until refresh; only the cheap pure analysis runs per keystroke.
+        let snap = self.completion_snapshot(cfg, &scope_db).await;
+        let sql_ctx = crate::complete::sql::analyze(&ctx.prefix, &ctx.suffix);
+        let items = crate::complete::sql::assemble(&sql_ctx, &snap, KEYWORDS, FUNCTIONS);
         Ok(CompletionResponse { items })
+    }
+
+    async fn invalidate_completion_cache(&self, cfg: &ResolvedConfig) {
+        self.completions.invalidate(&cfg.cache_key());
     }
 
     /// Streaming export: use sqlx's row CURSOR (`.fetch(&mut conn)`) so the
@@ -723,6 +679,146 @@ impl MysqlDriver {
 // --- Connection -------------------------------------------------------------
 
 impl MysqlDriver {
+    /// Get (or lazily build) the cached completion snapshot for `(connection, db)`.
+    /// Built once and reused until refresh; a connection failure yields an empty
+    /// snapshot that is NOT cached (so it retries next keystroke).
+    async fn completion_snapshot(
+        &self,
+        cfg: &ResolvedConfig,
+        db: &str,
+    ) -> std::sync::Arc<crate::complete::SchemaSnapshot> {
+        let cache_key = cfg.cache_key();
+        if let Some(s) = self.completions.get_snapshot(&cache_key, db) {
+            return s;
+        }
+        match self.build_completion_snapshot(cfg, db).await {
+            Some(snap) => self.completions.put_snapshot(&cache_key, db, snap),
+            None => std::sync::Arc::new(crate::complete::SchemaSnapshot::default()),
+        }
+    }
+
+    /// Introspect `information_schema` into a [`SchemaSnapshot`]: databases, the
+    /// scoped db's tables/views, and columns ranked by index membership
+    /// (PRIMARY → Pk, unique → Unique, other index → Index) so completion can put
+    /// indexed columns first. Four bulk queries, paid once per refresh.
+    async fn build_completion_snapshot(
+        &self,
+        cfg: &ResolvedConfig,
+        db: &str,
+    ) -> Option<crate::complete::SchemaSnapshot> {
+        use crate::complete::{FieldSnap, ObjKind, ObjectSnap, Rank, SchemaSnapshot};
+
+        let pool = self.pool(cfg).await.ok()?;
+        let databases: Vec<String> = sqlx::query_as::<_, (String,)>(
+            "SELECT CAST(schema_name AS CHAR) FROM information_schema.schemata ORDER BY schema_name",
+        )
+        .fetch_all(&pool)
+        .await
+        .ok()?
+        .into_iter()
+        .map(|(d,)| d)
+        .collect();
+
+        if db.is_empty() {
+            return Some(SchemaSnapshot {
+                databases,
+                objects: Vec::new(),
+            });
+        }
+
+        let tables = sqlx::query_as::<_, (String, String)>(
+            "SELECT CAST(table_name AS CHAR), table_type FROM information_schema.tables \
+             WHERE table_schema = ? ORDER BY table_name",
+        )
+        .bind(db)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        let cols = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT CAST(table_name AS CHAR), CAST(column_name AS CHAR), CAST(column_type AS CHAR) \
+             FROM information_schema.columns WHERE table_schema = ? \
+             ORDER BY table_name, ordinal_position",
+        )
+        .bind(db)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        // (table, column) → strongest index rank, from information_schema.statistics
+        // (which lists every index member column, so composite-index members all rank).
+        let stats = sqlx::query_as::<_, (String, String, String, i64)>(
+            "SELECT CAST(table_name AS CHAR), CAST(column_name AS CHAR), \
+             CAST(index_name AS CHAR), non_unique FROM information_schema.statistics \
+             WHERE table_schema = ?",
+        )
+        .bind(db)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        let mut rank: HashMap<(String, String), Rank> = HashMap::new();
+        for (t, c, idx, non_unique) in stats {
+            let r = if idx.eq_ignore_ascii_case("PRIMARY") {
+                Rank::Pk
+            } else if non_unique == 0 {
+                Rank::Unique
+            } else {
+                Rank::Index
+            };
+            let key = (t.to_ascii_lowercase(), c.to_ascii_lowercase());
+            let entry = rank.entry(key).or_insert(r);
+            if crate::complete::rank_strength(r) > crate::complete::rank_strength(*entry) {
+                *entry = r;
+            }
+        }
+
+        // Group columns by table (preserving ordinal order from the query).
+        let mut by_table: HashMap<String, Vec<FieldSnap>> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for (t, c, ty) in cols {
+            let key = (t.to_ascii_lowercase(), c.to_ascii_lowercase());
+            let r = rank.get(&key).copied().unwrap_or(Rank::Plain);
+            by_table.entry(t.clone()).or_insert_with(|| {
+                order.push(t.clone());
+                Vec::new()
+            });
+            by_table
+                .get_mut(&t)
+                .unwrap()
+                .push(FieldSnap::new(c, Some(ty), r));
+        }
+
+        let mut objects: Vec<ObjectSnap> = Vec::new();
+        for (name, ttype) in tables {
+            let kind = if ttype.eq_ignore_ascii_case("VIEW") {
+                ObjKind::View
+            } else {
+                ObjKind::Table
+            };
+            let fields = by_table.remove(&name).unwrap_or_default();
+            objects.push(ObjectSnap {
+                name,
+                kind,
+                fields,
+                fields_ready: true,
+            });
+        }
+        // Any tables that appeared only in columns (shouldn't happen, but be safe).
+        for name in order {
+            if let Some(fields) = by_table.remove(&name) {
+                objects.push(ObjectSnap {
+                    name,
+                    kind: ObjKind::Table,
+                    fields,
+                    fields_ready: true,
+                });
+            }
+        }
+
+        Some(SchemaSnapshot { databases, objects })
+    }
+
     /// Get (or lazily build + cache) the pool for `cfg`. The cache is keyed by
     /// [`ResolvedConfig::cache_key`], so any session-affecting difference
     /// (endpoint/creds/db/TLS/timezone) gets its own pool. A `MySqlPool` clone

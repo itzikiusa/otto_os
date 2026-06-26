@@ -226,22 +226,54 @@ For Redis, the keyspace expander has an inline **filter by prefix…** box
 (`RedisKeyFilter.svelte`): typing a prefix and pressing Enter re-scans the
 keyspace server-side with `SCAN … MATCH <prefix>*`.
 
-### Per-engine autocomplete
+### Per-engine autocomplete (smart & context-aware)
 
 The editor requests suggestions from `POST …/db/completion` (debounced ~120 ms;
-or explicitly on **Ctrl+Space**), scoped to the active database and the
-selected node. What each engine returns:
+or explicitly on **Ctrl+Space**). It also opens **automatically** when you type a
+`.` (member access — `alias.`, `db.coll.`, or a Mongo embedded `x.`) or a space
+right after a clause keyword (`from `, `where `, `and `, …). Each request carries
+the text **before** and **after** the cursor; the daemon parses it to decide what
+you actually want and ranks the results so the useful ones come first.
 
-- **MySQL** — ~50 SQL keywords, ~65 functions (aggregates, string, date/time,
-  math, JSON, casts, conditionals, hashes), plus **live identifiers**: database
-  names, table names (scoped to the active DB), and column names (capped).
-- **ClickHouse** — ~60 keywords (incl. `FORMAT`, ASOF/ARRAY joins), ~100+
-  functions (aggregates, array ops, date/time, `dictGet`, window funcs), plus live
-  database / table / column names (capped).
-- **MongoDB** — ~60 BSON/aggregation/query **operators** (`$match`, `$group`,
-  `$lookup`, `$set`, `$in`, `$regex`, …), the collection **methods** (`find`,
-  `aggregate`, `updateOne`, `insertMany`, `createIndex`, …), plus collection names
-  and sampled field names.
+**What "smart" means:**
+
+- **Intent by clause.** After `FROM`/`JOIN`/`UPDATE`/`INSERT INTO` you get
+  **tables/collections**; after `WHERE`/`AND`/`OR`/`ON`/`HAVING`/`SELECT`-list you
+  get **columns**; a qualified `alias.` / `table.` narrows to that one table's
+  columns. The `FROM` list is resolved from the *whole* statement, so a column in
+  the `SELECT` list still knows its table even though `FROM` comes after the cursor.
+- **Indexes first.** Columns are ranked by index membership — **PRIMARY KEY →
+  UNIQUE → other index → plain** — via a `score` the editor maps to CodeMirror's
+  `boost`. So in a `WHERE` the columns you'll actually filter on float to the top.
+  (ClickHouse uses `is_in_primary_key` / data-skipping indexes; the ORDER-BY/PK
+  columns lead.)
+- **Mongo, including embedded fields.** `db.` → collections; `db.coll.` → methods
+  (`find`/`aggregate`/…); inside `find({ … })` or a pipeline stage at a **key**
+  position → that collection's fields, **index fields first** (from `listIndexes`),
+  then sampled fields. Embedded paths are first-class: an index on `address.city`
+  offers **`address`** first, and once you type `address.` it offers
+  **`address.city`** / `address.zip` (nested paths are sampled up to depth 3).
+- **Never worse than before.** Anything the heuristic doesn't recognise falls back
+  to the old keyword + function + table dump, so completion always returns
+  *something*.
+
+**Fast & cached.** The schema each engine needs (databases, tables/collections,
+index-ranked columns) is introspected **once per connection + database** and
+reused for every subsequent keystroke — only the cheap text analysis runs per
+keystroke. The snapshot is held **until you refresh** (the schema tree's
+**Refresh** button / context-menu — which now also clears this cache via
+`POST …/db/completion/refresh`), with a ~5-minute TTL as a self-heal safety net.
+Mongo samples a collection's fields only when that collection is in context, then
+caches them.
+
+What each engine contributes to the candidate pool:
+
+- **MySQL** — ~50 SQL keywords, ~65 functions, plus live database / table /
+  index-ranked column names from `information_schema`.
+- **ClickHouse** — ~60 keywords, ~100+ functions, plus live database / table /
+  column names from `system.*` (primary-key & skip-index columns ranked first).
+- **MongoDB** — ~60 query/aggregation **operators**, the collection **methods**,
+  collection names, and index-first sampled field **paths** (incl. embedded).
 - **Redis** — the ~80 Redis **commands** (static; no per-keystroke keyspace scan).
 
 ---
@@ -646,7 +678,8 @@ execution/cancel/export = `ws editor` (global connections: root):
 | `POST …/db/schema-graph` | read-only ERD (`{schema, max_tables?}`; default 60, clamp 1..200) |
 | `POST …/db/query` | run a statement (`RunQueryReq` incl. `max_rows`, `node`, `query_id`, `timeout_ms`, `mask`, `confirm_write`) |
 | `POST …/db/cancel` | engine-native cancel of an in-flight `query_id` (204) |
-| `POST …/db/completion` | autocomplete suggestions |
+| `POST …/db/completion` | context-aware, index-first completion (`{prefix, suffix?, database?, node?}` → `{items:[…]}` with per-item `score`) |
+| `POST …/db/completion/refresh` | drop the cached completion snapshot for the connection (204) — wired to the schema **Refresh** button |
 | `GET …/db/history` | recent query history (per-user for non-root) |
 | `POST …/db/explain-with-agent` | spawn an agent to explain a schema/result |
 | `POST …/db/export` | uncapped result as a CSV/JSON browser download |

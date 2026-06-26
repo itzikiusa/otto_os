@@ -23,9 +23,19 @@ db.orders.insertMany([
   { _id: 4, customerId: 3, status: 'paid',    totalCents: 1500,  items: [{ productId: 2, qty: 1 }] },
 ]);
 
+// Embedded documents + an index on a dotted path, to exercise smart-completion's
+// embedded-field handling (`address` suggested first, then `address.city`/`.zip`).
+db.profiles.insertMany([
+  { _id: 1, userId: 1, address: { city: 'London',     zip: 'EC1', geo: { lat: 51.5, lng: -0.1 } }, prefs: { theme: 'dark',  locale: 'en-GB' } },
+  { _id: 2, userId: 2, address: { city: 'Manchester', zip: 'M1' },                                   prefs: { theme: 'light', locale: 'en-GB' } },
+  { _id: 3, userId: 3, address: { city: 'Boston',     zip: '02118' },                                prefs: { theme: 'dark',  locale: 'en-US' } },
+]);
+
 db.customers.createIndex({ email: 1 }, { unique: true });
 db.orders.createIndex({ customerId: 1 });
 db.orders.createIndex({ status: 1 });
+db.profiles.createIndex({ 'address.city': 1 });
+db.profiles.createIndex({ userId: 1 }, { unique: true });
 
 // A second database so the explorer shows multiple DBs.
 const a = db.getSiblingDB('analytics');

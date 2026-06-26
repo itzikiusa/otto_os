@@ -30,9 +30,9 @@ use crate::driver::Driver;
 use crate::export::{open_sink, ExportCounts, ExportFormat};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionItem,
-    CompletionKind, CompletionResponse, Engine, NodeKind, NodePath, ObjectDetail, QueryHandle,
-    QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode, TestResult,
+    self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
+    Engine, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest, QueryResult, QueryStats,
+    ResolvedConfig, SchemaNode, TestResult,
 };
 
 /// ClickHouse driver. Caches one transport handle per [`ResolvedConfig::cache_key`]:
@@ -48,6 +48,8 @@ use crate::types::{
 pub struct ClickhouseDriver {
     clients: Mutex<HashMap<String, reqwest::Client>>,
     native: Mutex<HashMap<String, Arc<klickhouse::Client>>>,
+    /// Per-connection schema snapshot cache backing smart completion.
+    completions: crate::complete::CompletionCache,
 }
 
 // --- Transport selection ----------------------------------------------------
@@ -172,6 +174,126 @@ impl JsonResponse {
 }
 
 impl ClickhouseDriver {
+    /// Get (or lazily build) the cached completion snapshot for `(connection, db)`.
+    async fn completion_snapshot(
+        &self,
+        cfg: &ResolvedConfig,
+        db: &str,
+    ) -> std::sync::Arc<crate::complete::SchemaSnapshot> {
+        let cache_key = cfg.cache_key();
+        if let Some(s) = self.completions.get_snapshot(&cache_key, db) {
+            return s;
+        }
+        match self.build_completion_snapshot(cfg, db).await {
+            Some(snap) => self.completions.put_snapshot(&cache_key, db, snap),
+            None => std::sync::Arc::new(crate::complete::SchemaSnapshot::default()),
+        }
+    }
+
+    /// Introspect `system.*` into a snapshot: databases, the scoped db's
+    /// tables/views, and columns ranked by index membership — a column in the
+    /// primary/sorting key (`is_in_primary_key`) ranks `Pk`, one covered by a
+    /// data-skipping index ranks `Index` (ClickHouse has no UNIQUE).
+    async fn build_completion_snapshot(
+        &self,
+        cfg: &ResolvedConfig,
+        db: &str,
+    ) -> Option<crate::complete::SchemaSnapshot> {
+        use crate::complete::{FieldSnap, ObjKind, ObjectSnap, Rank, SchemaSnapshot};
+
+        let databases: Vec<String> = self
+            .query_rows(cfg, "SELECT name FROM system.databases ORDER BY name")
+            .await
+            .ok()?
+            .first_col_strs()
+            .map(str::to_string)
+            .collect();
+
+        if db.is_empty() {
+            return Some(SchemaSnapshot {
+                databases,
+                objects: Vec::new(),
+            });
+        }
+
+        let tbl_sql = format!(
+            "SELECT name, engine FROM system.tables WHERE database = '{}' ORDER BY name",
+            esc(db)
+        );
+        let tables = self.query_rows(cfg, &tbl_sql).await.ok()?;
+
+        let col_sql = format!(
+            "SELECT table, name, type, is_in_primary_key FROM system.columns \
+             WHERE database = '{}' ORDER BY table, position",
+            esc(db)
+        );
+        let cols = self.query_rows(cfg, &col_sql).await.ok()?;
+
+        // Data-skipping indexes: mark any column whose name appears in an index
+        // expression as `Index` (best-effort token match; CH index exprs can be
+        // arbitrary, but the common case is a bare column).
+        let idx_sql = format!(
+            "SELECT table, expr FROM system.data_skipping_indices WHERE database = '{}'",
+            esc(db)
+        );
+        let skip = self.query_rows(cfg, &idx_sql).await.unwrap_or(RawRows {
+            meta: Vec::new(),
+            data: Vec::new(),
+            bytes_read: 0,
+        });
+        // (table_lc) → set of indexed column names referenced by skip-index exprs.
+        let mut skip_exprs: HashMap<String, Vec<String>> = HashMap::new();
+        for row in &skip.data {
+            let t = row.first().and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+            let expr = row.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+            skip_exprs.entry(t).or_default().push(expr);
+        }
+
+        // Group columns by table, assigning ranks.
+        let mut by_table: HashMap<String, Vec<FieldSnap>> = HashMap::new();
+        for row in &cols.data {
+            let table = row.first().and_then(Value::as_str).unwrap_or("").to_string();
+            let name = row.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+            let ty = row.get(2).and_then(Value::as_str).unwrap_or("").to_string();
+            let in_pk = row.get(3).map(cell_truthy).unwrap_or(false);
+            let rank = if in_pk {
+                Rank::Pk
+            } else if skip_exprs
+                .get(&table.to_ascii_lowercase())
+                .map(|exprs| exprs.iter().any(|e| expr_mentions(e, &name)))
+                .unwrap_or(false)
+            {
+                Rank::Index
+            } else {
+                Rank::Plain
+            };
+            by_table
+                .entry(table)
+                .or_default()
+                .push(FieldSnap::new(name, Some(ty), rank));
+        }
+
+        let mut objects: Vec<ObjectSnap> = Vec::new();
+        for row in &tables.data {
+            let name = row.first().and_then(Value::as_str).unwrap_or("").to_string();
+            let engine = row.get(1).and_then(Value::as_str).unwrap_or("");
+            let kind = if engine.contains("View") {
+                ObjKind::View
+            } else {
+                ObjKind::Table
+            };
+            let fields = by_table.remove(&name).unwrap_or_default();
+            objects.push(ObjectSnap {
+                name,
+                kind,
+                fields,
+                fields_ready: true,
+            });
+        }
+
+        Some(SchemaSnapshot { databases, objects })
+    }
+
     /// Get (or lazily build + cache) the `reqwest::Client` for `cfg`, keyed by
     /// [`ResolvedConfig::cache_key`]. Holding the tokio mutex across the
     /// (synchronous) build is fine — it only briefly serializes concurrent
@@ -863,6 +985,21 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+/// Truthy interpretation of a `system.columns.is_in_primary_key` cell, which
+/// may arrive as a JSON number (`1`), string (`"1"`), or bool depending on the
+/// ClickHouse output format.
+fn cell_truthy(v: &Value) -> bool {
+    v.as_i64() == Some(1) || v.as_str() == Some("1") || v.as_bool() == Some(true)
+}
+
+/// Whether a (case-insensitive) column `name` appears as a bare identifier token
+/// in a data-skipping-index expression `expr` (best-effort: splits on non-ident
+/// chars so `lower(country)` matches `country`).
+fn expr_mentions(expr: &str, name: &str) -> bool {
+    expr.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+        .any(|tok| tok.eq_ignore_ascii_case(name))
+}
+
 /// A fresh, opaque ClickHouse `query_id` for one execution. A ULID — purely
 /// `[0-9A-Z]`, so it's safe in the `query_id` request param and the
 /// `KILL QUERY WHERE query_id = '…'` literal.
@@ -1299,57 +1436,21 @@ impl Driver for ClickhouseDriver {
         cfg: &ResolvedConfig,
         ctx: &CompletionContext,
     ) -> Result<CompletionResponse> {
-        let mut items: Vec<CompletionItem> = Vec::new();
-
-        for kw in KEYWORDS {
-            items.push(CompletionItem::new(*kw, CompletionKind::Keyword));
-        }
-        for (name, sig) in FUNCTIONS {
-            items.push(CompletionItem::detailed(*name, CompletionKind::Function, *sig));
-        }
-
-        // Live identifiers — best-effort; never fail completion on a DB hiccup.
-        if let Ok(resp) = self
-            .query_rows(cfg, "SELECT name FROM system.databases ORDER BY name")
-            .await
-        {
-            for name in resp.first_col_strs() {
-                items.push(CompletionItem::new(name, CompletionKind::Database));
-            }
-        }
-
-        let database = ctx
+        let scope_db = ctx
             .database
             .clone()
             .or_else(|| cfg.database.clone())
-            .filter(|s| !s.is_empty());
-        if let Some(db) = database {
-            let tbl_sql = format!(
-                "SELECT name FROM system.tables WHERE database = '{}' ORDER BY name LIMIT 500",
-                esc(&db)
-            );
-            if let Ok(resp) = self.query_rows(cfg, &tbl_sql).await {
-                for name in resp.first_col_strs() {
-                    items.push(CompletionItem::new(name, CompletionKind::Table));
-                }
-            }
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
 
-            let col_sql = format!(
-                "SELECT name, type FROM system.columns WHERE database = '{}' \
-                 ORDER BY table, position LIMIT 2000",
-                esc(&db)
-            );
-            if let Ok(resp) = self.query_rows(cfg, &col_sql).await {
-                for row in &resp.data {
-                    if let Some(name) = row.first().and_then(Value::as_str) {
-                        let ty = row.get(1).and_then(Value::as_str).unwrap_or("");
-                        items.push(CompletionItem::detailed(name, CompletionKind::Column, ty));
-                    }
-                }
-            }
-        }
-
+        let snap = self.completion_snapshot(cfg, &scope_db).await;
+        let sql_ctx = crate::complete::sql::analyze(&ctx.prefix, &ctx.suffix);
+        let items = crate::complete::sql::assemble(&sql_ctx, &snap, KEYWORDS, FUNCTIONS);
         Ok(CompletionResponse { items })
+    }
+
+    async fn invalidate_completion_cache(&self, cfg: &ResolvedConfig) {
+        self.completions.invalidate(&cfg.cache_key());
     }
 
     /// Streaming export. On the HTTP transport (the common case, incl. over an

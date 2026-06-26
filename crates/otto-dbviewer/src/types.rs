@@ -606,6 +606,12 @@ pub struct CompletionItem {
     /// Text inserted if different from `label` (e.g. `func()` with cursor).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insert_text: Option<String>,
+    /// Relative ranking hint (maps to CodeMirror's `boost`). Higher sorts
+    /// earlier among equally-matching options — this is what puts index columns
+    /// ahead of plain ones and tables/collections ahead of keywords in a clause
+    /// where they're expected. `None` ≡ neutral (0). See [`crate::complete`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<i32>,
 }
 
 impl CompletionItem {
@@ -615,6 +621,7 @@ impl CompletionItem {
             kind,
             detail: None,
             insert_text: None,
+            score: None,
         }
     }
     pub fn detailed(label: impl Into<String>, kind: CompletionKind, detail: impl Into<String>) -> Self {
@@ -623,16 +630,27 @@ impl CompletionItem {
             kind,
             detail: Some(detail.into()),
             insert_text: None,
+            score: None,
         }
+    }
+    /// Set the ranking hint (CodeMirror `boost`) and return self.
+    pub fn scored(mut self, score: i32) -> Self {
+        self.score = Some(score);
+        self
     }
 }
 
 /// Context the editor sends to scope completions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CompletionContext {
-    /// The text up to the cursor (the driver may parse the last token / scope).
+    /// The text up to the cursor (the driver parses the clause / scope / qualifier).
     #[serde(default)]
     pub prefix: String,
+    /// The text from the cursor to the end of the current statement. Lets the
+    /// analyzer resolve the `FROM` table list even when the cursor sits in the
+    /// `SELECT` list *before* it (e.g. `SELECT |col FROM users`).
+    #[serde(default)]
+    pub suffix: String,
     /// Currently-selected database/keyspace, if any.
     #[serde(default)]
     pub database: Option<String>,

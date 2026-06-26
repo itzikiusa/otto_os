@@ -125,13 +125,26 @@
     // Only auto-open when there's a token or the user explicitly triggered.
     if (!ctx.explicit && word.length === 0) return Promise.resolve(null);
 
-    const from = before ? before.from : ctx.pos;
     const prefix = ctx.state.sliceDoc(0, ctx.pos);
+    // Text after the cursor lets the server resolve the FROM table list even
+    // when the cursor sits in the SELECT list before it.
+    const suffix = ctx.state.sliceDoc(ctx.pos);
+
+    // Where the accepted completion is inserted. In SQL, a `alias.`/`db.`
+    // qualifier is NOT part of the column/table identifier, so only the segment
+    // after the last dot is replaced (the qualifier is preserved, labels are
+    // bare). In Mongo the dotted path IS the identifier (`addr.city`), so the
+    // whole token is replaced with the full-path label.
+    let from = before ? before.from : ctx.pos;
+    if (before && database.queryLanguage !== 'mongo') {
+      const dot = before.text.lastIndexOf('.');
+      if (dot >= 0) from = before.from + dot + 1;
+    }
 
     return new Promise((resolve) => {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(async () => {
-        const items = await database.complete(prefix);
+        const items = await database.complete(prefix, suffix);
         if (items.length === 0) {
           resolve(null);
           return;
@@ -141,6 +154,9 @@
           type: cmType(it.kind),
           detail: it.detail ?? undefined,
           apply: it.insert_text ?? undefined,
+          // Index columns/fields and in-scope tables carry a higher score, so
+          // they sort above plain columns / keywords among matching options.
+          boost: it.score ?? undefined,
         }));
         resolve({ from, options, validFor: TOKEN_RE });
       }, 120);

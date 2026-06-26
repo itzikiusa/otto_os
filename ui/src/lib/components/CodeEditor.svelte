@@ -6,7 +6,7 @@
   import { EditorState, Compartment, Prec } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll } from '@codemirror/commands';
   import { search, searchKeymap } from '@codemirror/search';
-  import { autocompletion, completionKeymap } from '@codemirror/autocomplete';
+  import { autocompletion, completionKeymap, startCompletion } from '@codemirror/autocomplete';
   import type { CompletionSource } from '@codemirror/autocomplete';
   import { lintGutter, lintKeymap } from '@codemirror/lint';
   import {
@@ -326,8 +326,44 @@
   /** The autocompletion extension for the current completionSource (if any). */
   function completionExt(): Extension {
     return completionSource
-      ? autocompletion({ override: [completionSource], activateOnTyping: true })
+      ? [autocompletion({ override: [completionSource], activateOnTyping: true }), autoTriggerExt()]
       : autocompletion();
+  }
+
+  // Keywords after which a SPACE should open completion (so `select * from `
+  // immediately offers tables, `where `/`and ` offers columns).
+  const SPACE_TRIGGER_RE =
+    /(?:^|[\s({,])(?:from|join|where|and|or|on|into|update|set|by|using|select)\s$/i;
+
+  /**
+   * Open the completion popup proactively for the DB query editor (only when a
+   * `completionSource` is set) right after the user types:
+   *  - a `.` — member access: `alias.`, `db.coll.`, or a Mongo embedded `x.`;
+   *  - a space following a clause keyword, or an opening `(`/`{`/`,` (Mongo).
+   * Deferred a tick to avoid re-entrancy with the change that triggered it.
+   */
+  function autoTriggerExt(): Extension {
+    return EditorView.updateListener.of((u) => {
+      if (!u.docChanged || !u.view.hasFocus) return;
+      let fire = false;
+      for (const tr of u.transactions) {
+        if (!tr.isUserEvent('input.type') && !tr.isUserEvent('input.paste')) continue;
+        tr.changes.iterChanges((_fa, _ta, _fb, _tb, inserted) => {
+          const text = inserted.toString();
+          if (text === '.') {
+            fire = true;
+          } else if (text === ' ') {
+            const head = u.state.selection.main.head;
+            const back = u.state.sliceDoc(Math.max(0, head - 48), head);
+            if (SPACE_TRIGGER_RE.test(back) || /[({,]\s$/.test(back)) fire = true;
+          }
+        });
+      }
+      if (fire) {
+        const view = u.view;
+        setTimeout(() => startCompletion(view), 0);
+      }
+    });
   }
 
   /** Submit keybinding (Cmd/Ctrl+Enter) — used by the DB query editor. */

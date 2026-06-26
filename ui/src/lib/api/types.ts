@@ -3709,6 +3709,12 @@ export interface DbCompletionItem {
   kind: DbCompletionKind;
   detail?: string | null;
   insert_text?: string | null;
+  /**
+   * Ranking hint mapped to CodeMirror's `boost`. Higher sorts earlier among
+   * equally-matching options — index columns/fields out-rank plain ones, and
+   * tables out-rank keywords in a slot where they're expected.
+   */
+  score?: number | null;
 }
 
 /** What a given engine supports — drives the UI affordances. */
