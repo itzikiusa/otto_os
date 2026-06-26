@@ -19,8 +19,26 @@ pub fn canned_reply(prompt: &str) -> String {
     if prompt.contains("OTTO_TASK: db_assist") {
         return db_assist_reply();
     }
+    if prompt.contains("OTTO_TASK: scheduled_task") {
+        return scheduled_task_reply();
+    }
     // Generic fallback for any other agent call under E2E.
     "OK".to_string()
+}
+
+/// E2E stub for a scheduled task: a representative Markdown report with a counts
+/// header, a `---` rule (so `extract_summary` has something real to split on), and
+/// a details section — mirroring the example follow-up report shape.
+fn scheduled_task_reply() -> String {
+    "# Processed-ticket follow-up review\n\n\
+Reviewed: 1\n\
+New post-triage comments: 1\n\
+Improvements: No durable skill/memory improvements needed\n\
+Terminal/no-refetch: 0\n\n\
+---\n\n\
+## Details\n\n\
+- TICKET-1 — one new comment since triage; re-analyzed, no action needed.\n"
+        .to_string()
 }
 
 /// E2E stub for the DB Assistant. The real agent writes its query to `ANSWER.sql`;
@@ -139,6 +157,9 @@ mod tests {
         // DB Assistant → a read-only SQL fence the handler extracts as the query.
         let db = canned_reply("OTTO_TASK: db_assist read SCHEMA.md");
         assert!(db.contains("```sql") && db.to_uppercase().contains("SELECT"));
+        // Scheduled task → a markdown report with a counts header + a `---` rule.
+        let st = canned_reply("OTTO_TASK: scheduled_task run the job");
+        assert!(st.contains("Reviewed:") && st.contains("\n---\n"));
         assert_eq!(canned_reply("no sentinel"), "OK");
     }
 
