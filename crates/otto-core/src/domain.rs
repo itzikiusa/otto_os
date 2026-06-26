@@ -784,6 +784,9 @@ pub enum ReviewStatus {
     Running,
     Done,
     Error,
+    /// The run was cancelled by a user while it was still running: its agent
+    /// sessions are torn down and no further findings are persisted.
+    Cancelled,
 }
 
 impl ReviewStatus {
@@ -792,6 +795,7 @@ impl ReviewStatus {
             "running" => Some(Self::Running),
             "done" => Some(Self::Done),
             "error" => Some(Self::Error),
+            "cancelled" => Some(Self::Cancelled),
             _ => None,
         }
     }
@@ -801,6 +805,7 @@ impl ReviewStatus {
             Self::Running => "running",
             Self::Done => "done",
             Self::Error => "error",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -2021,7 +2026,7 @@ impl Feature {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capability, Feature};
+    use super::{Capability, Feature, ReviewStatus};
 
     #[test]
     fn capability_orders_and_roundtrips() {
@@ -2033,5 +2038,14 @@ mod tests {
         assert_eq!(Feature::ScheduledTasks.as_str(), "scheduled_tasks");
         assert_eq!(Feature::parse("run_with_otto"), Some(Feature::RunWithOtto));
         assert_eq!(Feature::RunWithOtto.as_str(), "run_with_otto");
+    }
+
+    #[test]
+    fn review_status_cancelled_roundtrips() {
+        assert_eq!(ReviewStatus::parse("cancelled"), Some(ReviewStatus::Cancelled));
+        assert_eq!(ReviewStatus::Cancelled.as_str(), "cancelled");
+        // Existing variants unaffected.
+        assert_eq!(ReviewStatus::parse("running"), Some(ReviewStatus::Running));
+        assert_eq!(ReviewStatus::parse("nope"), None);
     }
 }

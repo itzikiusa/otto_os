@@ -1090,15 +1090,20 @@ class DatabaseStore {
    */
   async retryConnection(id: Id | null = this.selectedConnId): Promise<void> {
     if (!id) return;
+    // Drop any stale completion snapshot from the previous (failed) session.
+    void this.refreshCompletions(id);
     await Promise.all([this.loadCapabilities(id), this.loadSchemaRoot(id)]);
   }
 
-  /** Re-fetch the schema root, clearing the children cache. */
+  /** Re-fetch the schema root, clearing the children + completion caches. */
   async refreshSchema(): Promise<void> {
     if (!this.selectedConnId) return;
     this.childrenCache = new Map();
     this.builderTablesCache = new Map();
     this.expanded = new Set();
+    // Clear the daemon's smart-completion snapshot too so suggestions reflect
+    // the schema the user just refreshed (fire-and-forget; non-blocking).
+    void this.refreshCompletions(this.selectedConnId);
     await this.loadSchemaRoot(this.selectedConnId);
   }
 
@@ -1791,12 +1796,13 @@ class DatabaseStore {
   }
 
   /** Fetch completions for the text before the cursor. */
-  async complete(prefix: string, node?: string): Promise<DbCompletionItem[]> {
+  async complete(prefix: string, suffix = '', node?: string): Promise<DbCompletionItem[]> {
     const id = this.selectedConnId;
     if (!id) return [];
     try {
       const res = await api.post<{ items: DbCompletionItem[] }>(`${this.connBase(id)}/completion`, {
         prefix,
+        suffix,
         database:
           this.activeDb ??
           (this.selectedConn?.params?.db ? String(this.selectedConn.params.db) : undefined),
@@ -1806,6 +1812,20 @@ class DatabaseStore {
     } catch {
       // Completion failures must never break typing — degrade silently.
       return [];
+    }
+  }
+
+  /**
+   * Clear the daemon's cached completion snapshot for the active connection so
+   * the next completion re-introspects the live schema. Fire-and-forget; called
+   * from `refreshSchema`/`retryConnection`. Completion stays cached otherwise.
+   */
+  async refreshCompletions(id: Id | null = this.selectedConnId): Promise<void> {
+    if (!id) return;
+    try {
+      await api.post(`/connections/${id}/db/completion/refresh`, {});
+    } catch {
+      // Best-effort — a failed cache clear must never break the refresh flow.
     }
   }
 

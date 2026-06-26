@@ -286,14 +286,17 @@ pub async fn run_agent_session_with_recovery(
     base_prompt: &str,
     timeout: Duration,
     max_attempts: Option<u32>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> AgentRunResult {
     let attempts = effective_max_attempts(max_attempts);
     // Shared retry loop (kills the prior session + backs off between attempts).
+    // The `cancel` flag, when set by a Cancel-review request, short-circuits the
+    // loop with `Stopped` and is not retried.
     let outcome = run_with_recovery(
         manager,
         attempts,
         &[REVIEW_RETRY_BACKOFF],
-        None, // PR review has no manual-Stop cancel flag
+        cancel,
         |_attempt| {
             run_agent_session(
                 manager, reviews, states, ws, user, provider, cwd, review_id, agent_index,

@@ -824,6 +824,16 @@ impl DbViewerService {
         r.driver.completion(&r.config, ctx).await
     }
 
+    /// Drop the cached completion snapshot for a connection so the next
+    /// completion re-introspects the live schema. Backs the UI "Refresh schema"
+    /// action — keeping smart completion in sync with a schema the user just
+    /// changed — and is a no-op for engines without a snapshot cache (Redis).
+    pub async fn refresh_completion_cache(&self, conn_id: &Id) -> Result<()> {
+        let r = self.resolve(conn_id).await?;
+        r.driver.invalidate_completion_cache(&r.config).await;
+        Ok(())
+    }
+
     // -- Persistence pass-throughs (saved queries / history / dashboards) ----
 
     /// All saved queries for a workspace — root / ws-Admin view.

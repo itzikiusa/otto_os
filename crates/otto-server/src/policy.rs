@@ -488,6 +488,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // produced and consumed by the Product workflows (the per-story ingest route
     // is mounted under `/product/…` and already covered above). We gate the
     // standalone memory API on Product: read=View, mutate=Edit. Root bypasses.
+    if p == "/memory/embedder" {
+        // Global daemon embedder config (provider/model/key). Reading the active
+        // model = View; switching the embedder rebuilds vector search for every
+        // workspace and stores a provider key, so it is an Admin operation —
+        // gated on Settings like the other daemon-wide config.
+        return Require(Settings, if get { View } else { Admin });
+    }
     if p.starts_with("/workspaces/{ws}/memories")
         || p.starts_with("/workspaces/{ws}/memory/")
     {

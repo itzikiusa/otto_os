@@ -180,7 +180,8 @@ async fn mysql_run_select() {
     );
 }
 
-/// completion offers the SELECT keyword and the orders table.
+/// After `FROM`, completion offers the tables (orders, customers) ranked above
+/// keywords.
 #[tokio::test]
 #[ignore]
 async fn mysql_completion() {
@@ -194,20 +195,82 @@ async fn mysql_completion() {
     let ctx = CompletionContext {
         database: Some("shopdb".into()),
         prefix: "SELECT * FROM ".into(),
+        suffix: String::new(),
         node: None,
     };
     let comp = d.completion(&cfg, &ctx).await.expect("completion");
+    let orders = comp
+        .items
+        .iter()
+        .find(|i| i.kind == CompletionKind::Table && i.label == "orders")
+        .expect("completion should include a Table 'orders'");
+    let kw = comp
+        .items
+        .iter()
+        .find(|i| i.kind == CompletionKind::Keyword)
+        .expect("completion should still include keywords");
     assert!(
-        comp.items.iter().any(|i| {
-            i.kind == CompletionKind::Keyword && i.label.eq_ignore_ascii_case("SELECT")
-        }),
-        "completion should include a Keyword 'SELECT'"
+        orders.score.unwrap_or(0) > kw.score.unwrap_or(0),
+        "tables must rank above keywords right after FROM"
     );
-    assert!(
+}
+
+/// In a `WHERE`, columns of the in-scope table come back index-first:
+/// id (PK) > email (UNIQUE) > country (INDEX) > full_name (plain).
+#[tokio::test]
+#[ignore]
+async fn mysql_completion_where_index_first() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MysqlDriver::default();
+    let cfg = cfg();
+    let ctx = CompletionContext {
+        database: Some("shopdb".into()),
+        prefix: "SELECT * FROM customers WHERE ".into(),
+        suffix: String::new(),
+        node: None,
+    };
+    let comp = d.completion(&cfg, &ctx).await.expect("completion");
+    let score = |label: &str| {
         comp.items
             .iter()
-            .any(|i| i.kind == CompletionKind::Table && i.label == "orders"),
-        "completion should include a Table 'orders'"
+            .find(|i| i.kind == CompletionKind::Column && i.label == label)
+            .unwrap_or_else(|| panic!("missing column {label}: {:?}", comp.items))
+            .score
+            .unwrap_or(0)
+    };
+    assert!(score("id") > score("email"), "PK before UNIQUE");
+    assert!(score("email") > score("country"), "UNIQUE before INDEX");
+    assert!(score("country") > score("full_name"), "INDEX before plain");
+}
+
+/// A qualified `c.` only offers that alias's table columns, not the joined one.
+#[tokio::test]
+#[ignore]
+async fn mysql_completion_qualified() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MysqlDriver::default();
+    let cfg = cfg();
+    let ctx = CompletionContext {
+        database: Some("shopdb".into()),
+        prefix: "SELECT * FROM orders o JOIN customers c ON o.id = c.id WHERE c.".into(),
+        suffix: String::new(),
+        node: None,
+    };
+    let comp = d.completion(&cfg, &ctx).await.expect("completion");
+    let cols: Vec<&str> = comp
+        .items
+        .iter()
+        .filter(|i| i.kind == CompletionKind::Column)
+        .map(|i| i.label.as_str())
+        .collect();
+    assert!(cols.contains(&"email"), "customers.email expected: {cols:?}");
+    assert!(
+        !cols.contains(&"total_cents"),
+        "must not leak orders columns through c.: {cols:?}"
     );
 }
 

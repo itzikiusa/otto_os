@@ -10,6 +10,7 @@ pub mod library;
 pub mod materialize;
 pub mod merge;
 pub mod provisioner;
+pub mod repomap;
 
 pub use http::{router, ContextCtx};
 pub use library::Library;

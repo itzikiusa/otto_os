@@ -1862,6 +1862,16 @@ pub struct WorkspaceContextConfig {
     /// preserved by the `PUT /workspaces/{id}/context` handler.
     #[serde(default)]
     pub repo_rules_md: String,
+    /// Inject an Aider-style tree-sitter + PageRank **repo map** (a ranked list
+    /// of the repo's most-referenced symbols) into the agent's context. Opt-in
+    /// (default `false`): it parses the repo on the spawn path, so it stays off
+    /// until a user enables it. Bounded + cached; always the lowest-priority
+    /// context section (trimmed first under the line budget).
+    #[serde(default)]
+    pub include_repo_map: bool,
+    /// Cap on the repo map's emitted lines (default 100 when `None`).
+    #[serde(default)]
+    pub repo_map_max_lines: Option<usize>,
 }
 
 fn default_include_memory() -> bool {
@@ -1876,6 +1886,8 @@ impl Default for WorkspaceContextConfig {
             extra_context_md: String::new(),
             include_memory: true,
             repo_rules_md: String::new(),
+            include_repo_map: false,
+            repo_map_max_lines: None,
         }
     }
 }
@@ -1891,6 +1903,9 @@ pub struct UpdateWorkspaceContextReq {
     pub extra_context_md: String,
     #[serde(default = "default_include_memory")]
     pub include_memory: bool,
+    /// Inject the tree-sitter repo map (opt-in; absent ⇒ keep stored value).
+    #[serde(default)]
+    pub include_repo_map: Option<bool>,
 }
 
 /// One provider's result from a materialize action.
@@ -2001,6 +2016,9 @@ pub struct ContextPreviewReq {
     /// Override the include-memory toggle (`None` ⇒ use stored config).
     #[serde(default)]
     pub include_memory: Option<bool>,
+    /// Override the include-repo-map toggle (`None` ⇒ use stored config).
+    #[serde(default)]
+    pub include_repo_map: Option<bool>,
     /// Working directory the spawn would use (`None` ⇒ the workspace root). The
     /// New Session sheet lets the user pick a cwd other than the workspace root;
     /// passing it here makes the preview match what that spawn would write.

@@ -331,6 +331,8 @@ async fn update_ws_context<C: ContextCtx>(
         extra_context_md: req.extra_context_md,
         include_memory: req.include_memory,
         repo_rules_md: stored.repo_rules_md,
+        include_repo_map: req.include_repo_map.unwrap_or(stored.include_repo_map),
+        repo_map_max_lines: stored.repo_map_max_lines,
     };
     let merged = config::write_into_settings(&ws.settings, &cfg);
     let updated = s
@@ -394,6 +396,8 @@ async fn preview_ws<C: ContextCtx>(
         extra_context_md: req.extra_context_md.unwrap_or(stored.extra_context_md),
         include_memory: req.include_memory.unwrap_or(stored.include_memory),
         repo_rules_md: stored.repo_rules_md,
+        include_repo_map: req.include_repo_map.unwrap_or(stored.include_repo_map),
+        repo_map_max_lines: stored.repo_map_max_lines,
     };
 
     let providers: Vec<String> = match req.provider {

@@ -367,6 +367,21 @@ fn build_block(
         }
     }
 
+    // Aider-style repo map — LAST (lowest priority) so the line budget trims it
+    // before any user-authored section, and bounded by its own line cap. Opt-in.
+    if cfg.include_repo_map {
+        let opts = crate::repomap::RepoMapOptions {
+            max_lines: cfg.repo_map_max_lines.unwrap_or(100),
+            ..Default::default()
+        };
+        if let Some(map) = crate::repomap::repo_map_cached(std::path::Path::new(cwd), &opts) {
+            let map = map.trim();
+            if !map.is_empty() {
+                sections.push(format!("## Repo Map (most-referenced symbols)\n\n```\n{map}\n```"));
+            }
+        }
+    }
+
     enforce_line_budget(sections.join("\n\n"))
 }
 
@@ -1130,6 +1145,41 @@ mod tests {
             assert!(ctx.contains("## Soul"), "{provider} keeps the soul at the head");
             assert!(ctx.contains("Otto trimmed"), "{provider} carries the truncation marker");
         }
+    }
+
+    #[test]
+    fn repo_map_section_injected_only_when_enabled() {
+        let (_l, cwd, root, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        lib.put_soul("otto", "Persona.").unwrap();
+        // A tiny code repo in the cwd: `shared` is referenced by two callers.
+        fs::write(cwd.path().join("core.rs"), "pub fn shared() {}\n").unwrap();
+        fs::write(cwd.path().join("a.rs"), "fn a() { shared(); }\n").unwrap();
+        fs::write(cwd.path().join("b.rs"), "fn b() { shared(); }\n").unwrap();
+
+        // Disabled (default) → no repo map.
+        let off = WorkspaceContextConfig { soul: Some("otto".into()), ..Default::default() };
+        provision(&lib, &off, &cwd_path, "claude", root.path());
+        let ctx_off = fs::read_to_string(
+            bundle_of(&root, "claude", &cwd_path).join(context_file_name("claude")),
+        )
+        .unwrap();
+        assert!(!ctx_off.contains("Repo Map"), "repo map must be opt-in");
+
+        // Enabled → the ranked map appears and names the shared symbol.
+        let on = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            include_repo_map: true,
+            ..Default::default()
+        };
+        provision(&lib, &on, &cwd_path, "claude", root.path());
+        let ctx_on = fs::read_to_string(
+            bundle_of(&root, "claude", &cwd_path).join(context_file_name("claude")),
+        )
+        .unwrap();
+        assert!(ctx_on.contains("## Repo Map"), "repo map section present:\n{ctx_on}");
+        assert!(ctx_on.contains("shared"), "repo map names the referenced symbol");
+        assert!(ctx_on.lines().count() <= MAX_CONTEXT_LINES);
     }
 
     #[test]

@@ -129,6 +129,16 @@ Notes:
   the daemon-written cursor `cli_auto_update_last_run` (RFC3339). The scheduler
   catches up a missed window on next boot and, when `reload_sessions`, restarts open
   agent sessions onto the new binary (resume-aware).
+- `process_sandbox` `{enabled:bool, network:"full"|"loopback"|"none", providers:str[]}`
+  — opt-in **OS-level confinement** for spawned agent/shell sessions (macOS Apple
+  Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, each
+  agent CLI runs under a Seatbelt profile that denies filesystem **writes** outside
+  the workspace cwd, the resolved git dir (so worktree commits still work), the
+  agent CLIs' own config/cache dirs and temp — while leaving reads global. `network`
+  defaults to `full` (agents still reach their model API; loopback always allowed);
+  `loopback`/`none` are stricter postures suited to non-model shells. `providers`
+  defaults to `["claude","codex","agy","shell"]`. Connection sessions are never
+  sandboxed. (Settings:Admin via `PUT /settings`.)
 
 ## Agent Swarm (#59–#86)
 
@@ -526,7 +536,8 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
 | POST /connections/{id}/db/cancel | ws editor | `{query_id}` | 204 — cancel an in-flight query engine-side |
-| POST /connections/{id}/db/completion | ws viewer | `{text,cursor}` | SQL completion suggestions |
+| POST /connections/{id}/db/completion | ws viewer | `{prefix, suffix?, database?, node?}` | Context-aware completion items (`{items:[DbCompletionItem]}`). The daemon parses `prefix` (text before the cursor) + `suffix` (text after, to resolve a `FROM` that follows the cursor) to decide intent — tables after `FROM`/`JOIN`, columns after `WHERE`/`AND`/`alias.`, Mongo collections/methods/field-keys (incl. embedded `x.a`). Each item carries a `score` (→ CodeMirror `boost`) so **index columns/fields rank first**, then the rest of the schema. Backed by a per-connection schema snapshot **cached until refresh** (see below; ~5-min TTL safety net). |
+| POST /connections/{id}/db/completion/refresh | ws viewer | `{}` | 204 — drop the connection's cached completion snapshot so the next completion re-introspects. Wired to the UI "Refresh schema" action. No-op for engines without a snapshot cache (Redis). |
 | GET /connections/{id}/db/history | ws viewer | — | recent query history |
 | POST /connections/{id}/db/explain-with-agent | ws editor | `{sql}` | AI explanation of a query (spawns an agent) |
 | POST /connections/{id}/db/export | ws editor | `{statement, format?, node?}` | Buffered CSV/JSON browser download. NOTE: routes through the interactive `run` path, so it is capped at the driver's default row limit — **not** a true full export. Superseded in the UI by export-to-path; kept for compatibility. |
@@ -695,6 +706,7 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | POST /pr-review-comments/{cid}/approve | ws editor | — | post a draft review comment to the PR |
 | POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
+| POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
 | POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent |
 | GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
 | POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |
@@ -1056,6 +1068,7 @@ interface ContextPreviewReq {
   soul?: string | null;         // omit ⇒ stored; null ⇒ global default
   extra_context_md?: string;    // omit ⇒ stored
   include_memory?: boolean;     // omit ⇒ stored
+  include_repo_map?: boolean;   // omit ⇒ stored; opt-in tree-sitter repo map
   cwd?: string;                 // omit ⇒ workspace root
 }
 
@@ -1525,6 +1538,9 @@ keyword + vector hybrid recall. Reads require `ws viewer`, mutations `ws editor`
 | POST /workspaces/{ws}/memory/import-graph | ws editor | `{collection?, graph:{nodes,edges}}` | `ImportStats{nodes,edges}` (graphify graph.json) |
 | GET /workspaces/{ws}/memory/entities/{id}/graph | ws viewer | — | `{links, neighbors}` (entity neighborhood) |
 | POST /workspaces/{ws}/product/stories/{sid}/memory/ingest | ws editor | — | `{ingested}` (extract a story's artifacts into memory) |
+| POST /workspaces/{ws}/memory/reindex | ws editor | — | `{embedded}` — re-embed the workspace's memories under the active embedder (idempotent: skips rows already at the active model; batched) |
+| GET /memory/embedder | settings view | — | `{provider, model?, dim?, active, key_present}` — the active Vault embedder |
+| PUT /memory/embedder | settings admin (root) | `{provider:"stub"\|"openai"\|"voyage", api_key?}` | switch the embedder live; stores `api_key` in the Keychain (never the DB). `400` for openai/voyage with no resolvable key. After switching providers, `POST …/memory/reindex` re-embeds existing memories. |
 
 Notes:
 - `MemoryQuery.mode` ∈ `{hybrid (default), semantic, keyword}`; `k` defaults to 20.
@@ -1532,8 +1548,13 @@ Notes:
 - Sharing across machines: set `OTTO_MEMORY_REMOTE_URL`/`OTTO_MEMORY_REMOTE_TOKEN`
   to point an instance at a shared host, or sync an `OTTO_MEMORY_VAULT_DIR` vault
   folder (git) and re-index. A shared SQLite *file* over a network is unsupported.
-- Vectors are embedded on write; the default embedder is a deterministic local stub
-  (real local/remote embedders swap in behind the `Embedder` trait, feature-gated).
+- Vectors are embedded on write. The default embedder is a deterministic local stub;
+  a **real** OpenAI/Voyage embedder is wired by `PUT /memory/embedder` (provider +
+  Keychain key) or the `embedder` setting at boot, resolving the key from the
+  Keychain (`<provider>_api_key`) or `<PROVIDER>_API_KEY`. The active embedder
+  swaps in live behind the `Embedder` trait; a model/dim change is reconciled by
+  `POST …/memory/reindex`. Outbound embed requests are SSRF-guarded (netguard),
+  time-bounded (20s) and size-capped.
 
 ## Message Brokers (Kafka viewer)
 
