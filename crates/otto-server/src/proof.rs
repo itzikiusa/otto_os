@@ -402,6 +402,108 @@ pub async fn pack_for_work_item(
     ctx.proof_repo.find_by_work_item(kind, work_item_id).await
 }
 
+// ---------------------------------------------------------------------------
+// Session gate (the all-done edge)
+// ---------------------------------------------------------------------------
+
+/// Detect the repo's test command from `cwd`, if recognizable. Conservative:
+/// only returns a command when a test runner is reliably inferable.
+fn detect_test_command(cwd: &str) -> Option<String> {
+    let p = std::path::Path::new(cwd);
+    if p.join("Cargo.toml").is_file() {
+        return Some("cargo test".to_string());
+    }
+    if p.join("go.mod").is_file() {
+        return Some("go test ./...".to_string());
+    }
+    let pkg = p.join("package.json");
+    if pkg.is_file() {
+        if let Ok(s) = std::fs::read_to_string(&pkg) {
+            // Only if a `test` script is declared (avoid npm's "missing script").
+            if s.contains("\"test\"") {
+                return Some("npm test".to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Whether session-done auto-test is enabled. Default OFF: running a repo's test
+/// suite from the daemon in the user's live cwd can be disruptive/expensive, so
+/// it is opt-in via `OTTO_PROOF_AUTO_TEST=1`. The diff is always assembled.
+fn auto_test_enabled() -> bool {
+    std::env::var("OTTO_PROOF_AUTO_TEST")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Gate a session that just reported all tasks done: ensure a pack, link it to a
+/// parent (goal-loop) pack when applicable, assemble the working-tree diff, run
+/// the repo's tests when enabled, recompute, and surface a Notice when the
+/// evidence is incomplete. Best-effort throughout — never fails the caller.
+pub async fn gate_session(ctx: &ServerCtx, session: &otto_core::domain::Session) {
+    let pack = match gate(
+        ctx,
+        WorkItemKind::Session,
+        &session.id,
+        &session.workspace_id,
+        &session.title,
+        &session.created_by,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!("proof gate_session ensure failed: {e}");
+            return;
+        }
+    };
+
+    // Rollup: link a goal-loop-spawned session's pack to the loop's pack (D21).
+    if session.meta.get("source").and_then(|v| v.as_str()) == Some("goal_loop") {
+        if let Some(loop_id) = session.meta.get("loop_id").and_then(|v| v.as_str()) {
+            if let Ok(Some(parent)) =
+                pack_for_work_item(ctx, WorkItemKind::GoalLoop, loop_id).await
+            {
+                let _ = ctx.proof_repo.set_parent(&pack.id, &parent.id).await;
+            }
+        }
+    }
+
+    // Always assemble the diff (best-effort).
+    let _ = assemble_diff(ctx, &pack, &session.cwd, None).await;
+
+    // Optionally auto-run the repo's tests.
+    if auto_test_enabled() {
+        if let Some(cmd) = detect_test_command(&session.cwd) {
+            let _ = run_command_artifact(ctx, &pack, &session.cwd, &cmd, Some("test")).await;
+        }
+    }
+
+    let updated = match recompute_and_emit(ctx, &pack.id).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!("proof gate_session recompute failed: {e}");
+            return;
+        }
+    };
+
+    // Surface a non-blocking nudge when the proof is incomplete (the badge is the
+    // durable signal; this is a one-shot toast on the done edge).
+    use otto_core::proof::ProofStatus;
+    if matches!(updated.status, ProofStatus::Missing | ProofStatus::Partial) {
+        let _ = ctx.events.send(Event::Notice {
+            level: "warn".into(),
+            title: "Tasks done — proof incomplete".into(),
+            body: format!(
+                "{} reported done but its proof pack is {}. Add tests / a self-review to the proof pack.",
+                session.title,
+                updated.status.as_str()
+            ),
+        });
+    }
+}
+
 /// Map an error to a not-found-tolerant unit (used by best-effort gates).
 pub fn ignore_err<T>(r: Result<T>) -> Option<T> {
     match r {

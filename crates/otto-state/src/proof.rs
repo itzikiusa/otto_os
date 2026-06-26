@@ -260,6 +260,23 @@ impl ProofRepo {
         Ok(())
     }
 
+    /// Link a pack to a parent (rollup). No-op if already set to the same parent.
+    pub async fn set_parent(&self, id: &str, parent_id: &str) -> Result<()> {
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE proof_packs SET parent_pack_id = ?, updated_at = ? \
+             WHERE id = ? AND (parent_pack_id IS NULL OR parent_pack_id <> ?)",
+        )
+        .bind(parent_id)
+        .bind(&now)
+        .bind(id)
+        .bind(parent_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set proof pack parent"))?;
+        Ok(())
+    }
+
     pub async fn delete_pack(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM proof_packs WHERE id = ?")
             .bind(id)
