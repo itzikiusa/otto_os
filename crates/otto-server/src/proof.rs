@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use otto_core::proof::{
     compute_badges, compute_risk, derive_status, preview as core_preview, ProofArtifact,
-    ProofArtifactKind, ProofArtifactStatus, ProofBadge, ProofPack, WorkItemKind, STORE_CAP,
+    ProofArtifactKind, ProofArtifactStatus, ProofBadge, ProofPack, ProofStatus, WorkItemKind,
+    STORE_CAP,
 };
 use otto_core::event::Event;
-use otto_core::{redact, Id, Result};
+use otto_core::{redact, Error, Id, Result};
 use otto_git::local::{DiffTarget, LocalGit};
 use serde_json::{json, Value};
 
@@ -490,7 +491,6 @@ pub async fn gate_session(ctx: &ServerCtx, session: &otto_core::domain::Session)
 
     // Surface a non-blocking nudge when the proof is incomplete (the badge is the
     // durable signal; this is a one-shot toast on the done edge).
-    use otto_core::proof::ProofStatus;
     if matches!(updated.status, ProofStatus::Missing | ProofStatus::Partial) {
         let _ = ctx.events.send(Event::Notice {
             level: "warn".into(),
@@ -502,6 +502,71 @@ pub async fn gate_session(ctx: &ServerCtx, session: &otto_core::domain::Session)
             ),
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// PR-creation gate (hard teeth)
+// ---------------------------------------------------------------------------
+
+/// Whether the PR-creation gate is enforced. Default ON — opening a PR over an
+/// unproven proof pack is blocked unless explicitly overridden. Disable with
+/// `OTTO_PROOF_REQUIRE_PR=0`.
+pub fn pr_gate_enabled() -> bool {
+    std::env::var("OTTO_PROOF_REQUIRE_PR")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+/// Gate a PR creation on its linked proof pack. Returns `Err(Conflict)` when the
+/// linked pack is not `passed`/`waived` and the caller did not pass
+/// `allow_unproven`. A PR with no linked pack is not gated (Otto can't enforce
+/// evidence it can't locate). The override is recorded as an audit artifact.
+pub async fn gate_pr(
+    ctx: &ServerCtx,
+    _workspace_id: &str,
+    req: &otto_core::api::CreatePrReq,
+) -> Result<()> {
+    let Some(pack_id) = req.proof_pack_id.as_deref() else {
+        return Ok(()); // unlinked PR — nothing to gate
+    };
+    if !pr_gate_enabled() {
+        return Ok(());
+    }
+    let pack = match ctx.proof_repo.get_pack(pack_id).await {
+        Ok(p) => p,
+        Err(_) => return Ok(()), // unknown pack — don't block the user
+    };
+    if !pr_should_block(pack.status, req.allow_unproven.unwrap_or(false)) {
+        // Allowed: either the pack is proven, or the caller overrode. Record the
+        // override (only) as an audit artifact.
+        if !matches!(pack.status, ProofStatus::Passed | ProofStatus::Waived) {
+            let _ = add_content_artifact(
+                ctx,
+                &pack,
+                ProofArtifactKind::Approval,
+                "PR opened over unproven proof",
+                Some("A pull request was opened despite an unproven proof pack (explicit override)."),
+                None,
+                ProofArtifactStatus::Passed,
+                serde_json::json!({ "override": true, "kind": "pr_override" }),
+                "otto",
+            )
+            .await;
+            let _ = recompute_and_emit(ctx, &pack.id).await;
+        }
+        return Ok(());
+    }
+    Err(Error::Conflict(format!(
+        "proof pack {} is '{}', not passed — provide evidence or open with allow_unproven to override",
+        pack.id,
+        pack.status.as_str()
+    )))
+}
+
+/// Whether a PR over a pack with `status` should be blocked, given the caller's
+/// `allow_unproven` flag. Pure — the decision core of [`gate_pr`].
+fn pr_should_block(status: ProofStatus, allow_unproven: bool) -> bool {
+    !matches!(status, ProofStatus::Passed | ProofStatus::Waived) && !allow_unproven
 }
 
 /// Map an error to a not-found-tolerant unit (used by best-effort gates).
@@ -565,6 +630,19 @@ mod tests {
         let (capped, meta) = prepare_content(&big);
         assert!(capped.len() <= STORE_CAP + 32);
         assert_eq!(meta["truncated"], json!(true));
+    }
+
+    #[test]
+    fn pr_gate_decision() {
+        // Unproven pack with no override → block.
+        assert!(pr_should_block(ProofStatus::Failed, false));
+        assert!(pr_should_block(ProofStatus::Missing, false));
+        assert!(pr_should_block(ProofStatus::Partial, false));
+        // Proven (or waived) → never block.
+        assert!(!pr_should_block(ProofStatus::Passed, false));
+        assert!(!pr_should_block(ProofStatus::Waived, false));
+        // Override lets an unproven pack through.
+        assert!(!pr_should_block(ProofStatus::Failed, true));
     }
 
     #[test]

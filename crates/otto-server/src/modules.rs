@@ -160,6 +160,7 @@ impl otto_brokers::BrokersCtx for ServerCtx {
     }
 }
 
+#[async_trait::async_trait]
 impl otto_git::GitCtx for ServerCtx {
     fn store(&self) -> &GitStore {
         &self.git_store
@@ -175,6 +176,13 @@ impl otto_git::GitCtx for ServerCtx {
     }
     fn events(&self) -> &tokio::sync::broadcast::Sender<Event> {
         &self.events
+    }
+    async fn check_pr_allowed(
+        &self,
+        workspace_id: &str,
+        req: &otto_core::api::CreatePrReq,
+    ) -> otto_core::Result<()> {
+        crate::proof::gate_pr(self, workspace_id, req).await
     }
 }
 
