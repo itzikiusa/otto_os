@@ -85,6 +85,21 @@ where
     // an `AuthContext` is present and scoped we enforce the scope and never look
     // at grants. If no `AuthContext` is present we behave exactly as before.
     if let Some(ctx) = req.extensions().get::<AuthContext>() {
+        // MCP BRANCH (design §14 F1). A `kind='mcp'` restricted token (the outward
+        // "Otto as MCP server") may reach ONLY the governed invoke choke point and
+        // the outward-server status read — every other route is denied, so a token
+        // leaked from an external agent's `.mcp.json` cannot bypass the control
+        // plane by calling feature endpoints directly. Deny-by-default.
+        if ctx.mcp_only {
+            let allowed = (method == Method::POST && template == "/api/v1/mcp/otto-tools/invoke")
+                || (method == Method::GET && template == "/api/v1/mcp/otto-server");
+            return if allowed {
+                next.run(req).await
+            } else {
+                forbidden("mcp-restricted token: only /mcp/otto-tools/invoke is permitted")
+                    .into_response()
+            };
+        }
         if let Some(scope) = ctx.scope.clone() {
             // EMAIL-OTP GATE (mobile plan Task 7.3). A share locked to a recipient
             // email is OTP-pending until the guest redeems the emailed code via

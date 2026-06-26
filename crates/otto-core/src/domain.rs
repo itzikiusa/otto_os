@@ -1879,6 +1879,7 @@ pub enum Feature {
     Settings,
     Users,
     Canvas,
+    Mcp,
 }
 
 impl Feature {
@@ -1904,6 +1905,7 @@ impl Feature {
             "settings" => Some(Self::Settings),
             "users" => Some(Self::Users),
             "canvas" => Some(Self::Canvas),
+            "mcp" => Some(Self::Mcp),
             _ => None,
         }
     }
@@ -1930,6 +1932,7 @@ impl Feature {
             Self::Settings => "settings",
             Self::Users => "users",
             Self::Canvas => "canvas",
+            Self::Mcp => "mcp",
         }
     }
 }

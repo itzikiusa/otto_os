@@ -105,6 +105,37 @@ impl Ctx {
         serde_json::from_slice(&body).map_err(|e| format!("parse json: {e}"))
     }
 
+    /// POST an `/api/v1` path with the bearer token (used only for the governed
+    /// gateway proxy — the read-only first-party tools never call this).
+    async fn post_json(&self, path: &str, body: &Value) -> Result<Value, String> {
+        let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
+        let resp = tokio::time::timeout(
+            CALL_TIMEOUT,
+            self.http.post(&url).bearer_auth(&self.token).json(body).send(),
+        )
+        .await
+        .map_err(|_| "upstream timeout".to_string())?
+        .map_err(|e| format!("request failed: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+        if !status.is_success() {
+            return Err(format!("daemon returned {status}: {}", text.chars().take(300).collect::<String>()));
+        }
+        serde_json::from_slice(text.as_bytes()).map_err(|e| format!("parse json: {e}"))
+    }
+
+    /// The governed downstream tools the live-agent **gateway** exposes for this
+    /// session's workspace, namespaced `mcp__<server>__<tool>`. Best-effort: an
+    /// empty list (gateway off, no workspace, or the session user lacks MCP
+    /// access) leaves the inward catalog unchanged.
+    async fn gateway_tools(&self) -> Vec<Value> {
+        let Some(ws) = &self.workspace_id else { return vec![] };
+        match self.get_json(&format!("/mcp/gateway/tools?workspace_id={}", seg(ws))).await {
+            Ok(v) => v.get("tools").and_then(Value::as_array).cloned().unwrap_or_default(),
+            Err(_) => vec![],
+        }
+    }
+
     /// Append a best-effort audit row for one tool call. Failures are logged to
     /// stderr (never stdout — that's the protocol channel) and swallowed.
     async fn audit(&self, tool: &str, args: &Value, ok: bool, rows: Option<i64>) {
@@ -323,6 +354,35 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
     }
 }
 
+/// Proxy a namespaced gateway tool (`mcp__<server>__<tool>`) through the control
+/// plane's governed `/mcp/gateway/invoke`. The pipeline there does allowlist /
+/// policy / approval / dry-run / execute / **audit**, so this path does NOT write
+/// the first-party `mcp_tool_calls` row (the call is already on `mcp_call_log`).
+/// Returns the governed envelope and whether it was an error/denial.
+async fn gateway_call(ctx: &Ctx, namespaced: &str, args: &Value) -> Result<(Value, bool), String> {
+    let Some(ws) = &ctx.workspace_id else {
+        return Err("gateway: no workspace context".into());
+    };
+    let tools = ctx.gateway_tools().await;
+    let entry = tools
+        .iter()
+        .find(|t| t.get("name").and_then(Value::as_str) == Some(namespaced))
+        .ok_or_else(|| format!("unknown gateway tool `{namespaced}`"))?;
+    let server_id = entry.get("server_id").and_then(Value::as_str).unwrap_or("");
+    let tool = entry.get("tool").and_then(Value::as_str).unwrap_or("");
+    let body = json!({
+        "server_id": server_id,
+        "tool": tool,
+        "arguments": args,
+        "workspace_id": ws,
+        "session_id": ctx.session_id,
+    });
+    let v = ctx.post_json("/mcp/gateway/invoke", &body).await?;
+    let is_error = matches!(v.get("decision").and_then(Value::as_str), Some("denied") | Some("error"))
+        || v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+    Ok((v, is_error))
+}
+
 /// Apply the row cap then redaction to a tool result, returning the cleaned
 /// value and the audited row count (largest array length seen pre-cap).
 fn finalize(v: Value) -> (Value, Option<i64>) {
@@ -372,7 +432,22 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
         // Client tells us it's ready; no response.
         "notifications/initialized" | "initialized" => None,
         "ping" => Some(rpc_ok(id.unwrap_or(Value::Null), json!({}))),
-        "tools/list" => Some(rpc_ok(id.unwrap_or(Value::Null), tool_catalog())),
+        "tools/list" => {
+            // The static first-party read-only catalog, plus — when the live-agent
+            // gateway is enabled for this workspace — the governed downstream tools.
+            let mut cat = tool_catalog();
+            let gw = ctx.gateway_tools().await;
+            if let Some(arr) = cat["tools"].as_array_mut() {
+                for t in gw {
+                    arr.push(json!({
+                        "name": t["name"],
+                        "description": t["description"],
+                        "inputSchema": t["inputSchema"],
+                    }));
+                }
+            }
+            Some(rpc_ok(id.unwrap_or(Value::Null), cat))
+        }
         "tools/call" => {
             let id = id.unwrap_or(Value::Null);
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -382,6 +457,14 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                 .unwrap_or("")
                 .to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            // A namespaced `mcp__server__tool` is a governed downstream call —
+            // route it through the control-plane gateway (which audits it itself).
+            if name.starts_with("mcp__") {
+                return Some(match gateway_call(ctx, &name, &args).await {
+                    Ok((v, is_error)) => rpc_ok(id, tool_result(&v, is_error)),
+                    Err(e) => rpc_ok(id, tool_result(&json!({ "error": e }), true)),
+                });
+            }
             match run_tool(ctx, &name, &args).await {
                 Ok((value, rows)) => {
                     ctx.audit(&name, &args, true, rows).await;

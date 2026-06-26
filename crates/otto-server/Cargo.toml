@@ -31,6 +31,7 @@ otto-connections.workspace = true
 otto-ssh.workspace = true
 otto-dbviewer.workspace = true
 otto-brokers.workspace = true
+otto-mcp.workspace = true
 otto-orchestrator.workspace = true
 otto-git.workspace = true
 otto-issues.workspace = true

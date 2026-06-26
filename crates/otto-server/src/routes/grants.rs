@@ -54,6 +54,7 @@ const ALL_FEATURES: &[Feature] = &[
     Feature::Context,
     Feature::Settings,
     Feature::Users,
+    Feature::Mcp,
 ];
 
 // ---------------------------------------------------------------------------
