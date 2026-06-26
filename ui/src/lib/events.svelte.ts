@@ -13,6 +13,7 @@ import { product } from './stores/product.svelte';
 import { canvas } from './stores/canvas.svelte';
 import { mockupAssist } from './stores/mockup-assist.svelte';
 import { database } from './stores/database.svelte';
+import { proof } from './stores/proof.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -250,6 +251,7 @@ class EventsClient {
           parsed.type === 'swarm_run_updated' ||
           parsed.type === 'swarm_task_updated' ||
           parsed.type === 'swarm_message_posted' ||
+          parsed.type === 'swarm_goal_updated' ||
           parsed.type === 'swarm_status'
         ) {
           swarm.applyEvent(parsed);
@@ -318,6 +320,9 @@ class EventsClient {
             parsed.sql,
             parsed.note,
           );
+        } else if (parsed.type === 'proof_pack_updated') {
+          // Proof page list/detail + sidebar proof chips refresh on the event.
+          proof.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

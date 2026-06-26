@@ -6,16 +6,22 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import StoryLinkCard from './StoryLinkCard.svelte';
+  import GoalsPanel from './GoalsPanel.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { isAbortError } from '../../lib/api/client';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { TASK_COLUMNS, type SwarmTask, type TaskStatus } from './types';
+  import { TASK_COLUMNS, type SwarmProject, type SwarmTask, type TaskStatus } from './types';
 
   // `onrecruit` lets the board surface the existing Recruiter (the agent
   // configurator) without owning its modal — SwarmPage flips `showRecruit`.
-  let { onrecruit }: { onrecruit?: () => void } = $props();
+  // `oneditproject` hands the selected project up so SwarmPage opens its
+  // create/edit modal (where project skills live).
+  let {
+    onrecruit,
+    oneditproject,
+  }: { onrecruit?: () => void; oneditproject?: (p: SwarmProject) => void } = $props();
 
   const projects = $derived(swarm.detail?.projects ?? []);
   // Fall back to the first project so the board is never wedged when
@@ -48,10 +54,25 @@
     blocked: 'Blocked',
     done: 'Done',
     cancelled: 'Cancelled',
+    verifying: 'Verifying',
   };
 
   function byStatus(s: TaskStatus): SwarmTask[] {
+    // `verifying` is a transient status with no column of its own — fold those
+    // cards into "In review" (with a verifying badge) so they never disappear.
+    if (s === 'in_review') return tasks.filter((t) => t.status === 'in_review' || t.status === 'verifying');
     return tasks.filter((t) => t.status === s);
+  }
+
+  // -- Per-task goals --------------------------------------------------------
+  let goalsTask = $state<SwarmTask | null>(null);
+
+  // Live goal summary for a card (only when goal data is in the store — from
+  // verification events or after the panel was opened once). Avoids eager loads.
+  function goalSummary(tid: string): { passed: number; total: number } | null {
+    const gs = swarm.goalsByTask[tid];
+    if (!gs || gs.length === 0) return null;
+    return { passed: gs.filter((g) => g.status === 'passed').length, total: gs.length };
   }
 
   // --- Bulk selection -------------------------------------------------------
@@ -190,6 +211,7 @@
     }));
     ctxMenu.show(e, [
       { label: 'Run now', icon: 'play', action: () => runNow(t) },
+      { label: 'Goals…', icon: 'check', action: () => (goalsTask = t) },
       { separator: true },
       ...moves,
       { separator: true },
@@ -284,6 +306,11 @@
     <button class="btn small" onclick={openGoalEditor} disabled={!pid} title="View or edit the project goal">
       <Icon name="note" size={13} /> {goal ? 'Edit goal' : 'Set goal'}
     </button>
+    {#if oneditproject && selectedProject}
+      <button class="btn small" onclick={() => selectedProject && oneditproject?.(selectedProject)} title="Project settings (name, repo, goal, skills)">
+        <Icon name="gear" size={13} /> Project
+      </button>
+    {/if}
     {#if planning}
       <span class="planning"><span class="spinner-xs"></span> Planning… <span class="dim">watch live in Runs</span></span>
       <button class="btn small" onclick={stopPlan} title="Stop waiting for the planner">
@@ -364,6 +391,7 @@
           <div class="col-body">
             {#each byStatus(col) as t (t.id)}
               {@const agent = swarm.agentById(t.assignee_agent_id)}
+              {@const gs = goalSummary(t.id)}
               <div
                 class="card"
                 class:dragging={draggingId === t.id}
@@ -393,6 +421,23 @@
                     <span class="assignee dim">unassigned</span>
                   {/if}
                   <span class="grow"></span>
+                  {#if t.status === 'verifying'}
+                    <span class="vchip" title="Verifying goals">verifying</span>
+                  {/if}
+                  {#if gs}
+                    <button
+                      class="gchip"
+                      class:all-passed={gs.passed === gs.total}
+                      onclick={(e) => { e.stopPropagation(); goalsTask = t; }}
+                      title="View goals"
+                    >
+                      <Icon name="check" size={10} /> {gs.passed}/{gs.total}
+                    </button>
+                  {:else}
+                    <button class="icon-btn small" onclick={(e) => { e.stopPropagation(); goalsTask = t; }} aria-label="goals" title="Goals">
+                      <Icon name="check" size={13} />
+                    </button>
+                  {/if}
                   <span class="chip {PRIORITY_CLASS[t.priority]}">{t.priority}</span>
                   <button class="icon-btn small" onclick={(e) => cardMenu(e, t)} aria-label="task menu">
                     <Icon name="dot" size={14} />
@@ -425,6 +470,10 @@
       <button class="btn primary" onclick={saveGoal} disabled={savingGoal}>{savingGoal ? 'Saving…' : 'Save'}</button>
     {/snippet}
   </Modal>
+{/if}
+
+{#if goalsTask}
+  <GoalsPanel task={goalsTask} onclose={() => (goalsTask = null)} />
 {/if}
 
 <style>
@@ -608,5 +657,40 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0 6px;
+  }
+  .vchip {
+    font-size: 10px;
+    color: #0a84ff;
+    border: 1px solid color-mix(in srgb, #0a84ff 40%, transparent);
+    border-radius: 999px;
+    padding: 0 6px;
+    animation: kb-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes kb-pulse {
+    50% {
+      opacity: 0.5;
+    }
+  }
+  .gchip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    color: var(--text-dim);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0 6px;
+    cursor: pointer;
+  }
+  .gchip:hover {
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+    color: var(--text);
+  }
+  .gchip.all-passed {
+    background: #7ee787;
+    color: #0a0a0a;
+    border-color: #7ee787;
+    font-weight: 600;
   }
 </style>

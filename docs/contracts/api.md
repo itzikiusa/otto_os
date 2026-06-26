@@ -1364,6 +1364,67 @@ them as four distinct routes. Each takes no body and returns the updated `Swarm`
 | POST /workspaces/{id}/swarm/swarms/{sid}/abort | ws editor | — | Swarm (cancel runs; kill swarm sessions) |
 | POST /workspaces/{id}/swarm/swarms/{sid}/resume | ws editor | — | Swarm (resume from paused) |
 
+## Swarm goals, verification & channel triggers (additive, continues #86)
+
+Additive to the frozen swarm block (#59–#86); these are NOT renumbered against the
+frozen #1–#89 core. Reads = `ws viewer`, writes = `ws editor`. JSON snake_case, ULID ids,
+RFC3339 timestamps, `Problem{code,message}` errors. The workspace is resolved from the
+parent row (task/project/swarm/goal). Goal-status changes also arrive live over
+`/ws/events` as `swarm_goal_updated` (see `ws.md`).
+
+**Goals.** A `SwarmGoal` is a verifiable success criterion attached to a task or project
+(`kind:"explicit"`) or a swarm-level template applied to every task (`kind:"standing"`). It
+carries an optional `metric`/`comparator`(`lte|gte|eq|contains|absent`)/`target_value`/
+`block_value`, an optional `verify_cmd`, a `max_retries` budget, a `blocking` flag, a
+lifecycle `status` (`pending|verifying|passed|warned|unmet|skipped|error`), the verifier's
+`verdict` (`{target_met,blocker,severity,measured,summary,findings[]}`), and `iterations`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/swarm/tasks/{tid}/goals | ws viewer | — | `SwarmGoal[]` |
+| GET /api/v1/swarm/projects/{pid}/goals | ws viewer | — | `SwarmGoal[]` |
+| POST /api/v1/swarm/tasks/{tid}/goals | ws editor | CreateGoalReq | SwarmGoal |
+| POST /api/v1/swarm/projects/{pid}/goals | ws editor | CreateGoalReq | SwarmGoal |
+| PATCH /api/v1/swarm/goals/{gid} | ws editor | UpdateGoalReq (all fields optional) | SwarmGoal |
+| DELETE /api/v1/swarm/goals/{gid} | ws editor | — | `{}` |
+| GET /api/v1/swarm/swarms/{sid}/standing-goals | ws viewer | — | `SwarmGoal[]` (swarm-level templates; seeded on first GET) |
+| PUT /api/v1/swarm/swarms/{sid}/standing-goals | ws editor | `{ goals: CreateGoalReq[] }` | `SwarmGoal[]` (replaces the set) |
+
+`CreateGoalReq` = `{ title, description?, metric?, comparator?, target_value?, block_value?,
+verify_cmd?, max_retries?, blocking?, order_idx? }`. `UpdateGoalReq` = the same with every
+field optional.
+
+**Verification.** Run goal verification on demand for a task (the Coordinator measures each
+goal and records a verdict, flipping the task to `verifying` while it runs).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/swarm/tasks/{tid}/verify | ws editor | — | `{ started: bool, reason?: string }` |
+| POST /api/v1/swarm/tasks/{tid}/verify/stop | ws editor | — | `{ stopped: bool }` |
+| GET /api/v1/swarm/tasks/{tid}/verification | ws viewer | — | `{ running: bool, task_status: string, goals: SwarmGoal[] }` |
+
+**Channel triggers.** A `SwarmChannelTrigger` auto-launches swarm work when a matching
+message arrives on a channel: `{ id, swarm_id, workspace_id, channel("slack"|"telegram"|
+"webhook"), match_chat, keyword, repo_path?, auto_start, reply, enabled, created_by,
+created_at, updated_at }`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/swarm/swarms/{sid}/triggers | ws viewer | — | `SwarmChannelTrigger[]` |
+| POST /api/v1/swarm/swarms/{sid}/triggers | ws editor | CreateTriggerReq | SwarmChannelTrigger |
+| PATCH /api/v1/swarm/triggers/{tid} | ws editor | UpdateTriggerReq | SwarmChannelTrigger |
+| DELETE /api/v1/swarm/triggers/{tid} | ws editor | — | `{}` |
+
+`CreateTriggerReq` = `{ channel, match_chat?, keyword?, repo_path?, auto_start?, reply?,
+enabled? }`. `UpdateTriggerReq` = the same with every field optional.
+
+**Project & team skills (ride existing routes).** Project-scoped skills travel on the
+existing `PATCH /api/v1/swarm/projects/{pid}` (#72) as a top-level `skills` array on
+`UpdateProjectReq`; team-wide skills travel on `PATCH /api/v1/swarm/swarms/{sid}` (#62) as a
+`skills` array nested inside `config`. `SwarmProject` additionally surfaces
+`integration_branch?`, `origin_channel?`, `origin_chat?`, `origin_thread?` (set when a
+project was launched from a channel trigger).
+
 ## Root-level routers (NOT under /api/v1; `?token=` auth)
 
 These self-authenticate via the `?token=` query parameter and are merged at the server root
@@ -1673,6 +1734,44 @@ Persistence: `otto_state::product_chat` (`DiscoveryChat`, `DiscoveryChatMessage`
 | 113 | POST /api/v1/product/discovery-chats/{cid}/archive | ws editor | — | DiscoveryChat |
 | 114 | POST /api/v1/product/discovery-chats/{cid}/apply | ws editor | `{action}` | ApplyResult `{story_updated, created_question_ids, created_note_ids, canvas_id}` |
 
+---
+
+## Proof Packs (#115-125)
+
+The evidence layer. Every meaningful unit of agent work carries a **proof pack**
+whose `status` (`missing | partial | passed | failed | waived`) is DERIVED from
+its evidence artifacts, not claimed by the agent. Otto auto-assembles what it can
+(diff, goal-loop verify commands, workflow node outputs, review findings, human
+approvals); agents and humans add the rest (build/lint, screenshots, api/db, ci,
+self-review) via the artifact endpoint. All persisted artifact content is redacted
+(`otto_core::redact`) and capped (2 MiB) before storage.
+
+Feature-gated by `Feature::ProofPack` (`policy.rs`): workspace-axis and flat
+routes alike require `ProofPack` View (reads) / Edit (writes); each handler also
+checks the caller's workspace role. Persistence: `otto_state::proof`
+(`ProofPack`, `ProofArtifact`); engine: `otto_server::proof`.
+
+| # | Method & path | Auth | Request | Response |
+|---|---|---|---|---|
+| 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?` | `ProofPackResp[]` |
+| 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?}` | ProofPackResp |
+| 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | — | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, badges[]}]}` |
+| 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[]}` |
+| 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
+| 120 | DELETE /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts) |
+| 121 | POST /api/v1/proof-packs/{id}/artifacts | ws editor · ProofPack Edit | AddArtifactReq `{kind, title, content?, content_url?, status?, metadata?}` | ProofPackResp |
+| 122 | POST /api/v1/proof-packs/{id}/assemble | ws editor · ProofPack Edit | AssembleReq `{cwd?, base?, commands?:[{cmd, kind?}]}` | ProofPackResp |
+| 123 | POST /api/v1/proof-packs/{id}/waive | ws editor · ProofPack Edit | WaiveReq `{reason}` | ProofPackResp |
+| 124 | DELETE /api/v1/proof-artifacts/{id} | ws editor · ProofPack Edit | — | `{ok:true}` |
+| 125 | GET /api/v1/proof-artifacts/{id}/content | ws viewer · ProofPack View | — | `{content, ref_kind, kind, status, metadata}` (full stored content) |
+
+Artifact kinds: `command | log | screenshot | diff | ci | api | db | review |
+approval | self_review`. Badges (derived server-side): `no_proof`,
+`tests_passed`, `tests_failed`, `human_approved`, `risky_change`, `ci_missing`,
+`db_api_verified`, `review_unresolved`, `waived`.
+
+---
+
 ## Mission Control (work graph)
 
 The unified work graph: every agentic activity (sessions, swarm projects, goal
@@ -1693,15 +1792,17 @@ Persistence: `otto_state::workgraph` (`WorkGraphRepo`); live signal:
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
-| 115 | GET /api/v1/workspaces/{wid}/workgraph/summary | mission_control view | — | MissionSummary `{total, active, needs_approval, total_cost, by_kind[], by_status[], by_risk[]}` |
-| 116 | GET /api/v1/workspaces/{wid}/workgraph/items | mission_control view | query `kind?,status?,risk?,q?,limit?` | `WorkItem[]` |
-| 117 | GET /api/v1/workspaces/{wid}/workgraph/graph | mission_control view | query `kind?,status?,risk?,limit?` | GraphView `{nodes[], edges[]}` |
-| 118 | GET /api/v1/workspaces/{wid}/workgraph/items/{id} | mission_control view | — | WorkItemDetail `{…WorkItem, edges[], events[], artifacts[], approvals[], pending_approvals, needs_approval}` |
-| 119 | PATCH /api/v1/workspaces/{wid}/workgraph/items/{id} | mission_control edit | `{risk_level?, goal?, result_summary?}` | WorkItem |
-| 120 | POST /api/v1/workspaces/{wid}/workgraph/items/{id}/edges | mission_control edit | `{to_item_id, relation}` | WorkEdge |
-| 121 | POST /api/v1/workspaces/{wid}/workgraph/items/{id}/approvals | mission_control edit | `{reason?}` | WorkApproval (pending) |
-| 122 | POST /api/v1/workspaces/{wid}/workgraph/approvals/{aid}/decide | mission_control edit | `{decision: approved\|rejected, note?}` | WorkApproval |
-| 123 | POST /api/v1/workspaces/{wid}/workgraph/backfill | mission_control edit | — | `{ok, summary: MissionSummary}` |
+| 126 | GET /api/v1/workspaces/{wid}/workgraph/summary | mission_control view | — | MissionSummary `{total, active, needs_approval, total_cost, by_kind[], by_status[], by_risk[]}` |
+| 127 | GET /api/v1/workspaces/{wid}/workgraph/items | mission_control view | query `kind?,status?,risk?,q?,limit?` | `WorkItem[]` |
+| 128 | GET /api/v1/workspaces/{wid}/workgraph/graph | mission_control view | query `kind?,status?,risk?,limit?` | GraphView `{nodes[], edges[]}` |
+| 129 | GET /api/v1/workspaces/{wid}/workgraph/items/{id} | mission_control view | — | WorkItemDetail `{…WorkItem, edges[], events[], artifacts[], approvals[], pending_approvals, needs_approval}` |
+| 130 | PATCH /api/v1/workspaces/{wid}/workgraph/items/{id} | mission_control edit | `{risk_level?, goal?, result_summary?}` | WorkItem |
+| 131 | POST /api/v1/workspaces/{wid}/workgraph/items/{id}/edges | mission_control edit | `{to_item_id, relation}` | WorkEdge |
+| 132 | POST /api/v1/workspaces/{wid}/workgraph/items/{id}/approvals | mission_control edit | `{reason?}` | WorkApproval (pending) |
+| 133 | POST /api/v1/workspaces/{wid}/workgraph/approvals/{aid}/decide | mission_control edit | `{decision: approved\|rejected, note?}` | WorkApproval |
+| 134 | POST /api/v1/workspaces/{wid}/workgraph/backfill | mission_control edit | — | `{ok, summary: MissionSummary}` |
+
+---
 
 ## MCP Control Plane
 

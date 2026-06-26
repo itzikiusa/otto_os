@@ -31,6 +31,7 @@ use crate::providers::{detect, make_provider, GitProvider, RemoteRef, RemoteRepo
 
 /// Dependencies the git router needs from the host application state.
 /// otto-server implements this on its `AppState`.
+#[async_trait::async_trait]
 pub trait GitCtx: Clone + Send + Sync + 'static {
     fn store(&self) -> &GitStore;
     /// Needed to resolve a workspace's `root_path` as the clone destination.
@@ -38,6 +39,12 @@ pub trait GitCtx: Clone + Send + Sync + 'static {
     fn secrets(&self) -> &Arc<dyn SecretStore>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
     fn events(&self) -> &tokio::sync::broadcast::Sender<Event>;
+    /// Optional gate run before a PR is created. The default allows everything;
+    /// `otto-server` overrides it to enforce the PR's linked proof pack (a PR
+    /// over an unproven pack is rejected unless `allow_unproven`).
+    async fn check_pr_allowed(&self, _workspace_id: &str, _req: &CreatePrReq) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Build the git router. Paths are relative to the `/api/v1` mount point.
@@ -1374,6 +1381,8 @@ async fn pr_create<S: GitCtx>(
     Json(req): Json<CreatePrReq>,
 ) -> ApiResult<Json<PrSummary>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    // Proof gate: refuse to open a PR over an unproven linked proof pack.
+    s.check_pr_allowed(&repo.workspace_id, &req).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     Ok(Json(provider.create_pr(&remote, &req).await?))
 }

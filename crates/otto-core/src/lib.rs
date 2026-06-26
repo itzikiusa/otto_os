@@ -10,6 +10,7 @@ pub mod error;
 pub mod event;
 pub mod hooks;
 pub mod id;
+pub mod proof;
 pub mod provider;
 pub mod redact;
 pub mod secrets;

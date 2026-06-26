@@ -9,6 +9,8 @@
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { activity } from '../lib/stores/activity.svelte';
+  import { proof } from '../lib/stores/proof.svelte';
+  import ProofStatusChip from '../lib/components/ProofStatusChip.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { availableModules, resolveOrder, visibleOrder, type SidebarModule } from '../lib/sidebar';
   import type { Session, SessionStatus } from '../lib/api/types';
@@ -18,6 +20,13 @@
   $effect(() => {
     const w = ws.currentId;
     if (w) void activity.loadSummary(w);
+  });
+
+  // Load the per-work-item proof roll-up so each session row can show an inline
+  // proof chip; kept fresh from the events WS (proof_pack_updated).
+  $effect(() => {
+    const w = ws.currentId;
+    if (w) void proof.loadSummary(w);
   });
 
   // A session is "suspended / resumable" — parked to save memory, but its
@@ -579,6 +588,7 @@
   {@const status = ws.statusMap[s.id] ?? s.status}
   {@const resumable = isResumable(s, status)}
   {@const sum = activity.summary(s.id)}
+  {@const proofRow = proof.summaryFor('session', s.id)}
   {@const needsYou = ws.needsYou[s.id] === true}
   <div class="nested-row" class:needs-you={needsYou}>
     {#if renamingId === s.id}
@@ -632,6 +642,9 @@
             class:active={sum.in_progress != null}
             title={sum.in_progress ? `Now: ${sum.in_progress}` : `${sum.done}/${sum.total} tasks done`}
           >{sum.done}/{sum.total}</span>
+        {/if}
+        {#if proofRow}
+          <ProofStatusChip status={proofRow.status} risk={proofRow.risk_score} compact />
         {/if}
         {#if resumable}
           <span class="susp-pill" title={SUSPENDED_TIP}>resumable</span>

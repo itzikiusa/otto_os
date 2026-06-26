@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::routing::post;
+use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use chrono::Utc;
 use otto_core::auth::AuthUser;
@@ -18,7 +18,11 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_state::swarm::NewTask;
-use otto_state::{NewRun, RunPatch, Swarm, SwarmAgent, SwarmTask, TaskPatch};
+use otto_state::{
+    GoalPatch, NewGoal, NewRun, NewTrigger, RunPatch, Swarm, SwarmAgent, SwarmChannelTrigger,
+    SwarmGoal, SwarmTask, TaskPatch, TriggerPatch,
+};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{ApiError, ApiResult};
@@ -79,6 +83,15 @@ pub fn start_coordinator(ctx: ServerCtx, swarm_id: Id) {
         if let Some(old) = reg.insert(swarm_id.clone(), handle.clone()) {
             old.cancel.store(true, Ordering::Relaxed);
         }
+    }
+    // Re-spawn any verification controllers stranded in `verifying` by a restart
+    // (review B2), then start the tick loop.
+    {
+        let ctx = ctx.clone();
+        let swarm_id = swarm_id.clone();
+        tokio::spawn(async move {
+            crate::swarm_verify::recover(&ctx, &swarm_id).await;
+        });
     }
     tokio::spawn(coordinator_loop(ctx, swarm_id, handle));
 }
@@ -172,6 +185,12 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         };
         if repo.agent_has_active_run(&agent.id).await.unwrap_or(false) {
             continue; // one turn per agent at a time
+        }
+        // Don't start another task for an agent whose branch is under verification —
+        // a second turn on the same worktree would pollute the diff being verified
+        // and the branch about to be merged (review B1).
+        if crate::swarm_verify::agent_under_verification(&agent.id) {
+            continue;
         }
         // Count this scheduled turn against the task's attempt ceiling. The
         // ceiling itself is enforced in `route_result` once the turn returns a
@@ -431,12 +450,27 @@ async fn route_result(
     let artifact_ref = res.artifacts.iter().find_map(|a| a.path.clone().or_else(|| a.url.clone()));
     match res.status.as_str() {
         "done" => {
-            // If a review was requested, go to in_review and enqueue a review run.
+            // If a review was requested, go to in_review and enqueue a review run
+            // (human-review flow takes precedence over goal verification).
             if !res.reviews.is_empty() {
                 let _ = repo.update_task(&task.id, TaskPatch {
                     status: Some("in_review".into()), result_ref: Some(artifact_ref), ..Default::default()
                 }).await;
                 enqueue_reviews(ctx, task, run, &res).await;
+            } else if crate::swarm_verify::task_has_goals(ctx, task).await {
+                // Goals attached → the leader verifies each sequentially before the
+                // task is done + its worktree branch is merged (requirement 3).
+                // Persist the dev as the assignee so restart-recovery + the
+                // coordinator's per-agent lock can find it.
+                let _ = repo.update_task(&task.id, TaskPatch {
+                    status: Some("verifying".into()),
+                    result_ref: Some(artifact_ref),
+                    assignee_agent_id: Some(Some(run.agent_id.clone())),
+                    ..Default::default()
+                }).await;
+                emit_task(ctx, &task.id).await;
+                crate::swarm_verify::start_verification(ctx, task.clone(), run.agent_id.clone());
+                return; // controller drives the task to done/blocked + posts summary
             } else {
                 let _ = repo.update_task(&task.id, TaskPatch {
                     status: Some("done".into()), result_ref: Some(artifact_ref), ..Default::default()
@@ -579,6 +613,20 @@ async fn complete_parent_if_done(ctx: &ServerCtx, task: &SwarmTask) {
 }
 
 async fn system_post(ctx: &ServerCtx, swarm_id: &str, project_id: Option<&str>, task_id: Option<&str>, kind: &str, body: &str) {
+    system_post_meta(ctx, swarm_id, project_id, task_id, kind, body, json!({})).await;
+}
+
+/// A system board post carrying structured `meta` (e.g. worktree/shared/merge/verify
+/// events). Used across the swarm runtime + verification controller.
+pub(crate) async fn system_post_meta(
+    ctx: &ServerCtx,
+    swarm_id: &str,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    kind: &str,
+    body: &str,
+    meta: serde_json::Value,
+) {
     let swarm = match ctx.swarm_repo.get_swarm(&swarm_id.to_string()).await {
         Ok(s) => s,
         Err(_) => return,
@@ -594,7 +642,7 @@ async fn system_post(ctx: &ServerCtx, swarm_id: &str, project_id: Option<&str>, 
         to_agent_id: None,
         kind: kind.to_string(),
         body: body.to_string(),
-        meta: json!({}),
+        meta,
     }).await {
         let _ = ctx.events.send(Event::SwarmMessagePosted {
             workspace_id: swarm.workspace_id,
@@ -612,6 +660,20 @@ async fn emit_task(ctx: &ServerCtx, task_id: &str) {
             project_id: t.project_id.clone(),
             task: serde_json::to_value(&t).unwrap_or_default(),
         });
+    }
+}
+
+/// Public re-export for the verification controller.
+pub(crate) async fn emit_task_pub(ctx: &ServerCtx, task_id: &str) {
+    emit_task(ctx, task_id).await;
+}
+
+/// True if the swarm is paused or over any budget — the verification controller
+/// consults this between goals/fixes so it doesn't run past the budget gate.
+pub(crate) async fn is_over_budget(ctx: &ServerCtx, swarm_id: &str) -> bool {
+    match ctx.swarm_repo.get_swarm(&swarm_id.to_string()).await {
+        Ok(s) => s.status == "paused" || budget_exceeded(ctx, &s).await.is_some(),
+        Err(_) => true,
     }
 }
 
@@ -649,6 +711,402 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/workspaces/{id}/swarm/recruit", post(recruit))
         .route("/workspaces/{id}/swarm/projects/{pid}/plan", post(plan))
         .route("/workspaces/{id}/swarm/swarms/{sid}/agent-stop", post(agent_stop))
+        // Goals (requirement 3)
+        .route("/swarm/tasks/{tid}/goals", get(list_task_goals).post(create_task_goal))
+        .route("/swarm/projects/{pid}/goals", get(list_project_goals).post(create_project_goal))
+        .route("/swarm/goals/{gid}", patch(update_goal_h).delete(delete_goal_h))
+        .route(
+            "/swarm/swarms/{sid}/standing-goals",
+            get(list_standing_goals_h).put(put_standing_goals_h),
+        )
+        // Verification controller
+        .route("/swarm/tasks/{tid}/verify", post(verify_task_h))
+        .route("/swarm/tasks/{tid}/verify/stop", post(stop_verify_h))
+        .route("/swarm/tasks/{tid}/verification", get(get_verification_h))
+        // Channel triggers (requirement 4)
+        .route("/swarm/swarms/{sid}/triggers", get(list_triggers_h).post(create_trigger_h))
+        .route("/swarm/triggers/{tid}", patch(update_trigger_h).delete(delete_trigger_h))
+}
+
+// --- HTTP: goals + verification + triggers ---------------------------------
+
+#[derive(Deserialize)]
+struct CreateGoalReq {
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    metric: Option<String>,
+    #[serde(default)]
+    comparator: Option<String>,
+    #[serde(default)]
+    target_value: Option<f64>,
+    #[serde(default)]
+    block_value: Option<f64>,
+    #[serde(default)]
+    verify_cmd: Option<String>,
+    #[serde(default)]
+    max_retries: Option<i64>,
+    #[serde(default)]
+    blocking: Option<bool>,
+    #[serde(default)]
+    order_idx: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+struct UpdateGoalReq {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    metric: Option<Option<String>>,
+    #[serde(default)]
+    comparator: Option<Option<String>>,
+    #[serde(default)]
+    target_value: Option<Option<f64>>,
+    #[serde(default)]
+    block_value: Option<Option<f64>>,
+    #[serde(default)]
+    verify_cmd: Option<Option<String>>,
+    #[serde(default)]
+    max_retries: Option<i64>,
+    #[serde(default)]
+    blocking: Option<bool>,
+    #[serde(default)]
+    order_idx: Option<i64>,
+}
+
+async fn emit_goal(ctx: &ServerCtx, goal: &SwarmGoal) {
+    let _ = ctx.events.send(Event::SwarmGoalUpdated {
+        workspace_id: goal.workspace_id.clone(),
+        swarm_id: goal.swarm_id.clone(),
+        task_id: goal.task_id.clone(),
+        goal: serde_json::to_value(goal).unwrap_or_default(),
+    });
+}
+
+async fn list_task_goals(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(tid): Path<Id>,
+) -> ApiResult<Json<Vec<SwarmGoal>>> {
+    let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
+    check(&ctx, &user, &task.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(ctx.swarm_repo.list_goals_for_task(&tid).await.map_err(ApiError)?))
+}
+
+async fn list_project_goals(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(pid): Path<Id>,
+) -> ApiResult<Json<Vec<SwarmGoal>>> {
+    let project = ctx.swarm_repo.get_project(&pid).await.map_err(ApiError)?;
+    check(&ctx, &user, &project.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(ctx.swarm_repo.list_goals_for_project(&pid).await.map_err(ApiError)?))
+}
+
+async fn create_task_goal(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(tid): Path<Id>,
+    Json(req): Json<CreateGoalReq>,
+) -> ApiResult<Json<SwarmGoal>> {
+    let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
+    check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    let goal = ctx
+        .swarm_repo
+        .create_goal(new_goal_from(req, &task.swarm_id, &task.workspace_id, Some(task.project_id.clone()), Some(tid), &user.0.id))
+        .await
+        .map_err(ApiError)?;
+    emit_goal(&ctx, &goal).await;
+    Ok(Json(goal))
+}
+
+async fn create_project_goal(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(pid): Path<Id>,
+    Json(req): Json<CreateGoalReq>,
+) -> ApiResult<Json<SwarmGoal>> {
+    let project = ctx.swarm_repo.get_project(&pid).await.map_err(ApiError)?;
+    check(&ctx, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
+    let goal = ctx
+        .swarm_repo
+        .create_goal(new_goal_from(req, &project.swarm_id, &project.workspace_id, Some(pid), None, &user.0.id))
+        .await
+        .map_err(ApiError)?;
+    emit_goal(&ctx, &goal).await;
+    Ok(Json(goal))
+}
+
+fn new_goal_from(
+    req: CreateGoalReq,
+    swarm_id: &str,
+    workspace_id: &str,
+    project_id: Option<Id>,
+    task_id: Option<Id>,
+    created_by: &str,
+) -> NewGoal {
+    NewGoal {
+        swarm_id: swarm_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        project_id,
+        task_id,
+        kind: "explicit".into(),
+        title: req.title,
+        description: req.description,
+        metric: req.metric,
+        comparator: req.comparator,
+        target_value: req.target_value,
+        block_value: req.block_value,
+        verify_cmd: req.verify_cmd,
+        max_retries: req.max_retries.unwrap_or(3),
+        blocking: req.blocking.unwrap_or(true),
+        order_idx: req.order_idx.unwrap_or(0),
+        created_by: created_by.to_string(),
+    }
+}
+
+async fn update_goal_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(gid): Path<Id>,
+    Json(req): Json<UpdateGoalReq>,
+) -> ApiResult<Json<SwarmGoal>> {
+    let cur = ctx.swarm_repo.get_goal(&gid).await.map_err(ApiError)?;
+    check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
+    let goal = ctx
+        .swarm_repo
+        .update_goal(
+            &gid,
+            GoalPatch {
+                title: req.title,
+                description: req.description,
+                metric: req.metric,
+                comparator: req.comparator,
+                target_value: req.target_value,
+                block_value: req.block_value,
+                verify_cmd: req.verify_cmd,
+                max_retries: req.max_retries,
+                blocking: req.blocking,
+                order_idx: req.order_idx,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    emit_goal(&ctx, &goal).await;
+    Ok(Json(goal))
+}
+
+async fn delete_goal_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(gid): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let cur = ctx.swarm_repo.get_goal(&gid).await.map_err(ApiError)?;
+    check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
+    ctx.swarm_repo.delete_goal(&gid).await.map_err(ApiError)?;
+    Ok(Json(json!({})))
+}
+
+async fn list_standing_goals_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(sid): Path<Id>,
+) -> ApiResult<Json<Vec<SwarmGoal>>> {
+    let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
+    check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
+    // Seed defaults on first read so the UI has something to edit.
+    crate::swarm_verify::ensure_standing_goals(&ctx, &swarm.id, &swarm.workspace_id, &swarm.created_by).await;
+    Ok(Json(ctx.swarm_repo.list_standing_goals(&sid).await.map_err(ApiError)?))
+}
+
+#[derive(Deserialize)]
+struct StandingGoalsReq {
+    goals: Vec<CreateGoalReq>,
+}
+
+/// Replace the swarm's standing-goal set (delete existing templates + insert new).
+async fn put_standing_goals_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(sid): Path<Id>,
+    Json(req): Json<StandingGoalsReq>,
+) -> ApiResult<Json<Vec<SwarmGoal>>> {
+    let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
+    check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
+    for g in ctx.swarm_repo.list_standing_goals(&sid).await.unwrap_or_default() {
+        let _ = ctx.swarm_repo.delete_goal(&g.id).await;
+    }
+    for (i, r) in req.goals.into_iter().enumerate() {
+        let mut ng = new_goal_from(r, &swarm.id, &swarm.workspace_id, None, None, &user.0.id);
+        ng.kind = "standing".into();
+        ng.order_idx = i as i64;
+        let _ = ctx.swarm_repo.create_goal(ng).await;
+    }
+    Ok(Json(ctx.swarm_repo.list_standing_goals(&sid).await.map_err(ApiError)?))
+}
+
+/// Manually kick the verification controller for a task (e.g. after a fix).
+async fn verify_task_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(tid): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
+    check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    if crate::swarm_verify::is_verifying(&tid) {
+        return Ok(Json(json!({"started": false, "reason": "already verifying"})));
+    }
+    let dev = task
+        .assignee_agent_id
+        .clone()
+        .ok_or_else(|| ApiError(Error::Invalid("task has no assignee to verify".into())))?;
+    let _ = ctx
+        .swarm_repo
+        .update_task(&tid, TaskPatch { status: Some("verifying".into()), ..Default::default() })
+        .await;
+    emit_task(&ctx, &tid).await;
+    crate::swarm_verify::start_verification(&ctx, task, dev);
+    Ok(Json(json!({"started": true})))
+}
+
+async fn stop_verify_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(tid): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
+    check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    crate::swarm_verify::stop_task(&ctx, &tid).await;
+    Ok(Json(json!({"stopped": true})))
+}
+
+async fn get_verification_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(tid): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
+    check(&ctx, &user, &task.workspace_id, WorkspaceRole::Viewer).await?;
+    let goals = ctx.swarm_repo.list_goals_for_task(&tid).await.map_err(ApiError)?;
+    Ok(Json(json!({
+        "running": crate::swarm_verify::is_verifying(&tid),
+        "task_status": task.status,
+        "goals": goals,
+    })))
+}
+
+#[derive(Deserialize)]
+struct CreateTriggerReq {
+    channel: String,
+    #[serde(default)]
+    match_chat: Option<String>,
+    #[serde(default)]
+    keyword: Option<String>,
+    #[serde(default)]
+    repo_path: Option<String>,
+    #[serde(default)]
+    auto_start: Option<bool>,
+    #[serde(default)]
+    reply: Option<bool>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+struct UpdateTriggerReq {
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    match_chat: Option<String>,
+    #[serde(default)]
+    keyword: Option<String>,
+    #[serde(default)]
+    repo_path: Option<Option<String>>,
+    #[serde(default)]
+    auto_start: Option<bool>,
+    #[serde(default)]
+    reply: Option<bool>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+async fn list_triggers_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(sid): Path<Id>,
+) -> ApiResult<Json<Vec<SwarmChannelTrigger>>> {
+    let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
+    check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(ctx.swarm_repo.list_triggers(&sid).await.map_err(ApiError)?))
+}
+
+async fn create_trigger_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(sid): Path<Id>,
+    Json(req): Json<CreateTriggerReq>,
+) -> ApiResult<Json<SwarmChannelTrigger>> {
+    let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
+    check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
+    let t = ctx
+        .swarm_repo
+        .create_trigger(NewTrigger {
+            swarm_id: swarm.id.clone(),
+            workspace_id: swarm.workspace_id.clone(),
+            channel: req.channel,
+            match_chat: req.match_chat.unwrap_or_default(),
+            keyword: req.keyword.unwrap_or_default(),
+            repo_path: req.repo_path,
+            auto_start: req.auto_start.unwrap_or(true),
+            reply: req.reply.unwrap_or(true),
+            enabled: req.enabled.unwrap_or(true),
+            created_by: user.0.id.clone(),
+        })
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(t))
+}
+
+async fn update_trigger_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(tid): Path<Id>,
+    Json(req): Json<UpdateTriggerReq>,
+) -> ApiResult<Json<SwarmChannelTrigger>> {
+    let cur = ctx.swarm_repo.get_trigger(&tid).await.map_err(ApiError)?;
+    check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
+    let t = ctx
+        .swarm_repo
+        .update_trigger(
+            &tid,
+            TriggerPatch {
+                channel: req.channel,
+                match_chat: req.match_chat,
+                keyword: req.keyword,
+                repo_path: req.repo_path,
+                auto_start: req.auto_start,
+                reply: req.reply,
+                enabled: req.enabled,
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(t))
+}
+
+async fn delete_trigger_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(tid): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let cur = ctx.swarm_repo.get_trigger(&tid).await.map_err(ApiError)?;
+    check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
+    ctx.swarm_repo.delete_trigger(&tid).await.map_err(ApiError)?;
+    Ok(Json(json!({})))
 }
 
 /// Stop an in-flight plan/recruit for this swarm: kills the live agent
@@ -715,6 +1173,9 @@ async fn abort(
 ) -> ApiResult<Json<Swarm>> {
     check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
     stop_coordinator(&ctx, &sid);
+    // Stop any in-flight verification controllers (own cancel + kill verify/fix
+    // sessions, short-circuiting run_swarm_agent retries; review B3).
+    crate::swarm_verify::stop_swarm(&ctx, &sid).await;
     // Cancel in-flight runs and mark them stopped.
     let stopped = ctx.swarm_repo.stop_active_runs(&sid).await.map_err(ApiError)?;
     for rid in &stopped {
@@ -878,7 +1339,7 @@ async fn recruit(
                 .unwrap_or_else(|| "recruiter".to_string());
             let cancel = crate::swarm_agent_run::begin(sid);
             let (raw, rid) = crate::swarm_agent_run::run_swarm_agent(
-                &ctx, &ws_obj, &user.0, sid, None, &nominal, "recruit",
+                &ctx, &ws_obj, &user.0, sid, None, None, &nominal, "claude", "recruit",
                 &format!("Recruit: {}", req.role), &cwd, &prompt,
                 |t| otto_swarm::recruiter::parse_recruited(t).is_some(),
                 &cancel,
@@ -971,8 +1432,8 @@ async fn plan(
             otto_swarm::recruiter::planner_prompt(&project.name, &goal, &preset_agents, angle);
         let title = format!("Plan {}/{}: {}", i + 1, angles.len(), project.name);
         let (raw, _) = crate::swarm_agent_run::run_swarm_agent(
-            &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), &nominal_agent, "plan",
-            &title, &cwd, &prompt,
+            &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), None, &nominal_agent,
+            "claude", "plan", &title, &cwd, &prompt,
             |t| otto_swarm::recruiter::extract_json(t).is_some(),
             &cancel,
         )
@@ -988,8 +1449,8 @@ async fn plan(
             &project.name, &goal, &preset_agents, &candidates,
         );
         let (raw, _) = crate::swarm_agent_run::run_swarm_agent(
-            &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), &nominal_agent, "plan",
-            &format!("Plan summary: {}", project.name), &cwd, &sum_prompt,
+            &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), None, &nominal_agent,
+            "claude", "plan", &format!("Plan summary: {}", project.name), &cwd, &sum_prompt,
             |t| otto_swarm::recruiter::extract_json(t).is_some(),
             &cancel,
         )

@@ -175,6 +175,7 @@ impl otto_mcp::McpCtx for ServerCtx {
     }
 }
 
+#[async_trait::async_trait]
 impl otto_git::GitCtx for ServerCtx {
     fn store(&self) -> &GitStore {
         &self.git_store
@@ -190,6 +191,13 @@ impl otto_git::GitCtx for ServerCtx {
     }
     fn events(&self) -> &tokio::sync::broadcast::Sender<Event> {
         &self.events
+    }
+    async fn check_pr_allowed(
+        &self,
+        workspace_id: &str,
+        req: &otto_core::api::CreatePrReq,
+    ) -> otto_core::Result<()> {
+        crate::proof::gate_pr(self, workspace_id, req).await
     }
 }
 
@@ -1536,6 +1544,7 @@ fn review_agent_timeout(diff_len: usize, override_secs: Option<u64>) -> Duration
 
 /// Background wrapper: runs `run_review_core` for a PR and sets the final
 /// status on the review row.
+#[allow(clippy::too_many_arguments)]
 async fn run_review(
     ctx: ServerCtx,
     review_id: Id,
@@ -1544,6 +1553,8 @@ async fn run_review(
     jira_context: Option<String>,
     user_context: Option<String>,
     workspace: Workspace,
+    repo_id: Id,
+    pr_number: u64,
 ) {
     let result = run_review_core(
         &ctx,
@@ -1553,6 +1564,8 @@ async fn run_review(
         jira_context,
         user_context,
         &workspace,
+        &repo_id,
+        pr_number,
     )
     .await;
     match result {
@@ -1593,6 +1606,7 @@ async fn run_review(
 /// context, and optional free-text user guidance, runs the configured agents,
 /// stores comments, and updates live agent-state rows. Used by both the PR and
 /// local-review flows.
+#[allow(clippy::too_many_arguments)]
 async fn run_review_core(
     ctx: &ServerCtx,
     review_id: &Id,
@@ -1601,6 +1615,8 @@ async fn run_review_core(
     jira_context: Option<String>,
     user_context: Option<String>,
     workspace: &Workspace,
+    repo_id: &Id,
+    pr_number: u64,
 ) -> Result<()> {
     let jira_ctx = jira_context.unwrap_or_default();
     // Build the optional free-text guidance block (prepended to every agent
@@ -1869,16 +1885,132 @@ async fn run_review_core(
         .set_agents(review_id, &agent_states)
         .await?;
 
-    // 6. Persist draft comments.
+    // 6. Persist draft comments AND drive the persistent findings lifecycle.
+    //    Each summarized comment is BOTH a draft comment (for posting to the PR)
+    //    and a fingerprinted finding (for the cross-run open→fixing→resolved/
+    //    regressed lifecycle). Wiring the findings store here is what makes AI
+    //    review lifecycle-driven (R3.2). Working-tree/local reviews use pr=0.
     tracing::info!(review = %review_id, "storing {} draft comments", parsed.len());
+    let mut seen_fingerprints: Vec<String> = Vec::new();
     for c in parsed {
         let sev = CommentSeverity::parse(&c.severity).unwrap_or(CommentSeverity::Info);
         ctx.reviews_store
             .add_comment(review_id, c.path.as_deref(), c.line, sev, &c.body)
             .await?;
+
+        // Upsert the finding (lifecycle) keyed by a stable fingerprint.
+        let category = Some(c.severity.as_str());
+        let fp = otto_state::review_findings::compute_fingerprint(
+            repo_id,
+            pr_number,
+            c.path.as_deref(),
+            category,
+            &c.body,
+        );
+        let nf = otto_state::review_findings::NewFinding {
+            review_id,
+            workspace_id: &workspace.id,
+            repo_id,
+            pr_number,
+            path: c.path.as_deref(),
+            line: c.line.map(|l| l as i64),
+            severity: &c.severity,
+            category,
+            body: &c.body,
+            fingerprint: &fp,
+            run_id: review_id,
+        };
+        if let Err(e) = ctx.findings_store.upsert(&nf).await {
+            tracing::warn!(review = %review_id, "finding upsert failed: {e}");
+        }
+        seen_fingerprints.push(fp);
     }
 
+    // Findings present in a prior run but absent now flip open→resolved (the
+    // "verification" leg: a re-run that no longer surfaces a finding resolves it).
+    let seen_refs: Vec<&str> = seen_fingerprints.iter().map(|s| s.as_str()).collect();
+    if let Err(e) = ctx
+        .findings_store
+        .resolve_absent(&workspace.id, repo_id, pr_number, &seen_refs, review_id)
+        .await
+    {
+        tracing::warn!(review = %review_id, "resolve_absent failed: {e}");
+    }
+
+    // 7. Assemble the proof pack for this review from the now-persisted findings.
+    assemble_review_proof(ctx, review_id, &workspace.id).await;
+
     Ok(())
+}
+
+/// Open/blocker/total finding counts for a review, from the persistent store.
+async fn review_findings_counts(ctx: &ServerCtx, review_id: &Id) -> (u64, u64, u64) {
+    let all = ctx
+        .findings_store
+        .list_for_review(review_id)
+        .await
+        .unwrap_or_default();
+    let total = all.len() as u64;
+    let is_open = |f: &otto_state::ReviewFindingRow| {
+        matches!(
+            f.state,
+            otto_state::FindingState::Open | otto_state::FindingState::Regressed
+        )
+    };
+    let open = all.iter().filter(|f| is_open(f)).count() as u64;
+    let blocker = all
+        .iter()
+        .filter(|f| f.severity == "bug" && is_open(f))
+        .count() as u64;
+    (total, open, blocker)
+}
+
+/// Build/update the review's proof pack with a `review` artifact whose status is
+/// Failed when unresolved findings remain, else Passed. Drives the
+/// `review_unresolved` badge. Best-effort.
+async fn assemble_review_proof(ctx: &ServerCtx, review_id: &Id, workspace_id: &Id) {
+    use otto_core::proof::{ProofArtifactKind, ProofArtifactStatus, WorkItemKind};
+    let (total, open, blocker) = review_findings_counts(ctx, review_id).await;
+    let pack = match crate::proof::gate(
+        ctx,
+        WorkItemKind::Review,
+        review_id,
+        workspace_id,
+        "Code review",
+        "otto",
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(review = %review_id, "review proof gate failed: {e}");
+            return;
+        }
+    };
+    let status = if open > 0 {
+        ProofArtifactStatus::Failed
+    } else {
+        ProofArtifactStatus::Passed
+    };
+    let resolved = total.saturating_sub(open);
+    let body = format!(
+        "Review findings: {open} unresolved ({blocker} blocker), {resolved} resolved, {total} total.",
+    );
+    let meta = serde_json::json!({
+        "open": open, "resolved": resolved, "total": total, "blocker_count": blocker,
+    });
+    let _ = crate::proof::upsert_content_artifact(
+        ctx,
+        &pack,
+        ProofArtifactKind::Review,
+        "Review findings",
+        &body,
+        status,
+        meta,
+        "otto",
+    )
+    .await;
+    let _ = crate::proof::recompute_and_emit(ctx, &pack.id).await;
 }
 
 /// Fetch PR diff + Jira context and delegate to `run_review_core`.
@@ -1956,6 +2088,8 @@ async fn run_pr_review_inner(
         jira_context,
         user_context,
         &workspace,
+        repo_id,
+        pr_number,
     )
     .await
 }
@@ -2972,9 +3106,12 @@ async fn start_local_review(
         });
         let ctx_bg = ctx.clone();
         let repo_path = repo.path.clone();
+        let repo_id_bg = repo.id.clone();
         tokio::spawn(async move {
+            // Local/working-tree review: no PR, so pr_number = 0 (the fingerprint
+            // accommodates pr 0).
             run_review(
-                ctx_bg, review_id, repo_path, diff_text, None, None, workspace,
+                ctx_bg, review_id, repo_path, diff_text, None, None, workspace, repo_id_bg, 0,
             )
             .await;
         });
@@ -3875,6 +4012,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_swarm::router::<ServerCtx>(),
         crate::swarm_runtime::routes(),
         crate::routes::goal_loops::routes(),
+        crate::routes::proof::routes(),
         crate::insights::routes(),
         orchestrator_routes(),
         db_explorer_routes(),

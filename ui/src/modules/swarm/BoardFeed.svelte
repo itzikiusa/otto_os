@@ -27,6 +27,11 @@
     'escalation',
     'handoff',
     'system',
+    // Coordinator lifecycle posts.
+    'worktree',
+    'shared',
+    'merge',
+    'verify',
   ];
 
   const filtered = $derived(
@@ -45,6 +50,19 @@
     decision: 'accent',
     review: 'accent',
     idea: 'ok',
+    worktree: 'ok',
+    shared: 'bad',
+    merge: 'ok',
+    verify: 'accent',
+  };
+
+  // Emoji glyphs for the Coordinator lifecycle kinds (distinct at a glance).
+  const KIND_ICON: Record<string, string> = {
+    worktree: '🌿',
+    shared: '⚠️',
+    merge: '✅',
+    verify: '🔎',
+    escalation: '🚫',
   };
 
   async function post() {
@@ -69,8 +87,10 @@
 <div class="board">
   <div class="b-filters">
     <button class="chip" class:accent={kindFilter === ''} onclick={() => (kindFilter = '')}>all</button>
-    {#each ['idea', 'review', 'decision', 'concern', 'status'] as k (k)}
-      <button class="chip" class:accent={kindFilter === k} onclick={() => (kindFilter = k)}>{k}</button>
+    {#each ['idea', 'review', 'decision', 'concern', 'status', 'worktree', 'shared', 'merge', 'verify', 'escalation'] as k (k)}
+      <button class="chip" class:accent={kindFilter === k} onclick={() => (kindFilter = k)}>
+        {KIND_ICON[k] ?? ''} {k}
+      </button>
     {/each}
     <span class="grow"></span>
     <button class="icon-btn" onclick={() => swarm.loadBoard()} aria-label="refresh"><Icon name="refresh" size={14} /></button>
@@ -83,7 +103,7 @@
     {#each filtered as m (m.id)}
       <div class="msg">
         <div class="msg-head">
-          <span class="chip {KIND_CLASS[m.kind] ?? ''}">{m.kind}</span>
+          <span class="chip {KIND_CLASS[m.kind] ?? ''}">{KIND_ICON[m.kind] ?? ''} {m.kind}</span>
           <span class="who">{author(m)}</span>
           {#if m.to_agent_id}<span class="dim">→ {swarm.agentById(m.to_agent_id)?.name ?? 'agent'}</span>{/if}
           <span class="grow"></span>

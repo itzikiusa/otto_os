@@ -110,6 +110,11 @@ pub struct ServerCtx {
     /// Unified work-graph service (persist + emit). The projector
     /// (`workgraph_projector`) feeds it from the event bus; the routes read it.
     pub workgraph: std::sync::Arc<otto_workgraph::WorkGraphService>,
+    // -- Proof Packs -------------------------------------------------------
+    pub proof_repo: otto_state::ProofRepo,
+    /// Per-pack async locks serializing status/risk recompute so concurrent
+    /// artifact adds / gates can't interleave a stale read→write (no lost-update).
+    pub proof_locks: crate::proof::ProofLocks,
 }
 
 impl ServerCtx {

@@ -162,12 +162,18 @@ otto-state, so the row is embedded as `serde_json::Value`):
 {"type":"swarm_run_updated","workspace_id":"…","swarm_id":"…","run":{…SwarmRun…}}
 {"type":"swarm_task_updated","workspace_id":"…","swarm_id":"…","project_id":"…","task":{…SwarmTask…}}
 {"type":"swarm_message_posted","workspace_id":"…","swarm_id":"…","message":{…SwarmMessage…}}
+{"type":"swarm_goal_updated","workspace_id":"…","swarm_id":"…","task_id":"…|null","goal":{…SwarmGoal…}}
 ```
 
 - `swarm_status` — a swarm's lifecycle status changed (`active|paused|aborted`).
 - `swarm_run_updated` — a swarm run was created or changed.
 - `swarm_task_updated` — a swarm task was created or changed.
-- `swarm_message_posted` — a new message was posted to a swarm's shared board.
+- `swarm_message_posted` — a new message was posted to a swarm's shared board. New
+  Coordinator-lifecycle message kinds — `worktree`, `shared`, `merge`, `verify`,
+  `escalation` — arrive on this same event.
+- `swarm_goal_updated` — a swarm goal was created or its verification status/verdict
+  changed (drives the per-task Goals panel + Kanban goal badges live). `task_id` is the
+  goal's task (null for project/standing goals).
 
 The UI mirrors all of these in `OttoEvent` (`ui/src/lib/events.svelte.ts`) and routes the
 `swarm_*` set into the `swarm` store, which updates the org tree, run graph, Kanban, runs
@@ -427,3 +433,20 @@ blind timer.
 - The Mission Control page re-fetches the workspace summary/list on a matching
   tick instead of polling.
 - TypeScript type: `{ type: 'work_graph_updated'; workspace_id: Id; item_id: Id; kind: string; status: string }`.
+
+---
+
+### `proof_pack_updated`
+
+```json
+{ "type": "proof_pack_updated", "workspace_id": "<Id>", "proof_pack_id": "<Id>",
+  "work_item_kind": "session|goal_loop|review|workflow_run|task|manual",
+  "work_item_id": "<id>", "status": "missing|partial|passed|failed|waived",
+  "risk_score": 0 }
+```
+
+- Emitted by `otto_server::proof::recompute_and_emit` whenever a proof pack is
+  created, (re)assembled, gains/loses an artifact, or is waived.
+- Scope: `Workspace` (gated on viewer access to that workspace).
+- The UI re-fetches the affected pack and refreshes the workspace proof summary.
+- TypeScript type: `{ type: 'proof_pack_updated'; workspace_id: Id; proof_pack_id: Id; work_item_kind: string; work_item_id: string; status: string; risk_score: number }`.

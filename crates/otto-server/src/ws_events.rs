@@ -228,6 +228,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::SwarmTaskUpdated { workspace_id, .. }
         | Event::SwarmMessagePosted { workspace_id, .. }
         | Event::SwarmStatus { workspace_id, .. }
+        | Event::SwarmGoalUpdated { workspace_id, .. }
         // Product events are workspace-scoped.
         | Event::ProductChanged { workspace_id, .. }
         | Event::PlanRun { workspace_id, .. }
@@ -252,7 +253,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // (it carries `workspace_id`), so they go to that workspace's members.
         | Event::BudgetExceeded { workspace_id, .. }
         // Work-graph (Mission Control) updates go to the item's workspace members.
-        | Event::WorkGraphUpdated { workspace_id, .. } => Scope::Workspace(workspace_id),
+        | Event::WorkGraphUpdated { workspace_id, .. }
+        // Proof-pack updates are workspace-scoped (gated on viewer access).
+        | Event::ProofPackUpdated { workspace_id, .. } => Scope::Workspace(workspace_id),
         // Usage tick, self-improvement updates, and insight-ready are global
         // (no workspace axis — insights are a cross-workspace cadence report).
         // Deliver them to every authenticated client, matching the `Notice` pattern.

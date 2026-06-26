@@ -397,8 +397,98 @@ pub async fn run_workflow(
     let _ = repo
         .update_run(&run_id, final_status, &states, err_msg.as_deref(), true)
         .await;
+    // Proof pack: package the run's node outputs, human approvals, and budget
+    // gate into inspectable evidence. Best-effort.
+    assemble_workflow_proof(&ctx, &workflow, &run_id, &states).await;
     // Final event: run complete.
     emit_run_updated(&ctx, &workflow.workspace_id, &run_id, final_status.as_str(), None);
+}
+
+/// Assemble the proof pack for a completed workflow run: each node's output is a
+/// `log` artifact (status from the node status), a `human_approval` node becomes
+/// an `approval` artifact (passed iff approved), and the run's approval metadata
+/// is captured. Best-effort.
+async fn assemble_workflow_proof(
+    ctx: &ServerCtx,
+    workflow: &Workflow,
+    run_id: &Id,
+    states: &[NodeRunState],
+) {
+    use otto_core::proof::{ProofArtifactKind as K, ProofArtifactStatus as S, WorkItemKind};
+    use sqlx::Row;
+
+    let pack = match crate::proof::gate(
+        ctx,
+        WorkItemKind::WorkflowRun,
+        run_id,
+        &workflow.workspace_id,
+        &workflow.name,
+        "otto",
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(run = %run_id, "workflow proof gate failed: {e}");
+            return;
+        }
+    };
+
+    // Approval fields live on the `workflow_runs` row, not the `WorkflowRun`
+    // struct (added by migration 0058).
+    let arow = sqlx::query("SELECT approved_by, approval_note, approved_at FROM workflow_runs WHERE id = ?")
+        .bind(run_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+    let approved_by: Option<String> = arow.as_ref().and_then(|r| r.try_get("approved_by").ok());
+    let approval_note: Option<String> = arow.as_ref().and_then(|r| r.try_get("approval_note").ok());
+    let approved_at: Option<String> = arow.as_ref().and_then(|r| r.try_get("approved_at").ok());
+
+    let mut state_by_id = std::collections::HashMap::new();
+    for s in states {
+        state_by_id.insert(s.node_id.as_str(), s);
+    }
+
+    for node in &workflow.graph.nodes {
+        let st = state_by_id.get(node.id.as_str()).copied();
+        let node_status = st.map(|s| s.status);
+        let title = if node.name.is_empty() {
+            node.kind.clone()
+        } else {
+            format!("{}: {}", node.kind, node.name)
+        };
+
+        if node.kind == "human_approval" {
+            let approved = approved_by.is_some();
+            let astatus = if approved { S::Passed } else { S::Failed };
+            let body = if approved {
+                format!("Approved by {}", approved_by.clone().unwrap_or_default())
+            } else {
+                "Not approved".to_string()
+            };
+            let meta = json!({
+                "approved_by": approved_by, "approval_note": approval_note,
+                "approved_at": approved_at, "node_id": node.id,
+            });
+            let _ = crate::proof::upsert_content_artifact(ctx, &pack, K::Approval, &title, &body, astatus, meta, "otto").await;
+        } else {
+            let art_status = match node_status {
+                Some(NodeStatus::Success) => S::Passed,
+                Some(NodeStatus::Error) => S::Failed,
+                _ => S::Info,
+            };
+            let content = st
+                .and_then(|s| s.output.as_ref())
+                .map(|o| serde_json::to_string_pretty(o).unwrap_or_default())
+                .unwrap_or_else(|| "(no output)".to_string());
+            let meta = json!({ "node_kind": node.kind, "node_id": node.id });
+            let _ = crate::proof::upsert_content_artifact(ctx, &pack, K::Log, &title, &content, art_status, meta, "otto").await;
+        }
+    }
+
+    let _ = crate::proof::recompute_and_emit(ctx, &pack.id).await;
 }
 
 /// `start` plus every node reachable from it via edges.

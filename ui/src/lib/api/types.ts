@@ -809,6 +809,13 @@ export type OttoEvent =
       swarm_id: Id;
       message: Record<string, unknown>;
     }
+  | {
+      type: 'swarm_goal_updated';
+      workspace_id: Id;
+      swarm_id: Id;
+      task_id?: Id | null;
+      goal: Record<string, unknown>;
+    }
   | { type: 'swarm_status'; workspace_id: Id; swarm_id: Id; status: string }
   /** Emitted after each metrics-sampler tick so the dashboard can refresh
    *  sparklines in near-real-time. `ts` is the sample timestamp (UTC ISO-8601).
@@ -891,6 +898,18 @@ export type OttoEvent =
       spend_usd: number;
       cap_usd: number;
       direction: string;
+    }
+  /** A proof pack was created, (re)assembled, had an artifact added, or was
+   *  waived — its derived status/risk may have changed. The Proof page + sidebar
+   *  badges re-fetch the affected pack and refresh the workspace proof summary. */
+  | {
+      type: 'proof_pack_updated';
+      workspace_id: Id;
+      proof_pack_id: Id;
+      work_item_kind: string;
+      work_item_id: string;
+      status: string;
+      risk_score: number;
     }
   | {
       /** A Mission Control work item was created or its normalized status
@@ -998,7 +1017,7 @@ export interface NotificationSettings {
 // RBAC — features + capabilities
 // ---------------------------------------------------------------------------
 
-/** The 21 protected features (snake_case, mirrors Rust Feature enum). */
+/** The 22 protected features (snake_case, mirrors Rust Feature enum). */
 export type Feature =
   | 'agents'
   | 'connections'
@@ -1019,6 +1038,7 @@ export type Feature =
   | 'settings'
   | 'users'
   | 'canvas'
+  | 'proof_pack'
   | 'mcp'
   | 'mission_control';
 
@@ -2080,6 +2100,121 @@ export interface RequestChangesReq {
 export interface UpdateProvidersReq {
   /** When set, only update that specific provider; omit to update all. */
   provider?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Proof Packs
+// ---------------------------------------------------------------------------
+
+export type ProofStatus = 'missing' | 'partial' | 'passed' | 'failed' | 'waived';
+export type ProofArtifactKind =
+  | 'command'
+  | 'log'
+  | 'screenshot'
+  | 'diff'
+  | 'ci'
+  | 'api'
+  | 'db'
+  | 'review'
+  | 'approval'
+  | 'self_review';
+export type ProofArtifactStatus = 'passed' | 'failed' | 'pending' | 'info';
+export type WorkItemKind = 'session' | 'goal_loop' | 'review' | 'workflow_run' | 'task' | 'manual';
+export type ProofBadge =
+  | 'no_proof'
+  | 'tests_passed'
+  | 'tests_failed'
+  | 'human_approved'
+  | 'risky_change'
+  | 'ci_missing'
+  | 'db_api_verified'
+  | 'review_unresolved'
+  | 'waived';
+
+export interface ProofPack {
+  id: Id;
+  workspace_id: Id;
+  work_item_kind: WorkItemKind;
+  work_item_id: string;
+  title: string;
+  status: ProofStatus;
+  summary: string;
+  risk_score: number;
+  parent_pack_id?: string | null;
+  waived_by?: string | null;
+  waived_reason?: string | null;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProofArtifact {
+  id: Id;
+  proof_pack_id: Id;
+  workspace_id: Id;
+  kind: ProofArtifactKind;
+  title: string;
+  content_ref?: string | null;
+  status: ProofArtifactStatus;
+  metadata: unknown;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A proof pack with its derived badge list + artifact count (list/summary row). */
+export interface ProofPackResp extends ProofPack {
+  badges: string[];
+  artifact_count: number;
+}
+
+/** One artifact plus a capped inline preview for list/detail rendering. */
+export interface ProofArtifactView extends ProofArtifact {
+  preview?: string | null;
+  truncated: boolean;
+}
+
+/** `GET /proof-packs/{id}` — the pack, its badges, artifacts, and any children. */
+export interface ProofPackDetail {
+  pack: ProofPack;
+  badges: string[];
+  artifacts: ProofArtifactView[];
+  children: ProofPackResp[];
+}
+
+export interface ProofSummaryRow {
+  work_item_kind: string;
+  work_item_id: string;
+  proof_pack_id: string;
+  status: string;
+  risk_score: number;
+  badges: string[];
+}
+
+export interface ProofSummaryResp {
+  rows: ProofSummaryRow[];
+}
+
+export interface CreateProofPackReq {
+  work_item_kind: string;
+  work_item_id: string;
+  title?: string;
+  parent_pack_id?: string;
+}
+
+export interface AddArtifactReq {
+  kind: string;
+  title: string;
+  content?: string;
+  content_url?: string;
+  status?: string;
+  metadata?: unknown;
+}
+
+export interface AssembleReq {
+  cwd?: string;
+  base?: string;
+  commands?: { cmd: string; kind?: string }[];
 }
 
 // ---------------------------------------------------------------------------
