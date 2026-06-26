@@ -19,7 +19,7 @@ everything else).
 This guide documents what the code in `crates/otto-server/src/run_engine.rs`,
 `run_service.rs`, `run_scheduler.rs`, `run_sources.rs`, `run_context.rs`,
 `run_workspace.rs`, `run_channels.rs`, `routes/runs.rs`,
-`crates/otto-state/src/runs.rs` (migration `0086_run_with_otto.sql`),
+`crates/otto-state/src/runs.rs` (migration `0087_run_with_otto.sql`),
 `crates/otto-core/src/run.rs`, and `ui/src/modules/run-with-otto/` actually does.
 The API shape is specified in `docs/contracts/api.md` (Run with Otto) and
 `docs/contracts/ws.md` (`otto_run_updated`), which remain authoritative.
@@ -31,7 +31,7 @@ The API shape is specified in `docs/contracts/api.md` (Run with Otto) and
 | | |
 |---|---|
 | **What it is** | One trigger turns any of eight sources into a reviewed, evidence-backed **PR draft**, gated by human approval. |
-| **Entity** | `OttoRun` (`otto_runs` + `otto_run_events`, migration **0086**). Its `status` **is** the pipeline stage machine (`otto_core::run::RunStatus`). |
+| **Entity** | `OttoRun` (`otto_runs` + `otto_run_events`, migration **0087**). Its `status` **is** the pipeline stage machine (`otto_core::run::RunStatus`). |
 | **Stages** | `queued → resolving_source → building_context → provisioning → executing → proving → reviewing → awaiting_approval → drafting_pr → completed` (+ `failed`/`rejected`/`cancelled`). |
 | **Execute modes** | `single_agent` (a headless `Orchestrator::run_agent` on an `otto-run/<id>` worktree — the default) or `goal_loop` (a full Plan→Execute→Evaluate→Digest loop). |
 | **Triggers** | **Slack/Telegram** (`/run <ref>`), **webhook** (`POST /webhooks/{ws}/run`), **REST** (`POST /workspaces/{ws}/runs`), and the **UI launcher**. All funnel into `RunService::launch`. |
@@ -48,7 +48,7 @@ The API shape is specified in `docs/contracts/api.md` (Run with Otto) and
 | Layer | File | Responsibility |
 |---|---|---|
 | **Stage machine** | `crates/otto-core/src/run.rs` | Pure `RunStatus` (`next_on_success`/`is_terminal`/`is_resumable_on_boot`), `SourceKind`, `RunMode`, `RunOrigin`, the DTOs, and the pure `parse_source_ref` source detector. |
-| **Persistence** | `crates/otto-state/src/runs.rs` + migration `0086_run_with_otto.sql` | `RunsRepo` — compare-and-set status transitions, the COALESCE patch, the timeline, the thread-bound awaiting lookup, and the resumable/interrupted boot queries. |
+| **Persistence** | `crates/otto-state/src/runs.rs` + migration `0087_run_with_otto.sql` | `RunsRepo` — compare-and-set status transitions, the COALESCE patch, the timeline, the thread-bound awaiting lookup, and the resumable/interrupted boot queries. |
 | **Source adapters** | `crates/otto-server/src/run_sources.rs` | The eight `resolve_source` adapters → a unified `ResolvedSource`, plus `resolve_repo` (the registered git repo the run works in). |
 | **Context packet** | `crates/otto-server/src/run_context.rs` | `build_packet` — the task prompt (redacted, capped). |
 | **Worktree** | `crates/otto-server/src/run_workspace.rs` | Idempotent `otto-run/<id>` worktree provisioning + removal. |
