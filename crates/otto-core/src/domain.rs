@@ -1856,7 +1856,74 @@ impl Capability {
     }
 }
 
-/// The 22 independently-gatable product features.
+/// A scheduled task: a recurring, workspace-scoped job that runs an agent on a
+/// cadence (interval/daily/weekly), captures its final reply as a Markdown report,
+/// and delivers it to a destination. v1 `kind` is `agent_prompt`. `schedule` and
+/// `destination` are opaque JSON the engine/cadence interpret. `last_run_at` is the
+/// scheduler cursor (advanced on run completion). `report_*` are output-only.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScheduledTask {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub kind: String,
+    pub prompt: String,
+    pub skill: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub cwd: String,
+    /// `{cadence:"interval"|"daily"|"weekly", every_min, at:"HH:MM", weekday}`.
+    pub schedule: serde_json::Value,
+    /// `{type:"none"|"slack"|"telegram"|"email"|"webhook", ...}`.
+    pub destination: serde_json::Value,
+    pub enabled: bool,
+    pub last_run_at: Option<String>,
+    pub last_status: Option<String>,
+    pub next_run_at: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One execution of a [`ScheduledTask`]. The `summary` is the extracted head of the
+/// report; the full report lives at `report_path` (served by run id). `delivered`
+/// records best-effort destination delivery. `session_id` is reserved (v1 runs are
+/// headless via `Orchestrator::run_agent`, so no Otto session row is created).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScheduledTaskRun {
+    pub id: String,
+    pub task_id: String,
+    pub workspace_id: String,
+    pub status: String,
+    pub trigger: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub summary: String,
+    pub report_path: Option<String>,
+    pub report_rel: Option<String>,
+    pub delivered: bool,
+    pub delivery_error: Option<String>,
+    pub error: Option<String>,
+    pub session_id: Option<String>,
+    pub created_at: String,
+}
+
+/// A built-in scheduled-task template the UI offers to pre-fill the create form.
+/// Pure data (no special engine path). Ships `ticket-followup-review` so the
+/// motivating example works out of the box.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScheduledTaskPreset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub kind: String,
+    pub prompt: String,
+    pub schedule: serde_json::Value,
+    pub suggested_destination: serde_json::Value,
+    pub skill: Option<String>,
+}
+
+/// The 23 independently-gatable product features.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -1883,6 +1950,8 @@ pub enum Feature {
     Mcp,
     /// Mission Control — the unified work graph across every activity.
     MissionControl,
+    /// Scheduled Tasks — recurring agent jobs with reports + delivery.
+    ScheduledTasks,
 }
 
 impl Feature {
@@ -1911,6 +1980,7 @@ impl Feature {
             "proof_pack" => Some(Self::ProofPack),
             "mcp" => Some(Self::Mcp),
             "mission_control" => Some(Self::MissionControl),
+            "scheduled_tasks" => Some(Self::ScheduledTasks),
             _ => None,
         }
     }
@@ -1940,6 +2010,7 @@ impl Feature {
             Self::ProofPack => "proof_pack",
             Self::Mcp => "mcp",
             Self::MissionControl => "mission_control",
+            Self::ScheduledTasks => "scheduled_tasks",
         }
     }
 }
@@ -1954,5 +2025,7 @@ mod tests {
         assert_eq!(Capability::parse("edit"), Some(Capability::Edit));
         assert_eq!(Feature::parse("database"), Some(Feature::Database));
         assert_eq!(Feature::Database.as_str(), "database");
+        assert_eq!(Feature::parse("scheduled_tasks"), Some(Feature::ScheduledTasks));
+        assert_eq!(Feature::ScheduledTasks.as_str(), "scheduled_tasks");
     }
 }
