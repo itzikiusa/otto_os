@@ -20,6 +20,6 @@ pub use bridge::Bridge;
 pub use email::GmailSender;
 pub use http::{router, ChannelsCtx};
 pub use manager::ChannelManager;
-pub use mirror::Mirror;
+pub use mirror::{InteractionImprover, Mirror};
 pub use swarm_trigger::{LaunchAck, SwarmTrigger};
 pub use webhook::WebhookAdapter;

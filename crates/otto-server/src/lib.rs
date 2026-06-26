@@ -22,6 +22,7 @@ pub mod finding_context;
 pub mod goal_loop;
 pub mod goal_loop_parse;
 pub mod goal_loop_workspace;
+pub mod improve_channels;
 pub mod insights;
 pub mod login_throttle;
 pub mod lsp;

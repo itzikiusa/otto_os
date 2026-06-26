@@ -78,6 +78,9 @@ pub struct ChannelManager {
     /// Optional hook: an inbound message on a swarm-bound channel launches that
     /// swarm instead of starting a normal session. Injected by otto-server.
     pub swarm_trigger: Option<Arc<dyn crate::swarm_trigger::SwarmTrigger>>,
+    /// Optional hook: after a channel interaction finishes, run self-improvement
+    /// on it and reply in-thread. Injected by otto-server (owns the engine).
+    pub improver: Option<Arc<dyn crate::mirror::InteractionImprover>>,
 }
 
 impl ChannelManager {
@@ -99,12 +102,20 @@ impl ChannelManager {
             root_user_id,
             events,
             swarm_trigger: None,
+            improver: None,
         }
     }
 
     /// Wire the swarm-launch hook (otto-server provides the implementation).
     pub fn with_swarm_trigger(mut self, trigger: Arc<dyn crate::swarm_trigger::SwarmTrigger>) -> Self {
         self.swarm_trigger = Some(trigger);
+        self
+    }
+
+    /// Wire the self-improvement-on-interaction hook (otto-server provides the
+    /// implementation; `None` leaves the mirror unchanged).
+    pub fn with_improver(mut self, improver: Arc<dyn crate::mirror::InteractionImprover>) -> Self {
+        self.improver = Some(improver);
         self
     }
 
@@ -138,7 +149,7 @@ impl ChannelManager {
     async fn supervise(self, cancel: Arc<AtomicBool>) {
         // Shared mirror + bridge survive across generations so an in-flight
         // session keeps its channel mapping when adapters are respawned.
-        let mirror = Mirror::new(Arc::clone(&self.manager));
+        let mirror = Mirror::new_with_improver(Arc::clone(&self.manager), self.improver.clone());
         let bridge = Bridge::new_with_swarm_trigger(
             Arc::clone(&self.manager),
             self.workspaces.clone(),

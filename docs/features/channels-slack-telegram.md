@@ -119,17 +119,40 @@ What actually crosses the bridge — derived directly from `bridge.rs` and
    and submitted with Enter. Otto waits for the TUI to settle, then confirms the
    prompt was dispatched (re-sending Enter once if it wasn't).
 7. **Working feed.** The `Mirror` tails the agent transcript and posts a rolling
-   `🧠 working…` message that it **edits in place** as tool calls happen
-   (throttled to one edit per 2.5 s; trimmed to stay under the channel's message
-   limit). Telegram additionally shows a "typing…" indicator every 4 s.
-8. **Final reply.** On the agent's final message the feed is rewritten to
-   `🧠 done — N steps`, and the reply is posted:
+   message that it **edits in place** as tool calls happen (throttled to one edit
+   per 2.5 s; trimmed to stay under the channel's message limit). Telegram
+   additionally shows a "typing…" indicator every 4 s.
+   - **Liveness header.** The header rotates through "still working" phrases
+     (`🧠 Analyzing…` → `🧠 Summarizing findings…` → …) on a ~3.5 s timer, so the
+     user sees the agent is alive even during a long think with no tool calls
+     (Slack has no typing indicator — this is its only progress signal).
+   - **Home dir hidden.** File paths and shell commands shown in the feed have the
+     user's home directory abbreviated to `~` (`/Users/alice/.foo` → `~/.foo`), so
+     the trail never leaks the username (`transcript.rs::abbreviate_home`).
+   - **Terminal previews.** A shell (`Bash`) call renders the command as a
+     formatted code block under a `💻 terminal` label — a readable preview of the
+     call (a ``` fenced block on Slack; indented lines on Telegram, whose
+     in-place edits carry no parse mode), capped to ~8 lines / 500 chars.
+8. **Final reply.** On the agent's final message the feed is frozen to
+   `🧠 done — N steps` (the liveness rotation stops), and the reply is posted:
    - **Short reply** → posted inline (with channel-native formatting:
      Slack `mrkdwn`, Telegram legacy `Markdown`).
    - **Long reply** (> ~1800 chars) → a short head is posted and the full text is
      attached as `investigation.md`.
    - **Explicit file attachments** the agent wrote on disk are uploaded if it
      wraps the absolute path in `⟦otto-file⟧/abs/path⟦/otto-file⟧`.
+9. **Self-improvement on the interaction.** When self-improvement is enabled for
+   the workspace (`self_improvement.enabled`, and the daemon-level
+   `OTTO_SELF_IMPROVE` gate is on), Otto runs a single-interaction improvement
+   pass on the just-finished conversation and, if it changed anything, posts a
+   one-line summary back **in the same thread** (e.g.
+   `🛠️ Self-improvement: updated skill \`frb-grant-failure\``). The pass is
+   deduped per turn and stays silent on a no-op. Implemented as an injected
+   `InteractionImprover` hook (`otto-server::improve_channels`) so otto-channels
+   needs no dependency on the improvement engine. This is distinct from the
+   opt-in `channels.notify_self_improvement` notifier, which mirrors *all*
+   self-improvement events to the workspace's default chat. See
+   `./self-improvement.md`.
 
 **File attachments inbound:** **Slack** downloads every attached file (via
 `url_private`, authenticated with the bot token) to a local temp path and tells
@@ -527,7 +550,10 @@ is no dedicated channel WS event. See `docs/contracts/ws.md`.
 - Per-workspace Slack + Telegram bridges; live config edits (no restart).
 - One agent per conversation thread; reuse across follow-ups; clean re-spawn after
   idle/archive.
-- Rolling "working…" activity feed (edited in place), Telegram typing indicator.
+- Rolling activity feed (edited in place) with a rotating "still working" header,
+  home-dir-abbreviated paths, and formatted terminal-command previews; Telegram
+  typing indicator.
+- Self-improvement on a finished interaction, replied in-thread (when enabled).
 - Two reply modes (Otto-relays vs agent-marks-text); long-reply auto-attach.
 - Outbound file uploads (both channels) and inbound file download (Slack).
 - Allowed-users allow-list; local quick commands.

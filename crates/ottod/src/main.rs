@@ -568,11 +568,19 @@ async fn run(cfg: Config) -> Result<(), String> {
         });
     }
 
+    // Gated by OTTO_SELF_IMPROVE (enabled by default; 0/false/off disables it).
+    // Computed here so the channel manager can decide whether to wire the
+    // self-improvement-on-interaction hook below.
+    let self_improve_enabled = !matches!(
+        std::env::var("OTTO_SELF_IMPROVE").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    );
+
     // --- Channel Manager (Telegram-first, Slack-ready) ---
     // Spawns agent sessions on behalf of incoming channel messages as the root
     // user resolved above (None when onboarding hasn't created one yet → skip).
     let _channel_handle = if let Some(uid) = root_user_id {
-        let cm = ChannelManager::new(
+        let mut cm = ChannelManager::new(
             Arc::clone(&manager),
             workspaces.clone(),
             IntegrationsRepo::new(pool.clone()),
@@ -588,6 +596,19 @@ async fn run(cfg: Config) -> Result<(), String> {
         .with_swarm_trigger(std::sync::Arc::new(
             otto_server::swarm_channels::SwarmTriggerImpl { ctx: ctx.clone() },
         ));
+        // When self-improvement is on, learn from each finished channel
+        // interaction and reply with the result in the same thread (per-workspace
+        // `self_improvement.enabled` is re-checked inside the hook).
+        if self_improve_enabled {
+            cm = cm.with_improver(std::sync::Arc::new(
+                otto_server::improve_channels::InteractionImproverImpl::new(
+                    Arc::clone(&improve_engine),
+                    workspaces.clone(),
+                    SessionsRepo::new(pool.clone()),
+                    ImprovementsRepo::new(pool.clone()),
+                ),
+            ));
+        }
         let handle = cm.start().await;
         tracing::info!("channel manager: supervisor started (adapters track config live)");
         Some(handle)
@@ -612,13 +633,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     };
 
     // --- Self-improvement (scheduler + live skill evolver) ---
-    // Gated by OTTO_SELF_IMPROVE so it can be killed without a rebuild: enabled
-    // by default; set OTTO_SELF_IMPROVE=0 (or false/off) to disable both the
-    // per-workspace self-reflection scheduler and the live in-loop evolver.
-    let self_improve_enabled = !matches!(
-        std::env::var("OTTO_SELF_IMPROVE").as_deref(),
-        Ok("0") | Ok("false") | Ok("off")
-    );
+    // Gated by OTTO_SELF_IMPROVE (computed above): enabled by default; set
+    // OTTO_SELF_IMPROVE=0 (or false/off) to disable both the per-workspace
+    // self-reflection scheduler and the live in-loop evolver.
     let (_scheduler_handle, _live_evolver_handle) = if self_improve_enabled {
         // Background supervisor that fires due per-workspace self-reflection runs.
         let scheduler = Scheduler::new(Arc::clone(&improve_engine), workspaces.clone())

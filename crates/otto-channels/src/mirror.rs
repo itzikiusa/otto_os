@@ -17,11 +17,25 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use otto_core::domain::Channel;
 use otto_core::Id;
 use otto_sessions::SessionManager;
 
 use crate::adapter::Adapter;
 use crate::transcript::{self, TranscriptEvent};
+
+/// Hook that runs Otto's self-improvement on a just-finished channel
+/// interaction and returns a short human-readable summary to post back in the
+/// thread (e.g. "🛠️ Self-improvement: updated skill `frb-grant-failure`").
+///
+/// Injected by otto-server (which owns the improvement engine), mirroring the
+/// `SwarmTrigger` pattern — so otto-channels needs no dependency on otto-improve.
+/// Returns `None` when self-improvement is disabled for the workspace, nothing
+/// changed, or the interaction was too trivial to learn from.
+#[async_trait::async_trait]
+pub trait InteractionImprover: Send + Sync {
+    async fn evolve_interaction(&self, session_id: &Id) -> Option<String>;
+}
 
 /// Maximum number of activity lines to retain in the rolling feed. High so a
 /// long investigation (100+ tool calls) shows its full trail of steps.
@@ -45,6 +59,25 @@ const LONG_REPLY_THRESHOLD: usize = 1800;
 const LONG_REPLY_HEAD_CHARS: usize = 1500;
 /// How often to send the typing indicator while the agent is working.
 const TYPING_INTERVAL: Duration = Duration::from_secs(4);
+/// How often the rolling feed's header advances to the next liveness phrase
+/// while a turn is in progress. Kept above [`EDIT_THROTTLE`] so a status tick is
+/// always a legitimate (non-throttled) edit. Slack has no typing indicator, so
+/// this rotating header is the only "still working" signal there.
+const STATUS_TICK: Duration = Duration::from_millis(3500);
+
+/// Rotating "still working" phrases shown in the feed header (cycled on each
+/// [`STATUS_TICK`]). Generic by design — they signal liveness without claiming
+/// progress the mirror can't actually observe.
+const STATUS_PHRASES: &[&str] = &[
+    "Analyzing…",
+    "Looking into it…",
+    "Working through it…",
+    "Gathering context…",
+    "Reviewing the details…",
+    "Summarizing findings…",
+    "Finding answers…",
+    "Putting it together…",
+];
 
 struct SessionEntry {
     cancel: Arc<AtomicBool>,
@@ -61,6 +94,9 @@ struct SessionEntry {
 pub struct Mirror {
     sessions: Mutex<HashMap<Id, SessionEntry>>,
     manager: Arc<SessionManager>,
+    /// Optional self-improvement hook: when set, a finished channel turn is fed
+    /// to Otto's improvement engine and the result posted back in the thread.
+    improver: Option<Arc<dyn InteractionImprover>>,
 }
 
 impl Mirror {
@@ -68,6 +104,20 @@ impl Mirror {
         Arc::new(Self {
             sessions: Mutex::new(HashMap::new()),
             manager,
+            improver: None,
+        })
+    }
+
+    /// Builder variant that wires the self-improvement hook (otto-server provides
+    /// the implementation). `None` leaves the mirror's behaviour unchanged.
+    pub fn new_with_improver(
+        manager: Arc<SessionManager>,
+        improver: Option<Arc<dyn InteractionImprover>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            sessions: Mutex::new(HashMap::new()),
+            manager,
+            improver,
         })
     }
 
@@ -197,121 +247,156 @@ impl Mirror {
             });
         }
 
-        // Process events: maintain a rolling "🧠 working…" feed of the agent's
-        // steps (edited in place), plus a typing indicator; on Final, rewrite to
-        // "done — N steps" and (unless agent_reply) post the reply text.
+        // Process events: maintain a rolling feed of the agent's steps (edited in
+        // place) whose header rotates through "still working" phrases on a timer
+        // so the user sees liveness even during a long think with no tool calls
+        // (Slack has no typing indicator). On Final, freeze the header to
+        // "done — N steps", post the reply, and run self-improvement if wired.
         let mut activity_lines: Vec<String> = Vec::new();
         let mut rolling_msg_id: Option<String> = None;
         let mut last_edit = Instant::now() - EDIT_THROTTLE * 2; // allow first edit immediately
         let mut last_posted_final: Option<String> = None;
+        let mut status_idx: usize = 0;
         let thread_ref = thread.as_deref();
+        // Slack renders mrkdwn (``` code fences) in chat.update text; Telegram's
+        // in-place edit carries no parse mode, so fences would show literally —
+        // there the command preview is rendered as plain indented lines instead.
+        let code_blocks = matches!(adapter.channel(), Channel::Slack);
 
-        while let Some(evt) = rx.recv().await {
+        // Liveness ticker: advances the header phrase while a turn is in flight.
+        let mut status_ticker = tokio::time::interval(STATUS_TICK);
+        status_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             // A new inbound comment starts a fresh turn: reset the feed so the
             // next activity posts a NEW "working…" message (rather than editing
-            // the previous turn's), and resume the typing indicator.
+            // the previous turn's), resume the rotating status, and resume typing.
             if new_turn.swap(false, Ordering::Relaxed) {
                 rolling_msg_id = None;
                 activity_lines.clear();
                 last_posted_final = None;
+                status_idx = 0;
+                last_edit = Instant::now() - EDIT_THROTTLE * 2; // post the new turn's first update at once
                 typing_active.store(true, Ordering::Relaxed);
             }
-            match evt {
-                TranscriptEvent::Tool {
-                    name: _,
-                    display: display_line,
-                } => {
-                    debug!(
-                        session = %session_id,
-                        activity = display_line.as_str(),
-                        "mirror: transcript tool event"
-                    );
-                    activity_lines.push(display_line);
-                    if activity_lines.len() > MAX_ACTIVITY_LINES {
-                        activity_lines.remove(0);
+
+            tokio::select! {
+                maybe_evt = rx.recv() => {
+                    let Some(evt) = maybe_evt else { break; };
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
                     }
-                    if last_edit.elapsed() >= EDIT_THROTTLE {
-                        last_edit = Instant::now();
-                        let body = render_feed("🧠 working…", &activity_lines);
-                        match rolling_msg_id.as_deref() {
-                            None => match adapter.send(&chat, thread_ref, &body).await {
-                                Ok(mid) => rolling_msg_id = Some(mid),
-                                Err(e) => warn!("mirror send: {e}"),
-                            },
-                            Some(mid) => {
-                                if let Err(e) = adapter.edit(&chat, mid, &body).await {
-                                    warn!("mirror edit: {e}");
+                    match evt {
+                        TranscriptEvent::Tool { name: _, display: display_line, code } => {
+                            let line = render_tool_line(&display_line, code.as_deref(), code_blocks);
+                            debug!(
+                                session = %session_id,
+                                activity = display_line.as_str(),
+                                "mirror: transcript tool event"
+                            );
+                            activity_lines.push(line);
+                            if activity_lines.len() > MAX_ACTIVITY_LINES {
+                                activity_lines.remove(0);
+                            }
+                            if last_edit.elapsed() >= EDIT_THROTTLE {
+                                last_edit = Instant::now();
+                                let body = render_feed(&status_header(status_idx), &activity_lines);
+                                post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await;
+                            }
+                        }
+                        TranscriptEvent::Final { text } => {
+                            info!(
+                                session = %session_id,
+                                chars = text.chars().count(),
+                                steps = activity_lines.len(),
+                                agent_reply,
+                                "mirror: transcript final event"
+                            );
+                            // Turn finished — pause typing + status rotation until
+                            // the next comment resumes it (via begin_turn).
+                            typing_active.store(false, Ordering::Relaxed);
+
+                            // Freeze the rolling feed to a final "done — N steps".
+                            let n = activity_lines.len();
+                            let header = format!("🧠 done — {n} step{}", if n == 1 { "" } else { "s" });
+                            let done_body = render_feed(&header, &activity_lines);
+                            last_edit = Instant::now();
+                            post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &done_body).await;
+
+                            // Otto posts the reply itself via the adapter (the bot that
+                            // received the message) — the agent never uses .env/tokens.
+                            // With agent_reply on, send only the agent's ⟦otto-send⟧
+                            // blocks if it marked any; otherwise (and when off) send the
+                            // whole final message. Dedup repeated Final events.
+                            let messages: Vec<String> = {
+                                let blocks = if agent_reply {
+                                    extract_send_blocks(&text)
+                                } else {
+                                    Vec::new()
+                                };
+                                if blocks.is_empty() {
+                                    vec![text.clone()]
+                                } else {
+                                    blocks
+                                }
+                            };
+                            // Explicit file attachments the agent requested via
+                            // ⟦otto-file⟧<abs path>⟦/otto-file⟧ — extracted from the full
+                            // text so it works whether or not it sits inside a send
+                            // block, and the markup is stripped from the posted text.
+                            let file_paths = extract_file_paths(&text);
+                            let joined = messages.join("\u{1e}");
+                            if last_posted_final.as_deref() != Some(joined.as_str()) {
+                                for body in &messages {
+                                    let cleaned = strip_file_directives(body);
+                                    let cleaned = cleaned.trim();
+                                    if !cleaned.is_empty() {
+                                        post_reply(&adapter, &chat, thread_ref, cleaned).await;
+                                    }
+                                }
+                                for path in &file_paths {
+                                    upload_file_path(&adapter, &chat, thread_ref, path).await;
+                                }
+                                last_posted_final = Some(joined);
+
+                                // Self-improvement: learn from this just-finished
+                                // interaction and reply in-thread (spawned so the
+                                // slow evolve never stalls the tailer). No-op when
+                                // no improver is wired / self-improvement is off.
+                                if let Some(improver) = self.improver.clone() {
+                                    let adapter2 = Arc::clone(&adapter);
+                                    let chat2 = chat.clone();
+                                    let thread2 = thread.clone();
+                                    let sid2 = session_id.clone();
+                                    tokio::spawn(async move {
+                                        if let Some(summary) = improver.evolve_interaction(&sid2).await {
+                                            post_reply(&adapter2, &chat2, thread2.as_deref(), &summary).await;
+                                        }
+                                    });
                                 }
                             }
                         }
                     }
                 }
-                TranscriptEvent::Final { text } => {
-                    info!(
-                        session = %session_id,
-                        chars = text.chars().count(),
-                        steps = activity_lines.len(),
-                        agent_reply,
-                        "mirror: transcript final event"
-                    );
-                    // Turn finished — pause the typing indicator until the next
-                    // comment resumes it (via begin_turn).
-                    typing_active.store(false, Ordering::Relaxed);
-
-                    // Rewrite the rolling feed to a final "done — N steps".
-                    let n = activity_lines.len();
-                    let header = format!("🧠 done — {n} step{}", if n == 1 { "" } else { "s" });
-                    let done_body = render_feed(&header, &activity_lines);
-                    match rolling_msg_id.as_deref() {
-                        None => match adapter.send(&chat, thread_ref, &done_body).await {
-                            Ok(mid) => rolling_msg_id = Some(mid),
-                            Err(e) => warn!("mirror done-send: {e}"),
-                        },
-                        Some(mid) => {
-                            if let Err(e) = adapter.edit(&chat, mid, &done_body).await {
-                                warn!("mirror done-edit: {e}");
-                            }
-                        }
+                _ = status_ticker.tick() => {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
                     }
-
-                    // Otto posts the reply itself via the adapter (the bot that
-                    // received the message) — the agent never uses .env/tokens.
-                    // With agent_reply on, send only the agent's ⟦otto-send⟧
-                    // blocks if it marked any; otherwise (and when off) send the
-                    // whole final message. Dedup repeated Final events.
-                    let messages: Vec<String> = {
-                        let blocks = if agent_reply {
-                            extract_send_blocks(&text)
-                        } else {
-                            Vec::new()
-                        };
-                        if blocks.is_empty() {
-                            vec![text.clone()]
-                        } else {
-                            blocks
+                    // While the turn is live, refresh the header (creating the feed
+                    // even before the first tool call so a long opening think still
+                    // shows "Analyzing…"), then advance the phrase for next time.
+                    // `interval`'s first tick fires immediately, so rendering before
+                    // the increment makes "Analyzing…" (idx 0) the opening phrase.
+                    if typing_active.load(Ordering::Relaxed) {
+                        if last_edit.elapsed() >= EDIT_THROTTLE {
+                            last_edit = Instant::now();
+                            let body = render_feed(&status_header(status_idx), &activity_lines);
+                            post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await;
                         }
-                    };
-                    // Explicit file attachments the agent requested via
-                    // ⟦otto-file⟧<abs path>⟦/otto-file⟧ — extracted from the full
-                    // text so it works whether or not it sits inside a send
-                    // block, and the markup is stripped from the posted text.
-                    let file_paths = extract_file_paths(&text);
-                    let joined = messages.join("\u{1e}");
-                    if last_posted_final.as_deref() != Some(joined.as_str()) {
-                        for body in &messages {
-                            let cleaned = strip_file_directives(body);
-                            let cleaned = cleaned.trim();
-                            if !cleaned.is_empty() {
-                                post_reply(&adapter, &chat, thread_ref, cleaned).await;
-                            }
-                        }
-                        for path in &file_paths {
-                            upload_file_path(&adapter, &chat, thread_ref, path).await;
-                        }
-                        last_posted_final = Some(joined);
+                        status_idx = status_idx.wrapping_add(1);
                     }
                 }
             }
@@ -352,6 +437,55 @@ impl Mirror {
     pub async fn cancel(&self, session_id: &Id) {
         if let Some(entry) = self.sessions.lock().await.get(session_id) {
             entry.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The rolling-feed header for liveness phrase `idx` (cycled through
+/// [`STATUS_PHRASES`]). Prefixed with 🧠 to match the "done" header's style.
+fn status_header(idx: usize) -> String {
+    let phrase = STATUS_PHRASES[idx % STATUS_PHRASES.len()];
+    format!("🧠 {phrase}")
+}
+
+/// Render one tool step for the feed. A plain step is its `display` line; a step
+/// with a `code` preview (a terminal command) renders the command beneath the
+/// label — as a ``` fenced block when the channel renders mrkdwn (`code_blocks`)
+/// or as indented plain lines otherwise (Telegram's in-place edit has no parse
+/// mode, so a literal fence would just be noise).
+fn render_tool_line(display: &str, code: Option<&str>, code_blocks: bool) -> String {
+    match code {
+        None => display.to_string(),
+        Some(cmd) if code_blocks => format!("{display}\n```\n{cmd}\n```"),
+        Some(cmd) => {
+            let indented = cmd
+                .lines()
+                .map(|l| format!("    {l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{display}\n{indented}")
+        }
+    }
+}
+
+/// Post `body` as a new rolling-feed message, or edit the existing one in place.
+/// Best-effort: send/edit failures are logged and swallowed.
+async fn post_or_edit_feed(
+    adapter: &Arc<dyn Adapter>,
+    chat: &str,
+    thread: Option<&str>,
+    rolling_msg_id: &mut Option<String>,
+    body: &str,
+) {
+    match rolling_msg_id.as_deref() {
+        None => match adapter.send(chat, thread, body).await {
+            Ok(mid) => *rolling_msg_id = Some(mid),
+            Err(e) => warn!("mirror feed send: {e}"),
+        },
+        Some(mid) => {
+            if let Err(e) = adapter.edit(chat, mid, body).await {
+                warn!("mirror feed edit: {e}");
+            }
         }
     }
 }
@@ -513,6 +647,44 @@ mod tests {
     fn render_feed_short_is_verbatim() {
         let lines = vec!["one".to_string(), "two".to_string()];
         assert_eq!(render_feed("🧠 working…", &lines), "🧠 working…\none\ntwo");
+    }
+
+    #[test]
+    fn status_header_cycles_through_phrases() {
+        // First phrase, and wraps around after the last.
+        assert_eq!(status_header(0), format!("🧠 {}", STATUS_PHRASES[0]));
+        assert_eq!(
+            status_header(STATUS_PHRASES.len()),
+            format!("🧠 {}", STATUS_PHRASES[0])
+        );
+        assert_eq!(
+            status_header(STATUS_PHRASES.len() + 1),
+            format!("🧠 {}", STATUS_PHRASES[1])
+        );
+    }
+
+    #[test]
+    fn render_tool_line_plain_step_is_just_the_display() {
+        assert_eq!(render_tool_line("📖 read: ~/x.md", None, true), "📖 read: ~/x.md");
+    }
+
+    #[test]
+    fn render_tool_line_terminal_uses_fenced_block_on_slack() {
+        // Slack (code_blocks=true) → command rendered as a ``` fenced block so it
+        // shows as a bordered code preview, matching the reference design.
+        assert_eq!(
+            render_tool_line("💻 terminal", Some("python ~/app.py"), true),
+            "💻 terminal\n```\npython ~/app.py\n```"
+        );
+    }
+
+    #[test]
+    fn render_tool_line_terminal_indents_on_plain_channel() {
+        // Telegram (code_blocks=false) → indented plain lines, no literal fences.
+        assert_eq!(
+            render_tool_line("💻 terminal", Some("cd ~/app\nmake build"), false),
+            "💻 terminal\n    cd ~/app\n    make build"
+        );
     }
 
     #[test]
