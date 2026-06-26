@@ -215,6 +215,62 @@ instead of waiting for the next timed tick.
   `ui/src/lib/api/types.ts` as `{ type: 'review_changed'; workspace_id: string;
   session_id?: string | null; review_id: string; status: string }`.
 
+## Review findings workflow (finding_updated / finding_action_started / proof_pack_exported)
+
+Workspace-scoped. Emitted by `crates/otto-server/src/routes/{findings,proof_pack}.rs`
+as the Review Findings workflow advances. The `FindingsBoard.svelte` board
+subscribes to all three (routed through the `findingBus` in
+`ui/src/lib/events.svelte.ts`) and refetches the matching review's findings — the
+same pattern `review_changed` uses to drive the Review panel.
+
+**`finding_updated`** — a finding's workflow `status` (or a tracked field) changed,
+emitted after every triage action / transition:
+
+```json
+{
+  "type": "finding_updated",
+  "workspace_id": "<Id>",
+  "review_id": "<review_id>",
+  "finding_id": "<finding_id>",
+  "status": "open|accepted|false_positive|fixed|verified|waived"
+}
+```
+
+**`finding_action_started`** — an agent-backed action (fix / verify /
+regression-test) spawned a live, openable session:
+
+```json
+{
+  "type": "finding_action_started",
+  "workspace_id": "<Id>",
+  "review_id": "<review_id>",
+  "finding_id": "<finding_id>",
+  "action": "fix|verify|regression_test",
+  "session_id": "<session_id | null>"
+}
+```
+
+**`proof_pack_exported`** — a review's Proof Pack was exported (a snapshot
+persisted + verified findings ingested into memory):
+
+```json
+{
+  "type": "proof_pack_exported",
+  "workspace_id": "<Id>",
+  "review_id": "<review_id>",
+  "proof_pack_id": "<proof_pack_id>"
+}
+```
+
+- `status` (finding_updated) — the new `FindingStatus` (snake_case).
+- `session_id` (finding_action_started) — the spawned agent session; omitted/`null`
+  when the action ran without one.
+- UI routing: `finding_updated`/`finding_action_started`/`proof_pack_exported` are
+  routed into `findingBus.apply(...)`; `FindingsBoard` re-fetches
+  `GET /reviews/{id}/findings` when the event's `review_id` matches the open board.
+- TypeScript types: added to the `OttoEvent` discriminated union in
+  `ui/src/lib/api/types.ts`.
+
 ## Goal-loop progress (Goal Loops)
 
 Workspace-scoped. Emitted by `crates/otto-server/src/goal_loop.rs` on every loop

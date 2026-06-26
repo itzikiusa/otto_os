@@ -11,6 +11,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
+  import FindingsBoard from './FindingsBoard.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
 
   interface Props {
@@ -357,6 +358,15 @@
     </div>
   {:else}
     <!-- done -->
+    <!-- Findings workflow board: persisted Finding rows with the 6-state status,
+         the 7 triage actions, and the Proof Pack. -->
+    {#if ws.currentId}
+      <div class="lrp-findings-section">
+        <h3 class="lrp-findings-title">Findings</h3>
+        <FindingsBoard reviewId={review.id} workspaceId={ws.currentId} />
+      </div>
+    {/if}
+
     <!-- Per-agent breakdown: open each agent's session + its own findings,
          shared with the PR review (same Open / Retry). -->
     {#if review.agents.length > 1}
@@ -485,6 +495,18 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  /* Findings workflow board section */
+  .lrp-findings-section {
+    margin: 4px 0 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .lrp-findings-title {
+    font-size: 12.5px;
+    font-weight: 600;
+    margin: 0 0 4px;
   }
 
   /* Toolbar */

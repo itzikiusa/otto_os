@@ -14,6 +14,12 @@ import type {
   ImportScanResult,
   ImportCreateReq,
   ImportCreateResult,
+  Finding,
+  FindingDetail,
+  FindingActionResp,
+  RepoRule,
+  ReviewProofPack,
+  ReviewProofPackExport,
 } from './types';
 import { serviceHealth } from '../stores/serviceHealth.svelte';
 
@@ -303,6 +309,111 @@ export function importScan(wsId: string, source: ImportSource): Promise<ImportSc
 /** Best-effort batch-create the chosen connections (POST …/import/create). */
 export function importCreate(wsId: string, body: ImportCreateReq): Promise<ImportCreateResult> {
   return api.post<ImportCreateResult>(`/workspaces/${wsId}/connections/import/create`, body);
+}
+
+// --- Review findings workflow ----------------------------------------------
+//
+// The multi-agent code review persists each finding as a tracked workflow
+// record (6-state `status` + immutable event trail). These mirror the
+// `/findings/*`, `/repo-rules/*`, and `/reviews/{id}/proof-pack*` endpoints
+// (see crates/otto-server/src/routes/{findings,repo_rules,proof_pack}.rs).
+
+/** List all persistent workflow findings for a completed review. */
+export function listFindings(reviewId: string): Promise<Finding[]> {
+  return api.get<Finding[]>(`/reviews/${reviewId}/findings`);
+}
+
+/** Fetch one finding with its full event timeline. */
+export function getFinding(id: string): Promise<FindingDetail> {
+  return api.get<FindingDetail>(`/findings/${id}`);
+}
+
+/** Accept an open finding (open → accepted). */
+export function acceptFinding(id: string): Promise<Finding> {
+  return api.post<Finding>(`/findings/${id}/accept`);
+}
+
+/** Waive a finding (→ waived). */
+export function waiveFinding(id: string, reason?: string): Promise<Finding> {
+  return api.post<Finding>(`/findings/${id}/waive`, { reason });
+}
+
+/** Mark a finding a false positive (→ false_positive). */
+export function falsePositiveFinding(id: string, reason?: string): Promise<Finding> {
+  return api.post<Finding>(`/findings/${id}/false-positive`, { reason });
+}
+
+/** Flag a finding as needing human sign-off (sets the approval gate). */
+export function requireApprovalFinding(id: string): Promise<Finding> {
+  return api.post<Finding>(`/findings/${id}/require-approval`);
+}
+
+/** Resolve the approval gate. `approve` clears it (open → accepted); `reject` → false_positive. */
+export function approveFinding(
+  id: string,
+  decision: 'approve' | 'reject',
+  note?: string,
+): Promise<Finding> {
+  return api.post<Finding>(`/findings/${id}/approve`, { decision, note });
+}
+
+/** Create a Jira issue from a finding. 400 `{code:'invalid'}` when no Jira account is configured. */
+export function findingToJira(
+  id: string,
+  body: { project_key: string; issue_type?: string; account_id?: string },
+): Promise<Finding> {
+  return api.post<Finding>(`/findings/${id}/jira`, body);
+}
+
+/** Generalize a finding into a durable repo rule (fed into the Context Engine). */
+export function findingToRepoRule(
+  id: string,
+  body?: { title?: string; body?: string; glob?: string },
+): Promise<RepoRule> {
+  return api.post<RepoRule>(`/findings/${id}/repo-rule`, body ?? {});
+}
+
+/** Spawn a fix agent for a finding (open|accepted → accepted; commit → fixed). */
+export function fixFinding(id: string): Promise<FindingActionResp> {
+  return api.post<FindingActionResp>(`/findings/${id}/fix`);
+}
+
+/** Verify a finding is resolved (accepted|fixed|verified → verified on pass). */
+export function verifyFinding(id: string): Promise<FindingActionResp> {
+  return api.post<FindingActionResp>(`/findings/${id}/verify`);
+}
+
+/** Spawn an agent to add a regression test (sets `linked_test`). */
+export function regressionTestFinding(id: string): Promise<FindingActionResp> {
+  return api.post<FindingActionResp>(`/findings/${id}/regression-test`);
+}
+
+/** List the workspace's repo rules. */
+export function listRepoRules(wsId: string): Promise<RepoRule[]> {
+  return api.get<RepoRule[]>(`/workspaces/${wsId}/repo-rules`);
+}
+
+/** Enable/disable a repo rule (re-materializes the workspace's rules block). */
+export function toggleRepoRule(id: string, enabled: boolean): Promise<RepoRule> {
+  return api.post<RepoRule>(`/repo-rules/${id}/toggle`, { enabled });
+}
+
+/** Delete a repo rule. */
+export function deleteRepoRule(id: string): Promise<void> {
+  return api.del<void>(`/repo-rules/${id}`);
+}
+
+/** Assemble the live Proof Pack for a review (summary + per-finding evidence). */
+export function getProofPack(reviewId: string): Promise<ReviewProofPack> {
+  return api.get<ReviewProofPack>(`/reviews/${reviewId}/proof-pack`);
+}
+
+/** Persist a Proof Pack snapshot (markdown) + ingest verified findings into memory. */
+export function exportProofPack(
+  reviewId: string,
+  format?: string,
+): Promise<ReviewProofPackExport> {
+  return api.post<ReviewProofPackExport>(`/reviews/${reviewId}/proof-pack/export`, { format });
 }
 
 /** Build a WS URL with the auth token, e.g. wsUrl('/ws/term/SESSION_ID'). */
