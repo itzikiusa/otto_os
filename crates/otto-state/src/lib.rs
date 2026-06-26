@@ -41,6 +41,7 @@ pub mod repo_rules;
 pub mod review_findings;
 pub mod review_proof_packs;
 pub mod reviews;
+pub mod runs;
 pub mod saved_views;
 pub mod scheduled_tasks;
 pub mod sessions;
@@ -80,6 +81,9 @@ pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::GrantsRepo;
 pub use name_themes::{CustomTheme, NameThemesRepo};
 pub use proof::ProofRepo;
+// NewRun/RunPatch/NewRunEvent are referenced via the `runs::` path downstream to
+// avoid colliding with swarm's `RunPatch`/`RunFilter` re-exports.
+pub use runs::RunsRepo;
 pub use scheduled_tasks::{
     NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
 };

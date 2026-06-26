@@ -34,6 +34,7 @@ pub fn risk(kind: WorkKind, title: &str) -> RiskLevel {
         | WorkKind::Pr
         | WorkKind::Session
         | WorkKind::ExternalTrigger
+        | WorkKind::OttoRun
         | WorkKind::Review => RiskLevel::Medium,
         WorkKind::Workflow | WorkKind::ProductStory => RiskLevel::Low,
     }

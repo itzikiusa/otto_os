@@ -48,6 +48,7 @@ str_enum!(
         ProductStory => "product_story",
         Pr => "pr",
         ExternalTrigger => "external_trigger",
+        OttoRun => "otto_run",
     }
 );
 
@@ -180,6 +181,16 @@ impl WorkStatus {
             ProductStory => match r.as_str() {
                 "done" | "closed" | "shipped" | "released" => Done,
                 "blocked" => Blocked,
+                _ => Running,
+            },
+            OttoRun => match r.as_str() {
+                "queued" => Pending,
+                "awaiting_approval" => Waiting,
+                "completed" => Succeeded,
+                "failed" => Failed,
+                "rejected" | "cancelled" => Cancelled,
+                // resolving_source/building_context/provisioning/executing/
+                // proving/reviewing/drafting_pr are all "actively working".
                 _ => Running,
             },
         }
