@@ -177,6 +177,7 @@ async fn clickhouse_completion() {
 
     let ctx = CompletionContext {
         prefix: String::new(),
+        suffix: String::new(),
         database: Some("analytics".into()),
         node: None,
     };
@@ -199,6 +200,38 @@ async fn clickhouse_completion() {
             .any(|i| i.kind == CompletionKind::Table && i.label == "events"),
         "completion should include table events"
     );
+}
+
+/// In a `WHERE`, ORDER BY / primary-key columns (`event_type`, `ts`) rank above
+/// the non-key columns (`path`, `user_id`) — ClickHouse "indexes first".
+#[tokio::test]
+#[ignore]
+async fn clickhouse_completion_where_primary_key_first() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = ClickhouseDriver::default();
+    let cfg = cfg();
+    let ctx = CompletionContext {
+        prefix: "SELECT * FROM events WHERE ".into(),
+        suffix: String::new(),
+        database: Some("analytics".into()),
+        node: None,
+    };
+    let comp = d.completion(&cfg, &ctx).await.expect("completion");
+    let score = |label: &str| {
+        comp.items
+            .iter()
+            .find(|i| i.kind == CompletionKind::Column && i.label == label)
+            .unwrap_or_else(|| panic!("missing column {label}: {:?}", comp.items))
+            .score
+            .unwrap_or(0)
+    };
+    assert!(
+        score("event_type") > score("path"),
+        "primary-key column should rank above a plain column"
+    );
+    assert!(score("ts") > score("user_id"), "ts is in the ORDER BY key");
 }
 
 /// The session time zone is applied: an `Europe/Amsterdam` profile makes

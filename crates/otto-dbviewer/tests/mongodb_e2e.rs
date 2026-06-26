@@ -100,8 +100,8 @@ async fn mongo_schema_tree() {
     );
 }
 
-/// object_detail of customers: a unique index (on email). Row count is
-/// intentionally not reported (no estimated counts).
+/// object_detail of customers: a unique index (on email) and the exact
+/// collStats document count as `row_count`.
 #[tokio::test]
 #[ignore]
 async fn mongo_object_detail() {
@@ -125,9 +125,12 @@ async fn mongo_object_detail() {
         detail.indexes.iter().any(|i| i.unique),
         "customers should have a unique index (on email)"
     );
-    assert!(
-        detail.row_count.is_none(),
-        "customers row_count should be None (no estimated counts), got {:?}",
+    // object_detail reports the exact collStats count for a collection (cheap +
+    // exact in Mongo, unlike SQL's opt-in estimates); the seed has 4 customers.
+    assert_eq!(
+        detail.row_count,
+        Some(4),
+        "customers row_count should be the collStats count (4), got {:?}",
         detail.row_count
     );
 }
@@ -185,6 +188,7 @@ async fn mongo_completion() {
 
     let ctx = CompletionContext {
         prefix: "$".into(),
+        suffix: String::new(),
         database: Some("shopdb".into()),
         node: Some("db:shopdb/coll:customers".into()),
     };
@@ -202,5 +206,115 @@ async fn mongo_completion() {
             .iter()
             .any(|i| i.label == "customers" && i.kind == CompletionKind::Collection),
         "completion should include Collection customers"
+    );
+}
+
+/// `db.` offers collections; `db.orders.` offers methods (find/aggregate).
+#[tokio::test]
+#[ignore]
+async fn mongo_completion_collection_and_method() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MongoDriver::default();
+    let cfg = cfg();
+
+    let coll_ctx = CompletionContext {
+        prefix: "db.".into(),
+        suffix: String::new(),
+        database: Some("shopdb".into()),
+        node: None,
+    };
+    let c = d.completion(&cfg, &coll_ctx).await.expect("completion");
+    assert!(
+        c.items.iter().any(|i| i.label == "orders" && i.kind == CompletionKind::Collection),
+        "db. should list collections"
+    );
+    assert!(
+        !c.items.iter().any(|i| i.kind == CompletionKind::Command),
+        "db. is not a method position"
+    );
+
+    let method_ctx = CompletionContext {
+        prefix: "db.orders.".into(),
+        suffix: String::new(),
+        database: Some("shopdb".into()),
+        node: None,
+    };
+    let m = d.completion(&cfg, &method_ctx).await.expect("completion");
+    assert!(
+        m.items.iter().any(|i| i.label == "find" && i.kind == CompletionKind::Command),
+        "db.orders. should offer methods"
+    );
+}
+
+/// Inside `db.orders.find({ ` the indexed fields (`_id`, `customerId`, `status`)
+/// rank above plain ones.
+#[tokio::test]
+#[ignore]
+async fn mongo_completion_fields_index_first() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MongoDriver::default();
+    let cfg = cfg();
+    let ctx = CompletionContext {
+        prefix: "db.orders.find({ ".into(),
+        suffix: String::new(),
+        database: Some("shopdb".into()),
+        node: None,
+    };
+    let c = d.completion(&cfg, &ctx).await.expect("completion");
+    let field = |label: &str| {
+        c.items
+            .iter()
+            .find(|i| i.kind == CompletionKind::Field && i.label == label)
+            .unwrap_or_else(|| panic!("missing field {label}: {:?}", c.items))
+            .score
+            .unwrap_or(0)
+    };
+    assert!(field("customerId") > field("totalCents"), "indexed field ranks first");
+    assert!(field("status") > field("totalCents"), "indexed field ranks first");
+}
+
+/// Embedded-field support: `db.profiles.find({ ` offers the parent `address`
+/// AND the indexed embedded path `address.city`, both ranked as indexes.
+#[tokio::test]
+#[ignore]
+async fn mongo_completion_embedded_paths() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MongoDriver::default();
+    let cfg = cfg();
+    let ctx = CompletionContext {
+        prefix: "db.profiles.find({ ".into(),
+        suffix: String::new(),
+        database: Some("shopdb".into()),
+        node: None,
+    };
+    let c = d.completion(&cfg, &ctx).await.expect("completion");
+    let labels: Vec<&str> = c
+        .items
+        .iter()
+        .filter(|i| i.kind == CompletionKind::Field)
+        .map(|i| i.label.as_str())
+        .collect();
+    assert!(labels.contains(&"address"), "parent path offered: {labels:?}");
+    assert!(
+        labels.contains(&"address.city"),
+        "indexed embedded path offered: {labels:?}"
+    );
+    // The indexed embedded path out-ranks a plain leaf like `address.zip`.
+    let score = |label: &str| {
+        c.items
+            .iter()
+            .find(|i| i.kind == CompletionKind::Field && i.label == label)
+            .map(|i| i.score.unwrap_or(0))
+            .unwrap_or(i32::MIN)
+    };
+    assert!(
+        score("address.city") > score("prefs.theme"),
+        "indexed embedded path ranks above a plain embedded path"
     );
 }

@@ -184,6 +184,10 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         )
         .route("/connections/{id}/db/cancel", post(cancel_query::<S>))
         .route("/connections/{id}/db/completion", post(completion::<S>))
+        .route(
+            "/connections/{id}/db/completion/refresh",
+            post(refresh_completion::<S>),
+        )
         .route("/connections/{id}/db/import", post(import_query::<S>))
         .route("/connections/{id}/db/nl-to-sql", post(nl_to_sql::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
@@ -788,6 +792,19 @@ async fn completion<S: DbViewerCtx>(
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
     Ok(Json(ctx.db().completion(&id, &req).await?).into_response())
+}
+
+/// Clear the cached completion snapshot for a connection so the next completion
+/// re-introspects. Called by the UI's "Refresh schema" action.
+async fn refresh_completion<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
+    ctx.db().refresh_completion_cache(&id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn history<S: DbViewerCtx>(

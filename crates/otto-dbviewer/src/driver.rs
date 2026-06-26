@@ -86,6 +86,12 @@ pub trait Driver: Send + Sync {
         ctx: &CompletionContext,
     ) -> Result<CompletionResponse>;
 
+    /// Drop any cached completion snapshot for this connection so the next
+    /// completion re-introspects the live schema. Called when the user refreshes
+    /// the connection. The default is a no-op (engines without a snapshot cache,
+    /// e.g. Redis, keep nothing to clear).
+    async fn invalidate_completion_cache(&self, _cfg: &ResolvedConfig) {}
+
     /// Stream a (potentially huge) **uncapped** read result to a local file at
     /// `dest`, in `format`, with **bounded daemon memory** — pull one row/chunk
     /// at a time from the engine's native cursor/stream and write it straight to a

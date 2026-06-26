@@ -10,6 +10,7 @@
 //!   tunnel, dispatches to the driver, records history.
 //! - [`http`] — the REST router (`api_router`) + [`http::DbViewerCtx`].
 
+pub mod complete;
 pub mod config;
 pub mod driver;
 pub mod drivers;
