@@ -1680,7 +1680,7 @@ loops, workflow runs, PR reviews, product stories, PRs, channel triggers)
 projected into one traceable model — `work_items` linked by `work_edges`, each
 carrying a `work_events` audit trail, `work_artifacts` (evidence/trace), and
 `work_approvals` (human gates). Items are materialized by the
-`workgraph_projector` (subscribes to the event bus + a 60 s reconcile/backfill;
+`workgraph_projector` (subscribes to the event bus + a periodic reconcile/backfill;
 no module rewiring). The API is read-mostly; writes are human annotation
 (risk/goal/result), manual edges, approvals, and a re-derive backfill. Gated by
 `Feature::MissionControl` (read=View, write=Edit) plus the workspace-role axis.
@@ -1702,3 +1702,51 @@ Persistence: `otto_state::workgraph` (`WorkGraphRepo`); live signal:
 | 121 | POST /api/v1/workspaces/{wid}/workgraph/items/{id}/approvals | mission_control edit | `{reason?}` | WorkApproval (pending) |
 | 122 | POST /api/v1/workspaces/{wid}/workgraph/approvals/{aid}/decide | mission_control edit | `{decision: approved\|rejected, note?}` | WorkApproval |
 | 123 | POST /api/v1/workspaces/{wid}/workgraph/backfill | mission_control edit | — | `{ok, summary: MissionSummary}` |
+
+## MCP Control Plane
+
+Governs registered MCP servers/tools (`Feature::Mcp`) and exposes Otto outward as an
+MCP server. RBAC: reads/previews = `mcp:view`, mutations/invoke = `mcp:edit`,
+posture changes (policy writes/import, outward-server config, approval decisions) =
+`mcp:admin`. Registering a `stdio` (command-spawning) server additionally requires
+`mcp:admin` in-handler (it runs a command as the daemon). Flat by-id routes also
+enforce the entity's workspace role.
+
+| # | Method + Path | Role | Body | Response |
+|---|---|---|---|---|
+| CP1 | GET /api/v1/workspaces/{wid}/mcp/servers | mcp:view + ws viewer | — | `McpServerDetail[]` |
+| CP2 | POST /api/v1/workspaces/{wid}/mcp/servers | mcp:edit + ws editor (stdio→mcp:admin) | CreateServerReq | McpServerDetail |
+| CP3 | GET /api/v1/mcp/servers/{id} | mcp:view + ws viewer | — | `{server, tools}` |
+| CP4 | PATCH /api/v1/mcp/servers/{id} | mcp:edit + ws editor | UpdateServerReq | McpServerDetail |
+| CP5 | DELETE /api/v1/mcp/servers/{id} | mcp:edit + ws editor | — | 204 |
+| CP6 | POST /api/v1/mcp/servers/{id}/health | mcp:edit + ws editor | — | McpServerDetail (health probed) |
+| CP7 | POST /api/v1/mcp/servers/{id}/discover | mcp:edit + ws editor | — | `McpTool[]` (tool catalog refreshed) |
+| CP8 | GET /api/v1/mcp/servers/{id}/tools | mcp:view + ws viewer | — | `McpTool[]` |
+| CP9 | POST /api/v1/mcp/servers/{id}/tools/{name}/invoke | mcp:edit + ws editor | `{arguments, dry_run?, workspace_id?}` | InvokeResp (governed) |
+| CP10 | PATCH /api/v1/mcp/tools/{tool_id} | mcp:edit + ws editor | `{enabled?,require_approval?,risk_label?,injection_risk?}` | McpTool |
+| CP11 | GET /api/v1/workspaces/{wid}/mcp/allowlist | mcp:view + ws viewer | — | `McpAllowlistEntry[]` |
+| CP12 | PUT /api/v1/workspaces/{wid}/mcp/allowlist | mcp:edit + ws editor | `{entries:[{server_id,tool_name?,mode}]}` | 204 |
+| CP13 | GET /api/v1/mcp/policies | mcp:view | `?workspace_id=` | `McpPolicy[]` |
+| CP14 | POST /api/v1/mcp/policies | mcp:admin | CreatePolicyReq | McpPolicy |
+| CP15 | PATCH /api/v1/mcp/policies/{id} | mcp:admin | UpdatePolicyReq | McpPolicy |
+| CP16 | DELETE /api/v1/mcp/policies/{id} | mcp:admin | — | 204 |
+| CP17 | GET /api/v1/mcp/policies/export | mcp:view | — | `{version, policies}` (policy-as-code doc) |
+| CP18 | POST /api/v1/mcp/policies/import | mcp:admin | `{policies, replace?}` | `{imported, replaced}` |
+| CP19 | POST /api/v1/mcp/policies/evaluate | mcp:view | `{server_id, tool, workspace_id?}` | decision preview |
+| CP20 | GET /api/v1/mcp/approvals | mcp:view (ws-filtered) | `?status=` | `McpApproval[]` |
+| CP21 | POST /api/v1/mcp/approvals/{id}/decide | mcp:admin (approver≠requester) | `{approved, note?}` | McpApproval |
+| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters | `McpCallLogRow[]` |
+| CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` |
+
+### Otto as an MCP server (outward) + live-agent gateway
+
+| # | Method + Path | Role | Body | Response |
+|---|---|---|---|---|
+| CP24 | GET /api/v1/mcp/otto-server | mcp:view | — | `{enabled, tools, has_token, token_prefix?}` |
+| CP25 | PATCH /api/v1/mcp/otto-server | mcp:admin | `{enabled?, tools?, rotate_token?}` | status + `token?` (shown once) |
+| CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result |
+| CP27 | GET /api/v1/mcp/gateway/tools | mcp:view | `?workspace_id=` | `{tools}` (namespaced `mcp__server__tool`) |
+| CP28 | POST /api/v1/mcp/gateway/invoke | mcp:edit | `{server_id, tool, arguments, dry_run?, workspace_id, session_id?}` | InvokeResp (governed) |
+| CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated}` |
+| CP30 | POST /api/v1/workspaces/{wid}/mcp/context-packet | mcp:edit + ws viewer | `{query?, story_id?, max_excerpts?}` | context packet |
+| CP31 | GET /api/v1/workspaces/{wid}/mcp/proof-pack | mcp:view + ws viewer | `?repo_id=&branch=&goal_loop_id=` | evidence bundle |

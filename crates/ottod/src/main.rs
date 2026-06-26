@@ -5,6 +5,7 @@
 //! optional 0.0.0.0 listener controlled by the `network_listener` setting).
 
 mod config;
+mod mcp_server;
 mod mcp_tools;
 mod usage_tailer;
 
@@ -58,6 +59,27 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("ottod mcp-tools: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // `ottod mcp-server` runs the OUTWARD "Otto as an MCP server" over stdio: an
+    // external agent (Claude Code, Copilot, …) launches it with an `OTTO_API_TOKEN`
+    // (a restricted `kind='mcp'` token) and calls the eight `otto.*` tools, every
+    // one governed by the control plane (design §7).
+    if std::env::args().nth(1).as_deref() == Some("mcp-server") {
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("ottod mcp-server: tokio runtime: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match runtime.block_on(mcp_server::run()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ottod mcp-server: {e}");
                 ExitCode::FAILURE
             }
         };
@@ -208,6 +230,9 @@ async fn run(cfg: Config) -> Result<(), String> {
         // Persist an audit row for every broker write (produce/delete/config/offset-reset).
         Some(otto_state::BrokerAuditRepo::new(pool.clone())),
     ));
+    // MCP Control Plane: outbound MCP client + governance pipeline. Server config
+    // is the augmented `mcp_servers`; secrets resolve from the same Keychain.
+    let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
     let spawner = Arc::new(PtySpawner {
         manager: Arc::clone(&manager),
         workspaces: workspaces.clone(),
@@ -330,6 +355,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         roles: Arc::new(RbacRoleChecker::new(pool.clone())),
         auth_cache: auth_cache.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        base_url: format!("http://127.0.0.1:{}", cfg.port),
         data_dir: cfg.data_dir.clone(),
         plugins: plugins.clone(),
         manager: Arc::clone(&manager),
@@ -338,6 +364,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         db_explorer,
         db_assist: otto_server::db_assist::new_registry(),
         brokers,
+        mcp,
         spawner,
         git_store: GitStore::new(pool.clone()),
         issues_store: IssuesRepo::new(pool.clone()),
@@ -705,6 +732,32 @@ async fn run(cfg: Config) -> Result<(), String> {
         tracing::info!("usage tailer: started (claude+codex; agy unsupported)");
         handle
     };
+
+    // MCP Control Plane: periodic health sweep of managed servers (ping/initialize
+    // → status+latency). Interval from `mcp_health_interval_secs` (default 300;
+    // 0 disables). Best-effort; failures only update a server's health row.
+    {
+        let mcp = Arc::clone(&ctx.mcp);
+        let settings = otto_state::SettingsRepo::new(pool.clone());
+        tokio::spawn(async move {
+            loop {
+                let secs = settings
+                    .get("mcp_health_interval_secs")
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(300);
+                if secs == 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                    continue;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                mcp.health_sweep().await;
+            }
+        });
+        tracing::info!("mcp control plane: health sweep started");
+    }
 
     let (api_extras, root_extras) = module_routers(&ctx);
     let router = build_router(ctx, api_extras, root_extras);

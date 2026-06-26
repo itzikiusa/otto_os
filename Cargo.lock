@@ -3018,6 +3018,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "hex",
+ "otto-core",
+ "otto-netguard",
+ "otto-state",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-memory"
 version = "0.1.0"
 dependencies = [
@@ -3136,6 +3159,7 @@ dependencies = [
  "otto-git",
  "otto-improve",
  "otto-issues",
+ "otto-mcp",
  "otto-memory",
  "otto-netguard",
  "otto-orchestrator",
@@ -3297,6 +3321,7 @@ dependencies = [
  "otto-dbviewer",
  "otto-improve",
  "otto-keychain",
+ "otto-mcp",
  "otto-memory",
  "otto-orchestrator",
  "otto-product",

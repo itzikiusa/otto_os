@@ -221,7 +221,7 @@ impl AuthRepo {
             // session tokens. API tokens keep their long fixed lifetime and
             // impersonation tokens have a SHORT FIXED TTL — neither is ever slid
             // (impersonation must time out predictably).
-            let slide = !is_impersonation && kind != "api";
+            let slide = !is_impersonation && kind != "api" && kind != "mcp";
             if slide {
                 sqlx::query(
                     "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
@@ -284,6 +284,7 @@ impl AuthRepo {
                 // a share-link scope; the share-token path will populate `scope`
                 // in mobile plan Task 1.3).
                 scope: None,
+                mcp_only: false,
             });
         }
 
@@ -338,6 +339,7 @@ impl AuthRepo {
                     role,
                     otp_pending,
                 }),
+                mcp_only: false,
             });
         }
 
@@ -348,6 +350,9 @@ impl AuthRepo {
             real_user: real_user.clone(),
             effective_user: real_user,
             scope: None,
+            // A `kind='mcp'` token is route-restricted by the feature guard to the
+            // governed invoke choke point (design §14 F1).
+            mcp_only: kind == "mcp",
         };
 
         // Populate the cache so the next request for this token avoids the DB.
@@ -440,6 +445,63 @@ impl AuthRepo {
                 expires_at,
             },
         ))
+    }
+
+    /// Mint a **restricted MCP** token (`kind='mcp'`) for the outward "Otto as
+    /// MCP server". It carries `user_id`'s identity (so the invoke handler can
+    /// re-check that user's RBAC per tool) but the feature guard authorizes it
+    /// for ONLY `POST /mcp/otto-tools/invoke` (+ `GET /mcp/otto-server`) — every
+    /// other route is 403. Returns the RAW token (shown once). Revoking the row
+    /// (or rotating) disables the outward server. Design §14 F1.
+    pub async fn issue_mcp_token(&self, user_id: &Id, label: Option<&str>) -> Result<String> {
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let token = hex::encode(buf);
+        let prefix: String = token.chars().take(12).collect();
+        let id = new_id();
+        let now = Utc::now();
+        let expires_at = now + Duration::days(API_TOKEN_TTL_DAYS);
+        sqlx::query(
+            "INSERT INTO auth_sessions
+               (id, user_id, token_hash, created_at, expires_at, last_seen_at, kind, label, token_prefix)
+             VALUES (?, ?, ?, ?, ?, ?, 'mcp', ?, ?)",
+        )
+        .bind(&id)
+        .bind(user_id)
+        .bind(token_hash(&token))
+        .bind(now.to_rfc3339())
+        .bind(expires_at.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(label)
+        .bind(&prefix)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("issue mcp token: {e}")))?;
+        Ok(token)
+    }
+
+    /// Revoke every `kind='mcp'` token for a user (used when rotating/disabling the
+    /// outward MCP server). Returns the number of tokens revoked.
+    pub async fn revoke_mcp_tokens(&self, user_id: &Id) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM auth_sessions WHERE user_id = ? AND kind = 'mcp'")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("revoke mcp tokens: {e}")))?;
+        Ok(res.rows_affected())
+    }
+
+    /// The 12-char prefix of the user's current `kind='mcp'` token, if any (for the
+    /// UI to show which token is active without revealing it).
+    pub async fn mcp_token_prefix(&self, user_id: &Id) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT token_prefix FROM auth_sessions WHERE user_id = ? AND kind = 'mcp' ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("mcp token prefix: {e}")))?;
+        Ok(row.map(|r| r.get::<String, _>("token_prefix")))
     }
 
     /// Mint a short-lived **impersonation** token: the REAL owner is `real_user_id`

@@ -57,7 +57,7 @@
   const ALL_FEATURES: Feature[] = [
     'agents', 'mission_control', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
     'api_client', 'workflows', 'channels', 'skill_eval', 'skills', 'insights',
-    'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas',
+    'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas', 'mcp',
   ];
   const FEATURE_LABELS: Record<Feature, string> = {
     agents: 'Agents', mission_control: 'Mission Control', connections: 'Connections', database: 'Database',
@@ -65,7 +65,7 @@
     api_client: 'API Client', workflows: 'Workflows', channels: 'Channels',
     skill_eval: 'Skills Evaluator', skills: 'Skills', insights: 'Insights',
     usage: 'Usage', self_improvement: 'Self-Improvement', context: 'Context',
-    settings: 'Settings', users: 'Users', canvas: 'Canvas',
+    settings: 'Settings', users: 'Users', canvas: 'Canvas', mcp: 'MCP Control Plane',
   };
   const CAP_OPTIONS: Capability[] = ['none', 'view', 'edit', 'admin'];
 
