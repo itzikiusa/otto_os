@@ -11,6 +11,7 @@ pub mod api_stream;
 pub mod audit;
 pub mod auth_routes;
 pub mod email_sender;
+pub mod findings;
 pub mod goal_loops;
 pub mod grants;
 pub mod grpc;

@@ -87,6 +87,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/ingest/") {
         return Exempt;
     }
+    // E2E-only test-seed routes (e.g. `/workspaces/{ws}/__e2e/findings`). The
+    // handler itself returns 404 unless `OTTO_E2E` is set, so this is inert in
+    // production; exempt from the feature gate so the hermetic E2E can seed state.
+    if p.contains("/__e2e/") {
+        return Exempt;
+    }
     // DB Assistant `q` tool — the file-backed agent posts read-only SQL here with
     // its per-assist `x-assist-key` (validated in the handler), NOT a user bearer
     // token (the agent's PTY has no user session). Mounted in public_routes, like
@@ -425,10 +431,23 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     if p.starts_with("/reviews/") {
         // review handoff / agent retry / state mutations = Edit;
-        // findings list + merge-readiness are read-only = View.
-        // Specifically: GET .../findings and GET .../merge-readiness are View;
-        // POST .../findings/{fp}/state is Edit; all other POSTs are Edit.
+        // findings list + merge-readiness + proof-pack are read-only = View.
+        // Specifically: GET .../findings, .../merge-readiness, .../proof-pack are
+        // View; POST .../findings/{fp}/state, .../proof-pack/export, etc. are Edit.
         return Require(Git, if get { View } else { Edit });
+    }
+    if p.starts_with("/findings/") {
+        // Findings WORKFLOW (id-keyed): GET .../{id} = View; every action
+        // (accept/waive/fix/verify/jira/repo-rule/regression-test/…) = Edit.
+        return Require(Git, if get { View } else { Edit });
+    }
+    if p == "/repo-rules" || p.starts_with("/repo-rules/") {
+        // Repo rules feed the Context Engine — governed by the Context feature.
+        return Require(Context, if get { View } else { Edit });
+    }
+    if p.starts_with("/workspaces/") && p.ends_with("/repo-rules") {
+        // Workspace-scoped repo-rules list (Context feature).
+        return Require(Context, if get { View } else { Edit });
     }
     if p == "/settings/pr-review" {
         // PR-review config — read=View, write=Edit (it's a Git-feature setting,
@@ -1116,6 +1135,21 @@ mod tests {
             pol(Method::GET, "/api/v1/reviews/{rid}/merge-readiness"),
             Require(Git, View)
         );
+        // Findings WORKFLOW (id-keyed): GET=View, action POSTs=Edit (Git feature).
+        assert_eq!(pol(Method::GET, "/api/v1/findings/{id}"), Require(Git, View));
+        assert_eq!(pol(Method::POST, "/api/v1/findings/{id}/fix"), Require(Git, Edit));
+        assert_eq!(pol(Method::POST, "/api/v1/findings/{id}/verify"), Require(Git, Edit));
+        assert_eq!(pol(Method::POST, "/api/v1/findings/{id}/accept"), Require(Git, Edit));
+        assert_eq!(pol(Method::POST, "/api/v1/findings/{id}/jira"), Require(Git, Edit));
+        // Proof pack rides the /reviews/ rule: GET=View, export POST=Edit.
+        assert_eq!(pol(Method::GET, "/api/v1/reviews/{rid}/proof-pack"), Require(Git, View));
+        assert_eq!(pol(Method::POST, "/api/v1/reviews/{rid}/proof-pack/export"), Require(Git, Edit));
+        // Repo rules feed the Context Engine (Context feature): GET=View, write=Edit.
+        assert_eq!(pol(Method::GET, "/api/v1/workspaces/{ws}/repo-rules"), Require(Context, View));
+        assert_eq!(pol(Method::POST, "/api/v1/repo-rules/{id}/toggle"), Require(Context, Edit));
+        assert_eq!(pol(Method::DELETE, "/api/v1/repo-rules/{id}"), Require(Context, Edit));
+        // E2E seed route is exempt from the feature gate (handler env-gates it).
+        assert_eq!(pol(Method::POST, "/api/v1/workspaces/{ws}/__e2e/findings"), Exempt);
     }
 
     #[test]

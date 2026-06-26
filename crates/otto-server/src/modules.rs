@@ -3863,6 +3863,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         orchestrator_routes(),
         db_explorer_routes(),
         pr_review_routes(),
+        crate::routes::findings::routes(),
         review_config_routes(),
         crate::skill_eval::routes(),
         provider_routes(),
