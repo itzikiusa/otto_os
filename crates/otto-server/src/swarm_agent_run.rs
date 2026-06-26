@@ -45,11 +45,31 @@ pub struct CancelState {
 }
 
 impl CancelState {
-    fn cancelled(&self) -> bool {
+    pub fn cancelled(&self) -> bool {
         self.flag.load(Ordering::Relaxed)
     }
     fn track(&self, sid: &Id) {
         self.sessions.lock().unwrap().push(sid.clone());
+    }
+    /// A cancel handle NOT registered in the per-swarm registry — for callers
+    /// (e.g. the verification controller) that own their own cancellation keyed
+    /// elsewhere and must not clobber an in-flight plan/recruit handle.
+    pub fn detached() -> CancelState {
+        CancelState {
+            flag: Arc::new(AtomicBool::new(false)),
+            sessions: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+    /// Flip the cancel flag (stops retries on the next check).
+    pub fn signal(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+    }
+    /// Kill every session this handle has tracked (mid-turn abort).
+    pub async fn kill_tracked(&self, ctx: &ServerCtx) {
+        let sids = self.sessions.lock().unwrap().clone();
+        for sid in sids {
+            let _ = ctx.manager.kill_session(&sid).await;
+        }
     }
 }
 
@@ -100,7 +120,9 @@ pub async fn run_swarm_agent(
     user: &User,
     swarm_id: &str,
     project_id: Option<&str>,
+    task_id: Option<&str>,
     nominal_agent_id: &str,
+    provider: &str,
     kind: &str,
     title: &str,
     cwd: &str,
@@ -108,7 +130,8 @@ pub async fn run_swarm_agent(
     transcript_ok: fn(&str) -> bool,
     cancel: &CancelState,
 ) -> (Option<String>, Id) {
-    let provider = "claude"; // planner/recruiter turns run on claude (transcript-backed)
+    // Turn start — bounds the per-turn token/cost backfill below.
+    let turn_started_at = chrono::Utc::now();
     // Canonicalize the cwd: claude resolves symlinks (e.g. macOS /var →
     // /private/var) when it computes its transcript dir, so we MUST create the
     // session in — and poll — the same resolved path, or watch_for_result never
@@ -124,7 +147,7 @@ pub async fn run_swarm_agent(
             swarm_id: swarm_id.to_string(),
             workspace_id: ws.id.clone(),
             project_id: project_id.map(|s| s.to_string()),
-            task_id: None,
+            task_id: task_id.map(|s| s.to_string()),
             agent_id: nominal_agent_id.to_string(),
             kind: kind.to_string(),
             trigger: "manual".to_string(),
@@ -232,6 +255,22 @@ pub async fn run_swarm_agent(
         .await;
 
         if let Some(raw) = outcome.raw {
+            // Best-effort per-turn token/cost backfill so verify/fix spend counts
+            // against the swarm budget (review M3). Bounded to this turn.
+            let (toks_in, toks_out, cost) =
+                crate::swarm_run::session_usage(ctx, Some(&sid), turn_started_at).await;
+            let _ = ctx
+                .swarm_repo
+                .update_run(
+                    &run_id,
+                    RunPatch {
+                        tokens_input: Some(toks_in),
+                        tokens_output: Some(toks_out),
+                        cost_usd: Some(cost),
+                        ..Default::default()
+                    },
+                )
+                .await;
             // Success: leave the session open for inspection.
             let _ = set_run(ctx, &run_id, "done", None, true).await;
             return (Some(raw), run_id);

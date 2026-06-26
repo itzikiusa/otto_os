@@ -248,13 +248,38 @@ async fn run_turn_inner(
     let ws = swarm.workspace_id.clone();
 
     // Prepare cwd + per-agent context (skills/soul/identity) + otto-post helper.
-    let cwd = match crate::swarm_workspace::ensure_cwd(ctx, &swarm, &agent, project.as_ref()).await {
+    let cwd_info = match crate::swarm_workspace::ensure_cwd_info(ctx, &swarm, &agent, project.as_ref()).await {
         Ok(c) => c,
         Err(e) => {
             mark_run_error(ctx, run, &format!("prepare cwd: {e}")).await;
             return None;
         }
     };
+    let cwd = cwd_info.path.clone();
+    // Requirement 1: announce a freshly-created worktree on the shared board so the
+    // team + user see who is working where (and the leader can coordinate merges).
+    if cwd_info.created {
+        if let (Some(branch), Some(task)) = (&cwd_info.branch, task.as_ref()) {
+            let base = cwd_info.integration_branch.clone().unwrap_or_default();
+            crate::swarm_runtime::system_post_meta(
+                ctx,
+                &swarm.id,
+                Some(&task.project_id),
+                Some(&task.id),
+                "worktree",
+                &format!(
+                    "🌿 {} created worktree `{}` (base `{}`) for “{}”.",
+                    agent.name, branch, base, task.title
+                ),
+                serde_json::json!({
+                    "event": "worktree_created",
+                    "agent_id": agent.id, "task_id": task.id,
+                    "branch": branch, "base": base, "path": cwd_info.path,
+                }),
+            )
+            .await;
+        }
+    }
     let manager_title = match &agent.reports_to {
         Some(mid) => repo.get_agent(mid).await.ok().map(|m| m.title),
         None => None,
@@ -275,7 +300,7 @@ async fn run_turn_inner(
         project.as_ref(),
         task.as_ref(),
     );
-    crate::swarm_workspace::provision_agent(ctx, &agent, identity, &cwd);
+    crate::swarm_workspace::provision_agent(ctx, &swarm, project.as_ref(), &agent, identity, &cwd);
 
     // Board context for the brief (recent messages to/about this agent).
     let board: Vec<String> = repo
@@ -379,6 +404,11 @@ async fn run_turn_inner(
     let (toks_in, toks_out, cost) =
         session_usage(ctx, outcome.session_id.as_deref(), turn_started_at).await;
 
+    // Requirement 1: detect when this agent's branch touches files another active
+    // agent's branch also changed, and warn the team on the board so the leader can
+    // coordinate before merge. Best-effort, post-turn.
+    detect_shared_files(ctx, &swarm, &agent, task.as_ref(), &cwd_info).await;
+
     // Persist terminal state.
     if let Some(raw) = outcome.raw.as_deref() {
         let parsed = parse_turn_result(raw);
@@ -451,7 +481,7 @@ fn enrich_result(parsed: Option<serde_json::Value>, cwd: &str, brief: &str) -> s
 /// `(input, output, cost_usd)`, each `None` when usage tracking is unavailable,
 /// no session was created, or no events were recorded in the window yet — the
 /// `RunPatch` then writes nulls rather than misleading zeros.
-async fn session_usage(
+pub(crate) async fn session_usage(
     ctx: &ServerCtx,
     session_id: Option<&str>,
     since: chrono::DateTime<Utc>,
@@ -628,5 +658,111 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         let t: String = s.chars().take(n).collect();
         format!("{t}…")
+    }
+}
+
+// --- Shared-functionality detection ---------------------------------------
+//
+// Tracks, per swarm, the files each active agent branch has changed (vs the
+// pinned integration branch). When two branches touch the same file(s), warn the
+// board so the leader can coordinate before the merges collide (requirement 1).
+
+#[derive(Clone)]
+struct BranchFiles {
+    agent_name: String,
+    files: std::collections::HashSet<String>,
+}
+
+#[derive(Default)]
+struct SharedState {
+    /// branch → files it changed.
+    by_branch: HashMap<String, BranchFiles>,
+    /// dedupe key (branchA|branchB|sorted-files-hash) → already announced.
+    announced: std::collections::HashSet<String>,
+}
+
+static SHARED_FILES: std::sync::OnceLock<Mutex<HashMap<String, SharedState>>> =
+    std::sync::OnceLock::new();
+
+fn shared_files() -> &'static Mutex<HashMap<String, SharedState>> {
+    SHARED_FILES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn detect_shared_files(
+    ctx: &ServerCtx,
+    swarm: &otto_state::Swarm,
+    agent: &SwarmAgent,
+    task: Option<&SwarmTask>,
+    cwd_info: &crate::swarm_workspace::CwdInfo,
+) {
+    let (Some(branch), Some(integration_branch)) = (&cwd_info.branch, &cwd_info.integration_branch)
+    else {
+        return;
+    };
+    // Files this agent's branch changed relative to the integration branch.
+    let git = otto_git::LocalGit::new(&cwd_info.path);
+    let files: std::collections::HashSet<String> = match git.changed_files(integration_branch).await {
+        Ok(f) => f.into_iter().collect(),
+        Err(_) => return,
+    };
+    if files.is_empty() {
+        return;
+    }
+    let project_id = task.map(|t| t.project_id.clone());
+
+    // Compute overlaps under the lock, collect what to announce, post after.
+    let mut to_post: Vec<(String, Vec<String>)> = Vec::new();
+    {
+        let mut map = shared_files().lock().unwrap();
+        let st = map.entry(swarm.id.clone()).or_default();
+        for (other_branch, other) in st.by_branch.iter() {
+            if other_branch == branch {
+                continue;
+            }
+            let mut overlap: Vec<String> = files.intersection(&other.files).cloned().collect();
+            if overlap.is_empty() {
+                continue;
+            }
+            overlap.sort();
+            let mut pair = [branch.as_str(), other_branch.as_str()];
+            pair.sort_unstable();
+            let key = format!("{}|{}|{}", pair[0], pair[1], overlap.join(","));
+            if st.announced.insert(key) {
+                to_post.push((
+                    format!(
+                        "⚠️ {} and {} both modified {} shared file(s): {} — coordinate before merge.",
+                        agent.name,
+                        other.agent_name,
+                        overlap.len(),
+                        overlap.iter().take(8).map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")
+                    ),
+                    overlap,
+                ));
+            }
+        }
+        st.by_branch.insert(
+            branch.clone(),
+            BranchFiles { agent_name: agent.name.clone(), files },
+        );
+    }
+
+    for (body, overlap) in to_post {
+        crate::swarm_runtime::system_post_meta(
+            ctx,
+            &swarm.id,
+            project_id.as_deref(),
+            task.map(|t| t.id.as_str()),
+            "shared",
+            &body,
+            json!({ "event": "shared_files", "files": overlap, "branch": branch }),
+        )
+        .await;
+    }
+}
+
+/// Forget a branch's tracked files (called when its worktree is merged/removed).
+pub(crate) fn forget_branch_files(swarm_id: &str, branch: &str) {
+    if let Some(st) = shared_files().lock().unwrap().get_mut(swarm_id) {
+        st.by_branch.remove(branch);
     }
 }

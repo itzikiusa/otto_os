@@ -12,7 +12,9 @@ export type TaskStatus =
   | 'in_review'
   | 'blocked'
   | 'done'
-  | 'cancelled';
+  | 'cancelled'
+  // The Coordinator is running goal verification on this task.
+  | 'verifying';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'done' | 'error' | 'stopped';
 export type MessageKind =
@@ -25,7 +27,13 @@ export type MessageKind =
   | 'concern'
   | 'escalation'
   | 'handoff'
-  | 'system';
+  | 'system'
+  // Coordinator lifecycle posts: a worktree was created/merged, a shared-file
+  // conflict was flagged, or a goal-verification verdict was recorded.
+  | 'worktree'
+  | 'shared'
+  | 'merge'
+  | 'verify';
 
 export interface SwarmConfig {
   provider?: string;
@@ -36,6 +44,8 @@ export interface SwarmConfig {
   auto_submit?: boolean;
   /** Naming theme for recruited agents (e.g. "Famous footballers"). */
   naming_theme?: string;
+  /** Team-wide skills every agent inherits (library skill names). */
+  skills?: unknown[];
   [k: string]: unknown;
 }
 
@@ -111,6 +121,14 @@ export interface SwarmProject {
   goal_md?: string | null;
   /** Source Product story this project was created from (Plan → Swarm), or null. */
   story_id?: Id | null;
+  /** Project-scoped skills every agent working this project inherits. */
+  skills?: unknown[];
+  /** Branch the Coordinator merges agent worktrees into (parallel work). */
+  integration_branch?: string | null;
+  /** Origin channel/chat/thread when the project was launched from a channel trigger. */
+  origin_channel?: string | null;
+  origin_chat?: string | null;
+  origin_thread?: string | null;
   status: 'active' | 'archived';
   order_idx: number;
   created_by: Id;
@@ -281,6 +299,16 @@ export interface RecruitedSkill {
   why: string;
 }
 
+/** A library skill as returned by `GET /library/skills` for the pickers. The
+ *  shared `LibrarySkill` type only carries name/description/body, so this
+ *  section-local shape adds the optional category/version metadata. */
+export interface LibrarySkillMeta {
+  name: string;
+  description: string;
+  category?: string | null;
+  version?: number | null;
+}
+
 export interface RecruitedAgent {
   name: string;
   title: string;
@@ -342,3 +370,121 @@ export interface TaskStoryLink {
   /** Acceptance criteria from the task description (convenience field). */
   acceptance: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Swarm goals & verification  (GET/POST /swarm/tasks|projects/{id}/goals, …)
+// ---------------------------------------------------------------------------
+
+/** `explicit` = a per-task/project goal; `standing` = a swarm-level template
+ *  applied to every task (the swarm's quality bar). */
+export type GoalKind = 'explicit' | 'standing';
+
+/** How `measured` is compared against `target_value`/`block_value`. */
+export type GoalComparator = 'lte' | 'gte' | 'eq' | 'contains' | 'absent';
+
+/** Lifecycle of a goal as the Coordinator verifies it. */
+export type GoalStatus =
+  | 'pending'
+  | 'verifying'
+  | 'passed'
+  | 'warned'
+  | 'unmet'
+  | 'skipped'
+  | 'error';
+
+/** The verifier's structured verdict (`SwarmGoal.verdict`). All fields best-effort. */
+export interface GoalVerdict {
+  target_met?: boolean;
+  blocker?: boolean;
+  severity?: string;
+  measured?: number | string | null;
+  summary?: string;
+  findings?: unknown[];
+  [k: string]: unknown;
+}
+
+export interface SwarmGoal {
+  id: Id;
+  swarm_id: Id;
+  workspace_id: Id;
+  project_id?: Id | null;
+  task_id?: Id | null;
+  kind: GoalKind;
+  title: string;
+  description: string;
+  metric?: string | null;
+  comparator?: GoalComparator | string | null;
+  target_value?: number | null;
+  block_value?: number | null;
+  verify_cmd?: string | null;
+  max_retries: number;
+  blocking: boolean;
+  status: GoalStatus;
+  /** {target_met,blocker,severity,measured,summary,findings[]} — null until verified. */
+  verdict?: GoalVerdict | null;
+  iterations: number;
+  order_idx: number;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateGoalReq {
+  title: string;
+  description?: string;
+  metric?: string;
+  comparator?: string;
+  target_value?: number;
+  block_value?: number;
+  verify_cmd?: string;
+  max_retries?: number;
+  blocking?: boolean;
+  order_idx?: number;
+}
+
+/** PATCH /swarm/goals/{gid} — every field optional (partial update). */
+export type UpdateGoalReq = Partial<CreateGoalReq>;
+
+/** GET /swarm/tasks/{tid}/verification. */
+export interface TaskVerification {
+  running: boolean;
+  task_status: string;
+  goals: SwarmGoal[];
+}
+
+// ---------------------------------------------------------------------------
+// Channel triggers  (GET/POST /swarm/swarms/{sid}/triggers, …)
+// ---------------------------------------------------------------------------
+
+/** A channel rule that auto-launches swarm work when a matching message arrives. */
+export interface SwarmChannelTrigger {
+  id: Id;
+  swarm_id: Id;
+  workspace_id: Id;
+  /** 'slack' | 'telegram' | 'webhook'. */
+  channel: string;
+  /** Channel/chat id (or name) this trigger listens to ('' = any). */
+  match_chat: string;
+  /** Keyword that must appear in the message to fire ('' = any). */
+  keyword: string;
+  repo_path?: string | null;
+  auto_start: boolean;
+  reply: boolean;
+  enabled: boolean;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTriggerReq {
+  channel: string;
+  match_chat?: string;
+  keyword?: string;
+  repo_path?: string;
+  auto_start?: boolean;
+  reply?: boolean;
+  enabled?: boolean;
+}
+
+/** PATCH /swarm/triggers/{id} — every field optional (partial update). */
+export type UpdateTriggerReq = Partial<CreateTriggerReq>;
