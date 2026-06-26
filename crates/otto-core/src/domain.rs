@@ -1877,11 +1877,25 @@ pub struct ScheduledTask {
     pub provider: String,
     pub model: String,
     pub cwd: String,
-    /// `{cadence:"interval"|"daily"|"weekly", every_min, at:"HH:MM", weekday}`.
+    /// `{cadence:"interval"|"daily"|"weekly"|"cron", every_min, at:"HH:MM", weekday, expr}`.
     pub schedule: serde_json::Value,
     /// `{type:"none"|"slack"|"telegram"|"email"|"webhook", ...}`.
     pub destination: serde_json::Value,
     pub enabled: bool,
+    // --- v2 ---
+    /// IANA timezone (e.g. `Europe/London`) the daily/weekly/cron times are
+    /// interpreted in. Default `UTC` (pre-v2 behaviour).
+    pub timezone: String,
+    /// For `kind = "workflow"`: the workflow this task launches instead of an agent.
+    pub workflow_id: Option<String>,
+    /// `none` (run in `cwd`) | `worktree` (run in a fresh isolated git worktree).
+    pub sandbox: String,
+    /// Extra agent attempts on failure (total attempts = 1 + max_retries).
+    pub max_retries: i64,
+    /// Deliver the report only when it meaningfully differs from the last ok run.
+    pub notify_on_change: bool,
+    /// Build a proof pack (report + run metadata) for each run.
+    pub attach_proof: bool,
     pub last_run_at: Option<String>,
     pub last_status: Option<String>,
     pub next_run_at: Option<String>,
@@ -1892,8 +1906,8 @@ pub struct ScheduledTask {
 
 /// One execution of a [`ScheduledTask`]. The `summary` is the extracted head of the
 /// report; the full report lives at `report_path` (served by run id). `delivered`
-/// records best-effort destination delivery. `session_id` is reserved (v1 runs are
-/// headless via `Orchestrator::run_agent`, so no Otto session row is created).
+/// records best-effort destination delivery. `session_id` is the visible agent
+/// session the run drove (v2: every agent run is an openable session).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScheduledTaskRun {
     pub id: String,
@@ -1910,6 +1924,17 @@ pub struct ScheduledTaskRun {
     pub delivery_error: Option<String>,
     pub error: Option<String>,
     pub session_id: Option<String>,
+    // --- v2 ---
+    /// Normalized hash of the report — backs `notify_on_change` change detection.
+    pub report_hash: Option<String>,
+    /// The proof pack built for this run (when `attach_proof`).
+    pub proof_pack_id: Option<String>,
+    /// Total agent attempts made (1 + retries used).
+    pub attempts: i64,
+    /// Delivery was suppressed because the report didn't meaningfully change.
+    pub skipped_delivery: bool,
+    /// For `kind = "workflow"`: the workflow run this task launched.
+    pub workflow_run_id: Option<String>,
     pub created_at: String,
 }
 

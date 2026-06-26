@@ -16,22 +16,25 @@
 //! [`Orchestrator::run_agent`]: otto_orchestrator::Orchestrator::run_agent
 //! [`ScheduledTask`]: otto_core::domain::ScheduledTask
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use otto_core::domain::{Channel, ScheduledTask};
+use otto_core::api::CreateSessionReq;
+use otto_core::domain::{Channel, ScheduledTask, SessionKind};
 use otto_core::event::Event;
 use otto_core::{Error, Result};
-use otto_state::{EmailSendersRepo, IntegrationsRepo, NewScheduledRun};
-use serde_json::Value;
+use otto_state::{EmailSendersRepo, FinishRun, IntegrationsRepo, NewScheduledRun};
+use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 use tracing::warn;
 
 use otto_channels::improve_notify::{build_adapter, send_to};
 use otto_channels::{Adapter, GmailSender, WebhookAdapter};
 
+use crate::agent_run::{run_with_recovery, watch_for_result};
 use crate::cadence;
+use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
 use crate::state::ServerCtx;
 
 /// Marker the prompt-wrap embeds so the offline E2E stub
@@ -40,9 +43,35 @@ pub const SENTINEL: &str = "OTTO_TASK: scheduled_task";
 
 /// No-progress (stuck) budget for a single scheduled agent run.
 const RUN_NO_PROGRESS: Duration = Duration::from_secs(600);
+/// Idle windows for the session watcher (waiting < stuck < grace timeout).
+const WAITING_IDLE: Duration = Duration::from_secs(60);
+const STUCK_IDLE: Duration = Duration::from_secs(300);
+/// Backoff between agent retries (capped at the slice count, last value reused).
+const RETRY_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(3),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+];
+/// Bounded shell-command runtime for `provider == "shell"` tasks.
+const SHELL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Poll cadence + cap while waiting for a handed-off workflow run to finish.
+const WORKFLOW_POLL: Duration = Duration::from_secs(2);
+const WORKFLOW_WAIT: Duration = Duration::from_secs(600);
 
 /// Keep at most this many runs per task; older runs (+ their report files) are pruned.
 const KEEP_RUNS: i64 = 100;
+
+/// What one execution produced — the report + how it was produced.
+struct ExecOutcome {
+    report: String,
+    summary: String,
+    /// The visible agent session the run drove (None for shell / workflow / E2E).
+    session_id: Option<String>,
+    /// The workflow run launched (kind == "workflow").
+    workflow_run_id: Option<String>,
+    /// Total agent attempts made (1 + retries used).
+    attempts: i64,
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested)
@@ -138,33 +167,67 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
         })
         .await?;
     emit(ctx, task, &run.id, "running");
+    let tz = cadence::task_tz(&task.timezone);
 
-    match execute(ctx, task).await {
-        Ok((report, summary)) => {
+    match execute(ctx, task, &run.id).await {
+        Ok(out) => {
             let now = Utc::now();
             let rel = report_rel(&task.id, now);
             let abs = ctx.data_dir.join("scheduled").join(&rel);
-            let (report_path, report_rel_opt) = match write_report(&abs, &report).await {
+            let (report_path, report_rel_opt) = match write_report(&abs, &out.report).await {
                 Ok(()) => (Some(abs.to_string_lossy().to_string()), Some(rel.clone())),
                 Err(e) => {
                     warn!(task = %task.id, "scheduled task: write report failed: {e}");
                     (None, None)
                 }
             };
-            let (delivered, derr) = deliver(ctx, task, &summary, &report).await;
+
+            // --- only notify on meaningful change ---
+            let hash = report_hash(&out.report);
+            let unchanged = task.notify_on_change
+                && repo
+                    .last_ok_report_hash(&task.id, &run.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some(hash.as_str());
+
+            let (delivered, derr, skipped) = if unchanged {
+                (false, None, true)
+            } else {
+                let (d, e) = deliver(ctx, task, &out.summary, &out.report).await;
+                (d, e, false)
+            };
+
+            // --- attach proof pack ---
+            let proof_pack_id = if task.attach_proof {
+                build_proof_pack(ctx, task, &run.id, &out).await
+            } else {
+                None
+            };
+
             repo.finish_run(
                 &run.id,
-                "ok",
-                &summary,
-                report_path.as_deref(),
-                report_rel_opt.as_deref(),
-                delivered,
-                derr.as_deref(),
-                None,
+                FinishRun {
+                    status: "ok".into(),
+                    summary: out.summary.clone(),
+                    report_path,
+                    report_rel: report_rel_opt,
+                    delivered,
+                    delivery_error: derr,
+                    session_id: out.session_id.clone(),
+                    report_hash: Some(hash),
+                    proof_pack_id,
+                    attempts: out.attempts,
+                    skipped_delivery: skipped,
+                    workflow_run_id: out.workflow_run_id.clone(),
+                    ..Default::default()
+                },
             )
             .await?;
             if trigger == "schedule" {
-                let next = cadence::next_run(&task.schedule, now).map(|d| d.to_rfc3339());
+                let next = cadence::next_run(&task.schedule, now, tz).map(|d| d.to_rfc3339());
                 let _ = repo
                     .set_runtime(&task.id, Some(&now.to_rfc3339()), "ok", next.as_deref())
                     .await;
@@ -177,11 +240,18 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
             let msg = e.to_string();
             warn!(task = %task.id, "scheduled task run failed: {msg}");
             let _ = repo
-                .finish_run(&run.id, "error", "", None, None, false, None, Some(&msg))
+                .finish_run(
+                    &run.id,
+                    FinishRun {
+                        status: "error".into(),
+                        error: Some(msg),
+                        ..Default::default()
+                    },
+                )
                 .await;
             if trigger == "schedule" {
                 let now = Utc::now();
-                let next = cadence::next_run(&task.schedule, now).map(|d| d.to_rfc3339());
+                let next = cadence::next_run(&task.schedule, now, tz).map(|d| d.to_rfc3339());
                 let _ = repo
                     .set_runtime(&task.id, Some(&now.to_rfc3339()), "error", next.as_deref())
                     .await;
@@ -192,47 +262,449 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
     }
 }
 
-/// Run the agent and return `(report_markdown, summary)`.
-async fn execute(ctx: &ServerCtx, task: &ScheduledTask) -> Result<(String, String)> {
-    let cwd = resolve_cwd(ctx, task).await?;
+/// Dispatch a task by kind/provider: a handed-off workflow, a shell command, or
+/// (the default) an agent run.
+async fn execute(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> Result<ExecOutcome> {
+    if task.kind == "workflow" {
+        return execute_workflow(ctx, task).await;
+    }
+    if task.provider.trim() == "shell" {
+        return execute_shell(ctx, task).await;
+    }
+    execute_agent(ctx, task, run_id).await
+}
+
+/// Build the wrapped + skill-composed prompt for an agent run.
+fn build_prompt(ctx: &ServerCtx, task: &ScheduledTask) -> String {
     let wrapped = wrap_prompt(&task.name, &task.prompt);
-    let prompt = match task.skill.as_deref().filter(|s| !s.is_empty()) {
+    match task.skill.as_deref().filter(|s| !s.is_empty()) {
         Some(skill) => {
             let skill_text = crate::modules::resolve_skill_inline(&ctx.context_library, skill);
             crate::modules::compose_draft_prompt(&skill_text, &wrapped)
         }
         None => wrapped,
-    };
-    let model = if task.model.trim().is_empty() {
-        None
-    } else {
-        Some(task.model.as_str())
-    };
+    }
+}
+
+/// Run the task's agent. Under `OTTO_E2E` this uses the deterministic headless
+/// stub (no real CLI). Otherwise every run is a **real, openable session** of the
+/// task's provider (claude/codex/agy/custom), retried up to `1 + max_retries`
+/// times, capturing the Markdown report the agent writes to a file.
+async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> Result<ExecOutcome> {
+    let cwd = resolve_cwd(ctx, task).await?;
+    let prompt = build_prompt(ctx, task);
+    let model = (!task.model.trim().is_empty()).then_some(task.model.as_str());
+
     let _permit = run_semaphore()
         .acquire()
         .await
         .map_err(|_| Error::Internal("scheduled-task semaphore closed".into()))?;
-    let report = ctx
-        .orchestrator
-        .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
-        .await?;
+
+    // Deterministic offline path for tests: the orchestrator's E2E stub returns a
+    // representative report; no PTY / session is spawned (the E2E daemon makes the
+    // CLI fail fast on purpose).
+    if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+        let report = ctx
+            .orchestrator
+            .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
+            .await?;
+        let summary = extract_summary(&report);
+        return Ok(ExecOutcome { report, summary, session_id: None, workflow_run_id: None, attempts: 1 });
+    }
+
+    // A task with no owner can't open a session under a user — fall back to the
+    // headless runner (claude). Owner-created tasks (the norm) get a visible session.
+    let owner = match task.created_by.as_deref().filter(|s| !s.is_empty()) {
+        Some(o) => o.to_string(),
+        None => {
+            let report = ctx
+                .orchestrator
+                .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
+                .await?;
+            let summary = extract_summary(&report);
+            return Ok(ExecOutcome { report, summary, session_id: None, workflow_run_id: None, attempts: 1 });
+        }
+    };
+    let ws = ctx.workspaces.get(&task.workspace_id).await?;
+
+    // The agent writes its report here; the watcher returns its contents.
+    let out_path = ctx
+        .data_dir
+        .join("scheduled")
+        .join(&task.id)
+        .join(format!("{run_id}.report.md"));
+    if let Some(p) = out_path.parent() {
+        let _ = tokio::fs::create_dir_all(p).await;
+    }
+    let _ = std::fs::remove_file(&out_path);
+    let augmented = augment_report_prompt(&prompt, &out_path.to_string_lossy());
+
+    // Pre-trust so the session doesn't stall on the "trust this folder?" prompt.
+    otto_sessions::trust::ensure_trusted(&task.provider, &cwd);
+
+    let max_attempts = (1 + task.max_retries).clamp(1, 6) as u32;
+    let captured_sid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let attempts = Arc::new(std::sync::atomic::AtomicI64::new(0));
+
+    let outcome = run_with_recovery(&ctx.manager, max_attempts, &RETRY_BACKOFF, None, |_attempt| {
+        let captured = captured_sid.clone();
+        let attempts = attempts.clone();
+        let ws = ws.clone();
+        let owner = owner.clone();
+        let cwd = cwd.clone();
+        let augmented = augmented.clone();
+        let out_path = out_path.clone();
+        async move {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            run_one_agent_session(ctx, &ws, &owner, task, run_id, &cwd, &augmented, &out_path, &captured)
+                .await
+        }
+    })
+    .await;
+
+    let session_id = captured_sid.lock().unwrap().clone();
+    if outcome.errored() {
+        return Err(Error::Internal(format!(
+            "agent run failed: {}",
+            outcome.reason.map(|r| r.as_str()).unwrap_or("unknown")
+        )));
+    }
+    let report = outcome.raw.unwrap_or_default();
+    if report.trim().is_empty() {
+        return Err(Error::Internal("agent produced an empty report".into()));
+    }
     let summary = extract_summary(&report);
-    Ok((report, summary))
+    Ok(ExecOutcome {
+        report,
+        summary,
+        session_id,
+        workflow_run_id: None,
+        attempts: attempts.load(std::sync::atomic::Ordering::Relaxed).max(1),
+    })
 }
 
-/// Resolve the working directory: the task's `cwd` if it exists, else a per-task
-/// scratch dir under the data directory. NOTE: `cwd` is NOT a security boundary —
-/// a coding agent can read/write anywhere the daemon user can (see feature docs).
+/// One attempt: create a visible session of the task's provider, inject the
+/// prompt, and watch for the report file. Mirrors the PR-review agent path.
+#[allow(clippy::too_many_arguments)]
+async fn run_one_agent_session(
+    ctx: &ServerCtx,
+    ws: &otto_core::domain::Workspace,
+    owner: &str,
+    task: &ScheduledTask,
+    run_id: &str,
+    cwd: &str,
+    prompt: &str,
+    out_path: &std::path::Path,
+    captured_sid: &Arc<Mutex<Option<String>>>,
+) -> crate::agent_run::RunOutcome {
+    use crate::agent_run::{FailReason, RunOutcome};
+
+    let _ = std::fs::remove_file(out_path);
+    let meta = json!({ "source": "scheduled_task", "task_id": task.id, "run_id": run_id });
+    let req = CreateSessionReq {
+        kind: SessionKind::Agent,
+        provider: Some(task.provider.clone()),
+        title: Some(format!("Scheduled: {}", task.name)),
+        cwd: Some(cwd.to_string()),
+        connection_id: None,
+        meta: Some(meta),
+    };
+    let session = match ctx.manager.create(ws, &owner.to_string(), req, None).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(task = %task.id, "scheduled task: create session ({}): {e}", task.provider);
+            return RunOutcome::failed(None, FailReason::CreateFailed);
+        }
+    };
+    let sid = session.id.clone();
+    *captured_sid.lock().unwrap() = Some(sid.clone());
+    // Persist the session id immediately so the UI can Open the run live.
+    let _ = ctx.scheduled_tasks.set_run_session(run_id, &sid).await;
+
+    if wait_for_tui(&ctx.manager, &sid).await {
+        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
+        tokio::time::sleep(PASTE_TO_ENTER).await;
+        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
+        let _ = ctx.manager.input(&sid, b"\r").await;
+        if !dispatched(&ctx.manager, &sid, before).await {
+            let _ = ctx.manager.input(&sid, b"\r").await;
+        }
+    }
+
+    watch_for_result(
+        &ctx.manager,
+        &sid,
+        &task.provider,
+        session.provider_session_id.as_deref(),
+        cwd,
+        out_path,
+        RUN_NO_PROGRESS,
+        WAITING_IDLE,
+        STUCK_IDLE,
+        |t| !t.trim().is_empty(),
+        |_st| async {},
+    )
+    .await
+}
+
+/// Run a `provider == "shell"` task: execute the prompt as a shell command in the
+/// resolved cwd, capturing stdout/stderr + exit code as the Markdown report.
+async fn execute_shell(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecOutcome> {
+    let cwd = resolve_cwd(ctx, task).await?;
+    let _permit = run_semaphore()
+        .acquire()
+        .await
+        .map_err(|_| Error::Internal("scheduled-task semaphore closed".into()))?;
+    let cmd = task.prompt.clone();
+    let cwd2 = cwd.clone();
+    let run = tokio::time::timeout(
+        SHELL_TIMEOUT,
+        tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(&cwd2)
+            .output(),
+    )
+    .await
+    .map_err(|_| Error::Internal("shell command timed out".into()))?
+    .map_err(|e| Error::Internal(format!("spawn shell: {e}")))?;
+
+    let report = shell_report(&task.name, &cmd, &run);
+    let summary = extract_summary(&report);
+    if !run.status.success() {
+        // Non-zero exit is a run error (so retries / error status apply), but we
+        // still produced a report for the run record.
+        return Err(Error::Internal(format!(
+            "shell command exited with {}",
+            run.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+        )));
+    }
+    Ok(ExecOutcome { report, summary, session_id: None, workflow_run_id: None, attempts: 1 })
+}
+
+/// Hand off to a workflow: launch a [`WorkflowRun`], wait (bounded) for it to
+/// reach a terminal state, and summarise the node statuses as the report.
+async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecOutcome> {
+    use otto_state::WorkflowsRepo;
+
+    let wf_id = task
+        .workflow_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Invalid("workflow task has no workflow_id".into()))?;
+    let repo = WorkflowsRepo::new(ctx.pool.clone());
+    let workflow = repo.get(&wf_id.to_string()).await?;
+    if workflow.workspace_id != task.workspace_id {
+        return Err(Error::Invalid("workflow belongs to a different workspace".into()));
+    }
+    let ws = ctx.workspaces.get(&task.workspace_id).await?;
+    let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
+    let run = repo
+        .create_run(&workflow.id, &workflow.workspace_id, &input)
+        .await?;
+    let run_id = run.id.clone();
+    {
+        let ctx2 = ctx.clone();
+        let ws2 = ws.clone();
+        let wf2 = workflow.clone();
+        let rid = run_id.clone();
+        let input2 = input.clone();
+        tokio::spawn(async move {
+            crate::workflow_engine::run_workflow(ctx2, ws2, wf2, rid, input2, None, false).await;
+        });
+    }
+
+    // Wait (bounded) for the workflow to finish so the report reflects its outcome.
+    let deadline = std::time::Instant::now() + WORKFLOW_WAIT;
+    loop {
+        tokio::time::sleep(WORKFLOW_POLL).await;
+        if let Ok(r) = repo.get_run(&run_id).await {
+            let status = format!("{:?}", r.status).to_lowercase();
+            if matches!(status.as_str(), "success" | "error" | "canceled") {
+                let report = workflow_report(&workflow.name, &r);
+                let summary = extract_summary(&report);
+                if status == "error" {
+                    return Err(Error::Internal(format!(
+                        "workflow run {run_id} finished with errors"
+                    )));
+                }
+                return Ok(ExecOutcome {
+                    report,
+                    summary,
+                    session_id: None,
+                    workflow_run_id: Some(run_id),
+                    attempts: 1,
+                });
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            let report = format!(
+                "# Workflow handed off: {}\n\nLaunched workflow run `{}`; still running after \
+                 {}s — see the Workflows page for live status.\n\n---\n\nThe scheduled task \
+                 handed control to the workflow engine.",
+                workflow.name,
+                run_id,
+                WORKFLOW_WAIT.as_secs()
+            );
+            let summary = extract_summary(&report);
+            return Ok(ExecOutcome {
+                report,
+                summary,
+                session_id: None,
+                workflow_run_id: Some(run_id),
+                attempts: 1,
+            });
+        }
+    }
+}
+
+/// Resolve the working directory. With `sandbox == "worktree"` and a `cwd` that is
+/// a git repo, run in a fresh isolated git worktree (left for inspection). Else
+/// the task's `cwd` if it exists, else a per-task scratch dir. NOTE: `cwd` is NOT
+/// a security boundary — a coding agent can read/write anywhere the daemon user
+/// can; the worktree isolates the *git working tree*, not the filesystem.
 async fn resolve_cwd(ctx: &ServerCtx, task: &ScheduledTask) -> Result<String> {
     let trimmed = task.cwd.trim();
-    if !trimmed.is_empty() && std::path::Path::new(trimmed).is_dir() {
-        return Ok(trimmed.to_string());
+    let base_dir = (!trimmed.is_empty() && std::path::Path::new(trimmed).is_dir())
+        .then(|| trimmed.to_string());
+
+    if task.sandbox == "worktree" {
+        if let Some(repo_path) = &base_dir {
+            if let Some(wt) = make_worktree(ctx, task, repo_path).await {
+                return Ok(wt);
+            }
+        }
+    }
+    if let Some(dir) = base_dir {
+        return Ok(dir);
     }
     let scratch = ctx.data_dir.join("scheduled").join(&task.id).join("work");
     tokio::fs::create_dir_all(&scratch)
         .await
         .map_err(|e| Error::Internal(format!("create scratch dir: {e}")))?;
     Ok(scratch.to_string_lossy().to_string())
+}
+
+/// Provision a fresh git worktree for a sandboxed run (best-effort). Returns the
+/// worktree path, or `None` if `repo_path` isn't a git repo / the add failed (the
+/// caller then falls back to running in `repo_path` directly).
+async fn make_worktree(ctx: &ServerCtx, task: &ScheduledTask, repo_path: &str) -> Option<String> {
+    let git = otto_git::LocalGit::new(repo_path);
+    let base = git.current_branch().await.unwrap_or_else(|_| "HEAD".into());
+    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+    let branch = format!("otto/scheduled/{}/{stamp}", short(&task.id));
+    let wt_path = ctx
+        .data_dir
+        .join("scheduled")
+        .join(&task.id)
+        .join("worktrees")
+        .join(stamp.to_string());
+    let wt = wt_path.to_string_lossy().to_string();
+    match git.worktree_add(&wt, &branch, &base).await {
+        Ok(()) => Some(wt),
+        Err(e) => {
+            warn!(task = %task.id, "scheduled task: worktree add failed ({repo_path}): {e}; running in repo");
+            None
+        }
+    }
+}
+
+fn short(id: &str) -> &str {
+    &id[..id.len().min(8)]
+}
+
+/// Normalised content hash for `notify_on_change` — collapses whitespace so a
+/// re-run with only formatting noise still counts as "unchanged".
+pub fn report_hash(report: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let normalized: String = report.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    normalized.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Append the "write your report to FILE" instruction (codex/agy write no
+/// transcript, so the file is the reliable capture path; claude's JSONL is a
+/// fallback handled by the watcher).
+fn augment_report_prompt(base: &str, out_path: &str) -> String {
+    format!(
+        "{base}\n\n---\nWhen you have finished, write your COMPLETE Markdown report (and nothing \
+         else) to this absolute file path, overwriting any existing content:\n\n{out_path}\n\n\
+         Writing that file is the last thing you do."
+    )
+}
+
+/// Format a shell run as a Markdown report.
+fn shell_report(name: &str, cmd: &str, out: &std::process::Output) -> String {
+    let code = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    format!(
+        "# {name}\n\nShell command exited with status `{code}`.\n\n---\n\n## Command\n\n\
+         ```sh\n{cmd}\n```\n\n## stdout\n\n```\n{}\n```\n\n## stderr\n\n```\n{}\n```\n",
+        stdout.trim_end(),
+        stderr.trim_end()
+    )
+}
+
+/// Format a finished workflow run as a Markdown report.
+fn workflow_report(name: &str, run: &otto_core::workflows::WorkflowRun) -> String {
+    let mut body = format!(
+        "# Workflow: {name}\n\nRun `{}` finished with status **{:?}**.\n\n---\n\n## Nodes\n\n",
+        run.id, run.status
+    );
+    for n in &run.nodes {
+        body.push_str(&format!("- `{}` — {:?}\n", n.node_id, n.status));
+    }
+    if let Some(err) = &run.error {
+        body.push_str(&format!("\n## Error\n\n{err}\n"));
+    }
+    body
+}
+
+/// Build a proof pack for a run: the report (+ run metadata) as evidence, status
+/// recomputed. Returns the pack id. Best-effort — never fails the run.
+async fn build_proof_pack(
+    ctx: &ServerCtx,
+    task: &ScheduledTask,
+    run_id: &str,
+    out: &ExecOutcome,
+) -> Option<String> {
+    use otto_core::proof::{ProofArtifactKind, ProofArtifactStatus, WorkItemKind};
+
+    let created_by = task.created_by.clone().unwrap_or_else(|| "system".into());
+    let pack = ctx
+        .proof_repo
+        .ensure_pack(
+            &task.workspace_id,
+            WorkItemKind::Task,
+            run_id,
+            &format!("Scheduled task: {}", task.name),
+            &created_by,
+        )
+        .await
+        .ok()?;
+
+    let meta = json!({
+        "task_id": task.id,
+        "provider": task.provider,
+        "session_id": out.session_id,
+        "workflow_run_id": out.workflow_run_id,
+        "attempts": out.attempts,
+    });
+    let _ = crate::proof::upsert_content_artifact(
+        ctx,
+        &pack,
+        ProofArtifactKind::Log,
+        "Scheduled run report",
+        &out.report,
+        ProofArtifactStatus::Info,
+        meta,
+        &created_by,
+    )
+    .await;
+    let _ = crate::proof::recompute_and_emit(ctx, &pack.id).await;
+    Some(pack.id)
 }
 
 async fn write_report(abs: &std::path::Path, report: &str) -> Result<()> {
@@ -459,5 +931,44 @@ mod tests {
     #[tokio::test]
     async fn webhook_blank_url_errors() {
         assert!(deliver_webhook("", "hi", "r.md", b"# r").await.is_err());
+    }
+
+    #[test]
+    fn report_hash_ignores_whitespace_noise() {
+        // notify-on-change: re-formatting alone must count as "unchanged".
+        let a = report_hash("# Title\n\nReviewed: 1\n");
+        let b = report_hash("# Title\n  Reviewed:   1");
+        assert_eq!(a, b);
+        // A real content change must differ.
+        let c = report_hash("# Title\n\nReviewed: 2\n");
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn augment_report_prompt_names_the_file() {
+        let p = augment_report_prompt("do it", "/tmp/out.md");
+        assert!(p.contains("do it"));
+        assert!(p.contains("/tmp/out.md"));
+        assert!(p.contains("Markdown report"));
+    }
+
+    #[test]
+    fn shell_report_has_command_and_streams() {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("echo hello")
+            .output()
+            .unwrap();
+        let r = shell_report("My Shell Task", "echo hello", &out);
+        assert!(r.contains("My Shell Task"));
+        assert!(r.contains("echo hello"));
+        assert!(r.contains("hello"));
+        assert!(r.contains("---")); // summary/details rule
+    }
+
+    #[test]
+    fn short_truncates_to_8() {
+        assert_eq!(short("0123456789abcdef"), "01234567");
+        assert_eq!(short("abc"), "abc");
     }
 }

@@ -4667,20 +4667,33 @@ export interface ScheduledTask {
   id: Id;
   workspace_id: Id;
   name: string;
-  /** v1: `agent_prompt`. */
+  /** `agent_prompt` (run an agent) or `workflow` (hand off to a workflow). */
   kind: string;
   prompt: string;
   skill?: string | null;
-  /** v1: `claude`. */
+  /** `claude` | `codex` | `agy` | `shell` | a custom provider slug. */
   provider: string;
   model: string;
   /** Working dir; `''` => a per-task scratch dir. NOT a security boundary. */
   cwd: string;
-  /** `{cadence:'interval'|'daily'|'weekly', every_min?, at?, weekday?}`. */
+  /** `{cadence:'interval'|'daily'|'weekly'|'cron', every_min?, at?, weekday?, expr?}`. */
   schedule: Record<string, unknown>;
   /** `{type:'none'|'slack'|'telegram'|'email'|'webhook', ...}`. */
   destination: Record<string, unknown>;
   enabled: boolean;
+  // v2
+  /** IANA timezone the daily/weekly/cron times are interpreted in (default UTC). */
+  timezone: string;
+  /** For `kind:'workflow'`: the workflow this task launches. */
+  workflow_id?: string | null;
+  /** `none` | `worktree` (run in a fresh isolated git worktree). */
+  sandbox: string;
+  /** Extra agent attempts on failure (total attempts = 1 + max_retries). */
+  max_retries: number;
+  /** Deliver only when the report meaningfully changes from the last ok run. */
+  notify_on_change: boolean;
+  /** Build a proof pack (report + run metadata) for each run. */
+  attach_proof: boolean;
   last_run_at?: string | null;
   last_status?: string | null;
   next_run_at?: string | null;
@@ -4704,7 +4717,15 @@ export interface ScheduledTaskRun {
   delivered: boolean;
   delivery_error?: string | null;
   error?: string | null;
+  /** The visible agent session the run drove (Open it from the run row). */
   session_id?: string | null;
+  // v2
+  report_hash?: string | null;
+  proof_pack_id?: string | null;
+  attempts: number;
+  /** Delivery was suppressed because the report didn't meaningfully change. */
+  skipped_delivery: boolean;
+  workflow_run_id?: string | null;
   created_at: string;
 }
 

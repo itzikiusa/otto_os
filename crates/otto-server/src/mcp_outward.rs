@@ -97,17 +97,22 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"}}}}),
         json!({"name":"otto.create_scheduled_task","mutating":true,
-            "description":"Create a scheduled task: a recurring job that runs an agent with `prompt` on a cadence, writes a Markdown report, and delivers it to a destination. DANGEROUS: an autonomous recurring capability — approval-gated. `schedule` = {cadence:'interval'|'daily'|'weekly', every_min, at:'HH:MM', weekday}. `destination` = {type:'none'|'slack'|'telegram'|'email'|'webhook', ...}.",
+            "description":"Create a scheduled task: a recurring job that runs an agent (or hands off to a workflow) on a cadence, writes a Markdown report, and delivers it to a destination. DANGEROUS: an autonomous recurring capability — approval-gated. `schedule` = {cadence:'interval'|'daily'|'weekly'|'cron', every_min, at:'HH:MM', weekday, expr:'<5-field cron>'} interpreted in `timezone` (IANA). `provider` = claude|codex|agy|shell|<custom>. `kind` = 'agent_prompt'|'workflow' (workflow requires workflow_id). `sandbox` = 'none'|'worktree'. `max_retries` 0..5. `notify_on_change` only delivers when the report changes. `attach_proof` builds a proof pack. `destination` = {type:'none'|'slack'|'telegram'|'email'|'webhook', ...}.",
             "inputSchema":{"type":"object","required":["workspace_id","name","prompt"],"properties":{
                 "workspace_id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},
-                "schedule":{"type":"object"},"destination":{"type":"object"},
-                "skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
+                "kind":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},
+                "schedule":{"type":"object"},"destination":{"type":"object"},"timezone":{"type":"string"},
+                "workflow_id":{"type":"string"},"sandbox":{"type":"string"},"max_retries":{"type":"integer"},
+                "notify_on_change":{"type":"boolean"},"attach_proof":{"type":"boolean"},
+                "cwd":{"type":"string"},"skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
         json!({"name":"otto.update_scheduled_task","mutating":true,
-            "description":"Update a scheduled task's fields (name/prompt/schedule/destination/skill/enabled). DANGEROUS — approval-gated.",
+            "description":"Update a scheduled task's fields (name/prompt/schedule/destination/provider/timezone/sandbox/max_retries/notify_on_change/attach_proof/workflow_id/skill/enabled). DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},
-                "schedule":{"type":"object"},"destination":{"type":"object"},
-                "skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
+                "provider":{"type":"string"},"schedule":{"type":"object"},"destination":{"type":"object"},
+                "timezone":{"type":"string"},"workflow_id":{"type":"string"},"sandbox":{"type":"string"},
+                "max_retries":{"type":"integer"},"notify_on_change":{"type":"boolean"},
+                "attach_proof":{"type":"boolean"},"skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
         json!({"name":"otto.set_scheduled_task_enabled","mutating":true,
             "description":"Enable or disable a scheduled task. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id","enabled"],"properties":{

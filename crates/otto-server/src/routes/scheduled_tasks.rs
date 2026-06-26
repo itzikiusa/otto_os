@@ -67,6 +67,19 @@ struct CreateReq {
     destination: Option<Value>,
     #[serde(default = "default_true")]
     enabled: bool,
+    // v2
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
+    workflow_id: Option<String>,
+    #[serde(default)]
+    sandbox: Option<String>,
+    #[serde(default)]
+    max_retries: Option<i64>,
+    #[serde(default)]
+    notify_on_change: Option<bool>,
+    #[serde(default)]
+    attach_proof: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -86,9 +99,17 @@ struct UpdateReq {
     schedule: Option<Value>,
     destination: Option<Value>,
     enabled: Option<bool>,
+    // v2
+    timezone: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    workflow_id: Option<Option<String>>,
+    sandbox: Option<String>,
+    max_retries: Option<i64>,
+    notify_on_change: Option<bool>,
+    attach_proof: Option<bool>,
 }
 
-/// Distinguish "key absent" from "key present and null" for `skill`.
+/// Distinguish "key absent" from "key present and null" for `skill`/`workflow_id`.
 fn double_option<'de, D>(de: D) -> Result<Option<Option<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -98,20 +119,73 @@ where
 
 // --- Validation ------------------------------------------------------------
 
-/// v1 supports claude only; reject other providers explicitly (the engine drives
-/// `Orchestrator::run_agent`, which is claude).
+/// Accepted agent providers plus `shell`; a non-empty custom slug is also allowed
+/// (a user-registered provider). Only an empty-but-required provider is rejected.
 fn check_provider(p: &str) -> Result<(), ApiError> {
-    if p.trim().is_empty() || p == "claude" {
+    let p = p.trim();
+    if p.is_empty() {
+        return Ok(()); // resolved to the default ("claude") downstream
+    }
+    // Slug-shaped (the provider registry key); reject obviously bad input.
+    if p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         Ok(())
     } else {
-        Err(ApiError(Error::Invalid(format!(
-            "provider '{p}' is not supported yet — scheduled tasks run with claude in this version"
-        ))))
+        Err(ApiError(Error::Invalid(format!("provider '{p}' is not a valid provider name"))))
+    }
+}
+
+fn check_sandbox(s: &str) -> Result<(), ApiError> {
+    match s {
+        "none" | "worktree" => Ok(()),
+        other => Err(ApiError(Error::Invalid(format!("sandbox must be none|worktree (got '{other}')")))),
+    }
+}
+
+fn check_kind(k: &str) -> Result<(), ApiError> {
+    match k {
+        "agent_prompt" | "workflow" => Ok(()),
+        other => Err(ApiError(Error::Invalid(format!("kind must be agent_prompt|workflow (got '{other}')")))),
+    }
+}
+
+fn check_retries(n: i64) -> Result<(), ApiError> {
+    if (0..=5).contains(&n) {
+        Ok(())
+    } else {
+        Err(ApiError(Error::Invalid("max_retries must be 0..=5".into())))
+    }
+}
+
+/// Validate a timezone string (empty == UTC). Rejects an unknown IANA name.
+fn check_timezone(tz: &str) -> Result<(), ApiError> {
+    let t = tz.trim();
+    if t.is_empty() || t.parse::<chrono_tz::Tz>().is_ok() {
+        Ok(())
+    } else {
+        Err(ApiError(Error::Invalid(format!("unknown timezone '{tz}'"))))
     }
 }
 
 fn validate_schedule(schedule: &Value) -> Result<(), ApiError> {
     cadence::validate(schedule).map_err(ApiError)
+}
+
+/// A `kind=workflow` task must name a workflow that exists in the same workspace.
+async fn validate_workflow(
+    ctx: &ServerCtx,
+    ws_id: &str,
+    workflow_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let wf_id = workflow_id
+        .ok_or_else(|| ApiError(Error::Invalid("kind=workflow requires a workflow_id".into())))?;
+    let wf = otto_state::WorkflowsRepo::new(ctx.pool.clone())
+        .get(&wf_id.to_string())
+        .await
+        .map_err(|_| ApiError(Error::Invalid("workflow_id not found".into())))?;
+    if wf.workspace_id != ws_id {
+        return Err(ApiError(Error::Invalid("workflow belongs to a different workspace".into())));
+    }
+    Ok(())
 }
 
 // --- Handlers --------------------------------------------------------------
@@ -139,17 +213,28 @@ async fn create(
     }
     let provider = req.provider.unwrap_or_else(|| "claude".into());
     check_provider(&provider)?;
+    let kind = req.kind.unwrap_or_else(|| "agent_prompt".into());
+    check_kind(&kind)?;
+    let sandbox = req.sandbox.unwrap_or_else(|| "none".into());
+    check_sandbox(&sandbox)?;
+    let max_retries = req.max_retries.unwrap_or(0);
+    check_retries(max_retries)?;
+    let timezone = req.timezone.unwrap_or_else(|| "UTC".into());
+    check_timezone(&timezone)?;
     let schedule = req.schedule.unwrap_or_else(|| json!({"cadence":"interval","every_min":60}));
     validate_schedule(&schedule)?;
+    let workflow_id = req.workflow_id.filter(|s| !s.is_empty());
+    if kind == "workflow" {
+        validate_workflow(&ctx, &ws_id, workflow_id.as_deref()).await?;
+    }
     let destination = req.destination.unwrap_or_else(|| json!({"type":"none"}));
-    let next = cadence::next_run(&schedule, chrono::Utc::now()).map(|d| d.to_rfc3339());
+    let tz = cadence::task_tz(&timezone);
+    let next = cadence::next_run(&schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
 
     let task = ctx
         .scheduled_tasks
         .create(NewScheduledTask {
-            workspace_id: ws_id.clone(),
-            name: req.name.trim().to_string(),
-            kind: req.kind.unwrap_or_else(|| "agent_prompt".into()),
+            kind,
             prompt: req.prompt,
             skill: req.skill.filter(|s| !s.is_empty()),
             provider,
@@ -159,6 +244,13 @@ async fn create(
             destination,
             enabled: req.enabled,
             created_by: Some(user.id.clone()),
+            timezone,
+            workflow_id,
+            sandbox,
+            max_retries,
+            notify_on_change: req.notify_on_change.unwrap_or(false),
+            attach_proof: req.attach_proof.unwrap_or(false),
+            ..NewScheduledTask::defaults(ws_id.clone(), req.name.trim().to_string())
         })
         .await
         .map_err(ApiError)?;
@@ -196,7 +288,27 @@ async fn update(
     if let Some(s) = &req.schedule {
         validate_schedule(s)?;
     }
+    if let Some(s) = req.sandbox.as_deref() {
+        check_sandbox(s)?;
+    }
+    if let Some(n) = req.max_retries {
+        check_retries(n)?;
+    }
+    if let Some(tz) = req.timezone.as_deref() {
+        check_timezone(tz)?;
+    }
+    // `kind` is fixed at create; if this is a workflow task, the (possibly new)
+    // workflow_id must still name a workflow in this workspace.
+    if task.kind == "workflow" {
+        let wf = req
+            .workflow_id
+            .clone()
+            .flatten()
+            .or_else(|| task.workflow_id.clone());
+        validate_workflow(&ctx, &task.workspace_id, wf.as_deref()).await?;
+    }
     let recompute_next = req.schedule.clone();
+    let tz_changed = req.timezone.is_some();
     let updated = ctx
         .scheduled_tasks
         .update(
@@ -211,13 +323,20 @@ async fn update(
                 schedule: req.schedule,
                 destination: req.destination,
                 enabled: req.enabled,
+                timezone: req.timezone,
+                workflow_id: req.workflow_id,
+                sandbox: req.sandbox,
+                max_retries: req.max_retries,
+                notify_on_change: req.notify_on_change,
+                attach_proof: req.attach_proof,
             },
         )
         .await
         .map_err(ApiError)?;
-    // If the cadence changed, refresh next_run_at for display.
-    if recompute_next.is_some() {
-        let next = cadence::next_run(&updated.schedule, chrono::Utc::now()).map(|d| d.to_rfc3339());
+    // If the cadence/timezone changed, refresh next_run_at for display.
+    if recompute_next.is_some() || tz_changed {
+        let tz = cadence::task_tz(&updated.timezone);
+        let next = cadence::next_run(&updated.schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
         let _ = ctx
             .scheduled_tasks
             .set_runtime(&id, None, updated.last_status.as_deref().unwrap_or(""), next.as_deref())
@@ -300,25 +419,80 @@ async fn presets(
 /// work out of the box (the agent uses the daemon's available Jira/Atlassian MCP
 /// tools — see docs/features/scheduled-tasks.md for the prerequisite).
 pub fn builtin_presets() -> Vec<ScheduledTaskPreset> {
-    vec![ScheduledTaskPreset {
-        id: "ticket-followup-review".into(),
-        name: "Processed-ticket follow-up review".into(),
-        description: "Hourly: re-analyze tickets updated in the last 24h, check for new \
-                      post-triage comments, and produce a follow-up report."
-            .into(),
-        kind: "agent_prompt".into(),
-        prompt: "Go over every ticket that was updated in the last 24 hours. Using the Jira/\
-                 Atlassian tools available to you, re-analyze each one and check for new \
-                 comments since it was last triaged. Produce a Markdown report titled \
-                 \"Processed-ticket follow-up review\" whose summary lists: number Reviewed, \
-                 number with New post-triage comments, any Improvements found (or \"No durable \
-                 skill/memory improvements needed\"), and a Terminal/no-refetch count. Then, \
-                 after a `---` rule, give the per-ticket details."
-            .into(),
-        schedule: json!({"cadence": "interval", "every_min": 60}),
-        suggested_destination: json!({"type": "none"}),
-        skill: None,
-    }]
+    vec![
+        ScheduledTaskPreset {
+            id: "ticket-followup-review".into(),
+            name: "Processed-ticket follow-up review".into(),
+            description: "Hourly: re-analyze tickets updated in the last 24h, check for new \
+                          post-triage comments, and produce a follow-up report."
+                .into(),
+            kind: "agent_prompt".into(),
+            prompt: "Go over every ticket that was updated in the last 24 hours. Using the Jira/\
+                     Atlassian tools available to you, re-analyze each one and check for new \
+                     comments since it was last triaged. Produce a Markdown report titled \
+                     \"Processed-ticket follow-up review\" whose summary lists: number Reviewed, \
+                     number with New post-triage comments, any Improvements found (or \"No durable \
+                     skill/memory improvements needed\"), and a Terminal/no-refetch count. Then, \
+                     after a `---` rule, give the per-ticket details."
+                .into(),
+            schedule: json!({"cadence": "interval", "every_min": 60}),
+            suggested_destination: json!({"type": "none"}),
+            skill: None,
+        },
+        ScheduledTaskPreset {
+            id: "weekly-security-scan".into(),
+            name: "Weekly security scan".into(),
+            description: "Weekly: run a security review of the repository in an isolated \
+                          worktree and report findings. Notifies only when findings change."
+                .into(),
+            kind: "agent_prompt".into(),
+            prompt: "Perform a security review of the code in this repository. Look for \
+                     injection, authn/authz gaps, SSRF, secret handling, unsafe deserialization, \
+                     and path-traversal issues. Produce a Markdown report titled \"Security scan\" \
+                     whose summary states the count of High/Medium/Low findings (or \"No new \
+                     findings\"), then after a `---` rule, list each finding with file:line, \
+                     severity, and a suggested fix. Do not modify any files."
+                .into(),
+            schedule: json!({"cadence": "cron", "expr": "0 8 * * 1"}),
+            suggested_destination: json!({"type": "none"}),
+            skill: Some("security-review".into()),
+        },
+        ScheduledTaskPreset {
+            id: "weekly-code-review".into(),
+            name: "Weekly code-quality review".into(),
+            description: "Weekly: review recent changes for quality/maintainability in an \
+                          isolated worktree and report. Attach a proof pack."
+                .into(),
+            kind: "agent_prompt".into(),
+            prompt: "Review the repository's recent changes (last 7 days of commits) for code \
+                     quality: correctness risks, missing tests, error handling, and \
+                     maintainability. Produce a Markdown report titled \"Code-quality review\" \
+                     whose summary lists the top issues by area, then after a `---` rule give \
+                     per-issue detail with file:line and a concrete suggestion. Do not modify \
+                     files."
+                .into(),
+            schedule: json!({"cadence": "weekly", "at": "08:00", "weekday": 0}),
+            suggested_destination: json!({"type": "none"}),
+            skill: Some("code-review".into()),
+        },
+        ScheduledTaskPreset {
+            id: "weekly-dependency-scan".into(),
+            name: "Weekly dependency / PR scan".into(),
+            description: "Weekly: check for outdated or vulnerable dependencies and stale open \
+                          PRs, and report what needs attention."
+                .into(),
+            kind: "agent_prompt".into(),
+            prompt: "Inspect this repository's dependency manifests and lockfiles for outdated or \
+                     known-vulnerable dependencies, and list any open pull requests that look \
+                     stale or unmerged. Produce a Markdown report titled \"Dependency & PR scan\" \
+                     whose summary lists counts (outdated, vulnerable, stale PRs), then after a \
+                     `---` rule give the specifics with suggested upgrades. Do not modify files."
+                .into(),
+            schedule: json!({"cadence": "cron", "expr": "0 9 * * 1"}),
+            suggested_destination: json!({"type": "none"}),
+            skill: None,
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -326,18 +500,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_check_allows_claude_and_blank_only() {
-        assert!(check_provider("claude").is_ok());
-        assert!(check_provider("").is_ok());
-        assert!(check_provider("codex").is_err());
+    fn provider_check_allows_known_and_custom_slugs() {
+        for p in ["claude", "codex", "agy", "shell", "", "my-custom-agent"] {
+            assert!(check_provider(p).is_ok(), "provider '{p}' should be accepted");
+        }
+        assert!(check_provider("bad provider!").is_err());
     }
 
     #[test]
-    fn ticket_preset_is_present_and_shaped() {
+    fn field_validators() {
+        assert!(check_sandbox("none").is_ok());
+        assert!(check_sandbox("worktree").is_ok());
+        assert!(check_sandbox("vm").is_err());
+        assert!(check_kind("agent_prompt").is_ok());
+        assert!(check_kind("workflow").is_ok());
+        assert!(check_kind("magic").is_err());
+        assert!(check_retries(0).is_ok());
+        assert!(check_retries(5).is_ok());
+        assert!(check_retries(6).is_err());
+        assert!(check_timezone("UTC").is_ok());
+        assert!(check_timezone("Europe/London").is_ok());
+        assert!(check_timezone("").is_ok());
+        assert!(check_timezone("Mars/Phobos").is_err());
+    }
+
+    #[test]
+    fn presets_present_and_shaped() {
         let p = builtin_presets();
-        assert_eq!(p.len(), 1);
-        assert_eq!(p[0].id, "ticket-followup-review");
-        assert_eq!(p[0].schedule["every_min"], 60);
-        assert!(p[0].prompt.contains("---"));
+        assert!(p.iter().any(|x| x.id == "ticket-followup-review"));
+        assert!(p.iter().any(|x| x.id == "weekly-security-scan"));
+        assert!(p.iter().any(|x| x.id == "weekly-code-review"));
+        assert!(p.iter().all(|x| x.prompt.contains("---")));
+        // cron preset is valid.
+        let sec = p.iter().find(|x| x.id == "weekly-security-scan").unwrap();
+        assert!(cadence::validate(&sec.schedule).is_ok());
     }
 }

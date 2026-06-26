@@ -85,7 +85,7 @@ pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
 // avoid colliding with swarm's `RunPatch`/`RunFilter` re-exports.
 pub use runs::RunsRepo;
 pub use scheduled_tasks::{
-    NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
+    FinishRun, NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
 };
 pub use product::*;
 pub use improvements::{ImprovementsRepo, NewEdit};
