@@ -448,6 +448,7 @@ pub fn provision_agent(
         extra_context_md: identity_md,
         include_memory: true,
         repo_rules_md: String::new(),
+        ..Default::default()
     };
     let ctx_root = otto_context::materialize::default_context_root();
     let _ =

@@ -1067,6 +1067,7 @@ interface ContextPreviewReq {
   soul?: string | null;         // omit ⇒ stored; null ⇒ global default
   extra_context_md?: string;    // omit ⇒ stored
   include_memory?: boolean;     // omit ⇒ stored
+  include_repo_map?: boolean;   // omit ⇒ stored; opt-in tree-sitter repo map
   cwd?: string;                 // omit ⇒ workspace root
 }
 

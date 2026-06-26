@@ -48,6 +48,7 @@
       soul: c.soul,
       extra_context_md: c.extra_context_md,
       include_memory: c.include_memory,
+      include_repo_map: c.include_repo_map ?? false,
     };
   }
 
@@ -117,6 +118,7 @@
         soul: cfg.soul,
         extra_context_md: cfg.extra_context_md,
         include_memory: cfg.include_memory,
+        include_repo_map: cfg.include_repo_map ?? false,
       };
       cfg = await contextApi.updateWorkspaceContext(wsId, body);
       allSkills = cfg.skills === null;
@@ -257,6 +259,20 @@
       <div class="field field-row">
         <label for="cs-memory">Inline workspace MEMORY.md</label>
         <input id="cs-memory" type="checkbox" bind:checked={cfg.include_memory} />
+      </div>
+
+      <!-- Include repo map -->
+      <div class="field field-row">
+        <label for="cs-repomap" title="Aider-style tree-sitter + PageRank map of the repo's most-referenced symbols">
+          Inject repo map (tree-sitter)
+        </label>
+        <input
+          id="cs-repomap"
+          type="checkbox"
+          checked={cfg.include_repo_map ?? false}
+          onchange={(e) => cfg && (cfg.include_repo_map = e.currentTarget.checked)}
+          data-testid="context-repomap"
+        />
       </div>
 
       <div class="actions">

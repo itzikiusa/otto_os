@@ -68,6 +68,16 @@ otto-workgraph = { path = "crates/otto-workgraph" }
 otto-mcp = { path = "crates/otto-mcp" }
 otto-sandbox = { path = "crates/otto-sandbox" }
 
+# Tree-sitter repo map (otto-context). A coherent grammar set pinned to one
+# tree-sitter ABI; `ignore` walks the repo honoring .gitignore.
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+ignore = "0.4"
+
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
