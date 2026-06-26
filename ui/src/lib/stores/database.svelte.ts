@@ -196,8 +196,12 @@ function scanTopLevel(sql: string): { kw: string; idx: number; end: number }[] {
 }
 
 /** Split a single SELECT into head / WHERE-body / tail. Returns null when it
- * can't safely parse (no top-level FROM, a PREWHERE, or multiple statements). */
-function splitStatement(sql: string): { head: string; whereBody: string; tail: string } | null {
+ * can't safely parse (no top-level FROM, a PREWHERE, or multiple statements).
+ * Exported so the cell "Query by value" / "Add to query" actions reuse the exact
+ * same top-level parser as the quick-filter chips (no second, drifting splicer). */
+export function splitStatement(
+  sql: string,
+): { head: string; whereBody: string; tail: string } | null {
   if (/;\s*\S/.test(sql)) return null; // a second statement after a semicolon
   const hits = scanTopLevel(sql);
   if (!hits.some((h) => h.kw === 'from')) return null;
@@ -222,8 +226,9 @@ function splitStatement(sql: string): { head: string; whereBody: string; tail: s
 }
 
 /** Replace the statement's WHERE with `newWhereBody` (removing WHERE when empty).
- * Returns the original unchanged when it can't safely parse. */
-function rewriteWhere(sql: string, newWhereBody: string): string {
+ * Returns the original unchanged when it can't safely parse. Exported for the
+ * cell filter actions (see `splitStatement`). */
+export function rewriteWhere(sql: string, newWhereBody: string): string {
   const trimmed = sql.trimEnd();
   const hadSemi = trimmed.endsWith(';');
   const core = hadSemi ? trimmed.slice(0, -1).trimEnd() : trimmed;
@@ -1758,6 +1763,19 @@ class DatabaseStore {
     if (!t) return;
     t.filters = [];
     this.applyFilters();
+  }
+
+  /** Take over the WHERE from a cell "Query by value" / "Add to query" action:
+   * set the rewritten statement AND drop any quick-filter chips — otherwise the
+   * chip bar would desync and the next chip op (`applyFilters`) would silently
+   * rebuild the WHERE from the stale chips, discarding the spliced condition.
+   * Clears the chips WITHOUT `applyFilters` (which would strip the new WHERE).
+   * Does NOT run. */
+  setStatementFromCellFilter(statement: string): void {
+    const t = this.tab;
+    if (!t) return;
+    t.filters = [];
+    this.setStatement(statement);
   }
 
   /** Rewrite the active statement's WHERE from the chips (does NOT run). */

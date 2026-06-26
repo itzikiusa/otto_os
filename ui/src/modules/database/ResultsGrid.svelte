@@ -12,6 +12,7 @@
   import { database } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { buildFilteredQuery, type FilterMode } from './query-filter';
   import type { QueryResult, DbExportFormat, ExportToPathResp, DbForeignKey } from '../../lib/api/types';
   import { api, postNdjsonStream } from '../../lib/api/client';
   import Modal from '../../lib/components/Modal.svelte';
@@ -352,6 +353,21 @@
     }
   }
 
+  // "Query by value" / "Add to query": write the rebuilt query into the editor
+  // AND the clipboard — never run it (the user reviews + presses Run). The query
+  // is built from the active statement by the same WHERE/find-filter splicer the
+  // quick-filter chips use (see ./query-filter + the store's splitStatement).
+  function applyFilterQuery(query: string, mode: FilterMode): void {
+    // Sets the editor statement AND clears any quick-filter chips (the rewritten
+    // query now owns the WHERE) so the chip bar can't later discard the splice.
+    database.setStatementFromCellFilter(query); // reflects in the editor (CodeEditor rebuilds)
+    void copyText(query); // clipboard parity with the editor
+    toasts.success(
+      mode === 'set' ? 'Query by value' : 'Added to query',
+      'Query updated & copied — press Run to execute',
+    );
+  }
+
   // ── Quick-filter context menus (cell + header) ───────────────────────────────
   function shortLabel(v: unknown): string {
     const s = v === null || v === undefined ? 'NULL' : isComplex(v) ? compactJson(v) : String(v);
@@ -393,9 +409,6 @@
     const items: import('../../lib/contextmenu.svelte').MenuItem[] = [
       { label: `Filter:  ${col} = ${short}`, icon: 'search', action: () => database.addQuickFilter(col, v, 'include') },
       { label: `Exclude:  ${col} ≠ ${short}`, icon: 'x', action: () => database.addQuickFilter(col, v, 'exclude') },
-      { separator: true },
-      { label: 'Expand value', icon: 'maximize', action: () => openCell(v) },
-      { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : isComplex(v) ? compactJson(v) : String(v)) },
     ];
     // In-grid foreign-key navigation (0003a): a cell in an FK column gets a
     // "→ Go to <ref_table>" jump opening a new tab with the referenced row.
@@ -403,7 +416,7 @@
     if (fk) {
       const sql = fkTargetSql(fk, rowIdx);
       if (sql) {
-        items.splice(2, 0, {
+        items.push({
           label: `→ Go to ${fk.ref_table}`,
           icon: 'external',
           action: () =>
@@ -415,6 +428,30 @@
         });
       }
     }
+    // "Query by value" / "Add to query": rebuild the ACTIVE query filtered by this
+    // cell, into the editor + clipboard (never run). SQL engines + Mongo `find`
+    // only; both items are hidden when the active statement can't be safely
+    // filtered (e.g. non-SELECT, multi-statement, a Mongo aggregate).
+    const fe = engine === 'mysql' || engine === 'clickhouse' || engine === 'mongodb' ? engine : null;
+    if (fe) {
+      const base = statement ?? '';
+      const setQ = buildFilteredQuery(fe, base, col, v, 'set');
+      const andQ = buildFilteredQuery(fe, base, col, v, 'and');
+      if (setQ || andQ) {
+        items.push({ separator: true });
+        if (setQ) {
+          items.push({ label: `Query by value:  ${col} = ${short}`, icon: 'search', action: () => applyFilterQuery(setQ, 'set') });
+        }
+        if (andQ) {
+          items.push({ label: `Add to query:  AND ${col} = ${short}`, icon: 'plus', action: () => applyFilterQuery(andQ, 'and') });
+        }
+      }
+    }
+    items.push(
+      { separator: true },
+      { label: 'Expand value', icon: 'maximize', action: () => openCell(v) },
+      { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : isComplex(v) ? compactJson(v) : String(v)) },
+    );
     // Delete actions — only for editable results (single table/collection with a
     // resolved key). Builds a statement and opens the review modal; never runs
     // immediately.
@@ -1325,7 +1362,7 @@
         <div class="view-seg" role="tablist" aria-label="Result view">
           <button class="vs" class:on={viewMode === 'grid'} role="tab" aria-selected={viewMode === 'grid'} onclick={() => (viewMode = 'grid')} title="Columnar grid">Grid</button>
           <button class="vs" class:on={viewMode === 'vertical'} role="tab" aria-selected={viewMode === 'vertical'} onclick={() => (viewMode = 'vertical')} title="One record per block (field: value)">Vertical</button>
-          <button class="vs" class:on={viewMode === 'json'} role="tab" aria-selected={viewMode === 'json'} onclick={() => (viewMode = 'json')} title="JSON array">JSON</button>
+          <button class="vs" class:on={viewMode === 'json'} role="tab" aria-selected={viewMode === 'json'} onclick={() => (viewMode = 'json')} title="One JSON object per row">JSON</button>
         </div>
         {#if viewMode === 'grid'}
           <button
@@ -1431,9 +1468,20 @@
     {/if}
 
     {#if viewMode === 'json'}
+      <!-- One JSON object PER ROW (not one big array) so row boundaries are
+           unmistakable: each row is its own bordered, numbered, copyable block.
+           Same data the server returned — only the rendering differs. -->
       <div class="alt-view">
         {#if viewTruncated}<div class="alt-note dim">Showing first {VIEW_CAP} of {viewRows.length} rows.</div>{/if}
-        <pre class="alt-json mono">{JSON.stringify(objRows, null, 2)}</pre>
+        {#each objRows as obj, ri (ri)}
+          <div class="jrec">
+            <div class="jrec-head mono">
+              <span class="jrec-n">#{ri + 1}</span>
+              <button class="jrec-copy" title="Copy this row as JSON" aria-label="Copy row JSON" onclick={() => copyText(prettyJson(obj))}><Icon name="file" size={10} /></button>
+            </div>
+            <pre class="alt-json mono">{prettyJson(obj)}</pre>
+          </div>
+        {/each}
       </div>
     {:else if viewMode === 'vertical'}
       <div class="alt-view">
@@ -2072,6 +2120,42 @@
     line-height: 1.5;
     white-space: pre-wrap;
     color: var(--text);
+  }
+  /* Per-row JSON card (json view): a bordered, numbered block per row so each
+     row's start/end is obvious. Mirrors the vertical view's .vrec idiom. */
+  .jrec {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    margin-bottom: 8px;
+    overflow: hidden;
+  }
+  .jrec-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 3px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .jrec-copy {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    color: var(--text-dim);
+    background: none;
+    border: none;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+  }
+  .jrec-copy:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  }
+  .jrec .alt-json {
+    padding: 6px 8px;
   }
   .vrec {
     border: 1px solid var(--border);

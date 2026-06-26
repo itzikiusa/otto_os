@@ -317,7 +317,10 @@ different connection, is always a benign `204` — never an error.
 Results render in a **virtualized grid** (`ResultsGrid.svelte`) — only the rows
 in view are in the DOM, so 100k-row results scroll smoothly. Three view modes:
 **Grid** (columnar, default), **Vertical** (one record per block), and **JSON**
-(the rows as a JSON array). Complex cells (objects/arrays) show as compact JSON
+(**one JSON object per row** — each row is its own bordered, numbered, copyable
+block rather than a single big array, so row boundaries are unmistakable; the
+server payload is unchanged, only the rendering differs). Complex cells
+(objects/arrays) show as compact JSON
 with click-to-expand; `NULL` renders as a dimmed `∅`. A **Search rows…** box
 filters the current view. The footer shows the row count (annotated "(filtered)"
 / "(sorted)" when active) and the query duration in ms, plus the **truncated**
@@ -333,6 +336,29 @@ none** (type-aware: numeric vs string; nulls sort last). Header right-click adds
 **Exclude: col ≠ value**, **Expand value**, and **Copy value**. (Column filters
 that *re-shape the query* show as chips with a "press Run to apply" hint —
 distinct from the client-side row search.)
+
+#### Query by value / Add to query
+
+A cell right-click also offers two actions that rewrite the **active query text**
+directly (for **MySQL, ClickHouse and MongoDB** — the engines with a filterable
+query language):
+
+- **Query by value: `col` = value** — sets the query's `WHERE` clause (Mongo: the
+  `find(…)` filter) to `col = value`, replacing any existing one.
+- **Add to query: AND `col` = value** — ANDs `col = value` onto the existing
+  `WHERE` (Mongo: merges the key into the filter object). e.g. from
+  `… WHERE a = 'x'`, adding `b = 'y'` gives `… WHERE a = 'x' AND b = 'y'`.
+
+Both **write the rebuilt query into the editor _and_ the clipboard** and **never
+run it** — you review it and press **Run**. They reuse the same top-level
+`WHERE`-splicer as the quick-filter chips (`splitStatement`/`rewriteWhere`),
+preserving `ORDER BY`/`LIMIT`/`GROUP BY`/ClickHouse `SETTINGS`·`FORMAT` tails,
+parenthesizing an existing `OR` before the `AND`, and `IS NULL` for null cells.
+The items are hidden when the active statement can't be safely filtered (a
+non-`SELECT`, a multi-statement buffer, or a Mongo aggregate) and for engines
+without a query language (Redis). The base for the rewrite is the editor's
+current statement, so if you edit the query without re-running, the filter
+splices onto the edited text.
 
 ### Approval-gated inline editing
 
