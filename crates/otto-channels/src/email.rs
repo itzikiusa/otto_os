@@ -22,6 +22,7 @@
 //! in the owner's own inbox.)
 
 use lettre::message::header::ContentType;
+use lettre::message::{Attachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use otto_core::{Error, Result};
@@ -78,6 +79,36 @@ impl GmailSender {
             .map_err(|e| Error::Invalid(format!("build email: {e}")))
     }
 
+    /// Build a multipart (text body + a single file attachment) message. The
+    /// attachment is sent as `text/markdown` (the scheduled-task report format).
+    fn build_with_attachment(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<Message> {
+        let from = self
+            .from_address
+            .parse()
+            .map_err(|e| Error::Invalid(format!("invalid sender address '{}': {e}", self.from_address)))?;
+        let to = to
+            .parse()
+            .map_err(|e| Error::Invalid(format!("invalid recipient address '{to}': {e}")))?;
+        let content_type = ContentType::parse("text/markdown").unwrap_or(ContentType::TEXT_PLAIN);
+        let attachment = Attachment::new(filename.to_string()).body(bytes.to_vec(), content_type);
+        let multipart = MultiPart::mixed()
+            .singlepart(SinglePart::plain(body.to_string()))
+            .singlepart(attachment);
+        Message::builder()
+            .from(from)
+            .to(to)
+            .subject(subject)
+            .multipart(multipart)
+            .map_err(|e| Error::Invalid(format!("build email with attachment: {e}")))
+    }
+
     /// Send a plain-text email to `to` over Gmail SMTP (STARTTLS + AUTH).
     pub async fn send(&self, to: &str, subject: &str, body: &str) -> Result<()> {
         let message = self.build(to, subject, body)?;
@@ -86,6 +117,25 @@ impl GmailSender {
             .send(message)
             .await
             .map_err(|e| Error::Upstream(format!("gmail send: {e}")))?;
+        Ok(())
+    }
+
+    /// Send a text email with one file attachment (used to deliver a scheduled-task
+    /// report `.md`). Body + attachment are otherwise identical transport to [`send`].
+    pub async fn send_with_attachment(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let message = self.build_with_attachment(to, subject, body, filename, bytes)?;
+        let mailer = self.transport()?;
+        mailer
+            .send(message)
+            .await
+            .map_err(|e| Error::Upstream(format!("gmail send (attachment): {e}")))?;
         Ok(())
     }
 
@@ -127,6 +177,26 @@ mod tests {
         assert!(raw.contains("From: me@gmail.com"));
         assert!(raw.contains("To: dest@example.com"));
         assert!(raw.contains("Subject: Subj"));
+        // The app password must never leak into the serialized message.
+        assert!(!raw.contains("app-password"));
+    }
+
+    #[test]
+    fn builds_multipart_with_attachment() {
+        let s = GmailSender::new("me@gmail.com", "app-password");
+        let msg = s
+            .build_with_attachment(
+                "dest@example.com",
+                "Report",
+                "summary body",
+                "report.md",
+                b"# Title\n\nReviewed: 1\n",
+            )
+            .expect("multipart builds");
+        let raw = String::from_utf8(msg.formatted()).unwrap();
+        assert!(raw.contains("report.md"), "attachment filename present");
+        assert!(raw.contains("summary body"), "body present");
+        assert!(raw.contains("multipart/mixed"), "is multipart");
         // The app password must never leak into the serialized message.
         assert!(!raw.contains("app-password"));
     }
