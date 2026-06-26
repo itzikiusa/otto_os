@@ -55,6 +55,7 @@ const ALL_FEATURES: &[Feature] = &[
     Feature::Settings,
     Feature::Users,
     Feature::Mcp,
+    Feature::ScheduledTasks,
 ];
 
 // ---------------------------------------------------------------------------

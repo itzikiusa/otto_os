@@ -723,6 +723,30 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(ProofPack, Edit);
     }
 
+    // ---- Scheduled Tasks -------------------------------------------------
+    // Workspace-axis list/create; flat by-id read/mutate; the report + presets are
+    // reads. The handler does the orthogonal workspace-membership check (flat routes
+    // load the task/run and `require_ws_role` on its workspace_id — IDOR guard).
+    // Placeholders MUST match the route templates (`{id}`, `{run_id}`) verbatim.
+    if p == "/workspaces/{id}/scheduled-tasks" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
+    if p == "/scheduled-tasks/presets" {
+        return Require(ScheduledTasks, View);
+    }
+    if p == "/scheduled-tasks/{id}" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
+    if p == "/scheduled-tasks/{id}/run" {
+        return Require(ScheduledTasks, Edit);
+    }
+    if p == "/scheduled-tasks/{id}/runs" {
+        return Require(ScheduledTasks, View);
+    }
+    if p == "/scheduled-tasks/runs/{run_id}/report" {
+        return Require(ScheduledTasks, View);
+    }
+
     // ----------------------------------------------------------------------
     // 4. Default — fail closed.
     // ----------------------------------------------------------------------

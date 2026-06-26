@@ -18,6 +18,7 @@ pub mod grpc;
 pub mod fs;
 pub mod proof_pack;
 pub mod repo_rules;
+pub mod scheduled_tasks;
 pub mod handover;
 pub mod impersonate;
 pub mod logs;

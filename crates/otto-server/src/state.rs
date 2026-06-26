@@ -116,6 +116,11 @@ pub struct ServerCtx {
     /// Unified work-graph service (persist + emit). The projector
     /// (`workgraph_projector`) feeds it from the event bus; the routes read it.
     pub workgraph: std::sync::Arc<otto_workgraph::WorkGraphService>,
+    // -- Scheduled Tasks ---------------------------------------------------
+    /// Recurring agent jobs (tasks + run history). The scheduler
+    /// (`scheduled_tasks_scheduler`) fires due tasks; the engine
+    /// (`scheduled_tasks_engine`) runs + delivers them; the routes read/write them.
+    pub scheduled_tasks: otto_state::ScheduledTasksRepo,
     // -- Proof Packs -------------------------------------------------------
     pub proof_repo: otto_state::ProofRepo,
     /// Per-pack async locks serializing status/risk recompute so concurrent

@@ -401,6 +401,7 @@ async fn run(cfg: Config) -> Result<(), String> {
             otto_state::WorkGraphRepo::new(pool.clone()),
             events.clone(),
         )),
+        scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
         proof_repo: otto_state::ProofRepo::new(pool.clone()),
         proof_locks: otto_server::proof::new_locks(),
     };
@@ -710,6 +711,12 @@ async fn run(cfg: Config) -> Result<(), String> {
     // that re-derive from the authoritative repos and refresh per-session cost.
     let _workgraph_projector_handle = otto_server::workgraph_projector::spawn(ctx.clone());
     tracing::info!("workgraph projector started");
+
+    // --- Scheduled Tasks ---
+    // Fires due recurring agent jobs (interval/daily/weekly), reaps interrupted
+    // runs on startup, and bounds concurrency. The engine writes + delivers reports.
+    let _scheduled_tasks_handle = otto_server::scheduled_tasks_scheduler::start(ctx.clone());
+    tracing::info!("scheduled tasks scheduler started");
 
     // --- Usage tracking + system metrics (embedded ClickHouse) ---
     // The recorder mines usage from the activity-trail event stream; the
