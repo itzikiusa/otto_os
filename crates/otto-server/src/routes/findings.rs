@@ -50,6 +50,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/findings/{id}/verify", post(verify))
         .route("/findings/{id}/regression-test", post(regression_test))
         // E2E-only seed (handler 404s unless OTTO_E2E; policy-exempt).
+        .route("/workspaces/{ws}/__e2e/review", post(e2e_seed_review))
         .route("/workspaces/{ws}/__e2e/findings", post(e2e_seed))
 }
 
@@ -736,6 +737,33 @@ async fn drive_to_status(ctx: &ServerCtx, id: &str, target: FindingStatus, who: 
 }
 
 #[derive(Deserialize)]
+struct SeedReviewReq {
+    repo_id: String,
+    #[serde(default)]
+    pr_number: Option<u64>,
+}
+
+/// `POST /workspaces/{ws}/__e2e/review` — create a real review row so the
+/// review-scoped endpoints (`/reviews/{id}/findings`, `/proof-pack`) resolve.
+/// 404 unless `OTTO_E2E`.
+async fn e2e_seed_review(
+    Path(_ws): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(_user): CurrentUser,
+    Json(b): Json<SeedReviewReq>,
+) -> ApiResult<Json<otto_core::domain::Review>> {
+    if !e2e_enabled() {
+        return Err(ApiError(Error::NotFound("not found".to_string())));
+    }
+    let review = ctx
+        .reviews_store
+        .create_review(&b.repo_id, b.pr_number.unwrap_or(0))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(review))
+}
+
+#[derive(Deserialize)]
 struct SeedReq {
     review_id: String,
     repo_id: String,
@@ -788,12 +816,14 @@ async fn e2e_seed(
         return Err(ApiError(Error::NotFound("not found".to_string())));
     }
     let who = actor_label(&user);
+    // Each seed is a distinct test fixture: salt the fingerprint so identical
+    // title/body across calls don't dedup into one finding.
     let fingerprint = otto_state::review_findings::compute_fingerprint(
         &b.repo_id,
         b.pr_number.unwrap_or(0),
         b.path.as_deref(),
         b.category.as_deref(),
-        &format!("{}-{}", b.title, b.body),
+        &format!("{}-{}-{}", b.title, b.body, otto_core::new_id()),
     );
     let nf = otto_state::NewFinding {
         review_id: &b.review_id,

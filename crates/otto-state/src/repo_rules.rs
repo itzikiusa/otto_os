@@ -153,8 +153,8 @@ mod tests {
                 "ws1",
                 "u1",
                 NewRepoRule {
-                    title: "Never build SQL with format!".into(),
-                    body: "Use parameterized queries.".into(),
+                    title: "Never build SQL with format!",
+                    body: "Use parameterized queries.",
                     category: Some("security"),
                     severity: Some("high"),
                     glob: None,

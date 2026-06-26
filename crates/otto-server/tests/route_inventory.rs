@@ -117,6 +117,11 @@ fn registered_routes(root: &Path) -> BTreeSet<String> {
             continue;
         }
         for p in extract_route_paths(&src) {
+            // Test-only seed routes (gated by OTTO_E2E, policy-exempt) are not part
+            // of the public API contract and are intentionally absent from api.md.
+            if p.contains("__e2e") {
+                continue;
+            }
             set.insert(p);
         }
     }
