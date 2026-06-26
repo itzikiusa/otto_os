@@ -506,3 +506,19 @@ blind timer.
 - Scope: `Workspace` (gated on viewer access to that workspace).
 - The UI re-fetches the affected pack and refreshes the workspace proof summary.
 - TypeScript type: `{ type: 'proof_pack_updated'; workspace_id: Id; proof_pack_id: Id; work_item_kind: string; work_item_id: string; status: string; risk_score: number }`.
+
+---
+
+### `scheduled_task_run_updated`
+
+```json
+{ "type": "scheduled_task_run_updated", "workspace_id": "<Id>", "task_id": "<Id>",
+  "run_id": "<Id>", "status": "running|ok|error" }
+```
+
+- Emitted by `otto_server::scheduled_tasks_engine` when a scheduled-task run
+  starts, finishes (`ok`), or errors.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- The Scheduled Tasks page re-fetches the task's run history on a matching tick
+  instead of polling.
+- TypeScript type: `{ type: 'scheduled_task_run_updated'; workspace_id: Id; task_id: Id; run_id: Id; status: string }`.
