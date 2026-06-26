@@ -23,6 +23,7 @@ pub mod improvements;
 pub mod integrations;
 pub mod issues;
 pub mod mcp_audit;
+pub mod mcp_control;
 pub mod goal_loops;
 pub mod mcp_servers;
 pub mod memory;
@@ -79,6 +80,12 @@ pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
 pub use issues::{IssuesRepo, NewIssueAccount};
 pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
+pub use mcp_control::{
+    CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval, McpApprovalRepo,
+    McpCallLogRepo, McpCallLogRow, McpPolicy, McpPolicyRepo, McpRegistryRepo, McpServerDetail,
+    McpTool, McpToolStats, McpToolsRepo, NewAllowlistEntry, NewApproval, NewCallLog, NewPolicy,
+    NewServerRow,
+};
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};

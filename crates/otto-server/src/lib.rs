@@ -22,6 +22,8 @@ pub mod goal_loop_workspace;
 pub mod insights;
 pub mod login_throttle;
 pub mod lsp;
+pub mod mcp_capabilities;
+pub mod mcp_outward;
 pub mod modules;
 pub mod monitor;
 pub mod plugins;

@@ -222,6 +222,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         secrets.clone(),
         None,
     ));
+    let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
     let swarm_repo = SwarmRepo::new(pool.clone());
     let swarm = Arc::new(otto_swarm::SwarmService::new(swarm_repo.clone()));
     let product_repo = ProductRepo::new(pool.clone());
@@ -245,6 +246,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         roles,
         auth_cache: otto_rbac::AuthCache::new(),
         version: "test".into(),
+        base_url: "http://127.0.0.1:0".into(),
         data_dir: PathBuf::from("/tmp/otto-test"),
         plugins: Arc::new(otto_server::plugins::PluginManager::new(
             otto_state::PluginsRepo::new(pool.clone()),
@@ -258,6 +260,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         db_explorer,
         db_assist: otto_server::db_assist::new_registry(),
         brokers,
+        mcp,
         spawner: Arc::new(NoopSpawner),
         git_store: GitStore::new(pool.clone()),
         issues_store: IssuesRepo::new(pool.clone()),

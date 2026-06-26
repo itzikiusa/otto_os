@@ -142,6 +142,357 @@ export interface UpdateMcpServerReq {
   enabled?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// MCP Control Plane — mirrors crates/otto-state/src/mcp_control.rs +
+// crates/otto-mcp/src/types.rs (wire JSON is snake_case). The legacy McpServer /
+// CreateMcpServerReq / UpdateMcpServerReq above stay intact — they drive the
+// `.mcp.json` config CRUD. The richer governed registry uses the DTOs below.
+// ---------------------------------------------------------------------------
+
+export type McpTransport = 'stdio' | 'http';
+export type McpRiskLabel = 'read' | 'write' | 'dangerous' | 'unknown';
+export type McpInjectionRisk = 'low' | 'medium' | 'high';
+export type McpHealthStatus = 'unknown' | 'healthy' | 'unhealthy' | 'disabled';
+export type McpToolAccess = 'allow' | 'deny';
+export type McpPolicyEffect = 'allow' | 'deny' | 'require_approval' | 'require_dry_run';
+/** `decision` on a governed invoke / audit row. */
+export type McpDecision =
+  | 'allowed'
+  | 'approved'
+  | 'denied'
+  | 'dry_run'
+  | 'pending_approval'
+  | 'error';
+export type McpApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'denied'
+  | 'expired'
+  | 'cancelled'
+  | 'consumed';
+
+/** Full registry view of a control-plane MCP server (augmented `mcp_servers`
+ *  row). Secret VALUES are never returned — only the key-name lists + has_secret. */
+export interface McpServerDetail {
+  id: Id;
+  workspace_id: Id;
+  name: string;
+  transport: McpTransport;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  url: string | null;
+  description: string | null;
+  headers: Record<string, string>;
+  secret_env_keys: string[];
+  secret_header_keys: string[];
+  has_secret: boolean;
+  injection_risk: McpInjectionRisk;
+  managed: boolean;
+  default_tool_access: McpToolAccess;
+  enabled: boolean;
+  health_status: McpHealthStatus;
+  health_checked_at: string | null;
+  health_latency_ms: number | null;
+  health_error: string | null;
+  tools_count: number;
+  tools_discovered_at: string | null;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A discovered tool + its governance metadata (`McpTool` in Rust). */
+export interface McpToolView {
+  id: Id;
+  server_id: Id;
+  name: string;
+  title: string | null;
+  description: string | null;
+  input_schema: unknown;
+  annotations: unknown;
+  risk_label: McpRiskLabel;
+  injection_risk: McpInjectionRisk;
+  mutating: boolean;
+  supports_dry_run: boolean;
+  enabled: boolean;
+  require_approval: boolean;
+  risk_overridden: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `GET /mcp/servers/{id}` body. */
+export interface McpServerWithTools {
+  server: McpServerDetail;
+  tools: McpToolView[];
+}
+
+/** `POST /workspaces/{ws}/mcp/servers` — secret_* values go to the keychain and
+ *  are never returned (only their key names show up as secret_*_keys). */
+export interface CreateMcpControlServerReq {
+  name: string;
+  transport?: McpTransport;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string | null;
+  description?: string | null;
+  headers?: Record<string, string>;
+  secret_env?: Record<string, string>;
+  secret_headers?: Record<string, string>;
+  injection_risk?: McpInjectionRisk;
+  default_tool_access?: McpToolAccess;
+  enabled?: boolean;
+}
+
+/** `PATCH /mcp/servers/{id}` — all fields optional; absent = keep current. */
+export interface UpdateMcpControlServerReq {
+  name?: string;
+  description?: string | null;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string | null;
+  headers?: Record<string, string>;
+  secret_env?: Record<string, string>;
+  secret_headers?: Record<string, string>;
+  injection_risk?: McpInjectionRisk;
+  default_tool_access?: McpToolAccess;
+  enabled?: boolean;
+}
+
+/** `PATCH /mcp/tools/{toolId}` — per-tool permission + risk override. */
+export interface PatchMcpToolReq {
+  enabled?: boolean;
+  require_approval?: boolean;
+  risk_label?: McpRiskLabel;
+  injection_risk?: McpInjectionRisk;
+}
+
+/** `POST /mcp/servers/{id}/tools/{name}/invoke` body. */
+export interface McpInvokeReq {
+  arguments?: unknown;
+  dry_run?: boolean;
+  workspace_id?: string | null;
+}
+
+/** The governed-invoke result (`InvokeResp` in Rust). */
+export interface McpInvokeResp {
+  decision: McpDecision;
+  executed: boolean;
+  dry_run: boolean;
+  reason?: string | null;
+  approval_id?: string | null;
+  /** Redacted, capped tool result content when executed. */
+  content?: unknown;
+  is_error?: boolean | null;
+  /** The dry-run preview when `dry_run`. */
+  preview?: unknown;
+}
+
+export interface McpAllowlistEntry {
+  id: Id;
+  workspace_id: Id;
+  server_id: Id;
+  /** null = whole server. */
+  tool_name: string | null;
+  mode: McpToolAccess;
+  created_by: Id;
+  created_at: string;
+}
+
+/** One entry in the bulk allowlist PUT body. */
+export interface McpAllowlistEntryInput {
+  server_id: Id;
+  tool_name?: string | null;
+  mode: McpToolAccess;
+}
+
+/** `PUT /workspaces/{ws}/mcp/allowlist`. */
+export interface SetMcpAllowlistReq {
+  entries: McpAllowlistEntryInput[];
+}
+
+/** A policy-as-code rule (`match` is an arbitrary matcher object). */
+export interface McpPolicy {
+  id: Id;
+  /** null = global. */
+  workspace_id: Id | null;
+  name: string;
+  enabled: boolean;
+  priority: number;
+  match: unknown;
+  effect: McpPolicyEffect;
+  reason: string | null;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateMcpPolicyReq {
+  workspace_id?: string | null;
+  name: string;
+  enabled?: boolean;
+  priority?: number;
+  match?: unknown;
+  effect: McpPolicyEffect;
+  reason?: string | null;
+}
+
+export interface UpdateMcpPolicyReq {
+  name?: string;
+  enabled?: boolean;
+  priority?: number;
+  match?: unknown;
+  effect?: McpPolicyEffect;
+  reason?: string | null;
+}
+
+/** `GET /mcp/policies/export`. */
+export interface McpPolicyExport {
+  version: number;
+  policies: McpPolicy[];
+}
+
+/** `POST /mcp/policies/import`. */
+export interface ImportMcpPoliciesReq {
+  policies: CreateMcpPolicyReq[];
+  replace?: boolean;
+}
+
+export interface ImportMcpPoliciesResp {
+  imported: number;
+  replaced: boolean;
+}
+
+/** `POST /mcp/policies/evaluate` request. */
+export interface EvaluateMcpReq {
+  server_id: string;
+  tool: string;
+  workspace_id?: string | null;
+  arguments?: unknown;
+}
+
+/** `POST /mcp/policies/evaluate` response (preview). */
+export interface McpEvaluatePreview {
+  server: string;
+  tool: string;
+  risk_label: string;
+  injection_risk: string;
+  policy_decision: string;
+  reason: string | null;
+}
+
+export interface McpApproval {
+  id: Id;
+  workspace_id: string | null;
+  /** 'tool_call' | 'human_ask'. */
+  kind: string;
+  server_id: string | null;
+  server_name: string | null;
+  tool: string | null;
+  title: string;
+  detail: string | null;
+  /** Redacted display copy of the arguments (never the full/secret values). */
+  args_redacted_json: string;
+  risk_label: string | null;
+  status: McpApprovalStatus;
+  requested_by: string | null;
+  requested_by_kind: string | null;
+  decided_by: string | null;
+  decision_note: string | null;
+  created_at: string;
+  decided_at: string | null;
+  consumed_at: string | null;
+  expires_at: string | null;
+}
+
+/** `POST /mcp/approvals/{id}/decide`. */
+export interface DecideMcpApprovalReq {
+  approved: boolean;
+  note?: string | null;
+}
+
+/** One row of the governed-call audit ledger. */
+export interface McpCallLogRow {
+  id: Id;
+  workspace_id: string | null;
+  server_id: string | null;
+  server_name: string | null;
+  tool: string;
+  /** 'outbound' | 'inbound'. */
+  direction: string;
+  caller_user_id: string | null;
+  caller_kind: string | null;
+  args_redacted_json: string;
+  decision: string;
+  decision_reason: string | null;
+  risk_label: string | null;
+  injection_risk: string | null;
+  dry_run: boolean;
+  ok: boolean;
+  error: string | null;
+  latency_ms: number | null;
+  bytes: number | null;
+  rows: number | null;
+  approval_id: string | null;
+  created_at: string;
+}
+
+/** Filters for `GET /mcp/audit`. */
+export interface McpAuditQuery {
+  server_id?: string;
+  tool?: string;
+  decision?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** Per-tool aggregate stats (cost = bytes proxy; latency / error counts). */
+export interface McpToolStats {
+  server_id: string | null;
+  server_name: string | null;
+  tool: string;
+  calls: number;
+  errors: number;
+  error_rate: number;
+  avg_latency_ms: number;
+  max_latency_ms: number;
+  total_bytes: number;
+  avg_bytes: number;
+  last_called_at: string | null;
+}
+
+// --- Otto-as-MCP-server (outward server admin) -----------------------------
+// Response shape per the design contract (§7/§10). The daemon admin route is
+// not yet wired into the otto-mcp router, so this DTO mirrors the documented
+// contract rather than a Rust struct.
+
+export interface McpOttoToolInfo {
+  name: string;
+  description: string;
+  mutating: boolean;
+  enabled: boolean;
+}
+
+/** `GET /mcp/otto-server` (+ `PATCH` reply, which may also carry `token` once). */
+export interface McpOttoServerStatus {
+  enabled: boolean;
+  tools: McpOttoToolInfo[];
+  has_token: boolean;
+  token_prefix?: string | null;
+  /** The freshly-minted token — returned ONCE on a mint/rotate, never again. */
+  token?: string | null;
+}
+
+/** `PATCH /mcp/otto-server`. */
+export interface UpdateMcpOttoServerReq {
+  enabled?: boolean;
+  tools?: string[];
+  rotate_token?: boolean;
+}
+
 export type GitProviderKind = 'github' | 'bitbucket' | 'gitlab';
 
 export interface GitAccount {
@@ -650,7 +1001,7 @@ export interface NotificationSettings {
 // RBAC — features + capabilities
 // ---------------------------------------------------------------------------
 
-/** The 19 protected features (snake_case, mirrors Rust Feature enum). */
+/** The protected features (snake_case, mirrors Rust Feature enum). */
 export type Feature =
   | 'agents'
   | 'connections'
@@ -671,7 +1022,8 @@ export type Feature =
   | 'settings'
   | 'users'
   | 'canvas'
-  | 'proof_pack';
+  | 'proof_pack'
+  | 'mcp';
 
 /** Capability ladder (None < View < Edit < Admin). */
 export type Capability = 'none' | 'view' | 'edit' | 'admin';

@@ -37,6 +37,7 @@
   import ApiPage from '../modules/api/ApiPage.svelte';
   import DatabasePage from '../modules/database/DatabasePage.svelte';
   import BrokersPage from '../modules/brokers/BrokersPage.svelte';
+  import McpPage from '../modules/mcp/McpPage.svelte';
   import WorkflowsPage from '../modules/workflows/WorkflowsPage.svelte';
   import SkillsEvalPage from '../modules/skills-eval/SkillsEvalPage.svelte';
   import UsagePage from '../modules/usage/UsagePage.svelte';
@@ -405,6 +406,7 @@
       { id: 'core.go-loops', title: 'Go to Goal Loops', group: 'Navigate', keywords: 'goal loop iterate autonomous objective plan execute evaluate', run: () => router.go('loops') },
       { id: 'core.go-proof', title: 'Go to Proof', group: 'Navigate', keywords: 'proof pack evidence badge verified tests ci approval audit', run: () => router.go('proof') },
       { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
+      { id: 'core.go-mcp', title: 'Go to MCP Control Plane', group: 'Navigate', keywords: 'mcp model context protocol server tool governance allowlist policy approval audit injection risk', run: () => router.go('mcp') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle Right Panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
@@ -574,6 +576,8 @@
       <DatabasePage />
     {:else if moduleName === 'brokers'}
       <BrokersPage />
+    {:else if moduleName === 'mcp'}
+      <McpPage />
     {:else if moduleName === 'workflows'}
       <WorkflowsPage />
     {:else if moduleName === 'skills-eval'}

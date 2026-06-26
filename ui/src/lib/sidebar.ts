@@ -49,6 +49,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'api', icon: 'send', label: 'API', feature: 'api_client' },
   { id: 'database', icon: 'db', label: 'Database', feature: 'database' },
   { id: 'brokers', icon: 'box', label: 'Message Brokers' },
+  { id: 'mcp', icon: 'plug', label: 'MCP Control Plane', feature: 'mcp' },
   { id: 'workflows', icon: 'split', label: 'Workflows', feature: 'workflows' },
   { id: 'skills-eval', icon: 'zap', label: 'Skills Evaluator', feature: 'skill_eval' },
   { id: 'insights', icon: 'gauge', label: 'Insights', feature: 'insights' },

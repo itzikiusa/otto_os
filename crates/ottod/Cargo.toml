@@ -25,6 +25,7 @@ otto-sessions.workspace = true
 otto-connections.workspace = true
 otto-dbviewer.workspace = true
 otto-brokers.workspace = true
+otto-mcp.workspace = true
 otto-orchestrator.workspace = true
 otto-channels.workspace = true
 otto-improve.workspace = true

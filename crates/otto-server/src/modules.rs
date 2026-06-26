@@ -160,6 +160,21 @@ impl otto_brokers::BrokersCtx for ServerCtx {
     }
 }
 
+impl otto_mcp::McpCtx for ServerCtx {
+    fn mcp(&self) -> &Arc<otto_mcp::McpService> {
+        &self.mcp
+    }
+    fn mcp_pool(&self) -> &otto_state::SqlitePool {
+        &self.pool
+    }
+    fn mcp_secrets(&self) -> &Arc<dyn otto_core::secrets::SecretStore> {
+        &self.secrets
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+}
+
 #[async_trait::async_trait]
 impl otto_git::GitCtx for ServerCtx {
     fn store(&self) -> &GitStore {
@@ -3983,6 +3998,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_connections::api_router::<ServerCtx>(),
         otto_dbviewer::api_router::<ServerCtx>(),
         otto_brokers::api_router::<ServerCtx>(),
+        otto_mcp::api_router::<ServerCtx>(),
         otto_product::router::<ServerCtx>(),
         otto_canvas::router::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
