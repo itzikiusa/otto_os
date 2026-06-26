@@ -42,58 +42,92 @@ pub struct UsageEngine {
     inner: RwLock<Inner>,
     config: RwLock<UsageConfig>,
     data_dir: PathBuf,
+    /// Serializes (re)initialization so two `reinit` calls can't both try to
+    /// start a server on the same (dir-locked) data dir.
+    reinit_lock: tokio::sync::Mutex<()>,
 }
 
 impl UsageEngine {
-    /// Build the engine: locate the binary, create the schema with the
-    /// configured retention, and spawn the batch writer. Never fails — on any
-    /// problem it returns a degraded (no-op) engine that still reports status
-    /// and can be revived later via [`Self::reinit`].
+    /// Build the engine and kick off ClickHouse bring-up **in the background**.
+    /// Returns immediately so a slow first boot (attaching a large pre-existing
+    /// dataset) never blocks daemon startup; the engine reports
+    /// `available() == false` until the server is healthy + the schema is ready.
+    /// Never fails — on any problem it stays a degraded (no-op) engine that can be
+    /// revived later via [`Self::reinit`].
     pub async fn start(config: UsageConfig, data_dir: PathBuf) -> Arc<Self> {
         let engine = Arc::new(Self {
             inner: RwLock::new(Inner::default()),
             config: RwLock::new(config.clone()),
             data_dir,
+            reinit_lock: tokio::sync::Mutex::new(()),
         });
-        engine.reinit(config).await;
+        let bg = Arc::clone(&engine);
+        tokio::spawn(async move {
+            bg.reinit(config).await;
+        });
         engine
     }
 
-    /// (Re)initialize the ClickHouse handle from `config`. Tears down any
-    /// previous writer (dropping the old channel ends its task) and swaps in a
-    /// fresh handle. Safe to call repeatedly.
+    /// (Re)initialize the ClickHouse handle from `config`. The persistent server
+    /// locks the data dir, so this STOPS any previous server first (drop the
+    /// writer channel → ends its task; shutdown the old server → releases the
+    /// lock) BEFORE starting a fresh one. Serialized + safe to call repeatedly.
     pub async fn reinit(&self, config: UsageConfig) {
+        let _g = self.reinit_lock.lock().await;
         let ch_dir = self.data_dir.join("clickhouse");
         let bin_path = ClickHouse::locate(config.clickhouse_path.as_deref());
 
+        // Stop the previous server FIRST (outside the new-server start) so the
+        // dir lock is released before we bind a new one.
+        let prev = {
+            let mut inner = self.inner.write().expect("usage inner lock");
+            inner.tx = None; // dropping the sender ends the writer task
+            inner.ch.take()
+        };
+        if let Some(old) = prev {
+            old.shutdown().await;
+        }
+
         let (ch, tx) = if config.enabled {
             match &bin_path {
-                Some(bin) => {
-                    let ch = Arc::new(ClickHouse::new(bin.clone(), ch_dir));
-                    match ch.exec(&schema::schema_sql(config.retention_days)).await {
-                        Ok(()) => {
-                            // Additive migration: add work-attribution columns to
-                            // tables created before B1. IF NOT EXISTS makes this
-                            // idempotent; errors are warnings so a quirky ClickHouse
-                            // build doesn't prevent the engine from starting.
-                            if let Err(e) = ch.exec(&schema::add_workref_columns_sql()).await {
-                                tracing::warn!("usage: add workref columns failed (non-fatal): {e}");
+                Some(bin) => match ClickHouse::start(bin.clone(), ch_dir.clone()).await {
+                    Ok(server) => {
+                        let ch = Arc::new(server);
+                        match ch.exec(&schema::schema_sql(config.retention_days)).await {
+                            Ok(()) => {
+                                // Additive migration: add work-attribution columns to
+                                // tables created before B1. IF NOT EXISTS makes this
+                                // idempotent; errors are warnings so a quirky build
+                                // doesn't prevent the engine from starting.
+                                if let Err(e) =
+                                    ch.exec(&schema::add_workref_columns_sql()).await
+                                {
+                                    tracing::warn!("usage: add workref columns failed (non-fatal): {e}");
+                                }
+                                if let Err(e) = ch.exec(&schema::alter_ttl_sql(config.retention_days)).await {
+                                    tracing::warn!("usage: modify ttl failed (non-fatal): {e}");
+                                }
+                                let (tx, rx) = mpsc::unbounded_channel();
+                                spawn_writer(Arc::clone(&ch), rx);
+                                tracing::info!(
+                                    "usage: clickhouse server ready at {} (binary {})",
+                                    ch.data_dir().display(),
+                                    bin.display()
+                                );
+                                (Some(ch), Some(tx))
                             }
-                            let (tx, rx) = mpsc::unbounded_channel();
-                            spawn_writer(Arc::clone(&ch), rx);
-                            tracing::info!(
-                                "usage: clickhouse ready at {} (binary {})",
-                                ch.data_dir().display(),
-                                bin.display()
-                            );
-                            (Some(ch), Some(tx))
-                        }
-                        Err(e) => {
-                            tracing::warn!("usage: clickhouse schema init failed: {e}");
-                            (None, None)
+                            Err(e) => {
+                                tracing::warn!("usage: clickhouse schema init failed: {e}");
+                                ch.shutdown().await;
+                                (None, None)
+                            }
                         }
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!("usage: clickhouse server start failed: {e}");
+                        (None, None)
+                    }
+                },
                 None => {
                     tracing::info!("usage: clickhouse binary not found — usage tracking disabled");
                     (None, None)
@@ -103,13 +137,57 @@ impl UsageEngine {
             (None, None)
         };
 
-        *self.config.write().expect("usage config lock") = config;
+        let became_available = ch.is_some();
+        let ch_for_compact = ch.clone();
+        *self.config.write().expect("usage config lock") = config.clone();
         *self.inner.write().expect("usage inner lock") = Inner { ch, tx, bin_path };
+
+        // One-time compaction + retention enforcement of a pre-existing bloated
+        // dataset (e.g. the 25k-part, 1.4 GB dir from the old per-query model).
+        // Marker-guarded so it runs at most once; background so it never blocks.
+        if became_available {
+            if let Some(ch) = ch_for_compact {
+                let retention = config.retention_days;
+                tokio::spawn(async move {
+                    maybe_compact(ch, ch_dir, retention).await;
+                });
+            }
+        }
     }
 
-    /// True when usage tracking is live (binary found + schema created).
+    /// Stop the ClickHouse server cleanly (SIGTERM → flush). Called from the
+    /// daemon's graceful-shutdown path so the dir lock is released and the next
+    /// daemon start doesn't have to reclaim an orphan.
+    pub async fn shutdown(&self) {
+        let ch = {
+            let mut inner = self.inner.write().expect("usage inner lock");
+            inner.tx = None;
+            inner.ch.take()
+        };
+        if let Some(ch) = ch {
+            ch.shutdown().await;
+        }
+    }
+
+    /// True when usage tracking is live (server up + schema created).
     pub fn available(&self) -> bool {
         self.inner.read().expect("usage inner lock").ch.is_some()
+    }
+
+    /// Poll until the engine is available (server up + schema ready) or `timeout`
+    /// elapses; returns the final availability. Useful right after [`Self::start`],
+    /// whose ClickHouse bring-up runs asynchronously so the daemon never blocks.
+    pub async fn wait_ready(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.available() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return self.available();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     fn ch(&self) -> Option<Arc<ClickHouse>> {
@@ -847,4 +925,63 @@ fn dir_size(dir: &Path) -> u64 {
         }
     }
     total
+}
+
+/// One-time compaction + retention enforcement of a pre-existing dataset. The old
+/// per-query model left `usage_events` with tens of thousands of never-merged tiny
+/// parts (1.4 GB of metadata for ~12 MB of data). With a persistent server,
+/// `OPTIMIZE … FINAL` collapses them and the row-TTL drops expired rows during the
+/// merge — reclaiming the disk and removing irrelevant (out-of-window) data.
+///
+/// Marker-guarded (`<dir>/.usage_compacted_v2`) so it runs at most once; spawned
+/// (never blocks); bounded by a 30-minute timeout (ordinary background merges
+/// converge regardless if it can't finish). The marker is written only on success
+/// so a failure retries on the next boot.
+async fn maybe_compact(ch: Arc<ClickHouse>, ch_dir: PathBuf, retention_days: u32) {
+    let marker = ch_dir.join(".usage_compacted_v2");
+    if marker.exists() {
+        return;
+    }
+    let before_rows = scalar_count(&ch).await;
+    let before_mb = dir_size(&ch_dir) / 1_048_576;
+    tracing::info!("usage: one-time compaction starting (rows={before_rows}, dir={before_mb} MB)");
+
+    // Ensure the retention window is applied so expired rows get dropped in the merge.
+    let _ = ch.exec(&schema::alter_ttl_sql(retention_days)).await;
+
+    let opt = tokio::time::timeout(
+        Duration::from_secs(30 * 60),
+        ch.exec("OPTIMIZE TABLE usage_events FINAL"),
+    )
+    .await;
+    match opt {
+        Ok(Ok(())) => {
+            // Also compact the metrics table (cheap).
+            let _ = ch.exec("OPTIMIZE TABLE system_metrics FINAL").await;
+            let after_rows = scalar_count(&ch).await;
+            let after_mb = dir_size(&ch_dir) / 1_048_576;
+            tracing::info!(
+                "usage: compaction done (rows {before_rows}->{after_rows}, {before_mb} MB -> {after_mb} MB)"
+            );
+            if let Err(e) = std::fs::write(&marker, "ok") {
+                tracing::warn!("usage: could not write compaction marker: {e}");
+            }
+        }
+        Ok(Err(e)) => tracing::warn!(
+            "usage: compaction OPTIMIZE failed (non-fatal; background merges continue): {e}"
+        ),
+        Err(_) => tracing::warn!(
+            "usage: compaction OPTIMIZE timed out after 30m (background merges continue)"
+        ),
+    }
+}
+
+/// `SELECT count() FROM usage_events`, 0 on any error.
+async fn scalar_count(ch: &ClickHouse) -> u64 {
+    ch.query_rows("SELECT count() AS n FROM usage_events")
+        .await
+        .ok()
+        .and_then(|r| r.into_iter().next())
+        .and_then(|v| v.get("n").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0)
 }

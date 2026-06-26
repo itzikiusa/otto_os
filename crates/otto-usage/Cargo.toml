@@ -12,6 +12,7 @@ serde_json.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 dirs.workspace = true
+reqwest.workspace = true
 sysinfo = "0.33"
 
 [dev-dependencies]

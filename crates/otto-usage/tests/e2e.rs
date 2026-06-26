@@ -80,6 +80,7 @@ async fn usage_engine_end_to_end() {
     };
 
     let engine = UsageEngine::start(config, data_dir.clone()).await;
+    engine.wait_ready(Duration::from_secs(30)).await;
     assert!(engine.available(), "engine should be available with a real clickhouse");
 
     // ── Record usage (synchronous insert for determinism) ──────────────────
@@ -171,6 +172,7 @@ async fn usage_engine_end_to_end() {
         data_dir.clone(),
     )
     .await;
+    engine2.wait_ready(Duration::from_secs(30)).await;
     assert!(engine2.available());
     let reopened = engine2.summary(30, false).await.expect("summary after reopen");
     assert_eq!(reopened.total_events, 6, "data persisted across restart");
@@ -257,6 +259,7 @@ async fn attribution_groups_by_dimension() {
         tmp.path().to_path_buf(),
     )
     .await;
+    engine.wait_ready(Duration::from_secs(30)).await;
     assert!(engine.available());
 
     // Insert 3 events across 2 origins.
@@ -322,6 +325,7 @@ async fn forecast_no_history_returns_zero() {
         tmp.path().to_path_buf(),
     )
     .await;
+    engine.wait_ready(Duration::from_secs(30)).await;
     assert!(engine.available());
 
     let resp = engine

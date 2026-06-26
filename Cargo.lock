@@ -3333,6 +3333,7 @@ dependencies = [
  "chrono",
  "dirs",
  "otto-core",
+ "reqwest",
  "serde",
  "serde_json",
  "sysinfo",

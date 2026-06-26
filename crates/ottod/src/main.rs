@@ -906,6 +906,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     if killed > 0 {
         tracing::info!("terminated {killed} live session(s) on shutdown");
     }
+    // Stop the embedded ClickHouse server cleanly (SIGTERM → flush) so its data
+    // dir lock is released and the next daemon start doesn't have to reclaim it.
+    usage.shutdown().await;
     tracing::info!("ottod stopped");
     Ok(())
 }

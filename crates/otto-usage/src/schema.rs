@@ -43,6 +43,7 @@ pub fn schema_sql(retention_days: u32) -> String {
     review_id          LowCardinality(String) DEFAULT '',
     origin             LowCardinality(String) DEFAULT ''
 ) ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_date)
 ORDER BY (event_date, provider, session_id, ts)
 TTL event_date + INTERVAL {ttl} DAY;
 
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS system_metrics (
     process_cpu_pct Float64,
     active_sessions UInt32
 ) ENGINE = MergeTree
+PARTITION BY toYYYYMM(metric_date)
 ORDER BY (metric_date, ts)
 TTL metric_date + INTERVAL {ttl} DAY;"
     )
