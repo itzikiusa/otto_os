@@ -225,6 +225,149 @@ pub async fn inbound(
         .into_response()
 }
 
+/// Inbound payload for `POST /api/v1/webhooks/{workspace_id}/run` — launch a
+/// Run with Otto run (the webhook entry to the one-button flow).
+#[derive(Debug, Deserialize)]
+pub struct RunInboundReq {
+    #[serde(default)]
+    pub source_kind: Option<otto_core::run::SourceKind>,
+    #[serde(default)]
+    pub source_ref: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Free-text request (becomes a `channel` run when no source is recognizable).
+    #[serde(default)]
+    pub seed_text: Option<String>,
+    #[serde(default)]
+    pub mode: Option<otto_core::run::RunMode>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub repo_id: Option<String>,
+    #[serde(default)]
+    pub auto_open_pr: Option<bool>,
+    #[serde(default)]
+    pub callback_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RunInboundResp {
+    accepted: bool,
+    run_id: String,
+    status: String,
+}
+
+/// `POST /api/v1/webhooks/{workspace_id}/run` — launch a Run with Otto run from a
+/// webhook. Same per-webhook-key auth as [`inbound`]; runs on the root user's
+/// behalf and returns `202` with the new run id.
+pub async fn run_inbound(
+    Path(ws_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // 1. Enabled webhook integration + key (identical guard to `inbound`).
+    match ctx.integrations_store.get(&ws_id, Channel::Webhook).await {
+        Ok(Some(i)) if i.enabled => {}
+        Ok(_) => {
+            return problem(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no enabled webhook for this workspace",
+            )
+        }
+        Err(e) => {
+            return problem(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &e.to_string(),
+            )
+        }
+    };
+    let expected = ctx
+        .secrets
+        .get(&format!("chan-bot-{ws_id}-webhook"))
+        .ok()
+        .flatten()
+        .filter(|k| !k.is_empty());
+    let Some(expected) = expected else {
+        return problem(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "webhook key not configured",
+        );
+    };
+    match extract_key(&headers) {
+        Some(p) if ct_eq(p.as_bytes(), expected.as_bytes()) => {}
+        _ => {
+            return problem(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "invalid or missing webhook key",
+            )
+        }
+    }
+
+    // 2. Parse body.
+    let req: RunInboundReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return problem(
+                StatusCode::BAD_REQUEST,
+                "invalid",
+                &format!("invalid JSON body: {e}"),
+            )
+        }
+    };
+
+    // 3. Root user is the actor (the webhook has no Otto session).
+    let Some(bridge) = ctx.channel_bridge.clone() else {
+        return problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "no root user yet — finish onboarding first",
+        );
+    };
+    let created_by = bridge.root_user_id.clone();
+
+    let launch = otto_core::run::LaunchRunReq {
+        source_kind: req.source_kind,
+        source_ref: req.source_ref,
+        url: req.url,
+        seed_text: req.seed_text,
+        mode: req.mode,
+        provider: req.provider,
+        repo_id: req.repo_id,
+        auto_open_pr: req.auto_open_pr,
+        title: None,
+    };
+    let origin = crate::run_service::LaunchOrigin {
+        callback_url: req.callback_url,
+        ..Default::default()
+    };
+    match crate::run_service::launch(
+        &ctx,
+        &ws_id,
+        &created_by,
+        otto_core::run::RunOrigin::Webhook,
+        origin,
+        launch,
+    )
+    .await
+    {
+        Ok(run) => (
+            StatusCode::ACCEPTED,
+            Json(RunInboundResp {
+                accepted: true,
+                run_id: run.id,
+                status: run.status.as_str().to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => problem(StatusCode::BAD_REQUEST, "invalid", &e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -21,6 +21,7 @@ use tracing::{info, warn};
 
 use crate::adapter::{Adapter, Inbound};
 use crate::mirror::Mirror;
+use crate::run_trigger::RunTrigger;
 use crate::swarm_trigger::SwarmTrigger;
 
 /// Composite key that identifies a conversation thread.
@@ -204,6 +205,10 @@ pub struct Bridge {
     /// launch that swarm instead of starting a normal session. Injected by
     /// otto-server (which owns the swarm runtime).
     swarm_trigger: Option<Arc<dyn SwarmTrigger>>,
+    /// Optional hook: an inbound `/run <ref>` launches a Run with Otto run, and an
+    /// `approve`/`reject` reply resolves an awaiting run's gate. Injected by
+    /// otto-server (which owns the run engine).
+    run_trigger: Option<Arc<dyn RunTrigger>>,
 }
 
 impl Bridge {
@@ -222,10 +227,11 @@ impl Bridge {
             root_user_id,
             sessions: Mutex::new(HashMap::new()),
             swarm_trigger: None,
+            run_trigger: None,
         })
     }
 
-    /// Builder variant that wires the swarm-launch hook (used by otto-server).
+    /// Builder variant that wires the swarm-launch + run hooks (used by otto-server).
     pub fn new_with_swarm_trigger(
         manager: Arc<SessionManager>,
         workspaces: WorkspacesRepo,
@@ -233,6 +239,7 @@ impl Bridge {
         mirror: Arc<Mirror>,
         root_user_id: String,
         swarm_trigger: Option<Arc<dyn SwarmTrigger>>,
+        run_trigger: Option<Arc<dyn RunTrigger>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             manager,
@@ -242,6 +249,7 @@ impl Bridge {
             root_user_id,
             sessions: Mutex::new(HashMap::new()),
             swarm_trigger,
+            run_trigger,
         })
     }
 
@@ -317,6 +325,37 @@ impl Bridge {
                         workspace = %msg.workspace_id,
                         chat = %msg.chat,
                         "bridge: inbound message launched a swarm"
+                    );
+                    let _ = adapter
+                        .send_formatted(&msg.chat, msg.thread.as_deref(), &ack.reply)
+                        .await;
+                    return;
+                }
+            }
+        }
+
+        // --- 3c. Run with Otto trigger: `/run <ref>` (or "run with otto …")
+        // launches the one-button pipeline, and an `approve`/`reject` reply
+        // resolves an awaiting run's gate. Like the swarm trigger, chat channels
+        // only (webhook has its dedicated /webhooks/{ws}/run route).
+        if adapter.channel() != Channel::Webhook {
+            if let Some(trigger) = &self.run_trigger {
+                if let Some(ack) = trigger
+                    .handle(
+                        &msg.workspace_id,
+                        adapter.channel().as_str(),
+                        &msg.chat,
+                        msg.thread.as_deref(),
+                        &msg.user,
+                        &msg.text,
+                    )
+                    .await
+                {
+                    info!(
+                        channel = %adapter.channel().as_str(),
+                        workspace = %msg.workspace_id,
+                        chat = %msg.chat,
+                        "bridge: inbound message handled by Run with Otto"
                     );
                     let _ = adapter
                         .send_formatted(&msg.chat, msg.thread.as_deref(), &ack.reply)

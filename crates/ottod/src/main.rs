@@ -588,7 +588,7 @@ async fn run(cfg: Config) -> Result<(), String> {
             IntegrationsRepo::new(pool.clone()),
             SettingsRepo::new(pool.clone()),
             secrets.clone(),
-            uid,
+            uid.clone(),
             // Share the daemon event bus so the proactive self-improvement
             // notifier can mirror Improvement* events to the user's channels
             // (opt-in via the `channels.notify_self_improvement` setting).
@@ -597,6 +597,11 @@ async fn run(cfg: Config) -> Result<(), String> {
         // An inbound message on a swarm-bound channel launches that swarm.
         .with_swarm_trigger(std::sync::Arc::new(
             otto_server::swarm_channels::SwarmTriggerImpl { ctx: ctx.clone() },
+        ))
+        // An inbound `/run <ref>` (or `approve`/`reject` reply) drives a Run with
+        // Otto run on the root user's behalf (the channel-trust model).
+        .with_run_trigger(std::sync::Arc::new(
+            otto_server::run_channels::ChannelRunTrigger::new(ctx.clone(), uid.clone()),
         ));
         // When self-improvement is on, learn from each finished channel
         // interaction and reply with the result in the same thread (per-workspace

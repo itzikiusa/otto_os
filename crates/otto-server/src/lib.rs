@@ -41,6 +41,7 @@ pub mod product_swarm;
 pub mod product_watcher;
 pub mod review_session;
 pub mod routes;
+pub mod run_channels;
 pub mod run_context;
 pub mod run_engine;
 pub mod run_scheduler;

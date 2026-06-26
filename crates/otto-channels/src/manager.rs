@@ -81,6 +81,9 @@ pub struct ChannelManager {
     /// Optional hook: after a channel interaction finishes, run self-improvement
     /// on it and reply in-thread. Injected by otto-server (owns the engine).
     pub improver: Option<Arc<dyn crate::mirror::InteractionImprover>>,
+    /// Optional hook: an inbound `/run <ref>` (or `approve`/`reject` reply)
+    /// launches/advances a Run with Otto run. Injected by otto-server.
+    pub run_trigger: Option<Arc<dyn crate::run_trigger::RunTrigger>>,
 }
 
 impl ChannelManager {
@@ -103,7 +106,14 @@ impl ChannelManager {
             events,
             swarm_trigger: None,
             improver: None,
+            run_trigger: None,
         }
+    }
+
+    /// Wire the Run with Otto launch/approval hook (otto-server provides it).
+    pub fn with_run_trigger(mut self, trigger: Arc<dyn crate::run_trigger::RunTrigger>) -> Self {
+        self.run_trigger = Some(trigger);
+        self
     }
 
     /// Wire the swarm-launch hook (otto-server provides the implementation).
@@ -157,6 +167,7 @@ impl ChannelManager {
             Arc::clone(&mirror),
             self.root_user_id.clone(),
             self.swarm_trigger.clone(),
+            self.run_trigger.clone(),
         );
 
         let mut gen_cancel: Option<Arc<AtomicBool>> = None;

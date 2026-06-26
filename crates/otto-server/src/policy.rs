@@ -588,6 +588,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/webhooks/{workspace_id}" {
         return Exempt;
     }
+    // Run with Otto webhook entry is PUBLIC-by-key too (same per-workspace webhook
+    // key as the channel webhook); exempt from the feature gate.
+    if p == "/webhooks/{workspace_id}/run" {
+        return Exempt;
+    }
     // Inbound swarm-trigger webhook is PUBLIC-by-key too (registered in
     // public_routes); the handler validates the same per-workspace webhook key
     // via `X-Otto-Webhook-Key` / `Authorization: Bearer` — exempt from the
@@ -745,6 +750,22 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     if p == "/scheduled-tasks/runs/{run_id}/report" {
         return Require(ScheduledTasks, View);
+    }
+
+    // Run with Otto — the one-button source→PR-draft pipeline. List/launch are
+    // workspace-scoped; the flat by-id routes load the run and re-check the role on
+    // its workspace (the IDOR guard). (The webhook entry is Exempt above.)
+    if p == "/workspaces/{wid}/runs" {
+        return Require(RunWithOtto, if get { View } else { Edit });
+    }
+    if p == "/workspaces/{wid}/runs/detect" {
+        return Require(RunWithOtto, View);
+    }
+    if p == "/runs/{id}" || p == "/runs/{id}/events" {
+        return Require(RunWithOtto, View);
+    }
+    if p == "/runs/{id}/approve" || p == "/runs/{id}/cancel" || p == "/runs/{id}/open-pr" {
+        return Require(RunWithOtto, Edit);
     }
 
     // ----------------------------------------------------------------------

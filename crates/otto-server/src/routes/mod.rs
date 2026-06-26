@@ -18,6 +18,7 @@ pub mod grpc;
 pub mod fs;
 pub mod proof_pack;
 pub mod repo_rules;
+pub mod runs;
 pub mod scheduled_tasks;
 pub mod handover;
 pub mod impersonate;
@@ -101,6 +102,10 @@ pub fn public_routes() -> Router<ServerCtx> {
         // the keychain before triggering any agent session.
         // POLICY EXEMPTION: same allowlist treatment as /workflows/*/webhook/*.
         .route("/webhooks/{workspace_id}", post(channel_webhook::inbound))
+        // Run with Otto webhook entry: launch a source→PR-draft run. Same
+        // per-workspace webhook key as the channel webhook. POLICY EXEMPTION:
+        // classified `Exempt` in policy.rs (key-guarded, no bearer).
+        .route("/webhooks/{workspace_id}/run", post(channel_webhook::run_inbound))
         // External trigger that auto-plans + starts a specific swarm (worktree
         // isolation). Same per-workspace webhook key as the channel webhook.
         .route("/webhooks/swarm/{workspace_id}/{swarm_id}", post(swarm_webhook::trigger))
