@@ -206,4 +206,43 @@ test.describe('DB Explorer · query editor', () => {
     // Neither the hash-tag nor the `:` namespace may be mistaken for a variable.
     await expect(page.locator('.qe-vars')).toHaveCount(0);
   });
+
+  test('smart completion: tables after FROM, PK column first in WHERE', async ({ page }) => {
+    test.skip(connId == null, 'mysql unavailable');
+    test.skip(isPhone(page), 'completion popup assertions target the desktop layout');
+    await openMysql(page);
+    await ensureEditorOpen(page);
+    const content = page.locator('.qe-edit .cm-content');
+    const pop = page.locator('.cm-tooltip-autocomplete');
+    const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+    const reset = async () => {
+      await content.click();
+      await page.keyboard.press(`${mod}+A`);
+      await page.keyboard.press('Delete');
+    };
+
+    // (1) After `FROM ` the popup offers the seeded tables (above keywords).
+    await reset();
+    await content.pressSequentially('SELECT * FROM ', { delay: 10 });
+    await page.keyboard.press('Control+Space');
+    await expect(pop).toBeVisible({ timeout: 10_000 });
+    await expect(
+      pop.locator('.cm-completionLabel', { hasText: /^orders$/ }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(
+      pop.locator('.cm-completionLabel', { hasText: /^customers$/ }).first(),
+    ).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    // (2) After `WHERE ` the popup offers columns, the PRIMARY KEY first
+    //     (indexes first) — `orders.id` ranks above plain columns / keywords.
+    await reset();
+    await content.pressSequentially('SELECT * FROM orders WHERE ', { delay: 10 });
+    await page.keyboard.press('Control+Space');
+    await expect(pop).toBeVisible({ timeout: 10_000 });
+    await expect(pop.locator('li').first().locator('.cm-completionLabel')).toHaveText('id', {
+      timeout: 10_000,
+    });
+    await page.keyboard.press('Escape');
+  });
 });

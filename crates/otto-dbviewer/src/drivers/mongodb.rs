@@ -26,9 +26,9 @@ use crate::drivers::{mongo_parse, mongo_sql};
 use crate::export::{open_sink, ExportCounts, ExportFormat};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, Column, CompletionContext, CompletionItem, CompletionKind,
-    CompletionResponse, Engine, IndexDef, NodePath, NodeKind, ObjectDetail, QueryRequest,
-    QueryResult, QueryStats, ResolvedConfig, SchemaNode, TestResult,
+    self, Capabilities, Column, CompletionContext, CompletionResponse, Engine, IndexDef, NodePath,
+    NodeKind, ObjectDetail, QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode,
+    TestResult,
 };
 
 /// How many documents to sample when inferring fields/types.
@@ -46,6 +46,9 @@ const SYSTEM_DBS: &[&str] = &["admin", "local", "config"];
 #[derive(Default)]
 pub struct MongoDriver {
     clients: Mutex<HashMap<String, Client>>,
+    /// Per-connection completion cache: the collection list (cheap) plus each
+    /// collection's sampled+indexed field paths (lazy, sampled only in context).
+    completions: crate::complete::CompletionCache,
 }
 
 #[async_trait]
@@ -191,8 +194,8 @@ impl Driver for MongoDriver {
         let coll: Collection<Document> = db.collection(coll_name);
 
         let mut detail = ObjectDetail::new(coll_name.to_string(), NodeKind::Collection);
-        // row_count stays None: the only cheap source is estimated_document_count,
-        // which is an estimate the user doesn't want surfaced.
+        // row_count is filled below from collStats (an exact, cheap count in
+        // Mongo — unlike SQL's opt-in estimates).
 
         // Indexes (name + keys → IndexDef; unique from options).
         if let Ok(mut cursor) = coll.list_indexes().await {
@@ -262,6 +265,7 @@ impl Driver for MongoDriver {
                     s.insert(k.to_string(), bson_to_json(v));
                 }
             }
+            // Surface the exact collStats document count as the row count.
             match stats.get("count") {
                 Some(Bson::Int64(c)) => detail.row_count = Some(*c),
                 Some(Bson::Int32(c)) => detail.row_count = Some(*c as i64),
@@ -299,6 +303,10 @@ impl Driver for MongoDriver {
         ctx: &CompletionContext,
     ) -> Result<CompletionResponse> {
         self.completion_impl(cfg, ctx).await
+    }
+
+    async fn invalidate_completion_cache(&self, cfg: &ResolvedConfig) {
+        self.completions.invalidate(&cfg.cache_key());
     }
 
     /// Streaming export: iterate the `Cursor` (a `Stream`) document-by-document
@@ -648,25 +656,8 @@ impl MongoDriver {
         cfg: &ResolvedConfig,
         ctx: &CompletionContext,
     ) -> Result<CompletionResponse> {
-        let mut items: Vec<CompletionItem> = MONGO_OPERATORS
-            .iter()
-            .map(|(label, detail)| {
-                CompletionItem::detailed(*label, CompletionKind::Operator, *detail)
-            })
-            .collect();
+        use crate::complete::mongo::{analyze, assemble, MongoExpect};
 
-        // Collection operations (the `db.<coll>.<op>(…)` verbs) so typing after a
-        // collection offers find/aggregate/count/distinct.
-        for (label, detail) in MONGO_METHODS {
-            items.push(CompletionItem::detailed(
-                *label,
-                CompletionKind::Command,
-                *detail,
-            ));
-        }
-
-        // Live collection + sampled-field identifiers, best-effort (never fail
-        // completion if the connection is momentarily unavailable).
         let db_name = ctx
             .database
             .clone()
@@ -675,44 +666,163 @@ impl MongoDriver {
                 ctx.node
                     .as_deref()
                     .and_then(|n| NodePath::parse(n).get("db").map(str::to_string))
-            });
-        if let Some(db_name) = db_name {
-            if let Ok(client) = self.connect(cfg).await {
-                let db = client.database(&db_name);
-                if let Ok(mut names) = db.list_collection_names().await {
-                    names.sort();
-                    for name in &names {
-                        items.push(CompletionItem::new(
-                            name.clone(),
-                            CompletionKind::Collection,
-                        ));
-                    }
-                    // Sampled fields from the contextually-selected collection.
-                    if let Some(coll_name) = ctx
-                        .node
-                        .as_deref()
-                        .and_then(|n| NodePath::parse(n).get("coll").map(str::to_string))
-                    {
-                        let coll: Collection<Document> = db.collection(&coll_name);
-                        if let Ok(fields) = sample_field_types(&coll).await {
-                            for (name, ty) in fields {
-                                items.push(CompletionItem::detailed(
-                                    name,
-                                    CompletionKind::Field,
-                                    ty,
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            })
+            .unwrap_or_default();
 
+        let mctx = analyze(&ctx.prefix);
+
+        // Collection list (cheap, cached per (connection, db)).
+        let collections = self.completion_collections(cfg, &db_name).await;
+
+        // Field paths only when the cursor is at a query key — sample lazily and
+        // cache per collection. The collection comes from the parsed `db.<coll>`
+        // or, failing that, the tree node the user has selected.
+        let fields = if matches!(mctx.expect, MongoExpect::Field { .. }) {
+            let coll = mctx.collection.clone().or_else(|| {
+                ctx.node
+                    .as_deref()
+                    .and_then(|n| NodePath::parse(n).get("coll").map(str::to_string))
+            });
+            match coll {
+                Some(c) if !db_name.is_empty() => Some(self.completion_fields(cfg, &db_name, &c).await),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let items = assemble(
+            &mctx,
+            &collections,
+            fields.as_deref().map(|v| v.as_slice()),
+            MONGO_OPERATORS,
+            MONGO_METHODS,
+        );
         Ok(CompletionResponse { items })
     }
 }
 
 impl MongoDriver {
+    /// The (cached) list of collection names for a database, backing collection
+    /// completion. Cached as a snapshot's `objects` until refresh; an unavailable
+    /// connection yields an empty list (not cached).
+    async fn completion_collections(&self, cfg: &ResolvedConfig, db: &str) -> Vec<String> {
+        if db.is_empty() {
+            return Vec::new();
+        }
+        let cache_key = cfg.cache_key();
+        if let Some(s) = self.completions.get_snapshot(&cache_key, db) {
+            return s.objects.iter().map(|o| o.name.clone()).collect();
+        }
+        let Ok(client) = self.connect(cfg).await else {
+            return Vec::new();
+        };
+        let mongo_db = client.database(db);
+        let Ok(mut names) = mongo_db.list_collection_names().await else {
+            return Vec::new();
+        };
+        names.sort();
+        let databases = client.list_database_names().await.unwrap_or_default();
+        let objects = names
+            .iter()
+            .map(|n| crate::complete::ObjectSnap {
+                name: n.clone(),
+                kind: crate::complete::ObjKind::Collection,
+                fields: Vec::new(),
+                fields_ready: false,
+            })
+            .collect();
+        self.completions.put_snapshot(
+            &cache_key,
+            db,
+            crate::complete::SchemaSnapshot { databases, objects },
+        );
+        names
+    }
+
+    /// A collection's (cached) field paths for field completion — its index key
+    /// paths (index-first, incl. embedded `x.a` and their parent `x`) followed by
+    /// sampled nested field paths. Sampled only when the collection is in context.
+    async fn completion_fields(
+        &self,
+        cfg: &ResolvedConfig,
+        db: &str,
+        coll: &str,
+    ) -> std::sync::Arc<Vec<crate::complete::FieldSnap>> {
+        use crate::complete::{rank_strength, FieldSnap, Rank};
+
+        let cache_key = cfg.cache_key();
+        if let Some(f) = self.completions.get_fields(&cache_key, db, coll) {
+            return f;
+        }
+        let Ok(client) = self.connect(cfg).await else {
+            return std::sync::Arc::new(Vec::new());
+        };
+        let collection: Collection<Document> = client.database(db).collection(coll);
+
+        // Insertion-ordered path list with the strongest rank seen for each path.
+        let mut order: Vec<String> = Vec::new();
+        let mut rank: std::collections::HashMap<String, Rank> = std::collections::HashMap::new();
+        let mut add = |path: String, r: Rank| {
+            match rank.get_mut(&path) {
+                Some(existing) => {
+                    if rank_strength(r) > rank_strength(*existing) {
+                        *existing = r;
+                    }
+                }
+                None => {
+                    order.push(path.clone());
+                    rank.insert(path, r);
+                }
+            }
+        };
+
+        // Indexes first: each key path (+ its dotted ancestors) ranked by index kind.
+        if let Ok(mut cursor) = collection.list_indexes().await {
+            while let Some(Ok(model)) = cursor.next().await {
+                let name = model.options.as_ref().and_then(|o| o.name.clone());
+                let unique = model.options.as_ref().and_then(|o| o.unique).unwrap_or(false);
+                let is_id = name.as_deref() == Some("_id_");
+                let r = if is_id {
+                    Rank::Pk
+                } else if unique {
+                    Rank::Unique
+                } else {
+                    Rank::Index
+                };
+                for key in model.keys.keys() {
+                    // Add every ancestor prefix (`addr` before `addr.city`) so the
+                    // parent is offered first and refines after a `.`.
+                    let parts: Vec<&str> = key.split('.').collect();
+                    for i in 1..parts.len() {
+                        add(parts[..i].join("."), Rank::Index);
+                    }
+                    add(key.to_string(), r);
+                }
+            }
+        }
+
+        // Then sampled field paths (nested, depth-bounded); plain unless indexed.
+        let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Ok(sampled) = sample_field_paths(&collection).await {
+            for (path, ty) in sampled {
+                types.entry(path.clone()).or_insert(ty);
+                add(path, Rank::Plain);
+            }
+        }
+
+        let fields: Vec<FieldSnap> = order
+            .into_iter()
+            .map(|path| {
+                let r = rank.get(&path).copied().unwrap_or(Rank::Plain);
+                let ty = types.get(&path).cloned();
+                FieldSnap::new(path, ty, r)
+            })
+            .collect();
+
+        self.completions.put_fields(&cache_key, db, coll, fields)
+    }
+
     /// Get (or lazily build + cache) the `Client` for `cfg`, keyed by
     /// [`ResolvedConfig::cache_key`]. The client is internally pooled +
     /// self-healing and cheap to clone, so reusing it across calls amortizes
@@ -1519,6 +1629,74 @@ async fn sample_field_types(coll: &Collection<Document>) -> Result<Vec<(String, 
             (k, ty)
         })
         .collect())
+}
+
+/// Max nesting depth for sampled embedded field paths (`a.b.c` is depth 3).
+const MAX_FIELD_DEPTH: usize = 3;
+/// Cap on total sampled paths so a wide/deep collection can't bloat completion.
+const MAX_FIELD_PATHS: usize = 400;
+
+/// Sample docs and infer dotted field PATHS (incl. embedded `addr.city` and the
+/// first element of document-arrays), depth- and count-bounded. Backs Mongo
+/// field completion's "indexes first, then sampled fields" with embedded support.
+async fn sample_field_paths(coll: &Collection<Document>) -> Result<Vec<(String, String)>> {
+    let pipeline = vec![doc! { "$sample": { "size": SAMPLE_SIZE } }];
+    let mut cursor = coll.aggregate(pipeline).await.map_err(types::upstream)?;
+    let mut order: Vec<String> = Vec::new();
+    let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    while let Some(next) = cursor.next().await {
+        let doc = match next {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        walk_field_paths(&doc, "", 0, &mut order, &mut types);
+        if order.len() >= MAX_FIELD_PATHS {
+            break;
+        }
+    }
+    order.sort_by_key(|k| if k == "_id" { 0 } else { 1 });
+    Ok(order
+        .into_iter()
+        .map(|k| {
+            let ty = types.get(&k).cloned().unwrap_or_default();
+            (k, ty)
+        })
+        .collect())
+}
+
+/// Recursively record `prefix.key` paths and their BSON type names.
+fn walk_field_paths(
+    doc: &Document,
+    prefix: &str,
+    depth: usize,
+    order: &mut Vec<String>,
+    types: &mut std::collections::HashMap<String, String>,
+) {
+    for (key, value) in doc.iter() {
+        if order.len() >= MAX_FIELD_PATHS {
+            return;
+        }
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        if !types.contains_key(&path) {
+            order.push(path.clone());
+            types.insert(path.clone(), bson_type_name(value).to_string());
+        }
+        if depth + 1 < MAX_FIELD_DEPTH {
+            match value {
+                Bson::Document(sub) => walk_field_paths(sub, &path, depth + 1, order, types),
+                Bson::Array(arr) => {
+                    if let Some(Bson::Document(sub)) = arr.first() {
+                        walk_field_paths(sub, &path, depth + 1, order, types);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Fetch a single document for the structure-tab sample (None if empty).
