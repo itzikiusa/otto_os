@@ -220,6 +220,31 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/mcp-servers/{id}",
             patch(mcp_servers::update).delete(mcp_servers::delete),
         )
+        // --- MCP Control Plane: outward "Otto as MCP server" + gateway + the
+        //     capability endpoints behind the otto.* tools. (The registry /
+        //     governance routes live in the otto-mcp module router.) ----------
+        .route(
+            "/mcp/otto-tools/invoke",
+            post(crate::mcp_outward::otto_tools_invoke),
+        )
+        .route(
+            "/mcp/otto-server",
+            get(crate::mcp_outward::otto_server_status).patch(crate::mcp_outward::otto_server_config),
+        )
+        .route("/mcp/gateway/tools", get(crate::mcp_outward::gateway_tools))
+        .route("/mcp/gateway/invoke", post(crate::mcp_outward::gateway_invoke))
+        .route(
+            "/workspaces/{wid}/mcp/code-search",
+            get(crate::mcp_capabilities::code_search),
+        )
+        .route(
+            "/workspaces/{wid}/mcp/context-packet",
+            post(crate::mcp_capabilities::context_packet),
+        )
+        .route(
+            "/workspaces/{wid}/mcp/proof-pack",
+            get(crate::mcp_capabilities::proof_pack),
+        )
         // --- Usage tracking & system metrics (embedded ClickHouse) -------
         .route("/usage/status", get(usage::status))
         .route("/usage/summary", get(usage::summary))

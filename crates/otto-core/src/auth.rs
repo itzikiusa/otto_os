@@ -81,6 +81,12 @@ pub struct AuthContext {
     /// The single-session capability a share-link token is pinned to; `None`
     /// for every unscoped (normal/api/impersonation) token.
     pub scope: Option<SessionScope>,
+    /// True for a `kind='mcp'` restricted token (the outward "Otto as MCP
+    /// server"). It authorizes ONLY `POST /mcp/otto-tools/invoke` (+ `GET
+    /// /mcp/otto-server`); the feature guard 403s every other route, so the
+    /// control plane stays in the path even if the token leaks from a
+    /// `.mcp.json` (design §14 F1). `false` for every other token kind.
+    pub mcp_only: bool,
 }
 
 impl AuthContext {
@@ -345,6 +351,7 @@ mod tests {
             real_user: u.clone(),
             effective_user: u,
             scope: None,
+            mcp_only: false,
         };
         assert_eq!(ctx.real_user.id, ctx.effective_user.id);
         assert_eq!(ctx.real_user.username, ctx.effective_user.username);
@@ -368,6 +375,7 @@ mod tests {
                 role: WorkspaceRole::Viewer,
                 otp_pending: false,
             }),
+            mcp_only: false,
         };
         assert!(ctx.is_scoped());
         let scope = ctx.scope.expect("scoped token must carry a SessionScope");

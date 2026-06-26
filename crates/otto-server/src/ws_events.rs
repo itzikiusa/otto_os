@@ -601,6 +601,7 @@ mod tests {
             real_user: u.clone(),
             effective_user: u,
             scope,
+            mcp_only: false,
         }
     }
 

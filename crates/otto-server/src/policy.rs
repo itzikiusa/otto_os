@@ -493,6 +493,31 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Database, if read { View } else { Edit });
     }
 
+    // ---- MCP Control Plane (Feature::Mcp) -------------------------------------
+    // Governs registered MCP servers/tools + exposes Otto outward as an MCP
+    // server. Distinct prefix from the legacy `/mcp-servers` config CRUD (Exempt,
+    // above): the control plane lives under `/mcp/*` and `/workspaces/{wid}/mcp/*`.
+    // Reads + non-mutating previews = View; mutations/invoke = Edit; security-
+    // posture changes (policy writes/import, the outward-server config) = Admin.
+    // (stdio-server registration additionally requires MCP Admin *in the handler*,
+    // since it runs an arbitrary command as the daemon — see otto-mcp F10.)
+    if p.starts_with("/mcp/") || p.starts_with("/workspaces/{wid}/mcp/") {
+        // Posture-changing routes → Admin: outward-server config, policy
+        // create/update/delete/import, and approval decisions (separation of
+        // duties is additionally enforced in the handler).
+        let posture = (p == "/mcp/otto-server" && !get)
+            || p == "/mcp/policies/import"
+            || (p == "/mcp/policies" && !get) // create policy
+            || p == "/mcp/policies/{id}" // update / delete policy
+            || p.ends_with("/approvals/{id}/decide");
+        if posture {
+            return Require(Mcp, Admin);
+        }
+        // Non-mutating previews (export, evaluate) are POST but read-only → View.
+        let read = get || p == "/mcp/policies/export" || p == "/mcp/policies/evaluate";
+        return Require(Mcp, if read { View } else { Edit });
+    }
+
     // ---- Swarm ----------------------------------------------------------------
     // §3.2: view swarms/board/runs=View; create/edit/run/start/pause/abort/
     // recruit/plan=Edit.
@@ -886,6 +911,44 @@ mod tests {
             Exempt
         );
         assert_eq!(pol(Method::DELETE, "/api/v1/mcp-servers/{id}"), Exempt);
+    }
+
+    #[test]
+    fn mcp_control_plane_rbac() {
+        // Reads = View.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/mcp/servers"),
+            Require(Mcp, View)
+        );
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/servers/{id}/tools"), Require(Mcp, View));
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/audit"), Require(Mcp, View));
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/stats"), Require(Mcp, View));
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/policies"), Require(Mcp, View));
+        // Non-mutating previews (POST but read-only) = View.
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/policies/export"), Require(Mcp, View));
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/policies/evaluate"), Require(Mcp, View));
+        // Mutations / invoke = Edit.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{wid}/mcp/servers"),
+            Require(Mcp, Edit)
+        );
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/servers/{id}/discover"), Require(Mcp, Edit));
+        assert_eq!(
+            pol(Method::POST, "/api/v1/mcp/servers/{id}/tools/{name}/invoke"),
+            Require(Mcp, Edit)
+        );
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/otto-tools/invoke"), Require(Mcp, Edit));
+        // Posture changes = Admin.
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/policies"), Require(Mcp, Admin));
+        assert_eq!(pol(Method::PATCH, "/api/v1/mcp/policies/{id}"), Require(Mcp, Admin));
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/policies/import"), Require(Mcp, Admin));
+        assert_eq!(pol(Method::PATCH, "/api/v1/mcp/otto-server"), Require(Mcp, Admin));
+        assert_eq!(
+            pol(Method::POST, "/api/v1/mcp/approvals/{id}/decide"),
+            Require(Mcp, Admin)
+        );
+        // The legacy config CRUD is still Exempt (workspace-role axis only).
+        assert_eq!(pol(Method::GET, "/api/v1/mcp-servers/{id}"), Exempt);
     }
 
     #[test]

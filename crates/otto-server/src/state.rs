@@ -34,6 +34,10 @@ pub struct ServerCtx {
     pub auth_cache: otto_rbac::AuthCache,
     /// Daemon version reported by `/meta` (the ottod CARGO_PKG_VERSION).
     pub version: String,
+    /// Loopback base URL of this daemon, e.g. `http://127.0.0.1:7700`. Used by the
+    /// outward MCP-server executor to self-call governed capability endpoints with
+    /// a short-lived ephemeral token (so each tool reuses its endpoint's RBAC).
+    pub base_url: String,
     /// The daemon data directory (library, swarm worktrees/scratch, …).
     pub data_dir: std::path::PathBuf,
     /// Runtime custom-plugin supervisor (spawns/proxies sidecar processes).
@@ -49,6 +53,9 @@ pub struct ServerCtx {
     pub db_assist: crate::db_assist::DbAssistRegistry,
     /// Message Brokers (Kafka) viewer engine — cluster CRUD + rdkafka client pool.
     pub brokers: Arc<otto_brokers::BrokersService>,
+    /// MCP Control Plane engine — outbound MCP client + governance pipeline
+    /// (registry/health/discovery/policy/approval/audit). See `otto-mcp`.
+    pub mcp: Arc<otto_mcp::McpService>,
     pub spawner: Arc<dyn Spawner>,
     pub git_store: GitStore,
     pub issues_store: IssuesRepo,
