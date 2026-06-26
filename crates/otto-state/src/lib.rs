@@ -80,7 +80,7 @@ pub use git::{GitStore, NewGitAccount, NewRepo};
 pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::GrantsRepo;
 pub use name_themes::{CustomTheme, NameThemesRepo};
-pub use proof::ProofRepo;
+pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
 // NewRun/RunPatch/NewRunEvent are referenced via the `runs::` path downstream to
 // avoid colliding with swarm's `RunPatch`/`RunFilter` re-exports.
 pub use runs::RunsRepo;

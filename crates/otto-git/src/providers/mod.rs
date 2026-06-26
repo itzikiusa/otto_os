@@ -93,6 +93,21 @@ pub trait GitProvider: Send + Sync {
     async fn token_expiry(&self) -> Result<Option<DateTime<Utc>>> {
         Ok(None)
     }
+
+    /// Aggregated CI / check-run status for a PR (Proof Packs use this to capture
+    /// a `ci` evidence artifact). The default derives the state from `get_pr`
+    /// (state only, no counts); each provider overrides to add counts + a
+    /// dashboard URL via its concrete `fetch_ci_status`. Best-effort: a failed
+    /// fetch yields a `none` status rather than erroring.
+    async fn ci_status(&self, r: &RemoteRef, number: u64) -> crate::types::CiStatus {
+        match self.get_pr(r, number).await {
+            Ok(d) => crate::types::CiStatus {
+                state: d.summary.ci_status.unwrap_or_else(|| "none".into()),
+                ..Default::default()
+            },
+            Err(_) => crate::types::CiStatus::default(),
+        }
+    }
 }
 
 /// Build a provider client for an account + token.

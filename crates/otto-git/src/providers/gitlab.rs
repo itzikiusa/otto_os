@@ -539,6 +539,10 @@ impl super::GitProvider for Gitlab {
         }
     }
 
+    async fn ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
+        self.fetch_ci_status(r, number).await
+    }
+
     /// GitLab exposes the current PAT via `GET /personal_access_tokens/self`,
     /// whose `expires_at` is a `YYYY-MM-DD` date (or null = never expires).
     /// We treat the date as end-of-day UTC. Tokens that don't expire ⇒ `None`.
