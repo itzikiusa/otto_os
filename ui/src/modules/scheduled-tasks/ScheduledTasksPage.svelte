@@ -365,13 +365,13 @@
                 {#if !t.enabled}<span class="pill">paused</span>{/if}
               </div>
               <div class="task-actions">
-                <button class="btn sm" onclick={() => runNow(t)} disabled={busy}>Run now</button>
-                <button class="btn sm" onclick={() => toggleRuns(t)}>
+                <button class="btn small" onclick={() => runNow(t)} disabled={busy}>Run now</button>
+                <button class="btn small" onclick={() => toggleRuns(t)}>
                   {expandedId === t.id ? 'Hide runs' : 'Runs'}
                 </button>
-                <button class="btn sm" onclick={() => toggle(t)}>{t.enabled ? 'Pause' : 'Enable'}</button>
-                <button class="btn sm" onclick={() => startEdit(t)}>Edit</button>
-                <button class="btn sm danger" onclick={() => remove(t)}>Delete</button>
+                <button class="btn small" onclick={() => toggle(t)}>{t.enabled ? 'Pause' : 'Enable'}</button>
+                <button class="btn small" onclick={() => startEdit(t)}>Edit</button>
+                <button class="btn small danger" onclick={() => remove(t)}>Delete</button>
               </div>
             </div>
             {#if expandedId === t.id}
@@ -382,7 +382,7 @@
                     <span class="run-when">{r.started_at}</span>
                     <span class="run-sum">{r.summary || '(no summary)'}</span>
                     {#if r.report_rel}
-                      <button class="btn sm" onclick={() => viewReport(r)}>View report</button>
+                      <button class="btn small" onclick={() => viewReport(r)}>View report</button>
                     {/if}
                     {#if r.delivered}<span class="pill ok">delivered</span>{/if}
                     {#if r.delivery_error}<span class="pill warn" title={r.delivery_error}>delivery failed</span>{/if}
@@ -408,7 +408,7 @@
       <div class="modal" role="dialog" aria-label="Report" aria-modal="true" tabindex="-1">
         <header class="modal-head">
           <strong>Report</strong>
-          <button class="btn sm" onclick={() => (reportOpen = false)}>Close</button>
+          <button class="btn small" onclick={() => (reportOpen = false)}>Close</button>
         </header>
         {#if reportLoading}
           <div class="muted">Loading…</div>
@@ -421,46 +421,51 @@
 </div>
 
 <style>
+  /* Colors come from the app theme tokens (tokens.css) so the page adapts to
+     light + dark. Buttons reuse the global `.btn`/`.btn.small/.primary/.danger`. */
   .sched { padding: 1rem 1.25rem; max-width: 980px; margin: 0 auto; }
   .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin-bottom: 0.75rem; }
-  .head h1 { margin: 0; font-size: 1.25rem; }
-  .sub { margin: 0.25rem 0 0; color: var(--muted, #8b949e); font-size: 0.85rem; max-width: 60ch; }
-  .empty, .muted { color: var(--muted, #8b949e); padding: 0.75rem 0; font-size: 0.9rem; }
-  .err { background: rgba(248,81,73,0.12); color: #f85149; padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 0.75rem; font-size: 0.85rem; }
+  .head h1 { margin: 0; font-size: 1.25rem; color: var(--text); }
+  .sub { margin: 0.25rem 0 0; color: var(--text-dim); font-size: 0.85rem; max-width: 60ch; }
+  .empty, .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
+  .err {
+    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
+    color: var(--status-exited); padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-s); margin-bottom: 0.75rem; font-size: 0.85rem;
+  }
   .tasks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
-  .task { border: 1px solid var(--border, #30363d); border-radius: 8px; padding: 0.6rem 0.75rem; }
+  .task { border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m); padding: 0.6rem 0.75rem; color: var(--text); }
   .task-main { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .task-info { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  .name { font-size: 0.95rem; }
-  .meta { color: var(--muted, #8b949e); font-size: 0.8rem; }
+  .name { font-size: 0.95rem; color: var(--text); }
+  .meta { color: var(--text-dim); font-size: 0.8rem; }
   .task-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; }
-  .runs { margin-top: 0.6rem; border-top: 1px solid var(--border, #30363d); padding-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem; }
-  .run { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; flex-wrap: wrap; }
-  .run-when { color: var(--muted, #8b949e); font-variant-numeric: tabular-nums; }
+  .runs { margin-top: 0.6rem; border-top: 1px solid var(--border); padding-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem; }
+  .run { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; flex-wrap: wrap; color: var(--text); }
+  .run-when { color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .run-sum { flex: 1; min-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pill { font-size: 0.7rem; padding: 0.05rem 0.4rem; border-radius: 999px; border: 1px solid var(--border, #30363d); }
-  .pill.ok { background: rgba(126,231,135,0.16); color: #7ee787; border-color: transparent; }
-  .pill.bad { background: rgba(248,81,73,0.16); color: #f85149; border-color: transparent; }
-  .pill.warn { background: rgba(210,153,34,0.16); color: #d29922; border-color: transparent; }
-  .pill.working { background: rgba(88,166,255,0.16); color: #58a6ff; border-color: transparent; }
+  .pill { font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+  .pill.ok { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-color: transparent; }
+  .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); border-color: transparent; }
+  .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); border-color: transparent; }
+  .pill.working { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); border-color: transparent; }
   .form { display: flex; flex-direction: column; gap: 0.75rem; max-width: 720px; }
   .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
   .row .fld { flex: 1; min-width: 180px; }
-  .fld { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
-  .fld span { color: var(--muted, #8b949e); }
+  .fld { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--text); }
+  .fld span { color: var(--text-dim); }
   .fld input, .fld select, .fld textarea {
-    background: var(--input-bg, #0d1117); color: inherit; border: 1px solid var(--border, #30363d);
-    border-radius: 6px; padding: 0.4rem 0.5rem; font: inherit;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius-s); padding: 0.45rem 0.55rem; font: inherit;
   }
-  .chk { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
+  .fld input::placeholder, .fld textarea::placeholder { color: var(--text-dim); }
+  .fld input:focus-visible, .fld select:focus-visible, .fld textarea:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px;
+  }
+  .chk { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: var(--text); }
   .actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
-  .btn { background: var(--btn-bg, #21262d); color: inherit; border: 1px solid var(--border, #30363d); border-radius: 6px; padding: 0.35rem 0.7rem; font: inherit; cursor: pointer; }
-  .btn.sm { padding: 0.2rem 0.5rem; font-size: 0.78rem; }
-  .btn.primary { background: var(--accent, #238636); border-color: transparent; color: #fff; }
-  .btn.danger, .btn.sm.danger { color: #f85149; }
-  .btn:disabled { opacity: 0.5; cursor: default; }
-  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; z-index: 50; }
-  .modal { background: var(--bg, #161b22); border: 1px solid var(--border, #30363d); border-radius: 10px; width: min(760px, 92vw); max-height: 82vh; overflow: auto; padding: 0.85rem 1rem; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
+  .modal { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-l); width: min(760px, 92vw); max-height: 82vh; overflow: auto; padding: 0.85rem 1rem; box-shadow: var(--shadow); }
   .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
-  .report { white-space: pre-wrap; word-break: break-word; font-family: var(--mono, ui-monospace, monospace); font-size: 0.8rem; line-height: 1.45; }
+  .report { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; color: var(--text); }
 </style>
