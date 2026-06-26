@@ -320,11 +320,17 @@ async fn update_ws_context<C: ContextCtx>(
 ) -> ApiResult<Json<WorkspaceContextConfig>> {
     s.roles().check(&user.0, &ws_id, WorkspaceRole::Admin).await?;
     let ws = s.workspaces().get(&ws_id).await?;
+    // PRESERVE the machine-managed `repo_rules_md` block — it is rendered from the
+    // `repo_rules` table by the server, not edited via this user-facing PUT, and
+    // must survive a user context edit (the wholesale overwrite would otherwise
+    // wipe it — a lost-update clobber).
+    let stored = config::from_settings(&ws.settings);
     let cfg = WorkspaceContextConfig {
         skills: req.skills,
         soul: req.soul,
         extra_context_md: req.extra_context_md,
         include_memory: req.include_memory,
+        repo_rules_md: stored.repo_rules_md,
     };
     let merged = config::write_into_settings(&ws.settings, &cfg);
     let updated = s
@@ -386,6 +392,7 @@ async fn preview_ws<C: ContextCtx>(
         soul: req.soul.unwrap_or(stored.soul),
         extra_context_md: req.extra_context_md.unwrap_or(stored.extra_context_md),
         include_memory: req.include_memory.unwrap_or(stored.include_memory),
+        repo_rules_md: stored.repo_rules_md,
     };
 
     let providers: Vec<String> = match req.provider {

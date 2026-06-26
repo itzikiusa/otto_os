@@ -259,4 +259,32 @@ pub enum Event {
         sql: String,
         note: String,
     },
+    /// A review finding's workflow `status` (or a tracked field) changed — emitted
+    /// after every triage action / transition. The Findings board subscribes and
+    /// refetches the matching finding (like `review_changed` drives the panel).
+    /// `status` is the new `FindingStatus` as snake_case.
+    FindingUpdated {
+        workspace_id: Id,
+        review_id: Id,
+        finding_id: Id,
+        status: String,
+    },
+    /// An agent-backed finding action just spawned a live, openable session (fix /
+    /// verify / regression-test). Lets the board attach the agent's shell so the
+    /// user can watch it close the loop. `action` is "fix" | "verify" | "regression_test".
+    FindingActionStarted {
+        workspace_id: Id,
+        review_id: Id,
+        finding_id: Id,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<Id>,
+    },
+    /// A review's Proof Pack was exported (a snapshot persisted + verified findings
+    /// ingested into memory). The Review panel can surface the new evidence bundle.
+    ProofPackExported {
+        workspace_id: Id,
+        review_id: Id,
+        proof_pack_id: Id,
+    },
 }
