@@ -464,4 +464,20 @@ mod tests {
         assert!(capped.len() <= STORE_CAP + 32);
         assert_eq!(meta["truncated"], json!(true));
     }
+
+    #[test]
+    fn prepare_content_redacts_secrets() {
+        // A trust layer must not itself leak secrets (D6). A Bearer token in
+        // captured output must be redacted before storage.
+        let raw = "running with Authorization: Bearer abcdef0123456789ABCDEF0123456789 in the log";
+        let (stored, meta) = prepare_content(raw);
+        assert!(
+            !stored.contains("abcdef0123456789ABCDEF0123456789"),
+            "secret must be redacted from stored content"
+        );
+        assert!(
+            meta["redactions"].as_u64().unwrap_or(0) >= 1,
+            "redaction count should be reported"
+        );
+    }
 }

@@ -24,6 +24,7 @@ pub mod mission;
 pub mod name_themes;
 pub mod notifications;
 pub mod onboarding;
+pub mod proof;
 pub mod product_memory;
 pub mod settings;
 pub mod share;

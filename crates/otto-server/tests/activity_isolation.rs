@@ -287,6 +287,8 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
         goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
         goal_loops: otto_server::goal_loop::new_registry(),
+        proof_repo: otto_state::ProofRepo::new(pool.clone()),
+        proof_locks: otto_server::proof::new_locks(),
     }
 }
 

@@ -644,6 +644,34 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Agents, View);
     }
 
+    // ---- Proof Packs (the evidence layer) --------------------------------
+    // Workspace-axis: list=View, create=Edit; the cheap summary=View. Flat
+    // routes mirror the reviews precedent (Require(Feature, …)), NOT goal-loops'
+    // Exempt — the handler does the orthogonal workspace-membership check.
+    if p == "/workspaces/{id}/proof-packs" {
+        return Require(ProofPack, if get { View } else { Edit });
+    }
+    if p == "/workspaces/{id}/proof-summary" {
+        return Require(ProofPack, View);
+    }
+    if p == "/proof-packs/{id}" {
+        // GET detail = View; PATCH = Edit; DELETE = Edit.
+        return Require(ProofPack, if get { View } else { Edit });
+    }
+    if p == "/proof-packs/{id}/artifacts" || p == "/proof-packs/{id}/assemble" {
+        return Require(ProofPack, Edit);
+    }
+    if p == "/proof-packs/{id}/waive" {
+        // Waiving the proof requirement is a human override (spec §7 = Edit).
+        return Require(ProofPack, Edit);
+    }
+    if p == "/proof-artifacts/{id}/content" {
+        return Require(ProofPack, View);
+    }
+    if p == "/proof-artifacts/{id}" {
+        return Require(ProofPack, Edit);
+    }
+
     // ----------------------------------------------------------------------
     // 4. Default — fail closed.
     // ----------------------------------------------------------------------
@@ -658,6 +686,48 @@ mod tests {
     // Helper: every test path carries the `/api/v1` nest prefix the guard sees.
     fn pol(m: Method, path: &str) -> PolicyDecision {
         policy_for(&m, path)
+    }
+
+    // ---- Proof Packs --------------------------------------------------------
+
+    #[test]
+    fn proof_pack_routes_are_feature_gated() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{id}/proof-packs"),
+            Require(ProofPack, View),
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{id}/proof-packs"),
+            Require(ProofPack, Edit),
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{id}/proof-summary"),
+            Require(ProofPack, View),
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/proof-packs/{id}"),
+            Require(ProofPack, View),
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/proof-packs/{id}"),
+            Require(ProofPack, Edit),
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/proof-packs/{id}/artifacts"),
+            Require(ProofPack, Edit),
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/proof-packs/{id}/waive"),
+            Require(ProofPack, Edit),
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/proof-artifacts/{id}/content"),
+            Require(ProofPack, View),
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/proof-artifacts/{id}"),
+            Require(ProofPack, Edit),
+        );
     }
 
     // ---- Security-critical mappings from the plan (Task 1.3 Step 1) ----------

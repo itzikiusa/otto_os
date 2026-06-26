@@ -1672,3 +1672,39 @@ Persistence: `otto_state::product_chat` (`DiscoveryChat`, `DiscoveryChatMessage`
 | 112 | POST /api/v1/product/discovery-chats/{cid}/messages | ws editor | `{body}` | `{user_message, agent_message}` (one turn; agent_message carries `actions_json`) |
 | 113 | POST /api/v1/product/discovery-chats/{cid}/archive | ws editor | — | DiscoveryChat |
 | 114 | POST /api/v1/product/discovery-chats/{cid}/apply | ws editor | `{action}` | ApplyResult `{story_updated, created_question_ids, created_note_ids, canvas_id}` |
+
+---
+
+## Proof Packs (#115-125)
+
+The evidence layer. Every meaningful unit of agent work carries a **proof pack**
+whose `status` (`missing | partial | passed | failed | waived`) is DERIVED from
+its evidence artifacts, not claimed by the agent. Otto auto-assembles what it can
+(diff, goal-loop verify commands, workflow node outputs, review findings, human
+approvals); agents and humans add the rest (build/lint, screenshots, api/db, ci,
+self-review) via the artifact endpoint. All persisted artifact content is redacted
+(`otto_core::redact`) and capped (2 MiB) before storage.
+
+Feature-gated by `Feature::ProofPack` (`policy.rs`): workspace-axis and flat
+routes alike require `ProofPack` View (reads) / Edit (writes); each handler also
+checks the caller's workspace role. Persistence: `otto_state::proof`
+(`ProofPack`, `ProofArtifact`); engine: `otto_server::proof`.
+
+| # | Method & path | Auth | Request | Response |
+|---|---|---|---|---|
+| 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?` | `ProofPackResp[]` |
+| 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?}` | ProofPackResp |
+| 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | — | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, badges[]}]}` |
+| 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[]}` |
+| 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
+| 120 | DELETE /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts) |
+| 121 | POST /api/v1/proof-packs/{id}/artifacts | ws editor · ProofPack Edit | AddArtifactReq `{kind, title, content?, content_url?, status?, metadata?}` | ProofPackResp |
+| 122 | POST /api/v1/proof-packs/{id}/assemble | ws editor · ProofPack Edit | AssembleReq `{cwd?, base?, commands?:[{cmd, kind?}]}` | ProofPackResp |
+| 123 | POST /api/v1/proof-packs/{id}/waive | ws editor · ProofPack Edit | WaiveReq `{reason}` | ProofPackResp |
+| 124 | DELETE /api/v1/proof-artifacts/{id} | ws editor · ProofPack Edit | — | `{ok:true}` |
+| 125 | GET /api/v1/proof-artifacts/{id}/content | ws viewer · ProofPack View | — | `{content, ref_kind, kind, status, metadata}` (full stored content) |
+
+Artifact kinds: `command | log | screenshot | diff | ci | api | db | review |
+approval | self_review`. Badges (derived server-side): `no_proof`,
+`tests_passed`, `tests_failed`, `human_approved`, `risky_change`, `ci_missing`,
+`db_api_verified`, `review_unresolved`, `waived`.
