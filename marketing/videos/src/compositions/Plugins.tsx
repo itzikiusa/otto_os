@@ -1,564 +1,549 @@
 import React from 'react';
-import { AbsoluteFill, useCurrentFrame } from 'remotion';
-import { T, brand, fonts, radius, alpha, status } from '../theme';
+import { AbsoluteFill } from 'remotion';
+import { T, brand, fonts, radius, alpha } from '../theme';
 import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
 import { OttoWindow } from '../components/Frame';
 import { Navigator } from '../components/Nav';
 import {
   Appear,
-  Stagger,
   TitleCard,
   Caption,
   Card,
-  Chip,
   Button,
-  Field,
+  Chip,
   Toggle,
-  StatusDot,
-  MetricStat,
-  BarChart,
   Icon,
-  track,
+  Toast,
 } from '../components/kit';
 
 // ════════════════════════════════════════════════════════════════════════════
-//  CUSTOM PLUGINS — runtime out-of-process sidecars with their own UI + scoped
-//  host API. Install from a GitHub URL or local path; enable / disable / remove.
+//  CUSTOM PLUGINS — runtime out-of-process sidecars in any language, with a
+//  scoped host API, reverse-proxied iframe UI, and slug-keyed RBAC.
 // ════════════════════════════════════════════════════════════════════════════
 
-const PLUGIN_VIOLET = '#a78bfa';
+const VIOLET = '#a78bfa';
 
-// ── Scene 1 — title card ─────────────────────────────────────────────────────
-const Title: React.FC = () => (
-  <TitleCard
-    kicker="CUSTOM PLUGINS"
-    title="Extend Otto — no rebuild"
-    subtitle="Drop-in sidecars with their own UI and a scoped host API"
-  />
+// ── Shared diagram helpers ────────────────────────────────────────────────────
+
+/** Glowing labelled box for the architecture diagram. */
+const ArchBox: React.FC<{ label: string; sub: string; color: string }> = ({ label, sub, color }) => (
+  <div
+    style={{
+      padding: '20px 28px',
+      borderRadius: radius.l,
+      background: alpha(color, 0.1),
+      border: `1.5px solid ${alpha(color, 0.5)}`,
+      boxShadow: `0 8px 32px ${alpha(color, 0.18)}`,
+      textAlign: 'center',
+      minWidth: 200,
+    }}
+  >
+    <div style={{ fontFamily: fonts.mono, fontSize: 15, fontWeight: 700, color }}>{label}</div>
+    <div style={{ fontFamily: fonts.mono, fontSize: 11.5, color: alpha(color, 0.65), marginTop: 5 }}>{sub}</div>
+  </div>
 );
 
-// ── Scene 2 — Settings → Plugins: install & manage at runtime ────────────────
-const InstalledRow: React.FC<{
-  name: string;
-  slug: string;
-  version: string;
-  port: string;
-  kind: string;
-  kindColor: string;
-  on?: boolean;
-}> = ({ name, slug, version, port, kind, kindColor, on = true }) => (
-  <Card
-    pad={13}
+/** Gradient arrow with a label above the line. */
+const Connector: React.FC<{ label: string; fromColor: string; toColor: string }> = ({
+  label,
+  fromColor,
+  toColor,
+}) => (
+  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, width: 136 }}>
+    <span
+      style={{
+        fontFamily: fonts.mono,
+        fontSize: 11,
+        color: alpha('#ffffff', 0.48),
+        letterSpacing: 0.5,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {label}
+    </span>
+    <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
+      <div
+        style={{
+          flex: 1,
+          height: 2,
+          background: `linear-gradient(90deg, ${fromColor}, ${toColor})`,
+        }}
+      />
+      <div
+        style={{
+          width: 0,
+          height: 0,
+          borderTop: '6px solid transparent',
+          borderBottom: '6px solid transparent',
+          borderLeft: `8px solid ${toColor}`,
+        }}
+      />
+    </div>
+  </div>
+);
+
+/** Mock iframe panel — a mini burndown chart as the plugin UI. */
+const PluginIframe: React.FC = () => (
+  <div
     style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 14,
-      background: T.surface2,
+      width: 260,
+      background: T.bg,
+      border: `1.5px solid ${VIOLET}`,
+      borderRadius: radius.m,
+      boxShadow: `0 12px 40px ${alpha(VIOLET, 0.22)}, 0 0 0 1px ${alpha(VIOLET, 0.14)}`,
+      overflow: 'hidden',
     }}
   >
     <div
       style={{
-        width: 38,
-        height: 38,
-        borderRadius: radius.m,
-        background: alpha(kindColor, 0.16),
-        border: `1px solid ${alpha(kindColor, 0.4)}`,
-        display: 'grid',
-        placeItems: 'center',
-        flexShrink: 0,
-      }}
-    >
-      <Icon name="zap" size={19} color={kindColor} />
-    </div>
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-        <span style={{ fontFamily: fonts.ui, fontSize: 16, fontWeight: 650 as never, color: T.text }}>{name}</span>
-        <Chip color={kindColor}>{kind}</Chip>
-        <span style={{ fontFamily: fonts.mono, fontSize: 12.5, color: T.textDim }}>v{version}</span>
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
-        <span style={{ fontFamily: fonts.mono, fontSize: 11.5, color: T.textDim }}>#/plugin/{slug}</span>
-        {on && (
-          <span
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
-              fontFamily: fonts.mono,
-              fontSize: 11.5,
-              color: status.working,
-            }}
-          >
-            <StatusDot kind="working" size={7} />
-            running · {port}
-          </span>
-        )}
-      </div>
-    </div>
-    <Toggle on={on} />
-    <Button variant="ghost" size="s" icon="trash">
-      Remove
-    </Button>
-  </Card>
-);
-
-const ManageScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  return (
-    <>
-      <Stage scale={0.9}>
-        <OttoWindow
-          nav={<Navigator active="settings" />}
-          title="Otto — Settings"
-        >
-          <div style={{ padding: '24px 30px', height: '100%', boxSizing: 'border-box', overflow: 'hidden' }}>
-            {/* page heading */}
-            <Appear delay={6} y={14}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 4 }}>
-                <Icon name="gear" size={18} color={T.textDim} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim }}>Settings</span>
-                <Icon name="chevronRight" size={13} color={T.textDim} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 22, fontWeight: 750 as never, color: T.text }}>
-                  Plugins
-                </span>
-              </div>
-            </Appear>
-            <Appear delay={10} y={10}>
-              <div style={{ fontFamily: fonts.ui, fontSize: 14, color: T.textDim, marginBottom: 18 }}>
-                Out-of-process sidecars, reverse-proxied through the daemon — installed and toggled at runtime.
-              </div>
-            </Appear>
-
-            {/* install field */}
-            <Appear delay={16} y={14}>
-              <Card pad={16} style={{ marginBottom: 18 }}>
-                <div style={{ fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 600, color: T.text, marginBottom: 11 }}>
-                  Install plugin
-                </div>
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12 }}>
-                  <Field
-                    label="GitHub URL or local path"
-                    value="github.com/acme/dora-metrics"
-                    icon="globe"
-                    mono
-                    focused
-                    caret
-                    style={{ flex: 1 }}
-                  />
-                  <Button variant="primary" icon="plus" style={{ height: 32 }}>
-                    Install
-                  </Button>
-                </div>
-              </Card>
-            </Appear>
-
-            {/* installed list */}
-            <Appear delay={22} y={12}>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  marginBottom: 10,
-                }}
-              >
-                <span style={{ fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 600, color: T.text }}>
-                  Installed
-                </span>
-                <span
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    fontFamily: fonts.mono,
-                    fontSize: 11.5,
-                    color: T.textDim,
-                  }}
-                >
-                  <Icon name="link" size={12} color={T.textDim} />
-                  reverse-proxied
-                </span>
-              </div>
-            </Appear>
-
-            <Stagger delay={28} step={8} y={16} style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
-              <InstalledRow
-                name="team-performance"
-                slug="team-performance"
-                version="1.2.0"
-                port=":49217"
-                kind="Node"
-                kindColor="#9ee039"
-              />
-              <InstalledRow
-                name="dora-metrics"
-                slug="dora-metrics"
-                version="0.4.1"
-                port=":49183"
-                kind="Rust"
-                kindColor="#ff8a65"
-              />
-            </Stagger>
-
-            {/* footnote */}
-            <Appear delay={48} y={10}>
-              <div
-                style={{
-                  marginTop: 16,
-                  fontFamily: fonts.ui,
-                  fontSize: 12,
-                  color: alpha(T.textDim, 0.9),
-                  opacity: track(frame, [48, 58], [0, 1]),
-                }}
-              >
-                Each plugin runs as a child process on a loopback port — no app rebuild, no restart.
-              </div>
-            </Appear>
-          </div>
-        </OttoWindow>
-      </Stage>
-      <Caption
-        step={1}
-        title="Install at runtime — enable, disable, remove"
-        sub="Node or Rust sidecars · no app rebuild"
-      />
-    </>
-  );
-};
-
-// ── Scene 3 — a plugin's iframe UI rendered in the sidebar ───────────────────
-const PluginUIScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  const grow = track(frame, [30, 70], [0, 1]);
-  return (
-    <>
-      <Stage scale={0.9}>
-        <OttoWindow
-          nav={<Navigator active="walkthroughs" />}
-          tabs={[{ label: 'DORA Metrics', icon: 'zap', active: true }]}
-          title="Otto — Plugin · dora-metrics"
-        >
-          <div style={{ padding: '22px 30px', height: '100%', boxSizing: 'border-box', overflow: 'hidden' }}>
-            {/* iframe chrome bar — routed under #/plugin/dora-metrics */}
-            <Appear delay={6} y={12}>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  height: 32,
-                  padding: '0 12px',
-                  borderRadius: `${radius.m}px ${radius.m}px 0 0`,
-                  background: T.surface2,
-                  border: `1px solid ${T.border}`,
-                  borderBottom: 'none',
-                }}
-              >
-                <Icon name="zap" size={14} color={PLUGIN_VIOLET} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 600, color: T.text }}>
-                  DORA Metrics
-                </span>
-                <Chip color={PLUGIN_VIOLET}>plugin</Chip>
-                <span style={{ flex: 1 }} />
-                <span style={{ fontFamily: fonts.mono, fontSize: 11.5, color: T.textDim }}>#/plugin/dora-metrics</span>
-                <Icon name="external" size={12} color={T.textDim} />
-              </div>
-            </Appear>
-
-            {/* the iframe body */}
-            <Appear delay={10} y={12}>
-              <div
-                style={{
-                  borderRadius: `0 0 ${radius.m}px ${radius.m}px`,
-                  border: `1px solid ${T.border}`,
-                  background: T.termBg,
-                  padding: 22,
-                  boxSizing: 'border-box',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 18 }}>
-                  <span style={{ fontFamily: fonts.ui, fontSize: 20, fontWeight: 750 as never, color: T.text }}>
-                    DORA · last 30 days
-                  </span>
-                  <span style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim }}>
-                    sinatra-users-go · main
-                  </span>
-                  <Chip tone="ok" style={{ marginLeft: 'auto' }}>
-                    Elite
-                  </Chip>
-                </div>
-
-                {/* metric row */}
-                <Stagger delay={16} step={6} y={16} style={{ display: 'flex', gap: 14, marginBottom: 18 }}>
-                  <MetricStat
-                    label="Deploy frequency"
-                    value="4.2 / day"
-                    delta="▲ 18% vs prev"
-                    deltaTone="ok"
-                    accent={PLUGIN_VIOLET}
-                    style={{ flex: 1 }}
-                  />
-                  <MetricStat
-                    label="Lead time"
-                    value="6.1 h"
-                    delta="▼ 22% faster"
-                    deltaTone="ok"
-                    style={{ flex: 1 }}
-                  />
-                  <MetricStat
-                    label="Change-fail %"
-                    value="3.4%"
-                    delta="▼ 1.2 pts"
-                    deltaTone="ok"
-                    style={{ flex: 1 }}
-                  />
-                  <MetricStat
-                    label="MTTR"
-                    value="41 min"
-                    delta="▲ 5 min"
-                    deltaTone="bad"
-                    style={{ flex: 1 }}
-                  />
-                </Stagger>
-
-                {/* deploy frequency bar chart */}
-                <Card pad={16} style={{ background: T.surface }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      marginBottom: 12,
-                    }}
-                  >
-                    <span style={{ fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 600, color: T.text }}>
-                      Deploys per week
-                    </span>
-                    <span style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim }}>last 8 weeks</span>
-                  </div>
-                  <BarChart
-                    data={[14, 18, 16, 22, 19, 26, 24, 30]}
-                    labels={['w1', 'w2', 'w3', 'w4', 'w5', 'w6', 'w7', 'w8']}
-                    color={PLUGIN_VIOLET}
-                    height={150}
-                    grow={grow}
-                  />
-                </Card>
-              </div>
-            </Appear>
-          </div>
-        </OttoWindow>
-      </Stage>
-      <Caption
-        step={2}
-        title="Plugins render right in the sidebar"
-        sub="A scoped host API: read repos, spawn agents — role-gated"
-      />
-    </>
-  );
-};
-
-// ── Scene 4 — host API + RBAC diagram ────────────────────────────────────────
-const NodeBox: React.FC<{
-  icon: string;
-  label: string;
-  color: string;
-  sub?: string;
-  delay?: number;
-}> = ({ icon, label, color, sub, delay = 0 }) => (
-  <Appear delay={delay} y={18} scale={0.92}>
-    <div
-      style={{
+        height: 33,
         display: 'flex',
         alignItems: 'center',
-        gap: 14,
-        padding: '18px 24px',
-        borderRadius: radius.l,
-        background: alpha(color, 0.1),
-        border: `1px solid ${alpha(color, 0.42)}`,
-        boxShadow: `0 10px 40px ${alpha(color, 0.18)}`,
-        minWidth: 240,
+        gap: 7,
+        padding: '0 10px',
+        background: T.bgSidebar,
+        borderBottom: `1px solid ${T.border}`,
       }}
     >
       <div
         style={{
-          width: 46,
-          height: 46,
-          borderRadius: radius.m,
-          background: alpha(color, 0.2),
-          display: 'grid',
-          placeItems: 'center',
-          flexShrink: 0,
+          width: 7,
+          height: 7,
+          borderRadius: '50%',
+          background: VIOLET,
+          boxShadow: `0 0 7px ${VIOLET}`,
+        }}
+      />
+      <span
+        style={{
+          flex: 1,
+          fontFamily: fonts.ui,
+          fontSize: 11.5,
+          fontWeight: 600,
+          color: T.text,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
         }}
       >
-        <Icon name={icon} size={24} color={color} />
-      </div>
-      <div>
-        <div style={{ fontFamily: fonts.ui, fontSize: 19, fontWeight: 700, color: '#fff' }}>{label}</div>
-        {sub && <div style={{ fontFamily: fonts.mono, fontSize: 13, color: alpha('#fff', 0.6), marginTop: 3 }}>{sub}</div>}
-      </div>
+        jira-burndown
+      </span>
+      <Chip style={{ marginLeft: 'auto' }}>iframe</Chip>
     </div>
-  </Appear>
-);
-
-const ScopeChip: React.FC<{ icon: string; label: string; color: string; delay: number }> = ({
-  icon,
-  label,
-  color,
-  delay,
-}) => (
-  <Appear delay={delay} y={10} scale={0.9}>
-    <div
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '8px 15px',
-        borderRadius: 999,
-        background: alpha(color, 0.12),
-        border: `1px solid ${alpha(color, 0.4)}`,
-        fontFamily: fonts.mono,
-        fontSize: 15,
-        fontWeight: 600,
-        color: '#fff',
-      }}
-    >
-      <Icon name={icon} size={15} color={color} />
-      {label}
-    </div>
-  </Appear>
-);
-
-const HostApiScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  const flow = track(frame, [24, 50], [0, 1]);
-  return (
-    <>
-      <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', padding: '0 120px' }}>
-        <Appear delay={4} y={14}>
+    <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ fontFamily: fonts.ui, fontSize: 11, color: T.textDim }}>Sprint 43 · 8 days remaining</div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 56 }}>
+        {[42, 36, 31, 28, 22, 18, 14, 10].map((v, i) => (
           <div
+            key={i}
             style={{
-              fontFamily: fonts.ui,
-              fontSize: 40,
-              fontWeight: 800,
-              letterSpacing: -1,
-              color: '#fff',
-              textAlign: 'center',
-              marginBottom: 50,
+              flex: 1,
+              height: `${(v / 42) * 100}%`,
+              borderRadius: 3,
+              background:
+                i < 4
+                  ? `linear-gradient(180deg, #863bff, ${alpha('#863bff', 0.46)})`
+                  : alpha('#863bff', 0.25),
             }}
-          >
-            Sandboxed by design —{' '}
-            <span
-              style={{
-                backgroundImage: brand.gradSoft,
-                WebkitBackgroundClip: 'text',
-                backgroundClip: 'text',
-                color: 'transparent',
-                WebkitTextFillColor: 'transparent',
-              }}
-            >
-              scoped & RBAC-gated
-            </span>
-          </div>
-        </Appear>
+          />
+        ))}
+      </div>
+      <div style={{ fontFamily: fonts.mono, fontSize: 10, color: T.textDim }}>14 pts remaining · ideal: 10</div>
+    </div>
+  </div>
+);
 
-        {/* plugin → host API flow */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
-          <NodeBox icon="zap" label="Plugin sidecar" color={PLUGIN_VIOLET} sub="dora-metrics" delay={10} />
-          {/* connector */}
-          <div style={{ position: 'relative', width: 130, height: 4, margin: '0 4px' }}>
-            <div
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                height: 4,
-                width: `${flow * 100}%`,
-                borderRadius: 999,
-                background: `linear-gradient(90deg, ${PLUGIN_VIOLET}, ${brand.cyan})`,
-                boxShadow: `0 0 12px ${alpha(brand.cyan, 0.6)}`,
-              }}
-            />
-            <Appear delay={26} scale={0.7}>
-              <div
-                style={{
-                  position: 'absolute',
-                  top: -19,
-                  left: '50%',
-                  transform: 'translateX(-50%)',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '3px 10px',
-                  borderRadius: 999,
-                  background: alpha(status.needsYou, 0.14),
-                  border: `1px solid ${alpha(status.needsYou, 0.5)}`,
-                  fontFamily: fonts.mono,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  color: status.needsYou,
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                <Icon name="key" size={12} color={status.needsYou} />
-                scoped
-              </div>
-            </Appear>
-          </div>
-          <NodeBox icon="gear" label="Host API" color={brand.cyan} sub="via the daemon" delay={18} />
-        </div>
+// ── Scene 1 — Title (~80 f) ───────────────────────────────────────────────────
 
-        {/* granted scopes */}
-        <Appear delay={32} y={10}>
-          <div style={{ fontFamily: fonts.ui, fontSize: 13, color: alpha('#fff', 0.55), marginTop: 34, marginBottom: 12 }}>
-            GRANTED SCOPES
-          </div>
-        </Appear>
-        <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap', maxWidth: 760 }}>
-          <ScopeChip icon="folder" label="repo.read" color={brand.cyan} delay={36} />
-          <ScopeChip icon="ticket" label="jira.accounts.list" color="#2684ff" delay={40} />
-          <ScopeChip icon="terminal" label="agent.spawn" color={PLUGIN_VIOLET} delay={44} />
-        </div>
+const TitleScene: React.FC = () => (
+  <TitleCard
+    kicker="Custom Plugins"
+    title="Extend Otto"
+    subtitle="Out-of-process sidecar plugins in any language — install, enable, and remove at runtime."
+  />
+);
 
-        {/* per-role grants */}
-        <Appear delay={50} y={10}>
-          <div style={{ fontFamily: fonts.ui, fontSize: 13, color: alpha('#fff', 0.55), marginTop: 30, marginBottom: 12 }}>
-            PER-ROLE GRANTS · slug-keyed in Settings → Plugins
-          </div>
-        </Appear>
-        <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
-          <ScopeChip icon="user" label="admin · Edit" color={status.working} delay={54} />
-          <ScopeChip icon="user" label="lead · View" color={brand.cyan} delay={58} />
-          <ScopeChip icon="user" label="guest · None" color={status.exited} delay={62} />
-        </div>
-      </AbsoluteFill>
-      <Caption step={3} title="Scoped & RBAC-gated" />
-    </>
-  );
+// ── Scene 2 — Install & manage plugins (~180 f) ───────────────────────────────
+
+const LANG_COLOR: Record<string, string> = {
+  node:   '#28c840',
+  rust:   '#febc2e',
+  python: '#0a84ff',
 };
 
-// ── Scene 5 — outro ──────────────────────────────────────────────────────────
+const PLUGINS: Array<{
+  name: string;
+  lang: string;
+  ver: string;
+  desc: string;
+  enabled: boolean;
+}> = [
+  {
+    name: 'jira-burndown',
+    lang: 'node',
+    ver: 'v1.4.2',
+    desc: 'Burndown & velocity charts pulled live from Jira sprints',
+    enabled: true,
+  },
+  {
+    name: 'cost-alerts',
+    lang: 'rust',
+    ver: 'v0.9.0',
+    desc: 'AWS cost-anomaly detection with configurable threshold webhooks',
+    enabled: true,
+  },
+  {
+    name: 'screenshot-diff',
+    lang: 'python',
+    ver: 'v2.1.0',
+    desc: 'Visual regression diff for UI snapshot comparisons',
+    enabled: false,
+  },
+];
+
+const ManageScene: React.FC = () => (
+  <>
+    <Stage scale={0.9}>
+      <OttoWindow
+        nav={<Navigator active="settings" />}
+        title="Otto — Settings · Plugins"
+      >
+        {/* positioning context so the Toast can be placed absolutely */}
+        <div style={{ position: 'relative', height: '100%', overflow: 'hidden' }}>
+          <div style={{ padding: '28px 32px' }}>
+            {/* Page header */}
+            <Appear delay={8} y={14}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  justifyContent: 'space-between',
+                  marginBottom: 28,
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      fontFamily: fonts.ui,
+                      fontSize: 22,
+                      fontWeight: 700,
+                      color: T.text,
+                      letterSpacing: -0.3,
+                    }}
+                  >
+                    Plugins
+                  </div>
+                  <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim, marginTop: 4 }}>
+                    Out-of-process sidecar plugins — any language, no rebuild required
+                  </div>
+                </div>
+                <Button variant="primary" icon="plus">
+                  Install plugin
+                </Button>
+              </div>
+            </Appear>
+
+            {/* Section label */}
+            <Appear delay={16} y={8}>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  color: T.textDim,
+                  textTransform: 'uppercase',
+                  letterSpacing: 0.8,
+                  marginBottom: 12,
+                }}
+              >
+                Installed · 3
+              </div>
+            </Appear>
+
+            {/* Plugin rows */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {PLUGINS.map((p, i) => (
+                <Appear key={p.name} delay={24 + i * 16} y={14}>
+                  <Card pad={14} style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                    {/* status glow dot */}
+                    <div
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: '50%',
+                        background: p.enabled ? '#28c840' : T.textDim,
+                        flexShrink: 0,
+                        boxShadow: p.enabled ? '0 0 7px #28c840' : 'none',
+                      }}
+                    />
+                    {/* name + meta */}
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                        <span
+                          style={{
+                            fontFamily: fonts.ui,
+                            fontSize: 14,
+                            fontWeight: 650 as never,
+                            color: T.text,
+                          }}
+                        >
+                          {p.name}
+                        </span>
+                        <Chip color={LANG_COLOR[p.lang]}>{p.lang}</Chip>
+                        <Chip>{p.ver}</Chip>
+                      </div>
+                      <div style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim }}>{p.desc}</div>
+                    </div>
+                    {/* controls */}
+                    <Toggle on={p.enabled} />
+                    <Button variant="ghost" size="s" icon="trash">
+                      Remove
+                    </Button>
+                  </Card>
+                </Appear>
+              ))}
+            </div>
+          </div>
+
+          {/* Toast — appears once the list is settled */}
+          <Toast
+            text="cost-alerts v0.9.0 · enabled · listening on :9201"
+            tone="ok"
+            delay={104}
+            style={{ position: 'absolute', bottom: 28, right: 28 }}
+          />
+        </div>
+      </OttoWindow>
+    </Stage>
+    <Caption
+      step={2}
+      title="Install out-of-process sidecar plugins — any language, no rebuild"
+      sub="Enable, disable, or remove at runtime. The daemon handles the lifecycle."
+    />
+  </>
+);
+
+// ── Scene 3 — Supervision chain + reverse-proxied iframe panel (~150 f) ───────
+
+const ArchScene: React.FC = () => (
+  <>
+    <AbsoluteFill
+      style={{ alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 52 }}
+    >
+      <Appear delay={4} y={22}>
+        <div
+          style={{
+            fontFamily: fonts.ui,
+            fontSize: 46,
+            fontWeight: 800,
+            letterSpacing: -1.2,
+            color: '#ffffff',
+            textAlign: 'center',
+          }}
+        >
+          Supervised. Proxied. Contained.
+        </div>
+      </Appear>
+
+      {/* Architecture flow: daemon → plugin process → iframe panel */}
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <Appear delay={18} y={14}>
+          <ArchBox label="daemon" sub="ottod · :7700" color={brand.cyan} />
+        </Appear>
+
+        <Appear delay={32} y={0} x={-16}>
+          <Connector label="supervises" fromColor={brand.cyan} toColor={brand.purple} />
+        </Appear>
+
+        <Appear delay={46} y={14}>
+          <ArchBox label="plugin process" sub="node / rust / python" color={brand.purple} />
+        </Appear>
+
+        <Appear delay={60} y={0} x={-16}>
+          <Connector label="reverse-proxy" fromColor={brand.purple} toColor={VIOLET} />
+        </Appear>
+
+        <Appear delay={74} y={14}>
+          <PluginIframe />
+        </Appear>
+      </div>
+    </AbsoluteFill>
+    <Caption
+      step={3}
+      title="The daemon supervises each plugin & reverse-proxies its UI into a panel"
+      sub="Plugins run in isolated processes — crash-safe, language-agnostic, zero rebuild"
+    />
+  </>
+);
+
+// ── Scene 4 — Scoped host API + slug-keyed RBAC (~120 f) ─────────────────────
+
+const API_CAPS: Array<{ label: string; color: string }> = [
+  { label: 'read:sessions',   color: brand.cyan   },
+  { label: 'read:usage',      color: brand.cyan   },
+  { label: 'webhook:inbound', color: brand.purple },
+  { label: 'emit:toast',      color: VIOLET       },
+  { label: 'write:none',      color: '#ff5f57'    },
+];
+
+const RBAC_ROWS: Array<{ slug: string; role: string; color: string }> = [
+  { slug: 'plugin:jira-burndown',   role: 'View', color: brand.cyan   },
+  { slug: 'plugin:cost-alerts',     role: 'Edit', color: brand.purple },
+  { slug: 'plugin:screenshot-diff', role: 'None', color: '#ff5f57'    },
+];
+
+const RbacScene: React.FC = () => (
+  <>
+    <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ display: 'flex', gap: 64, alignItems: 'flex-start', width: 1360 }}>
+        {/* ── Left: Scoped Host API ──────────────────────────────────────── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <Appear delay={6} y={18}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 2 }}>
+              <Icon name="plug" size={20} color={brand.cyan} />
+              <span
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 22,
+                  fontWeight: 700,
+                  color: '#fff',
+                  letterSpacing: -0.4,
+                }}
+              >
+                Scoped Host API
+              </span>
+            </div>
+            <div style={{ fontFamily: fonts.ui, fontSize: 14, color: alpha('#fff', 0.56), marginTop: 4 }}>
+              Each plugin declares exactly what it needs — nothing more.
+            </div>
+          </Appear>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+            {API_CAPS.map((c, i) => (
+              <Appear key={c.label} delay={18 + i * 9} y={10}>
+                <div
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: '9px 16px',
+                    borderRadius: radius.m,
+                    background: alpha(c.color, 0.12),
+                    border: `1px solid ${alpha(c.color, 0.45)}`,
+                    fontFamily: fonts.mono,
+                    fontSize: 14,
+                    fontWeight: 600,
+                    color: c.color,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {c.label}
+                </div>
+              </Appear>
+            ))}
+          </div>
+        </div>
+
+        {/* Divider */}
+        <Appear delay={12} y={0}>
+          <div
+            style={{
+              width: 1,
+              height: 240,
+              background: alpha('#ffffff', 0.12),
+              marginTop: 4,
+              flexShrink: 0,
+            }}
+          />
+        </Appear>
+
+        {/* ── Right: Slug-keyed RBAC ─────────────────────────────────────── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <Appear delay={10} y={18}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 2 }}>
+              <Icon name="key" size={20} color={brand.purple} />
+              <span
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 22,
+                  fontWeight: 700,
+                  color: '#fff',
+                  letterSpacing: -0.4,
+                }}
+              >
+                Slug-keyed RBAC
+              </span>
+            </div>
+            <div style={{ fontFamily: fonts.ui, fontSize: 14, color: alpha('#fff', 0.56), marginTop: 4 }}>
+              Every plugin action is gated by a per-slug role grant.
+            </div>
+          </Appear>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+            {RBAC_ROWS.map((r, i) => (
+              <Appear key={r.slug} delay={28 + i * 12} y={10}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '11px 14px',
+                    borderRadius: radius.s,
+                    background: T.surface,
+                    border: `1px solid ${T.border}`,
+                    gap: 16,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: fonts.mono,
+                      fontSize: 13,
+                      color: T.textDim,
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {r.slug}
+                  </span>
+                  <Chip color={r.color}>{r.role}</Chip>
+                </div>
+              </Appear>
+            ))}
+          </div>
+        </div>
+      </div>
+    </AbsoluteFill>
+    <Caption
+      step={4}
+      title="A scoped host API · slug-keyed RBAC per plugin"
+      sub="Plugins can only access what you explicitly grant — least-privilege by default."
+    />
+  </>
+);
+
+// ── Composition ───────────────────────────────────────────────────────────────
+
 const SCENES: SceneDef[] = [
-  { dur: 80, node: <Title />, name: 'Title' },
-  { dur: 210, node: <ManageScene />, name: 'Manage' },
-  { dur: 200, node: <PluginUIScene />, name: 'Plugin UI' },
-  { dur: 100, node: <HostApiScene />, name: 'Host API' },
+  { dur: 80,  node: <TitleScene />,  name: 'Title'  },
+  { dur: 180, node: <ManageScene />, name: 'Manage' },
+  { dur: 150, node: <ArchScene />,   name: 'Arch'   },
+  { dur: 120, node: <RbacScene />,   name: 'RBAC'   },
   {
     dur: 130,
+    name: 'Outro',
     node: (
       <WalkOutro
         title="Custom Plugins"
-        tagline="Make Otto yours."
+        tagline="Make Otto yours — extend it at runtime, in any language"
         pills={[
-          { label: 'Runtime install', color: '#0a84ff', icon: 'plus' },
-          { label: 'Node or Rust', color: brand.cyan, icon: 'box' },
-          { label: 'Iframe UI', color: brand.violet, icon: 'panel' },
-          { label: 'Scoped host API', color: '#28c840', icon: 'key' },
-          { label: 'RBAC', color: '#febc2e', icon: 'user' },
+          { label: 'Any language',      icon: 'box'  },
+          { label: 'No rebuild',        icon: 'zap'  },
+          { label: 'Sandboxed sidecar', icon: 'plug' },
+          { label: 'Scoped RBAC',       icon: 'key'  },
         ]}
       />
     ),
-    name: 'Outro',
   },
 ];
 

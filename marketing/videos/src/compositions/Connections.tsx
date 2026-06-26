@@ -1,364 +1,480 @@
 import React from 'react';
-import { useCurrentFrame } from 'remotion';
-import { T, brand, fonts, alpha, status as STATUS } from '../theme';
+import { T, brand, fonts, alpha } from '../theme';
 import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
 import { OttoWindow } from '../components/Frame';
-import { Navigator, NavSession } from '../components/Nav';
+import { Navigator } from '../components/Nav';
 import {
-  TitleCard,
-  Caption,
-  Segmented,
-  Field,
-  Chip,
-  Button,
-  Toast,
-  StatusDot,
-  Ring,
-  Terminal,
-  Icon,
   Appear,
-  track,
+  Caption,
+  TitleCard,
+  Terminal,
+  TermLine,
+  Chip,
+  Card,
+  Icon,
+  StatusDot,
+  Button,
+  Table,
 } from '../components/kit';
 
-// ── Shared chrome ────────────────────────────────────────────────────────────
-// Two live connection PTYs already open beside the agents, surfaced under the
-// Connections module's nested list (counts.connections = 2).
-const sessions: NavSession[] = [
-  { title: 'prod-db · mysql', provider: 'mysql', status: 'working' },
-  { title: 'cache-01 · redis', provider: 'redis', status: 'idle' },
-  { title: 'fix auth tests', provider: 'claude', status: 'working', tasks: [2, 4] },
+// ── Types & static data ───────────────────────────────────────────────────────
+
+interface ConnEntry {
+  name: string;
+  type: string;
+  icon: string;
+  color: string;
+  host: string;
+  tag?: string;
+}
+
+const CONNS: ConnEntry[] = [
+  { name: 'bastion-prod',      type: 'SSH',        icon: 'terminal', color: brand.cyan, host: 'bastion.example.internal:22' },
+  { name: 'users-mysql',       type: 'MySQL',      icon: 'db',       color: '#f29111',  host: 'users-mysql.internal:3306' },
+  { name: 'sessions-redis',    type: 'Redis',      icon: 'box',      color: '#d63b31',  host: 'redis-sessions.internal:6379' },
+  { name: 'atlas-mongo',       type: 'MongoDB',    icon: 'globe',    color: '#10aa50',  host: 'cluster0.mongodb.net', tag: '+srv' },
+  { name: 'events-clickhouse', type: 'ClickHouse', icon: 'chart',    color: '#febc2e',  host: 'ch-events.internal:8123' },
 ];
 
-const navFor = (active: string) => (
-  <Navigator
-    active={active}
-    sessions={sessions}
-    activeSessionTitle="prod-db · mysql"
-    workingCount={2}
-    counts={{ connections: 2 }}
-  />
-);
+const SSH_LINES: TermLine[] = [
+  { text: '$ ssh itzik@bastion-prod.example.internal',                           tone: 'cmd' },
+  { text: 'Welcome to bastion-prod (Ubuntu 22.04.4 LTS)',                        tone: 'dim' },
+  { text: 'Last login: Thu Jun 26 14:28:01 2025 from 10.0.1.42',                tone: 'dim' },
+  { text: '$ uname -a',                                                           tone: 'cmd' },
+  { text: 'Linux bastion-prod 6.5.0-1018-aws #18~22.04.1-Ubuntu SMP x86_64',    tone: 'text' },
+  { text: '$ uptime',                                                             tone: 'cmd' },
+  { text: ' 14:32:06 up 42 days,  3:11,  1 user,  load avg: 0.08, 0.05, 0.01', tone: 'ok' },
+  { text: '$ df -h /var/www',                                                     tone: 'cmd' },
+  { text: 'Filesystem       Size  Used Avail Use%  Mounted on',                  tone: 'dim' },
+  { text: '/dev/nvme0n1p3    80G   22G   56G  28%  /var',                        tone: 'text' },
+];
 
-// A little section heading used inside the content panes.
-const PaneTitle: React.FC<{ icon: string; children: React.ReactNode; right?: React.ReactNode }> = ({
-  icon,
-  children,
-  right,
-}) => (
-  <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 16 }}>
-    <Icon name={icon} size={17} color={T.textDim} />
-    <span style={{ fontFamily: fonts.ui, fontSize: 17, fontWeight: 700, color: T.text, letterSpacing: -0.2 }}>
-      {children}
-    </span>
-    <div style={{ flex: 1 }} />
-    {right}
-  </div>
-);
+interface TunnelEntry {
+  mode: string;
+  flag: string;
+  detail: string;
+  note: string;
+  color: string;
+  delay: number;
+}
 
-// ── Scene 1 — title ──────────────────────────────────────────────────────────
+const TUNNELS: TunnelEntry[] = [
+  {
+    mode: 'Local Forward',
+    flag: '-L 3306:users-mysql.internal:3306',
+    detail: 'Binds a local port to a remote host:port via the bastion.',
+    note: 'bastion must have AllowTcpForwarding yes',
+    color: brand.cyan,
+    delay: 16,
+  },
+  {
+    mode: 'SOCKS5 Dynamic',
+    flag: '-D 1080',
+    detail: 'Dynamic proxy — required for MongoDB +srv and Atlas.',
+    note: '+srv resolves SRV DNS records that -L cannot handle',
+    color: '#10aa50',
+    delay: 32,
+  },
+];
+
+const fileRow = (
+  name: string,
+  isDir: boolean,
+  size: string,
+  modified: string,
+): (string | React.ReactNode)[] => [
+  <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+    <Icon name={isDir ? 'folder' : 'file'} size={13} color={isDir ? brand.cyan : T.textDim} />
+    <span style={{ fontFamily: fonts.mono, fontSize: 13, color: T.text }}>{name}</span>
+  </div>,
+  size,
+  modified,
+];
+
+const FILE_ROWS: (string | React.ReactNode)[][] = [
+  fileRow('nginx',      true,  '—',      'Jun 25  08:14'),
+  fileRow('releases',   true,  '—',      'Jun 26  02:41'),
+  fileRow('uploads',    true,  '—',      'Jun 24  15:30'),
+  fileRow('nginx.conf', false, '4.2 KB', 'Jun 25  08:14'),
+  fileRow('server.crt', false, '1.8 KB', 'May 12  09:00'),
+  fileRow('deploy.sh',  false, '2.1 KB', 'Jun 26  02:41'),
+];
+
+// ── Scene 1 — Title ───────────────────────────────────────────────────────────
+
 const TitleScene: React.FC = () => (
   <TitleCard
-    kicker="CONNECTIONS"
-    title="Every shell & database, one keystroke away"
-    subtitle="SSH · MySQL · Redis · MongoDB · ClickHouse — live, beside your agents"
+    kicker="Connections · SSH & SFTP"
+    title="Connections"
+    subtitle="SSH, tunnels, SFTP, and every datastore — one global library."
   />
 );
 
-// ── Scene 2 — new connection form (secrets → Keychain) ───────────────────────
-const NewConnectionScene: React.FC = () => (
+// ── Scene 2 — Connection library ──────────────────────────────────────────────
+
+const ConnRow: React.FC<{ c: ConnEntry; delay: number }> = ({ c, delay }) => (
+  <Appear delay={delay} y={12}>
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        padding: '10px 16px',
+        borderBottom: `1px solid ${T.border}`,
+        background: T.surface,
+      }}
+    >
+      {/* type icon */}
+      <div
+        style={{
+          width: 34,
+          height: 34,
+          borderRadius: 9,
+          background: alpha(c.color, 0.16),
+          border: `1px solid ${alpha(c.color, 0.35)}`,
+          display: 'grid',
+          placeItems: 'center',
+          flexShrink: 0,
+        }}
+      >
+        <Icon name={c.icon} size={17} color={c.color} />
+      </div>
+
+      {/* name + type chips */}
+      <div style={{ flex: '0 0 210px' }}>
+        <div style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 600, color: T.text, marginBottom: 4 }}>
+          {c.name}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <Chip color={c.color}>{c.type}</Chip>
+          {c.tag && <Chip>{c.tag}</Chip>}
+        </div>
+      </div>
+
+      {/* host */}
+      <div
+        style={{
+          flex: 1,
+          fontFamily: fonts.mono,
+          fontSize: 12.5,
+          color: T.textDim,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {c.host}
+      </div>
+
+      {/* status + action */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+        <StatusDot kind="idle" size={8} />
+        <span style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim }}>Saved</span>
+        <Button size="s" variant="default" icon="terminal">Open</Button>
+      </div>
+    </div>
+  </Appear>
+);
+
+const LibraryScene: React.FC = () => (
   <>
-    <Stage scale={0.9}>
-      <OttoWindow nav={navFor('connections')} title="Otto — New Connection">
-        <div style={{ display: 'flex', height: '100%', boxSizing: 'border-box' }}>
-          {/* form column */}
-          <div style={{ width: 600, padding: '26px 30px', boxSizing: 'border-box', borderRight: `1px solid ${T.border}` }}>
-            <PaneTitle icon="plug">New Connection</PaneTitle>
+    <Stage scale={0.88}>
+      <OttoWindow nav={<Navigator active="connections" />} title="Otto — Connections">
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
 
-            <Appear delay={8} y={12}>
-              <div style={{ marginBottom: 20 }}>
-                <span style={{ fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 500, color: T.textDim, display: 'block', marginBottom: 7 }}>
-                  Type
-                </span>
-                <Segmented options={['SSH', 'MySQL', 'Redis', 'Mongo', 'ClickHouse']} active={1} />
-              </div>
-            </Appear>
-
-            <Appear delay={16} y={12}>
-              <div style={{ display: 'flex', gap: 12, marginBottom: 13 }}>
-                <Field label="Host" value="prod-db.internal" mono icon="globe" style={{ flex: 2 }} />
-                <Field label="Port" value="3306" mono style={{ flex: 1 }} />
-              </div>
-            </Appear>
-
-            <Appear delay={22} y={12}>
-              <Field label="User" value="otto_ro" mono icon="user" style={{ marginBottom: 13 }} />
-            </Appear>
-
-            <Appear delay={28} y={12}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                <span style={{ fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 500, color: T.textDim }}>Password</span>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    minHeight: 32,
-                    padding: '0 11px',
-                    borderRadius: 5,
-                    background: T.surface2,
-                    border: `1px solid ${T.border}`,
-                  }}
-                >
-                  <Icon name="key" size={14} color={brand.violet} />
-                  <span style={{ flex: 1, fontFamily: fonts.mono, fontSize: 14, color: T.text, letterSpacing: 1 }}>
-                    •••• · stored in Keychain
-                  </span>
-                  <Chip color={brand.violet}>
-                    <Icon name="key" size={11} color={brand.violet} /> Keychain
-                  </Chip>
-                </div>
-              </div>
-            </Appear>
-
-            <Appear delay={36} y={12}>
-              <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
-                <Button variant="default" icon="zap">Test connection</Button>
-                <Button variant="primary" icon="check">Save</Button>
-              </div>
-            </Appear>
-          </div>
-
-          {/* helper column */}
-          <div style={{ flex: 1, padding: '26px 30px', boxSizing: 'border-box' }}>
-            <PaneTitle icon="key">Secrets</PaneTitle>
-            <Appear delay={20} y={14}>
+          {/* toolbar */}
+          <Appear delay={4}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '8px 16px',
+                borderBottom: `1px solid ${T.border}`,
+                background: T.bg,
+                flexShrink: 0,
+              }}
+            >
               <div
                 style={{
-                  borderRadius: 10,
-                  border: `1px solid ${alpha(brand.violet, 0.4)}`,
-                  background: alpha(brand.violet, 0.08),
-                  padding: 18,
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  height: 28,
+                  padding: '0 10px',
+                  borderRadius: 6,
+                  background: T.surface2,
+                  border: `1px solid ${T.border}`,
+                  fontFamily: fonts.ui,
+                  fontSize: 13,
+                  color: T.textDim,
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 10 }}>
-                  <Icon name="key" size={16} color={brand.violet} />
-                  <span style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 700, color: T.text }}>
-                    macOS Keychain
-                  </span>
-                </div>
-                <div style={{ fontFamily: fonts.ui, fontSize: 13, lineHeight: 1.6, color: T.textDim }}>
-                  Your password never appears in the UI. The database only stores an
-                  opaque key reference — the secret itself lives in the Keychain.
-                </div>
+                <Icon name="search" size={13} color={T.textDim} />
+                Search connections…
               </div>
-            </Appear>
-            <Appear delay={30} y={14}>
-              <div style={{ marginTop: 16, fontFamily: fonts.mono, fontSize: 12.5, color: T.textDim, lineHeight: 1.8 }}>
-                <div>db.connection.secret_ref</div>
-                <div style={{ color: T.text }}>→ keychain://otto/conn/prod-db</div>
-              </div>
-            </Appear>
-            <Appear delay={40} y={14}>
-              <div style={{ marginTop: 22, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Icon name="link" size={14} color={brand.cyan} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim }}>
-                  SSH supports a bastion / ProxyJump host
-                </span>
-              </div>
-            </Appear>
+              <Button variant="primary" icon="plus" size="s">New Connection</Button>
+            </div>
+          </Appear>
+
+          {/* connection rows */}
+          <div style={{ flex: 1, overflow: 'hidden' }}>
+            {CONNS.map((c, i) => (
+              <ConnRow key={c.name} c={c} delay={12 + i * 14} />
+            ))}
           </div>
+
+          {/* keychain footer */}
+          <Appear delay={86}>
+            <div
+              style={{
+                padding: '9px 16px',
+                borderTop: `1px solid ${T.border}`,
+                background: T.bgSidebar,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+              }}
+            >
+              <Icon name="key" size={13} color={brand.cyan} />
+              <span style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim }}>
+                Credentials stored in the macOS Keychain — never in the database
+              </span>
+              <Chip tone="ok" style={{ marginLeft: 'auto' }}>Keychain secured</Chip>
+            </div>
+          </Appear>
+
         </div>
       </OttoWindow>
     </Stage>
     <Caption
-      step={1}
-      title="Add a connection — secrets go to the Keychain"
-      sub="The database only stores an opaque key reference"
+      step={2}
+      title="One global library — SSH, MySQL, Redis, Mongo, ClickHouse"
+      sub="Secrets in the macOS Keychain. Not the database."
     />
   </>
 );
 
-// ── Scene 3 — test connection probe ──────────────────────────────────────────
-const TestScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  // Spinner phase resolves into a "connected" result around frame 70.
-  const resolved = frame > 70;
-  const ringVal = resolved ? 1 : track(frame, [6, 70], [0, 0.9]);
-  const dots = '.'.repeat((Math.floor(frame / 8) % 3) + 1);
-  return (
-    <>
-      <Stage scale={0.9}>
-        <OttoWindow nav={navFor('connections')} title="Otto — Test Connection">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: 40, boxSizing: 'border-box' }}>
+// ── Scene 3 — SSH PTY + tunnel config ────────────────────────────────────────
+
+const TunnelCard: React.FC<{ entry: TunnelEntry }> = ({ entry }) => (
+  <Appear delay={entry.delay} y={14}>
+    <Card
+      pad={14}
+      style={{
+        marginBottom: 12,
+        border: `1px solid ${alpha(entry.color, 0.32)}`,
+        background: alpha(entry.color, 0.05),
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8 }}>
+        <Icon name="link" size={13} color={entry.color} />
+        <span
+          style={{
+            fontFamily: fonts.ui,
+            fontSize: 11.5,
+            fontWeight: 700,
+            color: entry.color,
+            textTransform: 'uppercase',
+            letterSpacing: 0.6,
+          }}
+        >
+          {entry.mode}
+        </span>
+      </div>
+      <div
+        style={{
+          fontFamily: fonts.mono,
+          fontSize: 12.5,
+          color: T.text,
+          background: T.termBg,
+          padding: '5px 10px',
+          borderRadius: 5,
+          marginBottom: 8,
+        }}
+      >
+        {entry.flag}
+      </div>
+      <div style={{ fontFamily: fonts.ui, fontSize: 11.5, color: T.textDim, lineHeight: 1.5 }}>
+        {entry.detail}
+      </div>
+      <div
+        style={{
+          fontFamily: fonts.ui,
+          fontSize: 11,
+          color: alpha(T.textDim, 0.65),
+          marginTop: 4,
+          fontStyle: 'italic',
+        }}
+      >
+        {entry.note}
+      </div>
+    </Card>
+  </Appear>
+);
+
+const SSHTunnelScene: React.FC = () => (
+  <>
+    <Stage scale={0.88}>
+      <OttoWindow
+        nav={<Navigator active="connections" />}
+        tabs={[{ label: 'bastion-prod', icon: 'terminal', active: true, dot: 'working' }]}
+        title="Otto — Connections"
+        contentStyle={{ display: 'flex' }}
+      >
+        {/* left: live PTY */}
+        <div
+          style={{
+            flex: '0 0 58%',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            borderRight: `1px solid ${T.border}`,
+          }}
+        >
+          <Terminal
+            lines={SSH_LINES}
+            delay={6}
+            step={10}
+            fontSize={13}
+            style={{ flex: 1, borderRadius: 0 }}
+          />
+        </div>
+
+        {/* right: tunnel config */}
+        <div
+          style={{
+            flex: 1,
+            background: T.bgSidebar,
+            padding: 16,
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <Appear delay={10}>
             <div
               style={{
-                width: 560,
-                borderRadius: 14,
-                border: `1px solid ${T.border}`,
-                background: T.surface,
-                padding: 36,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 22,
+                fontFamily: fonts.ui,
+                fontSize: 11.5,
+                fontWeight: 600,
+                color: T.textDim,
+                textTransform: 'uppercase',
+                letterSpacing: 0.7,
+                marginBottom: 14,
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <Icon name="db" size={18} color="#00758f" />
-                <span style={{ fontFamily: fonts.mono, fontSize: 15, fontWeight: 600, color: T.text }}>
-                  otto_ro@prod-db.internal:3306
-                </span>
-              </div>
-
-              <div style={{ position: 'relative', width: 130, height: 130, display: 'grid', placeItems: 'center' }}>
-                <Ring
-                  value={ringVal}
-                  size={130}
-                  color={resolved ? STATUS.working : brand.cyan}
-                  label={resolved ? undefined : '·'}
-                />
-                {resolved && (
-                  <Appear delay={0} scale={0.6} style={{ position: 'absolute' }}>
-                    <span style={{ width: 52, height: 52, borderRadius: '50%', background: alpha(STATUS.working, 0.18), display: 'grid', placeItems: 'center' }}>
-                      <Icon name="check" size={30} color={STATUS.working} />
-                    </span>
-                  </Appear>
-                )}
-              </div>
-
-              {resolved ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <StatusDot kind="working" size={11} />
-                  <span style={{ fontFamily: fonts.ui, fontSize: 18, fontWeight: 700, color: T.text }}>
-                    Connected
-                  </span>
-                  <Chip tone="ok">24 ms</Chip>
-                </div>
-              ) : (
-                <span style={{ fontFamily: fonts.ui, fontSize: 18, fontWeight: 600, color: T.textDim }}>
-                  Testing{dots}
-                </span>
-              )}
-
-              <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim, textAlign: 'center' }}>
-                Handshake · auth · server version — verified before save
-              </div>
+              Tunnels via bastion-prod
             </div>
-          </div>
-
-          {resolved && (
-            <Toast
-              text="Connected · 24ms"
-              tone="ok"
-              delay={0}
-              style={{ position: 'absolute', top: 22, right: 24 }}
-            />
-          )}
-        </OttoWindow>
-      </Stage>
-      <Caption step={2} title="Test before you save" sub="A diagnostic probe verifies the handshake end-to-end" />
-    </>
-  );
-};
-
-// ── Scene 4 — live PTY session over the connection ───────────────────────────
-const LiveScene: React.FC = () => (
-  <>
-    <Stage scale={0.9}>
-      <OttoWindow
-        nav={navFor('connections')}
-        tabs={[
-          { label: 'fix auth tests', icon: 'terminal', dot: 'working' },
-          { label: 'prod-db · mysql', icon: 'db', active: true, dot: 'idle' },
-          { label: 'cache-01 · redis', icon: 'db' },
-        ]}
-        title="Otto — prod-db · mysql"
-      >
-        <div style={{ display: 'flex', gap: 14, padding: 16, height: '100%', boxSizing: 'border-box' }}>
-          {/* mysql PTY */}
-          <div style={{ flex: 1.4, display: 'flex', flexDirection: 'column', background: T.termBg, border: `1px solid ${T.border}`, borderRadius: 10, overflow: 'hidden' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${T.border}`, background: alpha('#fff', 0.02) }}>
-              <Icon name="db" size={13} color="#00758f" />
-              <span style={{ flex: 1, fontFamily: fonts.mono, fontSize: 13, fontWeight: 600, color: T.text }}>
-                prod-db · mysql
-              </span>
-              <Chip color="#00758f">MySQL</Chip>
-            </div>
-            <Terminal
-              delay={14}
-              step={11}
-              pad={14}
-              fontSize={14}
-              style={{ flex: 1, background: 'transparent', borderRadius: 0 }}
-              lines={[
-                { text: 'mysql> SELECT count(*) FROM players;', tone: 'cmd' },
-                { text: '+----------+' },
-                { text: '| count(*) |' },
-                { text: '+----------+' },
-                { text: '|  482913  |', tone: 'accent' },
-                { text: '+----------+' },
-                { text: '1 row in set (0.01 sec)', tone: 'dim' },
-                { text: 'mysql> ▏', tone: 'cmd' },
-              ]}
-            />
-          </div>
-
-          {/* redis PTY */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.termBg, border: `1px solid ${T.border}`, borderRadius: 10, overflow: 'hidden' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${T.border}`, background: alpha('#fff', 0.02) }}>
-              <Icon name="db" size={13} color="#ff5f57" />
-              <span style={{ flex: 1, fontFamily: fonts.mono, fontSize: 13, fontWeight: 600, color: T.text }}>
-                cache-01 · redis
-              </span>
-              <Chip color="#ff5f57">Redis</Chip>
-            </div>
-            <Terminal
-              delay={60}
-              step={11}
-              pad={14}
-              fontSize={14}
-              style={{ flex: 1, background: 'transparent', borderRadius: 0 }}
-              lines={[
-                { text: '127.0.0.1:6379> GET session:482913', tone: 'cmd' },
-                { text: '"active"', tone: 'ok' },
-                { text: '127.0.0.1:6379> DBSIZE', tone: 'cmd' },
-                { text: '(integer) 19204', tone: 'accent' },
-                { text: '127.0.0.1:6379> ▏', tone: 'cmd' },
-              ]}
-            />
-          </div>
+          </Appear>
+          {TUNNELS.map((entry, i) => (
+            <TunnelCard key={i} entry={entry} />
+          ))}
         </div>
       </OttoWindow>
     </Stage>
     <Caption
       step={3}
-      title="A real prompt you can type into"
-      sub="Interactive sessions — recent & pinned in the sidebar"
+      title="Open a live PTY — or tunnel a private DB through bastion"
+      sub="Local forward (-L) for SQL · SOCKS5 (-D) for MongoDB +srv and Atlas"
     />
   </>
 );
 
-// ── Scene 5 — outro ──────────────────────────────────────────────────────────
-const OutroScene: React.FC = () => (
-  <WalkOutro
-    title="Connections"
-    tagline="Your whole stack, in reach."
-    pills={[
-      { label: 'SSH', color: brand.cyan, icon: 'key' },
-      { label: 'MySQL', color: '#00758f', icon: 'db' },
-      { label: 'Redis', color: '#ff5f57', icon: 'db' },
-      { label: 'MongoDB', color: '#28c840', icon: 'db' },
-      { label: 'Keychain', color: brand.violet, icon: 'key' },
-    ]}
-  />
+// ── Scene 4 — SFTP browser ────────────────────────────────────────────────────
+
+const SFTPScene: React.FC = () => (
+  <>
+    <Stage scale={0.88}>
+      <OttoWindow
+        nav={<Navigator active="connections" />}
+        tabs={[{ label: 'bastion-prod · SFTP', icon: 'folder', active: true }]}
+        title="Otto — Connections"
+      >
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            height: '100%',
+            padding: 16,
+            gap: 12,
+            boxSizing: 'border-box',
+          }}
+        >
+          {/* breadcrumb */}
+          <Appear delay={4}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                fontFamily: fonts.mono,
+                fontSize: 12.5,
+                color: T.textDim,
+              }}
+            >
+              <Icon name="globe" size={13} color={T.textDim} />
+              <span>bastion-prod.example.internal</span>
+              <Icon name="chevronRight" size={12} color={T.textDim} />
+              <span style={{ color: T.text }}>/var/www</span>
+            </div>
+          </Appear>
+
+          {/* file table */}
+          <Table
+            columns={['Name', 'Size', 'Modified']}
+            rows={FILE_ROWS}
+            widths={['1fr', '90px', '130px']}
+            delay={10}
+            step={7}
+            style={{ flex: 1 }}
+          />
+
+          {/* actions */}
+          <Appear delay={58}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <Button size="s" icon="arrowDown" variant="default">Download</Button>
+              <Button size="s" icon="arrowUp" variant="primary">Upload</Button>
+              <span style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim, marginLeft: 6 }}>
+                Drag files here to transfer
+              </span>
+            </div>
+          </Appear>
+        </div>
+      </OttoWindow>
+    </Stage>
+    <Caption
+      step={4}
+      title="Browse and transfer files over SFTP"
+      sub="Full file browser on any SSH connection — download, upload, drag and drop."
+    />
+  </>
 );
 
+// ── Scene list ────────────────────────────────────────────────────────────────
+
 const SCENES: SceneDef[] = [
-  { dur: 80, node: <TitleScene />, name: 'Title' },
-  { dur: 210, node: <NewConnectionScene />, name: 'New Connection' },
-  { dur: 160, node: <TestScene />, name: 'Test' },
-  { dur: 200, node: <LiveScene />, name: 'Live PTY' },
-  { dur: 130, node: <OutroScene />, name: 'Outro' },
+  { dur: 80,  node: <TitleScene />,     name: 'Title' },
+  { dur: 170, node: <LibraryScene />,   name: 'Library' },
+  { dur: 170, node: <SSHTunnelScene />, name: 'SSHTunnel' },
+  { dur: 120, node: <SFTPScene />,      name: 'SFTP' },
+  {
+    dur: 130,
+    node: (
+      <WalkOutro
+        title="Connections"
+        tagline="Every server and datastore, one click away"
+        pills={[
+          { label: 'SSH · SQL · Redis · Mongo · CH', icon: 'plug' },
+          { label: 'Tunnels (-L / -D)',               icon: 'link' },
+          { label: 'SFTP',                            icon: 'folder' },
+          { label: 'Keychain',                        icon: 'key' },
+        ]}
+      />
+    ),
+    name: 'Outro',
+  },
 ];
 
 export const connectionsDuration = scenesDuration(SCENES);

@@ -12,17 +12,24 @@ export interface NavSession {
   needsYou?: boolean;
 }
 
-// The real module list + order from the app's Navigator (RBAC-gated rows shown).
+// The real module list + order from the app's Navigator (ui/src/lib/sidebar.ts),
+// excluding the special "Agents" row which is rendered above with nested sessions.
 const MODULES: { id: string; icon: string; label: string }[] = [
+  { id: 'mission-control', icon: 'radar', label: 'Mission Control' },
   { id: 'connections', icon: 'plug', label: 'Connections' },
   { id: 'swarm', icon: 'grid', label: 'Swarm' },
+  { id: 'loops', icon: 'refresh', label: 'Goal Loops' },
+  { id: 'proof', icon: 'check', label: 'Proof' },
   { id: 'git', icon: 'branch', label: 'Git' },
   { id: 'product', icon: 'note', label: 'Product' },
   { id: 'vault', icon: 'globe', label: 'Vault' },
+  { id: 'canvas', icon: 'shapes', label: 'Canvas' },
   { id: 'api', icon: 'send', label: 'API' },
   { id: 'database', icon: 'db', label: 'Database' },
   { id: 'brokers', icon: 'box', label: 'Message Brokers' },
+  { id: 'mcp', icon: 'plug', label: 'MCP Control Plane' },
   { id: 'workflows', icon: 'split', label: 'Workflows' },
+  { id: 'scheduled-tasks', icon: 'clock', label: 'Scheduled Tasks' },
   { id: 'skills-eval', icon: 'zap', label: 'Skills Evaluator' },
   { id: 'insights', icon: 'gauge', label: 'Insights' },
   { id: 'usage', icon: 'chart', label: 'Usage' },

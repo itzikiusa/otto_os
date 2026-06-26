@@ -1,420 +1,372 @@
 import React from 'react';
 import { useCurrentFrame } from 'remotion';
-import { T, brand, fonts, providers, status, alpha } from '../theme';
+import { T, brand, fonts, providers, alpha } from '../theme';
 import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
 import { OttoWindow } from '../components/Frame';
 import { Navigator } from '../components/Nav';
 import {
   Appear,
-  Stagger,
   Caption,
   TitleCard,
   Card,
   Chip,
+  Button,
   StatusDot,
-  Icon,
+  Segmented,
+  Sparkline,
+  Table,
   track,
+  Icon,
 } from '../components/kit';
 
-// ── Scene 1 — title card ─────────────────────────────────────────────────────
-const Title: React.FC = () => (
+// ── Scene 1 — Title card ──────────────────────────────────────────────────────
+const TitleScene: React.FC = () => (
   <TitleCard
-    kicker="Multi-Agent Code Review"
-    title="A panel of reviewers, on every change"
-    subtitle="Fan out agents per lens — findings you can act on"
+    kicker="AI Code Review"
+    title="Code Review"
+    subtitle="Parallel reviewers. Tracked findings. Real evidence."
   />
 );
 
-// ── Scene 2 — fan-out: a reviewer per lens ───────────────────────────────────
-interface Lens {
-  name: string;
-  provider: keyof typeof providers;
-  scan: string[];
-  prog: number; // 0–1 target progress
+// ── Scene 2 — Fan-out: one agent per lens × provider ─────────────────────────
+
+interface ReviewAgentCardProps {
+  lens: string;
+  provider: 'claude' | 'codex';
+  statusKind: 'working' | 'idle';
+  data: number[];
+  color: string;
+  delay: number;
+  progress: number;
 }
 
-const LENSES: Lens[] = [
-  {
-    name: 'Correctness',
-    provider: 'claude',
-    scan: ['middleware/jwt.go', 'handlers/auth.go'],
-    prog: 0.82,
-  },
-  {
-    name: 'Security',
-    provider: 'agy',
-    scan: ['db/players.go', 'querybuilder.go'],
-    prog: 0.64,
-  },
-  {
-    name: 'Performance',
-    provider: 'codex',
-    scan: ['loader/player.go', 'cache/redis.go'],
-    prog: 0.71,
-  },
-  {
-    name: 'Tests',
-    provider: 'gemini',
-    scan: ['auth/jwt_test.go', 'coverage report'],
-    prog: 0.55,
-  },
-];
-
-const ReviewerCard: React.FC<{ lens: Lens; delay: number }> = ({ lens, delay }) => {
-  const frame = useCurrentFrame();
-  const color = providers[lens.provider];
-  const w = track(frame, [delay + 8, delay + 70], [0.06, lens.prog]);
+const ReviewAgentCard: React.FC<ReviewAgentCardProps> = ({
+  lens,
+  provider,
+  statusKind,
+  data,
+  color,
+  delay,
+  progress,
+}) => {
+  const provColor = provider === 'claude' ? providers.claude : providers.codex;
   return (
-    <Card
-      pad={0}
-      style={{
-        flex: '1 1 calc(50% - 9px)',
-        minWidth: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-      }}
-    >
-      {/* header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          padding: '12px 14px',
-          borderBottom: `1px solid ${T.border}`,
-          background: alpha('#fff', 0.02),
-        }}
-      >
-        <StatusDot kind="working" size={9} />
-        <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 16, fontWeight: 700, color: T.text }}>
-          {lens.name}
-        </span>
-        <Chip color={color}>{lens.provider}</Chip>
-        <Chip tone="accent">working</Chip>
-      </div>
-      {/* body */}
-      <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 11, flex: 1 }}>
-        {/* progress bar */}
+    <Appear delay={delay} y={18}>
+      <Card pad={18} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <StatusDot kind={statusKind} size={11} />
+          <span
+            style={{
+              flex: 1,
+              fontFamily: fonts.ui,
+              fontSize: 16,
+              fontWeight: 700,
+              color: T.text,
+              letterSpacing: -0.2,
+            }}
+          >
+            {lens}
+          </span>
+          <Chip color={provColor}>{provider}</Chip>
+          <Chip tone={statusKind === 'working' ? 'ok' : 'default'}>
+            {statusKind === 'working' ? 'running' : 'complete'}
+          </Chip>
+        </div>
+        {/* Sparkline */}
         <div
           style={{
-            height: 7,
-            borderRadius: 999,
             background: T.surface2,
+            borderRadius: 8,
+            padding: '10px 12px 6px',
             overflow: 'hidden',
           }}
         >
-          <div
-            style={{
-              width: `${w * 100}%`,
-              height: '100%',
-              borderRadius: 999,
-              background: `linear-gradient(90deg, ${alpha(color, 0.6)}, ${color})`,
-              boxShadow: `0 0 10px ${alpha(color, 0.6)}`,
-            }}
-          />
+          <Sparkline data={data} color={color} width={560} height={56} progress={progress} />
         </div>
-        {/* scan lines */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-          {lens.scan.map((s, i) => (
-            <div
-              key={s}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                fontFamily: fonts.mono,
-                fontSize: 13,
-                color: i === 0 ? T.text : T.textDim,
-              }}
-            >
-              <Icon name={i === 0 ? 'search' : 'file'} size={13} color={i === 0 ? color : T.textDim} />
-              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {i === 0 ? `scanning ${s}` : s}
-              </span>
-            </div>
-          ))}
+        {/* Footer */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontFamily: fonts.mono, fontSize: 12, color: T.textDim }}>
+            {statusKind === 'idle'
+              ? '3 findings · analysis complete'
+              : `${Math.round(progress * 100)}% analyzed`}
+          </span>
+          <Icon name="eye" size={13} color={color} />
         </div>
-      </div>
-    </Card>
+      </Card>
+    </Appear>
   );
 };
 
-const FanOut: React.FC = () => (
-  <>
-    <Stage scale={0.9}>
-      <OttoWindow
-        nav={<Navigator active="git" counts={{ git: 4 }} />}
-        title="Otto — Multi-Agent Review · sinatra-wallet-go"
-      >
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', boxSizing: 'border-box', padding: 22 }}>
-          <Appear delay={4} y={14}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
-              <Icon name="eye" size={20} color={brand.violet} />
-              <span style={{ fontFamily: fonts.ui, fontSize: 22, fontWeight: 750 as never, color: T.text }}>
-                Reviewing PR #482 · feat/wallet-rate-limit
-              </span>
-              <Chip tone="accent" style={{ marginLeft: 'auto' }}>
-                4 agents live
-              </Chip>
-            </div>
-          </Appear>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, flex: 1, alignContent: 'flex-start' }}>
-            {LENSES.map((lens, i) => (
-              <ReviewerCard key={lens.name} lens={lens} delay={16 + i * 12} />
-            ))}
+const FanOutScene: React.FC = () => {
+  const frame = useCurrentFrame();
+  return (
+    <>
+      <Stage scale={0.87}>
+        <OttoWindow
+          nav={<Navigator active="git" workingCount={3} />}
+          title="Otto — review · PR #482 · add-jwt-refresh"
+          tabs={[{ label: 'Review Agents', icon: 'eye', active: true, dot: 'working' }]}
+        >
+          <div
+            style={{
+              padding: '20px 22px',
+              height: '100%',
+              boxSizing: 'border-box',
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gridTemplateRows: '1fr 1fr',
+              gap: 14,
+            }}
+          >
+            <ReviewAgentCard
+              lens="Security"
+              provider="claude"
+              statusKind="working"
+              data={[8, 22, 35, 48, 57, 65, 73, 81, 88]}
+              color={brand.violet}
+              delay={8}
+              progress={track(frame, [28, 136], [0.12, 0.88])}
+            />
+            <ReviewAgentCard
+              lens="Correctness"
+              provider="codex"
+              statusKind="working"
+              data={[5, 15, 27, 40, 53, 65, 74, 82]}
+              color={providers.codex}
+              delay={20}
+              progress={track(frame, [40, 136], [0.10, 0.74])}
+            />
+            <ReviewAgentCard
+              lens="Performance"
+              provider="claude"
+              statusKind="working"
+              data={[10, 26, 40, 54, 66, 76, 84, 90]}
+              color={providers.claude}
+              delay={32}
+              progress={track(frame, [52, 136], [0.10, 0.81])}
+            />
+            <ReviewAgentCard
+              lens="Tests"
+              provider="codex"
+              statusKind="idle"
+              data={[14, 30, 46, 60, 73, 84, 93, 100]}
+              color={brand.cyan}
+              delay={44}
+              progress={1}
+            />
           </div>
-        </div>
-      </OttoWindow>
-    </Stage>
-    <Caption
-      step={1}
-      title="Fan out a reviewer per lens"
-      sub="Correctness · Security · Performance · Tests — each a live session"
-    />
-  </>
-);
-
-// ── Scene 3 — findings list ──────────────────────────────────────────────────
-interface Finding {
-  sev: 'High' | 'Med' | 'Low';
-  sevTone: 'bad' | 'warn' | 'default';
-  loc: string;
-  msg: string;
-  state: 'new' | 'approved' | 'fixed';
-}
-
-const FINDINGS: Finding[] = [
-  {
-    sev: 'High',
-    sevTone: 'bad',
-    loc: 'db/players.go:118',
-    msg: 'SQL built via string concat — injection risk',
-    state: 'new',
-  },
-  {
-    sev: 'Med',
-    sevTone: 'warn',
-    loc: 'loader/player.go:54',
-    msg: 'N+1 query in player loader',
-    state: 'approved',
-  },
-  {
-    sev: 'Med',
-    sevTone: 'warn',
-    loc: 'middleware/jwt.go:31',
-    msg: 'missing nil-check on token',
-    state: 'fixed',
-  },
-  {
-    sev: 'Low',
-    sevTone: 'default',
-    loc: 'auth/jwt_test.go',
-    msg: 'no test for expired JWT',
-    state: 'new',
-  },
-  {
-    sev: 'Low',
-    sevTone: 'default',
-    loc: 'cache/redis.go:77',
-    msg: 'unbounded key scan on warmup',
-    state: 'new',
-  },
-];
-
-const stateChip = (state: Finding['state']) => {
-  if (state === 'fixed') return <Chip tone="ok">fixed</Chip>;
-  if (state === 'approved') return <Chip color={brand.cyan}>approved</Chip>;
-  return <Chip tone="accent">new</Chip>;
+        </OttoWindow>
+      </Stage>
+      <Caption
+        step={1}
+        title="One agent per lens × provider"
+        sub="Fan-out over a PR or your working tree — Security, Correctness, Performance, Tests all run in parallel"
+      />
+    </>
+  );
 };
 
-const FindingRow: React.FC<{ f: Finding }> = ({ f }) => (
-  <div
-    style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 14,
-      padding: '13px 16px',
-      borderRadius: 10,
-      background: T.surface2,
-      border: `1px solid ${T.border}`,
-    }}
-  >
-    <Chip tone={f.sevTone} style={{ minWidth: 52, justifyContent: 'center' }}>
-      {f.sev}
-    </Chip>
-    <span
-      style={{
-        fontFamily: fonts.mono,
-        fontSize: 13.5,
-        color: T.textDim,
-        minWidth: 168,
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {f.loc}
-    </span>
-    <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 16, color: T.text, whiteSpace: 'nowrap' }}>
-      {f.msg}
-    </span>
-    {stateChip(f.state)}
-  </div>
-);
+// ── Scene 3 — Findings list ───────────────────────────────────────────────────
 
-const Findings: React.FC = () => (
-  <>
-    <Stage scale={0.9}>
-      <OttoWindow
-        nav={<Navigator active="git" counts={{ git: 4 }} />}
-        title="Otto — Multi-Agent Review · sinatra-wallet-go"
-      >
-        <div style={{ padding: 24, height: '100%', boxSizing: 'border-box' }}>
-          <Card pad={20} style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
-              <Icon name="eye" size={19} color={brand.violet} />
-              <span style={{ fontFamily: fonts.ui, fontSize: 21, fontWeight: 750 as never, color: T.text }}>
-                Findings (5)
-              </span>
-              <span style={{ fontFamily: fonts.ui, fontSize: 14, color: T.textDim, marginLeft: 4 }}>
-                fingerprinted · stable across re-runs
-              </span>
-              <Chip tone="bad" style={{ marginLeft: 'auto' }}>
-                1 blocker
-              </Chip>
-            </div>
-            <Stagger delay={8} step={7} y={14} style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
-              {FINDINGS.map((f) => (
-                <FindingRow key={f.loc} f={f} />
-              ))}
-            </Stagger>
-          </Card>
-        </div>
-      </OttoWindow>
-    </Stage>
-    <Caption
-      step={2}
-      title="Fingerprinted findings with a lifecycle"
-      sub="new → approved → fixed — stable across re-runs"
-    />
-  </>
-);
+const FindingsScene: React.FC = () => {
+  const findingRows: (string | React.ReactNode)[][] = [
+    [
+      <Chip tone="bad">HIGH</Chip>,
+      'middleware/jwt.go:42',
+      'Security',
+      <Chip>open</Chip>,
+    ],
+    [
+      <Chip tone="warn">MED</Chip>,
+      'repo/users.go:88',
+      'Performance',
+      <Chip tone="warn">triaged</Chip>,
+    ],
+    [
+      <Chip tone="warn">MED</Chip>,
+      'handlers/auth.go:17',
+      'Tests',
+      <Chip>open</Chip>,
+    ],
+    [
+      <Chip tone="ok">LOW</Chip>,
+      'api/routes.go:31',
+      'Correctness',
+      <Chip>open</Chip>,
+    ],
+  ];
 
-// ── Scene 4 — merge-readiness + handoff ──────────────────────────────────────
-const CheckRow: React.FC<{ label: string; ok?: boolean }> = ({ label, ok = true }) => (
-  <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-    <span
-      style={{
-        width: 19,
-        height: 19,
-        borderRadius: '50%',
-        background: ok ? alpha(status.working, 0.18) : alpha(status.needsYou, 0.18),
-        display: 'grid',
-        placeItems: 'center',
-        flexShrink: 0,
-      }}
-    >
-      <Icon name="check" size={12} color={ok ? status.working : status.needsYou} />
-    </span>
-    <span style={{ fontFamily: fonts.mono, fontSize: 14.5, color: T.text }}>{label}</span>
-  </div>
-);
-
-const MergeReady: React.FC = () => (
-  <>
-    <Stage scale={0.9}>
-      <OttoWindow
-        nav={<Navigator active="git" counts={{ git: 4 }} />}
-        title="Otto — Multi-Agent Review · sinatra-wallet-go"
-      >
-        <div
-          style={{
-            display: 'flex',
-            gap: 22,
-            padding: 24,
-            height: '100%',
-            boxSizing: 'border-box',
-            alignItems: 'stretch',
-          }}
+  return (
+    <>
+      <Stage scale={0.87}>
+        <OttoWindow
+          nav={<Navigator active="git" />}
+          title="Otto — review · PR #482 · add-jwt-refresh"
+          tabs={[{ label: 'Findings', icon: 'eye', active: true }]}
         >
-          {/* merge-readiness dashboard */}
-          <Appear delay={4} y={16} style={{ flex: 1.25, display: 'flex' }}>
-            <Card pad={22} style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 18 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-                <Icon name="merge" size={20} color={brand.violet} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 21, fontWeight: 750 as never, color: T.text }}>
-                  Merge readiness
-                </span>
-              </div>
-              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                <Chip tone="bad">1 blocker</Chip>
-                <Chip tone="warn">Not mergeable</Chip>
-                <Chip color={brand.cyan}>
-                  <Icon name="arrowUp" size={11} /> 6 ahead · <Icon name="arrowDown" size={11} /> 0 behind
-                </Chip>
-              </div>
+          <div style={{ padding: '20px 22px' }}>
+            {/* Summary banner */}
+            <Appear delay={4} y={12}>
               <div
                 style={{
                   display: 'flex',
-                  flexDirection: 'column',
-                  gap: 12,
-                  padding: 16,
-                  borderRadius: 10,
-                  background: T.surface2,
+                  alignItems: 'center',
+                  gap: 10,
+                  marginBottom: 18,
+                  padding: '12px 16px',
+                  background: T.surface,
                   border: `1px solid ${T.border}`,
+                  borderRadius: 10,
                 }}
               >
-                <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 600, color: T.textDim, letterSpacing: 0.4 }}>
-                  CI CHECKS
+                <Icon name="eye" size={16} color={brand.violet} />
+                <span
+                  style={{
+                    flex: 1,
+                    fontFamily: fonts.ui,
+                    fontSize: 14,
+                    fontWeight: 700,
+                    color: T.text,
+                  }}
+                >
+                  Review Findings — PR #482
                 </span>
-                <CheckRow label="lint" />
-                <CheckRow label="tests · 412 passed" />
-                <CheckRow label="build" />
+                <Chip tone="bad">4 issues</Chip>
+                <Chip tone="ok">2 agents done</Chip>
+                <Chip>2 running</Chip>
+              </div>
+            </Appear>
+            <Table
+              columns={['Severity', 'File : Line', 'Lens', 'State']}
+              rows={findingRows}
+              widths={['100px', '1fr', '130px', '120px']}
+              delay={14}
+              step={14}
+              fontSize={13}
+            />
+          </div>
+        </OttoWindow>
+      </Stage>
+      <Caption
+        step={2}
+        title="Findings ranked and de-duplicated"
+        sub="Merged across all lens agents — severity, file location, lens, and lifecycle state at a glance"
+      />
+    </>
+  );
+};
+
+// ── Scene 4 — Tracked finding detail ─────────────────────────────────────────
+
+const LIFECYCLE_STATES = ['open', 'triaged', 'in progress', 'fixed', 'verified', 'resolved'];
+
+const TrackedFindingScene: React.FC = () => (
+  <>
+    <Stage scale={0.87}>
+      <OttoWindow
+        nav={<Navigator active="git" />}
+        title="Otto — review · PR #482 · Finding"
+        tabs={[
+          { label: 'Findings', icon: 'eye' },
+          { label: 'Missing JWT exp check', icon: 'file', active: true, dot: 'needsYou' },
+        ]}
+      >
+        <div
+          style={{
+            padding: '22px 28px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 18,
+            height: '100%',
+            boxSizing: 'border-box',
+          }}
+        >
+          {/* Finding header card */}
+          <Appear delay={4} y={16}>
+            <Card pad={20} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+                <Chip tone="bad" style={{ marginTop: 3, flexShrink: 0 }}>
+                  HIGH
+                </Chip>
+                <div style={{ flex: 1 }}>
+                  <div
+                    style={{
+                      fontFamily: fonts.ui,
+                      fontSize: 18,
+                      fontWeight: 700,
+                      color: T.text,
+                      letterSpacing: -0.3,
+                      marginBottom: 6,
+                    }}
+                  >
+                    Missing JWT expiry check
+                  </div>
+                  <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: T.textDim }}>
+                    middleware/jwt.go:42 · Security · claude
+                  </div>
+                </div>
+              </div>
+              <div
+                style={{
+                  borderTop: `1px solid ${alpha('#ffffff', 0.08)}`,
+                  paddingTop: 14,
+                  fontFamily: fonts.ui,
+                  fontSize: 14,
+                  color: T.textDim,
+                  lineHeight: 1.72,
+                }}
+              >
+                JWT tokens are issued without an{' '}
+                <span
+                  style={{
+                    fontFamily: fonts.mono,
+                    color: T.accent,
+                    background: alpha(T.accent, 0.12),
+                    padding: '1px 6px',
+                    borderRadius: 4,
+                  }}
+                >
+                  exp
+                </span>{' '}
+                claim — any token minted by this handler never expires.
+                Session hijack and privilege escalation risk if a token leaks.
               </div>
             </Card>
           </Appear>
 
-          {/* handoff + retry column */}
-          <Appear delay={16} y={16} style={{ flex: 1, display: 'flex' }}>
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 18 }}>
-              {/* handoff session card */}
-              <Card pad={16} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <StatusDot kind="working" size={10} />
-                  <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 16, fontWeight: 700, color: T.text }}>
-                    Handed to claude · fixing…
-                  </span>
-                  <Chip color={providers.claude}>claude</Chip>
-                </div>
-                <div
-                  style={{
-                    fontFamily: fonts.mono,
-                    fontSize: 13,
-                    color: T.textDim,
-                    background: T.termBg,
-                    borderRadius: 8,
-                    padding: '11px 13px',
-                    lineHeight: 1.7,
-                    border: `1px solid ${T.border}`,
-                  }}
-                >
-                  <div style={{ color: brand.cyan }}>$ fix db/players.go:118</div>
-                  <div>parameterizing query…</div>
-                  <div style={{ color: status.working }}>✓ patch staged · re-running Security</div>
-                </div>
-              </Card>
-              {/* retry a reviewer */}
-              <Card pad={16} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <Icon name="refresh" size={17} color={providers.codex} />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 600, color: T.text }}>
-                    Performance reviewer
-                  </div>
-                  <div style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim }}>
-                    retry this agent independently
-                  </div>
-                </div>
-                <Chip color={providers.codex}>retry</Chip>
-              </Card>
+          {/* 6-state lifecycle pipeline */}
+          <Appear delay={18} y={14}>
+            <Card pad={18} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <span
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: T.textDim,
+                  textTransform: 'uppercase' as const,
+                  letterSpacing: 1,
+                }}
+              >
+                Lifecycle
+              </span>
+              <Segmented options={LIFECYCLE_STATES} active={1} />
+              <span style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim }}>
+                State changed to{' '}
+                <span style={{ color: T.text, fontWeight: 600 }}>triaged</span>
+                {' '}— assigned to sprint backlog, awaiting fix.
+              </span>
+            </Card>
+          </Appear>
+
+          {/* Action buttons */}
+          <Appear delay={30} y={12}>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+              <Button icon="tag">Triage</Button>
+              <Button icon="zap" variant="primary">Fix with agent</Button>
+              <Button icon="x" variant="ghost">Dismiss</Button>
+              <Button icon="check">Ingest → Proof Pack</Button>
+              <Button icon="globe" variant="ghost">Save → Vault</Button>
             </div>
           </Appear>
         </div>
@@ -422,33 +374,35 @@ const MergeReady: React.FC = () => (
     </Stage>
     <Caption
       step={3}
-      title="Merge-readiness at a glance"
-      sub="Hand a finding to an agent to fix — or retry a reviewer"
+      title="Every finding is tracked"
+      sub="Triage, fix with an agent, prove it's done, remember it — a full lifecycle in one view"
     />
   </>
 );
 
-// ── Scene 5 — outro ──────────────────────────────────────────────────────────
-const Outro: React.FC = () => (
-  <WalkOutro
-    title="Multi-Agent Review"
-    tagline="Catch it before it merges."
-    pills={[
-      { label: 'Local & PR', color: '#0a84ff', icon: 'eye' },
-      { label: 'Per-lens agents', color: brand.cyan, icon: 'grid' },
-      { label: 'Lifecycle findings', color: '#28c840', icon: 'check' },
-      { label: 'Merge-ready', color: brand.violet, icon: 'merge' },
-      { label: 'Ultrareview', color: providers.claude, icon: 'zap' },
-    ]}
-  />
-);
+// ── Scene list ────────────────────────────────────────────────────────────────
 
 const SCENES: SceneDef[] = [
-  { dur: 80, node: <Title />, name: 'Title' },
-  { dur: 220, node: <FanOut />, name: 'Fan-out' },
-  { dur: 220, node: <Findings />, name: 'Findings' },
-  { dur: 190, node: <MergeReady />, name: 'Merge-readiness' },
-  { dur: 130, node: <Outro />, name: 'Outro' },
+  { dur: 80,  node: <TitleScene />,          name: 'Title'          },
+  { dur: 150, node: <FanOutScene />,          name: 'FanOut'         },
+  { dur: 140, node: <FindingsScene />,        name: 'Findings'       },
+  { dur: 120, node: <TrackedFindingScene />,  name: 'TrackedFinding' },
+  {
+    dur: 130,
+    name: 'Outro',
+    node: (
+      <WalkOutro
+        title="AI Code Review"
+        tagline="Parallel reviewers, tracked findings, real evidence"
+        pills={[
+          { label: 'Per-lens agents',    icon: 'eye'    },
+          { label: 'PR or working tree', icon: 'branch' },
+          { label: 'Tracked findings',   icon: 'check'  },
+          { label: 'Proof + Vault',      icon: 'globe'  },
+        ]}
+      />
+    ),
+  },
 ];
 
 export const reviewDuration = scenesDuration(SCENES);

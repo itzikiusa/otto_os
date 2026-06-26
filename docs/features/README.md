@@ -13,7 +13,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 > it. Where the two diverge, each guide documents the *code's actual behavior* and
 > flags the drift; see [Known drift](#known-drift-between-docs-and-code) below.
 >
-> _Last verified against the codebase: **2026-06-21**._
+> _Last verified against the codebase: **2026-06-26**._
 
 ---
 
@@ -24,9 +24,11 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 | [Agent sessions](./agent-sessions.md) | Running `claude` / `codex` / `agy` / shell as PTY-backed, resumable, idle-suspending sessions — the terminal WS protocol, split/tile, trust & prompt-guard, the activity trail, and driving sessions programmatically. | No setup beyond an agent CLI on `PATH`. |
 | [Agent context injection](./agent-context-injection.md) | How Otto delivers a workspace's soul/skills/memory/hooks into each agent CLI via **out-of-tree bundles** (`~/.otto/context/…`) + per-client launch flags (`--add-dir`, `--append-system-prompt-file`, codex `developer_instructions`) — never touching the repo. Includes the **per-provider matrix** and a **how-to-add-a-new-provider** checklist. | None — automatic at spawn. |
 | [Agent Swarm](./agent-swarm.md) | A team of role-specialized agents in an org hierarchy (CEO → … → Devs) that autonomously work projects → tasks: the recruiter, the per-swarm coordinator, the shared board, org-tree / DAG / Kanban views, scheduled runs, and the five preset swarms. Includes a **"set up your company"** how-to. | Start from a preset or build an org in the Swarm tab. |
+| [Mission Control](./mission-control.md) | One **unified work graph** over all eight agentic kinds (sessions, swarms, goal loops, reviews, product stories, workflows, PRs, external triggers), built by a `WorkGraphProjector` off the daemon event bus with no producer rewiring. Nodes carry a normalized status; click one to open the work behind it. | In the Mission Control tab (gated by the `mission_control` feature). |
 | [AI code review](./code-review.md) | Fan out review agents (one per lens × provider) over a **PR** or your **local working tree**; live per-agent findings, retry, grace period, and the PR-review config. Lenses are data-driven from installed `review` skills. | PR mode needs a git token ([git guide](./git.md)). |
 | [Goal Loops](./goal-loops.md) | Give a **goal** + a **budget** (max iterations + active time); a team of agents iterates **Plan → Execute → Evaluate → Digest** on an isolated `goal-loop/<id>` branch until the **machine-checked** acceptance criteria are met or a limit is hit. AI-assisted goal definition, live phase/iteration monitoring, openable executor sessions. | No setup beyond an agent CLI on `PATH`. |
 | [Workflows](./workflows.md) | The visual workflow engine — nodes + edges + triggers, the topological run loop, `human_approval` pause/resume, and the API-client automation runner. **Honest maturity table**: which nodes/triggers are real vs. stubbed/unwired. | Build in the Workflows tab; webhook/event/manual triggers fire today. |
+| [Scheduled Tasks](./scheduled-tasks.md) | Recurring agent jobs — a prompt on a cadence (interval / daily / weekly) → a Markdown report → deliver to Slack / Telegram / email / webhook (redacted on the way out). Built-in **ticket-followup-review** preset; also driveable over 7 `otto.*` MCP tools. | Create one in the Scheduled Tasks tab (needs an agent CLI on `PATH`). |
 
 ## Source control & product delivery
 
@@ -35,6 +37,8 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 | [Git & Pull Requests](./git.md) | GitKraken-style repo tabs, stage/commit/discard, diffs, conflict resolution, and agent-drafted PRs that auto-push the branch. Includes **per-provider git-token setup**. | **GitHub** PAT, **Bitbucket Cloud** app password, or **GitLab** PAT → Settings → Git Accounts. |
 | [Jira & Confluence](./jira-confluence.md) | Connecting an Atlassian account and importing issues/pages (search by project/space, no key prefix), reading, and posting comments back. | **Atlassian Cloud API token** (email + token, Basic auth) → Settings → Issue Accounts. One account drives both Jira & Confluence. |
 | [Product](./product.md) | The full product-owner workflow on top of Jira/Confluence: multi-lens/multi-provider analysis + summarizer + open questions, rewrite, test-case generation → Confluence publish, the multi-agent **Plan/Tasks** breakdown (+ send-to-swarm), Discovery drafts → RFC/story, the global Learnings base, versioned history, and the background watcher. | Needs a connected Jira/Confluence account first. |
+| [Discovery Chat](./discovery-chat.md) | The blank-canvas discovery flow on the Product page — a persistent, resumable agent thread you feed ideas/transcripts, then publish as an **RFC** or a **Jira story**. | On the Product page; agent CLI on `PATH` (+ Jira to publish a story). |
+| [Canvas](./canvas.md) | File-backed visual scenes in two modes — **Excalidraw** (`canvas.json`) or **Mermaid** (`canvas.mermaid`); an agent edits the file while you converse in an embedded terminal. | In the Canvas tab, or from a Product story. |
 
 ## Team communication
 
@@ -58,6 +62,8 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 | [Skills library](./skills-library.md) | The bundled, versioned first-party skill catalog you browse and install/update from Settings; how installed skills drive Review lenses, Product analysis, and Insights. | Installs to `<data_dir>/library/skills/`. |
 | [Skills evaluator](./skills-evaluator.md) | Benchmark a skill: run implement → validate → score → improve across iterations/providers, view a run report, and compare runs side-by-side. | Settings → Skill Eval for defaults. |
 | [Self-improvement](./self-improvement.md) | The optional, gated engine that reflects on recent sessions and proposes edits to **skills (`SKILL.md`) and memory (`*.md`) only** — never repo code — with tiered autonomy (auto-apply vs. approval queue) and optional channel notifications. | Off by default; enable in Settings. |
+| [Proof Packs](./proof-packs.md) | The evidence layer — "no done without evidence": every work item carries a pack whose `status`/`risk_score`/badges are **derived** (pure `otto-core` functions) from inspectable artifacts. Five enforcement gates (sessions, goal loops, AI review, PR creation, workflows), redaction + a 2 MiB cap, and the `OTTO_PROOF_*` env knobs. | In-app **Proof** module; gates configured via env. |
+| [Review Findings Workflow](./review-findings.md) | Turns AI-review findings into tracked records — an 11-field `Finding`, a 6-state disposition machine, an immutable timeline, seven agent-backed actions (fix/verify/Jira/repo-rule/…), durable repo rules, and an exportable evidence bundle that ingests verified findings into Vault. | Sits on top of [AI code review](./code-review.md). |
 
 ## API & integration surface
 
@@ -65,6 +71,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 |-------|----------------|------------------|
 | [API client (REST workbench)](./api-client.md) | The built-in "Postman": collections, request builder (HTTP/SSE/WS/gRPC), environments + `{{vars}}`, response viewer, history, and automations. **Outbound is SSRF-guarded** (localhost/RFC1918/cloud-metadata blocked). | In-app; no external setup. |
 | [Daemon HTTP API](./daemon-http-api.md) | Driving Otto **programmatically** over `ottod` (`http://127.0.0.1:7700/api/v1`): authentication (PAT / login / share / ingest tokens), a navigable domain map of the REST surface, the WebSocket terminal & event streams, the async-202 pattern, and an explicit **what-you-can / cannot** list. | Create a PAT → Settings → Personal Access Tokens. |
+| [MCP Control Plane](./mcp-control-plane.md) | Govern MCP tool calls in the call path (allowlist → policy → single-use approval → dry-run → fail-closed audit → stats) **and** expose Otto outward as an MCP server (8 `otto.*` tools over a restricted `kind=mcp` token), with a live-agent gateway. | Register a server, or enable Otto Server in the MCP tab. |
 
 ## Observability
 
@@ -102,7 +109,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 ## Known drift between docs and code
 
 These are discrepancies the guides surfaced between the **frozen contracts /
-seed docs** and the **running code** (as of 2026-06-21). Each feature guide
+seed docs** and the **running code** (as of 2026-06-26). Each feature guide
 documents the code's real behavior; this list is a maintenance to-do for the
 contract owners.
 
@@ -133,5 +140,26 @@ contract owners.
   is in `otto-server`) and omitted `otto-brokers`, `otto-ssh`, `otto-memory`,
   `otto-netguard` and the `brokers`/`plugins`/`share`/`vault` UI modules. **Fixed**
   alongside these docs.
-- **README feature tour** — did not list **Custom plugins** or **Workflows**.
+- **README feature tour** — now also lists **Goal Loops**, **Mission Control**,
+  **Canvas**, **Proof Packs**, **Scheduled Tasks**, **Skills evaluator** and the
+  **MCP Control Plane** (previously also missing Custom plugins & Workflows).
   **Fixed** alongside these docs.
+- **`api.md` Canvas `assist_scene`** — the contract (#107) says it "does not
+  mutate", but the code commits `doc_json` and broadcasts `CanvasUpdated` /
+  `CanvasSessionStarted`. The active `CanvasPage` is file-backed-per-scene; the
+  legacy node-graph + Present/Toolbar surface is **unmounted**. See [canvas](./canvas.md).
+- **Canvas draft / Discovery method** — the draft-write behind `apply_draft` is
+  registered as `patch(update_draft_body)` (real method **PATCH**), and a
+  Discovery chat is **one persistent resumable session per chat** (history is not
+  replayed). See [discovery-chat](./discovery-chat.md).
+- **Proof Packs migration number** — the seed stub said `0077`; the real
+  migration is `0078_proof_packs.sql` (MCP is `0077`). Status/risk/badges are pure
+  `otto-core::proof` functions. See [proof-packs](./proof-packs.md).
+- **MCP design doc vs code** — there is no `mcp_gateway_enabled` toggle (gateway
+  tools surface additively) and no dedicated `McpApprovalPending` /
+  `McpServerHealth` WS event (the gateway uses the generic `notice`). See
+  [mcp-control-plane](./mcp-control-plane.md).
+- **Review Findings gating** — there is no `Feature::ReviewFindings`; findings are
+  gated by `Git`, and repo rules by `Context`. The `Finding` disposition machine
+  (`open · accepted · false_positive · fixed · verified · waived`) is distinct
+  from the engine detection `state`. See [review-findings](./review-findings.md).

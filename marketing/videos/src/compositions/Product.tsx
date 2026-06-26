@@ -1,594 +1,591 @@
 import React from 'react';
-import { useCurrentFrame } from 'remotion';
-import { T, brand, fonts, providers, status, alpha } from '../theme';
+import { T, brand, fonts, providers } from '../theme';
 import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
 import { OttoWindow } from '../components/Frame';
 import { Navigator } from '../components/Nav';
 import {
   Appear,
   Stagger,
-  track,
   TitleCard,
   Caption,
-  Button,
-  Chip,
   Card,
+  Chip,
+  Button,
   StatusDot,
-  Terminal,
-  Diff,
-  Toast,
-  Cursor,
+  Avatar,
   Icon,
+  Toast,
 } from '../components/kit';
 
 // ════════════════════════════════════════════════════════════════════════════
-//  PRODUCT — Jira / Confluence multi-agent story workflows
+//  PRODUCT — Jira & Confluence: import → analyze → rewrite → plan → discover
 // ════════════════════════════════════════════════════════════════════════════
 
-// Small section header used inside panels.
-const PanelHead: React.FC<{ icon: string; title: string; right?: React.ReactNode }> = ({ icon, title, right }) => (
-  <div
-    style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 9,
-      padding: '0 14px',
-      height: 40,
-      borderBottom: `1px solid ${T.border}`,
-      flexShrink: 0,
-    }}
-  >
-    <Icon name={icon} size={15} color={T.textDim} />
-    <span style={{ fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 700, color: T.text, flex: 1 }}>{title}</span>
-    {right}
-  </div>
-);
+// ── Shared data ───────────────────────────────────────────────────────────────
 
-// A source chip (Jira / Confluence / Draft) tinted to match the source.
-const SourceChip: React.FC<{ kind: 'Jira' | 'Confluence' | 'Draft' }> = ({ kind }) => {
-  const color = kind === 'Jira' ? '#2684ff' : kind === 'Confluence' ? '#1c8ad6' : T.textDim;
-  return (
-    <Chip color={kind === 'Draft' ? undefined : color}>
-      <Icon name={kind === 'Draft' ? 'edit' : 'note'} size={11} />
-      {kind}
-    </Chip>
-  );
-};
+interface LensData {
+  label: string;
+  finding: string;
+  dot: 'working' | 'idle' | 'needsYou';
+}
 
-// ── Scene 1 — title card ──────────────────────────────────────────────────────
+const LENSES: LensData[] = [
+  {
+    label: 'Risk',
+    finding: 'Static 7-day window enables token replay — must rotate on each successful use',
+    dot: 'working',
+  },
+  {
+    label: 'Edge Cases',
+    finding: 'Concurrent refresh calls may race and produce two simultaneously-valid tokens',
+    dot: 'working',
+  },
+  {
+    label: 'Dependencies',
+    finding: 'AuthService · SessionStore · AuditLog all require coordinated schema migrations',
+    dot: 'needsYou',
+  },
+  {
+    label: 'Acceptance',
+    finding: 'Missing: revoke-on-logout scope, device-binding criteria, rotation rate-limit',
+    dot: 'idle',
+  },
+];
+
+const SPEC_SECTIONS = [
+  {
+    title: 'Background',
+    body: 'Refresh tokens are currently static for 7 days. Any intercepted token is replayable within that window. Rotating on each successful use closes the exposure to the last-use interval.',
+  },
+  {
+    title: 'Requirements',
+    body: 'FR-1: Rotate token on every successful /auth/refresh call.\nFR-2: Invalidate the previous token within 100 ms of issue.\nFR-3: 48 h dual-validity grace for concurrent clients during rollout.',
+  },
+  {
+    title: 'Acceptance Criteria',
+    body: 'AC-1: Login → refresh → old token returns 401 Unauthorized.\nAC-2: Concurrent refresh returns 409 + Retry-After header.\nAC-3: Revoke-on-logout invalidates the entire token family.',
+  },
+  {
+    title: 'Edge Cases',
+    body: 'Network failure mid-rotation must never leave two valid tokens active. Device-bound tokens require device fingerprint in the rotation key.',
+  },
+];
+
+interface TaskData {
+  label: string;
+  done: boolean;
+  owner: string;
+  color: string;
+}
+
+const TASKS: TaskData[] = [
+  { label: 'Research token rotation RFCs + prior art', done: true,  owner: 'Alice', color: brand.cyan   },
+  { label: 'Implement rotation in auth/token.go',       done: false, owner: 'Ben',   color: brand.purple },
+  { label: 'Invalidate previous token within 100 ms',   done: false, owner: 'Ben',   color: brand.purple },
+  { label: 'Add E2E tests for concurrent-refresh race', done: false, owner: 'Carol', color: brand.violet },
+  { label: 'Update API docs + CHANGELOG entry',         done: false, owner: 'Alice', color: brand.cyan   },
+];
+
+const DISCOVERY_BODY =
+  'We need to pick a rate-limit strategy for auth endpoints before PROJ-1421 ships.\n\n' +
+  'Options on the table:\n' +
+  '• Sliding window — resets TTL on each hit; simple but exploitable under burst traffic\n' +
+  '• Token bucket — smooth burst handling; better fit for OAuth refresh flows\n' +
+  '• Fixed window + exponential backoff — easiest to reason about in distributed deployments\n\n' +
+  'Recommendation: token bucket at 10 req / min per device with a 5× burst allowance.';
+
+// ── Scene 1 — Title ───────────────────────────────────────────────────────────
+
 const TitleScene: React.FC = () => (
   <TitleCard
-    kicker="PRODUCT · JIRA / CONFLUENCE"
-    title="Turn a ticket into a plan"
-    subtitle="Import a story → multi-agent analysis → tasks your agents pick up"
+    kicker="Product · Jira & Confluence"
+    title="Product"
+    subtitle="Import any ticket or Confluence page — refine it into a build-ready spec, then hand it to your agents"
   />
 );
 
-// ── Scene 2 — story import ────────────────────────────────────────────────────
-type Story = { key: string; title: string; source: 'Jira' | 'Confluence' | 'Draft'; active?: boolean };
-const STORIES: Story[] = [
-  { key: 'SIN-4821', title: 'Add JWT validation to protected routes', source: 'Jira', active: true },
-  { key: 'SIN-4790', title: 'Rate-limit the login endpoint', source: 'Jira' },
-  { key: 'CONF-212', title: 'Auth RFC — session strategy', source: 'Confluence' },
-  { key: 'DRAFT-3', title: 'Idea: passkey sign-in flow', source: 'Draft' },
-];
+// ── Scene 2 — Import + Analyze ────────────────────────────────────────────────
 
-const StoryRow: React.FC<{ s: Story }> = ({ s }) => (
-  <div
-    style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 6,
-      padding: '11px 12px',
-      borderRadius: 9,
-      background: s.active ? alpha(brand.purple, 0.12) : 'transparent',
-      border: `1px solid ${s.active ? alpha(brand.purple, 0.4) : 'transparent'}`,
-    }}
-  >
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <span style={{ fontFamily: fonts.mono, fontSize: 12.5, fontWeight: 700, color: s.active ? brand.cyan : T.textDim }}>
-        {s.key}
-      </span>
-      <span style={{ flex: 1 }} />
-      <SourceChip kind={s.source} />
-    </div>
-    <span
-      style={{
-        fontFamily: fonts.ui,
-        fontSize: 13,
-        fontWeight: s.active ? 650 : 500,
-        color: s.active ? T.text : alpha(T.text, 0.82),
-        lineHeight: 1.3,
-      }}
-    >
-      {s.title}
-    </span>
-  </div>
-);
-
-const ImportScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  return (
-    <>
-      <Stage scale={0.9}>
-        <OttoWindow nav={<Navigator active="product" />} title="Otto — Product">
-          <div style={{ display: 'flex', height: '100%', boxSizing: 'border-box' }}>
-            {/* stories sidebar */}
-            <div
-              style={{
-                width: 392,
-                flexShrink: 0,
-                borderRight: `1px solid ${T.border}`,
-                display: 'flex',
-                flexDirection: 'column',
-                background: T.bgSidebar,
-              }}
-            >
-              <PanelHead
-                icon="note"
-                title="Stories"
-                right={<Chip color={brand.cyan}>4</Chip>}
-              />
-              <Stagger delay={10} step={6} y={12} style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {STORIES.map((s) => (
-                  <StoryRow key={s.key} s={s} />
-                ))}
-              </Stagger>
-            </div>
-
-            {/* opened story card */}
-            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-              <PanelHead
-                icon="ticket"
-                title="SIN-4821"
-                right={
-                  <div style={{ position: 'relative' }}>
-                    <Button variant="primary" icon="refresh">Import / Refresh</Button>
-                  </div>
-                }
-              />
-              <div style={{ flex: 1, padding: 22, display: 'flex', flexDirection: 'column', gap: 16, minHeight: 0 }}>
-                <Appear delay={16} y={14}>
-                  <div style={{ fontFamily: fonts.ui, fontSize: 24, fontWeight: 750 as never, color: T.text, letterSpacing: -0.4 }}>
-                    Add JWT validation to protected routes
-                  </div>
-                </Appear>
-                <Appear delay={22}>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    <SourceChip kind="Jira" />
-                    <Chip tone="warn">In Progress</Chip>
-                    <Chip color={brand.violet}>auth</Chip>
-                    <Chip color={brand.violet}>security</Chip>
-                    <Chip>P1</Chip>
-                  </div>
-                </Appear>
-                <Appear delay={28}>
-                  <Card pad={18} style={{ background: T.surface }}>
-                    <div style={{ fontFamily: fonts.ui, fontSize: 12, fontWeight: 600, color: T.textDim, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                      Summary
-                    </div>
-                    <div style={{ fontFamily: fonts.ui, fontSize: 15, lineHeight: 1.6, color: alpha(T.text, 0.9) }}>
-                      Every route under <span style={{ fontFamily: fonts.mono, color: brand.cyan }}>/api/v2/*</span> must
-                      verify a signed JWT before handling the request. Reject expired or tampered tokens with{' '}
-                      <span style={{ fontFamily: fonts.mono, color: brand.cyan }}>401</span>, and surface the failing claim
-                      in structured logs.
-                    </div>
-                  </Card>
-                </Appear>
-                <Appear delay={34}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: T.textDim, fontFamily: fonts.ui, fontSize: 13 }}>
-                    <Icon name="link" size={14} color={T.textDim} />
-                    Linked: CONF-212 · Auth RFC — session strategy
-                  </div>
-                </Appear>
-              </div>
-            </div>
-          </div>
-          {/* cursor drives the Import button, then a toast confirms */}
-          <Cursor from={[820, 560]} to={[1392, 86]} startAt={42} duration={26} click />
-          {track(frame, [74, 75], [0, 1]) > 0 && (
-            <div style={{ position: 'absolute', top: 100, right: 28 }}>
-              <Toast text="Imported from Jira — synced 4s ago" tone="ok" delay={74} />
-            </div>
-          )}
-        </OttoWindow>
-      </Stage>
-      <Caption
-        step={1}
-        title="Import from Jira or Confluence"
-        sub="Stories, RFCs & drafts in one place — context stays in sync"
-      />
-    </>
-  );
-};
-
-// ── Scene 3 — multi-agent analysis ────────────────────────────────────────────
-const AgentTile: React.FC<{
-  name: string;
-  provider: keyof typeof providers;
-  lines: { text: string; tone?: 'cmd' | 'ok' | 'dim' | 'text' | 'accent' }[];
-  delay: number;
-}> = ({ name, provider, lines, delay }) => (
-  <Appear delay={delay} y={18} style={{ flex: 1, minWidth: 0, display: 'flex' }}>
-    <div
-      style={{
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        background: T.termBg,
-        border: `1px solid ${T.border}`,
-        borderRadius: 11,
-        overflow: 'hidden',
-        boxShadow: `0 1px 0 ${alpha(providers[provider], 0.4)} inset`,
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '9px 12px',
-          borderBottom: `1px solid ${T.border}`,
-          background: alpha(providers[provider], 0.07),
-        }}
-      >
-        <StatusDot kind="working" size={8} />
-        <span style={{ flex: 1, fontFamily: fonts.mono, fontSize: 12.5, fontWeight: 600, color: T.text }}>{name}</span>
-        <Chip color={providers[provider]}>{provider}</Chip>
+const LensCard: React.FC<LensData & { delay: number }> = ({ label, finding, dot, delay }) => (
+  <Appear delay={delay} y={16} style={{ flex: 1, minWidth: 0 }}>
+    <Card t={T} pad={12}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 7 }}>
+        <StatusDot kind={dot} size={9} />
+        <span style={{ fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 700, color: T.text }}>
+          {label}
+        </span>
       </div>
-      <Terminal
-        lines={lines as never}
-        delay={delay + 10}
-        step={8}
-        pad={12}
-        fontSize={12.5}
-        style={{ flex: 1, background: 'transparent', borderRadius: 0, lineHeight: 1.6 }}
-      />
-    </div>
+      <div style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim, lineHeight: 1.55 }}>
+        {finding}
+      </div>
+    </Card>
   </Appear>
 );
 
-const AnalysisScene: React.FC = () => (
+const AnalyzeScene: React.FC = () => (
   <>
-    <Stage scale={0.9}>
-      <OttoWindow
-        nav={<Navigator active="product" />}
-        tabs={[{ label: 'SIN-4821 · Analysis', icon: 'note', active: true, dot: 'working' }]}
-        title="Otto — Product · multi-agent analysis"
-      >
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 16, gap: 12, boxSizing: 'border-box' }}>
-          {/* three tiled provider sessions */}
-          <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0 }}>
-            <AgentTile
-              name="claude · analyze"
-              provider="claude"
-              delay={8}
-              lines={[
-                { text: '$ analyze SIN-4821', tone: 'cmd' },
-                { text: 'reading ticket + CONF-212…', tone: 'dim' },
-                { text: 'risk: no exp/iss check', tone: 'text' },
-                { text: 'risk: error leaks claim', tone: 'text' },
-                { text: '✓ 4 findings', tone: 'ok' },
-              ]}
-            />
-            <AgentTile
-              name="codex · analyze"
-              provider="codex"
-              delay={14}
-              lines={[
-                { text: '$ analyze SIN-4821', tone: 'cmd' },
-                { text: 'scanning api/v2 routes…', tone: 'dim' },
-                { text: '12 routes unguarded', tone: 'text' },
-                { text: 'suggest: shared middleware', tone: 'text' },
-                { text: '✓ 3 findings', tone: 'ok' },
-              ]}
-            />
-            <AgentTile
-              name="gemini · analyze"
-              provider="gemini"
-              delay={20}
-              lines={[
-                { text: '$ analyze SIN-4821', tone: 'cmd' },
-                { text: 'checking test coverage…', tone: 'dim' },
-                { text: 'no negative-path tests', tone: 'text' },
-                { text: 'open Q: refresh tokens?', tone: 'accent' },
-                { text: '✓ 2 findings', tone: 'ok' },
-              ]}
-            />
+    <Stage scale={0.88}>
+      <OttoWindow nav={<Navigator active="product" />} title="Otto — Product">
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            height: '100%',
+            padding: 20,
+            gap: 12,
+            boxSizing: 'border-box',
+            overflow: 'hidden',
+          }}
+        >
+          {/* Story header */}
+          <Appear delay={6} y={18}>
+            <Card t={T} pad={14}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 7 }}>
+                <Icon name="ticket" size={15} color={T.textDim} />
+                <span style={{ fontFamily: fonts.mono, fontSize: 13, fontWeight: 700, color: T.accent }}>
+                  PROJ-1421
+                </span>
+                <span
+                  style={{
+                    fontFamily: fonts.ui,
+                    fontSize: 15,
+                    fontWeight: 700,
+                    color: T.text,
+                    flex: 1,
+                  }}
+                >
+                  Refresh-token rotation
+                </span>
+                <Chip tone="warn">In Progress</Chip>
+                <Chip color={providers.claude}>claude</Chip>
+                <Chip color={providers.codex}>codex</Chip>
+              </div>
+              <div style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim, lineHeight: 1.62 }}>
+                Implement automatic rotation of refresh tokens on each successful use to prevent token replay
+                attacks. Existing sessions must remain valid during the 48-hour migration grace period.
+              </div>
+            </Card>
+          </Appear>
+
+          {/* Lenses heading */}
+          <Appear delay={18} y={10}>
+            <div
+              style={{
+                fontFamily: fonts.ui,
+                fontSize: 11.5,
+                fontWeight: 600,
+                letterSpacing: 1.5,
+                textTransform: 'uppercase' as const,
+                color: T.textDim,
+              }}
+            >
+              Analysis Lenses · 4 providers
+            </div>
+          </Appear>
+
+          {/* Lens cards row */}
+          <div style={{ display: 'flex', gap: 10, flexShrink: 0 }}>
+            {LENSES.map((l, i) => (
+              <LensCard key={l.label} {...l} delay={24 + i * 9} />
+            ))}
           </div>
 
-          {/* summarizer consolidation */}
-          <Appear delay={44} y={16} style={{ flexShrink: 0 }}>
-            <Card pad={0} style={{ background: T.surface, border: `1px solid ${alpha(brand.cyan, 0.4)}` }}>
+          {/* Summary */}
+          <Appear delay={66} y={14}>
+            <Card t={T} pad={14}>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  letterSpacing: 1.5,
+                  textTransform: 'uppercase' as const,
+                  color: T.textDim,
+                  marginBottom: 8,
+                }}
+              >
+                Summary
+              </div>
+              <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.text, lineHeight: 1.65 }}>
+                Token rotation must invalidate the previous refresh token within 100 ms of issue. The static
+                7-day expiry is a critical vulnerability window. Session continuity during migration requires a
+                coordinated dual-validity grace period. AuthService and SessionStore need simultaneous schema
+                updates.
+              </div>
+            </Card>
+          </Appear>
+
+          {/* Open questions */}
+          <Appear delay={90} y={14}>
+            <Card t={T} pad={14}>
               <div
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 9,
-                  padding: '10px 14px',
-                  borderBottom: `1px solid ${T.border}`,
+                  justifyContent: 'space-between',
+                  marginBottom: 10,
                 }}
               >
-                <Icon name="zap" size={15} color={brand.cyan} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 700, color: T.text, flex: 1 }}>
-                  Summarizer · consolidated findings
-                </span>
-                <Chip color={brand.cyan}>9 → 5 deduped</Chip>
+                <div
+                  style={{
+                    fontFamily: fonts.ui,
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    letterSpacing: 1.5,
+                    textTransform: 'uppercase' as const,
+                    color: T.textDim,
+                  }}
+                >
+                  Open Questions · 3
+                </div>
+                <Button variant="primary" size="s" icon="comment">
+                  Post as comments
+                </Button>
               </div>
-              <Stagger delay={54} step={6} y={8} style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 7 }}>
-                {[
-                  'Add shared JWT middleware across all 12 /api/v2 routes',
-                  'Verify exp + iss claims; reject tampered tokens with 401',
-                  'Stop leaking the failing claim in error responses',
-                  'Add negative-path tests (expired, wrong issuer, no token)',
-                  'Open question: do we rotate refresh tokens here?',
-                ].map((b, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 9 }}>
-                    <span style={{ marginTop: 6, width: 6, height: 6, borderRadius: '50%', background: brand.cyan, flexShrink: 0 }} />
-                    <span style={{ fontFamily: fonts.ui, fontSize: 13.5, color: alpha(T.text, 0.92), lineHeight: 1.4 }}>{b}</span>
-                  </div>
-                ))}
-              </Stagger>
+              {[
+                'How long should each rotated token remain valid during the dual-validity grace window?',
+                'Should rotation be sliding (reset TTL on use) or fixed (inherit original expiry time)?',
+                'What is the correct response for concurrent refresh calls — 409 + retry, or rotate-last-wins?',
+              ].map((q, i) => (
+                <div
+                  key={i}
+                  style={{
+                    display: 'flex',
+                    gap: 8,
+                    alignItems: 'flex-start',
+                    padding: '6px 0',
+                    borderTop: `1px solid ${T.border}`,
+                  }}
+                >
+                  <Icon name="dot" size={12} color={T.textDim} style={{ marginTop: 3, flexShrink: 0 }} />
+                  <span style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.text, lineHeight: 1.55 }}>
+                    {q}
+                  </span>
+                </div>
+              ))}
             </Card>
           </Appear>
         </div>
       </OttoWindow>
     </Stage>
     <Caption
-      step={2}
-      title="Analyzed by a panel of agents"
-      sub="Fan out across providers · a summarizer consolidates"
+      step={1}
+      title="Import a ticket — analyze across lenses & providers, surface open questions"
+      sub="Risk · Edge Cases · Dependencies · Acceptance — summarized, ready to post back as Jira comments"
+      delay={16}
     />
   </>
 );
 
-// ── Scene 4 — plan → tasks ────────────────────────────────────────────────────
-type Task = { label: string; provider: keyof typeof providers; status: 'done' | 'working' | 'queued' };
-const TASKS: Task[] = [
-  { label: 'Add JWT middleware to /api/v2', provider: 'claude', status: 'done' },
-  { label: 'Validate exp / iss claims', provider: 'codex', status: 'working' },
-  { label: 'Return 401 on invalid token', provider: 'claude', status: 'working' },
-  { label: 'Unit + integration tests', provider: 'gemini', status: 'queued' },
-  { label: 'Update OpenAPI spec', provider: 'codex', status: 'queued' },
-];
+// ── Scene 3 — Rewrite + Plan ──────────────────────────────────────────────────
 
-const TaskRow: React.FC<{ t: Task }> = ({ t }) => {
-  const checked = t.status === 'done';
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        padding: '13px 16px',
-        borderRadius: 10,
-        background: T.surface,
-        border: `1px solid ${T.border}`,
-      }}
-    >
-      <span
-        style={{
-          width: 20,
-          height: 20,
-          borderRadius: 6,
-          flexShrink: 0,
-          display: 'grid',
-          placeItems: 'center',
-          background: checked ? status.working : 'transparent',
-          border: `1.5px solid ${checked ? status.working : T.border}`,
-        }}
-      >
-        {checked && <Icon name="check" size={13} color="#fff" />}
-      </span>
-      <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 15, fontWeight: 550 as never, color: T.text }}>{t.label}</span>
-      {t.status === 'working' && <StatusDot kind="working" size={9} />}
-      {t.status === 'queued' && <Chip>queued</Chip>}
-      <Chip color={providers[t.provider]}>{t.provider}</Chip>
-    </div>
-  );
-};
-
-const PlanScene: React.FC = () => (
-  <>
-    <Stage scale={0.9}>
-      <OttoWindow
-        nav={<Navigator active="product" />}
-        tabs={[{ label: 'SIN-4821 · Plan', icon: 'split', active: true, dot: 'working' }]}
-        title="Otto — Product · plan"
-      >
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-          <PanelHead
-            icon="split"
-            title="Plan · 5 tasks"
-            right={
-              <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-                <Chip color={brand.violet}>
-                  <Icon name="zap" size={11} />
-                  Autonomous
-                </Chip>
-                <Button variant="primary" icon="grid">Create Swarm project</Button>
-              </div>
-            }
-          />
-          <div style={{ flex: 1, padding: 22, display: 'flex', flexDirection: 'column', gap: 18, minHeight: 0 }}>
-            <Appear delay={10}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontFamily: fonts.ui, fontSize: 13, color: T.textDim }}>
-                <StatusDot kind="working" size={8} />
-                Multi-agent planning · broke the story into tasks and assigned providers
-              </div>
-            </Appear>
-            <Stagger delay={18} step={9} y={16} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {TASKS.map((t) => (
-                <TaskRow key={t.label} t={t} />
-              ))}
-            </Stagger>
-            <Appear delay={70} style={{ marginTop: 'auto' }}>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 12,
-                  padding: '14px 18px',
-                  borderRadius: 12,
-                  background: alpha(brand.violet, 0.1),
-                  border: `1px solid ${alpha(brand.violet, 0.4)}`,
-                }}
-              >
-                <Icon name="grid" size={18} color={brand.violet} />
-                <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 14, color: T.text }}>
-                  Push straight into a <b>Swarm</b> — role agents pick up tasks and run them.
-                </span>
-                <Button variant="default" icon="send">Send to agent</Button>
-              </div>
-            </Appear>
-          </div>
-        </div>
-      </OttoWindow>
-    </Stage>
-    <Caption
-      step={3}
-      title="Break it into tasks — agents pick them up"
-      sub="Multi-agent planning · push straight into a Swarm"
-    />
-  </>
-);
-
-// ── Scene 5 — rewrite + test cases + learnings ────────────────────────────────
-const REWRITE: { text: string; kind?: 'add' | 'del' | 'ctx' | 'hunk' }[] = [
-  { text: 'Acceptance criteria', kind: 'hunk' },
-  { text: 'Protected routes require a token.', kind: 'del' },
-  { text: 'Reject bad tokens.', kind: 'del' },
-  { text: 'All /api/v2/* routes verify a signed JWT.', kind: 'add' },
-  { text: 'exp + iss claims validated; clock-skew 60s.', kind: 'add' },
-  { text: 'Invalid/expired token → 401, no claim leak.', kind: 'add' },
-  { text: 'Failing claim recorded in structured logs.', kind: 'add' },
-];
-
-const TEST_CASES: { g: string; w: string; t: string }[] = [
-  { g: 'a request with a valid JWT', w: 'it hits /api/v2/orders', t: 'the handler runs, 200' },
-  { g: 'a request with an expired JWT', w: 'it hits any protected route', t: 'the server returns 401' },
-  { g: 'a tampered signature', w: 'the token is verified', t: '401, claim not echoed back' },
-  { g: 'no Authorization header', w: 'the route is protected', t: '401 with WWW-Authenticate' },
-];
-
-const TestCaseRow: React.FC<{ c: { g: string; w: string; t: string } }> = ({ c }) => (
+const TaskRow: React.FC<TaskData> = ({ label, done, owner, color }) => (
   <div
     style={{
       display: 'flex',
-      flexDirection: 'column',
-      gap: 3,
-      padding: '10px 13px',
-      borderRadius: 9,
+      alignItems: 'center',
+      gap: 10,
+      padding: '8px 12px',
+      borderRadius: 8,
       background: T.surface,
       border: `1px solid ${T.border}`,
     }}
   >
-    <Gwt k="Given" v={c.g} color={T.textDim} />
-    <Gwt k="When" v={c.w} color={brand.cyan} />
-    <Gwt k="Then" v={c.t} color={status.working} />
-  </div>
-);
-
-const Gwt: React.FC<{ k: string; v: string; color: string }> = ({ k, v, color }) => (
-  <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-    <span style={{ fontFamily: fonts.mono, fontSize: 11, fontWeight: 700, color, width: 44, flexShrink: 0 }}>{k}</span>
-    <span style={{ fontFamily: fonts.ui, fontSize: 12.5, color: alpha(T.text, 0.9), lineHeight: 1.35 }}>{v}</span>
+    <span
+      style={{
+        width: 18,
+        height: 18,
+        borderRadius: '50%',
+        background: done ? '#28c840' : T.surface2,
+        border: `1px solid ${done ? '#28c840' : T.border}`,
+        display: 'grid',
+        placeItems: 'center',
+        flexShrink: 0,
+      }}
+    >
+      {done && <Icon name="check" size={11} color="#fff" />}
+    </span>
+    <span
+      style={{
+        flex: 1,
+        fontFamily: fonts.ui,
+        fontSize: 12.5,
+        color: done ? T.textDim : T.text,
+        lineHeight: 1.4,
+        textDecoration: done ? 'line-through' : 'none',
+      }}
+    >
+      {label}
+    </span>
+    <Avatar name={owner} size={22} color={color} />
   </div>
 );
 
 const RewriteScene: React.FC = () => (
   <>
-    <Stage scale={0.9}>
-      <OttoWindow
-        nav={<Navigator active="product" />}
-        tabs={[{ label: 'SIN-4821 · Rewrite & tests', icon: 'edit', active: true }]}
-        title="Otto — Product · rewrite"
-      >
-        <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
-          {/* suggested rewrite */}
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', borderRight: `1px solid ${T.border}` }}>
-            <PanelHead icon="edit" title="Suggested rewrite" right={<Chip color={providers.claude}>AI polish</Chip>} />
-            <div style={{ padding: 18, flex: 1, minHeight: 0 }}>
-              <Appear delay={12}>
-                <Diff lines={REWRITE} delay={18} step={5} fontSize={13} style={{ height: '100%' }} />
-              </Appear>
-            </div>
-          </div>
-
-          {/* generated test cases */}
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-            <PanelHead
-              icon="check"
-              title="Generated test cases"
-              right={<Button variant="primary" icon="note">Approve & publish to Confluence</Button>}
-            />
-            <Stagger delay={26} step={8} y={12} style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 9, flex: 1, minHeight: 0 }}>
-              {TEST_CASES.map((c, i) => (
-                <TestCaseRow key={i} c={c} />
+    <Stage scale={0.88}>
+      <OttoWindow nav={<Navigator active="product" />} title="Otto — Product">
+        <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+          {/* Left: Spec rewrite */}
+          <div
+            style={{
+              flex: 1,
+              padding: 18,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+              overflow: 'hidden',
+              borderRight: `1px solid ${T.border}`,
+            }}
+          >
+            <Appear delay={6} y={10}>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  letterSpacing: 1.5,
+                  textTransform: 'uppercase' as const,
+                  color: T.textDim,
+                  marginBottom: 4,
+                }}
+              >
+                Rewritten Spec
+              </div>
+            </Appear>
+            <Stagger
+              delay={12}
+              step={12}
+              y={14}
+              style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
+            >
+              {SPEC_SECTIONS.map((s) => (
+                <Card key={s.title} t={T} pad={12}>
+                  <div
+                    style={{
+                      fontFamily: fonts.ui,
+                      fontSize: 11.5,
+                      fontWeight: 700,
+                      color: T.accent,
+                      marginBottom: 5,
+                    }}
+                  >
+                    {s.title}
+                  </div>
+                  <div
+                    style={{
+                      fontFamily: fonts.ui,
+                      fontSize: 12,
+                      color: T.text,
+                      lineHeight: 1.6,
+                      whiteSpace: 'pre-line',
+                    }}
+                  >
+                    {s.body}
+                  </div>
+                </Card>
               ))}
             </Stagger>
           </div>
-        </div>
-        {/* learnings chip row across the bottom */}
-        <Appear delay={64} style={{ position: 'absolute', left: 18, right: 18, bottom: 14 }}>
+
+          {/* Right: Task plan */}
           <div
             style={{
+              width: 370,
+              flexShrink: 0,
+              padding: 18,
               display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '9px 14px',
-              borderRadius: 10,
-              background: T.surface,
-              border: `1px solid ${T.border}`,
-              boxShadow: T.shadow,
+              flexDirection: 'column',
+              gap: 8,
+              overflow: 'hidden',
             }}
           >
-            <Icon name="tag" size={14} color={brand.violet} />
-            <span style={{ fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 600, color: T.textDim, marginRight: 4 }}>
-              Learnings
-            </span>
-            <Chip color={brand.violet}>always verify iss</Chip>
-            <Chip color={brand.violet}>never echo claims</Chip>
-            <Chip color={brand.violet}>shared auth middleware</Chip>
-            <span style={{ flex: 1 }} />
-            <Chip tone="warn">
-              <Icon name="comment" size={11} />2 open questions → comments
-            </Chip>
+            <Appear delay={8} y={10}>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  letterSpacing: 1.5,
+                  textTransform: 'uppercase' as const,
+                  color: T.textDim,
+                  marginBottom: 4,
+                }}
+              >
+                Task Plan · 5 tasks
+              </div>
+            </Appear>
+            <Stagger
+              delay={18}
+              step={10}
+              y={14}
+              style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
+            >
+              {TASKS.map((task) => (
+                <TaskRow key={task.label} {...task} />
+              ))}
+            </Stagger>
+            <Appear delay={82} y={10} style={{ marginTop: 4 }}>
+              <Button variant="primary" icon="grid">
+                Send to Swarm
+              </Button>
+            </Appear>
           </div>
-        </Appear>
+        </div>
       </OttoWindow>
     </Stage>
     <Caption
-      step={4}
-      title="Rewrites, test cases & learnings — written for you"
-      sub="Approve and publish back to Confluence; open questions post as comments"
+      step={2}
+      title="A build-ready rewrite and a task plan — hand it to a swarm"
+      sub="Every section is editable · tasks get owners · one click sends them to an Agent Swarm"
+      delay={16}
     />
   </>
 );
 
-// ── Scene 6 — outro ───────────────────────────────────────────────────────────
-const OutroScene: React.FC = () => (
-  <WalkOutro
-    title="Product Workflows"
-    tagline="From ticket to tasks, with agents."
-    pills={[
-      { label: 'Jira & Confluence', color: '#2684ff', icon: 'note' },
-      { label: 'Multi-agent analysis', color: providers.claude, icon: 'grid' },
-      { label: 'Plan → tasks', color: brand.cyan, icon: 'split' },
-      { label: 'Test cases', color: '#28c840', icon: 'check' },
-      { label: '→ Swarm', color: brand.violet, icon: 'grid' },
-    ]}
-  />
+// ── Scene 4 — Discovery + Inject ──────────────────────────────────────────────
+
+const DiscoveryScene: React.FC = () => (
+  <>
+    <Stage scale={0.88}>
+      <OttoWindow nav={<Navigator active="product" />} title="Otto — Product">
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            height: '100%',
+            padding: 20,
+            gap: 14,
+            boxSizing: 'border-box',
+            overflow: 'hidden',
+          }}
+        >
+          {/* Discovery draft card */}
+          <Appear delay={6} y={18}>
+            <Card t={T} pad={16}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                <Icon name="note" size={16} color={brand.violet} />
+                <span
+                  style={{
+                    fontFamily: fonts.ui,
+                    fontSize: 15,
+                    fontWeight: 700,
+                    color: T.text,
+                    flex: 1,
+                  }}
+                >
+                  Discovery: rate-limit strategy
+                </span>
+                <Chip tone="default">Draft</Chip>
+                <Button size="s" icon="ticket">
+                  Publish as Jira story
+                </Button>
+                <Button variant="primary" size="s" icon="send">
+                  Publish as RFC
+                </Button>
+              </div>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 13,
+                  color: T.text,
+                  lineHeight: 1.7,
+                  whiteSpace: 'pre-line',
+                }}
+              >
+                {DISCOVERY_BODY}
+              </div>
+            </Card>
+          </Appear>
+
+          {/* Inject into agent */}
+          <Appear delay={52} y={14}>
+            <Card t={T} pad={14}>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  letterSpacing: 1.5,
+                  textTransform: 'uppercase' as const,
+                  color: T.textDim,
+                  marginBottom: 10,
+                }}
+              >
+                Inject into Agent
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div
+                  style={{
+                    flex: 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: '8px 12px',
+                    borderRadius: 8,
+                    background: T.surface2,
+                    border: `1px solid ${T.border}`,
+                  }}
+                >
+                  <StatusDot kind="working" size={8} />
+                  <span
+                    style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 600, color: T.text }}
+                  >
+                    fix auth tests
+                  </span>
+                  <span style={{ fontFamily: fonts.mono, fontSize: 11, color: T.textDim }}>
+                    claude · working
+                  </span>
+                </div>
+                <Button variant="primary" icon="send">
+                  Inject story context ▸
+                </Button>
+              </div>
+            </Card>
+          </Appear>
+
+          {/* Toast confirmation */}
+          <Toast
+            text="Story context injected into fix auth tests"
+            tone="ok"
+            delay={84}
+            style={{ alignSelf: 'flex-end' }}
+          />
+        </div>
+      </OttoWindow>
+    </Stage>
+    <Caption
+      step={3}
+      title="Discovery → RFC or story · inject refined context into any agent"
+      sub="Start blank or paste call transcripts · publish to Jira or Confluence · inject into a running session"
+      delay={16}
+    />
+  </>
 );
 
-// ── sequence ──────────────────────────────────────────────────────────────────
+// ── Scene list ────────────────────────────────────────────────────────────────
+
 const SCENES: SceneDef[] = [
-  { dur: 80, node: <TitleScene />, name: 'Title' },
-  { dur: 210, node: <ImportScene />, name: 'Import' },
-  { dur: 220, node: <AnalysisScene />, name: 'Analysis' },
-  { dur: 210, node: <PlanScene />, name: 'Plan' },
-  { dur: 230, node: <RewriteScene />, name: 'Rewrite' },
-  { dur: 130, node: <OutroScene />, name: 'Outro' },
+  { dur: 75,  node: <TitleScene />,     name: 'Title'              },
+  { dur: 180, node: <AnalyzeScene />,   name: 'Import & Analyze'   },
+  { dur: 155, node: <RewriteScene />,   name: 'Rewrite & Plan'     },
+  { dur: 115, node: <DiscoveryScene />, name: 'Discovery & Inject' },
+  {
+    dur: 125,
+    name: 'Outro',
+    node: (
+      <WalkOutro
+        title="Product — Jira & Confluence"
+        tagline="From ticket to build-ready spec, then into a coding agent"
+        pills={[
+          { label: 'Analyze · Ask · Rewrite', icon: 'note'    },
+          { label: 'Test cases → Confluence', icon: 'check'   },
+          { label: 'Plan → Swarm',            icon: 'grid'    },
+          { label: 'Discovery → RFC/story',   icon: 'comment' },
+        ]}
+      />
+    ),
+  },
 ];
 
 export const productDuration = scenesDuration(SCENES);

@@ -1,645 +1,510 @@
 import React from 'react';
 import { useCurrentFrame } from 'remotion';
-import { T, brand, fonts, status as STATUS, alpha } from '../theme';
+import { T, brand, fonts, status as STATUS, providers, alpha } from '../theme';
 import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
 import { OttoWindow } from '../components/Frame';
 import { Navigator } from '../components/Nav';
 import {
+  Appear,
+  track,
   TitleCard,
   Caption,
-  Appear,
-  Stagger,
   Chip,
   Button,
-  Card,
-  Segmented,
+  Toast,
   StatusDot,
   Icon,
-  track,
 } from '../components/kit';
 
 // ════════════════════════════════════════════════════════════════════════════
-//  WORKFLOWS — visual automation: typed nodes wired on a canvas, triggers
-//  (webhook / cron / manual / event), runs that pause at human-approval gates,
-//  and a run inspector with per-node results, logs & saved views. Native dark.
+//  WORKFLOWS — visual automation graph: typed nodes wired on a canvas,
+//  a topological run loop, human approval gates, webhook/event/manual triggers.
+//  5 scenes · 620 frames · 30 fps
 // ════════════════════════════════════════════════════════════════════════════
 
-const mono = fonts.mono;
+type ExecState = 'pending' | 'running' | 'done' | 'paused';
 
-// node-type accent palette (matches the brand pills in the outro)
-const C = {
-  trigger: brand.cyan,
-  review: brand.violet,
-  approval: '#febc2e',
-  notify: '#36c5f0',
-  product: '#9ee039',
-  swarm: brand.cyan,
-  db: '#0a84ff',
-  api: '#bf7aff',
-} as const;
-
-// ── Scene 1 — title card ──────────────────────────────────────────────────────
-const TitleScene: React.FC = () => (
-  <TitleCard
-    kicker="WORKFLOWS"
-    title="Wire your agents into pipelines"
-    subtitle="Typed nodes, triggers & approval gates — drawn on a canvas"
-  />
-);
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Scene 2 — the canvas: a node graph wired left→right + a node-type palette
-// ════════════════════════════════════════════════════════════════════════════
-
-interface FlowNode {
+interface NodeDef {
   id: string;
-  title: string;
-  type: string;
   icon: string;
+  label: string;
+  sublabel: string;
   color: string;
-  x: number;
-  y: number;
-  st: keyof typeof STATUS;
-  pending?: boolean;
 }
 
-const NW = 196;
-const NH = 78;
+// ── Graph node definitions (left-to-right) ────────────────────────────────────
 
-const FLOW_NODES: FlowNode[] = [
-  { id: 'trigger', title: 'Webhook', type: 'on PR opened', icon: 'zap', color: C.trigger, x: 18, y: 150, st: 'exited' },
-  { id: 'review', title: 'review_run', type: 'multi-agent review', icon: 'eye', color: C.review, x: 300, y: 150, st: 'exited' },
-  { id: 'approval', title: 'human_approval', type: 'approve deploy?', icon: 'check', color: C.approval, x: 582, y: 150, st: 'needsYou', pending: true },
-  { id: 'notify', title: 'channel_notify', type: 'Slack #releases', icon: 'slack', color: C.notify, x: 864, y: 150, st: 'idle' },
+const NODES: NodeDef[] = [
+  {
+    id: 'webhook',
+    icon: 'link',
+    label: 'Webhook trigger',
+    sublabel: 'POST /hooks/release-guard',
+    color: brand.cyan,
+  },
+  {
+    id: 'review',
+    icon: 'eye',
+    label: 'Agent: run review',
+    sublabel: 'claude · code-review',
+    color: providers.claude,
+  },
+  {
+    id: 'ci',
+    icon: 'check',
+    label: 'HTTP: check CI',
+    sublabel: 'GET github/status/main',
+    color: STATUS.working,
+  },
+  {
+    id: 'approval',
+    icon: 'user',
+    label: 'Human approval',
+    sublabel: '@ops-team · sign-off',
+    color: STATUS.needsYou,
+  },
+  {
+    id: 'notify',
+    icon: 'slack',
+    label: 'Notify Slack',
+    sublabel: '#releases — deploy ready',
+    color: '#36c5f0',
+  },
 ];
 
-const FLOW_EDGES: [string, string][] = [
-  ['trigger', 'review'],
-  ['review', 'approval'],
-  ['approval', 'notify'],
-];
+// ── Node box ──────────────────────────────────────────────────────────────────
 
-// node card on the canvas
-const CanvasNode: React.FC<{ n: FlowNode; delay: number }> = ({ n, delay }) => {
-  const frame = useCurrentFrame();
-  const op = track(frame, [delay, delay + 10], [0, 1]);
-  const y = track(frame, [delay, delay + 10], [12, 0]);
-  // approval node pulses to read as "pending / waiting on you"
-  const pulse = n.pending ? Math.sin(frame / 9) * 0.5 + 0.5 : 0;
-  const glow = n.pending
-    ? `0 0 ${22 + pulse * 18}px ${alpha(n.color, 0.42)}`
-    : '0 10px 26px rgba(0,0,0,0.42)';
+const NodeBox: React.FC<{ node: NodeDef; execState?: ExecState }> = ({
+  node,
+  execState = 'pending',
+}) => {
+  const isPaused = execState === 'paused';
+  const isDone   = execState === 'done';
+  const isRunning = execState === 'running';
+
+  const borderColor = isPaused
+    ? STATUS.needsYou
+    : isDone
+    ? alpha(STATUS.working, 0.55)
+    : isRunning
+    ? alpha(node.color, 0.65)
+    : T.border;
+
+  const boxShadow = isPaused
+    ? `0 0 22px ${alpha(STATUS.needsYou, 0.38)}, 0 4px 16px rgba(0,0,0,0.3)`
+    : isRunning
+    ? `0 0 16px ${alpha(node.color, 0.28)}, 0 4px 16px rgba(0,0,0,0.3)`
+    : '0 4px 16px rgba(0,0,0,0.25)';
+
   return (
-    <Card
-      pad={0}
+    <div
       style={{
-        position: 'absolute',
-        left: n.x,
-        top: n.y,
-        width: NW,
-        height: NH,
-        opacity: op,
-        transform: `translateY(${y}px)`,
-        border: `1px solid ${alpha(n.color, n.pending ? 0.7 : 0.42)}`,
-        boxShadow: glow,
-        overflow: 'hidden',
+        width: 158,
+        background: T.surface,
+        border: `1.5px solid ${borderColor}`,
+        borderRadius: 10,
+        padding: '11px 12px',
+        boxShadow,
+        flexShrink: 0,
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', height: '100%', padding: '0 13px', gap: 11 }}>
-        <span
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6 }}>
+        <div
           style={{
-            width: 38,
-            height: 38,
-            borderRadius: 10,
-            flexShrink: 0,
-            background: alpha(n.color, 0.16),
-            color: n.color,
+            width: 26,
+            height: 26,
+            borderRadius: 7,
+            background: alpha(node.color, 0.15),
             display: 'grid',
             placeItems: 'center',
+            flexShrink: 0,
           }}
         >
-          <Icon name={n.icon} size={19} />
-        </span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontFamily: mono, fontSize: 13.5, fontWeight: 700, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {n.title}
-            </span>
-            <StatusDot kind={n.st} size={7} pulse={n.pending} />
-          </div>
-          <div style={{ fontFamily: fonts.ui, fontSize: 11.5, color: T.textDim, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {n.type}
-          </div>
-          <div style={{ marginTop: 5 }}>
-            <span
-              style={{
-                fontFamily: mono,
-                fontSize: 9.5,
-                fontWeight: 700,
-                letterSpacing: 0.4,
-                textTransform: 'uppercase',
-                color: n.color,
-                background: alpha(n.color, 0.14),
-                border: `1px solid ${alpha(n.color, 0.34)}`,
-                borderRadius: 4,
-                padding: '1px 6px',
-              }}
-            >
-              {n.id === 'trigger' ? 'trigger' : n.title.split(' ')[0]}
-            </span>
-          </div>
+          <Icon name={node.icon} size={13} color={node.color} />
         </div>
-      </div>
-    </Card>
-  );
-};
-
-// SVG edges with a draw-in + one animated moving dot (trigger→review)
-const CanvasEdges: React.FC<{ w: number; h: number }> = ({ w, h }) => {
-  const frame = useCurrentFrame();
-  const draw = track(frame, [10, 42], [0, 1]);
-  const byId = (id: string) => FLOW_NODES.find((n) => n.id === id)!;
-  // a looping 0→1 progress for the moving dot on the first edge
-  const dotT = (frame % 70) / 70;
-
-  const edgePath = (a: string, b: string) => {
-    const na = byId(a);
-    const nb = byId(b);
-    const x1 = na.x + NW;
-    const y1 = na.y + NH / 2;
-    const x2 = nb.x;
-    const y2 = nb.y + NH / 2;
-    const mx = (x1 + x2) / 2;
-    return { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, x1, y1, x2, y2 };
-  };
-
-  // moving dot position along the first edge (cubic with flat control y → straight)
-  const e0 = edgePath('trigger', 'review');
-  const dotX = e0.x1 + (e0.x2 - e0.x1) * dotT;
-  const dotY = e0.y1; // both endpoints share y for this segment
-
-  return (
-    <svg width={w} height={h} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-      {FLOW_EDGES.map(([a, b], i) => {
-        const { d } = edgePath(a, b);
-        // the approval→notify edge is "pending" (the run hasn't passed the gate yet)
-        const pending = a === 'approval';
-        const col = pending ? alpha(C.approval, 0.5) : alpha(brand.cyan, 0.6);
-        return (
-          <path
-            key={i}
-            d={d}
-            fill="none"
-            stroke={col}
-            strokeWidth={2.4}
-            strokeDasharray={pending ? '7 7' : 320}
-            strokeDashoffset={pending ? 0 : 320 * (1 - draw)}
-            opacity={pending ? draw : 1}
-          />
-        );
-      })}
-      {/* arrowheads at each target */}
-      {FLOW_EDGES.map(([a, b], i) => {
-        const { x2, y2 } = edgePath(a, b);
-        const pending = a === 'approval';
-        const col = pending ? C.approval : brand.cyan;
-        return (
-          <path
-            key={`h${i}`}
-            d={`M${x2 - 8},${y2 - 5} L${x2},${y2} L${x2 - 8},${y2 + 5}`}
-            fill="none"
-            stroke={col}
-            strokeWidth={2.2}
-            opacity={draw}
-          />
-        );
-      })}
-      {/* the animated traveling dot on the active first edge */}
-      <circle cx={dotX} cy={dotY} r={5} fill={brand.cyan} opacity={draw} />
-      <circle cx={dotX} cy={dotY} r={10} fill="none" stroke={brand.cyan} strokeWidth={1.5} opacity={draw * 0.4} />
-    </svg>
-  );
-};
-
-// the left palette of node types you drag onto the canvas
-const PALETTE: { label: string; icon: string; color: string }[] = [
-  { label: 'product_analyze', icon: 'note', color: C.product },
-  { label: 'product_rewrite', icon: 'edit', color: C.product },
-  { label: 'product_plan', icon: 'split', color: C.product },
-  { label: 'review_run', icon: 'eye', color: C.review },
-  { label: 'swarm_task', icon: 'grid', color: C.swarm },
-  { label: 'api_run', icon: 'send', color: C.api },
-  { label: 'db_query', icon: 'db', color: C.db },
-  { label: 'broker_peek', icon: 'box', color: '#0a84ff' },
-  { label: 'channel_notify', icon: 'slack', color: C.notify },
-  { label: 'budget_gate', icon: 'gauge', color: '#ff8a65' },
-  { label: 'human_approval', icon: 'check', color: C.approval },
-];
-
-const Palette: React.FC = () => (
-  <div
-    style={{
-      width: 230,
-      flexShrink: 0,
-      background: T.bgSidebar,
-      borderRight: `1px solid ${T.border}`,
-      display: 'flex',
-      flexDirection: 'column',
-      padding: '13px 11px',
-      gap: 7,
-    }}
-  >
-    <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '0 4px 4px' }}>
-      <Icon name="grid" size={14} color={brand.cyan} />
-      <span style={{ fontFamily: fonts.ui, fontSize: 11.5, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase', color: T.textDim }}>
-        Node types
-      </span>
-    </div>
-    <Stagger delay={14} step={3.5} y={8} style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-      {PALETTE.map((p) => (
-        <div
-          key={p.label}
+        <span
           style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 9,
-            height: 32,
-            padding: '0 9px',
-            borderRadius: 7,
-            background: T.surface,
-            border: `1px solid ${T.border}`,
+            flex: 1,
+            fontFamily: fonts.ui,
+            fontSize: 11.5,
+            fontWeight: 600,
+            color: T.text,
+            lineHeight: 1.3,
           }}
         >
-          <span style={{ width: 22, height: 22, borderRadius: 6, flexShrink: 0, background: alpha(p.color, 0.16), color: p.color, display: 'grid', placeItems: 'center' }}>
-            <Icon name={p.icon} size={13} />
+          {node.label}
+        </span>
+        {isDone && (
+          <span
+            style={{
+              width: 16,
+              height: 16,
+              borderRadius: '50%',
+              background: STATUS.working,
+              display: 'grid',
+              placeItems: 'center',
+              flexShrink: 0,
+            }}
+          >
+            <Icon name="check" size={9} color="#fff" />
           </span>
-          <span style={{ flex: 1, fontFamily: mono, fontSize: 12, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {p.label}
-          </span>
-        </div>
-      ))}
-    </Stagger>
+        )}
+        {isRunning && <StatusDot kind="working" size={8} />}
+        {isPaused && <StatusDot kind="needsYou" size={8} pulse={false} />}
+      </div>
+      <div
+        style={{
+          fontFamily: fonts.mono,
+          fontSize: 10,
+          color: T.textDim,
+          paddingLeft: 33,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        {node.sublabel}
+      </div>
+    </div>
+  );
+};
+
+// ── Edge connector ────────────────────────────────────────────────────────────
+
+const Connector: React.FC<{ done?: boolean }> = ({ done = false }) => (
+  <div style={{ display: 'flex', alignItems: 'center', width: 36, flexShrink: 0 }}>
+    <div style={{ flex: 1, height: 1.5, background: done ? STATUS.working : T.border }} />
+    <Icon name="chevronRight" size={11} color={done ? STATUS.working : T.textDim} />
   </div>
 );
 
-const CanvasScene: React.FC = () => {
-  const CW = 1086; // canvas inner width
-  const CH = 380;
+// ── Shared window chrome ──────────────────────────────────────────────────────
+
+const WorkflowCanvas: React.FC<{
+  children: React.ReactNode;
+  running?: boolean;
+}> = ({ children, running = false }) => (
+  <OttoWindow
+    nav={<Navigator active="workflows" />}
+    title="Otto — Release Guard"
+  >
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* toolbar */}
+      <div
+        style={{
+          height: 42,
+          borderBottom: `1px solid ${T.border}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '0 16px',
+          background: T.surface,
+          flexShrink: 0,
+        }}
+      >
+        <Icon name="split" size={14} color={brand.cyan} />
+        <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 13, fontWeight: 600, color: T.text }}>
+          Release Guard
+        </span>
+        {running ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <StatusDot kind="working" size={8} />
+            <span style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim }}>Running…</span>
+          </div>
+        ) : (
+          <Chip tone="ok">Published</Chip>
+        )}
+        <Button variant={running ? 'default' : 'primary'} size="s" icon="play">
+          {running ? 'Running' : 'Run'}
+        </Button>
+      </div>
+      {/* dot-grid canvas */}
+      <div
+        style={{
+          flex: 1,
+          position: 'relative',
+          overflow: 'hidden',
+          backgroundColor: T.bg,
+          backgroundImage: `radial-gradient(circle, ${alpha('#ffffff', 0.055)} 1px, transparent 1px)`,
+          backgroundSize: '28px 28px',
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  </OttoWindow>
+);
+
+// ── Scene 1 — Title ───────────────────────────────────────────────────────────
+
+const TitleScene: React.FC = () => (
+  <TitleCard
+    kicker="Workflows"
+    title="Workflows"
+    subtitle="Visual graph — chain agents, HTTP, approvals & swarm tasks into a runnable pipeline."
+  />
+);
+
+// ── Scene 2 — Build the graph ─────────────────────────────────────────────────
+
+const GraphScene: React.FC = () => (
+  <>
+    <Stage scale={0.88}>
+      <WorkflowCanvas>
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            {NODES.map((node, i) => (
+              <React.Fragment key={node.id}>
+                {i > 0 && (
+                  <Appear delay={20 + (i - 1) * 14 + 9} y={0}>
+                    <Connector />
+                  </Appear>
+                )}
+                <Appear delay={20 + i * 14} y={20}>
+                  <NodeBox node={node} />
+                </Appear>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      </WorkflowCanvas>
+    </Stage>
+    <Caption
+      step={1}
+      title="Chain agents, HTTP, DB, brokers, approvals & swarm tasks into a graph"
+      sub="Design once — Otto runs nodes in topological order, concurrently where possible."
+    />
+  </>
+);
+
+// ── Scene 3 — Run + human approval ───────────────────────────────────────────
+
+const RunScene: React.FC = () => {
+  const frame = useCurrentFrame();
+
+  // CI completes and approval pauses at the same topological moment (frame 22)
+  const execStates: ExecState[] = [
+    'done',
+    'done',
+    frame < 22 ? 'running' : 'done',
+    frame < 22 ? 'pending' : 'paused',
+    'pending',
+  ];
+
+  const approvalPanelProgress = track(frame, [38, 58], [0, 1]);
+
   return (
     <>
-      <Stage scale={0.9}>
-        <OttoWindow
-          nav={<Navigator active="workflows" counts={{ workflows: 3 }} />}
-          tabs={[
-            { label: 'release-guard', icon: 'split', active: true },
-            { label: 'Runs', icon: 'clock' },
-            { label: 'Triggers', icon: 'zap' },
-          ]}
-          title="Otto — Workflows · release-guard"
-        >
-          <div style={{ display: 'flex', height: '100%' }}>
-            <Palette />
-            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', padding: '14px 18px 18px' }}>
-              {/* canvas toolbar */}
-              <Appear delay={4} y={8}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 10 }}>
-                  <Icon name="split" size={16} color={brand.cyan} />
-                  <span style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 750 as never, color: T.text }}>release-guard</span>
-                  <Chip color={C.trigger}>
-                    <Icon name="zap" size={11} color={C.trigger} /> webhook
-                  </Chip>
-                  <div style={{ flex: 1 }} />
-                  <Chip tone="default">4 nodes</Chip>
-                  <Button variant="primary" size="s" icon="play">Run</Button>
-                </div>
-              </Appear>
-              {/* the canvas itself */}
-              <div
+      <Stage scale={0.88}>
+        <WorkflowCanvas running>
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 22,
+            }}
+          >
+            {/* graph row */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              {NODES.map((node, i) => (
+                <React.Fragment key={node.id}>
+                  {i > 0 && <Connector done={execStates[i - 1] === 'done'} />}
+                  <NodeBox node={node} execState={execStates[i]} />
+                </React.Fragment>
+              ))}
+            </div>
+
+            {/* human approval panel */}
+            <div
+              style={{
+                opacity: approvalPanelProgress,
+                transform: `translateY(${(1 - approvalPanelProgress) * 14}px)`,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                background: T.surface,
+                border: `1.5px solid ${alpha(STATUS.needsYou, 0.55)}`,
+                borderRadius: 10,
+                padding: '12px 18px',
+                boxShadow: `0 0 28px ${alpha(STATUS.needsYou, 0.22)}, 0 6px 20px rgba(0,0,0,0.35)`,
+              }}
+            >
+              <StatusDot kind="needsYou" size={9} />
+              <span
                 style={{
-                  position: 'relative',
-                  flex: 1,
-                  borderRadius: 12,
-                  background:
-                    `radial-gradient(${alpha('#ffffff', 0.05)} 1px, transparent 1px)`,
-                  backgroundSize: '22px 22px',
-                  border: `1px solid ${T.border}`,
-                  overflow: 'hidden',
+                  fontFamily: fonts.ui,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: T.text,
+                  marginRight: 6,
                 }}
               >
-                <div style={{ position: 'absolute', left: 0, top: 0, width: CW, height: CH }}>
-                  <CanvasEdges w={CW} h={CH} />
-                  {FLOW_NODES.map((n, i) => (
-                    <CanvasNode key={n.id} n={n} delay={16 + i * 7} />
-                  ))}
-                </div>
-              </div>
+                Human approval requested ·{' '}
+                <span style={{ color: STATUS.needsYou }}>@ops-team</span>
+              </span>
+              <Button variant="primary" size="s" icon="check">Approve</Button>
+              <Button variant="danger"  size="s" icon="x">Reject</Button>
             </div>
           </div>
-        </OttoWindow>
+
+          {/* resumed toast — appears at frame 100, stays visible */}
+          <Toast
+            text="Approved — workflow resumed, running Notify Slack"
+            tone="ok"
+            delay={100}
+            style={{ position: 'absolute', top: 14, right: 14 }}
+          />
+        </WorkflowCanvas>
       </Stage>
       <Caption
-        step={1}
-        title="Drag typed nodes onto a canvas"
-        sub="product · review · swarm · db · broker · api · gates"
+        step={2}
+        title="A topological run loop — pause for a human, then resume"
+        sub="Human approval nodes block execution until an operator approves or rejects."
       />
     </>
   );
 };
 
-// ════════════════════════════════════════════════════════════════════════════
-//  Scene 3 — triggers panel + an approval gate paused on you
-// ════════════════════════════════════════════════════════════════════════════
+// ── Scene 4 — Triggers ────────────────────────────────────────────────────────
 
-const TriggerRow: React.FC<{
+interface TriggerDef {
+  label: string;
   icon: string;
-  color: string;
-  title: string;
-  detail: React.ReactNode;
-  on?: boolean;
-}> = ({ icon, color, title, detail, on = true }) => (
-  <div
-    style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 12,
-      padding: '13px 14px',
-      borderRadius: 10,
-      background: T.surface,
-      border: `1px solid ${on ? alpha(color, 0.36) : T.border}`,
-    }}
-  >
-    <span style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, background: alpha(color, 0.16), color, display: 'grid', placeItems: 'center' }}>
-      <Icon name={icon} size={17} />
-    </span>
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 700, color: T.text }}>{title}</div>
-      <div style={{ fontFamily: mono, fontSize: 12, color: T.textDim, marginTop: 4 }}>{detail}</div>
-    </div>
-    {on && <StatusDot kind="working" size={8} />}
-  </div>
-);
+  desc: string;
+  active: boolean;
+}
+
+const TRIGGERS: TriggerDef[] = [
+  { label: 'Manual',    icon: 'play',  desc: 'Run on demand from UI or API',      active: true  },
+  { label: 'Webhook',   icon: 'link',  desc: 'POST /hooks/{workflow-id}',          active: true  },
+  { label: 'Event',     icon: 'zap',   desc: 'System or Otto event subscription', active: true  },
+  { label: 'Scheduled', icon: 'clock', desc: 'Cron schedule — coming soon',       active: false },
+];
 
 const TriggersScene: React.FC = () => (
   <>
-    <Stage scale={0.9}>
-      <OttoWindow
-        nav={<Navigator active="workflows" counts={{ workflows: 3 }} />}
-        tabs={[
-          { label: 'release-guard', icon: 'split' },
-          { label: 'Triggers', icon: 'zap', active: true },
-        ]}
-        title="Otto — Workflows · triggers"
-      >
-        <div style={{ display: 'flex', height: '100%', padding: 18, gap: 16, boxSizing: 'border-box' }}>
-          {/* triggers column */}
-          <div style={{ flex: 1.25, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <Appear delay={4} y={8}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <Icon name="zap" size={16} color={brand.cyan} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 750 as never, color: T.text }}>Triggers</span>
-                <div style={{ flex: 1 }} />
-                <Chip tone="ok">3 active</Chip>
+    <Stage scale={0.88}>
+      <WorkflowCanvas>
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '0 80px',
+          }}
+        >
+          <div style={{ width: '100%', maxWidth: 880 }}>
+            <Appear delay={8} y={10}>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: T.textDim,
+                  letterSpacing: 1.4,
+                  textTransform: 'uppercase',
+                  marginBottom: 18,
+                }}
+              >
+                Trigger type
               </div>
             </Appear>
-            <Stagger delay={10} step={7} y={12} style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
-              <TriggerRow
-                icon="globe"
-                color={C.trigger}
-                title="Webhook"
-                detail={
-                  <span>
-                    <span style={{ color: T.textDim }}>POST </span>
-                    <span style={{ color: brand.cyan }}>/hooks/wf_8c1a…</span>
-                    <span style={{ color: T.textDim }}> · public-by-token</span>
-                  </span>
-                }
-              />
-              <TriggerRow icon="clock" color="#0a84ff" title="Schedule" detail="cron · 0 9 * * 1  (Mon 09:00)" />
-              <TriggerRow icon="zap" color={C.product} title="On event" detail="product.story.updated → run" />
-              <TriggerRow icon="play" color={T.textDim} title="Manual" detail="Run from the UI · ⌘↵" on={false} />
-            </Stagger>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 16 }}>
+              {TRIGGERS.map((trig, i) => (
+                <Appear key={trig.label} delay={16 + i * 14} y={22}>
+                  <div
+                    style={{
+                      background: trig.active ? alpha(brand.cyan, 0.07) : alpha(T.surface, 0.6),
+                      border: `1.5px solid ${trig.active ? alpha(brand.cyan, 0.35) : T.border}`,
+                      borderRadius: 12,
+                      padding: '18px 16px',
+                      opacity: trig.active ? 1 : 0.44,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                      <div
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 8,
+                          background: trig.active ? alpha(brand.cyan, 0.15) : alpha(T.textDim, 0.1),
+                          display: 'grid',
+                          placeItems: 'center',
+                        }}
+                      >
+                        <Icon name={trig.icon} size={15} color={trig.active ? brand.cyan : T.textDim} />
+                      </div>
+                      <div>
+                        <div
+                          style={{
+                            fontFamily: fonts.ui,
+                            fontSize: 14,
+                            fontWeight: 700,
+                            color: trig.active ? T.text : T.textDim,
+                            marginBottom: trig.active ? 0 : 4,
+                          }}
+                        >
+                          {trig.label}
+                        </div>
+                        {!trig.active && <Chip tone="warn">coming soon</Chip>}
+                      </div>
+                    </div>
+                    <div style={{ fontFamily: fonts.mono, fontSize: 11, color: T.textDim, lineHeight: 1.5 }}>
+                      {trig.desc}
+                    </div>
+                  </div>
+                </Appear>
+              ))}
+            </div>
           </div>
-          {/* approval gate card */}
-          <Appear delay={14} y={12} style={{ flex: 1, minWidth: 0 }}>
-            <Card pad={0} style={{ background: T.bgSidebar, border: `1px solid ${alpha(C.approval, 0.5)}`, overflow: 'hidden', height: '100%' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px', borderBottom: `1px solid ${T.border}` }}>
-                <span style={{ width: 30, height: 30, borderRadius: 8, background: alpha(C.approval, 0.18), color: C.approval, display: 'grid', placeItems: 'center' }}>
-                  <Icon name="check" size={16} />
-                </span>
-                <span style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 750 as never, color: T.text }}>human_approval</span>
-                <div style={{ flex: 1 }} />
-                <Chip color={C.approval}>
-                  <StatusDot kind="needsYou" size={7} /> paused
-                </Chip>
-              </div>
-              <div style={{ padding: '18px 16px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-                <div style={{ fontFamily: fonts.ui, fontSize: 20, fontWeight: 750 as never, color: T.text }}>Approve deploy?</div>
-                <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim, lineHeight: 1.5 }}>
-                  <span style={{ color: T.text, fontFamily: mono }}>sinatra-users-go</span> · review passed · 1 PR ready to ship to prod.
-                </div>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 9,
-                    padding: '10px 12px',
-                    borderRadius: 9,
-                    background: alpha(C.approval, 0.1),
-                    border: `1px solid ${alpha(C.approval, 0.34)}`,
-                  }}
-                >
-                  <StatusDot kind="needsYou" size={9} />
-                  <span style={{ fontFamily: fonts.ui, fontSize: 13, color: C.approval, fontWeight: 600 }}>
-                    Paused — waiting on you
-                  </span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 2 }}>
-                  <Button variant="primary" icon="check">Approve</Button>
-                  <Button variant="danger" icon="x">Deny</Button>
-                </div>
-              </div>
-            </Card>
-          </Appear>
         </div>
-      </OttoWindow>
+      </WorkflowCanvas>
     </Stage>
     <Caption
-      step={2}
-      title="Trigger by webhook, schedule or hand"
-      sub="Runs pause at approval gates — resume or deny from the UI"
+      step={3}
+      title="Fire on manual, webhook, or event triggers"
+      sub="Scheduled triggers are being wired — manual, webhook, and event fire today."
     />
   </>
 );
 
-// ════════════════════════════════════════════════════════════════════════════
-//  Scene 4 — run inspector: per-node timeline with status, durations & logs
-// ════════════════════════════════════════════════════════════════════════════
+// ── Scenes list ───────────────────────────────────────────────────────────────
 
-interface RunRow {
-  node: string;
-  type: string;
-  icon: string;
-  color: string;
-  st: keyof typeof STATUS;
-  stLabel: string;
-  dur: string;
-}
-
-const RUN_ROWS: RunRow[] = [
-  { node: 'on PR opened', type: 'webhook', icon: 'zap', color: C.trigger, st: 'exited', stLabel: 'done', dur: '0.1s' },
-  { node: 'review_run', type: 'multi-agent review', icon: 'eye', color: C.review, st: 'exited', stLabel: 'done', dur: '48s' },
-  { node: 'human_approval', type: 'approve deploy?', icon: 'check', color: C.approval, st: 'needsYou', stLabel: 'paused', dur: '— ' },
-  { node: 'channel_notify', type: 'Slack #releases', icon: 'slack', color: C.notify, st: 'idle', stLabel: 'queued', dur: '—' },
-];
-
-const RunNodeRow: React.FC<{ r: RunRow; delay: number }> = ({ r, delay }) => {
-  const frame = useCurrentFrame();
-  const op = track(frame, [delay, delay + 8], [0, 1]);
-  const x = track(frame, [delay, delay + 8], [-10, 0]);
-  const running = r.st === 'needsYou';
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        padding: '11px 13px',
-        borderRadius: 10,
-        background: running ? alpha(r.color, 0.08) : T.surface,
-        border: `1px solid ${running ? alpha(r.color, 0.45) : T.border}`,
-        opacity: op,
-        transform: `translateX(${x}px)`,
-      }}
-    >
-      <span style={{ width: 30, height: 30, borderRadius: 8, flexShrink: 0, background: alpha(r.color, 0.16), color: r.color, display: 'grid', placeItems: 'center' }}>
-        <Icon name={r.icon} size={15} />
-      </span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontFamily: mono, fontSize: 13.5, fontWeight: 700, color: T.text }}>{r.node}</div>
-        <div style={{ fontFamily: fonts.ui, fontSize: 11.5, color: T.textDim, marginTop: 3 }}>{r.type}</div>
-      </div>
-      <span style={{ fontFamily: mono, fontSize: 12, color: T.textDim, width: 44, textAlign: 'right' }}>{r.dur}</span>
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, width: 86, justifyContent: 'flex-end' }}>
-        {r.st === 'exited' ? (
-          <Icon name="check" size={14} color={STATUS.working} />
-        ) : (
-          <StatusDot kind={r.st} size={8} pulse={running} />
-        )}
-        <span
-          style={{
-            fontFamily: fonts.ui,
-            fontSize: 12,
-            fontWeight: 600,
-            color: r.st === 'exited' ? STATUS.working : r.st === 'needsYou' ? C.approval : T.textDim,
-          }}
-        >
-          {r.stLabel}
-        </span>
-      </span>
-    </div>
-  );
-};
-
-const LOG_LINES: { text: string; color: string }[] = [
-  { text: '12:04:02  review_run  ✓ 3 lenses · 0 blocking comments', color: STATUS.working },
-  { text: '12:04:50  human_approval  ⏸ paused — awaiting operator', color: C.approval },
-];
-
-const InspectorScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  return (
-    <>
-      <Stage scale={0.9}>
-      <OttoWindow
-        nav={<Navigator active="workflows" counts={{ workflows: 3 }} />}
-        tabs={[
-          { label: 'release-guard', icon: 'split' },
-          { label: 'Runs', icon: 'clock', active: true, dot: 'needsYou' },
-        ]}
-        title="Otto — Workflows · run #312"
-      >
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 18, gap: 13, boxSizing: 'border-box' }}>
-          {/* header: run id + saved views */}
-          <Appear delay={4} y={8}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-              <Icon name="clock" size={16} color={brand.cyan} />
-              <span style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 750 as never, color: T.text }}>Run #312</span>
-              <Chip color={C.approval}>
-                <StatusDot kind="needsYou" size={7} /> paused
-              </Chip>
-              <Chip tone="default">via webhook</Chip>
-              <div style={{ flex: 1 }} />
-              <Segmented options={['All runs', 'Paused', 'Failed', 'Mine']} active={1} />
-            </div>
-          </Appear>
-
-          {/* per-node timeline */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-            {RUN_ROWS.map((r, i) => (
-              <RunNodeRow key={r.node} r={r} delay={12 + i * 7} />
-            ))}
-          </div>
-
-          {/* logs */}
-          <Appear delay={44} y={10} style={{ flex: 1, minHeight: 0 }}>
-            <div
-              style={{
-                height: '100%',
-                background: T.termBg,
-                borderRadius: 10,
-                border: `1px solid ${T.border}`,
-                padding: '12px 14px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 7,
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
-                <Icon name="terminal" size={13} color={T.textDim} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 12, fontWeight: 600, color: T.textDim }}>Node logs</span>
-              </div>
-              {LOG_LINES.map((l, i) => {
-                const op = track(frame, [48 + i * 8, 56 + i * 8], [0, 1]);
-                return (
-                  <div key={i} style={{ opacity: op, fontFamily: mono, fontSize: 12.5, color: l.color, whiteSpace: 'pre-wrap' }}>
-                    {l.text}
-                  </div>
-                );
-              })}
-            </div>
-          </Appear>
-        </div>
-      </OttoWindow>
-    </Stage>
-    <Caption step={3} title="Inspect every run" sub="Per-node results & logs · saved views" />
-    </>
-  );
-};
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Scene 5 — outro
-// ════════════════════════════════════════════════════════════════════════════
-const Outro: React.FC = () => (
-  <WalkOutro
-    title="Workflows"
-    tagline="Automation, with a human in the loop."
-    pills={[
-      { label: 'Typed nodes', color: '#9ee039', icon: 'split' },
-      { label: 'Webhook/Cron', color: brand.cyan, icon: 'clock' },
-      { label: 'Approval gates', color: '#febc2e', icon: 'check' },
-      { label: 'Run inspector', color: '#0a84ff', icon: 'eye' },
-      { label: 'Event triggers', color: brand.violet, icon: 'zap' },
-    ]}
-  />
-);
-
-// ── compose ──────────────────────────────────────────────────────────────────
 const SCENES: SceneDef[] = [
-  { dur: 80, node: <TitleScene />, name: 'Title' },
-  { dur: 240, node: <CanvasScene />, name: 'Canvas' },
-  { dur: 200, node: <TriggersScene />, name: 'Triggers' },
-  { dur: 190, node: <InspectorScene />, name: 'Inspector' },
-  { dur: 130, node: <Outro />, name: 'Outro' },
+  { dur: 75,  node: <TitleScene />,    name: 'Title'    },
+  { dur: 175, node: <GraphScene />,    name: 'Build'    },
+  { dur: 145, node: <RunScene />,      name: 'Run'      },
+  { dur: 105, node: <TriggersScene />, name: 'Triggers' },
+  {
+    dur: 120,
+    name: 'Outro',
+    node: (
+      <WalkOutro
+        title="Workflows"
+        tagline="Automate the repeatable — with a human in the loop when it matters"
+        pills={[
+          { label: 'Visual graph',    icon: 'split' },
+          { label: 'Human approval',  icon: 'check' },
+          { label: 'Webhook / event', icon: 'link'  },
+          { label: 'Multi-step',      icon: 'box'   },
+        ]}
+      />
+    ),
+  },
 ];
 
 export const workflowsDuration = scenesDuration(SCENES);

@@ -30,6 +30,14 @@ bridges so an agent can work a ticket from a chat thread.
 - **AI code review** — fan out several review agents (one per provider/lens)
   over a PR *or* your local working tree. Each runs as an openable session with
   live progress, per-agent findings, retry, and a configurable grace period.
+  Findings become **tracked items** — a review-findings workflow with statuses
+  and fix / verify / open-Jira / false-positive / regression-test actions — and
+  can be **ingested into a Proof Pack** or saved to the Vault.
+- **Proof Packs** — an evidence layer so "done" means *proven*. Each unit of work
+  collects **artifacts** (test output, diffs, PR links, screenshots, logs) into a
+  pack, and pure rules derive a **status, risk and badges** from them. Artifacts
+  are redacted and size-capped, and optional **gates** can require a PR, a Goal
+  Loop, or passing tests before work is allowed to close.
 - **Product (Jira / Confluence)** — import a Jira issue or Confluence page
   (search by project or space — no key prefix needed) and run a product-owner
   workflow over it: multi-agent, multi-provider **analysis** with a summarizer
@@ -40,6 +48,11 @@ bridges so an agent can work a ticket from a chat thread.
   a **Plan/Tasks** breakdown, and a recurring-patterns **learnings** base. A
   background watcher polls for new comments/updates, and you can inject a story's
   full refined context into any running agent.
+- **Canvas** — think visually. Each canvas scene is **file-backed** in one of two
+  modes: **Excalidraw** (`canvas.json`, freeform shapes & arrows) or **Mermaid**
+  (`canvas.mermaid`, diagram-as-code). An agent edits the underlying file while
+  you converse in an embedded terminal, so a diagram becomes something an agent
+  builds *with* you.
 - **Channels** — bridge a Slack or Telegram thread to an agent session: messages
   (and file attachments) are relayed in, the agent's reply (and any file) is
   relayed back. One agent per ticket, auto-archived when idle.
@@ -58,6 +71,16 @@ bridges so an agent can work a ticket from a chat thread.
   tokens than API-driven equivalents: sessions are **persistent and resumed** (no
   whole-history re-feed each turn) and agents' outputs are read from transcripts/
   files (zero model tokens).
+- **Goal Loops** — give a **goal**, machine-checkable acceptance criteria, and a
+  **budget** (max iterations + active time). A team of agents iterates
+  **Plan → Execute → Evaluate → Digest** on an isolated `goal-loop/<id>` branch,
+  repeating until the criteria pass or the budget runs out — with live
+  phase/iteration monitoring and openable executor sessions.
+- **Mission Control** — one **unified work graph** over everything your agents are
+  doing across all eight kinds (sessions, swarms, goal loops, reviews, product
+  stories, workflows, PRs, external triggers). A projector builds it from the
+  daemon's event bus, so every workstream shows up as a node with a live status —
+  click one to jump straight to the work behind it.
 - **Connections** — open SSH / MySQL / Redis / MongoDB / ClickHouse sessions
   side-by-side with agents.
 - **Database Explorer** — a TablePlus-class browser for MySQL, Redis, MongoDB,
@@ -95,6 +118,9 @@ bridges so an agent can work a ticket from a chat thread.
   can browse and install/update from Settings; skills drive review lenses,
   product analysis, and insights, and the self-improvement engine refines them
   from your sessions.
+- **Skills evaluator** — benchmark a skill: run **implement → validate → score →
+  improve** across multiple iterations and providers, read a per-run report, and
+  compare runs side-by-side to see what actually got better.
 - **Insights** — scheduled, multi-provider "catch-up" reports that turn recent
   activity into action-first summaries, generated on demand and cached.
 - **Usage & cost** — an embedded ClickHouse engine records real per-turn token
@@ -103,10 +129,20 @@ bridges so an agent can work a ticket from a chat thread.
   retention.
 - **API client** — a built-in REST workbench (collections, environments, history),
   with import/export (Postman / OpenAPI / HAR) and an SSRF-guarded executor.
+- **MCP Control Plane** — two-way Model Context Protocol. **Outbound:** every MCP
+  tool your agents call passes a governance pipeline (allowlist → policy →
+  single-use approval → dry-run → fail-closed audit → stats). **Outward:**
+  `ottod mcp-server` exposes a set of `otto.*` tools (codebase search, context
+  packets, goal loops, work items, read-only DB, PR drafts, proof packs, human
+  approval) to external MCP clients behind a restricted, single-purpose token.
 - **Workflows** — a visual workflow engine that chains steps (agent prompts, HTTP
   requests, DB queries, broker peeks, channel notifications, human approvals,
   swarm tasks, …) into runnable graphs. Manual, webhook, and event triggers fire
   today; scheduled triggers and a few Product/Review nodes are still being wired.
+- **Scheduled Tasks** — recurring agent jobs on an **interval / daily / weekly**
+  schedule. Each run executes a prompt, writes a **Markdown report**, and
+  **delivers** it to Slack, Telegram, email, or a webhook (secrets redacted) —
+  with a run history and a set of `otto.*` MCP tools to manage jobs.
 - **Custom plugins** — extend Otto at runtime with out-of-process **sidecar
   plugins** (any language) you install/enable/remove **without rebuilding**: the
   daemon supervises each plugin process, reverse-proxies its HTTP/UI into an
@@ -147,7 +183,9 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   (self-improvement), `otto-usage` (ClickHouse usage/metrics), `otto-skills`
   (bundled skill library), `otto-context`, `otto-rbac`, `otto-netguard`
   (SSRF guard), `otto-keychain` (macOS Keychain secret storage),
-  `otto-server` (routes), `ottod` (binary).
+  `otto-canvas` (Canvas scenes), `otto-mcp` (MCP control plane + governance),
+  `otto-workgraph` (Mission Control work graph), `otto-server` (routes),
+  `ottod` (binary).
 
 ## Prerequisites
 
@@ -254,14 +292,28 @@ docs/features/  Per-feature guides (setup, walkthrough, API, limits)
 
 ## Documentation
 
-Every feature above has a dedicated, code-grounded guide under
+Every feature above has a dedicated, **code-grounded** guide under
 **[`docs/features/`](./docs/features/README.md)** — setup (incl. token/account
 and Slack-manifest steps), a full walkthrough, the relevant REST/WS surface,
 explicit capabilities & limitations, security notes, and troubleshooting. Start
-at the [features index](./docs/features/README.md). The API itself is specified
-in `docs/contracts/` (authoritative); operator runbooks for multi-user/RBAC and
-remote access live at [`docs/MULTI-USER-RBAC.md`](./docs/MULTI-USER-RBAC.md) and
-[`docs/remote-access-runbook.md`](./docs/remote-access-runbook.md).
+at the **[features index](./docs/features/README.md)**.
+
+Where everything lives:
+
+| Doc | What it is |
+|-----|------------|
+| **[Feature guides](./docs/features/README.md)** | One in-depth guide per feature — the definitive reference. Start here. |
+| [`docs/contracts/`](./docs/contracts/) — [`api.md`](./docs/contracts/api.md), [`ws.md`](./docs/contracts/ws.md), [`product.md`](./docs/contracts/product.md) | The REST + WebSocket contracts. **Authoritative** for the API shape; the TS types in `ui/src/lib/api/types.ts` mirror them. |
+| [`docs/MULTI-USER-RBAC.md`](./docs/MULTI-USER-RBAC.md) | Operator runbook: per-feature roles, isolation, impersonation, API tokens. |
+| [`docs/remote-access-runbook.md`](./docs/remote-access-runbook.md) | Operator runbook: reaching Otto from a phone/iPad — Cloudflare tunnel, PWA, share links, email-OTP. |
+| [`docs/RELEASE.md`](./docs/RELEASE.md) | The macOS packaging flow — sidecar copy, Tauri build, codesigning, DMG. |
+| [`docs/plugins/AUTHORING.md`](./docs/plugins/AUTHORING.md) | How to write a custom sidecar plugin (the host API, manifest, examples). |
+| [`marketing/videos/`](./marketing/videos/) | The Remotion source for the in-app **Walkthroughs** (rendered to `ui/public/walkthroughs/`). |
+
+Design notes, implementation plans, and research write-ups live under
+[`docs/design/`](./docs/design/), [`docs/plans/`](./docs/plans/), and
+[`docs/research/`](./docs/research/) — useful background, but the feature guides
+and `docs/contracts/` are the sources of truth.
 
 ## Contributing
 

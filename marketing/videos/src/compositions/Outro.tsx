@@ -1,87 +1,213 @@
 import React from 'react';
 import { AbsoluteFill, useCurrentFrame, interpolate } from 'remotion';
-import { brand, fonts, alpha, providers } from '../theme';
-import { Scenes, SceneDef, scenesDuration } from '../components/scene';
-import { OttoIcon } from '../components/OttoLogo';
-import { Appear, Kicker, FeaturePill, Keys, Icon } from '../components/kit';
+import { brand, fonts, alpha } from '../theme';
+import { Scenes, SceneDef, scenesDuration, FloorGlow } from '../components/scene';
+import {
+  Appear,
+  Kicker,
+  BrandWord,
+  FeaturePill,
+  Keys,
+  OttoIcon,
+} from '../components/kit';
 
-// ── Scene 1 — kinetic recap of the whole surface area ────────────────────────
-const RECAP: { label: string; color: string; icon: string }[] = [
-  { label: 'Agent Sessions', color: providers.claude, icon: 'terminal' },
-  { label: 'Git & PRs', color: '#28c840', icon: 'branch' },
-  { label: 'Code Review', color: brand.violet, icon: 'eye' },
-  { label: 'Product', color: '#2684ff', icon: 'note' },
-  { label: 'Database', color: '#0a84ff', icon: 'db' },
-  { label: 'Kafka', color: '#febc2e', icon: 'box' },
-  { label: 'Swarm', color: brand.cyan, icon: 'grid' },
-  { label: 'Connections', color: '#bf7aff', icon: 'plug' },
-  { label: 'Channels', color: '#36c5f0', icon: 'slack' },
-  { label: 'Usage & Budgets', color: '#ff8a65', icon: 'chart' },
-  { label: 'Workflows', color: '#9ee039', icon: 'split' },
-  { label: 'Plugins', color: '#a78bfa', icon: 'zap' },
-  { label: 'Vault', color: '#47bfff', icon: 'globe' },
-  { label: 'Remote & Mobile', color: '#0a84ff', icon: 'share' },
+// ── Scene 1 — Recap (~150f) ───────────────────────────────────────────────────
+//
+// Brand closer recap: kicker + gradient headline + staggered pill grid.
+// No app window — pure cinematic. The 12-pill stagger (delay 30 + i×9)
+// means the final pill springs in at frame ~129; the scene then holds
+// every element visible through frame 150, staying alive to the cut.
+
+const MARQUEE: { label: string; color: string; icon: string }[] = [
+  { label: 'Agent Sessions',     color: '#d97757',  icon: 'terminal' },
+  { label: 'Mission Control',    color: '#47bfff',  icon: 'gauge'    },
+  { label: 'Git & Review',       color: '#28c840',  icon: 'branch'   },
+  { label: 'Product & Canvas',   color: '#a78bfa',  icon: 'note'     },
+  { label: 'Swarm & Goal Loops', color: '#863bff',  icon: 'grid'     },
+  { label: 'Database & Brokers', color: '#0a84ff',  icon: 'db'       },
+  { label: 'Scheduled Tasks',    color: '#bf7aff',  icon: 'clock'    },
+  { label: 'MCP & Plugins',      color: '#ff8a65',  icon: 'plug'     },
+  { label: 'Proof Packs',        color: '#28c840',  icon: 'check'    },
+  { label: 'Usage & Insights',   color: '#febc2e',  icon: 'chart'    },
+  { label: 'Vault',              color: '#8ab4f8',  icon: 'globe'    },
+  { label: 'Remote & Mobile',    color: '#2684ff',  icon: 'share'    },
 ];
 
 const Recap: React.FC = () => (
   <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', padding: '0 120px' }}>
-    <div style={{ marginBottom: 16 }}>
-      <Kicker delay={2}>One window for all of it</Kicker>
+    {/* Kicker eyebrow */}
+    <div style={{ marginBottom: 18 }}>
+      <Kicker delay={2}>Everything, in one window</Kicker>
     </div>
-    <Appear delay={8} y={18}>
-      <div style={{ fontFamily: fonts.ui, fontSize: 62, fontWeight: 800, letterSpacing: -1.6, color: '#fff', textAlign: 'center', lineHeight: 1.06 }}>
-        Your agents. Your stack.
+
+    {/* Headline — white + gradient second line */}
+    <Appear delay={12} y={24}>
+      <div
+        style={{
+          fontFamily: fonts.ui,
+          fontSize: 62,
+          fontWeight: 800,
+          letterSpacing: -1.6,
+          color: '#ffffff',
+          textAlign: 'center',
+          lineHeight: 1.1,
+          marginBottom: 46,
+        }}
+      >
+        Your whole engineering workflow,
         <br />
-        <span style={{ backgroundImage: brand.gradSoft, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent', WebkitTextFillColor: 'transparent' }}>
-          One Otto.
+        <span
+          style={{
+            backgroundImage: brand.gradSoft,
+            WebkitBackgroundClip: 'text',
+            backgroundClip: 'text',
+            color: 'transparent',
+            WebkitTextFillColor: 'transparent',
+          }}
+        >
+          orchestrated.
         </span>
       </div>
     </Appear>
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 13, justifyContent: 'center', maxWidth: 1480, marginTop: 42 }}>
-      {RECAP.map((p, i) => (
-        <FeaturePill key={p.label} label={p.label} color={p.color} icon={p.icon} delay={24 + i * 3} />
+
+    {/* Pill grid — staggered so the last pill arrives near frame 129, then holds */}
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 16,
+        justifyContent: 'center',
+        maxWidth: 1440,
+      }}
+    >
+      {MARQUEE.map((p, i) => (
+        <FeaturePill
+          key={p.label}
+          label={p.label}
+          color={p.color}
+          icon={p.icon}
+          delay={30 + i * 9}
+        />
       ))}
     </div>
+
+    <FloorGlow color={brand.purple} w={800} />
   </AbsoluteFill>
 );
 
-// ── Scene 2 — final CTA lockup ───────────────────────────────────────────────
-const CTA: React.FC = () => {
+// ── Scene 2 — Brand Lockup (~140f) ────────────────────────────────────────────
+//
+// Cinematic closing frame: icon + two slow-expanding rings, BrandWord, subtitle,
+// closing tagline, and ⌘K hint. The last scene — never fades out (holds to end).
+
+const Lockup: React.FC = () => {
   const frame = useCurrentFrame();
-  const line = interpolate(frame, [40, 90], [0, 460], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+
+  // Two rings emerge from center and expand outward, fading as they spread —
+  // keeps the scene alive without competing with the wordmark.
+  const r1 = interpolate(frame, [4, 130], [0, 680], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+  const op1 = interpolate(frame, [4, 70, 139], [0, 0.45, 0.0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+  const r2 = interpolate(frame, [22, 139], [0, 900], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+  const op2 = interpolate(frame, [22, 90, 139], [0, 0.20, 0.0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+
   return (
     <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center' }}>
-      <Appear delay={2} scale={0.66} y={0} style={{ marginBottom: 30 }}>
-        <OttoIcon size={158} glowPx={120} />
+      {/* Purple expanding ring */}
+      <div
+        style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          width: r1,
+          height: r1,
+          transform: 'translate(-50%, -50%)',
+          borderRadius: '50%',
+          border: `1.5px solid ${alpha(brand.purple, op1)}`,
+          boxShadow: `0 0 48px ${alpha(brand.purple, op1 * 0.5)}`,
+          pointerEvents: 'none',
+        }}
+      />
+      {/* Cyan outer ring */}
+      <div
+        style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          width: r2,
+          height: r2,
+          transform: 'translate(-50%, -50%)',
+          borderRadius: '50%',
+          border: `1px solid ${alpha(brand.cyan, op2)}`,
+          pointerEvents: 'none',
+        }}
+      />
+
+      {/* Logo */}
+      <Appear delay={2} scale={0.52} y={0} style={{ marginBottom: 32 }}>
+        <OttoIcon size={148} glowPx={120} />
       </Appear>
-      <Appear delay={12} y={20}>
-        <div style={{ fontFamily: fonts.ui, fontSize: 112, fontWeight: 800, letterSpacing: -3, lineHeight: 1, backgroundImage: brand.gradSoft, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent', WebkitTextFillColor: 'transparent' }}>
-          Otto
-        </div>
-      </Appear>
-      <Appear delay={22} y={14}>
-        <div style={{ fontFamily: fonts.ui, fontSize: 29, color: alpha('#fff', 0.66), marginTop: 16 }}>
+
+      {/* "Otto" wordmark */}
+      <BrandWord delay={16} size={120}>Otto</BrandWord>
+
+      {/* Subtitle */}
+      <Appear delay={28} y={18}>
+        <div
+          style={{
+            fontFamily: fonts.ui,
+            fontSize: 32,
+            color: alpha('#ffffff', 0.62),
+            marginTop: 18,
+            textAlign: 'center',
+            letterSpacing: 0.1,
+          }}
+        >
           The Agentic Development Environment
         </div>
       </Appear>
-      <div style={{ height: 1, width: line, marginTop: 30, background: `linear-gradient(90deg, transparent, ${alpha(brand.cyan, 0.7)}, transparent)` }} />
-      <div style={{ marginTop: 30, display: 'flex', alignItems: 'center', gap: 18 }}>
-        <Appear delay={40}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 9, padding: '12px 20px', borderRadius: 12, background: alpha('#fff', 0.06), border: `1px solid ${alpha('#fff', 0.14)}`, fontFamily: fonts.ui, fontSize: 20, color: '#fff' }}>
-            <Icon name="command" size={18} color={brand.cyan} /> macOS desktop app
-          </div>
+
+      {/* Closing line */}
+      <Appear delay={42} y={14}>
+        <div
+          style={{
+            fontFamily: fonts.ui,
+            fontSize: 27,
+            color: alpha('#ffffff', 0.78),
+            marginTop: 14,
+            textAlign: 'center',
+            letterSpacing: 0.1,
+          }}
+        >
+          Run your coding agents{' '}
+          <span style={{ color: brand.cyan, fontWeight: 700 }}>like a pro.</span>
+        </div>
+      </Appear>
+
+      {/* ⌘K hint */}
+      <div style={{ marginTop: 52, display: 'flex', alignItems: 'center', gap: 16 }}>
+        <Appear delay={56}>
+          <span style={{ fontFamily: fonts.ui, fontSize: 21, color: alpha('#ffffff', 0.52) }}>
+            Press
+          </span>
         </Appear>
-        <Appear delay={46}><span style={{ fontFamily: fonts.ui, fontSize: 20, color: alpha('#fff', 0.55) }}>press</span></Appear>
-        <Keys keys={['⌘', 'K']} delay={50} />
-        <Appear delay={56}><span style={{ fontFamily: fonts.ui, fontSize: 20, color: alpha('#fff', 0.55) }}>to begin</span></Appear>
+        <Keys keys={['⌘', 'K']} delay={62} />
+        <Appear delay={68}>
+          <span style={{ fontFamily: fonts.ui, fontSize: 21, color: alpha('#ffffff', 0.52) }}>
+            to launch anything
+          </span>
+        </Appear>
       </div>
+
+      <FloorGlow color={brand.cyan} w={580} />
     </AbsoluteFill>
   );
 };
 
+// ── Composition ───────────────────────────────────────────────────────────────
+
 const SCENES: SceneDef[] = [
-  { dur: 168, node: <Recap />, name: 'Recap' },
-  { dur: 192, node: <CTA />, name: 'CTA' },
+  { dur: 150, node: <Recap />,  name: 'Recap'  },
+  { dur: 140, node: <Lockup />, name: 'Lockup' },
 ];
 
 export const outroDuration = scenesDuration(SCENES);

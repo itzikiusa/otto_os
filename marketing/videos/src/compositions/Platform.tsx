@@ -1,644 +1,723 @@
 import React from 'react';
-import { useCurrentFrame } from 'remotion';
-import { T, themes, Theme, brand, fonts, alpha, status as STATUS } from '../theme';
+import { T, brand, fonts, radius, alpha } from '../theme';
 import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
 import { OttoWindow } from '../components/Frame';
-import { Navigator } from '../components/Nav';
+import { Navigator, NavSession } from '../components/Nav';
 import {
   Appear,
-  Stagger,
-  track,
   Caption,
   TitleCard,
-  Chip,
+  Keys,
   Toggle,
   Segmented,
-  Keys,
-  Caret,
-  StatusDot,
+  Toast,
   Icon,
+  Terminal,
+  TermLine,
+  navActive,
 } from '../components/kit';
 
-// ════════════════════════════════════════════════════════════════════════════
-//  PLATFORM — power & polish: command palette, mission control, search,
-//  capability health, theming, CLI auto-update.
-// ════════════════════════════════════════════════════════════════════════════
+// ── Shared helpers ────────────────────────────────────────────────────────────
 
-// ── Scene 1 — title ──────────────────────────────────────────────────────────
-const Title: React.FC = () => (
-  <TitleCard
-    kicker="Power & Polish"
-    title="Built to run all day"
-    subtitle="Command palette, mission control, health & theming — keyboard-first."
-  />
-);
-
-// ── Scene 2 — command palette (⌘K) + Ask Otto (⌘I) ───────────────────────────
-type PaletteRow = { icon: string; label: string; hint?: string; kind: 'cmd' | 'recent' };
-
-const PALETTE_ROWS: PaletteRow[] = [
-  { icon: 'branch', label: 'Git · Open repo tab…', hint: 'Action', kind: 'cmd' },
-  { icon: 'send', label: 'API · New request', hint: 'Action', kind: 'cmd' },
-  { icon: 'terminal', label: 'fix auth tests', hint: 'sinatra-users-go', kind: 'recent' },
-  { icon: 'grid', label: 'Swarm · payments-platform', hint: 'Project', kind: 'recent' },
-  { icon: 'db', label: 'Database · prod-readonly', hint: 'Connection', kind: 'recent' },
-];
-
-const PaletteResult: React.FC<{ row: PaletteRow; active?: boolean }> = ({ row, active }) => (
-  <div
-    style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 12,
-      height: 42,
-      padding: '0 14px',
-      borderRadius: 9,
-      background: active ? alpha(brand.violet, 0.2) : 'transparent',
-      boxShadow: active ? `inset 2px 0 0 ${brand.cyan}` : 'none',
-    }}
-  >
-    <span
+const SectionHead: React.FC<{ label: string; delay?: number }> = ({ label, delay = 0 }) => (
+  <Appear delay={delay} y={8}>
+    <div
       style={{
-        width: 26,
-        height: 26,
-        borderRadius: 7,
-        background: alpha(active ? brand.cyan : T.textDim, 0.14),
-        display: 'grid',
-        placeItems: 'center',
-        color: active ? brand.cyan : T.textDim,
+        fontFamily: fonts.ui,
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: 1.2,
+        textTransform: 'uppercase',
+        color: T.textDim,
+        marginBottom: 6,
+        marginTop: 16,
       }}
     >
-      <Icon name={row.icon} size={15} />
-    </span>
-    <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 16, fontWeight: active ? 650 : 550, color: active ? '#fff' : T.text }}>
-      {row.label}
-    </span>
-    {row.hint && (
-      <span style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim }}>{row.hint}</span>
-    )}
-    {row.kind === 'recent' && <Icon name="clock" size={13} color={alpha(T.textDim, 0.8)} />}
-  </div>
+      {label}
+    </div>
+  </Appear>
 );
 
-const ASK_PLAN = [
-  'Find the CI run for `payments` that failed',
-  'Open the failing job + jump to the error log',
-  'Draft a fix branch from the offending commit',
-];
-
-const PaletteScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  const dim = track(frame, [8, 22], [0, 0.55]);
-  return (
-    <>
-      <Stage scale={0.9}>
-        <div style={{ position: 'relative' }}>
-          <OttoWindow nav={<Navigator active="agents" workingCount={2} />} title="Otto — sinatra-users-go">
-            <div style={{ height: '100%' }} />
-          </OttoWindow>
-
-          {/* scrim over the window */}
-          <div style={{ position: 'absolute', inset: 0, background: alpha('#05050a', dim), borderRadius: 14 }} />
-
-          {/* ⌘K command palette modal */}
-          <Appear delay={14} y={-18} scale={0.97} style={{ position: 'absolute', top: 86, left: '50%', transform: 'translateX(-50%)' }}>
-            <div
-              style={{
-                width: 660,
-                borderRadius: 16,
-                background: alpha(T.surface, 0.98),
-                border: `1px solid ${alpha('#fff', 0.14)}`,
-                boxShadow: `0 40px 120px rgba(0,0,0,0.7), 0 0 0 1px ${alpha(brand.violet, 0.3)}`,
-                overflow: 'hidden',
-              }}
-            >
-              {/* search field with typed query */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '16px 18px', borderBottom: `1px solid ${T.border}` }}>
-                <Icon name="search" size={19} color={T.textDim} />
-                <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 19, color: '#fff' }}>
-                  open repo
-                  <Caret color={brand.cyan} h={20} />
-                </span>
-                <Chip color={brand.violet}>⌘K</Chip>
-              </div>
-
-              {/* result list */}
-              <div style={{ padding: '8px 8px 10px' }}>
-                <div style={{ fontFamily: fonts.ui, fontSize: 11.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: T.textDim, padding: '6px 14px 4px' }}>
-                  Commands
-                </div>
-                <Stagger delay={22} step={5} y={8}>
-                  {PALETTE_ROWS.slice(0, 2).map((r, i) => (
-                    <PaletteResult key={i} row={r} active={i === 0} />
-                  ))}
-                </Stagger>
-                <div style={{ fontFamily: fonts.ui, fontSize: 11.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: T.textDim, padding: '8px 14px 4px' }}>
-                  Recent
-                </div>
-                <Stagger delay={34} step={5} y={8}>
-                  {PALETTE_ROWS.slice(2).map((r, i) => (
-                    <PaletteResult key={i} row={r} />
-                  ))}
-                </Stagger>
-              </div>
-            </div>
-          </Appear>
-
-          {/* ⌘I Ask Otto variant — natural language → deterministic plan */}
-          <Appear delay={50} y={20} style={{ position: 'absolute', bottom: 96, left: '50%', transform: 'translateX(-50%)' }}>
-            <div
-              style={{
-                width: 660,
-                borderRadius: 14,
-                background: alpha(T.surface, 0.98),
-                border: `1px solid ${alpha(brand.cyan, 0.4)}`,
-                boxShadow: `0 30px 90px rgba(0,0,0,0.6)`,
-                overflow: 'hidden',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: `1px solid ${T.border}` }}>
-                <Icon name="zap" size={16} color={brand.cyan} />
-                <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 15, fontWeight: 600, color: '#fff' }}>
-                  “open the failing CI for payments”
-                </span>
-                <Chip color={brand.cyan}>⌘I · Ask Otto</Chip>
-              </div>
-              <div style={{ padding: '10px 14px 12px', display: 'flex', flexDirection: 'column', gap: 7 }}>
-                <Stagger delay={62} step={6} y={8}>
-                  {ASK_PLAN.map((step, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 11,
-                        padding: '8px 12px',
-                        borderRadius: 9,
-                        background: alpha(brand.violet, 0.1),
-                        border: `1px solid ${alpha(brand.violet, 0.28)}`,
-                      }}
-                    >
-                      <span
-                        style={{
-                          width: 20,
-                          height: 20,
-                          borderRadius: '50%',
-                          background: brand.grad,
-                          color: '#fff',
-                          fontFamily: fonts.ui,
-                          fontSize: 11,
-                          fontWeight: 800,
-                          display: 'grid',
-                          placeItems: 'center',
-                          flexShrink: 0,
-                        }}
-                      >
-                        {i + 1}
-                      </span>
-                      <span style={{ fontFamily: fonts.ui, fontSize: 13.5, color: T.text }}>{step}</span>
-                    </div>
-                  ))}
-                </Stagger>
-              </div>
-            </div>
-          </Appear>
-        </div>
-      </Stage>
-      <Caption step={1} title="⌘K to launch anything · ⌘I to ask" sub="Natural language → a deterministic plan." />
-    </>
-  );
-};
-
-// ── Scene 3 — Mission Control: 6 bucket board ────────────────────────────────
-type Bucket = {
-  id: string;
+const SettingRow: React.FC<{
   label: string;
-  count: number;
-  color: string;
-  rows: { title: string; provider: string; status: keyof typeof STATUS }[];
-};
-
-const BUCKETS: Bucket[] = [
-  {
-    id: 'needs_you',
-    label: 'Needs you',
-    count: 3,
-    color: STATUS.needsYou,
-    rows: [
-      { title: 'approve plan · api/v2', provider: 'claude', status: 'needsYou' },
-      { title: 'resolve conflict · web', provider: 'codex', status: 'needsYou' },
-    ],
-  },
-  {
-    id: 'working',
-    label: 'Working',
-    count: 5,
-    color: STATUS.working,
-    rows: [
-      { title: 'fix auth tests', provider: 'claude', status: 'working' },
-      { title: 'refactor billing', provider: 'codex', status: 'working' },
-    ],
-  },
-  {
-    id: 'review_ready',
-    label: 'Review-ready',
-    count: 4,
-    color: brand.cyan,
-    rows: [
-      { title: 'PR #482 · rate-limit', provider: 'claude', status: 'idle' },
-      { title: 'PR #479 · cache layer', provider: 'codex', status: 'idle' },
-    ],
-  },
-  {
-    id: 'waiting',
-    label: 'Waiting',
-    count: 2,
-    color: STATUS.idle,
-    rows: [{ title: 'blocked on review', provider: 'claude', status: 'idle' }],
-  },
-  {
-    id: 'failed',
-    label: 'Failed',
-    count: 1,
-    color: STATUS.exited,
-    rows: [{ title: 'deploy · payments-svc', provider: 'codex', status: 'exited' }],
-  },
-  {
-    id: 'budget_warn',
-    label: 'Budget warn',
-    count: 2,
-    color: STATUS.needsYou,
-    rows: [{ title: 'swarm · over 80% cap', provider: 'claude', status: 'needsYou' }],
-  },
-];
-
-const SAVED_VIEWS = ['All workspaces', 'My turn', 'Failing now', 'Over budget'];
-
-const BucketCard: React.FC<{ b: Bucket }> = ({ b }) => (
-  <div
-    style={{
-      background: T.surface,
-      border: `1px solid ${alpha(b.color, 0.45)}`,
-      borderRadius: 12,
-      padding: 14,
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 10,
-      boxShadow: `inset 0 2px 0 ${alpha(b.color, 0.5)}`,
-    }}
-  >
-    <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-      <span style={{ width: 9, height: 9, borderRadius: '50%', background: b.color, boxShadow: `0 0 8px ${alpha(b.color, 0.8)}` }} />
-      <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 15, fontWeight: 700, color: T.text }}>{b.label}</span>
-      <span
-        style={{
-          minWidth: 28,
-          height: 26,
-          padding: '0 8px',
-          borderRadius: 8,
-          background: alpha(b.color, 0.18),
-          color: b.color,
-          fontFamily: fonts.ui,
-          fontSize: 16,
-          fontWeight: 800,
-          display: 'grid',
-          placeItems: 'center',
-        }}
-      >
-        {b.count}
-      </span>
-    </div>
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      {b.rows.map((r, i) => (
-        <div
-          key={i}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '7px 10px',
-            borderRadius: 8,
-            background: T.surface2,
-            border: `1px solid ${T.border}`,
-          }}
-        >
-          <StatusDot kind={r.status} size={8} />
-          <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 12.5, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {r.title}
-          </span>
-          <span style={{ fontFamily: fonts.ui, fontSize: 10.5, color: T.textDim }}>{r.provider}</span>
-        </div>
-      ))}
-    </div>
-  </div>
-);
-
-const MissionControlScene: React.FC = () => (
-  <>
-    <Stage scale={0.9}>
-      <OttoWindow nav={<Navigator active="agents" workingCount={5} />} title="Otto — Mission Control">
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 18, gap: 14, boxSizing: 'border-box' }}>
-          {/* header + saved views */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <Icon name="gauge" size={18} color={brand.cyan} />
-            <span style={{ fontFamily: fonts.ui, fontSize: 19, fontWeight: 750 as never, color: '#fff' }}>Mission Control</span>
-            <span style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim }}>· every workspace</span>
-            <div style={{ flex: 1 }} />
-            <Appear delay={40} y={0} style={{ display: 'flex', gap: 7 }}>
-              <span style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim, alignSelf: 'center', marginRight: 2 }}>Saved views</span>
-              {SAVED_VIEWS.map((v, i) => (
-                <Chip key={v} tone={i === 1 ? 'accent' : 'default'} color={i === 1 ? brand.cyan : undefined}>
-                  {v}
-                </Chip>
-              ))}
-            </Appear>
-          </div>
-
-          {/* 6-bucket grid */}
-          <Stagger
-            delay={12}
-            step={6}
-            y={18}
-            style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gridTemplateRows: '1fr 1fr', gap: 14 }}
-            childStyle={{ minHeight: 0 }}
-          >
-            {BUCKETS.map((b) => (
-              <BucketCard key={b.id} b={b} />
-            ))}
-          </Stagger>
-        </div>
-      </OttoWindow>
-    </Stage>
-    <Caption
-      step={2}
-      title="Mission Control — every workspace, six buckets"
-      sub="needs-you · working · review-ready · waiting · failed · budget · saved views."
-    />
-  </>
-);
-
-// ── Scene 4 — Theming + capability health ────────────────────────────────────
-const THEME_SWATCHES: { label: string; t: Theme }[] = [
-  { label: 'Native', t: themes.nativeDark },
-  { label: 'Pro Dark', t: themes.proDark },
-  { label: 'Warm', t: themes.warmDark },
-];
-
-const ThemeSwatch: React.FC<{ label: string; t: Theme; active?: boolean }> = ({ label, t, active }) => (
-  <div
-    style={{
-      borderRadius: 12,
-      padding: 9,
-      background: alpha('#000', 0.2),
-      border: `1.5px solid ${active ? brand.cyan : T.border}`,
-      boxShadow: active ? `0 0 0 3px ${alpha(brand.cyan, 0.22)}` : 'none',
-      flex: 1,
-    }}
-  >
-    {/* mini mock window in this theme */}
-    <div style={{ borderRadius: 8, overflow: 'hidden', border: `1px solid ${t.border}`, background: t.bg }}>
-      <div style={{ height: 16, background: t.bgSidebar, display: 'flex', alignItems: 'center', gap: 3, padding: '0 6px' }}>
-        <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#ff5f57' }} />
-        <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#febc2e' }} />
-        <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#28c840' }} />
-      </div>
-      <div style={{ display: 'flex', height: 56 }}>
-        <div style={{ width: 26, background: t.bgSidebar, borderRight: `1px solid ${t.border}`, padding: 5, display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ height: 5, borderRadius: 2, background: t.accent }} />
-          <span style={{ height: 5, borderRadius: 2, background: alpha(t.textDim, 0.5) }} />
-          <span style={{ height: 5, borderRadius: 2, background: alpha(t.textDim, 0.5) }} />
-        </div>
-        <div style={{ flex: 1, padding: 7, display: 'flex', flexDirection: 'column', gap: 5 }}>
-          <span style={{ height: 6, width: '70%', borderRadius: 3, background: t.surface2 }} />
-          <span style={{ height: 6, width: '55%', borderRadius: 3, background: t.surface2 }} />
-          <span style={{ height: 6, width: '40%', borderRadius: 3, background: alpha(t.accent, 0.7) }} />
-        </div>
-      </div>
-    </div>
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
-      <span style={{ width: 11, height: 11, borderRadius: '50%', background: t.accent }} />
-      <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: active ? 700 : 600, color: active ? '#fff' : T.text }}>{label}</span>
-      {active && <Icon name="check" size={13} color={brand.cyan} style={{ marginLeft: 'auto' }} />}
-    </div>
-  </div>
-);
-
-type Health = { label: string; icon: string; state: 'ready' | 'degraded' | 'missing'; note: string };
-const HEALTH: Health[] = [
-  { label: 'Agents', icon: 'terminal', state: 'ready', note: '5 sessions' },
-  { label: 'Message Brokers', icon: 'box', state: 'ready', note: '2 clusters' },
-  { label: 'Database', icon: 'db', state: 'ready', note: '4 connections' },
-  { label: 'Insights', icon: 'gauge', state: 'missing', note: 'ClickHouse not configured' },
-];
-
-const stateColor = (s: Health['state']) =>
-  s === 'ready' ? STATUS.working : s === 'degraded' ? STATUS.needsYou : STATUS.needsYou;
-const stateLabel = (s: Health['state']) => (s === 'ready' ? 'Ready' : s === 'degraded' ? 'Degraded' : 'Missing setup');
-
-const HealthRow: React.FC<{ h: Health }> = ({ h }) => {
-  const c = stateColor(h.state);
-  return (
+  sub?: string;
+  delay?: number;
+  children: React.ReactNode;
+}> = ({ label, sub, delay = 0, children }) => (
+  <Appear delay={delay} y={8}>
     <div
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 11,
-        padding: '11px 13px',
-        borderRadius: 10,
-        background: T.surface2,
-        border: `1px solid ${h.state === 'ready' ? T.border : alpha(c, 0.4)}`,
+        gap: 14,
+        padding: '10px 0',
+        borderBottom: `1px solid ${alpha(T.border, 0.6)}`,
       }}
     >
-      <span style={{ width: 28, height: 28, borderRadius: 8, background: alpha(c, 0.16), display: 'grid', placeItems: 'center', color: c }}>
-        <Icon name={h.icon} size={15} />
-      </span>
       <div style={{ flex: 1 }}>
-        <div style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 650 as never, color: T.text }}>{h.label}</div>
-        <div style={{ fontFamily: fonts.ui, fontSize: 11.5, color: T.textDim }}>{h.note}</div>
+        <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.text }}>{label}</div>
+        {sub && (
+          <div style={{ fontFamily: fonts.ui, fontSize: 11.5, color: T.textDim, marginTop: 2 }}>
+            {sub}
+          </div>
+        )}
       </div>
-      <span style={{ fontFamily: fonts.ui, fontSize: 12, fontWeight: 700, color: c }}>
-        {h.state === 'ready' ? '✓ ' : ''}
-        {stateLabel(h.state)}
-      </span>
-      {h.state !== 'ready' && (
-        <span style={{ fontFamily: fonts.ui, fontSize: 12, fontWeight: 700, color: brand.cyan, padding: '4px 10px', borderRadius: 7, background: alpha(brand.cyan, 0.14) }}>
-          Fix →
-        </span>
-      )}
+      {children}
     </div>
-  );
-};
+  </Appear>
+);
 
-const ThemeHealthScene: React.FC = () => (
-  <>
-    <Stage scale={0.9}>
-      <OttoWindow nav={<Navigator active="settings" />} title="Otto — Settings · Appearance & Health">
-        <div style={{ display: 'flex', height: '100%', gap: 16, padding: 18, boxSizing: 'border-box' }}>
-          {/* LEFT — theming */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <Appear delay={6} y={10}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-                <Icon name="gear" size={16} color={brand.violet} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 16, fontWeight: 700, color: '#fff' }}>Theme</span>
-              </div>
-            </Appear>
-            <Stagger delay={12} step={6} y={16} style={{ display: 'flex', gap: 11 }} childStyle={{ flex: 1, display: 'flex' }}>
-              {THEME_SWATCHES.map((s, i) => (
-                <ThemeSwatch key={s.label} label={s.label} t={s.t} active={i === 1} />
-              ))}
-            </Stagger>
-            <Appear delay={30} y={12}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
-                <span style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim }}>Appearance</span>
-                <Segmented options={['Light', 'Dark', 'Auto']} active={1} />
-                <div style={{ flex: 1 }} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim }}>RTL</span>
-                <Toggle on />
-              </div>
-            </Appear>
-            <Appear delay={38} y={12}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, marginTop: 2 }}>
-                <Icon name="archive" size={15} color={T.textDim} />
-                <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 13, color: T.text }}>Settings backup &amp; restore</span>
-                <Chip color={brand.cyan}>Export</Chip>
-                <Chip>Restore</Chip>
-              </div>
-            </Appear>
-          </div>
+// ── Scene 1 — Title card (~80f) ───────────────────────────────────────────────
 
-          {/* RIGHT — capability health */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <Appear delay={10} y={10}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-                <Icon name="gauge" size={16} color={STATUS.working} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 16, fontWeight: 700, color: '#fff' }}>Capability health</span>
-              </div>
-            </Appear>
-            <Stagger delay={16} step={6} y={14} style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-              {HEALTH.map((h) => (
-                <HealthRow key={h.label} h={h} />
-              ))}
-            </Stagger>
-            <Appear delay={44} y={12}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', borderRadius: 10, background: alpha(brand.violet, 0.1), border: `1px solid ${alpha(brand.violet, 0.3)}`, marginTop: 2 }}>
-                <Icon name="refresh" size={15} color={brand.cyan} />
-                <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 13, color: T.text }}>CLI auto-update · daily 03:00</span>
-                <Chip tone="ok">On</Chip>
-              </div>
-            </Appear>
-          </div>
+const TitleScene: React.FC = () => (
+  <TitleCard
+    kicker="Platform & Shortcuts"
+    title="Platform"
+    subtitle="The native layer that ties everything together"
+  />
+);
+
+// ── Scene 2 — Command Palette (~160f) ─────────────────────────────────────────
+
+const paletteSessions: NavSession[] = [
+  { title: 'fix(auth): token expiry',  provider: 'claude', status: 'working', tasks: [3, 6] },
+  { title: 'migrate postgres schema',  provider: 'codex',  status: 'idle',    tasks: [4, 4] },
+  { title: 'add rate-limit headers',   provider: 'claude', status: 'idle',    tasks: [2, 3] },
+];
+
+const PALETTE_RESULTS: { icon: string; label: string; hint: string; active?: boolean }[] = [
+  { icon: 'terminal', label: 'Open session…',       hint: 'Agents',  active: true },
+  { icon: 'branch',   label: 'Go to Git',           hint: 'Git'                   },
+  { icon: 'eye',      label: 'New code review…',    hint: 'Review'                },
+  { icon: 'grid',     label: 'Walkthrough: Swarm',  hint: 'Help'                  },
+];
+
+const PaletteBgContent: React.FC = () => (
+  <div
+    style={{
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      display: 'flex',
+      gap: 12,
+      padding: 16,
+      boxSizing: 'border-box',
+      opacity: 0.38,
+      filter: 'blur(1.5px)',
+    }}
+  >
+    <div style={{ flex: 1, background: T.termBg, borderRadius: 8, padding: 14 }}>
+      <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: '#28c840', marginBottom: 6 }}>
+        $ go test ./internal/auth/...
+      </div>
+      <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: T.textDim }}>
+        {'  → reading: middleware.go, jwt.go'}
+      </div>
+      <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: '#ff5f57', marginTop: 4 }}>
+        {'  FAIL TestTokenValidation'}
+      </div>
+      <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: T.accent, marginTop: 4 }}>
+        {'  ↳ applying patch…'}
+      </div>
+      <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: '#28c840', marginTop: 4 }}>
+        {'  ✓ PASS — 142 tests (3.2s)'}
+      </div>
+    </div>
+    <div style={{ flex: 1, background: T.termBg, borderRadius: 8, padding: 14 }}>
+      <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: '#28c840', marginBottom: 6 }}>
+        $ codex run migrate.md
+      </div>
+      <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: T.textDim }}>
+        {'  reading schema.sql, types.ts'}
+      </div>
+      <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: T.text, marginTop: 4 }}>
+        {'  writing migration_0042.sql'}
+      </div>
+      <div style={{ fontFamily: fonts.mono, fontSize: 12.5, color: '#28c840', marginTop: 4 }}>
+        {'  ✓ build ok · vet clean'}
+      </div>
+    </div>
+  </div>
+);
+
+const PaletteOverlay: React.FC = () => (
+  <Appear
+    delay={10}
+    y={-10}
+    scale={0.97}
+    style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+  >
+    {/* dark backdrop */}
+    <div
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: alpha('#000', 0.52),
+      }}
+    />
+    {/* palette card centered */}
+    <div
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        display: 'flex',
+        alignItems: 'flex-start',
+        justifyContent: 'center',
+        paddingTop: 76,
+      }}
+    >
+      <div
+        style={{
+          width: 544,
+          background: T.surface,
+          border: `1px solid ${T.border}`,
+          borderRadius: radius.l,
+          boxShadow: `0 32px 80px rgba(0,0,0,0.65), 0 0 0 1px ${alpha('#fff', 0.04)}`,
+          overflow: 'hidden',
+        }}
+      >
+        {/* search row */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '11px 14px',
+            borderBottom: `1px solid ${T.border}`,
+            background: T.surface2,
+          }}
+        >
+          <Icon name="search" size={15} color={T.textDim} />
+          <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 14.5, color: T.text }}>
+            Open session…
+          </span>
+          <span
+            style={{
+              fontFamily: fonts.mono,
+              fontSize: 11.5,
+              color: T.textDim,
+              background: T.bg,
+              padding: '2px 7px',
+              borderRadius: 5,
+              border: `1px solid ${T.border}`,
+            }}
+          >
+            ⌘K
+          </span>
         </div>
+
+        {/* section label */}
+        <div
+          style={{
+            padding: '9px 14px 3px',
+            fontFamily: fonts.ui,
+            fontSize: 11,
+            fontWeight: 600,
+            letterSpacing: 0.9,
+            textTransform: 'uppercase',
+            color: T.textDim,
+          }}
+        >
+          Quick actions
+        </div>
+
+        {/* result rows */}
+        <div style={{ paddingBottom: 5 }}>
+          {PALETTE_RESULTS.map((r, i) => (
+            <Appear key={r.label} delay={18 + i * 7} y={6}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  height: 35,
+                  padding: '0 12px',
+                  margin: '1px 5px',
+                  borderRadius: radius.s,
+                  background: r.active ? navActive.bg : 'transparent',
+                  color: r.active ? navActive.fg : T.text,
+                }}
+              >
+                <Icon
+                  name={r.icon}
+                  size={14}
+                  color={r.active ? navActive.fg : T.textDim}
+                />
+                <span
+                  style={{
+                    flex: 1,
+                    fontFamily: fonts.ui,
+                    fontSize: 13.5,
+                    fontWeight: r.active ? 600 : 400,
+                  }}
+                >
+                  {r.label}
+                </span>
+                <span
+                  style={{
+                    fontFamily: fonts.ui,
+                    fontSize: 12,
+                    color: r.active ? alpha(navActive.fg, 0.65) : T.textDim,
+                  }}
+                >
+                  {r.hint}
+                </span>
+                {r.active && (
+                  <span
+                    style={{
+                      fontFamily: fonts.mono,
+                      fontSize: 11,
+                      color: alpha(navActive.fg, 0.7),
+                      background: alpha(navActive.fg, 0.16),
+                      padding: '1px 6px',
+                      borderRadius: 4,
+                    }}
+                  >
+                    ↵
+                  </span>
+                )}
+              </div>
+            </Appear>
+          ))}
+        </div>
+
+        {/* footer: ⌘I / ⌘F / ⌘T hints */}
+        <div
+          style={{
+            display: 'flex',
+            gap: 20,
+            padding: '8px 14px',
+            borderTop: `1px solid ${T.border}`,
+            background: T.surface2,
+          }}
+        >
+          {[['⌘I', 'Ask Otto'], ['⌘F', 'find'], ['⌘T', 'jump session']].map(([key, label]) => (
+            <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span
+                style={{
+                  fontFamily: fonts.mono,
+                  fontSize: 11.5,
+                  color: T.textDim,
+                  background: T.bg,
+                  padding: '2px 7px',
+                  borderRadius: 4,
+                  border: `1px solid ${T.border}`,
+                }}
+              >
+                {key}
+              </span>
+              <span style={{ fontFamily: fonts.ui, fontSize: 11.5, color: T.textDim }}>
+                {label}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  </Appear>
+);
+
+const PaletteScene: React.FC = () => (
+  <>
+    <Stage scale={0.87}>
+      <OttoWindow
+        nav={
+          <Navigator
+            active="agents"
+            sessions={paletteSessions}
+            activeSessionTitle="fix(auth): token expiry"
+            workingCount={1}
+          />
+        }
+        tabs={[
+          { label: 'fix(auth): token expiry', icon: 'terminal', active: true, dot: 'working' },
+          { label: 'migrate postgres schema',  icon: 'terminal' },
+          { label: 'add rate-limit headers',   icon: 'terminal' },
+        ]}
+        title="Otto — sinatra-go"
+      >
+        <PaletteBgContent />
+        <PaletteOverlay />
       </OttoWindow>
     </Stage>
+
+    {/* ⌘K callout floating over the cinematic bg */}
+    <Appear delay={34} y={-10} style={{ position: 'absolute', top: 68, right: 88 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <Keys keys={['⌘', 'K']} />
+        <span
+          style={{
+            fontFamily: fonts.ui,
+            fontSize: 20,
+            color: alpha('#fff', 0.78),
+            fontWeight: 500,
+          }}
+        >
+          open from anywhere
+        </span>
+      </div>
+    </Appear>
+
     <Caption
-      step={3}
-      title="Make it yours — and keep it healthy"
-      sub="3 themes × light/dark + RTL · capability health · daily CLI auto-update."
+      step={1}
+      title="⌘K runs anything · ⌘I Ask Otto · ⌘F find · ⌘T jump"
+      sub="One palette to launch sessions, navigate, search, and run any command"
     />
   </>
 );
 
-// ── Scene 5 — cross-module search ────────────────────────────────────────────
-type SearchGroup = { group: string; icon: string; color: string; items: string[] };
-const SEARCH_GROUPS: SearchGroup[] = [
-  { group: 'Stories', icon: 'note', color: '#2684ff', items: ['PAY-318 · Refund flow rounding', 'PAY-204 · Payout webhook retries'] },
-  { group: 'Repos', icon: 'branch', color: '#28c840', items: ['payments-svc · main', 'payments-web · feat/checkout'] },
-  { group: 'Workflows', icon: 'split', color: '#9ee039', items: ['payments · nightly reconcile'] },
-  { group: 'Clusters', icon: 'box', color: '#febc2e', items: ['msk-prod · payments.events'] },
+// ── Scene 3 — Theming + Customizable Sidebar (~160f) ──────────────────────────
+
+const THEME_PREVIEWS: { name: string; bg: string; text: string; selected: boolean }[] = [
+  { name: 'Native',   bg: '#1e1e23', text: '#f2f2f5', selected: true  },
+  { name: 'Pro Dark', bg: '#16161c', text: '#e8e8ee', selected: false },
+  { name: 'Warm',     bg: '#faf9f7', text: '#3d3a35', selected: false },
 ];
 
-const SearchScene: React.FC = () => (
+const SIDEBAR_MODULES: { icon: string; label: string; visible: boolean }[] = [
+  { icon: 'terminal', label: 'Agents',          visible: true  },
+  { icon: 'branch',   label: 'Git',             visible: true  },
+  { icon: 'grid',     label: 'Swarm',           visible: true  },
+  { icon: 'db',       label: 'Database',        visible: true  },
+  { icon: 'box',      label: 'Message Brokers', visible: false },
+  { icon: 'globe',    label: 'Vault',           visible: true  },
+  { icon: 'chart',    label: 'Usage',           visible: false },
+];
+
+const ThemingScene: React.FC = () => (
   <>
-    <Stage scale={0.9}>
-      <OttoWindow nav={<Navigator active="agents" workingCount={5} />} title="Otto — Search">
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 20, gap: 16, boxSizing: 'border-box', alignItems: 'center' }}>
-          {/* search bar */}
-          <Appear delay={4} y={-12} style={{ width: '74%', maxWidth: 820 }}>
+    <Stage scale={0.87}>
+      <OttoWindow nav={<Navigator active="settings" />} title="Otto — Settings · Appearance">
+        <div style={{ display: 'flex', height: '100%' }}>
+          {/* ── Left: Appearance ── */}
+          <div
+            style={{
+              flex: 1,
+              padding: '22px 26px',
+              borderRight: `1px solid ${T.border}`,
+              overflow: 'hidden',
+            }}
+          >
+            <Appear delay={8} y={14}>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 17,
+                  fontWeight: 700,
+                  color: T.text,
+                  marginBottom: 2,
+                }}
+              >
+                Appearance
+              </div>
+              <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim, marginBottom: 4 }}>
+                Customize how Otto looks and feels.
+              </div>
+            </Appear>
+
+            <SectionHead label="Theme" delay={18} />
+
+            <Appear delay={22} y={8}>
+              <Segmented options={['Native', 'Pro Dark', 'Warm']} active={0} />
+              {/* theme preview tiles */}
+              <div style={{ display: 'flex', gap: 9, marginTop: 12 }}>
+                {THEME_PREVIEWS.map((th) => (
+                  <div
+                    key={th.name}
+                    style={{
+                      flex: 1,
+                      height: 50,
+                      borderRadius: 9,
+                      background: th.bg,
+                      border: `2px solid ${th.selected ? brand.cyan : alpha('#fff', 0.1)}`,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 6,
+                      boxShadow: th.selected
+                        ? `0 0 14px ${alpha(brand.cyan, 0.35)}`
+                        : 'none',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 7,
+                        height: 7,
+                        borderRadius: '50%',
+                        background: th.text,
+                        opacity: 0.65,
+                      }}
+                    />
+                    <span
+                      style={{
+                        fontFamily: fonts.ui,
+                        fontSize: 12,
+                        color: th.text,
+                        opacity: 0.75,
+                        fontWeight: 500,
+                      }}
+                    >
+                      {th.name}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </Appear>
+
+            <SectionHead label="Color scheme" delay={34} />
+
+            <SettingRow label="Light / Dark mode" delay={38}>
+              <Segmented options={['Auto', 'Light', 'Dark']} active={2} />
+            </SettingRow>
+
+            <SettingRow
+              label="RTL layout"
+              sub="Mirror the interface for right-to-left languages"
+              delay={46}
+            >
+              <Toggle on={false} />
+            </SettingRow>
+          </div>
+
+          {/* ── Right: Sidebar ── */}
+          <div
+            style={{
+              width: 316,
+              flexShrink: 0,
+              padding: '22px 20px',
+              overflow: 'hidden',
+            }}
+          >
+            <Appear delay={14} y={14}>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 17,
+                  fontWeight: 700,
+                  color: T.text,
+                  marginBottom: 2,
+                }}
+              >
+                Sidebar
+              </div>
+              <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim, marginBottom: 14 }}>
+                Drag to reorder · toggle to hide.
+              </div>
+            </Appear>
+
+            {SIDEBAR_MODULES.map((m, i) => (
+              <Appear key={m.label} delay={22 + i * 8} y={7}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 9,
+                    height: 34,
+                    padding: '0 6px',
+                    borderRadius: radius.s,
+                    background: i === 0 ? alpha(T.accent, 0.07) : 'transparent',
+                    marginBottom: 2,
+                    opacity: m.visible ? 1 : 0.44,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: fonts.mono,
+                      fontSize: 14,
+                      color: T.textDim,
+                      cursor: 'grab',
+                      userSelect: 'none',
+                      lineHeight: 1,
+                    }}
+                  >
+                    ⠿
+                  </span>
+                  <Icon name={m.icon} size={13} color={T.textDim} />
+                  <span
+                    style={{ flex: 1, fontFamily: fonts.ui, fontSize: 12.5, color: T.text }}
+                  >
+                    {m.label}
+                  </span>
+                  <Toggle on={m.visible} />
+                </div>
+              </Appear>
+            ))}
+          </div>
+        </div>
+      </OttoWindow>
+    </Stage>
+
+    <Caption
+      step={2}
+      title="Make it yours"
+      sub="Themes, light/dark, RTL, a sidebar you reorder and trim"
+    />
+  </>
+);
+
+// ── Scene 4 — Daily CLI Auto-update (~110f) ────────────────────────────────────
+
+const updateLines: TermLine[] = [
+  { text: '[03:00 UTC] checking for CLI updates…',          tone: 'dim'    },
+  { text: '  claude:  v1.0.8 → v1.1.2',                    tone: 'text'   },
+  { text: '  codex:   v0.9.3 → v0.9.5',                    tone: 'text'   },
+  { text: '  downloading claude@1.1.2…',                    tone: 'dim'    },
+  { text: '  downloading codex@0.9.5…',                     tone: 'dim'    },
+  { text: '  ✓ claude updated',                             tone: 'ok'     },
+  { text: '  ✓ codex updated',                              tone: 'ok'     },
+  { text: '  reloading 2 resumed session(s)…',              tone: 'accent' },
+  { text: '  ✓ done · next update: 03:00 UTC tomorrow',     tone: 'ok'     },
+];
+
+const AutoUpdateScene: React.FC = () => (
+  <>
+    <Stage scale={0.87}>
+      <OttoWindow nav={<Navigator active="settings" />} title="Otto — Settings · Updates">
+        <div
+          style={{
+            padding: '24px 28px',
+            height: '100%',
+            boxSizing: 'border-box',
+            position: 'relative',
+            overflow: 'hidden',
+          }}
+        >
+          <Appear delay={6} y={14}>
+            <div
+              style={{
+                fontFamily: fonts.ui,
+                fontSize: 17,
+                fontWeight: 700,
+                color: T.text,
+                marginBottom: 2,
+              }}
+            >
+              Updates
+            </div>
+            <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim, marginBottom: 20 }}>
+              Otto automatically keeps your agent CLIs up to date.
+            </div>
+          </Appear>
+
+          {/* setting card */}
+          <Appear delay={16} y={10}>
             <div
               style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: 13,
-                padding: '16px 20px',
-                borderRadius: 14,
+                gap: 14,
+                padding: '14px 16px',
                 background: T.surface,
-                border: `1px solid ${alpha(brand.cyan, 0.45)}`,
-                boxShadow: `0 0 0 4px ${alpha(brand.cyan, 0.14)}`,
+                border: `1px solid ${T.border}`,
+                borderRadius: radius.m,
+                marginBottom: 20,
               }}
             >
-              <Icon name="search" size={21} color={brand.cyan} />
-              <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 21, fontWeight: 600, color: '#fff' }}>
-                payments
-                <Caret color={brand.cyan} h={22} />
-              </span>
-              <Chip color={brand.violet}>Everywhere</Chip>
-            </div>
-          </Appear>
-
-          {/* grouped results */}
-          <Stagger
-            delay={14}
-            step={6}
-            y={16}
-            style={{ width: '74%', maxWidth: 820, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 13 }}
-          >
-            {SEARCH_GROUPS.map((g) => (
-              <div key={g.group} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 14 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 9 }}>
-                  <span style={{ width: 22, height: 22, borderRadius: 7, background: alpha(g.color, 0.16), display: 'grid', placeItems: 'center', color: g.color }}>
-                    <Icon name={g.icon} size={13} />
-                  </span>
-                  <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 700, color: T.text }}>{g.group}</span>
-                  <span style={{ fontFamily: fonts.ui, fontSize: 11, fontWeight: 700, color: g.color }}>{g.items.length}</span>
+              <Icon name="refresh" size={18} color={brand.cyan} />
+              <div style={{ flex: 1 }}>
+                <div
+                  style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 600, color: T.text }}
+                >
+                  Daily CLI auto-update
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {g.items.map((it, i) => (
-                    <div key={i} style={{ fontFamily: fonts.mono, fontSize: 12.5, color: T.textDim, padding: '5px 9px', borderRadius: 7, background: T.surface2 }}>
-                      {it}
-                    </div>
-                  ))}
+                <div
+                  style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim, marginTop: 3 }}
+                >
+                  Update claude, codex and other CLIs at a fixed time each day
                 </div>
               </div>
-            ))}
-          </Stagger>
-
-          <Appear delay={40} y={10}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontFamily: fonts.ui, fontSize: 13, color: T.textDim }}>
-              <span>stories · workflows · API · swarm · memories · repos · brokers</span>
-              <Keys keys={['⌘', 'F']} />
+              <Toggle on />
+              <span
+                style={{
+                  fontFamily: fonts.mono,
+                  fontSize: 12,
+                  color: T.textDim,
+                  background: T.surface2,
+                  padding: '3px 10px',
+                  borderRadius: 5,
+                  border: `1px solid ${T.border}`,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                03:00 UTC
+              </span>
             </div>
           </Appear>
+
+          {/* last-run log */}
+          <Appear delay={24} y={8}>
+            <div
+              style={{
+                fontFamily: fonts.ui,
+                fontSize: 11.5,
+                fontWeight: 600,
+                letterSpacing: 0.8,
+                textTransform: 'uppercase',
+                color: T.textDim,
+                marginBottom: 9,
+              }}
+            >
+              Last run log
+            </div>
+            <Terminal
+              lines={updateLines}
+              delay={30}
+              step={7}
+              fontSize={13}
+              style={{ maxHeight: 280 }}
+            />
+          </Appear>
+
+          {/* toast notification */}
+          <Toast
+            text="claude & codex updated · 2 sessions reloaded"
+            tone="ok"
+            delay={68}
+            style={{ position: 'absolute', top: 14, right: 14 }}
+          />
         </div>
       </OttoWindow>
     </Stage>
-    <Caption step={4} title="Search across everything" sub="Stories, repos, workflows, clusters, memories — one query." />
+
+    <Caption
+      step={3}
+      title="Agent CLIs auto-update daily"
+      sub="Resumed sessions reload cleanly — no manual maintenance needed"
+    />
   </>
 );
 
-// ── Scene 6 — outro ──────────────────────────────────────────────────────────
+// ── Scene 5 — Outro (~110f) ───────────────────────────────────────────────────
+
+const OutroScene: React.FC = () => (
+  <WalkOutro
+    title="Platform"
+    tagline="A native macOS app that gets out of your way"
+    pills={[
+      { label: '⌘K palette',          icon: 'command', color: brand.cyan   },
+      { label: 'Themes + RTL',         icon: 'gear',    color: brand.purple },
+      { label: 'Customizable sidebar', icon: 'sidebar', color: brand.violet },
+      { label: 'CLI auto-update',      icon: 'refresh', color: '#28c840'   },
+    ]}
+  />
+);
+
+// ── Composition ───────────────────────────────────────────────────────────────
+
 const SCENES: SceneDef[] = [
-  { dur: 80, node: <Title />, name: 'Title' },
-  { dur: 210, node: <PaletteScene />, name: 'Command palette' },
-  { dur: 220, node: <MissionControlScene />, name: 'Mission Control' },
-  { dur: 180, node: <ThemeHealthScene />, name: 'Theming + health' },
-  { dur: 80, node: <SearchScene />, name: 'Search' },
-  {
-    dur: 130,
-    node: (
-      <WalkOutro
-        title="Power & Polish"
-        tagline="The little things, done right."
-        pills={[
-          { label: '⌘K palette', color: brand.cyan, icon: 'command' },
-          { label: 'Mission Control', color: '#0a84ff', icon: 'grid' },
-          { label: 'Cross-search', color: brand.violet, icon: 'search' },
-          { label: 'Themes + RTL', color: '#febc2e', icon: 'gear' },
-          { label: 'Auto-update', color: '#28c840', icon: 'refresh' },
-        ]}
-      />
-    ),
-    name: 'Outro',
-  },
+  { dur: 80,  node: <TitleScene />,      name: 'Title'      },
+  { dur: 160, node: <PaletteScene />,    name: 'Palette'    },
+  { dur: 160, node: <ThemingScene />,    name: 'Theming'    },
+  { dur: 110, node: <AutoUpdateScene />, name: 'AutoUpdate' },
+  { dur: 110, node: <OutroScene />,      name: 'Outro'      },
 ];
 
 export const platformDuration = scenesDuration(SCENES);
