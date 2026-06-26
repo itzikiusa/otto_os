@@ -200,6 +200,20 @@ impl LocalGit {
         Ok(out.trim().to_string())
     }
 
+    /// Files this worktree's HEAD changed relative to `base` (`git diff
+    /// --name-only base...HEAD`). Used by the swarm to detect when two agents'
+    /// branches touch the same shared files. Empty on no changes.
+    pub async fn changed_files(&self, base: &str) -> Result<Vec<String>> {
+        let range = format!("{base}...HEAD");
+        let out = self.run(&["diff", "--name-only", &range]).await?;
+        Ok(out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     /// True when a local branch already exists. Lets Goal Loops re-attach an
     /// existing loop branch NON-destructively instead of `-B`-resetting it.
     pub async fn branch_exists(&self, branch: &str) -> bool {
@@ -1730,6 +1744,31 @@ mod tests {
         assert_eq!(head[0].sha, sha, "prior commit preserved");
         assert_eq!(head[0].subject, "agent turn 1");
         assert!(wt.join("agent_work.txt").exists(), "committed file preserved");
+    }
+
+    /// `changed_files` lists what a worktree branch changed vs its base — the
+    /// signal the swarm uses to detect two agents touching the same shared files.
+    #[tokio::test]
+    async fn changed_files_lists_branch_changes() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        let wt = dir.parent().unwrap().join("cf-wt");
+        let wt_str = wt.to_str().unwrap().to_string();
+        git.worktree_add_if_absent(&wt_str, "swarm/s1/a1", "main").await.unwrap();
+
+        let wt_git = LocalGit::new(&wt);
+        // No commits on the branch yet → no changes vs base.
+        assert!(wt_git.changed_files("main").await.unwrap().is_empty());
+
+        // Commit a new file + modify an existing one.
+        write(&wt, "shared.txt", "agent A\n");
+        write(&wt, "a.txt", "alpha line 1\nalpha line 2\nalpha A\n");
+        wt_git.stage(&["shared.txt".into(), "a.txt".into()]).await.unwrap();
+        wt_git.commit("agent A work", false).await.unwrap();
+
+        let mut files = wt_git.changed_files("main").await.unwrap();
+        files.sort();
+        assert_eq!(files, vec!["a.txt".to_string(), "shared.txt".to_string()]);
     }
 
     /// `worktree_exists` is path-aware: false for an unrelated path, true once

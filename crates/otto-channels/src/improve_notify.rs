@@ -299,10 +299,29 @@ async fn send_one(
     }
 }
 
+/// Send `text` to a SPECIFIC chat/thread on `integ` (not its default chat). Used
+/// by the swarm to reply/escalate back to the channel that launched it. Returns
+/// `true` on success; best-effort.
+pub async fn send_to(
+    secrets: &Arc<dyn SecretStore>,
+    integ: &Integration,
+    chat: &str,
+    thread: Option<&str>,
+    text: &str,
+) -> bool {
+    if chat.trim().is_empty() {
+        return false;
+    }
+    let Some(adapter) = build_adapter(secrets, integ) else {
+        return false;
+    };
+    adapter.send_formatted(chat, thread, text).await.is_ok()
+}
+
 /// Build the outbound adapter for an integration, resolving its bot token from
 /// the secret store (same refs the channel manager uses). Returns `None` when the
 /// token is missing/empty (nothing to send with).
-fn build_adapter(secrets: &Arc<dyn SecretStore>, integ: &Integration) -> Option<Arc<dyn Adapter>> {
+pub fn build_adapter(secrets: &Arc<dyn SecretStore>, integ: &Integration) -> Option<Arc<dyn Adapter>> {
     let ws = &integ.workspace_id;
     match integ.channel {
         Channel::Telegram => {

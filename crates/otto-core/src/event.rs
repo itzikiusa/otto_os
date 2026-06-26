@@ -109,6 +109,15 @@ pub enum Event {
         swarm_id: Id,
         status: String,
     },
+    /// A swarm goal was created/changed (verification progress). `goal` is the
+    /// serialized SwarmGoal row (otto-core can't depend on otto-state).
+    SwarmGoalUpdated {
+        workspace_id: Id,
+        swarm_id: Id,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<Id>,
+        goal: serde_json::Value,
+    },
     /// Throttle marker emitted after each metrics-sampler tick. The UI can
     /// subscribe to refresh the `/usage/metrics` sparklines in near-real-time
     /// instead of polling blindly. `ts` is the sample timestamp (UTC ISO-8601).

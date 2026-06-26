@@ -113,9 +113,9 @@ pub use skill_evals::SkillEvalsRepo;
 // Note: `swarm::NewTask` collides with `activity::NewTask`; access it via the
 // module path (`otto_state::swarm::NewTask`). The rest are re-exported here.
 pub use swarm::{
-    AgentPatch, NewAgent, NewMessage, NewProject, NewRun, NewSwarm, ProjectPatch, RunFilter,
-    RunPatch, Swarm, SwarmAgent, SwarmMessage, SwarmPatch, SwarmProject, SwarmRepo, SwarmRun,
-    SwarmTask, TaskPatch,
+    AgentPatch, GoalPatch, NewAgent, NewGoal, NewMessage, NewProject, NewRun, NewSwarm, NewTrigger,
+    ProjectPatch, RunFilter, RunPatch, Swarm, SwarmAgent, SwarmChannelTrigger, SwarmGoal,
+    SwarmMessage, SwarmPatch, SwarmProject, SwarmRepo, SwarmRun, SwarmTask, TaskPatch, TriggerPatch,
 };
 pub use workflow_triggers::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger};
 pub use workflows::WorkflowsRepo;

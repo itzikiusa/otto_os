@@ -75,6 +75,9 @@ pub struct ChannelManager {
     /// Daemon event bus (the same one the WS subscribes to). The proactive
     /// self-improvement notifier subscribes to this; `None` disables it.
     pub events: Option<broadcast::Sender<Event>>,
+    /// Optional hook: an inbound message on a swarm-bound channel launches that
+    /// swarm instead of starting a normal session. Injected by otto-server.
+    pub swarm_trigger: Option<Arc<dyn crate::swarm_trigger::SwarmTrigger>>,
 }
 
 impl ChannelManager {
@@ -95,7 +98,14 @@ impl ChannelManager {
             secrets,
             root_user_id,
             events,
+            swarm_trigger: None,
         }
+    }
+
+    /// Wire the swarm-launch hook (otto-server provides the implementation).
+    pub fn with_swarm_trigger(mut self, trigger: Arc<dyn crate::swarm_trigger::SwarmTrigger>) -> Self {
+        self.swarm_trigger = Some(trigger);
+        self
     }
 
     /// Start the supervisor. Returns immediately; adapters run in the
@@ -129,12 +139,13 @@ impl ChannelManager {
         // Shared mirror + bridge survive across generations so an in-flight
         // session keeps its channel mapping when adapters are respawned.
         let mirror = Mirror::new(Arc::clone(&self.manager));
-        let bridge = Bridge::new(
+        let bridge = Bridge::new_with_swarm_trigger(
             Arc::clone(&self.manager),
             self.workspaces.clone(),
             self.settings.clone(),
             Arc::clone(&mirror),
             self.root_user_id.clone(),
+            self.swarm_trigger.clone(),
         );
 
         let mut gen_cancel: Option<Arc<AtomicBool>> = None;

@@ -14,11 +14,32 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use otto_core::Id;
-use otto_state::{NewProject, SwarmPatch};
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::state::ServerCtx;
+use crate::swarm_channels::{GoalSpec, LaunchOpts, Origin};
+
+#[derive(Deserialize)]
+pub struct WebhookGoalReq {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub metric: Option<String>,
+    #[serde(default)]
+    pub comparator: Option<String>,
+    #[serde(default)]
+    pub target_value: Option<f64>,
+    #[serde(default)]
+    pub block_value: Option<f64>,
+    #[serde(default)]
+    pub verify_cmd: Option<String>,
+    #[serde(default)]
+    pub max_retries: Option<i64>,
+    #[serde(default)]
+    pub blocking: Option<bool>,
+}
 
 #[derive(Deserialize)]
 pub struct SwarmTriggerReq {
@@ -28,10 +49,16 @@ pub struct SwarmTriggerReq {
     /// Project name (defaults to the goal's first line).
     #[serde(default)]
     pub name: Option<String>,
-    /// Repo the agents work in (required for worktree isolation to actually
-    /// branch; without it agents fall back to a scratch dir).
+    /// Repo the agents work in (worktree isolation branches from it; without it
+    /// agents fall back to a scratch dir).
     #[serde(default)]
     pub repo_path: Option<String>,
+    /// Explicit goals the leader verifies after the work is done (requirement 3).
+    #[serde(default)]
+    pub goals: Vec<WebhookGoalReq>,
+    /// Where to POST progress/result/escalation back (optional).
+    #[serde(default)]
+    pub callback_url: Option<String>,
     /// Start the coordinator immediately (default true). False = plan only.
     #[serde(default)]
     pub start: Option<bool>,
@@ -88,72 +115,49 @@ pub async fn trigger(
         return (StatusCode::BAD_REQUEST, "goal is required").into_response();
     }
 
-    // 3. Enforce worktree isolation: each agent gets its own branch/worktree.
-    if swarm.config.get("cwd_mode").and_then(|v| v.as_str()) != Some("worktree") {
-        let mut cfg = swarm.config.clone();
-        if let Some(obj) = cfg.as_object_mut() {
-            obj.insert("cwd_mode".into(), json!("worktree"));
-        }
-        let _ = ctx
-            .swarm_repo
-            .update_swarm(&sid, SwarmPatch { config: Some(cfg), ..Default::default() })
-            .await;
-    }
-
-    // 4. Create the project from the goal.
-    let creator = swarm.created_by.clone();
-    let name = req.name.clone().unwrap_or_else(|| {
-        req.goal
-            .lines()
-            .next()
-            .unwrap_or("Webhook feature")
-            .chars()
-            .take(80)
-            .collect()
-    });
-    let project = match ctx
-        .swarm_repo
-        .create_project(NewProject {
-            swarm_id: sid.clone(),
-            workspace_id: ws.clone(),
-            name,
-            description: "Triggered via webhook".into(),
-            repo_path: req.repo_path.clone(),
-            goal_md: Some(req.goal.clone()),
-            story_id: None,
-            order_idx: 0,
-            created_by: creator.clone(),
-        })
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("swarm webhook: create_project: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let project_id = project.id.clone();
-
-    // 5. Plan + start in the background; reply 202 immediately (the planner can
-    //    run for a while, and external callers shouldn't block on it).
+    // 3. Launch via the shared path (creates the project, attaches goals, records
+    //    the channel origin, seeds tasks + starts the coordinator in the
+    //    background). Agents run in worktrees by default (the cwd-mode default), so
+    //    several can share the repo without clobbering each other.
     let start = req.start.unwrap_or(true);
-    let goal = req.goal.clone();
-    let ctx2 = ctx.clone();
-    let sid2 = sid.clone();
-    let ws2 = ws.clone();
-    tokio::spawn(async move {
-        let _ = crate::product_swarm::seed_tasks(&ctx2, &project, &creator, &goal).await;
-        if start {
-            let _ = ctx2.swarm_repo.set_swarm_status(&sid2, "active").await;
-            crate::swarm_runtime::set_paused(&ctx2, &sid2, false);
-            crate::swarm_runtime::start_coordinator(ctx2.clone(), sid2.clone());
-            crate::swarm_runtime::emit_status(&ctx2, &ws2, &sid2, "active");
-        }
+    let goals: Vec<GoalSpec> = req
+        .goals
+        .into_iter()
+        .map(|g| GoalSpec {
+            title: g.title,
+            description: g.description,
+            metric: g.metric,
+            comparator: g.comparator,
+            target_value: g.target_value,
+            block_value: g.block_value,
+            verify_cmd: g.verify_cmd,
+            max_retries: g.max_retries,
+            blocking: g.blocking,
+        })
+        .collect();
+    let origin = req.callback_url.clone().filter(|u| !u.trim().is_empty()).map(|url| Origin {
+        channel: "webhook".into(),
+        chat: url,
+        thread: None,
     });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({ "swarm_id": sid, "project_id": project_id, "started": start })),
-    )
-        .into_response()
+    let opts = LaunchOpts {
+        goal: req.goal.clone(),
+        name: req.name.clone(),
+        repo_path: req.repo_path.clone(),
+        goals,
+        origin,
+        start,
+        created_by: swarm.created_by.clone(),
+    };
+    match crate::swarm_channels::launch(&ctx, &swarm, opts).await {
+        Ok(project_id) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "swarm_id": sid, "project_id": project_id, "started": start })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!("swarm webhook: launch: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }

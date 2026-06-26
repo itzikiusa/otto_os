@@ -73,6 +73,16 @@ pub struct SwarmProject {
     pub goal_md: Option<String>,
     /// Source Product story this project was created from (Plan → Swarm), if any.
     pub story_id: Option<Id>,
+    /// Project-level skill set, layered on team (swarm) + per-agent skills.
+    /// `[{name, must_use?}]` (same shape as agent skills).
+    pub skills: Value,
+    /// Dedicated swarm branch agent worktrees are based on + merged into. Pinned
+    /// once at first worktree creation; NEVER the user's working branch.
+    pub integration_branch: Option<String>,
+    /// Channel a webhook/Slack-launched project replies/escalates back to.
+    pub origin_channel: Option<String>,
+    pub origin_chat: Option<String>,
+    pub origin_thread: Option<String>,
     pub status: String,
     pub order_idx: i64,
     pub created_by: Id,
@@ -144,6 +154,53 @@ pub struct SwarmMessage {
     pub body: String,
     pub meta: Value,
     pub created_at: DateTime<Utc>,
+}
+
+/// A goal the leader verifies for a task/project, or a swarm-level standing
+/// (always-applied) goal template. See docs/design/swarm-enhancements-2026-06-26.md §3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmGoal {
+    pub id: Id,
+    pub swarm_id: Id,
+    pub workspace_id: Id,
+    pub project_id: Option<Id>,
+    pub task_id: Option<Id>,
+    pub kind: String,    // explicit | standing
+    pub title: String,
+    pub description: String,
+    pub metric: Option<String>,
+    pub comparator: Option<String>,
+    pub target_value: Option<f64>,
+    pub block_value: Option<f64>,
+    pub verify_cmd: Option<String>,
+    pub max_retries: i64,
+    pub blocking: bool,
+    pub status: String,  // pending|verifying|passed|warned|unmet|skipped|error
+    pub verdict: Option<Value>,
+    pub iterations: i64,
+    pub order_idx: i64,
+    pub created_by: Id,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Binds a workspace channel (Slack/Telegram/webhook) to a swarm so an inbound
+/// message launches the team. See design §4.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmChannelTrigger {
+    pub id: Id,
+    pub swarm_id: Id,
+    pub workspace_id: Id,
+    pub channel: String, // slack | telegram | webhook
+    pub match_chat: String,
+    pub keyword: String,
+    pub repo_path: Option<String>,
+    pub auto_start: bool,
+    pub reply: bool,
+    pub enabled: bool,
+    pub created_by: Id,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 // --- Inputs ----------------------------------------------------------------
@@ -240,8 +297,73 @@ pub struct ProjectPatch {
     pub repo_path: Option<Option<String>>,
     pub goal_md: Option<Option<String>>,
     pub story_id: Option<Option<Id>>,
+    pub skills: Option<Value>,
+    pub integration_branch: Option<Option<String>>,
+    pub origin_channel: Option<Option<String>>,
+    pub origin_chat: Option<Option<String>>,
+    pub origin_thread: Option<Option<String>>,
     pub status: Option<String>,
     pub order_idx: Option<i64>,
+}
+
+pub struct NewGoal {
+    pub swarm_id: Id,
+    pub workspace_id: Id,
+    pub project_id: Option<Id>,
+    pub task_id: Option<Id>,
+    pub kind: String,
+    pub title: String,
+    pub description: String,
+    pub metric: Option<String>,
+    pub comparator: Option<String>,
+    pub target_value: Option<f64>,
+    pub block_value: Option<f64>,
+    pub verify_cmd: Option<String>,
+    pub max_retries: i64,
+    pub blocking: bool,
+    pub order_idx: i64,
+    pub created_by: Id,
+}
+
+#[derive(Default)]
+pub struct GoalPatch {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub metric: Option<Option<String>>,
+    pub comparator: Option<Option<String>>,
+    pub target_value: Option<Option<f64>>,
+    pub block_value: Option<Option<f64>>,
+    pub verify_cmd: Option<Option<String>>,
+    pub max_retries: Option<i64>,
+    pub blocking: Option<bool>,
+    pub status: Option<String>,
+    pub verdict: Option<Option<Value>>,
+    pub iterations: Option<i64>,
+    pub order_idx: Option<i64>,
+}
+
+pub struct NewTrigger {
+    pub swarm_id: Id,
+    pub workspace_id: Id,
+    pub channel: String,
+    pub match_chat: String,
+    pub keyword: String,
+    pub repo_path: Option<String>,
+    pub auto_start: bool,
+    pub reply: bool,
+    pub enabled: bool,
+    pub created_by: Id,
+}
+
+#[derive(Default)]
+pub struct TriggerPatch {
+    pub channel: Option<String>,
+    pub match_chat: Option<String>,
+    pub keyword: Option<String>,
+    pub repo_path: Option<Option<String>>,
+    pub auto_start: Option<bool>,
+    pub reply: Option<bool>,
+    pub enabled: Option<bool>,
 }
 
 pub struct NewTask {
@@ -395,6 +517,11 @@ fn row_to_project(r: &sqlx::sqlite::SqliteRow) -> Result<SwarmProject> {
         repo_path: r.get("repo_path"),
         goal_md: r.get("goal_md"),
         story_id: r.get("story_id"),
+        skills: json(&r.get::<String, _>("skills_json"))?,
+        integration_branch: r.get("integration_branch"),
+        origin_channel: r.get("origin_channel"),
+        origin_chat: r.get("origin_chat"),
+        origin_thread: r.get("origin_thread"),
         status: r.get("status"),
         order_idx: r.get("order_idx"),
         created_by: r.get("created_by"),
@@ -467,6 +594,51 @@ fn row_to_message(r: &sqlx::sqlite::SqliteRow) -> Result<SwarmMessage> {
         body: r.get("body"),
         meta: json(&r.get::<String, _>("meta_json"))?,
         created_at: ts(&r.get::<String, _>("created_at"))?,
+    })
+}
+
+fn row_to_goal(r: &sqlx::sqlite::SqliteRow) -> Result<SwarmGoal> {
+    Ok(SwarmGoal {
+        id: r.get("id"),
+        swarm_id: r.get("swarm_id"),
+        workspace_id: r.get("workspace_id"),
+        project_id: r.get("project_id"),
+        task_id: r.get("task_id"),
+        kind: r.get("kind"),
+        title: r.get("title"),
+        description: r.get("description"),
+        metric: r.get("metric"),
+        comparator: r.get("comparator"),
+        target_value: r.get("target_value"),
+        block_value: r.get("block_value"),
+        verify_cmd: r.get("verify_cmd"),
+        max_retries: r.get("max_retries"),
+        blocking: r.get::<i64, _>("blocking") != 0,
+        status: r.get("status"),
+        verdict: opt_json(r.get::<Option<String>, _>("verdict_json"))?,
+        iterations: r.get("iterations"),
+        order_idx: r.get("order_idx"),
+        created_by: r.get("created_by"),
+        created_at: ts(&r.get::<String, _>("created_at"))?,
+        updated_at: ts(&r.get::<String, _>("updated_at"))?,
+    })
+}
+
+fn row_to_trigger(r: &sqlx::sqlite::SqliteRow) -> Result<SwarmChannelTrigger> {
+    Ok(SwarmChannelTrigger {
+        id: r.get("id"),
+        swarm_id: r.get("swarm_id"),
+        workspace_id: r.get("workspace_id"),
+        channel: r.get("channel"),
+        match_chat: r.get("match_chat"),
+        keyword: r.get("keyword"),
+        repo_path: r.get("repo_path"),
+        auto_start: r.get::<i64, _>("auto_start") != 0,
+        reply: r.get::<i64, _>("reply") != 0,
+        enabled: r.get::<i64, _>("enabled") != 0,
+        created_by: r.get("created_by"),
+        created_at: ts(&r.get::<String, _>("created_at"))?,
+        updated_at: ts(&r.get::<String, _>("updated_at"))?,
     })
 }
 
@@ -861,18 +1033,30 @@ impl SwarmRepo {
         let repo_path = p.repo_path.unwrap_or(cur.repo_path);
         let goal_md = p.goal_md.unwrap_or(cur.goal_md);
         let story_id = p.story_id.unwrap_or(cur.story_id);
+        let skills = p.skills.unwrap_or(cur.skills);
+        let integration_branch = p.integration_branch.unwrap_or(cur.integration_branch);
+        let origin_channel = p.origin_channel.unwrap_or(cur.origin_channel);
+        let origin_chat = p.origin_chat.unwrap_or(cur.origin_chat);
+        let origin_thread = p.origin_thread.unwrap_or(cur.origin_thread);
         let status = p.status.unwrap_or(cur.status);
         let order_idx = p.order_idx.unwrap_or(cur.order_idx);
         let now = fmt(Utc::now());
         sqlx::query(
             "UPDATE swarm_projects SET name = ?, description = ?, repo_path = ?, goal_md = ?,
-                story_id = ?, status = ?, order_idx = ?, updated_at = ? WHERE id = ?",
+                story_id = ?, skills_json = ?, integration_branch = ?, origin_channel = ?,
+                origin_chat = ?, origin_thread = ?, status = ?, order_idx = ?, updated_at = ?
+             WHERE id = ?",
         )
         .bind(&name)
         .bind(&description)
         .bind(&repo_path)
         .bind(&goal_md)
         .bind(&story_id)
+        .bind(skills.to_string())
+        .bind(&integration_branch)
+        .bind(&origin_channel)
+        .bind(&origin_chat)
+        .bind(&origin_thread)
         .bind(&status)
         .bind(order_idx)
         .bind(&now)
@@ -1400,6 +1584,248 @@ impl SwarmRepo {
         .await
         .map_err(dberr("board for agent"))?;
         rows.iter().map(row_to_message).collect()
+    }
+
+    // -- Goals --------------------------------------------------------------
+
+    pub async fn create_goal(&self, g: NewGoal) -> Result<SwarmGoal> {
+        let id = new_id();
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "INSERT INTO swarm_goals (id, swarm_id, workspace_id, project_id, task_id, kind, title,
+                description, metric, comparator, target_value, block_value, verify_cmd, max_retries,
+                blocking, status, iterations, order_idx, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&g.swarm_id)
+        .bind(&g.workspace_id)
+        .bind(&g.project_id)
+        .bind(&g.task_id)
+        .bind(&g.kind)
+        .bind(&g.title)
+        .bind(&g.description)
+        .bind(&g.metric)
+        .bind(&g.comparator)
+        .bind(g.target_value)
+        .bind(g.block_value)
+        .bind(&g.verify_cmd)
+        .bind(g.max_retries)
+        .bind(g.blocking as i64)
+        .bind(g.order_idx)
+        .bind(&g.created_by)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("create goal"))?;
+        self.get_goal(&id).await
+    }
+
+    pub async fn get_goal(&self, id: &Id) -> Result<SwarmGoal> {
+        let row = sqlx::query("SELECT * FROM swarm_goals WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("get goal"))?;
+        row_to_goal(&row)
+    }
+
+    /// Explicit goals attached to a task, ordered.
+    pub async fn list_goals_for_task(&self, task_id: &Id) -> Result<Vec<SwarmGoal>> {
+        let rows = sqlx::query(
+            "SELECT * FROM swarm_goals WHERE task_id = ? ORDER BY order_idx, created_at",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list task goals"))?;
+        rows.iter().map(row_to_goal).collect()
+    }
+
+    /// Explicit goals attached to a project (not a specific task), ordered.
+    pub async fn list_goals_for_project(&self, project_id: &Id) -> Result<Vec<SwarmGoal>> {
+        let rows = sqlx::query(
+            "SELECT * FROM swarm_goals WHERE project_id = ? AND task_id IS NULL
+             ORDER BY order_idx, created_at",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list project goals"))?;
+        rows.iter().map(row_to_goal).collect()
+    }
+
+    /// Swarm-level standing-goal templates (task_id IS NULL, project_id IS NULL).
+    pub async fn list_standing_goals(&self, swarm_id: &Id) -> Result<Vec<SwarmGoal>> {
+        let rows = sqlx::query(
+            "SELECT * FROM swarm_goals WHERE swarm_id = ? AND kind = 'standing'
+             AND task_id IS NULL AND project_id IS NULL ORDER BY order_idx, created_at",
+        )
+        .bind(swarm_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list standing goals"))?;
+        rows.iter().map(row_to_goal).collect()
+    }
+
+    pub async fn update_goal(&self, id: &Id, p: GoalPatch) -> Result<SwarmGoal> {
+        let cur = self.get_goal(id).await?;
+        let title = p.title.unwrap_or(cur.title);
+        let description = p.description.unwrap_or(cur.description);
+        let metric = p.metric.unwrap_or(cur.metric);
+        let comparator = p.comparator.unwrap_or(cur.comparator);
+        let target_value = p.target_value.unwrap_or(cur.target_value);
+        let block_value = p.block_value.unwrap_or(cur.block_value);
+        let verify_cmd = p.verify_cmd.unwrap_or(cur.verify_cmd);
+        let max_retries = p.max_retries.unwrap_or(cur.max_retries);
+        let blocking = p.blocking.unwrap_or(cur.blocking);
+        let status = p.status.unwrap_or(cur.status);
+        let verdict = p.verdict.unwrap_or(cur.verdict);
+        let iterations = p.iterations.unwrap_or(cur.iterations);
+        let order_idx = p.order_idx.unwrap_or(cur.order_idx);
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE swarm_goals SET title = ?, description = ?, metric = ?, comparator = ?,
+                target_value = ?, block_value = ?, verify_cmd = ?, max_retries = ?, blocking = ?,
+                status = ?, verdict_json = ?, iterations = ?, order_idx = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&title)
+        .bind(&description)
+        .bind(&metric)
+        .bind(&comparator)
+        .bind(target_value)
+        .bind(block_value)
+        .bind(&verify_cmd)
+        .bind(max_retries)
+        .bind(blocking as i64)
+        .bind(&status)
+        .bind(verdict.map(|v| v.to_string()))
+        .bind(iterations)
+        .bind(order_idx)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update goal"))?;
+        self.get_goal(id).await
+    }
+
+    pub async fn delete_goal(&self, id: &Id) -> Result<()> {
+        sqlx::query("DELETE FROM swarm_goals WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete goal"))?;
+        Ok(())
+    }
+
+    // -- Channel triggers ---------------------------------------------------
+
+    pub async fn create_trigger(&self, t: NewTrigger) -> Result<SwarmChannelTrigger> {
+        let id = new_id();
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "INSERT INTO swarm_channel_triggers (id, swarm_id, workspace_id, channel, match_chat,
+                keyword, repo_path, auto_start, reply, enabled, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&t.swarm_id)
+        .bind(&t.workspace_id)
+        .bind(&t.channel)
+        .bind(&t.match_chat)
+        .bind(&t.keyword)
+        .bind(&t.repo_path)
+        .bind(t.auto_start as i64)
+        .bind(t.reply as i64)
+        .bind(t.enabled as i64)
+        .bind(&t.created_by)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("create trigger"))?;
+        self.get_trigger(&id).await
+    }
+
+    pub async fn get_trigger(&self, id: &Id) -> Result<SwarmChannelTrigger> {
+        let row = sqlx::query("SELECT * FROM swarm_channel_triggers WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("get trigger"))?;
+        row_to_trigger(&row)
+    }
+
+    pub async fn list_triggers(&self, swarm_id: &Id) -> Result<Vec<SwarmChannelTrigger>> {
+        let rows = sqlx::query(
+            "SELECT * FROM swarm_channel_triggers WHERE swarm_id = ? ORDER BY created_at",
+        )
+        .bind(swarm_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list triggers"))?;
+        rows.iter().map(row_to_trigger).collect()
+    }
+
+    /// Find an enabled trigger for an inbound message: matches workspace + channel,
+    /// and (if set) the specific chat. Keyword matching is done by the caller.
+    /// Most-recently-created wins.
+    pub async fn find_triggers(
+        &self,
+        workspace_id: &Id,
+        channel: &str,
+    ) -> Result<Vec<SwarmChannelTrigger>> {
+        let rows = sqlx::query(
+            "SELECT * FROM swarm_channel_triggers WHERE workspace_id = ? AND channel = ?
+             AND enabled = 1 ORDER BY created_at DESC",
+        )
+        .bind(workspace_id)
+        .bind(channel)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("find triggers"))?;
+        rows.iter().map(row_to_trigger).collect()
+    }
+
+    pub async fn update_trigger(&self, id: &Id, p: TriggerPatch) -> Result<SwarmChannelTrigger> {
+        let cur = self.get_trigger(id).await?;
+        let channel = p.channel.unwrap_or(cur.channel);
+        let match_chat = p.match_chat.unwrap_or(cur.match_chat);
+        let keyword = p.keyword.unwrap_or(cur.keyword);
+        let repo_path = p.repo_path.unwrap_or(cur.repo_path);
+        let auto_start = p.auto_start.unwrap_or(cur.auto_start);
+        let reply = p.reply.unwrap_or(cur.reply);
+        let enabled = p.enabled.unwrap_or(cur.enabled);
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE swarm_channel_triggers SET channel = ?, match_chat = ?, keyword = ?,
+                repo_path = ?, auto_start = ?, reply = ?, enabled = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&channel)
+        .bind(&match_chat)
+        .bind(&keyword)
+        .bind(&repo_path)
+        .bind(auto_start as i64)
+        .bind(reply as i64)
+        .bind(enabled as i64)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update trigger"))?;
+        self.get_trigger(id).await
+    }
+
+    pub async fn delete_trigger(&self, id: &Id) -> Result<()> {
+        sqlx::query("DELETE FROM swarm_channel_triggers WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete trigger"))?;
+        Ok(())
     }
 }
 

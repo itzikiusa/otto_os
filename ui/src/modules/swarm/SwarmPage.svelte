@@ -13,12 +13,14 @@
   import NewSwarm from './NewSwarm.svelte';
   import RecruiterWizard from './RecruiterWizard.svelte';
   import AgentEditor from './AgentEditor.svelte';
+  import SwarmSettings from './SwarmSettings.svelte';
+  import SkillPicker from './SkillPicker.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { CreateAgentReq, RecruitedAgent, Swarm, SwarmAgent } from './types';
+  import type { CreateAgentReq, RecruitedAgent, Swarm, SwarmAgent, SwarmProject } from './types';
 
   type View = 'tree' | 'graph' | 'kanban' | 'runs' | 'board';
   let view = $state<View>('tree');
@@ -71,10 +73,15 @@
   }
   let editAgent = $state<SwarmAgent | null>(null);
   let editorOpen = $state(false);
+  let showSettings = $state(false);
   let projModal = $state(false);
+  // null = creating; an id = editing that project.
+  let projEditId = $state<string | null>(null);
   let projName = $state('');
   let projRepo = $state('');
   let projGoal = $state('');
+  let projSkills = $state<string[]>([]);
+  let projSaving = $state(false);
 
   // Load swarms for the current workspace.
   $effect(() => {
@@ -136,18 +143,56 @@
     await swarm.updateSwarm(detail.id, { max_total_runs: next } as Partial<Swarm>);
   }
 
-  async function createProject() {
-    if (!detail || !projName.trim()) return;
-    await swarm.createProject(detail.id, {
-      name: projName.trim(),
-      repo_path: projRepo.trim() || undefined,
-      goal_md: projGoal.trim() || undefined,
-    });
+  function openProjectCreate() {
+    projEditId = null;
     projName = '';
     projRepo = '';
     projGoal = '';
-    projModal = false;
-    view = 'kanban';
+    projSkills = [];
+    projModal = true;
+  }
+
+  function openProjectEdit(p: SwarmProject) {
+    projEditId = p.id;
+    projName = p.name;
+    projRepo = p.repo_path ?? '';
+    projGoal = p.goal_md ?? '';
+    projSkills = ((p.skills ?? []) as unknown[]).map((s) => String(s));
+    projModal = true;
+  }
+
+  async function saveProject() {
+    if (!detail || !projName.trim() || projSaving) return;
+    projSaving = true;
+    try {
+      if (projEditId) {
+        await swarm.updateProject(projEditId, {
+          name: projName.trim(),
+          repo_path: projRepo.trim() || null,
+          goal_md: projGoal.trim() || null,
+          skills: projSkills,
+        } as Partial<SwarmProject>);
+        toasts.success('Project updated');
+      } else {
+        await swarm.createProject(detail.id, {
+          name: projName.trim(),
+          repo_path: projRepo.trim() || undefined,
+          goal_md: projGoal.trim() || undefined,
+        });
+        // Project skills ride PATCH /swarm/projects/{pid}; apply them once the
+        // new project exists (createProject pins selectedProjectId to it).
+        const pid = swarm.selectedProjectId;
+        if (pid && projSkills.length) {
+          await swarm.updateProject(pid, { skills: projSkills } as Partial<SwarmProject>);
+        }
+        view = 'kanban';
+      }
+      projModal = false;
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      projSaving = false;
+    }
   }
 
   async function deleteSwarm() {
@@ -327,7 +372,8 @@
             <button class="btn small primary" onclick={() => lifecycle('start')}><Icon name="play" size={12} /> Start</button>
           {/if}
           <button class="btn small" onclick={() => (showRecruit = true)}><Icon name="plus" size={12} /> Recruit</button>
-          <button class="btn small" onclick={() => (projModal = true)}><Icon name="note" size={12} /> Project</button>
+          <button class="btn small" onclick={openProjectCreate}><Icon name="note" size={12} /> Project</button>
+          <button class="btn small" onclick={() => (showSettings = true)} title="Standing goals, team skills & channel triggers"><Icon name="gear" size={12} /> Settings</button>
           <button class="icon-btn" onclick={deleteSwarm} aria-label="delete swarm"><Icon name="trash" size={14} /></button>
         </div>
       </header>
@@ -353,7 +399,7 @@
           {:else if view === 'graph'}
             <AgentGraph />
           {:else if view === 'kanban'}
-            <KanbanBoard onrecruit={() => (showRecruit = true)} />
+            <KanbanBoard onrecruit={() => (showRecruit = true)} oneditproject={openProjectEdit} />
           {:else if view === 'runs'}
             <RunsList onhire={(p, rid) => { recruitProposal = p; recruitProposalRunId = rid; showRecruit = true; }} />
           {:else if view === 'board'}
@@ -400,14 +446,20 @@
     onclose={() => { editorOpen = false; editorPrefill = null; }}
   />
 {/if}
+{#if showSettings}
+  <SwarmSettings onclose={() => (showSettings = false)} />
+{/if}
 {#if projModal}
-  <Modal title="New project" width={480} onclose={() => (projModal = false)}>
+  <Modal title={projEditId ? 'Edit project' : 'New project'} width={480} onclose={() => (projModal = false)}>
     <div class="field"><label for="p-name">Name</label><input id="p-name" class="input" bind:value={projName} /></div>
     <div class="field"><label for="p-repo">Repo path (optional, for code projects)</label><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></div>
     <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
+    <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}
       <button class="btn" class:ghost={true} onclick={() => (projModal = false)}>Cancel</button>
-      <button class="btn" class:primary={true} onclick={createProject} disabled={!projName.trim()}>Create</button>
+      <button class="btn" class:primary={true} onclick={saveProject} disabled={!projName.trim() || projSaving}>
+        {projSaving ? 'Saving…' : projEditId ? 'Save' : 'Create'}
+      </button>
     {/snippet}
   </Modal>
 {/if}

@@ -6,18 +6,26 @@ import { api } from '../api/client';
 import type { OttoEvent } from '../api/types';
 import type {
   CreateAgentReq,
+  CreateGoalReq,
+  CreateTriggerReq,
+  LibrarySkillMeta,
   RecruitedAgent,
   RunFilters,
   Swarm,
   SwarmAgent,
+  SwarmChannelTrigger,
   SwarmDetail,
+  SwarmGoal,
   SwarmGraph,
   SwarmMessage,
   SwarmPreset,
   SwarmProject,
   SwarmRun,
   SwarmTask,
+  TaskVerification,
   UpdateAgentReq,
+  UpdateGoalReq,
+  UpdateTriggerReq,
 } from '../../modules/swarm/types';
 
 type Lifecycle = 'start' | 'pause' | 'abort' | 'resume';
@@ -33,6 +41,20 @@ class SwarmStore {
   selectedProjectId: string | null = $state(null);
   selectedSessionId: string | null = $state(null);
   loading = $state(false);
+
+  // -- Goals / verification / triggers / library skills --------------------
+  /** Goals keyed by task id (per-task explicit + applied standing goals). */
+  goalsByTask: Record<string, SwarmGoal[]> = $state({});
+  /** Goals keyed by project id. */
+  goalsByProject: Record<string, SwarmGoal[]> = $state({});
+  /** The open swarm's standing goals (its quality bar, applied to every task). */
+  standingGoals: SwarmGoal[] = $state([]);
+  /** Live verification state per task id (running + last task_status). */
+  verifyByTask: Record<string, { running: boolean; task_status: string }> = $state({});
+  /** The open swarm's channel triggers. */
+  triggers: SwarmChannelTrigger[] = $state([]);
+  /** Cached library skills for the skill pickers (loaded once). */
+  librarySkills: LibrarySkillMeta[] = $state([]);
   /** Set when a deep-link (e.g. Product → Swarm) wants the Kanban view shown
    *  for the just-opened project. SwarmPage reads + clears this on mount. */
   pendingKanban = $state(false);
@@ -102,6 +124,15 @@ class SwarmStore {
     this.graph = null;
     this.selectedProjectId = null;
     this.selectedSessionId = null;
+    this.goalsByTask = {};
+    this.goalsByProject = {};
+    this.standingGoals = [];
+    this.verifyByTask = {};
+    this.triggers = [];
+  }
+
+  goalsForTask(tid: string | null | undefined): SwarmGoal[] {
+    return tid ? (this.goalsByTask[tid] ?? []) : [];
   }
 
   async createSwarm(name: string, presetSlug?: string): Promise<SwarmDetail | null> {
@@ -374,6 +405,175 @@ class SwarmStore {
     }
   }
 
+  // -- Goals ----------------------------------------------------------------
+
+  async loadTaskGoals(tid: string): Promise<void> {
+    try {
+      this.goalsByTask[tid] = await api.get<SwarmGoal[]>(`/swarm/tasks/${tid}/goals`);
+      this.goalsByTask = { ...this.goalsByTask };
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async loadProjectGoals(pid: string): Promise<void> {
+    try {
+      this.goalsByProject[pid] = await api.get<SwarmGoal[]>(`/swarm/projects/${pid}/goals`);
+      this.goalsByProject = { ...this.goalsByProject };
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** Create a goal on a task OR a project (exactly one scope must be set). */
+  async createGoal(
+    scope: { task?: string; project?: string },
+    req: CreateGoalReq,
+  ): Promise<SwarmGoal> {
+    if (scope.task) {
+      const g = await api.post<SwarmGoal>(`/swarm/tasks/${scope.task}/goals`, req);
+      await this.loadTaskGoals(scope.task);
+      return g;
+    }
+    if (scope.project) {
+      const g = await api.post<SwarmGoal>(`/swarm/projects/${scope.project}/goals`, req);
+      await this.loadProjectGoals(scope.project);
+      return g;
+    }
+    throw new Error('createGoal needs a task or project scope');
+  }
+
+  async updateGoal(gid: string, patch: UpdateGoalReq): Promise<SwarmGoal> {
+    const updated = await api.patch<SwarmGoal>(`/swarm/goals/${gid}`, patch);
+    this.mergeGoal(updated);
+    return updated;
+  }
+
+  async deleteGoal(gid: string): Promise<void> {
+    await api.del(`/swarm/goals/${gid}`);
+    // Drop it from whichever scope held it.
+    for (const tid of Object.keys(this.goalsByTask)) {
+      this.goalsByTask[tid] = this.goalsByTask[tid].filter((g) => g.id !== gid);
+    }
+    for (const pid of Object.keys(this.goalsByProject)) {
+      this.goalsByProject[pid] = this.goalsByProject[pid].filter((g) => g.id !== gid);
+    }
+    this.standingGoals = this.standingGoals.filter((g) => g.id !== gid);
+    this.goalsByTask = { ...this.goalsByTask };
+    this.goalsByProject = { ...this.goalsByProject };
+  }
+
+  /** Splice an updated goal into every cache it appears in (or its task scope). */
+  private mergeGoal(g: SwarmGoal): void {
+    if (g.task_id) {
+      const list = this.goalsByTask[g.task_id] ?? [];
+      const idx = list.findIndex((x) => x.id === g.id);
+      this.goalsByTask[g.task_id] = idx >= 0 ? list.map((x) => (x.id === g.id ? g : x)) : [...list, g];
+      this.goalsByTask = { ...this.goalsByTask };
+    }
+    if (g.project_id) {
+      const list = this.goalsByProject[g.project_id] ?? [];
+      const idx = list.findIndex((x) => x.id === g.id);
+      this.goalsByProject[g.project_id] =
+        idx >= 0 ? list.map((x) => (x.id === g.id ? g : x)) : [...list, g];
+      this.goalsByProject = { ...this.goalsByProject };
+    }
+    if (g.kind === 'standing' && !g.task_id && !g.project_id) {
+      const idx = this.standingGoals.findIndex((x) => x.id === g.id);
+      this.standingGoals =
+        idx >= 0 ? this.standingGoals.map((x) => (x.id === g.id ? g : x)) : [...this.standingGoals, g];
+    }
+  }
+
+  // -- Standing goals (swarm-level templates) --------------------------------
+
+  async loadStandingGoals(sid: string): Promise<void> {
+    try {
+      this.standingGoals = await api.get<SwarmGoal[]>(`/swarm/swarms/${sid}/standing-goals`);
+    } catch {
+      this.standingGoals = [];
+    }
+  }
+
+  async putStandingGoals(sid: string, goals: CreateGoalReq[]): Promise<void> {
+    this.standingGoals = await api.put<SwarmGoal[]>(`/swarm/swarms/${sid}/standing-goals`, {
+      goals,
+    });
+  }
+
+  // -- Verification ----------------------------------------------------------
+
+  async verifyTask(tid: string): Promise<{ started: boolean; reason?: string }> {
+    const res = await api.post<{ started: boolean; reason?: string }>(
+      `/swarm/tasks/${tid}/verify`,
+    );
+    if (res.started) {
+      this.verifyByTask[tid] = { running: true, task_status: 'verifying' };
+      this.verifyByTask = { ...this.verifyByTask };
+    }
+    return res;
+  }
+
+  async stopVerify(tid: string): Promise<{ stopped: boolean }> {
+    const res = await api.post<{ stopped: boolean }>(`/swarm/tasks/${tid}/verify/stop`);
+    const cur = this.verifyByTask[tid];
+    if (cur) {
+      this.verifyByTask[tid] = { ...cur, running: false };
+      this.verifyByTask = { ...this.verifyByTask };
+    }
+    return res;
+  }
+
+  async loadVerification(tid: string): Promise<void> {
+    try {
+      const v = await api.get<TaskVerification>(`/swarm/tasks/${tid}/verification`);
+      this.verifyByTask[tid] = { running: v.running, task_status: v.task_status };
+      this.verifyByTask = { ...this.verifyByTask };
+      this.goalsByTask[tid] = v.goals;
+      this.goalsByTask = { ...this.goalsByTask };
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  // -- Channel triggers ------------------------------------------------------
+
+  async loadTriggers(sid: string): Promise<void> {
+    try {
+      this.triggers = await api.get<SwarmChannelTrigger[]>(`/swarm/swarms/${sid}/triggers`);
+    } catch {
+      this.triggers = [];
+    }
+  }
+
+  async createTrigger(sid: string, req: CreateTriggerReq): Promise<SwarmChannelTrigger> {
+    const t = await api.post<SwarmChannelTrigger>(`/swarm/swarms/${sid}/triggers`, req);
+    this.triggers = [...this.triggers, t];
+    return t;
+  }
+
+  async updateTrigger(id: string, patch: UpdateTriggerReq): Promise<SwarmChannelTrigger> {
+    const updated = await api.patch<SwarmChannelTrigger>(`/swarm/triggers/${id}`, patch);
+    this.triggers = this.triggers.map((t) => (t.id === id ? updated : t));
+    return updated;
+  }
+
+  async deleteTrigger(id: string): Promise<void> {
+    await api.del(`/swarm/triggers/${id}`);
+    this.triggers = this.triggers.filter((t) => t.id !== id);
+  }
+
+  // -- Library skills (for the skill pickers) --------------------------------
+
+  async loadLibrarySkills(): Promise<void> {
+    if (this.librarySkills.length) return;
+    try {
+      this.librarySkills = await api.get<LibrarySkillMeta[]>('/library/skills');
+    } catch {
+      this.librarySkills = [];
+    }
+  }
+
   // -- Presets --------------------------------------------------------------
 
   async loadPresets(): Promise<void> {
@@ -430,6 +630,22 @@ class SwarmStore {
         const msg = ev.message as unknown as SwarmMessage;
         if (this.board.some((m) => m.id === msg.id)) return true;
         this.board = [msg, ...this.board];
+        return true;
+      }
+      case 'swarm_goal_updated': {
+        if (this.detail?.id !== ev.swarm_id) return true;
+        const goal = ev.goal as unknown as SwarmGoal;
+        this.mergeGoal(goal);
+        // Keep the per-task verification banner in sync with the goal's status.
+        const tid = ev.task_id ?? goal.task_id ?? null;
+        if (tid) {
+          const cur = this.verifyByTask[tid];
+          this.verifyByTask[tid] = {
+            running: goal.status === 'verifying',
+            task_status: cur?.task_status ?? goal.status,
+          };
+          this.verifyByTask = { ...this.verifyByTask };
+        }
         return true;
       }
       default:

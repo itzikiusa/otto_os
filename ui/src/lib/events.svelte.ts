@@ -232,6 +232,7 @@ class EventsClient {
           parsed.type === 'swarm_run_updated' ||
           parsed.type === 'swarm_task_updated' ||
           parsed.type === 'swarm_message_posted' ||
+          parsed.type === 'swarm_goal_updated' ||
           parsed.type === 'swarm_status'
         ) {
           swarm.applyEvent(parsed);
