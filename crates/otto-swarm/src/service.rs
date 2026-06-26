@@ -233,8 +233,10 @@ impl SwarmService {
                     // story_id is an internal Plan → Swarm back-link, not editable
                     // via the project PATCH endpoint — leave it unchanged.
                     story_id: None,
+                    skills: req.skills,
                     status: req.status,
                     order_idx: req.order_idx,
+                    ..Default::default()
                 },
             )
             .await

@@ -171,6 +171,10 @@ pub struct UpdateProjectReq {
     pub repo_path: Option<String>,
     #[serde(default)]
     pub goal_md: Option<String>,
+    /// Project-level skill set (`[{name, must_use?}]` or `["name", …]`), layered
+    /// on team + per-agent skills.
+    #[serde(default)]
+    pub skills: Option<serde_json::Value>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]

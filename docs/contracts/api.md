@@ -1404,6 +1404,67 @@ them as four distinct routes. Each takes no body and returns the updated `Swarm`
 | POST /workspaces/{id}/swarm/swarms/{sid}/abort | ws editor | — | Swarm (cancel runs; kill swarm sessions) |
 | POST /workspaces/{id}/swarm/swarms/{sid}/resume | ws editor | — | Swarm (resume from paused) |
 
+## Swarm goals, verification & channel triggers (additive, continues #86)
+
+Additive to the frozen swarm block (#59–#86); these are NOT renumbered against the
+frozen #1–#89 core. Reads = `ws viewer`, writes = `ws editor`. JSON snake_case, ULID ids,
+RFC3339 timestamps, `Problem{code,message}` errors. The workspace is resolved from the
+parent row (task/project/swarm/goal). Goal-status changes also arrive live over
+`/ws/events` as `swarm_goal_updated` (see `ws.md`).
+
+**Goals.** A `SwarmGoal` is a verifiable success criterion attached to a task or project
+(`kind:"explicit"`) or a swarm-level template applied to every task (`kind:"standing"`). It
+carries an optional `metric`/`comparator`(`lte|gte|eq|contains|absent`)/`target_value`/
+`block_value`, an optional `verify_cmd`, a `max_retries` budget, a `blocking` flag, a
+lifecycle `status` (`pending|verifying|passed|warned|unmet|skipped|error`), the verifier's
+`verdict` (`{target_met,blocker,severity,measured,summary,findings[]}`), and `iterations`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/swarm/tasks/{tid}/goals | ws viewer | — | `SwarmGoal[]` |
+| GET /api/v1/swarm/projects/{pid}/goals | ws viewer | — | `SwarmGoal[]` |
+| POST /api/v1/swarm/tasks/{tid}/goals | ws editor | CreateGoalReq | SwarmGoal |
+| POST /api/v1/swarm/projects/{pid}/goals | ws editor | CreateGoalReq | SwarmGoal |
+| PATCH /api/v1/swarm/goals/{gid} | ws editor | UpdateGoalReq (all fields optional) | SwarmGoal |
+| DELETE /api/v1/swarm/goals/{gid} | ws editor | — | `{}` |
+| GET /api/v1/swarm/swarms/{sid}/standing-goals | ws viewer | — | `SwarmGoal[]` (swarm-level templates; seeded on first GET) |
+| PUT /api/v1/swarm/swarms/{sid}/standing-goals | ws editor | `{ goals: CreateGoalReq[] }` | `SwarmGoal[]` (replaces the set) |
+
+`CreateGoalReq` = `{ title, description?, metric?, comparator?, target_value?, block_value?,
+verify_cmd?, max_retries?, blocking?, order_idx? }`. `UpdateGoalReq` = the same with every
+field optional.
+
+**Verification.** Run goal verification on demand for a task (the Coordinator measures each
+goal and records a verdict, flipping the task to `verifying` while it runs).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/swarm/tasks/{tid}/verify | ws editor | — | `{ started: bool, reason?: string }` |
+| POST /api/v1/swarm/tasks/{tid}/verify/stop | ws editor | — | `{ stopped: bool }` |
+| GET /api/v1/swarm/tasks/{tid}/verification | ws viewer | — | `{ running: bool, task_status: string, goals: SwarmGoal[] }` |
+
+**Channel triggers.** A `SwarmChannelTrigger` auto-launches swarm work when a matching
+message arrives on a channel: `{ id, swarm_id, workspace_id, channel("slack"|"telegram"|
+"webhook"), match_chat, keyword, repo_path?, auto_start, reply, enabled, created_by,
+created_at, updated_at }`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/swarm/swarms/{sid}/triggers | ws viewer | — | `SwarmChannelTrigger[]` |
+| POST /api/v1/swarm/swarms/{sid}/triggers | ws editor | CreateTriggerReq | SwarmChannelTrigger |
+| PATCH /api/v1/swarm/triggers/{tid} | ws editor | UpdateTriggerReq | SwarmChannelTrigger |
+| DELETE /api/v1/swarm/triggers/{tid} | ws editor | — | `{}` |
+
+`CreateTriggerReq` = `{ channel, match_chat?, keyword?, repo_path?, auto_start?, reply?,
+enabled? }`. `UpdateTriggerReq` = the same with every field optional.
+
+**Project & team skills (ride existing routes).** Project-scoped skills travel on the
+existing `PATCH /api/v1/swarm/projects/{pid}` (#72) as a top-level `skills` array on
+`UpdateProjectReq`; team-wide skills travel on `PATCH /api/v1/swarm/swarms/{sid}` (#62) as a
+`skills` array nested inside `config`. `SwarmProject` additionally surfaces
+`integration_branch?`, `origin_channel?`, `origin_chat?`, `origin_thread?` (set when a
+project was launched from a channel trigger).
+
 ## Root-level routers (NOT under /api/v1; `?token=` auth)
 
 These self-authenticate via the `?token=` query parameter and are merged at the server root

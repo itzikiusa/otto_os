@@ -56,16 +56,20 @@ fn swarm_base(ctx: &ServerCtx, swarm_id: &str, agent_id: &str) -> PathBuf {
 }
 
 fn cwd_mode(swarm: &Swarm, agent: &SwarmAgent, has_repo: bool) -> String {
-    // 1. An explicit PER-AGENT choice always wins (e.g. "worktree" for isolation).
+    // 1. An explicit PER-AGENT choice always wins: "repo" opts a *single* agent
+    //    out (a deliberately single-agent project), "scratch" for non-code roles,
+    //    "worktree" to force isolation.
     if let Some(m) = agent.cwd_mode.clone().filter(|s| !s.trim().is_empty()) {
         return m;
     }
-    // 2. A project repo path is a strong "work here" signal — it beats the
-    //    swarm-level default, which is almost always the auto-inserted "scratch"
-    //    (swarm creation stamps config.cwd_mode="scratch"). Honoring the path the
-    //    operator set is what they expect.
+    // 2. A project repo path means agents work in CODE. Isolate each in its own
+    //    git worktree so several agents can share the repo without clobbering each
+    //    other's index/working tree (the requirement). Shared "repo" mode is now
+    //    opt-in per agent only — there is intentionally NO global disable switch
+    //    that would re-introduce the clobbering. (Worktree-default also stops
+    //    `provision_agent` from writing CLAUDE.md/.claude into the user's real repo.)
     if has_repo {
-        return "repo".to_string();
+        return "worktree".to_string();
     }
     // 3. No repo path: fall back to the swarm-level config, else scratch.
     swarm
@@ -82,43 +86,145 @@ fn short(id: &str) -> &str {
     &id[id.len() - n..]
 }
 
+/// Where an agent turn runs, and (for worktrees) enough to notify the feed + merge.
+#[derive(Debug, Clone)]
+pub struct CwdInfo {
+    pub path: String,
+    pub mode: String,
+    /// True iff a NEW git worktree was created on this call (vs reused/scratch).
+    pub created: bool,
+    /// The agent's worktree branch (worktree mode only).
+    pub branch: Option<String>,
+    /// The pinned integration branch the worktree is based on + merges into.
+    pub integration_branch: Option<String>,
+}
+
+/// The integration branch for a project: a DEDICATED swarm branch (never the
+/// user's working branch) that all of a project's agent worktrees are based on
+/// and merged into. Read from the project if already pinned, else computed.
+pub fn integration_branch_name(swarm: &Swarm, project: &SwarmProject) -> String {
+    project
+        .integration_branch
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("swarm/{}/{}/int", short(&swarm.id), short(&project.id)))
+}
+
+/// Path of the dedicated integration worktree (checked out on `integration_branch`).
+/// All merges happen here so Otto never touches the user's primary checkout.
+pub fn integration_worktree_path(ctx: &ServerCtx, swarm_id: &str, project_id: &str) -> std::path::PathBuf {
+    ctx.data_dir
+        .join("swarm")
+        .join(swarm_id)
+        .join(project_id)
+        .join("_integration")
+        .join("wt")
+}
+
+/// Ensure the dedicated integration branch + its worktree exist (idempotent), and
+/// persist the branch on the project the first time. Returns (worktree_path, branch).
+/// The branch is pinned from the repo's HEAD on first creation — the single base
+/// every agent worktree branches from, so per-task merges compose.
+pub async fn ensure_integration_worktree(
+    ctx: &ServerCtx,
+    swarm: &Swarm,
+    project: &SwarmProject,
+) -> Result<(String, String)> {
+    let repo_path = project
+        .repo_path
+        .clone()
+        .ok_or_else(|| otto_core::Error::Invalid("project has no repo_path".into()))?;
+    let branch = integration_branch_name(swarm, project);
+    let wt = integration_worktree_path(ctx, &swarm.id, &project.id);
+    let wt_str = wt.to_string_lossy().to_string();
+    let git = otto_git::LocalGit::new(&repo_path);
+    let base = git
+        .current_branch()
+        .await
+        .unwrap_or_else(|_| "HEAD".to_string());
+    // Creates the integration branch from the repo's current HEAD on first call;
+    // reuses it (with accumulated merges) afterwards.
+    git.worktree_add_if_absent(&wt_str, &branch, &base).await?;
+    // Persist the pin so subsequent turns + the merge step agree on the target.
+    if project
+        .integration_branch
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        let _ = ctx
+            .swarm_repo
+            .update_project(
+                &project.id,
+                otto_state::ProjectPatch {
+                    integration_branch: Some(Some(branch.clone())),
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+    Ok((wt_str, branch))
+}
+
 /// Ensure the agent has a prepared, unique working directory. Returns its path.
+/// Thin wrapper over [`ensure_cwd_info`] for callers that only need the path.
 pub async fn ensure_cwd(
     ctx: &ServerCtx,
     swarm: &Swarm,
     agent: &SwarmAgent,
     project: Option<&SwarmProject>,
 ) -> Result<String> {
+    Ok(ensure_cwd_info(ctx, swarm, agent, project).await?.path)
+}
+
+/// Ensure the agent's working directory and report how it was provisioned.
+/// In worktree mode the agent's branch (`swarm/<s>/<a>`) is based on the project's
+/// pinned integration branch so per-task work merges back cleanly.
+pub async fn ensure_cwd_info(
+    ctx: &ServerCtx,
+    swarm: &Swarm,
+    agent: &SwarmAgent,
+    project: Option<&SwarmProject>,
+) -> Result<CwdInfo> {
     let repo = project.and_then(|p| p.repo_path.clone());
     let mode = cwd_mode(swarm, agent, repo.is_some());
 
     if mode == "repo" {
         if let Some(r) = &repo {
-            return Ok(r.clone());
+            return Ok(CwdInfo { path: r.clone(), mode, created: false, branch: None, integration_branch: None });
         }
     }
 
     if mode == "worktree" {
-        if let Some(repo_path) = &repo {
+        if let (Some(repo_path), Some(project)) = (&repo, project) {
+            // Pin (and create) the integration branch first — it's the base.
+            let integration_branch = match ensure_integration_worktree(ctx, swarm, project).await {
+                Ok((_, branch)) => branch,
+                Err(e) => {
+                    tracing::warn!("swarm: integration worktree failed ({e}); scratch fallback");
+                    return Ok(scratch_info(ctx, swarm, agent));
+                }
+            };
             let wt = swarm_base(ctx, &swarm.id, &agent.id).join("wt");
             let wt_str = wt.to_string_lossy().to_string();
             let branch = format!("swarm/{}/{}", short(&swarm.id), short(&agent.id));
             let git = otto_git::LocalGit::new(repo_path);
-            // Base the worktree on the repo's current HEAD — but ONLY when it
-            // doesn't exist yet. `worktree_add_if_absent` reuses an existing
-            // tree as-is, so a resumed turn lands in the SAME worktree with the
-            // agent's prior commits intact (the old unconditional `-B`/`--force`
-            // reset the branch to base HEAD every turn and discarded that work).
-            let base = git
-                .current_branch()
-                .await
-                .unwrap_or_else(|_| "HEAD".to_string());
-            match git.worktree_add_if_absent(&wt_str, &branch, &base).await {
+            // Base the agent worktree on the pinned integration branch — but only
+            // on first creation. `worktree_add_if_absent` reuses an existing tree
+            // as-is, so a resumed turn keeps the agent's prior commits.
+            match git.worktree_add_if_absent(&wt_str, &branch, &integration_branch).await {
                 Ok(created) => {
                     if created {
-                        tracing::info!("swarm: created worktree {} on {}", wt_str, branch);
+                        tracing::info!("swarm: created worktree {} on {} (base {})", wt_str, branch, integration_branch);
                     }
-                    return Ok(wt_str);
+                    return Ok(CwdInfo {
+                        path: wt_str,
+                        mode,
+                        created,
+                        branch: Some(branch),
+                        integration_branch: Some(integration_branch),
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("swarm: worktree add failed ({}), falling back to scratch: {e}", wt_str);
@@ -128,22 +234,48 @@ pub async fn ensure_cwd(
     }
 
     // scratch (default, and the fallback).
-    let scratch = swarm_base(ctx, &swarm.id, &agent.id).join("work");
-    let _ = std::fs::create_dir_all(&scratch);
-    Ok(scratch.to_string_lossy().to_string())
+    Ok(scratch_info(ctx, swarm, agent))
 }
 
-/// Skill names the agent should have active (must-use + recommended).
-fn skill_names(agent: &SwarmAgent) -> Vec<String> {
-    agent
-        .skills
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+fn scratch_info(ctx: &ServerCtx, swarm: &Swarm, agent: &SwarmAgent) -> CwdInfo {
+    let scratch = swarm_base(ctx, &swarm.id, &agent.id).join("work");
+    let _ = std::fs::create_dir_all(&scratch);
+    CwdInfo {
+        path: scratch.to_string_lossy().to_string(),
+        mode: "scratch".to_string(),
+        created: false,
+        branch: None,
+        integration_branch: None,
+    }
+}
+
+/// Effective skill set for a swarm agent: the UNION of team (swarm `config.skills`),
+/// project (`project.skills`) and per-agent (`agent.skills`) skills, deduped by name
+/// (first-seen order). Each layer is `[{name, must_use?}]` or `["name", …]`. This is
+/// how a team/project adds skills on top of an agent's defaults (requirement 2).
+pub fn resolve_skills(swarm: &Swarm, project: Option<&SwarmProject>, agent: &SwarmAgent) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |v: Option<&serde_json::Value>| {
+        if let Some(arr) = v.and_then(|v| v.as_array()) {
+            for s in arr {
+                let name = s
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| s.get("name").and_then(|v| v.as_str()).map(str::to_string));
+                if let Some(name) = name {
+                    if !name.is_empty() && seen.insert(name.clone()) {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+    };
+    add(swarm.config.get("skills"));
+    add(project.map(|p| &p.skills));
+    add(Some(&agent.skills));
+    out
 }
 
 /// Render the agent's identity markdown (role, soul, scope, org position, the
@@ -304,12 +436,14 @@ curl -s -X POST "$BASE/api/v1/ingest/swarm/discovery-report" \
 /// `otto-discovery-report` discovery helpers. Best-effort.
 pub fn provision_agent(
     ctx: &ServerCtx,
+    swarm: &Swarm,
+    project: Option<&SwarmProject>,
     agent: &SwarmAgent,
     identity_md: String,
     cwd: &str,
 ) {
     let cfg = WorkspaceContextConfig {
-        skills: Some(skill_names(agent)),
+        skills: Some(resolve_skills(swarm, project, agent)),
         soul: agent.soul_name.clone(),
         extra_context_md: identity_md,
         include_memory: true,
@@ -331,5 +465,115 @@ pub fn install_helper(cwd: &str, name: &str, body: &str) {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn swarm(config: serde_json::Value) -> Swarm {
+        let now = chrono::Utc::now();
+        Swarm {
+            id: "s".into(),
+            workspace_id: "w".into(),
+            name: "t".into(),
+            description: String::new(),
+            preset_slug: None,
+            status: "active".into(),
+            config,
+            max_total_runs: None,
+            max_cost_usd: None,
+            max_runtime_secs: None,
+            max_attempts: 3,
+            run_started_at: None,
+            pause_reason: None,
+            created_by: "u".into(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn project(skills: serde_json::Value) -> SwarmProject {
+        let now = chrono::Utc::now();
+        SwarmProject {
+            id: "p".into(),
+            swarm_id: "s".into(),
+            workspace_id: "w".into(),
+            name: "proj".into(),
+            description: String::new(),
+            repo_path: Some("/tmp/repo".into()),
+            goal_md: None,
+            story_id: None,
+            skills,
+            integration_branch: None,
+            origin_channel: None,
+            origin_chat: None,
+            origin_thread: None,
+            status: "active".into(),
+            order_idx: 0,
+            created_by: "u".into(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn agent(skills: serde_json::Value, cwd_mode: Option<String>) -> SwarmAgent {
+        let now = chrono::Utc::now();
+        SwarmAgent {
+            id: "a".into(),
+            swarm_id: "s".into(),
+            workspace_id: "w".into(),
+            name: "Dev".into(),
+            title: "Backend".into(),
+            reports_to: None,
+            provider: "claude".into(),
+            model: None,
+            soul_name: None,
+            soul_md: None,
+            specialization: String::new(),
+            scope_md: String::new(),
+            skills,
+            schedule: None,
+            cwd_mode,
+            avatar: String::new(),
+            status: "active".into(),
+            order_idx: 0,
+            created_by: "u".into(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn resolve_skills_unions_team_project_agent() {
+        // Team (string form) + project ({name} form) + agent — union, deduped,
+        // team-first order, both shapes accepted.
+        let sw = swarm(json!({ "skills": ["team-a", "shared"] }));
+        let pr = project(json!([{ "name": "proj-b" }, { "name": "shared" }]));
+        let ag = agent(json!([{ "name": "agent-c", "must_use": true }, { "name": "team-a" }]), None);
+        let got = resolve_skills(&sw, Some(&pr), &ag);
+        assert_eq!(got, vec!["team-a", "shared", "proj-b", "agent-c"]);
+    }
+
+    #[test]
+    fn resolve_skills_agent_only_when_no_layers() {
+        let sw = swarm(json!({}));
+        let ag = agent(json!([{ "name": "only" }]), None);
+        assert_eq!(resolve_skills(&sw, None, &ag), vec!["only"]);
+    }
+
+    #[test]
+    fn cwd_mode_defaults_to_worktree_for_code_projects() {
+        let sw = swarm(json!({}));
+        let ag = agent(json!([]), None);
+        // Has repo, no per-agent override → worktree (isolation), not "repo".
+        assert_eq!(cwd_mode(&sw, &ag, true), "worktree");
+        // No repo → scratch.
+        assert_eq!(cwd_mode(&sw, &ag, false), "scratch");
+        // Explicit per-agent "repo" still opts out (single-agent intent).
+        let ag_repo = agent(json!([]), Some("repo".into()));
+        assert_eq!(cwd_mode(&sw, &ag_repo, true), "repo");
     }
 }

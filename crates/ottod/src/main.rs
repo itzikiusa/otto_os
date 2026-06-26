@@ -578,7 +578,11 @@ async fn run(cfg: Config) -> Result<(), String> {
             // notifier can mirror Improvement* events to the user's channels
             // (opt-in via the `channels.notify_self_improvement` setting).
             Some(events.clone()),
-        );
+        )
+        // An inbound message on a swarm-bound channel launches that swarm.
+        .with_swarm_trigger(std::sync::Arc::new(
+            otto_server::swarm_channels::SwarmTriggerImpl { ctx: ctx.clone() },
+        ));
         let handle = cm.start().await;
         tracing::info!("channel manager: supervisor started (adapters track config live)");
         Some(handle)

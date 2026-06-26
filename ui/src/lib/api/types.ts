@@ -809,6 +809,13 @@ export type OttoEvent =
       swarm_id: Id;
       message: Record<string, unknown>;
     }
+  | {
+      type: 'swarm_goal_updated';
+      workspace_id: Id;
+      swarm_id: Id;
+      task_id?: Id | null;
+      goal: Record<string, unknown>;
+    }
   | { type: 'swarm_status'; workspace_id: Id; swarm_id: Id; status: string }
   /** Emitted after each metrics-sampler tick so the dashboard can refresh
    *  sparklines in near-real-time. `ts` is the sample timestamp (UTC ISO-8601).
