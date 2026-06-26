@@ -1856,7 +1856,7 @@ impl Capability {
     }
 }
 
-/// The 19 independently-gatable product features.
+/// The 21 independently-gatable product features.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -1879,6 +1879,7 @@ pub enum Feature {
     Settings,
     Users,
     Canvas,
+    ProofPack,
     Mcp,
 }
 
@@ -1905,6 +1906,7 @@ impl Feature {
             "settings" => Some(Self::Settings),
             "users" => Some(Self::Users),
             "canvas" => Some(Self::Canvas),
+            "proof_pack" => Some(Self::ProofPack),
             "mcp" => Some(Self::Mcp),
             _ => None,
         }
@@ -1932,6 +1934,7 @@ impl Feature {
             Self::Settings => "settings",
             Self::Users => "users",
             Self::Canvas => "canvas",
+            Self::ProofPack => "proof_pack",
             Self::Mcp => "mcp",
         }
     }

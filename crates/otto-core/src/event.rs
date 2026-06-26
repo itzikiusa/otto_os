@@ -287,4 +287,15 @@ pub enum Event {
         review_id: Id,
         proof_pack_id: Id,
     },
+    /// A proof pack was created, (re)assembled, had an artifact added, or was
+    /// waived — its derived status / risk may have changed. The UI re-fetches the
+    /// affected pack and refreshes the workspace proof summary.
+    ProofPackUpdated {
+        workspace_id: Id,
+        proof_pack_id: Id,
+        work_item_kind: String,
+        work_item_id: String,
+        status: String,
+        risk_score: u8,
+    },
 }

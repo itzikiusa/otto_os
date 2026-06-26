@@ -48,6 +48,7 @@
   import InsightsPage from '../modules/insights/InsightsPage.svelte';
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
   import LoopsPage from '../modules/loops/LoopsPage.svelte';
+  import ProofPage from '../modules/proof/ProofPage.svelte';
   import VaultPage from '../modules/vault/VaultPage.svelte';
   import PluginFrame from '../modules/plugins/PluginFrame.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
@@ -403,6 +404,7 @@
       { id: 'core.go-insights', title: 'Go to Insights', group: 'Navigate', keywords: 'insights reports daily weekly monthly summary analytics activity', run: () => router.go('insights') },
       { id: 'core.go-swarm', title: 'Go to Swarm', group: 'Navigate', keywords: 'swarm agents team org orchestrator kanban board company', run: () => router.go('swarm') },
       { id: 'core.go-loops', title: 'Go to Goal Loops', group: 'Navigate', keywords: 'goal loop iterate autonomous objective plan execute evaluate', run: () => router.go('loops') },
+      { id: 'core.go-proof', title: 'Go to Proof', group: 'Navigate', keywords: 'proof pack evidence badge verified tests ci approval audit', run: () => router.go('proof') },
       { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
       { id: 'core.go-mcp', title: 'Go to MCP Control Plane', group: 'Navigate', keywords: 'mcp model context protocol server tool governance allowlist policy approval audit injection risk', run: () => router.go('mcp') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
@@ -596,6 +598,8 @@
       <SwarmPage />
     {:else if moduleName === 'loops'}
       <LoopsPage />
+    {:else if moduleName === 'proof'}
+      <ProofPage />
     {:else if moduleName === 'vault'}
       <VaultPage />
     {:else if moduleName === 'plugin'}

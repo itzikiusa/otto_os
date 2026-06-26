@@ -57,7 +57,8 @@
   const ALL_FEATURES: Feature[] = [
     'agents', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
     'api_client', 'workflows', 'channels', 'skill_eval', 'skills', 'insights',
-    'usage', 'self_improvement', 'context', 'settings', 'users', 'mcp',
+    'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas',
+    'proof_pack', 'mcp',
   ];
   const FEATURE_LABELS: Record<Feature, string> = {
     agents: 'Agents', connections: 'Connections', database: 'Database',
@@ -65,7 +66,8 @@
     api_client: 'API Client', workflows: 'Workflows', channels: 'Channels',
     skill_eval: 'Skills Evaluator', skills: 'Skills', insights: 'Insights',
     usage: 'Usage', self_improvement: 'Self-Improvement', context: 'Context',
-    settings: 'Settings', users: 'Users', canvas: 'Canvas', mcp: 'MCP Control Plane',
+    settings: 'Settings', users: 'Users', canvas: 'Canvas',
+    proof_pack: 'Proof Packs', mcp: 'MCP Control Plane',
   };
   const CAP_OPTIONS: Capability[] = ['none', 'view', 'edit', 'admin'];
 

@@ -462,3 +462,20 @@ blind timer.
 - `channels.notify_budget_exceeded` setting (default off) routes this to
   Slack / Telegram via `otto-channels/improve_notify.rs`.
 - TypeScript type: `{ type: 'budget_exceeded'; workspace_id: Id; provider: string; spend_usd: number; cap_usd: number; direction: string }`.
+
+---
+
+### `proof_pack_updated`
+
+```json
+{ "type": "proof_pack_updated", "workspace_id": "<Id>", "proof_pack_id": "<Id>",
+  "work_item_kind": "session|goal_loop|review|workflow_run|task|manual",
+  "work_item_id": "<id>", "status": "missing|partial|passed|failed|waived",
+  "risk_score": 0 }
+```
+
+- Emitted by `otto_server::proof::recompute_and_emit` whenever a proof pack is
+  created, (re)assembled, gains/loses an artifact, or is waived.
+- Scope: `Workspace` (gated on viewer access to that workspace).
+- The UI re-fetches the affected pack and refreshes the workspace proof summary.
+- TypeScript type: `{ type: 'proof_pack_updated'; workspace_id: Id; proof_pack_id: Id; work_item_kind: string; work_item_id: string; status: string; risk_score: number }`.

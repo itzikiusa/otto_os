@@ -1386,6 +1386,14 @@ pub struct CreatePrReq {
     pub description: String,
     pub source_branch: String,
     pub target_branch: String,
+    /// Optional proof pack to gate this PR on. When set, Otto refuses to open the
+    /// PR unless the pack is `passed`/`waived` (or `allow_unproven` is set).
+    #[serde(default)]
+    pub proof_pack_id: Option<String>,
+    /// Open the PR even if its proof pack isn't passed — records an audit
+    /// `approval` artifact on the pack ("PR opened over unproven proof").
+    #[serde(default)]
+    pub allow_unproven: Option<bool>,
 }
 
 /// `POST /repos/{id}/pr/draft` — ask an agent to draft a PR title + description
@@ -2346,4 +2354,106 @@ pub struct ProductLens {
     pub description: String,
     /// Whether the lens is checked by default in the Analysis tab.
     pub default_on: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Proof Packs
+// ---------------------------------------------------------------------------
+
+/// A proof pack with its derived badge list (snake_case strings) and artifact
+/// count — the list/summary row shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofPackResp {
+    #[serde(flatten)]
+    pub pack: crate::proof::ProofPack,
+    /// Derived badges as snake_case strings (see `ProofBadge`).
+    pub badges: Vec<String>,
+    pub artifact_count: u32,
+}
+
+/// One artifact plus a capped inline preview for list/detail rendering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofArtifactView {
+    #[serde(flatten)]
+    pub artifact: crate::proof::ProofArtifact,
+    /// Capped preview (`PREVIEW_CAP`) of inline content; absent for url/file refs.
+    pub preview: Option<String>,
+    pub truncated: bool,
+}
+
+/// `GET /proof-packs/{id}` — the pack, its badges, artifacts, and any children.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofPackDetailResp {
+    pub pack: crate::proof::ProofPack,
+    pub badges: Vec<String>,
+    pub artifacts: Vec<ProofArtifactView>,
+    pub children: Vec<ProofPackResp>,
+}
+
+/// `POST /workspaces/{id}/proof-packs`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateProofPackReq {
+    /// `session | goal_loop | review | workflow_run | task | manual`.
+    pub work_item_kind: String,
+    pub work_item_id: String,
+    pub title: Option<String>,
+    pub parent_pack_id: Option<String>,
+}
+
+/// `POST /proof-packs/{id}/artifacts`. Provide at most one of `content`/`content_url`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddArtifactReq {
+    /// One of the `ProofArtifactKind` snake_case strings.
+    pub kind: String,
+    pub title: String,
+    /// Inline text content (redacted + capped on store).
+    pub content: Option<String>,
+    /// An external URL (CI build, screenshot) — stored as `ref_kind=url`.
+    pub content_url: Option<String>,
+    /// One of the `ProofArtifactStatus` strings; defaults to `info`.
+    pub status: Option<String>,
+    pub metadata: Option<Value>,
+}
+
+/// One command to run during `/assemble`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssembleCmd {
+    pub cmd: String,
+    /// `test | build | lint`; inferred if omitted.
+    pub kind: Option<String>,
+}
+
+/// `POST /proof-packs/{id}/assemble` — re-run auto-assembly then recompute.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssembleReq {
+    /// Working directory to assemble a diff from (and run commands in).
+    pub cwd: Option<String>,
+    /// Optional base ref for the diff (defaults to the working tree vs HEAD).
+    pub base: Option<String>,
+    /// Optional commands to run and capture as `command` artifacts.
+    pub commands: Option<Vec<AssembleCmd>>,
+}
+
+/// `POST /proof-packs/{id}/waive`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaiveReq {
+    pub reason: String,
+}
+
+/// One row of `GET /workspaces/{id}/proof-summary` — cheap badge lookup keyed by
+/// work item (the UI maps `"<kind>:<work_item_id>"` -> this).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofSummaryRow {
+    pub work_item_kind: String,
+    pub work_item_id: String,
+    pub proof_pack_id: String,
+    pub status: String,
+    pub risk_score: u8,
+    pub badges: Vec<String>,
+}
+
+/// `GET /workspaces/{id}/proof-summary`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofSummaryResp {
+    pub rows: Vec<ProofSummaryRow>,
 }
