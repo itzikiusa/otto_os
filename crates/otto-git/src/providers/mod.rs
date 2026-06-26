@@ -54,6 +54,18 @@ pub struct RemoteRepoSummary {
 pub trait GitProvider: Send + Sync {
     async fn list_prs(&self, r: &RemoteRef, state: PrState) -> Result<Vec<PrSummary>>;
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail>;
+    /// Fetch a hosted **issue** (not a PR). Default: unsupported — only GitHub
+    /// overrides it (the Run with Otto github-issue source). GitLab/Bitbucket
+    /// issues are out of scope for v1.
+    async fn get_issue(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+    ) -> Result<otto_core::api::IssueLite> {
+        Err(otto_core::Error::Invalid(
+            "fetching issues is only supported for GitHub".into(),
+        ))
+    }
     /// Provider's unified diff, parsed with `crate::parse::parse_diff`.
     async fn get_pr_diff(&self, r: &RemoteRef, number: u64) -> Result<DiffResp>;
     async fn create_pr(&self, r: &RemoteRef, req: &CreatePrReq) -> Result<PrSummary>;

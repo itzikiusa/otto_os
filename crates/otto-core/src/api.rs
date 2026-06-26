@@ -1349,6 +1349,18 @@ pub struct PrDetail {
     pub mergeable: Option<bool>,
 }
 
+/// A minimal hosted **issue** (not a PR). Used by Run with Otto's GitHub-issue
+/// source adapter; only GitHub implements `GitProvider::get_issue` today.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueLite {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub url: String,
+    /// `open` | `closed`.
+    pub state: String,
+}
+
 /// A PR reviewer/participant with their approval state. `avatar_url` and
 /// `reviewed_at` are best-effort (provider-dependent; None when unavailable).
 #[derive(Debug, Clone, Serialize, Deserialize)]

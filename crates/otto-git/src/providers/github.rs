@@ -349,6 +349,27 @@ impl super::GitProvider for Github {
         })
     }
 
+    async fn get_issue(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+    ) -> Result<otto_core::api::IssueLite> {
+        let v: Value = self
+            .http
+            .json(self.req(
+                reqwest::Method::GET,
+                &format!("{}/{number}", Self::issues_path(r)),
+            ))
+            .await?;
+        Ok(otto_core::api::IssueLite {
+            number,
+            title: vstr(&v, &["title"]),
+            body: vstr(&v, &["body"]),
+            url: vstr(&v, &["html_url"]),
+            state: vstr(&v, &["state"]),
+        })
+    }
+
     async fn get_pr_diff(&self, r: &RemoteRef, number: u64) -> Result<DiffResp> {
         let text = self
             .http
