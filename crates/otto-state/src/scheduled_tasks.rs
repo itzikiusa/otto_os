@@ -36,6 +36,39 @@ pub struct NewScheduledTask {
     pub destination: Value,
     pub enabled: bool,
     pub created_by: Option<String>,
+    // v2
+    pub timezone: String,
+    pub workflow_id: Option<String>,
+    pub sandbox: String,
+    pub max_retries: i64,
+    pub notify_on_change: bool,
+    pub attach_proof: bool,
+}
+
+impl NewScheduledTask {
+    /// Construct with v2 fields at their backward-compatible defaults.
+    pub fn defaults(workspace_id: String, name: String) -> Self {
+        Self {
+            workspace_id,
+            name,
+            kind: "agent_prompt".into(),
+            prompt: String::new(),
+            skill: None,
+            provider: "claude".into(),
+            model: String::new(),
+            cwd: String::new(),
+            schedule: Value::Null,
+            destination: Value::Null,
+            enabled: true,
+            created_by: None,
+            timezone: "UTC".into(),
+            workflow_id: None,
+            sandbox: "none".into(),
+            max_retries: 0,
+            notify_on_change: false,
+            attach_proof: false,
+        }
+    }
 }
 
 /// Partial update — every `Some` field is written (`None` leaves it unchanged).
@@ -50,6 +83,13 @@ pub struct ScheduledTaskPatch {
     pub schedule: Option<Value>,
     pub destination: Option<Value>,
     pub enabled: Option<bool>,
+    // v2
+    pub timezone: Option<String>,
+    pub workflow_id: Option<Option<String>>,
+    pub sandbox: Option<String>,
+    pub max_retries: Option<i64>,
+    pub notify_on_change: Option<bool>,
+    pub attach_proof: Option<bool>,
 }
 
 /// Fields for opening a run row (status starts `running`).
@@ -58,6 +98,25 @@ pub struct NewRun {
     pub task_id: String,
     pub workspace_id: String,
     pub trigger: String,
+}
+
+/// Terminal state for a run — the engine fills this once the agent/workflow
+/// completes (success or failure) and delivery has been attempted.
+#[derive(Clone, Debug, Default)]
+pub struct FinishRun {
+    pub status: String,
+    pub summary: String,
+    pub report_path: Option<String>,
+    pub report_rel: Option<String>,
+    pub delivered: bool,
+    pub delivery_error: Option<String>,
+    pub error: Option<String>,
+    pub session_id: Option<String>,
+    pub report_hash: Option<String>,
+    pub proof_pack_id: Option<String>,
+    pub attempts: i64,
+    pub skipped_delivery: bool,
+    pub workflow_run_id: Option<String>,
 }
 
 // --- Row mapping -----------------------------------------------------------
@@ -78,6 +137,12 @@ fn row_to_task(r: &sqlx::sqlite::SqliteRow) -> Result<ScheduledTask> {
         schedule: json(&sched_raw).unwrap_or(Value::Null),
         destination: json(&dest_raw).unwrap_or(Value::Null),
         enabled: r.get::<i64, _>("enabled") != 0,
+        timezone: r.get("timezone"),
+        workflow_id: r.get("workflow_id"),
+        sandbox: r.get("sandbox"),
+        max_retries: r.get("max_retries"),
+        notify_on_change: r.get::<i64, _>("notify_on_change") != 0,
+        attach_proof: r.get::<i64, _>("attach_proof") != 0,
         last_run_at: r.get("last_run_at"),
         last_status: r.get("last_status"),
         next_run_at: r.get("next_run_at"),
@@ -103,6 +168,11 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<ScheduledTaskRun> {
         delivery_error: r.get("delivery_error"),
         error: r.get("error"),
         session_id: r.get("session_id"),
+        report_hash: r.get("report_hash"),
+        proof_pack_id: r.get("proof_pack_id"),
+        attempts: r.get("attempts"),
+        skipped_delivery: r.get::<i64, _>("skipped_delivery") != 0,
+        workflow_run_id: r.get("workflow_run_id"),
         created_at: r.get("created_at"),
     })
 }
@@ -119,8 +189,9 @@ impl ScheduledTasksRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO scheduled_tasks (id, workspace_id, name, kind, prompt, skill, provider, \
-             model, cwd, schedule_json, destination_json, enabled, created_by, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             model, cwd, schedule_json, destination_json, enabled, timezone, workflow_id, sandbox, \
+             max_retries, notify_on_change, attach_proof, created_by, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&t.workspace_id)
@@ -134,6 +205,12 @@ impl ScheduledTasksRepo {
         .bind(t.schedule.to_string())
         .bind(t.destination.to_string())
         .bind(t.enabled as i64)
+        .bind(&t.timezone)
+        .bind(&t.workflow_id)
+        .bind(&t.sandbox)
+        .bind(t.max_retries)
+        .bind(t.notify_on_change as i64)
+        .bind(t.attach_proof as i64)
         .bind(&t.created_by)
         .bind(&now)
         .bind(&now)
@@ -185,6 +262,12 @@ impl ScheduledTasksRepo {
                schedule_json = COALESCE(?, schedule_json), \
                destination_json = COALESCE(?, destination_json), \
                enabled = COALESCE(?, enabled), \
+               timezone = COALESCE(?, timezone), \
+               workflow_id = CASE WHEN ? THEN ? ELSE workflow_id END, \
+               sandbox = COALESCE(?, sandbox), \
+               max_retries = COALESCE(?, max_retries), \
+               notify_on_change = COALESCE(?, notify_on_change), \
+               attach_proof = COALESCE(?, attach_proof), \
                updated_at = ? \
              WHERE id = ?",
         )
@@ -199,6 +282,13 @@ impl ScheduledTasksRepo {
         .bind(p.schedule.map(|v| v.to_string()))
         .bind(p.destination.map(|v| v.to_string()))
         .bind(p.enabled.map(|b| b as i64))
+        .bind(p.timezone)
+        .bind(p.workflow_id.is_some())
+        .bind(p.workflow_id.flatten())
+        .bind(p.sandbox)
+        .bind(p.max_retries)
+        .bind(p.notify_on_change.map(|b| b as i64))
+        .bind(p.attach_proof.map(|b| b as i64))
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -261,36 +351,59 @@ impl ScheduledTasksRepo {
         self.get_run(&id).await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn finish_run(
-        &self,
-        run_id: &str,
-        status: &str,
-        summary: &str,
-        report_path: Option<&str>,
-        report_rel: Option<&str>,
-        delivered: bool,
-        delivery_error: Option<&str>,
-        error: Option<&str>,
-    ) -> Result<()> {
+    pub async fn finish_run(&self, run_id: &str, f: FinishRun) -> Result<()> {
         sqlx::query(
             "UPDATE scheduled_task_runs SET status = ?, summary = ?, report_path = ?, \
-             report_rel = ?, delivered = ?, delivery_error = ?, error = ?, finished_at = ? \
-             WHERE id = ?",
+             report_rel = ?, delivered = ?, delivery_error = ?, error = ?, session_id = ?, \
+             report_hash = ?, proof_pack_id = ?, attempts = ?, skipped_delivery = ?, \
+             workflow_run_id = ?, finished_at = ? WHERE id = ?",
         )
-        .bind(status)
-        .bind(summary)
-        .bind(report_path)
-        .bind(report_rel)
-        .bind(delivered as i64)
-        .bind(delivery_error)
-        .bind(error)
+        .bind(&f.status)
+        .bind(&f.summary)
+        .bind(&f.report_path)
+        .bind(&f.report_rel)
+        .bind(f.delivered as i64)
+        .bind(&f.delivery_error)
+        .bind(&f.error)
+        .bind(&f.session_id)
+        .bind(&f.report_hash)
+        .bind(&f.proof_pack_id)
+        .bind(f.attempts.max(1))
+        .bind(f.skipped_delivery as i64)
+        .bind(&f.workflow_run_id)
         .bind(fmt(Utc::now()))
         .bind(run_id)
         .execute(&self.pool)
         .await
         .map_err(dberr("finish scheduled task run"))?;
         Ok(())
+    }
+
+    /// Persist the live session id as soon as the run's agent session is created,
+    /// so the UI can Open it while the run is still in flight.
+    pub async fn set_run_session(&self, run_id: &str, session_id: &str) -> Result<()> {
+        sqlx::query("UPDATE scheduled_task_runs SET session_id = ? WHERE id = ?")
+            .bind(session_id)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set run session"))?;
+        Ok(())
+    }
+
+    /// The report hash of the most recent successful run for a task (excluding a
+    /// given run id) — backs `notify_on_change` change detection.
+    pub async fn last_ok_report_hash(&self, task_id: &str, exclude_run: &str) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT report_hash FROM scheduled_task_runs WHERE task_id = ? AND status = 'ok' \
+             AND id != ? AND report_hash IS NOT NULL ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .bind(exclude_run)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("last ok report hash"))?;
+        Ok(row.and_then(|r| r.get::<Option<String>, _>("report_hash")))
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<ScheduledTaskRun> {
@@ -379,18 +492,11 @@ mod tests {
 
     fn new_task(ws: &str, name: &str) -> NewScheduledTask {
         NewScheduledTask {
-            workspace_id: ws.into(),
-            name: name.into(),
-            kind: "agent_prompt".into(),
             prompt: "do the thing".into(),
-            skill: None,
-            provider: "claude".into(),
-            model: "".into(),
-            cwd: "".into(),
             schedule: json!({"cadence":"interval","every_min":60}),
             destination: json!({"type":"none"}),
-            enabled: true,
             created_by: Some("u1".into()),
+            ..NewScheduledTask::defaults(ws.into(), name.into())
         }
     }
 
@@ -474,13 +580,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(run.status, "running");
-        repo.finish_run(&run.id, "ok", "Reviewed: 1", Some("/x/r.md"), Some("t/reports/r.md"), true, None, None)
-            .await
-            .unwrap();
+        repo.finish_run(
+            &run.id,
+            FinishRun {
+                status: "ok".into(),
+                summary: "Reviewed: 1".into(),
+                report_path: Some("/x/r.md".into()),
+                report_rel: Some("t/reports/r.md".into()),
+                delivered: true,
+                session_id: Some("sess-1".into()),
+                report_hash: Some("abc123".into()),
+                attempts: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let got = repo.get_run(&run.id).await.unwrap();
         assert_eq!(got.status, "ok");
         assert_eq!(got.summary, "Reviewed: 1");
         assert!(got.delivered);
+        assert_eq!(got.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(got.attempts, 2);
+        // last_ok_report_hash returns this run's hash for a sibling lookup.
+        let h = repo.last_ok_report_hash(&t.id, "other-run").await.unwrap();
+        assert_eq!(h.as_deref(), Some("abc123"));
         let runs = repo.list_runs(&t.id, 10).await.unwrap();
         assert_eq!(runs.len(), 1);
     }
@@ -496,9 +620,16 @@ mod tests {
                 .create_run(NewRun { task_id: t.id.clone(), workspace_id: "ws1".into(), trigger: "schedule".into() })
                 .await
                 .unwrap();
-            repo.finish_run(&r.id, "ok", "", Some(&format!("/x/{i}.md")), None, false, None, None)
-                .await
-                .unwrap();
+            repo.finish_run(
+                &r.id,
+                FinishRun {
+                    status: "ok".into(),
+                    report_path: Some(format!("/x/{i}.md")),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         }
         let deleted = repo.prune_runs(&t.id, 2).await.unwrap();
         assert_eq!(deleted.len(), 3);

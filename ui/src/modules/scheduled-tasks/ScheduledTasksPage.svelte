@@ -16,20 +16,40 @@
   let reportText = $state('');
   let reportLoading = $state(false);
 
+  /** The browser's IANA timezone, e.g. "Europe/London" (default for new tasks). */
+  const browserTz = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    } catch {
+      return 'UTC';
+    }
+  })();
+
   // --- form model ---
   let fName = $state('');
   let fPrompt = $state('');
   let fSkill = $state('');
-  let fCadence = $state<'interval' | 'daily' | 'weekly'>('interval');
+  let fKind = $state<'agent_prompt' | 'workflow'>('agent_prompt');
+  let fProvider = $state('claude');
+  let fWorkflowId = $state('');
+  let fCadence = $state<'interval' | 'daily' | 'weekly' | 'cron'>('interval');
   let fEveryMin = $state(60);
   let fAt = $state('03:00');
   let fWeekday = $state(0);
+  let fCronExpr = $state('0 9 * * 1');
+  let fTimezone = $state(browserTz);
+  let fSandbox = $state<'none' | 'worktree'>('none');
+  let fMaxRetries = $state(0);
+  let fNotifyOnChange = $state(false);
+  let fAttachProof = $state(false);
   let fDestType = $state<'none' | 'slack' | 'telegram' | 'email' | 'webhook'>('none');
   let fChatId = $state('');
   let fEmailTo = $state('');
   let fUrl = $state('');
   let fEnabled = $state(true);
   let fCwd = $state('');
+
+  const PROVIDERS = ['claude', 'codex', 'agy', 'shell'];
 
   $effect(() => {
     const id = ws.currentId;
@@ -46,10 +66,19 @@
     fName = '';
     fPrompt = '';
     fSkill = '';
+    fKind = 'agent_prompt';
+    fProvider = 'claude';
+    fWorkflowId = '';
     fCadence = 'interval';
     fEveryMin = 60;
     fAt = '03:00';
     fWeekday = 0;
+    fCronExpr = '0 9 * * 1';
+    fTimezone = browserTz;
+    fSandbox = 'none';
+    fMaxRetries = 0;
+    fNotifyOnChange = false;
+    fAttachProof = false;
     fDestType = 'none';
     fChatId = '';
     fEmailTo = '';
@@ -71,13 +100,25 @@
     fName = p.name;
     fPrompt = p.prompt;
     fSkill = p.skill ?? '';
-    const cad = (p.schedule.cadence as string) ?? 'interval';
-    fCadence = cad === 'daily' || cad === 'weekly' ? cad : 'interval';
-    fEveryMin = (p.schedule.every_min as number) ?? 60;
-    fAt = (p.schedule.at as string) ?? '03:00';
-    fWeekday = (p.schedule.weekday as number) ?? 0;
+    loadSchedule(p.schedule);
+    // Review/security/dependency presets benefit from an isolated worktree + change-only notify.
+    if (p.id.startsWith('weekly-')) {
+      fSandbox = 'worktree';
+      fNotifyOnChange = p.id !== 'weekly-code-review';
+      fAttachProof = p.id === 'weekly-code-review';
+    }
     const dt = (p.suggested_destination?.type as string) ?? 'none';
     fDestType = ['slack', 'telegram', 'email', 'webhook'].includes(dt) ? (dt as typeof fDestType) : 'none';
+  }
+
+  /** Populate the cadence form vars from a schedule object (preset or task). */
+  function loadSchedule(s: Record<string, unknown>): void {
+    const cad = (s.cadence as string) ?? 'interval';
+    fCadence = ['daily', 'weekly', 'cron'].includes(cad) ? (cad as typeof fCadence) : 'interval';
+    fEveryMin = (s.every_min as number) ?? 60;
+    fAt = (s.at as string) ?? '03:00';
+    fWeekday = (s.weekday as number) ?? 0;
+    fCronExpr = (s.expr as string) ?? '0 9 * * 1';
   }
 
   function startEdit(t: ScheduledTask): void {
@@ -87,11 +128,15 @@
     fName = t.name;
     fPrompt = t.prompt;
     fSkill = t.skill ?? '';
-    const cad = (t.schedule.cadence as string) ?? 'interval';
-    fCadence = cad === 'daily' || cad === 'weekly' ? cad : 'interval';
-    fEveryMin = (t.schedule.every_min as number) ?? 60;
-    fAt = (t.schedule.at as string) ?? '03:00';
-    fWeekday = (t.schedule.weekday as number) ?? 0;
+    fKind = t.kind === 'workflow' ? 'workflow' : 'agent_prompt';
+    fProvider = t.provider || 'claude';
+    fWorkflowId = t.workflow_id ?? '';
+    loadSchedule(t.schedule ?? {});
+    fTimezone = t.timezone || browserTz;
+    fSandbox = t.sandbox === 'worktree' ? 'worktree' : 'none';
+    fMaxRetries = t.max_retries ?? 0;
+    fNotifyOnChange = !!t.notify_on_change;
+    fAttachProof = !!t.attach_proof;
     const d = t.destination ?? {};
     const dt = (d.type as string) ?? 'none';
     fDestType = ['slack', 'telegram', 'email', 'webhook'].includes(dt) ? (dt as typeof fDestType) : 'none';
@@ -105,6 +150,7 @@
   function buildSchedule(): Record<string, unknown> {
     if (fCadence === 'interval') return { cadence: 'interval', every_min: Math.max(5, fEveryMin) };
     if (fCadence === 'daily') return { cadence: 'daily', at: fAt };
+    if (fCadence === 'cron') return { cadence: 'cron', expr: fCronExpr.trim() };
     return { cadence: 'weekly', at: fAt, weekday: fWeekday };
   }
 
@@ -131,11 +177,19 @@
     const body: ScheduledTaskInput = {
       name: fName.trim(),
       prompt: fPrompt,
+      kind: fKind,
+      provider: fProvider,
       skill: fSkill.trim() || null,
       cwd: fCwd.trim(),
       schedule: buildSchedule(),
       destination: buildDestination(),
       enabled: fEnabled,
+      timezone: fTimezone.trim() || 'UTC',
+      sandbox: fSandbox,
+      max_retries: fMaxRetries,
+      notify_on_change: fNotifyOnChange,
+      attach_proof: fAttachProof,
+      ...(fKind === 'workflow' ? { workflow_id: fWorkflowId.trim() || null } : {}),
     };
     busy = true;
     try {
@@ -190,6 +244,11 @@
     await scheduledTasks.loadRuns(t.id);
   }
 
+  /** Navigate to the agent session a run drove (visible session row). */
+  function openSession(sessionId: string | null | undefined): void {
+    if (sessionId) ws.navigateToSession(sessionId);
+  }
+
   async function viewReport(run: ScheduledTaskRun): Promise<void> {
     reportOpen = true;
     reportLoading = true;
@@ -206,10 +265,12 @@
   function cadenceLabel(t: ScheduledTask): string {
     const s = t.schedule ?? {};
     const c = (s.cadence as string) ?? 'interval';
+    const tz = t.timezone || 'UTC';
     if (c === 'interval') return `every ${(s.every_min as number) ?? 60} min`;
-    if (c === 'daily') return `daily at ${(s.at as string) ?? '09:00'} UTC`;
+    if (c === 'cron') return `cron \`${(s.expr as string) ?? ''}\` ${tz}`;
+    if (c === 'daily') return `daily at ${(s.at as string) ?? '09:00'} ${tz}`;
     const wd = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][(s.weekday as number) ?? 0];
-    return `weekly ${wd} at ${(s.at as string) ?? '09:00'} UTC`;
+    return `weekly ${wd} at ${(s.at as string) ?? '09:00'} ${tz}`;
   }
 
   function destLabel(t: ScheduledTask): string {
@@ -253,10 +314,43 @@
         <input bind:value={fName} placeholder="Nightly ticket review" />
       </label>
 
-      <label class="fld">
-        <span>Prompt (the agent's instructions)</span>
-        <textarea bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
-      </label>
+      <div class="row">
+        <label class="fld">
+          <span>Type</span>
+          <select bind:value={fKind}>
+            <option value="agent_prompt">Run an agent</option>
+            <option value="workflow">Hand off to a workflow</option>
+          </select>
+        </label>
+        {#if fKind === 'agent_prompt'}
+          <label class="fld">
+            <span>Provider</span>
+            <select bind:value={fProvider}>
+              {#each PROVIDERS as p}<option value={p}>{p}</option>{/each}
+              {#if !PROVIDERS.includes(fProvider)}<option value={fProvider}>{fProvider}</option>{/if}
+            </select>
+          </label>
+        {:else}
+          <label class="fld">
+            <span>Workflow id</span>
+            <input bind:value={fWorkflowId} placeholder="workflow to launch" />
+          </label>
+        {/if}
+      </div>
+
+      {#if fKind === 'workflow'}
+        <p class="hint">The task launches this workflow on its cadence and reports the run outcome.</p>
+      {:else if fProvider === 'shell'}
+        <label class="fld">
+          <span>Shell command</span>
+          <textarea bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
+        </label>
+      {:else}
+        <label class="fld">
+          <span>Prompt (the agent's instructions)</span>
+          <textarea bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
+        </label>
+      {/if}
 
       <div class="row">
         <label class="fld">
@@ -265,6 +359,7 @@
             <option value="interval">Interval</option>
             <option value="daily">Daily</option>
             <option value="weekly">Weekly</option>
+            <option value="cron">Cron</option>
           </select>
         </label>
         {#if fCadence === 'interval'}
@@ -272,9 +367,14 @@
             <span>Every (minutes, min 5)</span>
             <input type="number" min="5" bind:value={fEveryMin} />
           </label>
+        {:else if fCadence === 'cron'}
+          <label class="fld">
+            <span>Cron expression (5 fields)</span>
+            <input bind:value={fCronExpr} placeholder="0 9 * * 1" />
+          </label>
         {:else}
           <label class="fld">
-            <span>At (HH:MM UTC)</span>
+            <span>At (HH:MM)</span>
             <input bind:value={fAt} placeholder="03:00" />
           </label>
           {#if fCadence === 'weekly'}
@@ -287,6 +387,12 @@
               </select>
             </label>
           {/if}
+        {/if}
+        {#if fCadence !== 'interval'}
+          <label class="fld">
+            <span>Timezone</span>
+            <input bind:value={fTimezone} placeholder="e.g. Europe/London" />
+          </label>
         {/if}
       </div>
 
@@ -319,18 +425,43 @@
         {/if}
       </div>
 
-      <div class="row">
-        <label class="fld">
-          <span>Skill (optional, inlined)</span>
-          <input bind:value={fSkill} placeholder="e.g. db-mysql" />
-        </label>
+      {#if fKind === 'agent_prompt' && fProvider !== 'shell'}
+        <div class="row">
+          <label class="fld">
+            <span>Skill (optional, inlined)</span>
+            <input bind:value={fSkill} placeholder="e.g. db-mysql" />
+          </label>
+          <label class="fld">
+            <span>Working dir (optional)</span>
+            <input bind:value={fCwd} placeholder="repo path — not a sandbox" />
+          </label>
+        </div>
+
+        <div class="row">
+          <label class="fld">
+            <span>Sandbox</span>
+            <select bind:value={fSandbox}>
+              <option value="none">Run in working dir</option>
+              <option value="worktree">Isolated git worktree</option>
+            </select>
+          </label>
+          <label class="fld">
+            <span>Retries on failure (0–5)</span>
+            <input type="number" min="0" max="5" bind:value={fMaxRetries} />
+          </label>
+        </div>
+      {:else if fProvider === 'shell'}
         <label class="fld">
           <span>Working dir (optional)</span>
-          <input bind:value={fCwd} placeholder="repo path — not a sandbox" />
+          <input bind:value={fCwd} placeholder="dir to run the command in" />
         </label>
-      </div>
+      {/if}
 
-      <label class="chk"><input type="checkbox" bind:checked={fEnabled} /> Enabled</label>
+      <div class="toggles">
+        <label class="chk"><input type="checkbox" bind:checked={fNotifyOnChange} /> Only notify on meaningful change</label>
+        <label class="chk"><input type="checkbox" bind:checked={fAttachProof} /> Attach a proof pack to each run</label>
+        <label class="chk"><input type="checkbox" bind:checked={fEnabled} /> Enabled</label>
+      </div>
 
       <div class="actions">
         <button class="btn primary" disabled={busy} onclick={save}>{busy ? 'Saving…' : 'Save'}</button>
@@ -384,8 +515,15 @@
                     {#if r.report_rel}
                       <button class="btn small" onclick={() => viewReport(r)}>View report</button>
                     {/if}
+                    {#if r.session_id}
+                      <button class="btn small" title="Open the agent session this run drove" onclick={() => openSession(r.session_id)}>Open session</button>
+                    {/if}
+                    {#if (r.attempts ?? 1) > 1}<span class="pill warn">{r.attempts} attempts</span>{/if}
                     {#if r.delivered}<span class="pill ok">delivered</span>{/if}
+                    {#if r.skipped_delivery}<span class="pill" title="report unchanged since last run">no change</span>{/if}
                     {#if r.delivery_error}<span class="pill warn" title={r.delivery_error}>delivery failed</span>{/if}
+                    {#if r.proof_pack_id}<span class="pill ok" title="proof pack attached">proof</span>{/if}
+                    {#if r.workflow_run_id}<span class="pill" title={r.workflow_run_id}>workflow</span>{/if}
                   </div>
                 {:else}
                   <div class="muted">No runs yet.</div>
@@ -463,6 +601,8 @@
     outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px;
   }
   .chk { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: var(--text); }
+  .toggles { display: flex; flex-direction: column; gap: 0.4rem; margin: 0.25rem 0; }
+  .hint { font-size: 0.82rem; color: var(--text-dim); margin: 0 0 0.25rem; }
   .actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
   .modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
   .modal { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-l); width: min(760px, 92vw); max-height: 82vh; overflow: auto; padding: 0.85rem 1rem; box-shadow: var(--shadow); }

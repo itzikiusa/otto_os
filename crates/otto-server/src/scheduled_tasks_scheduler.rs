@@ -67,7 +67,8 @@ async fn tick(ctx: &ServerCtx, in_flight: &Arc<Mutex<HashSet<String>>>) -> otto_
                 continue;
             }
             let last = task.last_run_at.as_deref().and_then(parse_ts);
-            if !cadence::is_due(&task.schedule, last, now) {
+            let tz = cadence::task_tz(&task.timezone);
+            if !cadence::is_due(&task.schedule, last, now, tz) {
                 continue;
             }
             set.insert(task.id.clone());

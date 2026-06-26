@@ -1942,37 +1942,51 @@ enforce the entity's workspace role.
 
 ## Scheduled Tasks
 
-Recurring, workspace-scoped jobs. Each task runs an agent (`Orchestrator::run_agent`,
-the self-improvement primitive) with a configurable `prompt` on a cadence
-(`interval | daily | weekly`), captures the agent's final reply as a Markdown
-**report**, stores it, and delivers it to an optional **destination** (Slack /
-Telegram / email / webhook). v1 `kind` = `agent_prompt`, provider = `claude`.
-Driveable over MCP (see CP-S below). Gated by `Feature::ScheduledTasks`
-(read=View, write=Edit) plus the workspace-role axis; flat by-id routes load the
-task/run and enforce the role on its `workspace_id` (IDOR guard).
+Recurring, workspace-scoped jobs. Each task runs an agent (any provider —
+`claude | codex | agy | shell | <custom>`) **as a real, openable session** with a
+configurable `prompt` on a cadence, captures the agent's Markdown **report**,
+stores it, and delivers it to an optional **destination** (Slack / Telegram /
+email / webhook). `kind` is `agent_prompt` (run an agent) or `workflow` (launch a
+workflow run via `workflow_id` and report its outcome). Driveable over MCP (see
+CP-S below). Gated by `Feature::ScheduledTasks` (read=View, write=Edit) plus the
+workspace-role axis; flat by-id routes load the task/run and enforce the role on
+its `workspace_id` (IDOR guard).
 
-`schedule` = `{cadence, every_min (≥5), at:"HH:MM", weekday:0..6}`. `destination` =
+**v2 capabilities** (all backward-compatible; old tasks behave unchanged):
+- **timezone** — `timezone` (IANA, default `UTC`) interprets daily/weekly/cron times DST-correctly.
+- **cron** — `schedule = {cadence:"cron", expr:"<5-field cron>"}` (standard Vixie semantics), evaluated in `timezone`.
+- **provider** — `provider` may be `claude|codex|agy|shell|<custom slug>`; `shell` runs the prompt as a command.
+- **visible session** — every agent run creates a session row (`run.session_id`) you can Open live.
+- **sandbox** — `sandbox:"worktree"` runs in a fresh isolated git worktree (when `cwd` is a repo).
+- **retry policy** — `max_retries` (0..5); the agent session is retried with backoff (`run.attempts`).
+- **notify on change** — `notify_on_change` delivers only when the report hash differs from the last ok run (else `run.skipped_delivery`).
+- **proof pack** — `attach_proof` builds a proof pack per run (`run.proof_pack_id`).
+
+`schedule` = `{cadence:"interval"|"daily"|"weekly"|"cron", every_min (≥5), at:"HH:MM",
+weekday:0..6, expr}`. `destination` =
 `{type:"none"|"slack"|"telegram"|"email"|"webhook", chat_id?, to?, subject?, url?}`.
-A `ScheduledTask` carries `{id, workspace_id, name, kind, prompt, skill?, provider,
-model, cwd, schedule, destination, enabled, last_run_at?, last_status?, next_run_at?,
-created_by?, created_at, updated_at}`. A `ScheduledTaskRun` carries `{id, task_id,
-workspace_id, status:"running"|"ok"|"error", trigger:"schedule"|"manual", started_at,
-finished_at?, summary, report_path?, report_rel?, delivered, delivery_error?, error?,
-session_id?, created_at}`.
+A `ScheduledTask` carries `{…, provider, model, cwd, schedule, destination, enabled,
+timezone, workflow_id?, sandbox, max_retries, notify_on_change, attach_proof,
+last_run_at?, last_status?, next_run_at?, …}`. A `ScheduledTaskRun` carries `{…,
+status, trigger, started_at, finished_at?, summary, report_path?, report_rel?,
+delivered, delivery_error?, error?, session_id?, report_hash?, proof_pack_id?,
+attempts, skipped_delivery, workflow_run_id?, created_at}`.
 
-Persistence: `otto_state::scheduled_tasks`; scheduler:
+Persistence: `otto_state::scheduled_tasks` (migrations 0084 + 0085); scheduler:
 `otto_server::scheduled_tasks_scheduler` (60s tick, in-flight-guard-first,
-advance-cursor-on-completion, startup reaper, global run semaphore); live signal:
-`Event::ScheduledTaskRunUpdated` (see `ws.md`). Delivered report bodies are redacted
-(`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard`).
+advance-cursor-on-completion, startup reaper, global run semaphore); engine:
+`scheduled_tasks_engine` (session-based provider-agnostic agent runs via
+`agent_run`, shell, and workflow handoff); cadence: `cadence` (tz + cron); live
+signal: `Event::ScheduledTaskRunUpdated` (see `ws.md`). Delivered report bodies are
+redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard`).
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 135 | GET /api/v1/workspaces/{id}/scheduled-tasks | scheduled_tasks view + ws viewer | — | `ScheduledTask[]` |
-| 136 | POST /api/v1/workspaces/{id}/scheduled-tasks | scheduled_tasks edit + ws editor | `{name, prompt?, kind?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?}` | ScheduledTask |
+| 136 | POST /api/v1/workspaces/{id}/scheduled-tasks | scheduled_tasks edit + ws editor | `{name, prompt?, kind?, provider?, model?, cwd?, skill?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
 | 137 | GET /api/v1/scheduled-tasks/presets | scheduled_tasks view | — | `ScheduledTaskPreset[]` |
 | 138 | GET /api/v1/scheduled-tasks/{id} | scheduled_tasks view + ws viewer | — | ScheduledTask |
-| 139 | PATCH /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | `{name?, prompt?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?}` | ScheduledTask |
+| 139 | PATCH /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | `{name?, prompt?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
 | 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun (the manual run; poll for status) |
 | 142 | GET /api/v1/scheduled-tasks/{id}/runs | scheduled_tasks view + ws viewer | — | `ScheduledTaskRun[]` |

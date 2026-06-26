@@ -15,6 +15,13 @@ export interface ScheduledTaskInput {
   schedule?: Record<string, unknown>;
   destination?: Record<string, unknown>;
   enabled?: boolean;
+  // v2
+  timezone?: string;
+  workflow_id?: string | null;
+  sandbox?: string;
+  max_retries?: number;
+  notify_on_change?: boolean;
+  attach_proof?: boolean;
 }
 
 export const scheduledTasksApi = {

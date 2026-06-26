@@ -12,6 +12,43 @@ It is the generic engine behind examples like an hourly *"go over every ticket
 updated in the last 24h, re-analyze it, check for new comments, and produce a
 follow-up report"* — shipped as the built-in **`ticket-followup-review` preset**.
 
+## What's new in v2
+
+Scheduled Tasks v2 lifts every v1 limit (claude-only, no cron, UTC-only, headless
+runs, `cwd` not a sandbox, one-agent-run-per-task):
+
+- **Any provider** — `provider` is `claude | codex | agy | shell | <custom slug>`.
+  Agent runs are provider-agnostic (the agent writes its report to a file we read);
+  `shell` runs the prompt as a command and captures stdout/stderr/exit-code.
+- **Local timezone** — a per-task IANA `timezone` (the create form defaults to your
+  browser's). Daily/weekly/cron times are interpreted there, DST-correctly.
+- **Cron** — `schedule = {cadence:"cron", expr:"0 9 * * 1"}` (standard 5-field cron,
+  Vixie day-of-month/day-of-week semantics), evaluated in the task timezone.
+- **Visible session per run** — every agent run is a **real, openable session**
+  (`run.session_id`); Open it from the run row to watch or unblock it live.
+- **Per-task sandbox** — `sandbox:"worktree"` runs in a **fresh isolated git
+  worktree** off the repo's current branch (left for inspection), so a task that
+  touches files can't disturb your working tree.
+- **Workflow handoff** — `kind:"workflow"` launches a workflow run (`workflow_id`)
+  instead of an agent and reports its node-by-node outcome.
+- **Retry policy** — `max_retries` (0..5); a failed/stuck agent session is killed
+  and retried with backoff. `run.attempts` records how many it took.
+- **Only notify on change** — `notify_on_change` delivers only when the report's
+  normalized hash differs from the last successful run; otherwise the run is marked
+  `skipped_delivery` (the report is still stored).
+- **Attach a proof pack** — `attach_proof` builds a proof pack per run
+  (`run.proof_pack_id`) with the report + run metadata as evidence.
+- **Recurring PR / review / security scans** — built-in presets
+  (`weekly-security-scan`, `weekly-code-review`, `weekly-dependency-scan`) that pair
+  a review/security prompt with a worktree sandbox + weekly cron.
+
+All v2 fields default to backward-compatible values (provider unchanged,
+`timezone=UTC`, `sandbox=none`, `max_retries=0`, no notify-gate, no proof), so every
+pre-v2 task keeps behaving exactly as before. Schema: migration
+`0085_scheduled_tasks_v2.sql`. Implementation note: agent runs go through the shared
+`agent_run` session runner (the same one PR-review uses), not the headless
+`run_agent` — except under `OTTO_E2E`, which keeps the deterministic stub.
+
 This is the definitive end-user + operator guide. It documents what the code in
 `crates/otto-server/src/scheduled_tasks_engine.rs`,
 `crates/otto-server/src/scheduled_tasks_scheduler.rs`,
