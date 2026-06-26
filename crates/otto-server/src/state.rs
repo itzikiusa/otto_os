@@ -126,6 +126,14 @@ pub struct ServerCtx {
     /// Per-pack async locks serializing status/risk recompute so concurrent
     /// artifact adds / gates can't interleave a stale read→write (no lost-update).
     pub proof_locks: crate::proof::ProofLocks,
+    // -- Run with Otto -----------------------------------------------------
+    /// Source→PR-draft pipeline runs (the "one button"). The engine
+    /// (`run_engine`) drives the stage machine; the scheduler (`run_scheduler`)
+    /// reaps + re-drives on boot; the routes + channel trigger launch them.
+    pub runs: otto_state::RunsRepo,
+    /// Per-run in-flight guard so a racing reaper / double-approve can't
+    /// double-advance a run.
+    pub runs_engine: std::sync::Arc<crate::run_engine::RunEngine>,
 }
 
 impl ServerCtx {

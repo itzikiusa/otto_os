@@ -2000,7 +2000,7 @@ async fn run_review_core(
 }
 
 /// Open/blocker/total finding counts for a review, from the persistent store.
-async fn review_findings_counts(ctx: &ServerCtx, review_id: &Id) -> (u64, u64, u64) {
+pub(crate) async fn review_findings_counts(ctx: &ServerCtx, review_id: &Id) -> (u64, u64, u64) {
     let all = ctx
         .findings_store
         .list_for_review(review_id)
@@ -2518,17 +2518,29 @@ async fn draft_pr(
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
-    let git = otto_git::LocalGit::new(&repo.path);
-    let source = git.current_branch().await.map_err(crate::error::ApiError)?;
-    let diff = git
-        .diff_text_against(&body.base)
+    let resp = draft_pr_core(&ctx, &repo.path, &body.base)
         .await
         .map_err(crate::error::ApiError)?;
+    Ok(Json(resp))
+}
+
+/// Core PR-draft logic shared by the `POST /repos/{id}/pr/draft` handler and the
+/// Run with Otto engine: diff the checkout at `repo_path` against `base`, draft a
+/// title + description with the `pull-request` skill, and return them. The caller
+/// owns auth/HTTP concerns. `repo_path` may be a worktree (Run with Otto passes
+/// the run's `otto-run/<id>` worktree).
+pub(crate) async fn draft_pr_core(
+    ctx: &ServerCtx,
+    repo_path: &str,
+    base: &str,
+) -> Result<otto_core::api::DraftPrResp> {
+    let git = otto_git::LocalGit::new(repo_path);
+    let source = git.current_branch().await?;
+    let diff = git.diff_text_against(base).await?;
     if diff.trim().is_empty() {
-        return Err(crate::error::ApiError(Error::Invalid(format!(
-            "no changes between '{source}' and '{}'",
-            body.base
-        ))));
+        return Err(Error::Invalid(format!(
+            "no changes between '{source}' and '{base}'"
+        )));
     }
 
     // Cap the diff fed to the drafting agent — a title/description doesn't need
@@ -2536,7 +2548,6 @@ async fn draft_pr(
     const MAX_DIFF: usize = 40_000;
     let truncated = diff.len() > MAX_DIFF;
     let diff_slice = if truncated {
-        // Trim to a char boundary at/under MAX_DIFF.
         let mut end = MAX_DIFF;
         while end > 0 && !diff.is_char_boundary(end) {
             end -= 1;
@@ -2569,7 +2580,7 @@ async fn draft_pr(
          {{\"title\": \"...\", \"description\": \"...\"}}.\n\n\
          {trunc}DIFF:\n{diff}",
         source = source,
-        base = body.base,
+        base = base,
         jira = jira,
         trunc = if truncated {
             "(diff truncated for brevity)\n\n"
@@ -2584,14 +2595,8 @@ async fn draft_pr(
 
     let reply = ctx
         .orchestrator
-        .run_agent(
-            &prompt,
-            &repo.path,
-            None,
-            std::time::Duration::from_secs(150),
-        )
-        .await
-        .map_err(crate::error::ApiError)?;
+        .run_agent(&prompt, repo_path, None, std::time::Duration::from_secs(150))
+        .await?;
     let (mut title, description) = parse_pr_draft(&reply, &source);
     // Deterministically guarantee the Jira key prefixes the title (the agent is
     // asked to, but may omit it) — the reference must always be present.
@@ -2599,12 +2604,62 @@ async fn draft_pr(
         title = ensure_jira_in_subject(&title, &key);
     }
 
-    Ok(Json(otto_core::api::DraftPrResp {
+    Ok(otto_core::api::DraftPrResp {
         title,
         description,
         source_branch: source,
-        target_branch: body.base,
-    }))
+        target_branch: base.to_string(),
+    })
+}
+
+/// Launch an AI review on a specific branch/worktree (Run with Otto's `reviewing`
+/// stage). Diffs `worktree_path` against `base_commit`, creates a local-review row
+/// keyed to `repo_id`, and drives `run_review` in the background. Returns the
+/// `review_id`; the caller polls `reviews_store.get_review` for `Done`/`Error` and
+/// reads counts via [`review_findings_counts`].
+pub(crate) async fn run_review_for_branch(
+    ctx: &ServerCtx,
+    repo_id: &Id,
+    worktree_path: &str,
+    base_commit: &str,
+) -> Result<Id> {
+    let repo = ctx.git_store.get_repo(repo_id).await?;
+    let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
+    let git = otto_git::LocalGit::new(worktree_path);
+    let diff_text = git.diff_text_against(base_commit).await?;
+    let review = ctx
+        .reviews_store
+        .create_review(repo_id, LOCAL_REVIEW_PR_NUMBER)
+        .await?;
+    let review_id = review.id.clone();
+
+    if diff_text.trim().is_empty() {
+        // No changes vs base — complete immediately with no findings.
+        ctx.reviews_store
+            .set_status(&review_id, ReviewStatus::Done, None)
+            .await?;
+        let _ = ctx.events.send(Event::ReviewChanged {
+            workspace_id: workspace.id.clone(),
+            session_id: None,
+            review_id: review_id.clone(),
+            status: ReviewStatus::Done.as_str().to_string(),
+        });
+    } else {
+        let _ = ctx.events.send(Event::ReviewChanged {
+            workspace_id: workspace.id.clone(),
+            session_id: None,
+            review_id: review_id.clone(),
+            status: ReviewStatus::Running.as_str().to_string(),
+        });
+        let ctx_bg = ctx.clone();
+        let rid = review_id.clone();
+        let wt = worktree_path.to_string();
+        let repo_id_bg = repo_id.clone();
+        tokio::spawn(async move {
+            run_review(ctx_bg, rid, wt, diff_text, None, None, workspace, repo_id_bg, 0).await;
+        });
+    }
+    Ok(review_id)
 }
 
 /// Tolerantly extract a commit message from an agent reply. The agent is asked

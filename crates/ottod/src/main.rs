@@ -404,6 +404,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
         proof_repo: otto_state::ProofRepo::new(pool.clone()),
         proof_locks: otto_server::proof::new_locks(),
+        runs: otto_state::RunsRepo::new(pool.clone()),
+        runs_engine: otto_server::run_engine::RunEngine::new(),
     };
 
     // Spawn enabled runtime plugins (sidecar processes Otto supervises + proxies).
@@ -734,6 +736,12 @@ async fn run(cfg: Config) -> Result<(), String> {
     // runs on startup, and bounds concurrency. The engine writes + delivers reports.
     let _scheduled_tasks_handle = otto_server::scheduled_tasks_scheduler::start(ctx.clone());
     tracing::info!("scheduled tasks scheduler started");
+
+    // --- Run with Otto ---
+    // Boot reaper (fail interrupted runs, re-drive resumable ones) + a 30 s tick
+    // that re-drives still-active runs. The engine drives the stage machine.
+    otto_server::run_scheduler::spawn(ctx.clone());
+    tracing::info!("run-with-otto scheduler started");
 
     // --- Usage tracking + system metrics (embedded ClickHouse) ---
     // The recorder mines usage from the activity-trail event stream; the

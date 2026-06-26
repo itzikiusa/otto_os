@@ -256,7 +256,13 @@ pub async fn assemble_diff(ctx: &ServerCtx, pack: &ProofPack, cwd: &str, base: O
     let (text, resp) = match base {
         Some(b) => {
             let t = git.diff_text_against(b).await;
-            let r = git.diff(DiffTarget::Commit(b.to_string()), None).await;
+            // Structured metadata must describe the work done since `base`
+            // (the `base..HEAD` range), NOT `git show <base>` (the base commit's
+            // own patch). The latter made files_changed/additions/risky_files —
+            // and therefore the derived risk_score — reflect the wrong commit.
+            let r = git
+                .diff(DiffTarget::Range(b.to_string(), "HEAD".to_string()), None)
+                .await;
             (t, r)
         }
         None => {
