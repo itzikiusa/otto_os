@@ -286,12 +286,19 @@ impl LocalGit {
 
     /// Non-destructive worktree provisioning for multi-turn agents.
     ///
-    /// On FIRST use the worktree doesn't exist yet, so this creates it exactly
-    /// like [`worktree_add`] (`-B` + `--force`), branching `branch` from `base`.
-    /// On every later turn the worktree already exists with the agent's prior
-    /// commits, so this is a no-op and the agent resumes on top of its own work
-    /// — `base` is ignored and the branch is NOT reset. Returns `true` when it
-    /// created the worktree, `false` when it reused an existing one.
+    /// Three cases, none of which ever discards committed work:
+    /// 1. The worktree already exists → reuse it untouched (`Ok(false)`); the
+    ///    agent resumes on top of its own prior commits, `base` ignored.
+    /// 2. The worktree is absent but the `branch` already exists (e.g. its
+    ///    worktree was pruned by idle cleanup or a restart, but `worktree_remove`
+    ///    keeps the branch) → RE-ATTACH the surviving branch with
+    ///    [`worktree_attach`] (no `-B`, `base` ignored), preserving every commit.
+    /// 3. Neither exists → fresh [`worktree_add`], branching `branch` from `base`.
+    ///
+    /// Returns `true` when it (re)created the worktree directory, `false` when it
+    /// reused an already-checked-out tree. Critically, this NEVER takes the
+    /// destructive `-B` path against an existing branch — that reset-to-base is
+    /// what used to throw away a swarm agent's work between turns.
     pub async fn worktree_add_if_absent(
         &self,
         path: &str,
@@ -301,7 +308,13 @@ impl LocalGit {
         if self.worktree_exists(path).await {
             return Ok(false);
         }
-        self.worktree_add(path, branch, base).await?;
+        if self.branch_exists(branch).await {
+            // The branch (and its commits) outlived its worktree. Re-attach it
+            // instead of resetting it to `base`.
+            self.worktree_attach(path, branch).await?;
+        } else {
+            self.worktree_add(path, branch, base).await?;
+        }
         Ok(true)
     }
 
@@ -1744,6 +1757,52 @@ mod tests {
         assert_eq!(head[0].sha, sha, "prior commit preserved");
         assert_eq!(head[0].subject, "agent turn 1");
         assert!(wt.join("agent_work.txt").exists(), "committed file preserved");
+    }
+
+    /// D2 regression: if the worktree was REMOVED between turns (the branch is
+    /// kept by `worktree_remove`), a later `worktree_add_if_absent` must
+    /// RE-ATTACH the surviving branch — never reset it to `base` with `-B`. The
+    /// old destructive `-B` path discarded the agent's committed work whenever
+    /// its worktree had been pruned (idle cleanup / restart), which is exactly
+    /// the "destructive `-B --force` branch reuse" hazard.
+    #[tokio::test]
+    async fn worktree_add_if_absent_reattaches_branch_after_worktree_removed() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        let wt = dir.parent().unwrap().join("reattach-wt");
+        let wt_str = wt.to_str().unwrap().to_string();
+        let branch = "swarm/s2/a2";
+
+        // base = the FIRST commit (≠ HEAD/second commit) so a reset-to-base is
+        // observable as a different sha than the agent's own commit.
+        let base = git.log(1, 1, false).await.unwrap()[0].sha.clone();
+
+        // Turn 1: create on the branch from HEAD, then commit agent work.
+        git.worktree_add_if_absent(&wt_str, branch, "HEAD").await.unwrap();
+        let wt_git = LocalGit::new(&wt);
+        write(&wt, "agent_work.txt", "turn 1 output\n");
+        wt_git.stage(&["agent_work.txt".into()]).await.unwrap();
+        let sha = wt_git.commit("agent turn 1", false).await.unwrap();
+
+        // The worktree is pruned, but the branch + its commit must live on.
+        git.worktree_remove(&wt_str).await.unwrap();
+        assert!(!git.worktree_exists(&wt_str).await);
+        assert!(git.branch_exists(branch).await, "branch survives worktree removal");
+
+        // Turn 2: re-provision with a DIFFERENT base. It must RE-ATTACH the
+        // existing branch (preserving the agent commit), not reset to base.
+        let created = git.worktree_add_if_absent(&wt_str, branch, &base).await.unwrap();
+        assert!(created, "re-provisioning a pruned worktree counts as created");
+        let head = wt_git.log(1, 0, false).await.unwrap();
+        assert_eq!(
+            head[0].sha, sha,
+            "branch must NOT be reset to base; agent commit preserved"
+        );
+        assert_eq!(head[0].subject, "agent turn 1");
+        assert!(
+            wt.join("agent_work.txt").exists(),
+            "committed file restored on re-attach"
+        );
     }
 
     /// `changed_files` lists what a worktree branch changed vs its base — the
