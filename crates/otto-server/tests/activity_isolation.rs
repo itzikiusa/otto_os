@@ -300,6 +300,8 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
         proof_repo: otto_state::ProofRepo::new(pool.clone()),
         proof_locks: otto_server::proof::new_locks(),
+        runs: otto_state::RunsRepo::new(pool.clone()),
+        runs_engine: otto_server::run_engine::RunEngine::new(),
     }
 }
 

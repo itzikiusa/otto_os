@@ -126,17 +126,14 @@ fn determine_source(
     if let Some(detected) = parse_source_ref(probe) {
         return Ok(detected);
     }
-    // A chat/webhook trigger with free text becomes a channel run.
-    if matches!(
-        origin,
-        RunOrigin::Slack | RunOrigin::Telegram | RunOrigin::Webhook
-    ) && req.seed_text.as_deref().is_some_and(|s| !s.trim().is_empty())
-    {
+    // Free text (from any surface — a chat reply, a webhook, or the UI launcher's
+    // "describe what you want" box) becomes a channel run.
+    if req.seed_text.as_deref().is_some_and(|s| !s.trim().is_empty()) {
         let handle = origin_meta
             .thread
             .clone()
             .or_else(|| origin_meta.kind_chat.clone())
-            .unwrap_or_else(|| "thread".to_string());
+            .unwrap_or_else(|| origin.as_str().to_string());
         return Ok((SourceKind::Channel, format!("thread:{handle}"), None));
     }
     Err(Error::Invalid(

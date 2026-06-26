@@ -761,7 +761,7 @@ mod tests {
             !cfg.executors.is_empty(),
             "default goal-loop config has an executor"
         );
-        let criteria = vec![AcceptanceCriterion {
+        let criteria = [AcceptanceCriterion {
             id: "c1".to_string(),
             text: "the goal".to_string(),
             verify: "A reviewer confirms the goal is met.".to_string(),

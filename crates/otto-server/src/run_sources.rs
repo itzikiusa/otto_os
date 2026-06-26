@@ -339,7 +339,7 @@ async fn resolve_test(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> 
         .collect::<Vec<_>>()
         .join("\n");
     Ok(ResolvedSource {
-        title: format!("Failing test cases ({})", failing.len().max(0)),
+        title: format!("Failing test cases ({})", failing.len()),
         body_md: clean(&body, BODY_CAP),
         goal: "Make the failing test case(s) pass.".to_string(),
         source_url: tc_run.confluence_url.clone(),

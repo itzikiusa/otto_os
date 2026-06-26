@@ -101,9 +101,7 @@ impl RunTrigger for ChannelRunTrigger {
         }
 
         // 2. Launch via `/run <ref>` or "run with otto …".
-        let Some(arg) = run_arg(text) else {
-            return None;
-        };
+        let arg = run_arg(text)?;
         if arg.is_empty() {
             return Some(RunAck {
                 reply: "Usage: `/run <Jira key | GitHub/Confluence URL | finding:/story:/test:/report:<id>>` \

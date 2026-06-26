@@ -930,6 +930,15 @@ export type OttoEvent =
       status: string;
     }
   | {
+      /** A Run with Otto run advanced through its stage machine (status changed,
+       *  proof/review attached, or it reached approval/PR/terminal). The Run with
+       *  Otto page re-fetches the affected run + the workspace list on a match. */
+      type: 'otto_run_updated';
+      workspace_id: Id;
+      run_id: Id;
+      status: string;
+    }
+  | {
       /** A canvas scene's source doc changed — pushed LIVE while an agent edits
        *  the backing file (per-poll) and once with the committed result. The
        *  Canvas page re-renders `doc` for the matching `scene_id`. */
@@ -1080,7 +1089,8 @@ export type Feature =
   | 'proof_pack'
   | 'mcp'
   | 'mission_control'
-  | 'scheduled_tasks';
+  | 'scheduled_tasks'
+  | 'run_with_otto';
 
 /** Capability ladder (None < View < Edit < Admin). */
 export type Capability = 'none' | 'view' | 'edit' | 'admin';
@@ -3321,7 +3331,10 @@ export interface Workflow {
   updated_at: string;
 }
 
-export type RunStatus = 'pending' | 'running' | 'success' | 'error' | 'canceled';
+// NOTE: named `WorkflowRunStatus` (not `RunStatus`) to avoid colliding with the
+// Run-with-Otto `RunStatus` stage machine below. Rust namespaces these per crate
+// module (`otto-core::workflows` vs `otto-core::run`); this flat TS file cannot.
+export type WorkflowRunStatus = 'pending' | 'running' | 'success' | 'error' | 'canceled';
 export type NodeStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped';
 
 export interface NodeRunState {
@@ -3337,7 +3350,7 @@ export interface WorkflowRun {
   id: Id;
   workflow_id: Id;
   workspace_id: Id;
-  status: RunStatus;
+  status: WorkflowRunStatus;
   input: unknown;
   nodes: NodeRunState[];
   error?: string | null;
@@ -3383,7 +3396,10 @@ export interface UpdateTriggerReq {
   enabled?: boolean;
 }
 
-export interface ApproveRunReq {
+// NOTE: named `WorkflowApproveRunReq` (not `ApproveRunReq`) to avoid colliding
+// with the Run-with-Otto `ApproveRunReq` below — same per-module-vs-flat-file
+// reason as WorkflowRunStatus.
+export interface WorkflowApproveRunReq {
   node_id: string;
   approved: boolean;
   note?: string | null;
@@ -4567,4 +4583,131 @@ export interface ScheduledTaskPreset {
   schedule: Record<string, unknown>;
   suggested_destination: Record<string, unknown>;
   skill?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Run with Otto — the "one button" flow: a source item driven through a stage
+// machine (resolve source → context → worktree → agent/goal-loop → proof → AI
+// review → human approval → PR draft). Mirrors otto-core / otto_state::otto_runs.
+// ---------------------------------------------------------------------------
+
+/** Where a run is in its stage machine. The `*_*` mid-states are the live
+ *  stages; the trailing ones are terminal. */
+export type RunStatus =
+  | 'queued'
+  | 'resolving_source'
+  | 'building_context'
+  | 'provisioning'
+  | 'executing'
+  | 'proving'
+  | 'reviewing'
+  | 'awaiting_approval'
+  | 'drafting_pr'
+  | 'completed'
+  | 'failed'
+  | 'rejected'
+  | 'cancelled';
+
+/** The kind of source an a run was seeded from. */
+export type SourceKind =
+  | 'jira'
+  | 'confluence'
+  | 'github_pr'
+  | 'github_issue'
+  | 'channel'
+  | 'product_story'
+  | 'finding'
+  | 'test'
+  | 'scheduled_report';
+
+/** Single agent turn vs an iterative goal loop. */
+export type RunMode = 'single_agent' | 'goal_loop';
+
+/** Where the run was launched from. */
+export type RunOrigin = 'slack' | 'telegram' | 'webhook' | 'ui' | 'mcp' | 'api';
+
+/** A Run with Otto run: a source item driven end-to-end into a reviewed,
+ *  evidence-backed PR draft. */
+export interface OttoRun {
+  id: Id;
+  workspace_id: Id;
+  title: string;
+  source_kind: SourceKind;
+  source_ref: string;
+  source_url?: string;
+  goal: string;
+  mode: RunMode;
+  provider: string;
+  repo_id?: string;
+  repo_path?: string;
+  base_branch?: string;
+  branch?: string;
+  worktree_path?: string;
+  base_commit?: string;
+  status: RunStatus;
+  error?: string;
+  origin_kind: RunOrigin;
+  origin_chat?: string;
+  origin_thread?: string;
+  origin_user?: string;
+  callback_url?: string;
+  goal_loop_id?: string;
+  review_id?: string;
+  proof_pack_id?: string;
+  proof_status?: string;
+  risk_score?: number;
+  findings_total: number;
+  findings_blocking: number;
+  pr_draft_json?: string;
+  pr_url?: string;
+  auto_open_pr: boolean;
+  approval_decision?: string;
+  approved_by?: string;
+  approved_at?: string;
+  result_summary?: string;
+  context_summary?: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One entry in a run's stage timeline (a stage start/finish/note). */
+export interface RunEvent {
+  id: Id;
+  run_id: Id;
+  workspace_id: Id;
+  kind: string;
+  status?: string;
+  message: string;
+  detail?: unknown;
+  created_at: string;
+}
+
+/** Launch a run — either from a detected source (`source_kind`/`source_ref` or
+ *  `url`) or free `seed_text` (→ a channel run). */
+export interface LaunchRunReq {
+  source_kind?: SourceKind;
+  source_ref?: string;
+  url?: string;
+  seed_text?: string;
+  mode?: RunMode;
+  provider?: string;
+  repo_id?: string;
+  auto_open_pr?: boolean;
+  title?: string;
+}
+
+/** Human approval / rejection of a run awaiting approval. */
+export interface ApproveRunReq {
+  decision: 'approve' | 'reject';
+  note?: string;
+}
+
+/** The shape returned by `GET /runs/:id/detect` — a best-effort source guess. */
+export interface RunDetectResp {
+  detected?: {
+    source_kind: SourceKind;
+    source_ref: string;
+    url: string;
+  };
 }

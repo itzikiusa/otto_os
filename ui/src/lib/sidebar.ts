@@ -38,6 +38,7 @@ export interface SidebarModule {
  */
 export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'agents', icon: 'terminal', label: 'Agents', feature: 'agents', special: true },
+  { id: 'run-with-otto', icon: 'play', label: 'Run with Otto', feature: 'run_with_otto' },
   { id: 'mission-control', icon: 'radar', label: 'Mission Control', feature: 'mission_control' },
   { id: 'connections', icon: 'plug', label: 'Connections', feature: 'connections', special: true },
   { id: 'swarm', icon: 'grid', label: 'Swarm', feature: 'swarm' },

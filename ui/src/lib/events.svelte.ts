@@ -15,6 +15,7 @@ import { mockupAssist } from './stores/mockup-assist.svelte';
 import { database } from './stores/database.svelte';
 import { proof } from './stores/proof.svelte';
 import { scheduledTasks } from './stores/scheduledTasks.svelte';
+import { runWithOtto } from './stores/runWithOtto.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -388,6 +389,9 @@ class EventsClient {
         } else if (parsed.type === 'scheduled_task_run_updated') {
           // Scheduled Tasks page refreshes the affected task's runs + list status.
           scheduledTasks.applyEvent(parsed);
+        } else if (parsed.type === 'otto_run_updated') {
+          // Run with Otto page refreshes the affected run + the workspace list.
+          runWithOtto.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);
