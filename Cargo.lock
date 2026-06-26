@@ -3048,6 +3048,7 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "otto-core",
+ "otto-netguard",
  "otto-state",
  "reqwest",
  "serde",

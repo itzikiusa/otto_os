@@ -2,7 +2,7 @@
 //! search (keyword ⊕ vector, fused by RRF, re-ranked), and the token-budgeted
 //! `recall_brief`.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use otto_core::Result;
 use otto_state::memory::{ListFilter, SearchFilter};
@@ -16,11 +16,17 @@ use crate::retrieve::{rerank_score, rrf_fuse, RerankSignals};
 use crate::types::*;
 
 const STUB_DIM: usize = 256;
+/// Batch size when re-embedding memories so a remote provider round-trips are
+/// amortized instead of one HTTP call per memory.
+const REINDEX_BATCH: usize = 64;
 
 pub struct MemoryService {
     repo: MemoriesRepo,
-    embedder: Option<Arc<dyn Embedder>>,
-    index: Option<Arc<dyn VectorIndex>>,
+    /// Interior-mutable so the active embedder/index can be swapped at runtime
+    /// (the `PUT /memory/embedder` endpoint) without rebuilding the whole
+    /// service. The Arc is cloned out under a short read lock before any await.
+    embedder: RwLock<Option<Arc<dyn Embedder>>>,
+    index: RwLock<Option<Arc<dyn VectorIndex>>>,
     /// When set, every operation forwards to a shared host Otto instead of the
     /// local SQLite — this is how a team shares one memory across machines.
     remote: Option<RemoteClient>,
@@ -37,8 +43,8 @@ impl MemoryService {
     ) -> Self {
         Self {
             repo: MemoriesRepo::new(pool),
-            embedder: Some(embedder),
-            index: Some(index),
+            embedder: RwLock::new(Some(embedder)),
+            index: RwLock::new(Some(index)),
             remote: None,
             vault: None,
         }
@@ -56,8 +62,8 @@ impl MemoryService {
     pub fn new_keyword_only(pool: SqlitePool) -> Self {
         Self {
             repo: MemoriesRepo::new(pool),
-            embedder: None,
-            index: None,
+            embedder: RwLock::new(None),
+            index: RwLock::new(None),
             remote: None,
             vault: None,
         }
@@ -78,11 +84,105 @@ impl MemoryService {
     pub fn remote(pool: SqlitePool, base_url: String, token: String) -> Self {
         Self {
             repo: MemoriesRepo::new(pool),
-            embedder: None,
-            index: None,
+            embedder: RwLock::new(None),
+            index: RwLock::new(None),
             remote: Some(RemoteClient::new(base_url, token)),
             vault: None,
         }
+    }
+
+    // -- runtime embedder management (settings/keychain-driven) --------------
+
+    /// Clone the active embedder out from under the read lock (drop the guard
+    /// before any await).
+    fn current_embedder(&self) -> Option<Arc<dyn Embedder>> {
+        self.embedder.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Clone the active index out from under the read lock.
+    fn current_index(&self) -> Option<Arc<dyn VectorIndex>> {
+        self.index.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Swap the active embedder at runtime (e.g. from `PUT /memory/embedder`).
+    /// The vector index is rebuilt to match the embedder's `model_id` so KNN
+    /// only scores vectors produced by the active model. `None` disables vector
+    /// search (keyword-only). Existing vectors at other models are simply
+    /// ignored until a `reindex` re-embeds them under the new model.
+    pub fn set_embedder(&self, embedder: Option<Arc<dyn Embedder>>) {
+        let index: Option<Arc<dyn VectorIndex>> = embedder.as_ref().map(|e| {
+            Arc::new(BruteForceIndex::new(
+                self.repo.pool().clone(),
+                e.model_id().to_string(),
+            )) as Arc<dyn VectorIndex>
+        });
+        if let Ok(mut g) = self.embedder.write() {
+            *g = embedder;
+        }
+        if let Ok(mut g) = self.index.write() {
+            *g = index;
+        }
+    }
+
+    /// `(model_id, dim)` of the active embedder, or `None` when keyword-only.
+    pub fn embedder_status(&self) -> Option<(String, usize)> {
+        self.embedder
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|e| (e.model_id().to_string(), e.dim())))
+    }
+
+    /// Re-embed a workspace's memories under the active embedder, skipping rows
+    /// already embedded at the current model (idempotent). Batched to amortize
+    /// remote round-trips. Returns the number of memories (re)embedded. No-op
+    /// (returns 0) when keyword-only or when forwarding to a remote backend.
+    pub async fn reindex(&self, ws: &str) -> Result<usize> {
+        if self.remote.is_some() {
+            return Ok(0);
+        }
+        let Some(e) = self.current_embedder() else {
+            return Ok(0);
+        };
+        let model = e.model_id().to_string();
+        // Memories already embedded at the active model — skip them.
+        let already: std::collections::HashSet<String> = self
+            .repo
+            .all_vectors(ws, &model)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let filter = ListFilter {
+            collection: None,
+            kind: None,
+            story_id: None,
+            tag: None,
+            include_inactive: true,
+            limit: 100_000,
+            viewer: None,
+        };
+        let memories = self.repo.list(ws, &filter).await?;
+        let pending: Vec<&Memory> = memories.iter().filter(|m| !already.contains(&m.id)).collect();
+        let mut count = 0usize;
+        for chunk in pending.chunks(REINDEX_BATCH) {
+            let texts: Vec<String> = chunk
+                .iter()
+                .map(|m| format!("{}\n{}", m.title, m.body))
+                .collect();
+            if let Ok(vecs) = e.embed(&texts).await {
+                for (m, v) in chunk.iter().zip(vecs.into_iter()) {
+                    if self
+                        .repo
+                        .put_vector(&m.id, e.model_id(), e.dim(), &v)
+                        .await
+                        .is_ok()
+                    {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        Ok(count)
     }
 
     /// Enable Obsidian-vault write-through: saved memories are also written as
@@ -118,7 +218,7 @@ impl MemoryService {
     }
 
     async fn embed_one(&self, m: &Memory) {
-        if let Some(e) = &self.embedder {
+        if let Some(e) = self.current_embedder() {
             let text = format!("{}\n{}", m.title, m.body);
             if let Ok(v) = e.embed(&[text]).await {
                 if let Some(v0) = v.into_iter().next() {
@@ -278,7 +378,7 @@ impl MemoryService {
 
         let mut sem_ids: Vec<String> = Vec::new();
         if q.mode != SearchMode::Keyword && !text.is_empty() {
-            if let (Some(e), Some(idx)) = (&self.embedder, &self.index) {
+            if let (Some(e), Some(idx)) = (self.current_embedder(), self.current_index()) {
                 if let Ok(qv) = e.embed(std::slice::from_ref(&text)).await {
                     if let Some(v0) = qv.into_iter().next() {
                         sem_ids = idx

@@ -2,15 +2,34 @@
 //! no network) — real embedders (local fastembed / remote OpenAI/Voyage) plug in
 //! behind this trait behind cargo features.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
+
+/// Outbound embed request timeout (matches the otto-mcp client posture).
+const EMBED_TIMEOUT: Duration = Duration::from_secs(20);
+/// Hard cap on an embeddings response body (defends against a hostile/buggy
+/// endpoint streaming an unbounded body). 32 MiB is far above any real
+/// embeddings batch (dim × count × ~8 bytes of JSON).
+const MAX_EMBED_BODY: u64 = 32 * 1024 * 1024;
 
 #[async_trait]
 pub trait Embedder: Send + Sync {
     fn model_id(&self) -> &str;
     fn dim(&self) -> usize;
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+}
+
+/// Validate a remote embedder base URL against the outbound SSRF guard
+/// (loopback / private / link-local / metadata addresses are refused). The
+/// daemon calls this when a user configures a custom embedder endpoint so a
+/// hostile URL is rejected before any request is ever made.
+pub async fn validate_remote_url(url: &str) -> Result<()> {
+    otto_netguard::check_url(url)
+        .await
+        .map_err(|e| Error::Invalid(format!("embedder url rejected: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -72,12 +91,20 @@ impl RemoteEmbedder {
     }
 
     pub fn with(api_key: String, base_url: String, model: String, dim: usize) -> Self {
+        // Bounded, redirect-guarded client: a timeout so a hung provider can't
+        // stall ingest, and the netguard redirect policy so a 3xx can't bounce
+        // the request to a private/loopback address.
+        let http = reqwest::Client::builder()
+            .timeout(EMBED_TIMEOUT)
+            .redirect(otto_netguard::redirect_policy())
+            .build()
+            .unwrap_or_default();
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model,
             dim,
-            http: reqwest::Client::new(),
+            http,
         }
     }
 }
@@ -107,6 +134,14 @@ impl Embedder for RemoteEmbedder {
                 "embed provider returned {}",
                 resp.status()
             )));
+        }
+        // Reject an oversized body before buffering it.
+        if let Some(len) = resp.content_length() {
+            if len > MAX_EMBED_BODY {
+                return Err(Error::Upstream(format!(
+                    "embed response too large: {len} bytes"
+                )));
+            }
         }
         let body: EmbedResp = resp
             .json()

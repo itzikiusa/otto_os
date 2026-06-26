@@ -1526,6 +1526,9 @@ keyword + vector hybrid recall. Reads require `ws viewer`, mutations `ws editor`
 | POST /workspaces/{ws}/memory/import-graph | ws editor | `{collection?, graph:{nodes,edges}}` | `ImportStats{nodes,edges}` (graphify graph.json) |
 | GET /workspaces/{ws}/memory/entities/{id}/graph | ws viewer | — | `{links, neighbors}` (entity neighborhood) |
 | POST /workspaces/{ws}/product/stories/{sid}/memory/ingest | ws editor | — | `{ingested}` (extract a story's artifacts into memory) |
+| POST /workspaces/{ws}/memory/reindex | ws editor | — | `{embedded}` — re-embed the workspace's memories under the active embedder (idempotent: skips rows already at the active model; batched) |
+| GET /memory/embedder | settings view | — | `{provider, model?, dim?, active, key_present}` — the active Vault embedder |
+| PUT /memory/embedder | settings admin (root) | `{provider:"stub"\|"openai"\|"voyage", api_key?}` | switch the embedder live; stores `api_key` in the Keychain (never the DB). `400` for openai/voyage with no resolvable key. After switching providers, `POST …/memory/reindex` re-embeds existing memories. |
 
 Notes:
 - `MemoryQuery.mode` ∈ `{hybrid (default), semantic, keyword}`; `k` defaults to 20.
@@ -1533,8 +1536,13 @@ Notes:
 - Sharing across machines: set `OTTO_MEMORY_REMOTE_URL`/`OTTO_MEMORY_REMOTE_TOKEN`
   to point an instance at a shared host, or sync an `OTTO_MEMORY_VAULT_DIR` vault
   folder (git) and re-index. A shared SQLite *file* over a network is unsupported.
-- Vectors are embedded on write; the default embedder is a deterministic local stub
-  (real local/remote embedders swap in behind the `Embedder` trait, feature-gated).
+- Vectors are embedded on write. The default embedder is a deterministic local stub;
+  a **real** OpenAI/Voyage embedder is wired by `PUT /memory/embedder` (provider +
+  Keychain key) or the `embedder` setting at boot, resolving the key from the
+  Keychain (`<provider>_api_key`) or `<PROVIDER>_API_KEY`. The active embedder
+  swaps in live behind the `Embedder` trait; a model/dim change is reconciled by
+  `POST …/memory/reindex`. Outbound embed requests are SSRF-guarded (netguard),
+  time-bounded (20s) and size-capped.
 
 ## Message Brokers (Kafka viewer)
 

@@ -66,6 +66,23 @@ export interface GovImportResp {
   import_id: string;
 }
 
+// -- Embedder configuration (mirror of crates/otto-server/src/embedder.rs) ----
+
+export type EmbedderProvider = 'stub' | 'openai' | 'voyage';
+
+export interface EmbedderStatus {
+  provider: string;
+  model: string | null;
+  dim: number | null;
+  active: boolean;
+  key_present: boolean;
+}
+
+export interface SetEmbedderReq {
+  provider: EmbedderProvider;
+  api_key?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -85,6 +102,10 @@ class VaultStore {
   // Merge UI state
   mergeMode = $state(false);
   mergeIds = $state<string[]>([]);
+
+  // Embedder configuration state
+  embedder = $state<EmbedderStatus | null>(null);
+  embedderBusy = $state(false);
 
   /** Distinct collections present, for the filter chips. */
   collections = $derived.by(() => {
@@ -156,6 +177,48 @@ class VaultStore {
       this.graph = await api.get<MemoryGraphData>(`/workspaces/${wsId}/memory/graph`);
     } finally {
       this.loading = false;
+    }
+  }
+
+  // -- embedder config -----------------------------------------------------
+
+  /** Fetch the active Vault embedder (provider/model/dim). */
+  async loadEmbedder(): Promise<void> {
+    try {
+      this.embedder = await api.get<EmbedderStatus>('/memory/embedder');
+    } catch {
+      // Non-fatal: the panel just stays hidden if status can't be read.
+      this.embedder = null;
+    }
+  }
+
+  /** Switch the embedder provider (optionally storing an API key), then refresh. */
+  async setEmbedder(provider: EmbedderProvider, apiKey?: string): Promise<void> {
+    this.embedderBusy = true;
+    try {
+      const body: SetEmbedderReq = { provider };
+      if (apiKey && apiKey.trim()) body.api_key = apiKey.trim();
+      this.embedder = await api.put<EmbedderStatus>('/memory/embedder', body);
+      toasts.info(`Embedder set to ${this.embedder.model ?? provider}`);
+    } catch (e) {
+      toasts.error('Could not set embedder', e instanceof Error ? e.message : String(e));
+    } finally {
+      this.embedderBusy = false;
+    }
+  }
+
+  /** Re-embed this workspace's memories under the active embedder. */
+  async reindex(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    this.embedderBusy = true;
+    try {
+      const r = await api.post<{ embedded: number }>(`/workspaces/${wsId}/memory/reindex`, {});
+      toasts.info(`Re-embedded ${r.embedded} ${r.embedded === 1 ? 'memory' : 'memories'}`);
+    } catch (e) {
+      toasts.error('Reindex failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      this.embedderBusy = false;
     }
   }
 

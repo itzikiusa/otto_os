@@ -27,9 +27,30 @@
   let showMerge = $state(false);
   let showSplit = $state(false);
 
+  // Embedder settings panel.
+  let showEmbedder = $state(false);
+  let embProvider = $state<'stub' | 'openai' | 'voyage'>('stub');
+  let embKey = $state('');
+
   $effect(() => {
     if (ws.currentId) void vault.load();
   });
+
+  // Load the active embedder status once.
+  $effect(() => {
+    void vault.loadEmbedder();
+  });
+
+  // Keep the provider selector in sync with the loaded status.
+  $effect(() => {
+    const p = vault.embedder?.provider;
+    if (p === 'stub' || p === 'openai' || p === 'voyage') embProvider = p;
+  });
+
+  async function applyEmbedder(): Promise<void> {
+    await vault.setEmbedder(embProvider, embKey);
+    embKey = '';
+  }
 
   // Load the superseded-by memory whenever the selected note changes.
   $effect(() => {
@@ -193,6 +214,65 @@
         </button>
       {/if}
     </div>
+
+    <!-- Embedder status + settings (semantic search backend) -->
+    {#if vault.embedder}
+      <div class="embedder-bar" data-testid="vault-embedder">
+        <button
+          class="embedder-summary"
+          onclick={() => (showEmbedder = !showEmbedder)}
+          title="Configure the semantic-search embedder"
+        >
+          <span class="embedder-dot" class:active={vault.embedder.active}></span>
+          <span class="embedder-label">
+            Embedder: {vault.embedder.model ?? vault.embedder.provider}
+            {#if vault.embedder.dim}<span class="dim">· {vault.embedder.dim}d</span>{/if}
+          </span>
+          <span class="embedder-caret">{showEmbedder ? '▾' : '▸'}</span>
+        </button>
+        {#if showEmbedder}
+          <div class="embedder-form">
+            <label class="embedder-row">
+              <span>Provider</span>
+              <select bind:value={embProvider} data-testid="embedder-provider">
+                <option value="stub">Local stub (no key)</option>
+                <option value="openai">OpenAI</option>
+                <option value="voyage">Voyage</option>
+              </select>
+            </label>
+            {#if embProvider === 'openai' || embProvider === 'voyage'}
+              <label class="embedder-row">
+                <span>API key</span>
+                <input
+                  type="password"
+                  placeholder={vault.embedder.key_present ? '•••• (stored)' : 'paste key…'}
+                  bind:value={embKey}
+                  data-testid="embedder-key"
+                />
+              </label>
+            {/if}
+            <div class="embedder-actions">
+              <button
+                class="embedder-apply"
+                disabled={vault.embedderBusy}
+                onclick={applyEmbedder}
+                data-testid="embedder-apply"
+              >
+                {vault.embedderBusy ? 'Saving…' : 'Apply'}
+              </button>
+              <button
+                class="embedder-reindex"
+                disabled={vault.embedderBusy || !vault.embedder.active}
+                onclick={() => vault.reindex()}
+                title="Re-embed existing memories under the active model"
+              >
+                Reindex
+              </button>
+            </div>
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     <ul class="vault-list">
       {#each vault.visible as m (m.id)}
@@ -408,6 +488,91 @@
     padding: 4px 8px 6px;
     border-bottom: 1px solid var(--border, #2a2a2a);
     flex-wrap: wrap;
+  }
+  .embedder-bar {
+    padding: 4px 8px 6px;
+    border-bottom: 1px solid var(--border, #2a2a2a);
+    font-size: 11px;
+  }
+  .embedder-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--text-dim, #aaa);
+    cursor: pointer;
+    padding: 2px 0;
+    font-size: 11px;
+  }
+  .embedder-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-dim, #888);
+    flex: none;
+  }
+  .embedder-dot.active {
+    background: var(--accent, #4c6ef5);
+  }
+  .embedder-label {
+    flex: 1;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .embedder-label .dim {
+    opacity: 0.6;
+  }
+  .embedder-form {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 6px 0 2px;
+  }
+  .embedder-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    justify-content: space-between;
+  }
+  .embedder-row span {
+    color: var(--text-dim, #aaa);
+  }
+  .embedder-row select,
+  .embedder-row input {
+    flex: 1;
+    min-width: 0;
+    font-size: 11px;
+    padding: 3px 5px;
+    border-radius: 5px;
+    border: 1px solid var(--border, #444);
+    background: var(--bg-elev, transparent);
+    color: var(--text, #ddd);
+  }
+  .embedder-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .embedder-actions button {
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 5px;
+    border: 1px solid var(--border, #444);
+    background: transparent;
+    color: var(--text-dim, #aaa);
+    cursor: pointer;
+  }
+  .embedder-apply {
+    background: var(--accent, #4c6ef5) !important;
+    color: #fff !important;
+    border-color: var(--accent, #4c6ef5) !important;
+  }
+  .embedder-actions button:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .merge-bar button {
     font-size: 11px;

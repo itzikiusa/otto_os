@@ -34,6 +34,17 @@ async fn remote_embedder_posts_and_parses() {
 }
 
 #[tokio::test]
+async fn remote_embedder_url_validation_blocks_loopback() {
+    // SSRF guard: a loopback embedder URL must be refused by netguard before any
+    // request is made (the daemon validates the configured URL at config time).
+    assert!(
+        otto_memory::embed::validate_remote_url("http://127.0.0.1:9/v1")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn remote_embedder_surfaces_http_errors() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -42,6 +53,72 @@ async fn remote_embedder_surfaces_http_errors() {
         .await;
     let e = RemoteEmbedder::with("bad".into(), server.uri(), "m".into(), 3);
     assert!(e.embed(&["x".into()]).await.is_err());
+}
+
+/// The embedder can be wired in at runtime (the daemon does this from settings
+/// + keychain), `embedder_status` reflects the active model, and `reindex`
+/// back-fills vectors for pre-existing memories idempotently.
+#[tokio::test]
+async fn embedder_hot_swap_status_and_reindex() {
+    use otto_memory::embed::StubEmbedder;
+    use otto_memory::{MemoryQuery, MemoryService, NewMemory, Scope, SearchMode};
+    use std::sync::Arc;
+
+    fn mk(title: &str, body: &str) -> NewMemory {
+        NewMemory {
+            collection: "product".into(),
+            record_type: "item".into(),
+            visibility: "shared".into(),
+            scope: Scope::Workspace,
+            story_id: None,
+            kind: "fact".into(),
+            title: title.into(),
+            body: body.into(),
+            entities: vec![],
+            tags: vec![],
+            source_kind: "manual".into(),
+            source_ref: None,
+            refs: vec![],
+            confidence: None,
+            salience: None,
+        }
+    }
+
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    // Start keyword-only: no embedder configured at construction.
+    let svc = MemoryService::new_keyword_only(pool);
+    assert!(svc.embedder_status().is_none(), "keyword-only has no embedder");
+
+    // Save a memory before any embedder exists (no vector written yet).
+    svc.save(&ws, &user, vec![mk("Settlement", "settlement happens via webhook")])
+        .await
+        .unwrap();
+
+    // Hot-swap a stub embedder in at runtime.
+    svc.set_embedder(Some(Arc::new(StubEmbedder::new(64))));
+    let (model, dim) = svc.embedder_status().expect("embedder now configured");
+    assert_eq!(model, "stub-v1");
+    assert_eq!(dim, 64);
+
+    // Reindex embeds the pre-existing memory under the active model.
+    assert_eq!(svc.reindex(&ws).await.unwrap(), 1);
+    // Idempotent: a second reindex skips rows already at this model.
+    assert_eq!(svc.reindex(&ws).await.unwrap(), 0);
+
+    // Semantic search now flows through the swapped-in embedder.
+    let hits = svc
+        .search(
+            &ws,
+            MemoryQuery {
+                text: Some("settlement webhook".into()),
+                mode: SearchMode::Semantic,
+                k: 3,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(hits.iter().any(|h| h.memory.body.contains("webhook")));
 }
 
 #[tokio::test]
