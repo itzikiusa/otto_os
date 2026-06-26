@@ -13,6 +13,7 @@ import { product } from './stores/product.svelte';
 import { canvas } from './stores/canvas.svelte';
 import { mockupAssist } from './stores/mockup-assist.svelte';
 import { database } from './stores/database.svelte';
+import { proof } from './stores/proof.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -295,6 +296,9 @@ class EventsClient {
             parsed.sql,
             parsed.note,
           );
+        } else if (parsed.type === 'proof_pack_updated') {
+          // Proof page list/detail + sidebar proof chips refresh on the event.
+          proof.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);
