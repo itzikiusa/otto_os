@@ -532,7 +532,7 @@ impl ReviewFindingsRepo {
         .bind(&p.jira_url)
         .bind(&p.fix_session_id)
         .bind(&p.repo_rule_id)
-        .bind(p.requires_human_approval.map(|b| i64::from(b)))
+        .bind(p.requires_human_approval.map(i64::from))
         .bind(&p.approved_by)
         .bind(&p.approved_at)
         .bind(&p.approval_decision)

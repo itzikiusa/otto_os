@@ -16,6 +16,8 @@ pub mod goal_loops;
 pub mod grants;
 pub mod grpc;
 pub mod fs;
+pub mod proof_pack;
+pub mod repo_rules;
 pub mod handover;
 pub mod impersonate;
 pub mod logs;
