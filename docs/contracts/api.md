@@ -1943,3 +1943,36 @@ advance-cursor-on-completion, startup reaper, global run semaphore); live signal
 | `otto.set_scheduled_task_enabled` | yes (DANGEROUS) | off | #139 |
 | `otto.run_scheduled_task` | yes (DANGEROUS) | off | #141 |
 | `otto.delete_scheduled_task` | yes (DANGEROUS) | off | #140 |
+
+## Run with Otto
+
+The flagship **one-button** flow: a source item (Jira / Confluence / GitHub issue or
+PR / Slack or Telegram thread / Product task / Review finding / Failing test /
+Scheduled-task report) becomes an `OttoRun` driven through a fixed stage machine —
+resolve source → context packet → isolated branch/worktree → goal-loop or single
+agent → proof pack → AI review → **human approval** → PR draft. Workspace-scoped,
+gated by `Feature::RunWithOtto` (`run_with_otto`: View for reads, Edit for writes).
+Flat by-id routes load the run and re-check the role on its workspace (IDOR guard).
+The run advances in the background; subscribe to `Event::OttoRunUpdated` (see `ws.md`).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/workspaces/{wid}/runs | run_with_otto edit + ws editor | `LaunchRunReq {source_kind?, source_ref?, url?, seed_text?, mode?, provider?, repo_id?, auto_open_pr?, title?}` | OttoRun (queued; poll/subscribe) |
+| GET /api/v1/workspaces/{wid}/runs | run_with_otto view + ws viewer | — | `OttoRun[]` |
+| GET /api/v1/workspaces/{wid}/runs/detect?q= | run_with_otto view + ws viewer | — | `{detected: {source_kind, source_ref, url}?}` |
+| GET /api/v1/runs/{id} | run_with_otto view + ws viewer | — | OttoRun |
+| GET /api/v1/runs/{id}/events | run_with_otto view + ws viewer | — | `RunEvent[]` (the stage timeline) |
+| POST /api/v1/runs/{id}/approve | run_with_otto edit + ws editor | `{decision: "approve"\|"reject", note?}` | OttoRun |
+| POST /api/v1/runs/{id}/cancel | run_with_otto edit + ws editor | — | OttoRun |
+| POST /api/v1/runs/{id}/open-pr | run_with_otto edit + ws editor | — | PrSummary (requires approved + passed/waived proof) |
+
+Webhook entry (public-by-key, same per-workspace `X-Otto-Webhook-Key` as the channel
+webhook; classified `Exempt` in `policy.rs`):
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}` |
+
+Slack/Telegram entry: a `/run <ref>` (or "run with otto …") message launches a run;
+an `approve`/`reject` reply in the run's thread resolves the approval gate (authorized
+by the integration's `allowed_users`, executed as the daemon root user).

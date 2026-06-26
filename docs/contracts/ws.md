@@ -522,3 +522,18 @@ blind timer.
 - The Scheduled Tasks page re-fetches the task's run history on a matching tick
   instead of polling.
 - TypeScript type: `{ type: 'scheduled_task_run_updated'; workspace_id: Id; task_id: Id; run_id: Id; status: string }`.
+
+---
+
+### `otto_run_updated`
+
+```json
+{ "type": "otto_run_updated", "workspace_id": "<Id>", "run_id": "<Id>",
+  "status": "queued|resolving_source|building_context|provisioning|executing|proving|reviewing|awaiting_approval|drafting_pr|completed|failed|rejected|cancelled" }
+```
+
+- Emitted by `otto_server::run_engine` on every Run with Otto stage transition,
+  failure, or completion. `status` is the snake_case `RunStatus`.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- The Run with Otto page re-fetches the run + its timeline on a matching tick.
+- TypeScript type: `{ type: 'otto_run_updated'; workspace_id: Id; run_id: Id; status: string }`.
