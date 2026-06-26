@@ -38,15 +38,23 @@ approximation:
 
 ## Compositions
 
-`Intro` · `Sessions` · `Git` · `Review` · `Product` · `Connections` ·
-`Database` · `Brokers` · `Swarm` · `Channels` · `UsageInsights` · `Skills` ·
-`Workflows` · `Plugins` · `Vault` · `TeamMobile` · `Platform` · `Outro`
+`Intro` · `Sessions` · `MissionControl` · `Git` · `Review` · `ProofPacks` ·
+`Product` · `Canvas` · `Swarm` · `GoalLoops` · `Connections` · `Database` ·
+`Brokers` · `Channels` · `Workflows` · `ScheduledTasks` · `Mcp` · `Vault` ·
+`Skills` · `SkillsEval` · `UsageInsights` · `Api` · `Plugins` · `TeamMobile` ·
+`Platform` · `Outro`
 
-Together they cover the full Otto surface: agent sessions, git/PRs, multi-agent
-review, Jira/Confluence product workflows, connections, the database explorer,
-Kafka brokers, the agent swarm, Slack/Telegram channels, usage/budgets/insights,
-skills & context, workflows, custom plugins, the knowledge vault, RBAC + remote +
-mobile, and the platform polish (palette, mission control, theming, auto-update).
+Together they cover the full Otto surface — one walkthrough per gatable feature
+plus the brand intro/outro: agent sessions, Mission Control's unified work graph,
+git/PRs, multi-agent review + tracked findings, Proof Packs, Jira/Confluence
+product workflows, the Canvas, the agent swarm, Goal Loops, connections, the
+database explorer, Kafka brokers, Slack/Telegram channels, workflows, scheduled
+tasks, the MCP control plane, the knowledge vault, the skill library +
+self-improvement, the skills evaluator, usage/budgets/insights, the API client,
+custom plugins, RBAC + remote + mobile, and the platform polish (palette,
+theming, RTL, auto-update). The in-app **Walkthroughs** page
+(`ui/src/modules/help/Walkthroughs.svelte`) lists the same set, rendered to
+`ui/public/walkthroughs/`.
 
 ## Commands
 

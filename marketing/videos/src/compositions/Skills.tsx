@@ -1,492 +1,689 @@
 import React from 'react';
-import { useCurrentFrame } from 'remotion';
-import { T, brand, fonts, providers, status, alpha } from '../theme';
+import { AbsoluteFill, useCurrentFrame } from 'remotion';
+import { T, brand, fonts, alpha, radius, navActive } from '../theme';
 import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
 import { OttoWindow } from '../components/Frame';
 import { Navigator } from '../components/Nav';
 import {
   Appear,
-  Stagger,
-  TitleCard,
   Caption,
-  Card,
+  TitleCard,
   Chip,
   Button,
-  Segmented,
-  StatusDot,
-  Diff,
+  Card,
   Icon,
+  Toggle,
+  Segmented,
   track,
 } from '../components/kit';
 
-// ════════════════════════════════════════════════════════════════════════════
-//  SKILLS & CONTEXT — skill library · skill evaluation · souls & context
-// ════════════════════════════════════════════════════════════════════════════
+// ── Scene 1 — Title (~70f) ────────────────────────────────────────────────────
 
-// ── Scene 1 — title ──────────────────────────────────────────────────────────
 const TitleScene: React.FC = () => (
   <TitleCard
-    kicker="SKILLS & CONTEXT"
-    title="Skills your agents actually use"
-    subtitle="Bundled, versioned, evaluated — and refined from your work"
+    kicker="Skills & Self-Improvement"
+    title="Skills Library"
+    subtitle="A versioned skill library that powers review, product & insights — and quietly sharpens itself from how you work."
   />
 );
 
-// ── Scene 2 — the versioned skill library ────────────────────────────────────
-interface SkillRow {
-  name: string;
+// ── Scene 2 — Library (~165f) ─────────────────────────────────────────────────
+
+const SETTINGS_SECTIONS = ['General', 'Appearance', 'Providers', 'Skills', 'Plugins', 'Integrations'];
+
+interface SkillEntry {
+  id: string;
   version: string;
   desc: string;
-  tags: { label: string; color: string }[];
   installed: boolean;
+  icon: string;
+  color: string;
 }
 
-const TAG = {
-  review: '#bf7aff',
-  feature: '#0a84ff',
-  testing: '#28c840',
-  product: '#febc2e',
-  insights: brand.cyan,
-};
-
-const SKILLS: SkillRow[] = [
+const SKILL_ENTRIES: SkillEntry[] = [
   {
-    name: 'golang-feature-implementation',
-    version: 'v3',
-    desc: 'SOLID services, DAO + worker templates, multi-tenant SQL',
-    tags: [{ label: 'feature', color: TAG.feature }],
+    id: 'review/security',
+    version: 'v2.1',
+    desc: 'Vulnerability patterns, SSRF & injection detection lenses',
     installed: true,
+    icon: 'eye',
+    color: brand.violet,
   },
   {
-    name: 'code-review',
-    version: 'v2',
-    desc: 'Security · performance · architecture lens for review runs',
-    tags: [{ label: 'review', color: TAG.review }],
-    installed: true,
-  },
-  {
-    name: 'golang-testing',
-    version: 'v2',
-    desc: 'Unit / component / integration pyramid + mock reuse',
-    tags: [{ label: 'testing', color: TAG.testing }],
-    installed: true,
-  },
-  {
-    name: 'product-prd',
-    version: 'v4',
-    desc: 'Jira-ready PRDs with acceptance criteria from a repo scan',
-    tags: [{ label: 'product', color: TAG.product }],
+    id: 'review/performance',
+    version: 'v1.4',
+    desc: 'Hotpath detection, N+1 queries & bundle size analysis',
     installed: false,
+    icon: 'gauge',
+    color: '#febc2e',
   },
   {
-    name: 'insights',
-    version: 'v1',
-    desc: 'Usage-signal summaries that power the daily report',
-    tags: [{ label: 'insights', color: TAG.insights }],
+    id: 'product/analysis',
+    version: 'v3.0',
+    desc: 'Discovery chat, story decomposition & mockup generation',
+    installed: true,
+    icon: 'square',
+    color: brand.purple,
+  },
+  {
+    id: 'insights/catch-up',
+    version: 'v1.2',
+    desc: 'Daily digest, agent summaries & session anomaly alerts',
     installed: false,
+    icon: 'chart',
+    color: brand.cyan,
   },
 ];
 
-const SkillCard: React.FC<{ s: SkillRow }> = ({ s }) => (
-  <Card pad={14} style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-    <span
-      style={{
-        width: 38,
-        height: 38,
-        borderRadius: 10,
-        background: alpha(s.tags[0].color, 0.16),
-        border: `1px solid ${alpha(s.tags[0].color, 0.4)}`,
-        display: 'grid',
-        placeItems: 'center',
-        color: s.tags[0].color,
-        flexShrink: 0,
-      }}
+const SkillRow: React.FC<{ entry: SkillEntry; delay: number }> = ({ entry, delay }) => (
+  <Appear delay={delay} y={12}>
+    <Card
+      t={T}
+      pad={14}
+      style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 8 }}
     >
-      <Icon name="zap" size={19} color={s.tags[0].color} />
-    </span>
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-        <span style={{ fontFamily: fonts.mono, fontSize: 16, fontWeight: 700, color: T.text }}>{s.name}</span>
-        <Chip color={brand.cyan} style={{ height: 19, fontSize: 11 }}>
-          {s.version}
-        </Chip>
-        {s.tags.map((tg) => (
-          <Chip key={tg.label} color={tg.color} style={{ height: 19, fontSize: 11 }}>
-            {tg.label}
-          </Chip>
-        ))}
+      {/* icon badge */}
+      <div
+        style={{
+          width: 42,
+          height: 42,
+          borderRadius: radius.m,
+          flexShrink: 0,
+          background: alpha(entry.color, 0.14),
+          border: `1px solid ${alpha(entry.color, 0.38)}`,
+          display: 'grid',
+          placeItems: 'center',
+        }}
+      >
+        <Icon name={entry.icon} size={20} color={entry.color} />
       </div>
-      <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim, marginTop: 5 }}>{s.desc}</div>
-    </div>
-    {s.installed ? (
-      <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: fonts.ui, fontSize: 12.5, color: status.working }}>
-          <StatusDot kind="working" size={8} pulse={false} />
-          Installed
-        </span>
-        <Button size="s" icon="refresh">
-          Update
-        </Button>
-      </span>
-    ) : (
-      <Button variant="primary" size="s" icon="arrowDown" style={{ flexShrink: 0 }}>
-        Install
-      </Button>
-    )}
-  </Card>
+
+      {/* name + desc */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <span
+            style={{
+              fontFamily: fonts.mono,
+              fontSize: 14,
+              fontWeight: 700,
+              color: T.text,
+            }}
+          >
+            {entry.id}
+          </span>
+          <Chip color={entry.color}>{entry.version}</Chip>
+          {entry.installed && <Chip tone="ok">installed</Chip>}
+        </div>
+        <div
+          style={{
+            fontFamily: fonts.ui,
+            fontSize: 13,
+            color: T.textDim,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {entry.desc}
+        </div>
+      </div>
+
+      {/* action */}
+      <div style={{ flexShrink: 0 }}>
+        {entry.installed ? (
+          <Button variant="default" size="s" icon="check">
+            Installed
+          </Button>
+        ) : (
+          <Button variant="primary" size="s" icon="arrowDown">
+            Install
+          </Button>
+        )}
+      </div>
+    </Card>
+  </Appear>
+);
+
+const SettingsSidebar: React.FC<{ activeIdx: number }> = ({ activeIdx }) => (
+  <div
+    style={{
+      width: 210,
+      flexShrink: 0,
+      borderRight: `1px solid ${T.border}`,
+      background: T.bgSidebar,
+      padding: '10px 0',
+    }}
+  >
+    {SETTINGS_SECTIONS.map((s, i) => {
+      const on = i === activeIdx;
+      return (
+        <div
+          key={s}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 9,
+            margin: '0 8px 2px',
+            padding: '7px 12px',
+            borderRadius: 6,
+            background: on ? navActive.bg : 'transparent',
+            color: on ? navActive.fg : T.textDim,
+            fontFamily: fonts.ui,
+            fontSize: 13.5,
+            fontWeight: on ? 600 : 500,
+          }}
+        >
+          {s}
+        </div>
+      );
+    })}
+  </div>
 );
 
 const LibraryScene: React.FC = () => (
   <>
-    <Stage scale={0.9}>
+    <Stage scale={0.88} enter="up">
       <OttoWindow
-        nav={<Navigator active="skills-eval" counts={{ 'skills-eval': 12 }} />}
-        title="Otto — Skills"
+        nav={<Navigator active="settings" />}
+        title="Otto — Settings · Skills"
+        width={1560}
+        height={884}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', boxSizing: 'border-box', padding: 22 }}>
-          {/* header row */}
-          <Appear delay={4} y={12}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
-              <Icon name="zap" size={20} color={brand.cyan} />
-              <span style={{ fontFamily: fonts.ui, fontSize: 21, fontWeight: 750 as never, color: T.text }}>Skill Library</span>
-              <Chip color={T.textDim} style={{ height: 21 }}>
-                12 skills
-              </Chip>
-              <div style={{ flex: 1 }} />
-              <Segmented options={['All', 'review', 'feature', 'testing', 'product']} active={0} />
-            </div>
-          </Appear>
-          {/* skill cards */}
-          <Stagger delay={14} step={8} y={16} style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
-            {SKILLS.map((s) => (
-              <SkillCard key={s.name} s={s} />
-            ))}
-          </Stagger>
-        </div>
-      </OttoWindow>
-    </Stage>
-    <Caption
-      step={1}
-      title="A versioned skill library"
-      sub="Install, update & filter by tag — skills power review, product & insights"
-    />
-  </>
-);
+        <div style={{ display: 'flex', height: '100%' }}>
+          <SettingsSidebar activeIdx={3} />
 
-// ── Scene 3 — skill evaluation (variants → diff → promote winner) ────────────
-const VariantCard: React.FC<{
-  label: string;
-  color: string;
-  score: number;
-  best?: boolean;
-  notes: string;
-  delay: number;
-}> = ({ label, color, score, best, notes, delay }) => {
-  const frame = useCurrentFrame();
-  const grow = track(frame, [delay + 6, delay + 26], [0, 1]);
-  return (
-    <Appear delay={delay} y={14} style={{ flex: 1 }}>
-      <Card
-        pad={13}
-        style={{
-          border: `1px solid ${best ? alpha(status.working, 0.55) : T.border}`,
-          background: best ? alpha(status.working, 0.06) : T.surface,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 9 }}>
-          <StatusDot kind={best ? 'working' : 'idle'} size={9} pulse={best} />
-          <span style={{ fontFamily: fonts.mono, fontSize: 13.5, fontWeight: 700, color: T.text, flex: 1 }}>{label}</span>
-          {best && (
-            <Chip tone="ok" style={{ height: 19, fontSize: 11 }}>
-              winner
-            </Chip>
-          )}
-        </div>
-        {/* score bar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-          <div style={{ flex: 1, height: 8, borderRadius: 999, background: T.surface2, overflow: 'hidden' }}>
-            <div
-              style={{
-                width: `${score * grow}%`,
-                height: '100%',
-                borderRadius: 999,
-                background: `linear-gradient(90deg, ${color}, ${alpha(color, 0.55)})`,
-              }}
-            />
-          </div>
-          <span style={{ fontFamily: fonts.mono, fontSize: 14, fontWeight: 700, color: best ? status.working : T.text, width: 38, textAlign: 'right' }}>
-            {Math.round(score * grow)}
-          </span>
-        </div>
-        <div style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim, marginTop: 8 }}>{notes}</div>
-      </Card>
-    </Appear>
-  );
-};
-
-const EvalScene: React.FC = () => (
-  <>
-    <Stage scale={0.9}>
-      <OttoWindow
-        nav={<Navigator active="skills-eval" counts={{ 'skills-eval': 12 }} />}
-        title="Otto — Skill Evaluator"
-      >
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', boxSizing: 'border-box', padding: 22, gap: 14 }}>
-          {/* run header */}
-          <Appear delay={3} y={12}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-              <Icon name="play" size={18} color={brand.cyan} />
-              <span style={{ fontFamily: fonts.ui, fontSize: 19, fontWeight: 750 as never, color: T.text }}>
-                Evaluating <span style={{ fontFamily: fonts.mono, color: brand.cyan }}>golang-feature-implementation</span>
-              </span>
-              <div style={{ flex: 1 }} />
-              <Chip color={T.textDim} style={{ height: 22 }}>
-                sources: pr_bo · docs/
-              </Chip>
-            </div>
-          </Appear>
-
-          <div style={{ display: 'flex', gap: 16, flex: 1, minHeight: 0 }}>
-            {/* left: variants + promote */}
-            <div style={{ width: 430, display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div style={{ display: 'flex', gap: 12 }}>
-                <VariantCard
-                  label="variant A · claude"
-                  color={providers.claude}
-                  score={91}
-                  best
-                  notes="Adds worker/ETL template + table-schema check"
-                  delay={14}
-                />
-                <VariantCard
-                  label="variant B · codex"
-                  color={providers.codex}
-                  score={78}
-                  notes="Good SOLID pass, missed mock-reuse rule"
-                  delay={22}
-                />
-              </div>
-              <Appear delay={64} y={14}>
-                <Card pad={14} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <span
+          {/* Catalog content */}
+          <div
+            style={{
+              flex: 1,
+              padding: '24px 28px',
+              overflowY: 'hidden' as const,
+            }}
+          >
+            {/* Section header */}
+            <Appear delay={14} y={14}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: 20,
+                }}
+              >
+                <div>
+                  <div
                     style={{
-                      width: 34,
-                      height: 34,
-                      borderRadius: 9,
-                      background: alpha(status.working, 0.16),
-                      display: 'grid',
-                      placeItems: 'center',
-                      color: status.working,
+                      fontFamily: fonts.ui,
+                      fontSize: 20,
+                      fontWeight: 700,
+                      color: T.text,
                     }}
                   >
-                    <Icon name="check" size={18} color={status.working} />
-                  </span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 700, color: T.text }}>variant A wins · +13 pts</div>
-                    <div style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim, marginTop: 2 }}>
-                      Promotes to v4 · v3 kept for rollback
-                    </div>
+                    Skills Library
                   </div>
-                  <Button variant="primary" size="m" icon="arrowUp">
-                    Promote winner
-                  </Button>
-                </Card>
-              </Appear>
-            </div>
-
-            {/* right: iteration diff */}
-            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 9 }}>
-              <Appear delay={30} y={10}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Icon name="split" size={15} color={T.textDim} />
-                  <span style={{ fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 600, color: T.text }}>
-                    Iteration diff — SKILL.md
-                  </span>
-                  <Chip color={brand.cyan} style={{ height: 18, fontSize: 10.5 }}>
-                    v3 → v4
-                  </Chip>
+                  <div
+                    style={{
+                      fontFamily: fonts.ui,
+                      fontSize: 13,
+                      color: T.textDim,
+                      marginTop: 3,
+                    }}
+                  >
+                    48 skills available · 2 installed
+                  </div>
                 </div>
-              </Appear>
-              <Diff
-                delay={36}
-                step={5}
-                fontSize={13}
-                style={{ flex: 1 }}
-                lines={[
-                  { text: '## Mandatory checks', kind: 'hunk' },
-                  { text: 'Verify table schemas before any query', kind: 'ctx' },
-                  { text: 'Guess column names from entity structs', kind: 'del' },
-                  { text: 'Cross-check ~/go_tests_utils/component/tables', kind: 'add' },
-                  { text: 'Reuse mocks from go_casino_kit/clients', kind: 'add' },
-                  { text: '', kind: 'ctx' },
-                  { text: '## Worker / ETL pattern', kind: 'hunk' },
-                  { text: 'Use GeneralWorkerJobService + Conductor', kind: 'add' },
-                  { text: 'Enrich with hourly aggregate + currency', kind: 'add' },
-                ]}
-              />
-            </div>
+                <Segmented options={['Installed', 'All 48']} active={1} />
+              </div>
+            </Appear>
+
+            {/* Skill rows */}
+            {SKILL_ENTRIES.map((entry, i) => (
+              <SkillRow key={entry.id} entry={entry} delay={26 + i * 15} />
+            ))}
           </div>
         </div>
       </OttoWindow>
     </Stage>
     <Caption
       step={2}
-      title="Evaluate & promote the best version"
-      sub="Agents iterate a skill against your codebase — keep the winner"
+      title="A bundled, versioned skill library — browse & install"
+      sub="Skills ship with Otto and update independently. Install to activate review lenses, product templates & insight prompts."
     />
   </>
 );
 
-// ── Scene 4 — souls & context, materialized on spawn ─────────────────────────
-const CtxItem: React.FC<{ icon: string; color: string; name: string; meta: string }> = ({ icon, color, name, meta }) => (
-  <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 4px' }}>
-    <span
-      style={{
-        width: 26,
-        height: 26,
-        borderRadius: 7,
-        background: alpha(color, 0.16),
-        display: 'grid',
-        placeItems: 'center',
-        color,
-        flexShrink: 0,
-      }}
-    >
-      <Icon name={icon} size={14} color={color} />
-    </span>
-    <span style={{ flex: 1, fontFamily: fonts.mono, fontSize: 13, color: T.text }}>{name}</span>
-    <span style={{ fontFamily: fonts.ui, fontSize: 11.5, color: T.textDim }}>{meta}</span>
-  </div>
-);
+// ── Scene 3 — Skills drive features (~120f) ───────────────────────────────────
 
-const PreviewLine: React.FC<{ icon: string; text: string; tone?: string }> = ({ icon, text, tone }) => (
-  <div style={{ display: 'flex', alignItems: 'center', gap: 9, fontFamily: fonts.mono, fontSize: 12.5, color: tone ?? T.textDim }}>
-    <Icon name={icon} size={13} color={tone ?? T.textDim} />
-    {text}
-  </div>
-);
+const DRIVE_TARGETS = [
+  { label: 'Review lenses',    icon: 'eye',    color: brand.violet, delay: 34 },
+  { label: 'Product analysis', icon: 'square', color: brand.purple, delay: 50 },
+  { label: 'Insights',         icon: 'chart',  color: brand.cyan,   delay: 66 },
+] as const;
 
-const ContextScene: React.FC = () => (
-  <>
-    <Stage scale={0.9}>
-      <OttoWindow nav={<Navigator active="skills-eval" />} title="Otto — Context Assembly">
-        <div style={{ display: 'flex', gap: 18, height: '100%', boxSizing: 'border-box', padding: 22 }}>
-          {/* left: selection */}
-          <div style={{ width: 470, display: 'flex', flexDirection: 'column', gap: 13 }}>
-            <Appear delay={4} y={10}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <Icon name="folder" size={18} color={brand.cyan} />
-                <span style={{ fontFamily: fonts.ui, fontSize: 17, fontWeight: 750 as never, color: T.text }}>
-                  Context · workspace sinatra-users-go
-                </span>
-              </div>
-            </Appear>
-            <Appear delay={12} y={12}>
-              <Card pad={12}>
-                <div style={{ fontFamily: fonts.ui, fontSize: 12, fontWeight: 600, color: T.textDim, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
-                  Skills
-                </div>
-                <CtxItem icon="zap" color={TAG.feature} name="golang-feature-implementation v4" meta="selected" />
-                <CtxItem icon="zap" color={TAG.review} name="code-review v2" meta="selected" />
-                <CtxItem icon="zap" color={TAG.testing} name="golang-testing v2" meta="selected" />
-              </Card>
-            </Appear>
-            <Appear delay={20} y={12}>
-              <Card pad={12}>
-                <div style={{ fontFamily: fonts.ui, fontSize: 12, fontWeight: 600, color: T.textDim, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
-                  Soul & context docs
-                </div>
-                <CtxItem icon="user" color={brand.violet} name="Soul · senior-go-reviewer" meta="active" />
-                <CtxItem icon="file" color={T.textDim} name="AGENTS.md" meta="repo" />
-                <CtxItem icon="note" color={T.textDim} name="pr_bo schema notes" meta="library" />
-              </Card>
-            </Appear>
-          </div>
+// Fan-out SVG lines from skill card center to each feature target
+const SVG_LINES = [
+  { x1: 0, y1: 120, x2: 200, y2: 42  },
+  { x1: 0, y1: 120, x2: 200, y2: 120 },
+  { x1: 0, y1: 120, x2: 200, y2: 196 },
+] as const;
 
-          {/* right: dry-run preview */}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <Appear delay={28} y={12} style={{ height: '100%' }}>
+const LINE_COLORS = [brand.violet, brand.purple, brand.cyan] as const;
+
+const DriveScene: React.FC = () => {
+  const frame = useCurrentFrame();
+
+  const p0 = track(frame, [20, 52], [0, 1]);
+  const p1 = track(frame, [32, 64], [0, 1]);
+  const p2 = track(frame, [44, 76], [0, 1]);
+  const lineProgress = [p0, p1, p2];
+
+  return (
+    <>
+      <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          {/* Selected skill card */}
+          <Appear delay={8} y={20}>
+            <Card
+              t={T}
+              pad={24}
+              style={{
+                width: 248,
+                textAlign: 'center',
+                background: alpha(brand.purple, 0.12),
+                border: `1.5px solid ${alpha(brand.purple, 0.46)}`,
+                boxShadow: `0 0 44px ${alpha(brand.purple, 0.22)}`,
+              }}
+            >
               <div
                 style={{
-                  height: '100%',
-                  borderRadius: 10,
-                  border: `1px solid ${T.border}`,
-                  background: T.termBg,
                   display: 'flex',
-                  flexDirection: 'column',
-                  overflow: 'hidden',
+                  justifyContent: 'center',
+                  marginBottom: 14,
                 }}
               >
                 <div
                   style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '11px 14px',
-                    borderBottom: `1px solid ${T.border}`,
+                    width: 56,
+                    height: 56,
+                    borderRadius: radius.l,
+                    background: alpha(brand.purple, 0.18),
+                    border: `1px solid ${alpha(brand.purple, 0.42)}`,
+                    display: 'grid',
+                    placeItems: 'center',
                   }}
                 >
-                  <Icon name="eye" size={15} color={brand.cyan} />
-                  <span style={{ flex: 1, fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 600, color: T.text }}>
-                    Dry-run preview — materialized on spawn
-                  </span>
-                  <Chip tone="accent" style={{ height: 19, fontSize: 11 }}>
-                    no session yet
-                  </Chip>
+                  <Icon name="zap" size={26} color={brand.purple} />
                 </div>
-                <div style={{ flex: 1, padding: 16, display: 'flex', flexDirection: 'column', gap: 9 }}>
-                  <Stagger delay={40} step={6} y={8} style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-                    <PreviewLine icon="folder" text=".claude/skills/golang-feature-implementation/" tone={T.text} />
-                    <PreviewLine icon="folder" text=".claude/skills/code-review/" tone={T.text} />
-                    <PreviewLine icon="folder" text=".claude/skills/golang-testing/" tone={T.text} />
-                    <PreviewLine icon="file" text="SOUL.md → senior-go-reviewer" tone={brand.violet} />
-                    <PreviewLine icon="file" text="CLAUDE.md  (AGENTS.md + schema notes)" tone={T.text} />
-                    <PreviewLine icon="check" text="3 skills · 1 soul · 2 docs ready" tone={status.working} />
-                  </Stagger>
+              </div>
+              <div
+                style={{
+                  fontFamily: fonts.mono,
+                  fontSize: 14.5,
+                  fontWeight: 700,
+                  color: T.text,
+                  marginBottom: 10,
+                }}
+              >
+                review/security
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: 6 }}>
+                <Chip color={brand.purple}>v2.1</Chip>
+                <Chip tone="ok">installed</Chip>
+              </div>
+            </Card>
+          </Appear>
+
+          {/* Animated SVG connector lines */}
+          <svg
+            width={200}
+            height={240}
+            viewBox="0 0 200 240"
+            style={{ overflow: 'visible', flexShrink: 0 }}
+          >
+            {SVG_LINES.map((l, i) => {
+              const dx = l.x2 - l.x1;
+              const dy = l.y2 - l.y1;
+              const len = Math.sqrt(dx * dx + dy * dy);
+              const drawn = len * lineProgress[i];
+              return (
+                <line
+                  key={i}
+                  x1={l.x1}
+                  y1={l.y1}
+                  x2={l.x2}
+                  y2={l.y2}
+                  stroke={alpha(LINE_COLORS[i], 0.55)}
+                  strokeWidth={1.5}
+                  strokeDasharray={len}
+                  strokeDashoffset={len - drawn}
+                />
+              );
+            })}
+          </svg>
+
+          {/* Feature target chips */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
+            {DRIVE_TARGETS.map((tgt) => (
+              <Appear key={tgt.label} delay={tgt.delay} x={-16} y={0}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                    padding: '14px 20px',
+                    borderRadius: radius.m,
+                    background: alpha(tgt.color, 0.11),
+                    border: `1px solid ${alpha(tgt.color, 0.38)}`,
+                    boxShadow: `0 4px 22px ${alpha(tgt.color, 0.14)}`,
+                    fontFamily: fonts.ui,
+                    fontSize: 16,
+                    fontWeight: 600,
+                    color: '#ffffff',
+                    minWidth: 220,
+                  }}
+                >
+                  <Icon name={tgt.icon} size={20} color={tgt.color} />
+                  {tgt.label}
                 </div>
-                <Appear delay={88} y={8}>
-                  <div style={{ padding: '0 16px 16px', display: 'flex', justifyContent: 'flex-end' }}>
-                    <Button variant="primary" size="m" icon="play">
-                      Spawn with this context
-                    </Button>
+              </Appear>
+            ))}
+          </div>
+        </div>
+      </AbsoluteFill>
+      <Caption
+        step={3}
+        title="Installed skills power review lenses, product analysis & insights"
+        sub="One install wires the skill into the review engine, the product canvas, and your daily insights feed."
+      />
+    </>
+  );
+};
+
+// ── Scene 4 — Self-improvement (~150f) ────────────────────────────────────────
+
+interface Proposal {
+  target: string;
+  change: string;
+  tier: 'safe' | 'risky';
+}
+
+const PROPOSALS: Proposal[] = [
+  {
+    target: 'review/security SKILL.md',
+    change: 'Added SSRF detection pattern for Go net/http clients',
+    tier: 'safe',
+  },
+  {
+    target: 'memory/go-patterns.md',
+    change: 'New: nil pointer guard patterns in multi-tenant service layer',
+    tier: 'safe',
+  },
+  {
+    target: 'product/analysis v3.0',
+    change: 'Expand discovery prompt — 2 extra clarification rounds before decomposing',
+    tier: 'risky',
+  },
+  {
+    target: 'insights/catch-up',
+    change: 'Merge weekly digest template with daily summary format',
+    tier: 'risky',
+  },
+];
+
+const ProposalRow: React.FC<{ p: Proposal; delay: number }> = ({ p, delay }) => (
+  <Appear delay={delay} y={10}>
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '12px 14px',
+        borderRadius: radius.m,
+        background: T.surface,
+        border: `1px solid ${T.border}`,
+        marginBottom: 8,
+      }}
+    >
+      {/* tier icon */}
+      <div
+        style={{
+          width: 34,
+          height: 34,
+          borderRadius: radius.s,
+          flexShrink: 0,
+          background:
+            p.tier === 'safe' ? alpha('#28c840', 0.12) : alpha('#febc2e', 0.12),
+          border: `1px solid ${
+            p.tier === 'safe' ? alpha('#28c840', 0.3) : alpha('#febc2e', 0.3)
+          }`,
+          display: 'grid',
+          placeItems: 'center',
+        }}
+      >
+        <Icon
+          name={p.tier === 'safe' ? 'check' : 'edit'}
+          size={15}
+          color={p.tier === 'safe' ? '#28c840' : '#febc2e'}
+        />
+      </div>
+
+      {/* target + description */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontFamily: fonts.mono,
+            fontSize: 12.5,
+            color: brand.cyan,
+            marginBottom: 3,
+          }}
+        >
+          {p.target}
+        </div>
+        <div
+          style={{
+            fontFamily: fonts.ui,
+            fontSize: 13.5,
+            color: T.text,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {p.change}
+        </div>
+      </div>
+
+      {/* tier chip */}
+      <Chip tone={p.tier === 'safe' ? 'ok' : 'warn'}>
+        {p.tier === 'safe' ? 'safe · auto-applied' : 'needs approval'}
+      </Chip>
+
+      {/* approve / reject for risky only */}
+      {p.tier === 'risky' && (
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+          <Button variant="primary" size="s" icon="check">
+            Approve
+          </Button>
+          <Button variant="danger" size="s" icon="x">
+            Reject
+          </Button>
+        </div>
+      )}
+    </div>
+  </Appear>
+);
+
+const ImproveScene: React.FC = () => (
+  <>
+    <Stage scale={0.88} enter="up">
+      <OttoWindow
+        nav={<Navigator active="settings" />}
+        title="Otto — Settings · Self-Improvement"
+        width={1560}
+        height={884}
+      >
+        <div style={{ display: 'flex', height: '100%' }}>
+          <SettingsSidebar activeIdx={3} />
+
+          {/* Engine panel */}
+          <div
+            style={{
+              flex: 1,
+              padding: '24px 28px',
+              overflowY: 'hidden' as const,
+            }}
+          >
+            {/* Engine header */}
+            <Appear delay={10} y={14}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  justifyContent: 'space-between',
+                  marginBottom: 18,
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      fontFamily: fonts.ui,
+                      fontSize: 20,
+                      fontWeight: 700,
+                      color: T.text,
+                    }}
+                  >
+                    Self-Improvement Engine
                   </div>
-                </Appear>
+                  <div
+                    style={{
+                      fontFamily: fonts.ui,
+                      fontSize: 13,
+                      color: T.textDim,
+                      marginTop: 3,
+                      maxWidth: 640,
+                    }}
+                  >
+                    Reflects on recent sessions · proposes edits to skills &amp; memory only ·
+                    never touches your repo code
+                  </div>
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    marginTop: 2,
+                  }}
+                >
+                  <span
+                    style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim }}
+                  >
+                    Enabled
+                  </span>
+                  <Toggle on={true} />
+                </div>
               </div>
             </Appear>
+
+            {/* Stats row */}
+            <Appear delay={18} y={10}>
+              <div style={{ display: 'flex', gap: 10, marginBottom: 22 }}>
+                {[
+                  { label: 'Sessions analysed', value: '47'        },
+                  { label: 'Edits auto-applied', value: '12'        },
+                  { label: 'Queued for review',  value: '2'         },
+                  { label: 'Last run',            value: '4 min ago' },
+                ].map((stat) => (
+                  <div
+                    key={stat.label}
+                    style={{
+                      flex: 1,
+                      padding: '10px 14px',
+                      borderRadius: radius.m,
+                      background: T.surface,
+                      border: `1px solid ${T.border}`,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontFamily: fonts.ui,
+                        fontSize: 11.5,
+                        color: T.textDim,
+                        marginBottom: 5,
+                      }}
+                    >
+                      {stat.label}
+                    </div>
+                    <div
+                      style={{
+                        fontFamily: fonts.ui,
+                        fontSize: 22,
+                        fontWeight: 700,
+                        color: T.text,
+                      }}
+                    >
+                      {stat.value}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Appear>
+
+            {/* Proposals section heading */}
+            <Appear delay={24} y={8}>
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  color: T.textDim,
+                  letterSpacing: 0.5,
+                  textTransform: 'uppercase' as const,
+                  marginBottom: 12,
+                }}
+              >
+                Proposed edits · 4
+              </div>
+            </Appear>
+
+            {/* Proposal rows */}
+            {PROPOSALS.map((p, i) => (
+              <ProposalRow key={p.target} p={p} delay={30 + i * 18} />
+            ))}
           </div>
         </div>
       </OttoWindow>
     </Stage>
     <Caption
-      step={3}
-      title="Souls & context, materialized on spawn"
-      sub="Preview exactly what each session will get"
+      step={4}
+      title="Self-improvement proposes edits to skills & memory — safe auto-applied, risky queued"
+      sub="The engine reflects across providers. Tiered autonomy: safe changes land immediately; risky ones wait for you."
     />
   </>
 );
 
-// ── scenes ───────────────────────────────────────────────────────────────────
+// ── Composition ───────────────────────────────────────────────────────────────
+
 const SCENES: SceneDef[] = [
-  { dur: 80, node: <TitleScene />, name: 'Title' },
-  { dur: 210, node: <LibraryScene />, name: 'Library' },
-  { dur: 220, node: <EvalScene />, name: 'Eval' },
-  { dur: 140, node: <ContextScene />, name: 'Context' },
+  { dur: 70,  node: <TitleScene />,   name: 'Title'   },
+  { dur: 165, node: <LibraryScene />, name: 'Library' },
+  { dur: 120, node: <DriveScene />,   name: 'Drive'   },
+  { dur: 150, node: <ImproveScene />, name: 'Improve' },
   {
     dur: 130,
+    name: 'Outro',
     node: (
       <WalkOutro
-        title="Skills & Context"
-        tagline="Sharper agents, every run."
+        title="Skills & Self-Improvement"
+        tagline="Otto sharpens its own skills from how you actually work"
         pills={[
-          { label: 'Skill library', color: '#0a84ff', icon: 'zap' },
-          { label: 'Versioned', color: brand.cyan, icon: 'tag' },
-          { label: 'Skill eval', color: providers.claude, icon: 'eye' },
-          { label: 'Souls & context', color: brand.violet, icon: 'user' },
-          { label: 'Self-improving', color: '#28c840', icon: 'refresh' },
+          { label: 'Versioned library',              icon: 'zap'     },
+          { label: 'Drives review/product/insights', icon: 'eye'     },
+          { label: 'Auto-improves',                  icon: 'refresh' },
+          { label: 'Approval-gated',                 icon: 'check'   },
         ]}
       />
     ),
-    name: 'Outro',
   },
 ];
 

@@ -1,6 +1,6 @@
 import React from 'react';
 import { useCurrentFrame } from 'remotion';
-import { T, brand, fonts, alpha, providers, status as STATUS } from '../theme';
+import { T, brand, fonts, providers, series, alpha } from '../theme';
 import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
 import { OttoWindow } from '../components/Frame';
 import { Navigator } from '../components/Nav';
@@ -8,227 +8,139 @@ import {
   Appear,
   Caption,
   TitleCard,
-  Chip,
-  Button,
-  Card,
   MetricStat,
   BarChart,
   Sparkline,
   Ring,
   Segmented,
-  Toggle,
-  StatusDot,
+  Chip,
+  Card,
   Icon,
   track,
 } from '../components/kit';
 
 // ════════════════════════════════════════════════════════════════════════════
-//  USAGE · BUDGETS · INSIGHTS — Otto tails Claude & Codex transcripts into an
-//  embedded ClickHouse store: token + cost rollups, budget guardrails, daemon
-//  health metrics, and scheduled multi-provider catch-up reports.
+//  USAGE, COST & INSIGHTS
+//  Otto tails Claude & Codex transcripts into an embedded ClickHouse engine:
+//  per-turn token + cost breakdown (input / output / cache-read / cache-write),
+//  per-provider / day / session rollups, system metrics (CPU / RAM), opt-in
+//  budgets, and scheduled multi-provider catch-up reports (daily / weekly /
+//  monthly) that turn recent activity into action-first HTML summaries.
 // ════════════════════════════════════════════════════════════════════════════
 
-// ── Scene 1 — title card ─────────────────────────────────────────────────────
-const Title: React.FC = () => (
-  <TitleCard
-    kicker="Usage · Budgets · Insights"
-    title="Know exactly what your agents cost"
-    subtitle="Tokens & spend, tracked automatically — with caps that hold"
-  />
-);
+// ── local helpers ─────────────────────────────────────────────────────────────
 
-// ── small building blocks ────────────────────────────────────────────────────
-
-// A per-provider spend row: chip + token count + dollars + a proportional bar.
-const ProviderRow: React.FC<{
-  name: string;
-  color: string;
-  tokens: string;
-  cost: string;
-  frac: number; // 0–1 share of the bar track
-  grow: number; // 0–1 animation
-  delay: number;
-}> = ({ name, color, tokens, cost, frac, grow, delay }) => (
-  <Appear delay={delay} y={10}>
-    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-      <Chip color={color} style={{ height: 22, minWidth: 78, justifyContent: 'center' }}>
-        {name}
-      </Chip>
-      <div style={{ flex: 1, height: 9, borderRadius: 999, background: T.surface2, overflow: 'hidden' }}>
-        <div
-          style={{
-            width: `${frac * grow * 100}%`,
-            height: '100%',
-            borderRadius: 999,
-            background: `linear-gradient(90deg, ${alpha(color, 0.7)}, ${color})`,
-          }}
-        />
-      </div>
-      <span style={{ fontFamily: fonts.mono, fontSize: 13, color: T.textDim, minWidth: 78, textAlign: 'right' }}>
-        {tokens}
-      </span>
-      <span style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 700, color: T.text, minWidth: 78, textAlign: 'right' }}>
-        {cost}
-      </span>
-    </div>
-  </Appear>
-);
-
-// Section header used inside content cards/panels.
-const PanelHead: React.FC<{ icon: string; title: string; color?: string; right?: React.ReactNode }> = ({
-  icon,
-  title,
-  color = brand.cyan,
-  right,
-}) => (
-  <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
-    <Icon name={icon} size={15} color={color} />
-    <span style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 700, color: T.text }}>{title}</span>
-    <div style={{ flex: 1 }} />
-    {right}
+const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div
+    style={{
+      fontFamily: fonts.ui,
+      fontSize: 11.5,
+      fontWeight: 600,
+      letterSpacing: 0.7,
+      textTransform: 'uppercase',
+      color: T.textDim,
+      marginBottom: 10,
+    }}
+  >
+    {children}
   </div>
 );
 
-// ── Scene 2 — usage dashboard ────────────────────────────────────────────────
-const UsageDashScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  const grow = track(frame, [40, 78], [0, 1]); // bars + provider bars draw in
-  return (
-    <>
-      <Stage scale={0.9}>
-        <OttoWindow
-          nav={<Navigator active="usage" />}
-          tabs={[{ label: 'Usage · last 30 days', icon: 'chart', active: true }]}
-          title="Otto — Usage · embedded ClickHouse"
-        >
-          <div style={{ height: '100%', padding: 20, display: 'flex', flexDirection: 'column', gap: 16, minHeight: 0 }}>
-            {/* header strip */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Icon name="chart" size={16} color={brand.cyan} />
-              <span style={{ fontFamily: fonts.ui, fontSize: 17, fontWeight: 700, color: T.text }}>
-                Usage — last 30 days
-              </span>
-              <Chip color="#febc2e" style={{ height: 22 }}>
-                ClickHouse
-              </Chip>
-              <div style={{ flex: 1 }} />
-              <Chip tone="ok" style={{ height: 22 }}>
-                <StatusDot kind="working" size={7} />
-                tailing transcripts
-              </Chip>
-              <Segmented options={['Day', 'Session', 'Feature']} active={0} />
-            </div>
-
-            {/* top metric row */}
-            <div style={{ display: 'flex', gap: 14 }}>
-              <Appear delay={6} y={14} style={{ flex: 1 }}>
-                <MetricStat label="Spend · 30d" value="$284.10" delta="▲ 11% vs prev 30d" deltaTone="bad" style={{ minWidth: 0 }} accent={T.text} />
-              </Appear>
-              <Appear delay={11} y={14} style={{ flex: 1 }}>
-                <MetricStat label="Tokens" value="412M" delta="in · out · cache" deltaTone="ok" style={{ minWidth: 0 }} accent={T.text} />
-              </Appear>
-              <Appear delay={16} y={14} style={{ flex: 1 }}>
-                <MetricStat label="Sessions" value="1,203" delta="▲ 142 this week" deltaTone="ok" style={{ minWidth: 0 }} accent={T.text} />
-              </Appear>
-              <Appear delay={21} y={14} style={{ flex: 1 }}>
-                <MetricStat label="Cache hit" value="71%" delta="cache-read saves $$" deltaTone="ok" style={{ minWidth: 0 }} accent={brand.cyan} />
-              </Appear>
-            </div>
-
-            {/* charts row: daily spend bars + per-provider breakdown */}
-            <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: 14 }}>
-              {/* daily spend */}
-              <Appear delay={28} y={16} scale={0.97} style={{ flex: 1.55 }}>
-                <Card pad={0} style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                  <div style={{ padding: '12px 16px 0' }}>
-                    <PanelHead
-                      icon="chart"
-                      title="Daily spend"
-                      right={<span style={{ fontFamily: fonts.mono, fontSize: 12.5, color: T.textDim }}>$9.47 / day avg</span>}
-                    />
-                  </div>
-                  <div style={{ flex: 1, minHeight: 0, padding: '0 16px 14px', display: 'flex' }}>
-                    <BarChart
-                      data={[6, 9, 7, 11, 8, 13, 10, 12, 9, 15, 11, 14, 8, 12, 16]}
-                      labels={['', '', '5', '', '', '10', '', '', '15', '', '', '20', '', '', '30']}
-                      color={brand.cyan}
-                      grow={grow}
-                      height={172}
-                    />
-                  </div>
-                </Card>
-              </Appear>
-
-              {/* per-provider breakdown */}
-              <Appear delay={34} y={16} scale={0.97} style={{ flex: 1 }}>
-                <Card style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                  <PanelHead icon="grid" title="By provider" color={brand.violet} />
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 4 }}>
-                    <ProviderRow name="claude" color={providers.claude} tokens="268M tok" cost="$196.40" frac={1} grow={grow} delay={42} />
-                    <ProviderRow name="codex" color={providers.codex} tokens="144M tok" cost="$87.70" frac={0.46} grow={grow} delay={48} />
-                  </div>
-                  <div style={{ flex: 1 }} />
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      paddingTop: 14,
-                      borderTop: `1px solid ${T.border}`,
-                      fontFamily: fonts.ui,
-                      fontSize: 12,
-                      color: T.textDim,
-                    }}
-                  >
-                    <Icon name="info" size={12} color={T.textDim} />
-                    input · output · cache-read · cache-write tracked per call
-                  </div>
-                </Card>
-              </Appear>
-            </div>
-          </div>
-        </OttoWindow>
-      </Stage>
-      <Caption
-        step={1}
-        title="Every token & dollar, by provider, day & session"
-        sub="Tailed straight from transcripts — zero instrumentation"
-      />
-    </>
-  );
-};
-
-// ── Scene 3 — budgets ────────────────────────────────────────────────────────
-const BudgetBar: React.FC<{
+const BreakdownBox: React.FC<{
   label: string;
-  spend: string;
-  cap: string;
-  frac: number; // 0–1 of cap
+  value: string;
+  pct: string;
   color: string;
-  grow: number;
+}> = ({ label, value, pct, color }) => (
+  <div
+    style={{
+      flex: 1,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 8,
+      padding: '10px 13px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 3,
+    }}
+  >
+    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 2,
+          background: color,
+          flexShrink: 0,
+          boxShadow: `0 0 6px ${alpha(color, 0.55)}`,
+        }}
+      />
+      <span style={{ fontFamily: fonts.ui, fontSize: 11.5, color: T.textDim }}>
+        {label}
+      </span>
+    </div>
+    <div
+      style={{
+        fontFamily: fonts.ui,
+        fontSize: 20,
+        fontWeight: 700,
+        color: T.text,
+        letterSpacing: -0.3,
+      }}
+    >
+      {value}
+    </div>
+    <div style={{ fontFamily: fonts.ui, fontSize: 11, color: T.textDim }}>
+      {pct} of total
+    </div>
+  </div>
+);
+
+const ProviderBar: React.FC<{
+  name: string;
+  providerColor: string;
+  cost: string;
+  pct: string;
+  frac: number;
   delay: number;
-  chip?: React.ReactNode;
-}> = ({ label, spend, cap, frac, color, grow, delay, chip }) => (
-  <Appear delay={delay} y={12}>
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-        <span style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 600, color: T.text }}>{label}</span>
-        {chip}
-        <div style={{ flex: 1 }} />
-        <span style={{ fontFamily: fonts.mono, fontSize: 13.5, color: T.text }}>
-          <span style={{ color, fontWeight: 700 }}>{spend}</span>
-          <span style={{ color: T.textDim }}> / {cap}</span>
+}> = ({ name, providerColor, cost, pct, frac, delay }) => (
+  <Appear delay={delay} y={8}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+        <span
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: '50%',
+            background: providerColor,
+            flexShrink: 0,
+            boxShadow: `0 0 7px ${alpha(providerColor, 0.55)}`,
+          }}
+        />
+        <span style={{ fontFamily: fonts.ui, fontSize: 13, color: T.text, flex: 1 }}>
+          {name}
         </span>
+        <span
+          style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 700, color: T.text }}
+        >
+          {cost}
+        </span>
+        <Chip>{pct}</Chip>
       </div>
-      <div style={{ position: 'relative', height: 14, borderRadius: 999, background: T.surface2, overflow: 'hidden' }}>
-        {/* 80% warn tick */}
-        <div style={{ position: 'absolute', left: '80%', top: 0, bottom: 0, width: 2, background: alpha(STATUS.needsYou, 0.7), zIndex: 2 }} />
+      <div
+        style={{
+          height: 8,
+          borderRadius: 999,
+          background: T.surface2,
+          overflow: 'hidden',
+        }}
+      >
         <div
           style={{
-            width: `${Math.min(1, frac) * grow * 100}%`,
+            width: `${frac * 100}%`,
             height: '100%',
             borderRadius: 999,
-            background: `linear-gradient(90deg, ${alpha(color, 0.65)}, ${color})`,
+            background: `linear-gradient(90deg, ${alpha(providerColor, 0.6)}, ${providerColor})`,
           }}
         />
       </div>
@@ -236,333 +148,620 @@ const BudgetBar: React.FC<{
   </Appear>
 );
 
-const BudgetsScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  const grow = track(frame, [34, 70], [0, 1]);
-  const ringV = track(frame, [40, 78], [0, 0.57]); // workspace ring fills to 57%
-  return (
-    <>
-      <Stage scale={0.9}>
-        <OttoWindow
-          nav={<Navigator active="usage" />}
-          tabs={[{ label: 'Budgets', icon: 'gauge', active: true }]}
-          title="Otto — Usage · Budgets"
-        >
-          <div style={{ height: '100%', padding: 20, display: 'flex', gap: 16, minHeight: 0 }}>
-            {/* left — workspace cap ring */}
-            <Appear delay={6} y={16} scale={0.97} style={{ width: 360, flexShrink: 0 }}>
-              <Card style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                <PanelHead icon="gauge" title="Workspace budget" />
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18 }}>
-                  <Ring value={ringV} size={188} color={brand.cyan} label="57%" />
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontFamily: fonts.ui, fontSize: 22, fontWeight: 800, color: T.text }}>
-                      $284.10 <span style={{ color: T.textDim, fontWeight: 600, fontSize: 18 }}>/ $500</span>
-                    </div>
-                    <div style={{ fontFamily: fonts.ui, fontSize: 13, color: T.textDim, marginTop: 4 }}>
-                      this month · resets in 9 days
-                    </div>
-                  </div>
-                </div>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 10,
-                    paddingTop: 14,
-                    borderTop: `1px solid ${T.border}`,
-                  }}
-                >
-                  <Toggle on />
-                  <span style={{ fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 600, color: T.text }}>Block on exceed</span>
-                  <div style={{ flex: 1 }} />
-                  <Chip style={{ height: 22 }}>opt-in</Chip>
-                </div>
-              </Card>
-            </Appear>
-
-            {/* right — per-provider caps with warn / block states */}
-            <Appear delay={12} y={16} scale={0.97} style={{ flex: 1 }}>
-              <Card style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                <PanelHead
-                  icon="grid"
-                  title="Provider caps"
-                  color={brand.violet}
-                  right={
-                    <span style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim }}>
-                      warn at 80% · block at 100%
-                    </span>
-                  }
-                />
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 26, marginTop: 8 }}>
-                  <BudgetBar
-                    label="claude"
-                    spend="$196.40"
-                    cap="$250"
-                    frac={0.79}
-                    color={STATUS.needsYou}
-                    grow={grow}
-                    delay={20}
-                    chip={
-                      <Chip tone="warn" style={{ height: 20 }}>
-                        <Icon name="info" size={11} color={STATUS.needsYou} />
-                        warning · 79%
-                      </Chip>
-                    }
-                  />
-                  <BudgetBar
-                    label="codex"
-                    spend="$87.70"
-                    cap="$150"
-                    frac={0.58}
-                    color={STATUS.working}
-                    grow={grow}
-                    delay={28}
-                    chip={
-                      <Chip tone="ok" style={{ height: 20 }}>
-                        healthy · 58%
-                      </Chip>
-                    }
-                  />
-                  <BudgetBar
-                    label="gemini · sandbox"
-                    spend="$60"
-                    cap="$60"
-                    frac={1}
-                    color={STATUS.exited}
-                    grow={grow}
-                    delay={36}
-                    chip={
-                      <Chip tone="bad" style={{ height: 20 }}>
-                        <Icon name="x" size={11} color={STATUS.exited} />
-                        blocked · 100%
-                      </Chip>
-                    }
-                  />
-                </div>
-                <div style={{ flex: 1 }} />
-                <Appear delay={48} y={10}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 11,
-                      padding: '12px 14px',
-                      borderRadius: 8,
-                      background: alpha(STATUS.exited, 0.1),
-                      border: `1px solid ${alpha(STATUS.exited, 0.4)}`,
-                    }}
-                  >
-                    <Icon name="info" size={15} color={STATUS.exited} />
-                    <span style={{ fontFamily: fonts.ui, fontSize: 13.5, color: T.text }}>
-                      <b>gemini · sandbox</b> hit its $60 cap — new runs are blocked until next month.
-                    </span>
-                    <div style={{ flex: 1 }} />
-                    <Button size="s">Raise cap</Button>
-                  </div>
-                </Appear>
-              </Card>
-            </Appear>
-          </div>
-        </OttoWindow>
-      </Stage>
-      <Caption
-        step={2}
-        title="Set caps — warn at 80%, block at 100%"
-        sub="Per workspace & per provider · enforcement is opt-in"
-      />
-    </>
-  );
-};
-
-// ── Scene 4 — metrics + scheduled insights ───────────────────────────────────
-const InsightRow: React.FC<{ icon: string; color: string; text: string; delay: number }> = ({
-  icon,
-  color,
-  text,
-  delay,
-}) => (
-  <Appear delay={delay} y={10}>
-    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 11 }}>
-      <span
+const BulletRow: React.FC<{
+  icon: string;
+  color: string;
+  text: string;
+  sub: string;
+  delay: number;
+}> = ({ icon, color, text, sub, delay }) => (
+  <Appear delay={delay} y={12}>
+    <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+      <div
         style={{
-          width: 26,
-          height: 26,
-          borderRadius: 8,
-          flexShrink: 0,
-          marginTop: 1,
-          background: alpha(color, 0.16),
-          border: `1px solid ${alpha(color, 0.4)}`,
+          width: 34,
+          height: 34,
+          borderRadius: 9,
+          background: alpha(color, 0.13),
+          border: `1px solid ${alpha(color, 0.35)}`,
           display: 'grid',
           placeItems: 'center',
+          flexShrink: 0,
+          marginTop: 1,
         }}
       >
-        <Icon name={icon} size={14} color={color} />
-      </span>
-      <span style={{ fontFamily: fonts.ui, fontSize: 14, lineHeight: 1.45, color: T.text }}>{text}</span>
+        <Icon name={icon} size={16} color={color} />
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <span
+          style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 600, color: T.text }}
+        >
+          {text}
+        </span>
+        <span style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim }}>
+          {sub}
+        </span>
+      </div>
     </div>
   </Appear>
 );
 
-const MetricsInsightsScene: React.FC = () => {
+// ── data ─────────────────────────────────────────────────────────────────────
+
+const COST_DATA = [
+  18.4, 22.1, 15.7, 28.9, 31.2, 24.6, 19.8, 35.1, 27.4, 22.9, 41.2, 33.6, 28.1, 38.7,
+];
+const DAY_LABELS = [
+  'Jun 13', 'Jun 14', 'Jun 15', 'Jun 16', 'Jun 17', 'Jun 18', 'Jun 19',
+  'Jun 20', 'Jun 21', 'Jun 22', 'Jun 23', 'Jun 24', 'Jun 25', 'Jun 26',
+];
+
+const CPU_DATA = [
+  42, 38, 55, 71, 63, 48, 52, 68, 74, 61, 57, 66, 73, 58, 62, 55, 68, 72, 64, 59,
+];
+const RAM_DATA = [
+  6.2, 6.4, 6.8, 7.1, 7.0, 6.9, 7.3, 7.5, 7.4, 7.2, 7.6, 7.8, 7.9, 7.7, 7.6, 7.8, 8.0,
+  7.9, 7.8, 7.7,
+];
+
+const BULLETS: { icon: string; color: string; text: string; sub: string }[] = [
+  {
+    icon: 'pr',
+    color: series[0],
+    text: 'Review PR #312 — 3 tests added by agent in sinatra-go need your sign-off',
+    sub: 'feat/auth-refactor · opened 2 h ago by claude · go test ./internal/auth/... passing',
+  },
+  {
+    icon: 'gauge',
+    color: series[2],
+    text: 'Budget at 64% ($319 / $500) — claude accounts for 79% of spend this week',
+    sub: 'Pace: $26/day · projected to close at $428 · 12 days remaining',
+  },
+  {
+    icon: 'bell',
+    color: series[4],
+    text: '12 sessions completed overnight · "refactor api/v2" closed with PR #147 opened',
+    sub: '247 sessions total · 3 agents still running · 1 needs your input',
+  },
+];
+
+// ── Scene 1 — Title (~75f) ────────────────────────────────────────────────────
+
+const TitleScene: React.FC = () => (
+  <TitleCard
+    kicker="Usage, Cost & Insights"
+    title="Know Your Agents"
+    subtitle="Real token cost tailed from transcripts · budgets · catch-up reports"
+  />
+);
+
+// ── Scene 2 — Usage Dashboard (~190f) ─────────────────────────────────────────
+
+const UsageDashboardScene: React.FC = () => {
   const frame = useCurrentFrame();
-  const cpu = track(frame, [34, 84], [0, 1]); // cpu sparkline draws in
+  const chartGrow = track(frame, [44, 110], [0, 1]);
+
   return (
     <>
-      <Stage scale={0.9}>
+      <Stage scale={0.88}>
         <OttoWindow
-          nav={<Navigator active="insights" />}
-          tabs={[{ label: 'Health & Insights', icon: 'gauge', active: true, dot: 'working' }]}
-          title="Otto — Insights · daemon metrics & reports"
+          nav={<Navigator active="usage" />}
+          title="Otto — Usage"
         >
-          <div style={{ height: '100%', padding: 20, display: 'flex', gap: 16, minHeight: 0 }}>
-            {/* left — daemon health */}
-            <Appear delay={6} y={16} scale={0.97} style={{ width: 460, flexShrink: 0 }}>
-              <Card style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                <PanelHead
-                  icon="gauge"
-                  title="Daemon health"
-                  right={
-                    <Chip tone="ok" style={{ height: 20 }}>
-                      <StatusDot kind="working" size={7} />
-                      ottod up · 6d
-                    </Chip>
-                  }
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 14,
+              padding: 18,
+              height: '100%',
+              boxSizing: 'border-box',
+              overflow: 'hidden',
+            }}
+          >
+            {/* ── metric strip ── */}
+            <div style={{ display: 'flex', gap: 12, flexShrink: 0 }}>
+              <Appear delay={10} y={14} style={{ flex: 1 }}>
+                <MetricStat
+                  label="Total Tokens"
+                  value="48.2M"
+                  delta="↑ 12% vs last week"
+                  deltaTone="ok"
+                  accent={series[0]}
+                  style={{ width: '100%' }}
                 />
-                <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-                  <MetricStat label="RAM" value="412 MB" delta="steady" deltaTone="ok" style={{ flex: 1, minWidth: 0 }} accent={T.text} />
-                  <MetricStat label="Load avg" value="1.24" delta="8 cores" deltaTone="ok" style={{ flex: 1, minWidth: 0 }} accent={T.text} />
-                </div>
+              </Appear>
+              <Appear delay={16} y={14} style={{ flex: 1 }}>
+                <MetricStat
+                  label="Total Cost"
+                  value="$312.40"
+                  delta="↑ 8% vs last week"
+                  deltaTone="ok"
+                  style={{ width: '100%' }}
+                />
+              </Appear>
+              <Appear delay={22} y={14} style={{ flex: 1 }}>
+                <MetricStat
+                  label="Sessions"
+                  value="247"
+                  delta="↑ 34 this week"
+                  deltaTone="ok"
+                  accent={series[2]}
+                  style={{ width: '100%' }}
+                />
+              </Appear>
+              <Appear delay={28} y={14} style={{ flex: 1 }}>
+                <MetricStat
+                  label="Cache Savings"
+                  value="$48.70"
+                  delta="15.6% of total spend"
+                  deltaTone="ok"
+                  accent={series[4]}
+                  style={{ width: '100%' }}
+                />
+              </Appear>
+            </div>
+
+            {/* ── cost-by-day bar chart ── */}
+            <Appear
+              delay={30}
+              y={10}
+              style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+            >
+              <Card
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 10,
+                  minHeight: 0,
+                }}
+              >
                 <div
                   style={{
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
-                    marginBottom: 8,
-                    fontFamily: fonts.ui,
-                    fontSize: 12.5,
-                    color: T.textDim,
+                    flexShrink: 0,
                   }}
                 >
-                  <span>CPU · last 60 min</span>
-                  <span style={{ fontFamily: fonts.mono, color: STATUS.working }}>peak 38%</span>
+                  <span
+                    style={{
+                      fontFamily: fonts.ui,
+                      fontSize: 13,
+                      fontWeight: 600,
+                      color: T.text,
+                    }}
+                  >
+                    Cost by Day (USD)
+                  </span>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <Chip>Jun 13 – Jun 26</Chip>
+                    <Chip tone="ok">claude + codex</Chip>
+                  </div>
                 </div>
                 <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'flex-end' }}>
-                  <Sparkline
-                    data={[8, 11, 9, 14, 12, 22, 18, 16, 27, 21, 19, 31, 24, 20, 38, 26, 17, 22, 15, 12]}
-                    color={STATUS.working}
-                    width={412}
-                    height={150}
-                    progress={cpu}
+                  <BarChart
+                    data={COST_DATA}
+                    labels={DAY_LABELS}
+                    color={series[0]}
+                    grow={chartGrow}
+                    height={190}
                   />
                 </div>
               </Card>
             </Appear>
 
-            {/* right — scheduled insights report */}
-            <Appear delay={12} y={16} scale={0.97} style={{ flex: 1 }}>
-              <Card pad={0} style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                {/* report header */}
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 11,
-                    padding: '14px 18px',
-                    borderBottom: `1px solid ${T.border}`,
-                    background: alpha(brand.purple, 0.08),
-                  }}
-                >
-                  <Icon name="note" size={16} color={brand.cyan} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 700, color: T.text }}>
-                      Weekly catch-up
-                    </div>
-                    <div style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim }}>
-                      Jun 15 – Jun 21 · claude + codex · written for you
-                    </div>
-                  </div>
-                  <Segmented options={['Daily', 'Weekly', 'Monthly']} active={1} />
-                  <Button variant="primary" icon="play" size="s">
-                    Run now
-                  </Button>
-                </div>
-
-                {/* action-first bullets */}
-                <div style={{ flex: 1, padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 18, minHeight: 0 }}>
-                  <span style={{ fontFamily: fonts.ui, fontSize: 12, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: T.textDim }}>
-                    Do this next
-                  </span>
-                  <InsightRow
-                    color={STATUS.needsYou}
-                    icon="zap"
-                    text="claude spend is up 23% — the auth-refactor sessions retry the test suite 4×. Cache the fixtures to cut ~$40/wk."
-                    delay={24}
-                  />
-                  <InsightRow
-                    color={brand.cyan}
-                    icon="branch"
-                    text="3 sessions on sinatra-users-go stalled needing review — they are 81% of idle token burn this week."
-                    delay={32}
-                  />
-                  <InsightRow
-                    color={STATUS.working}
-                    icon="check"
-                    text="codex stayed 42% under cap; cache-hit climbed to 71%. Consider shifting refactors to codex."
-                    delay={40}
-                  />
-                </div>
-
-                {/* footer schedule */}
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 9,
-                    padding: '12px 18px',
-                    borderTop: `1px solid ${T.border}`,
-                    fontFamily: fonts.ui,
-                    fontSize: 12.5,
-                    color: T.textDim,
-                  }}
-                >
-                  <Icon name="clock" size={13} color={T.textDim} />
-                  Scheduled — every Monday 09:00 · delivered to Slack
-                  <div style={{ flex: 1 }} />
-                  <Toggle on />
-                </div>
-              </Card>
-            </Appear>
+            {/* ── token breakdown row ── */}
+            <div style={{ display: 'flex', gap: 10, flexShrink: 0 }}>
+              <Appear delay={78} y={10} style={{ flex: 1 }}>
+                <BreakdownBox label="Input" value="31.4M" pct="65%" color={series[0]} />
+              </Appear>
+              <Appear delay={86} y={10} style={{ flex: 1 }}>
+                <BreakdownBox label="Output" value="9.2M" pct="19%" color={series[1]} />
+              </Appear>
+              <Appear delay={94} y={10} style={{ flex: 1 }}>
+                <BreakdownBox label="Cache Read" value="6.8M" pct="14%" color={series[4]} />
+              </Appear>
+              <Appear delay={102} y={10} style={{ flex: 1 }}>
+                <BreakdownBox label="Cache Write" value="0.8M" pct="2%" color={series[5]} />
+              </Appear>
+            </div>
           </div>
         </OttoWindow>
       </Stage>
+
       <Caption
-        step={3}
-        title="Health metrics + scheduled insight reports"
-        sub="Daily / weekly / monthly catch-ups, written for you"
+        step={1}
+        title="Real per-turn tokens & cost"
+        sub="Tailed from transcripts, zero instrumentation · input / output / cache-read / cache-write breakdown"
+        delay={16}
       />
     </>
   );
 };
 
-// ── Scenes ────────────────────────────────────────────────────────────────────
+// ── Scene 3 — Budgets + System (~150f) ────────────────────────────────────────
+
+const BudgetsSystemScene: React.FC = () => {
+  const frame = useCurrentFrame();
+  const sparkProgress = track(frame, [34, 100], [0, 1]);
+
+  return (
+    <>
+      <Stage scale={0.88}>
+        <OttoWindow
+          nav={<Navigator active="usage" />}
+          title="Otto — Usage · Budgets & System"
+        >
+          <div
+            style={{
+              display: 'flex',
+              gap: 14,
+              padding: 18,
+              height: '100%',
+              boxSizing: 'border-box',
+              overflow: 'hidden',
+            }}
+          >
+            {/* ── left: budget ring + provider breakdown ── */}
+            <div
+              style={{
+                width: 340,
+                flexShrink: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 14,
+              }}
+            >
+              <Appear delay={8} y={16}>
+                <Card
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    padding: 20,
+                    gap: 12,
+                  }}
+                >
+                  <SectionLabel>Monthly Budget</SectionLabel>
+                  <Ring value={0.64} size={144} color={series[2]} label="64%" />
+                  <div
+                    style={{
+                      fontFamily: fonts.ui,
+                      fontSize: 13,
+                      color: T.textDim,
+                      textAlign: 'center',
+                    }}
+                  >
+                    <span style={{ color: T.text, fontWeight: 700 }}>$319.40</span>
+                    {' '}of $500.00 used
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <Chip tone="warn">12 days left</Chip>
+                    <Chip tone="ok">On track</Chip>
+                  </div>
+                </Card>
+              </Appear>
+
+              <Appear delay={18} y={14}>
+                <Card style={{ padding: 14 }}>
+                  <SectionLabel>Provider Breakdown</SectionLabel>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                    <ProviderBar
+                      name="claude"
+                      providerColor={providers.claude}
+                      cost="$248.60"
+                      pct="79%"
+                      frac={1}
+                      delay={28}
+                    />
+                    <ProviderBar
+                      name="codex"
+                      providerColor={providers.codex}
+                      cost="$63.80"
+                      pct="21%"
+                      frac={0.27}
+                      delay={36}
+                    />
+                  </div>
+                </Card>
+              </Appear>
+            </div>
+
+            {/* ── right: today rollup + cpu/ram sparklines ── */}
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 14,
+                minWidth: 0,
+              }}
+            >
+              <Appear delay={14} y={12}>
+                <Card>
+                  <SectionLabel>Today · Jun 26</SectionLabel>
+                  <div style={{ display: 'flex', gap: 10 }}>
+                    <MetricStat label="Sessions"  value="18"     style={{ flex: 1 }} />
+                    <MetricStat
+                      label="Tokens"
+                      value="4.1M"
+                      accent={series[0]}
+                      style={{ flex: 1 }}
+                    />
+                    <MetricStat label="Cost"      value="$26.80" style={{ flex: 1 }} />
+                    <MetricStat
+                      label="Cache Hit"
+                      value="78%"
+                      accent={series[4]}
+                      style={{ flex: 1 }}
+                    />
+                  </div>
+                </Card>
+              </Appear>
+
+              <Appear delay={26} y={12} style={{ flex: 1 }}>
+                <Card
+                  style={{
+                    height: '100%',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <SectionLabel>CPU · last hour</SectionLabel>
+                    <Chip>64% avg</Chip>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <Sparkline
+                      data={CPU_DATA}
+                      color={series[4]}
+                      width={860}
+                      height={72}
+                      progress={sparkProgress}
+                    />
+                  </div>
+                </Card>
+              </Appear>
+
+              <Appear delay={36} y={12} style={{ flex: 1 }}>
+                <Card
+                  style={{
+                    height: '100%',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <SectionLabel>RAM · last hour</SectionLabel>
+                    <Chip>7.8 GB</Chip>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <Sparkline
+                      data={RAM_DATA}
+                      color={series[1]}
+                      width={860}
+                      height={72}
+                      progress={sparkProgress}
+                    />
+                  </div>
+                </Card>
+              </Appear>
+            </div>
+          </div>
+        </OttoWindow>
+      </Stage>
+
+      <Caption
+        step={2}
+        title="Provider / day / session rollups · budgets · system metrics"
+        sub="Per-provider spend · monthly budget ring · live CPU & RAM sparklines · retention TTL"
+        delay={20}
+      />
+    </>
+  );
+};
+
+// ── Scene 4 — Insights Report (~170f) ────────────────────────────────────────
+
+const InsightsReportScene: React.FC = () => (
+  <>
+    <Stage scale={0.88}>
+      <OttoWindow
+        nav={<Navigator active="insights" />}
+        title="Otto — Insights"
+      >
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 14,
+            padding: 18,
+            height: '100%',
+            boxSizing: 'border-box',
+            overflow: 'hidden',
+          }}
+        >
+          {/* ── page header ── */}
+          <Appear delay={8} y={12}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+            >
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span
+                  style={{
+                    fontFamily: fonts.ui,
+                    fontSize: 22,
+                    fontWeight: 700,
+                    color: T.text,
+                    letterSpacing: -0.4,
+                  }}
+                >
+                  Catch-up Reports
+                </span>
+                <span style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim }}>
+                  Generated by Otto · multi-provider synthesis · action-first
+                </span>
+              </div>
+              <Segmented options={['Daily', 'Weekly', 'Monthly']} active={0} />
+            </div>
+          </Appear>
+
+          {/* ── report card ── */}
+          <Appear delay={18} y={16} style={{ flex: 1 }}>
+            <Card
+              pad={20}
+              style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 16,
+                background: `linear-gradient(160deg, ${alpha(brand.cyan, 0.04)} 0%, ${T.surface} 40%)`,
+              }}
+            >
+              {/* report header */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexShrink: 0,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: 9,
+                      background: alpha(brand.cyan, 0.13),
+                      border: `1px solid ${alpha(brand.cyan, 0.3)}`,
+                      display: 'grid',
+                      placeItems: 'center',
+                    }}
+                  >
+                    <Icon name="bell" size={17} color={brand.cyan} />
+                  </div>
+                  <div>
+                    <div
+                      style={{
+                        fontFamily: fonts.ui,
+                        fontSize: 17,
+                        fontWeight: 700,
+                        color: T.text,
+                        letterSpacing: -0.2,
+                      }}
+                    >
+                      Daily Catch-up
+                    </div>
+                    <div style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim }}>
+                      Thursday, Jun 26
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <Chip tone="ok">Generated 6:00 AM</Chip>
+                  <Chip color={providers.claude}>claude + codex</Chip>
+                </div>
+              </div>
+
+              {/* summary line */}
+              <div
+                style={{
+                  fontFamily: fonts.ui,
+                  fontSize: 13.5,
+                  color: T.textDim,
+                  paddingBottom: 14,
+                  borderBottom: `1px solid ${T.border}`,
+                  flexShrink: 0,
+                }}
+              >
+                3 actions recommended · 12 sessions completed overnight · 1 agent needs your input
+              </div>
+
+              {/* action bullets */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                {BULLETS.map((b, i) => (
+                  <BulletRow
+                    key={i}
+                    icon={b.icon}
+                    color={b.color}
+                    text={b.text}
+                    sub={b.sub}
+                    delay={32 + i * 16}
+                  />
+                ))}
+              </div>
+            </Card>
+          </Appear>
+        </div>
+      </OttoWindow>
+    </Stage>
+
+    <Caption
+      step={3}
+      title="Scheduled catch-up reports"
+      sub="Daily, weekly, monthly — or on demand · action-first HTML summaries · generated & cached"
+      delay={20}
+    />
+  </>
+);
+
+// ── Composition ───────────────────────────────────────────────────────────────
+
 const SCENES: SceneDef[] = [
-  { dur: 80, node: <Title />, name: 'Title' },
-  { dur: 230, node: <UsageDashScene />, name: 'Usage dashboard' },
-  { dur: 210, node: <BudgetsScene />, name: 'Budgets' },
-  { dur: 190, node: <MetricsInsightsScene />, name: 'Metrics + Insights' },
+  {
+    dur: 75,
+    node: <TitleScene />,
+    name: 'Title',
+  },
+  {
+    dur: 190,
+    node: <UsageDashboardScene />,
+    name: 'UsageDashboard',
+  },
+  {
+    dur: 150,
+    node: <BudgetsSystemScene />,
+    name: 'BudgetsSystem',
+  },
+  {
+    dur: 170,
+    node: <InsightsReportScene />,
+    name: 'InsightsReport',
+  },
   {
     dur: 130,
     node: (
       <WalkOutro
-        title="Usage & Insights"
-        tagline="Cost you can see — and control."
+        title="Usage, Cost & Insights"
+        tagline="Know exactly what your agents cost — and what they did"
         pills={[
-          { label: 'Token tracking', color: '#0a84ff', icon: 'chart' },
-          { label: 'Per-feature spend', color: brand.cyan, icon: 'gauge' },
-          { label: 'Budget caps', color: '#febc2e', icon: 'gauge' },
-          { label: 'CPU/RAM', color: '#28c840', icon: 'gauge' },
-          { label: 'Scheduled reports', color: brand.violet, icon: 'clock' },
+          { label: 'Token cost',       icon: 'chart', color: series[0] },
+          { label: 'Cache breakdown',  icon: 'db',    color: series[4] },
+          { label: 'Budgets',          icon: 'gauge', color: series[2] },
+          { label: 'Catch-up reports', icon: 'bell',  color: brand.cyan },
         ]}
       />
     ),

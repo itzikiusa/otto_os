@@ -1,561 +1,601 @@
 import React from 'react';
-import { useCurrentFrame } from 'remotion';
-import { T, brand, fonts, providers, status, alpha } from '../theme';
+import { AbsoluteFill, useCurrentFrame } from 'remotion';
+import { T, brand, fonts, providers, status as STATUS, alpha, radius } from '../theme';
 import { Scenes, SceneDef, scenesDuration, Stage, WalkOutro } from '../components/scene';
 import { OttoWindow } from '../components/Frame';
 import { Navigator } from '../components/Nav';
 import {
-  TitleCard,
-  Caption,
   Appear,
   Avatar,
-  StatusDot,
+  Caption,
   Chip,
-  Icon,
+  Button,
+  StatusDot,
+  TitleCard,
   track,
+  Icon,
 } from '../components/kit';
 
-// ════════════════════════════════════════════════════════════════════════════
-//  AGENT SWARM — teams of role-specialized agents, an org tree & a coordinator
-// ════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+//  Shared: provider-to-color assignments for each role-agent
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ── Scene 1 — title card ──────────────────────────────────────────────────────
-const Title: React.FC = () => (
+const COLORS = {
+  ada:      providers.claude,   // CEO
+  linus:    providers.codex,    // CTO
+  grace:    brand.cyan,         // Team Lead
+  dijkstra: providers.claude,   // Dev
+  hopper:   providers.codex,    // Dev
+  turing:   brand.violet,       // Reviewer
+  lovelace: providers.shell,    // QA
+} as const;
+
+// Consistent tab bars for the three Swarm sub-views
+const SWARM_TABS_ORG = [
+  { label: 'Overview',  icon: 'gauge' },
+  { label: 'Org Tree',  icon: 'user',  active: true },
+  { label: 'Board',     icon: 'grid' },
+  { label: 'Run Graph', icon: 'split' },
+  { label: 'Scheduled', icon: 'clock' },
+] as const;
+
+const SWARM_TABS_BOARD = [
+  { label: 'Overview',  icon: 'gauge' },
+  { label: 'Org Tree',  icon: 'user' },
+  { label: 'Board',     icon: 'grid',  active: true, dot: 'working' as const },
+  { label: 'Run Graph', icon: 'split' },
+  { label: 'Scheduled', icon: 'clock' },
+] as const;
+
+const SWARM_TABS_RUN = [
+  { label: 'Overview',  icon: 'gauge' },
+  { label: 'Org Tree',  icon: 'user' },
+  { label: 'Board',     icon: 'grid' },
+  { label: 'Run Graph', icon: 'split', active: true },
+  { label: 'Scheduled', icon: 'clock' },
+] as const;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Scene 1 — Title card
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TitleScene: React.FC = () => (
   <TitleCard
     kicker="Agent Swarm"
-    title="A whole team of agents"
-    subtitle="Roles, an org tree, and a coordinator that schedules the work"
+    title="A Company of Agents"
+    subtitle="Role-specialized workers, drafted by a Recruiter, coordinated by a Scheduler — running your projects autonomously."
   />
 );
 
-// ── shared bits ───────────────────────────────────────────────────────────────
-const ProviderChip: React.FC<{ name: string; color: string }> = ({ name, color }) => (
-  <span
-    style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 5,
-      padding: '0 7px',
-      height: 17,
-      borderRadius: 999,
-      fontFamily: fonts.ui,
-      fontSize: 10,
-      fontWeight: 600,
-      color,
-      background: alpha(color, 0.16),
-      border: `1px solid ${alpha(color, 0.38)}`,
-      whiteSpace: 'nowrap',
-    }}
-  >
-    <span style={{ width: 6, height: 6, borderRadius: '50%', background: color }} />
-    {name}
-  </span>
-);
+// ─────────────────────────────────────────────────────────────────────────────
+//  Scene 2 — Org tree
+//  Content area: 1312 × 802 px (after Navigator 248 + Titlebar 44 + TabBar 38)
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ── Scene 2 — org tree ────────────────────────────────────────────────────────
-interface OrgNode {
-  role: string;
-  person: string;
-  color: string;
-  provider: string;
-  provColor: string;
-  st: keyof typeof status;
-}
+// Approximate card dimensions for connector-line math
+const CARD_W = 128;
+const CARD_H = 124;
 
-const COORD: OrgNode = { role: 'Coordinator', person: 'C', color: brand.cyan, provider: 'claude', provColor: providers.claude, st: 'working' };
-const LEADS: OrgNode[] = [
-  { role: 'CTO', person: 'T', color: brand.violet, provider: 'claude', provColor: providers.claude, st: 'working' },
-  { role: 'VP Eng', person: 'V', color: '#0a84ff', provider: 'codex', provColor: providers.codex, st: 'idle' },
-];
-const LEAVES: OrgNode[] = [
-  { role: 'Backend Eng', person: 'B', color: providers.codex, provider: 'codex', provColor: providers.codex, st: 'working' },
-  { role: 'Backend Eng', person: 'B', color: providers.codex, provider: 'codex', provColor: providers.codex, st: 'working' },
-  { role: 'Reviewer', person: 'R', color: brand.violet, provider: 'claude', provColor: providers.claude, st: 'idle' },
-  { role: 'QA', person: 'Q', color: '#febc2e', provider: 'gemini', provColor: providers.gemini, st: 'working' },
-];
-
-const OrgCard: React.FC<{ node: OrgNode; w?: number }> = ({ node, w = 184 }) => (
-  <div
-    style={{
-      width: w,
-      display: 'flex',
-      alignItems: 'center',
-      gap: 10,
-      padding: '11px 12px',
-      borderRadius: 12,
-      background: T.surface,
-      border: `1px solid ${alpha(node.color, 0.4)}`,
-      boxShadow: `0 8px 26px rgba(0,0,0,0.4), 0 0 0 1px ${alpha(node.color, 0.12)}`,
-      boxSizing: 'border-box',
-    }}
-  >
-    <Avatar name={node.person} color={node.color} size={34} />
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ fontFamily: fonts.ui, fontSize: 14, fontWeight: 700, color: T.text }}>{node.role}</span>
-        <StatusDot kind={node.st} size={7} />
-      </div>
-      <div style={{ marginTop: 5 }}>
-        <ProviderChip name={node.provider} color={node.provColor} />
-      </div>
-    </div>
-  </div>
-);
-
-// SVG connector layer drawn behind the cards (relative to the content box).
-const OrgWires: React.FC = () => {
+// Vertical connector line with dashoffset draw-in
+const OrgLine: React.FC<{
+  x1: number; y1: number; x2: number; y2: number; delay?: number;
+}> = ({ x1, y1, x2, y2, delay = 0 }) => {
   const frame = useCurrentFrame();
-  const draw = track(frame, [10, 40], [0, 1]);
-  const W = 1130;
-  const H = 560;
-  // coordinate anchors (matched to the flex layout below)
-  const coordX = W / 2;
-  const coordY = 96;
-  const leadY = 250;
-  const leadXs = [W / 2 - 220, W / 2 + 220];
-  const leafY = 420;
-  const leafXs = [W / 2 - 360, W / 2 - 120, W / 2 + 120, W / 2 + 360];
-  const stroke = alpha(brand.cyan, 0.5);
-  const lines: [number, number, number, number][] = [
-    // coordinator → leads
-    [coordX, coordY, leadXs[0], leadY],
-    [coordX, coordY, leadXs[1], leadY],
-    // CTO → backend ×2
-    [leadXs[0], leadY, leafXs[0], leafY],
-    [leadXs[0], leadY, leafXs[1], leafY],
-    // VP Eng → reviewer, QA
-    [leadXs[1], leadY, leafXs[2], leafY],
-    [leadXs[1], leadY, leafXs[3], leafY],
-  ];
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.ceil(Math.sqrt(dx * dx + dy * dy));
+  const t = track(frame, [delay, delay + 16], [0, 1]);
   return (
-    <svg width={W} height={H} style={{ position: 'absolute', left: '50%', top: 0, transform: 'translateX(-50%)', pointerEvents: 'none' }}>
-      {lines.map(([x1, y1, x2, y2], i) => {
-        const my = (y1 + y2) / 2;
-        const d = `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
-        return (
-          <path
-            key={i}
-            d={d}
-            fill="none"
-            stroke={stroke}
-            strokeWidth={2}
-            strokeDasharray={460}
-            strokeDashoffset={460 * (1 - draw)}
-          />
-        );
-      })}
-    </svg>
+    <line
+      x1={x1} y1={y1} x2={x2} y2={y2}
+      stroke={alpha(brand.cyan, 0.55)}
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeDasharray={len}
+      strokeDashoffset={len * (1 - t)}
+    />
   );
 };
 
+// Grace → 4 reports: spine-style elbow connector
+const L4_XS   = [340, 550, 762, 972] as const;
+const L3_CX   = 656;
+const L3_BOT  = 380 + CARD_H;  // = 504, Grace bottom y
+const ELBOW_Y = 534;            // horizontal bar y
+const L4_TOP  = 555;            // L4 card top y
+
+const ElbowConnector: React.FC<{ delay?: number }> = ({ delay = 0 }) => {
+  const frame = useCurrentFrame();
+  const t = track(frame, [delay, delay + 24], [0, 1]);
+  const stroke = alpha(brand.cyan, 0.55);
+  return (
+    <g opacity={t}>
+      {/* Stem from Grace down to elbow bar */}
+      <line x1={L3_CX} y1={L3_BOT} x2={L3_CX} y2={ELBOW_Y}
+        stroke={stroke} strokeWidth={1.5} strokeLinecap="round" />
+      {/* Horizontal spine */}
+      <line x1={L4_XS[0]} y1={ELBOW_Y} x2={L4_XS[L4_XS.length - 1]} y2={ELBOW_Y}
+        stroke={stroke} strokeWidth={1.5} strokeLinecap="round" />
+      {/* Drops to each child */}
+      {L4_XS.map((x) => (
+        <line key={x} x1={x} y1={ELBOW_Y} x2={x} y2={L4_TOP}
+          stroke={stroke} strokeWidth={1.5} strokeLinecap="round" />
+      ))}
+    </g>
+  );
+};
+
+interface AgentDef {
+  name: string;
+  role: string;
+  pColor: string;
+  pLabel: string;
+  cx: number;    // horizontal center
+  ty: number;    // top y
+  delay: number;
+}
+
+const ORG: AgentDef[] = [
+  // L1
+  { name: 'Ada',      role: 'CEO',       pColor: COLORS.ada,      pLabel: 'claude', cx: 656,      ty: 20,    delay: 6  },
+  // L2
+  { name: 'Linus',    role: 'CTO',       pColor: COLORS.linus,    pLabel: 'codex',  cx: 656,      ty: 198,   delay: 20 },
+  // L3
+  { name: 'Grace',    role: 'Team Lead', pColor: COLORS.grace,    pLabel: 'claude', cx: 656,      ty: 380,   delay: 36 },
+  // L4
+  { name: 'Dijkstra', role: 'Dev',       pColor: COLORS.dijkstra, pLabel: 'claude', cx: L4_XS[0], ty: L4_TOP, delay: 55 },
+  { name: 'Hopper',   role: 'Dev',       pColor: COLORS.hopper,   pLabel: 'codex',  cx: L4_XS[1], ty: L4_TOP, delay: 63 },
+  { name: 'Turing',   role: 'Reviewer',  pColor: COLORS.turing,   pLabel: 'codex',  cx: L4_XS[2], ty: L4_TOP, delay: 71 },
+  { name: 'Lovelace', role: 'QA',        pColor: COLORS.lovelace, pLabel: 'shell',  cx: L4_XS[3], ty: L4_TOP, delay: 79 },
+];
+
+const AgentNode: React.FC<AgentDef> = ({ name, role, pColor, pLabel, cx, ty, delay }) => (
+  <div style={{ position: 'absolute', left: cx, top: ty, transform: 'translateX(-50%)' }}>
+    <Appear delay={delay} y={10}>
+      <div style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5,
+        padding: '10px 16px', borderRadius: radius.l, minWidth: CARD_W,
+        background: T.surface, border: `1px solid ${alpha(pColor, 0.45)}`,
+        boxShadow: `0 6px 28px ${alpha(pColor, 0.2)}, ${T.shadow}`,
+      }}>
+        <Avatar name={name} size={34} color={pColor} />
+        <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{name}</span>
+        <span style={{ fontFamily: fonts.ui, fontSize: 11, color: T.textDim }}>{role}</span>
+        <Chip color={pColor}>{pLabel}</Chip>
+      </div>
+    </Appear>
+  </div>
+);
+
 const OrgTreeScene: React.FC = () => (
   <>
-    <Stage scale={0.9}>
+    <Stage scale={0.87}>
       <OttoWindow
-        nav={<Navigator active="swarm" counts={{ swarm: 7 }} />}
-        title="Otto — Swarm · Platform Team"
+        nav={<Navigator active="swarm" />}
+        title="Otto — Swarm · Payments Squad"
+        tabs={[...SWARM_TABS_ORG]}
+        width={1560}
+        height={884}
       >
-        <div style={{ position: 'relative', height: '100%', padding: '28px 0', boxSizing: 'border-box' }}>
-          {/* board header */}
-          <div style={{ position: 'absolute', top: 18, left: 26, display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Icon name="grid" size={16} color={brand.cyan} />
-            <span style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 700, color: T.text }}>Org Tree</span>
-            <Chip color={brand.cyan}>7 agents</Chip>
-            <Chip tone="default">3 working</Chip>
-          </div>
-
-          <OrgWires />
-
-          <div style={{ position: 'relative', height: '100%' }}>
-            {/* Coordinator */}
-            <div style={{ position: 'absolute', top: 70, left: '50%', transform: 'translateX(-50%)' }}>
-              <Appear delay={4} y={14}>
-                <OrgCard node={COORD} w={210} />
-              </Appear>
-            </div>
-            {/* Leads row */}
-            <div style={{ position: 'absolute', top: 224, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 256 }}>
-              {LEADS.map((n, i) => (
-                <Appear key={i} delay={14 + i * 4} y={14}>
-                  <OrgCard node={n} w={196} />
-                </Appear>
-              ))}
-            </div>
-            {/* Leaves row */}
-            <div style={{ position: 'absolute', top: 396, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 56 }}>
-              {LEAVES.map((n, i) => (
-                <Appear key={i} delay={26 + i * 5} y={14}>
-                  <OrgCard node={n} w={184} />
-                </Appear>
-              ))}
-            </div>
-            {/* recruiter strip */}
-            <div style={{ position: 'absolute', bottom: 6, left: '50%', transform: 'translateX(-50%)' }}>
-              <Appear delay={52} y={12}>
-                <div
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 9,
-                    padding: '8px 14px',
-                    borderRadius: 999,
-                    background: alpha(providers.claude, 0.1),
-                    border: `1px solid ${alpha(providers.claude, 0.32)}`,
-                    fontFamily: fonts.ui,
-                    fontSize: 13,
-                    color: T.text,
-                  }}
-                >
-                  <Icon name="user" size={14} color={providers.claude} />
-                  Recruiter drafted each agent — role, persona, skills &amp; schedule
-                </div>
-              </Appear>
-            </div>
-          </div>
-        </div>
+        <AbsoluteFill>
+          {/* SVG connector lines — drawn behind agent cards */}
+          <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
+            {/* L1 → L2 */}
+            <OrgLine x1={L3_CX} y1={20 + CARD_H}   x2={L3_CX} y2={198}  delay={14} />
+            {/* L2 → L3 */}
+            <OrgLine x1={L3_CX} y1={198 + CARD_H}  x2={L3_CX} y2={380}  delay={28} />
+            {/* L3 → L4 elbow spine */}
+            <ElbowConnector delay={48} />
+          </svg>
+          {/* Agent nodes */}
+          {ORG.map((a) => <AgentNode key={a.name} {...a} />)}
+        </AbsoluteFill>
       </OttoWindow>
     </Stage>
     <Caption
       step={1}
-      title="Role agents in an org hierarchy"
-      sub="A recruiter drafts each one · 5 presets ship in the box"
+      title="Org hierarchy — drafted by a Recruiter"
+      sub="Each agent gets a role, skills & soul. CEO delegates to CTO → Team Lead → Dev / Reviewer / QA."
     />
   </>
 );
 
-// ── Scene 3 — Kanban board ────────────────────────────────────────────────────
-interface KCard {
+// ─────────────────────────────────────────────────────────────────────────────
+//  Scene 3 — Coordinator banner + Kanban board
+// ─────────────────────────────────────────────────────────────────────────────
+
+type CardStatus = 'idle' | 'working' | 'done' | 'review';
+
+const CARD_DOT_TONE: Record<CardStatus, 'working' | 'idle' | 'needsYou'> = {
+  idle:    'idle',
+  working: 'working',
+  done:    'working',
+  review:  'needsYou',
+};
+
+const CARD_CHIP_CLR: Record<CardStatus, string> = {
+  idle:    STATUS.idle,
+  working: STATUS.working,
+  done:    STATUS.working,
+  review:  STATUS.needsYou,
+};
+
+const CARD_CHIP_LBL: Record<CardStatus, string> = {
+  idle:    'queued',
+  working: 'running',
+  done:    'done',
+  review:  'needs review',
+};
+
+interface TaskCardDef {
   title: string;
-  who: string;
-  whoColor: string;
-  st: keyof typeof status;
-  stLabel: string;
+  owner: string;
+  ownerColor: string;
+  cardStatus: CardStatus;
+  delay: number;
 }
 
-const COLUMNS: { name: string; tone: string; cards: KCard[] }[] = [
+const TaskCard: React.FC<TaskCardDef> = ({ title, owner, ownerColor, cardStatus, delay }) => {
+  const chipColor = CARD_CHIP_CLR[cardStatus];
+  const isActive  = cardStatus === 'working';
+  return (
+    <Appear delay={delay} y={8}>
+      <div style={{
+        background: T.surface, borderRadius: radius.m, padding: '10px 12px', marginBottom: 8,
+        border: `1px solid ${isActive ? alpha(chipColor, 0.4) : T.border}`,
+        boxShadow: isActive ? `0 4px 18px ${alpha(chipColor, 0.18)}` : T.shadow,
+      }}>
+        <div style={{
+          fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 600,
+          color: T.text, marginBottom: 8, lineHeight: 1.4,
+        }}>
+          {title}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Avatar name={owner} size={17} color={ownerColor} />
+            <span style={{ fontFamily: fonts.ui, fontSize: 11, color: T.textDim }}>{owner}</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <StatusDot kind={CARD_DOT_TONE[cardStatus]} size={7} pulse={cardStatus === 'working'} />
+            <Chip color={chipColor}>{CARD_CHIP_LBL[cardStatus]}</Chip>
+          </div>
+        </div>
+      </div>
+    </Appear>
+  );
+};
+
+interface ColumnDef {
+  title: string;
+  dotColor: string;
+  tasks: TaskCardDef[];
+  colDelay: number;
+}
+
+const KanbanCol: React.FC<ColumnDef> = ({ title, dotColor, tasks, colDelay }) => (
+  <Appear
+    delay={colDelay}
+    y={18}
+    style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}
+  >
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column',
+      background: alpha('#ffffff', 0.025),
+      border: `1px solid ${T.border}`, borderRadius: radius.m,
+    }}>
+      {/* Header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '10px 14px', borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+      }}>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor, flexShrink: 0 }} />
+        <span style={{ fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 700, color: T.text, flex: 1 }}>{title}</span>
+        <span style={{
+          minWidth: 18, height: 18, padding: '0 5px', borderRadius: 999,
+          background: T.surface2, fontFamily: fonts.ui, fontSize: 11,
+          fontWeight: 600, color: T.textDim, display: 'grid', placeItems: 'center',
+        }}>{tasks.length}</span>
+      </div>
+      {/* Cards */}
+      <div style={{ padding: '10px 10px 0', flex: 1 }}>
+        {tasks.map((task, i) => <TaskCard key={i} {...task} />)}
+      </div>
+    </div>
+  </Appear>
+);
+
+const COLUMNS: ColumnDef[] = [
   {
-    name: 'Backlog',
-    tone: T.textDim,
-    cards: [
-      { title: 'Add pagination to /orders', who: 'B', whoColor: providers.codex, st: 'idle', stLabel: 'queued' },
-      { title: 'Cache currency rates', who: 'B', whoColor: providers.codex, st: 'idle', stLabel: 'queued' },
+    title: 'Backlog', dotColor: T.textDim, colDelay: 10,
+    tasks: [
+      { title: 'Add rate-limiting middleware', owner: 'Lovelace', ownerColor: COLORS.lovelace, cardStatus: 'idle',    delay: 22 },
+      { title: 'Extend OAuth token scopes',    owner: 'Dijkstra', ownerColor: COLORS.dijkstra, cardStatus: 'idle',    delay: 28 },
     ],
   },
   {
-    name: 'In progress',
-    tone: status.working,
-    cards: [
-      { title: 'JWT refresh middleware', who: 'B', whoColor: providers.codex, st: 'working', stLabel: 'running' },
-      { title: 'Rate-limit gateway', who: 'V', whoColor: '#0a84ff', st: 'working', stLabel: 'running' },
+    title: 'In Progress', dotColor: brand.cyan, colDelay: 14,
+    tasks: [
+      { title: 'Implement JWT refresh flow',   owner: 'Hopper',   ownerColor: COLORS.hopper,   cardStatus: 'working', delay: 30 },
+      { title: 'Build user search endpoint',   owner: 'Dijkstra', ownerColor: COLORS.dijkstra, cardStatus: 'working', delay: 36 },
     ],
   },
   {
-    name: 'Review',
-    tone: brand.violet,
-    cards: [
-      { title: 'Refactor wallet ledger', who: 'R', whoColor: brand.violet, st: 'needsYou', stLabel: 'in review' },
+    title: 'Review', dotColor: STATUS.needsYou, colDelay: 18,
+    tasks: [
+      { title: 'DB migration v3',              owner: 'Turing',   ownerColor: COLORS.turing,   cardStatus: 'review',  delay: 40 },
+      { title: 'API error-response format',    owner: 'Grace',    ownerColor: COLORS.grace,    cardStatus: 'review',  delay: 46 },
     ],
   },
   {
-    name: 'Done',
-    tone: status.working,
-    cards: [
-      { title: 'Fix flaky auth tests', who: 'Q', whoColor: '#febc2e', st: 'exited', stLabel: 'merged' },
-      { title: 'Seed staging DB', who: 'B', whoColor: providers.codex, st: 'exited', stLabel: 'merged' },
+    title: 'Done', dotColor: STATUS.working, colDelay: 22,
+    tasks: [
+      { title: 'Initialise monorepo',          owner: 'Ada',      ownerColor: COLORS.ada,      cardStatus: 'done',    delay: 50 },
+      { title: 'Design schema v1',             owner: 'Linus',    ownerColor: COLORS.linus,    cardStatus: 'done',    delay: 56 },
+      { title: 'Auth service (basic)',          owner: 'Grace',    ownerColor: COLORS.grace,    cardStatus: 'done',    delay: 62 },
     ],
   },
 ];
 
-const TaskCard: React.FC<{ c: KCard; moving?: boolean }> = ({ c, moving }) => {
-  const frame = useCurrentFrame();
-  const lift = moving ? track(frame, [70, 96], [0, 1]) : 0;
-  return (
-    <div
-      style={{
-        padding: '11px 12px',
-        borderRadius: 10,
-        background: T.surface,
-        border: `1px solid ${moving ? alpha(brand.cyan, 0.6) : T.border}`,
-        boxShadow: moving
-          ? `0 ${12 + lift * 8}px ${22 + lift * 10}px rgba(0,0,0,0.5), 0 0 0 1px ${alpha(brand.cyan, 0.4)}`
-          : '0 4px 14px rgba(0,0,0,0.28)',
-        transform: moving ? `translate(${lift * 18}px, ${-lift * 6}px) rotate(${lift * 1.4}deg)` : 'none',
-      }}
-    >
-      <div style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 600, color: T.text, lineHeight: 1.3 }}>{c.title}</div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 9 }}>
-        <Avatar name={c.who} color={c.whoColor} size={20} />
-        <span style={{ flex: 1 }} />
-        <StatusDot kind={c.st} size={7} />
-        <span style={{ fontFamily: fonts.ui, fontSize: 11, color: T.textDim }}>{c.stLabel}</span>
-      </div>
-    </div>
-  );
-};
+const COORD_AGENTS: Array<{ name: string; color: string; active: boolean }> = [
+  { name: 'Dijkstra', color: COLORS.dijkstra, active: true  },
+  { name: 'Hopper',   color: COLORS.hopper,   active: true  },
+  { name: 'Turing',   color: COLORS.turing,   active: true  },
+  { name: 'Grace',    color: COLORS.grace,    active: false },  // scheduled, not yet dispatched
+];
 
 const KanbanScene: React.FC = () => (
   <>
-    <Stage scale={0.9}>
+    <Stage scale={0.87}>
       <OttoWindow
-        nav={<Navigator active="swarm" counts={{ swarm: 7 }} />}
-        tabs={[
-          { label: 'Kanban', icon: 'grid', active: true },
-          { label: 'Run Graph', icon: 'split' },
-          { label: 'Org Tree', icon: 'box' },
-          { label: 'Runs', icon: 'clock' },
-          { label: 'Board', icon: 'comment' },
-        ]}
-        title="Otto — Swarm · Checkout Revamp"
+        nav={<Navigator active="swarm" />}
+        title="Otto — Swarm · Payments Squad"
+        tabs={[...SWARM_TABS_BOARD]}
+        width={1560}
+        height={884}
       >
-        <div style={{ display: 'flex', gap: 14, padding: 20, height: '100%', boxSizing: 'border-box' }}>
-          {COLUMNS.map((col, ci) => (
-            <Appear key={col.name} delay={6 + ci * 6} y={18} style={{ flex: 1, display: 'flex' }}>
-              <div
-                style={{
-                  flex: 1,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  background: alpha('#fff', 0.018),
-                  border: `1px solid ${T.border}`,
-                  borderRadius: 12,
-                  padding: 11,
-                  minWidth: 0,
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 11, padding: '0 2px' }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: col.tone }} />
-                  <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 700, color: T.text }}>{col.name}</span>
-                  <span style={{ fontFamily: fonts.ui, fontSize: 12, color: T.textDim }}>{col.cards.length}</span>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {col.cards.map((c, i) => (
-                    <Appear key={i} delay={16 + ci * 6 + i * 5} y={12}>
-                      <TaskCard c={c} moving={ci === 1 && i === 0} />
-                    </Appear>
-                  ))}
-                </div>
+        <div style={{
+          display: 'flex', flexDirection: 'column', height: '100%',
+          padding: 16, gap: 12, boxSizing: 'border-box',
+        }}>
+          {/* Coordinator status banner */}
+          <Appear delay={4}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 14,
+              padding: '0 18px', height: 48, flexShrink: 0,
+              background: alpha(brand.cyan, 0.07), borderRadius: radius.m,
+              border: `1px solid ${alpha(brand.cyan, 0.3)}`,
+            }}>
+              <Icon name="grid" size={15} color={brand.cyan} />
+              <span style={{ fontFamily: fonts.ui, fontSize: 13.5, fontWeight: 700, color: T.text }}>
+                Coordinator
+              </span>
+              <div style={{ width: 1, height: 22, background: T.border, margin: '0 2px' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <StatusDot kind="working" size={8} />
+                <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 600, color: T.text }}>
+                  3 / 4 sessions active
+                </span>
+                <Chip color={brand.cyan}>cap 4</Chip>
               </div>
-            </Appear>
-          ))}
+              <span style={{ flex: 1 }} />
+              {/* Per-agent indicators */}
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                {COORD_AGENTS.map(({ name, color, active }) => (
+                  <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <StatusDot kind={active ? 'working' : 'idle'} size={7} pulse={active} />
+                    <Avatar name={name} size={20} color={color} />
+                    {!active && (
+                      <span style={{ fontFamily: fonts.ui, fontSize: 10, color: T.textDim }}>scheduled</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Appear>
+
+          {/* Four Kanban columns */}
+          <div style={{ flex: 1, display: 'flex', gap: 12, minHeight: 0 }}>
+            {COLUMNS.map((col) => <KanbanCol key={col.title} {...col} />)}
+          </div>
         </div>
       </OttoWindow>
     </Stage>
     <Caption
       step={2}
-      title="Projects break into tasks on a board"
-      sub="The Coordinator assigns work within a parallel cap"
+      title="Coordinator schedules work within the session cap"
+      sub="Tasks flow Backlog → In Progress → Review → Done. Agents auto-assigned; coordinator respects the parallel cap."
     />
   </>
 );
 
-// ── Scene 4 — run graph + board ───────────────────────────────────────────────
-interface GNode {
-  id: string;
+// ─────────────────────────────────────────────────────────────────────────────
+//  Scene 4 — Run-graph (DAG) + swarm controls
+//  Row-1 at cy=115, row-2 at cy=285. Controls banner at content bottom.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type RunStatus = 'done' | 'working' | 'idle';
+
+const RUN_DOT_KIND: Record<RunStatus, 'working' | 'idle'> = {
+  done: 'working', working: 'working', idle: 'idle',
+};
+const RUN_CHIP_CLR: Record<RunStatus, string> = {
+  done: STATUS.working, working: brand.cyan, idle: STATUS.idle,
+};
+const RUN_CHIP_LBL: Record<RunStatus, string> = {
+  done: 'done', working: 'running', idle: 'queued',
+};
+
+// Node geometry
+const NW  = 188;        // node width
+const NH  = 60;         // node height
+const HNW = NW / 2;     // 94
+const HNH = NH / 2;     // 30
+
+interface RunNodeDef {
   label: string;
-  x: number;
-  y: number;
-  st: keyof typeof status;
-  color: string;
+  owner: string;
+  ownerColor: string;
+  runStatus: RunStatus;
+  cx: number;    // center x
+  cy: number;    // center y
+  delay: number;
 }
 
-const GNODES: GNode[] = [
-  { id: 'plan', label: 'Plan', x: 70, y: 150, st: 'exited', color: status.idle },
-  { id: 'api', label: 'API layer', x: 280, y: 78, st: 'exited', color: status.idle },
-  { id: 'db', label: 'DB schema', x: 280, y: 222, st: 'exited', color: status.idle },
-  { id: 'impl', label: 'Implement', x: 500, y: 150, st: 'working', color: status.working },
-  { id: 'review', label: 'Review', x: 720, y: 78, st: 'working', color: status.working },
-  { id: 'qa', label: 'QA', x: 720, y: 222, st: 'idle', color: status.idle },
-  { id: 'merge', label: 'Merge PR', x: 930, y: 150, st: 'idle', color: status.idle },
-];
-const GEDGES: [string, string][] = [
-  ['plan', 'api'],
-  ['plan', 'db'],
-  ['api', 'impl'],
-  ['db', 'impl'],
-  ['impl', 'review'],
-  ['impl', 'qa'],
-  ['review', 'merge'],
-  ['qa', 'merge'],
+const RUN_NODES: RunNodeDef[] = [
+  // Row 1 — main track
+  { label: 'Init repo',         owner: 'Ada',      ownerColor: COLORS.ada,      runStatus: 'done',    cx: 155,  cy: 115, delay: 6  },
+  { label: 'Design schema',     owner: 'Linus',    ownerColor: COLORS.linus,    runStatus: 'done',    cx: 385,  cy: 115, delay: 12 },
+  { label: 'Auth service',      owner: 'Grace',    ownerColor: COLORS.grace,    runStatus: 'done',    cx: 615,  cy: 115, delay: 18 },
+  { label: 'REST endpoints',    owner: 'Dijkstra', ownerColor: COLORS.dijkstra, runStatus: 'working', cx: 850,  cy: 115, delay: 24 },
+  { label: 'Integration tests', owner: 'Hopper',   ownerColor: COLORS.hopper,   runStatus: 'idle',    cx: 1100, cy: 115, delay: 30 },
+  // Row 2 — parallel frontend track
+  { label: 'Frontend setup',    owner: 'Hopper',   ownerColor: COLORS.hopper,   runStatus: 'working', cx: 850,  cy: 285, delay: 36 },
+  { label: 'E2E test suite',    owner: 'Lovelace', ownerColor: COLORS.lovelace, runStatus: 'idle',    cx: 1100, cy: 285, delay: 42 },
 ];
 
-const RunGraph: React.FC = () => {
+// DAG edges: [x1, y1, x2, y2, animDelay]
+const DAG_EDGES: Array<[number, number, number, number, number]> = [
+  [155 + HNW, 115,        385 - HNW, 115,        4  ],  // Init → Schema
+  [385 + HNW, 115,        615 - HNW, 115,        10 ],  // Schema → Auth
+  [615 + HNW, 115,        850 - HNW, 115,        16 ],  // Auth → REST
+  [850 + HNW, 115,       1100 - HNW, 115,        22 ],  // REST → Integration
+  [850,       115 + HNH,  850,       285 - HNH,  28 ],  // REST → Frontend (vertical)
+  [850 + HNW, 285,       1100 - HNW, 285,        36 ],  // Frontend → E2E
+];
+
+const DagEdge: React.FC<{ x1: number; y1: number; x2: number; y2: number; delay?: number }> = ({
+  x1, y1, x2, y2, delay = 0,
+}) => {
   const frame = useCurrentFrame();
-  const draw = track(frame, [8, 40], [0, 1]);
-  const byId = (id: string) => GNODES.find((n) => n.id === id)!;
-  const NW = 116;
-  const NH = 44;
+  const len = Math.ceil(Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2));
+  const t = track(frame, [delay, delay + 16], [0, 1]);
   return (
-    <div style={{ position: 'relative', width: 1046, height: 320 }}>
-      <svg width={1046} height={320} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-        {GEDGES.map(([a, b], i) => {
-          const na = byId(a);
-          const nb = byId(b);
-          const x1 = na.x + NW;
-          const y1 = na.y + NH / 2;
-          const x2 = nb.x;
-          const y2 = nb.y + NH / 2;
-          const mx = (x1 + x2) / 2;
-          const d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
-          const active = na.st === 'exited' && (nb.st === 'working' || nb.st === 'exited');
-          const col = active ? brand.cyan : alpha('#fff', 0.18);
-          return (
-            <path
-              key={i}
-              d={d}
-              fill="none"
-              stroke={col}
-              strokeWidth={active ? 2.4 : 1.6}
-              strokeDasharray={300}
-              strokeDashoffset={300 * (1 - draw)}
-            />
-          );
-        })}
-      </svg>
-      {GNODES.map((n, i) => {
-        const op = track(frame, [10 + i * 4, 22 + i * 4], [0, 1]);
-        const lit = n.st === 'working';
-        return (
-          <div
-            key={n.id}
-            style={{
-              position: 'absolute',
-              left: n.x,
-              top: n.y,
-              width: NW,
-              height: NH,
-              opacity: op,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '0 12px',
-              boxSizing: 'border-box',
-              borderRadius: 10,
-              background: lit ? alpha(status.working, 0.14) : T.surface,
-              border: `1px solid ${lit ? alpha(status.working, 0.6) : T.border}`,
-              boxShadow: lit ? `0 0 22px ${alpha(status.working, 0.35)}` : '0 4px 12px rgba(0,0,0,0.3)',
-            }}
-          >
-            <StatusDot kind={n.st} size={8} pulse={lit} />
-            <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 600, color: T.text }}>{n.label}</span>
+    <line
+      x1={x1} y1={y1} x2={x2} y2={y2}
+      stroke={alpha(T.textDim, 0.5)}
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeDasharray={len}
+      strokeDashoffset={len * (1 - t)}
+    />
+  );
+};
+
+const RunNode: React.FC<RunNodeDef> = ({ label, owner, ownerColor, runStatus, cx, cy, delay }) => {
+  const chipColor = RUN_CHIP_CLR[runStatus];
+  const isRunning = runStatus === 'working';
+  return (
+    <div style={{ position: 'absolute', left: cx - HNW, top: cy - HNH }}>
+      <Appear delay={delay} y={8}>
+        <div style={{
+          width: NW, height: NH,
+          display: 'flex', alignItems: 'center', gap: 9,
+          padding: '0 12px', borderRadius: radius.m, boxSizing: 'border-box',
+          background: isRunning ? alpha(chipColor, 0.09) : T.surface,
+          border: `1px solid ${isRunning ? alpha(chipColor, 0.5) : T.border}`,
+          boxShadow: isRunning ? `0 4px 22px ${alpha(chipColor, 0.24)}` : T.shadow,
+        }}>
+          <StatusDot kind={RUN_DOT_KIND[runStatus]} size={9} pulse={isRunning} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontFamily: fonts.ui, fontSize: 12, fontWeight: 700, color: T.text,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {label}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 3 }}>
+              <Avatar name={owner} size={14} color={ownerColor} />
+              <span style={{ fontFamily: fonts.ui, fontSize: 10, color: T.textDim }}>{owner}</span>
+            </div>
           </div>
-        );
-      })}
+          <Chip color={chipColor}>{RUN_CHIP_LBL[runStatus]}</Chip>
+        </div>
+      </Appear>
     </div>
   );
 };
 
-interface BoardMsg {
-  who: string;
-  color: string;
-  text: string;
-  st: keyof typeof status;
-}
-const BOARD: BoardMsg[] = [
-  { who: 'Reviewer', color: brand.violet, text: 'approved #142 — wallet ledger LGTM', st: 'working' },
-  { who: 'QA', color: '#febc2e', text: '3 cases passing · 0 failing', st: 'working' },
-  { who: 'Backend Eng', color: providers.codex, text: 'pushed impl, requesting review', st: 'idle' },
-  { who: 'Coordinator', color: brand.cyan, text: 'handed off Merge PR → VP Eng', st: 'idle' },
-];
-
-const SwarmBoard: React.FC = () => (
-  <div
-    style={{
-      width: 360,
-      flexShrink: 0,
-      display: 'flex',
-      flexDirection: 'column',
-      background: alpha('#fff', 0.02),
-      border: `1px solid ${T.border}`,
-      borderRadius: 12,
-      padding: 12,
-    }}
-  >
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-      <Icon name="comment" size={15} color={brand.cyan} />
-      <span style={{ fontFamily: fonts.ui, fontSize: 13, fontWeight: 700, color: T.text }}>Board</span>
-      <StatusDot kind="working" size={7} />
-    </div>
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {BOARD.map((m, i) => (
-        <Appear key={i} delay={30 + i * 7} y={10}>
-          <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start' }}>
-            <Avatar name={m.who} color={m.color} size={24} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 700, color: m.color }}>{m.who}</span>
-                <StatusDot kind={m.st} size={6} />
-              </div>
-              <div style={{ fontFamily: fonts.ui, fontSize: 12.5, color: T.textDim, marginTop: 3, lineHeight: 1.35 }}>{m.text}</div>
-            </div>
-          </div>
-        </Appear>
-      ))}
-    </div>
-  </div>
-);
-
 const RunGraphScene: React.FC = () => (
   <>
-    <Stage scale={0.9}>
+    <Stage scale={0.87}>
       <OttoWindow
-        nav={<Navigator active="swarm" counts={{ swarm: 7 }} />}
-        tabs={[
-          { label: 'Kanban', icon: 'grid' },
-          { label: 'Run Graph', icon: 'split', active: true, dot: 'working' },
-          { label: 'Org Tree', icon: 'box' },
-          { label: 'Runs', icon: 'clock' },
-          { label: 'Board', icon: 'comment' },
-        ]}
-        title="Otto — Swarm · Checkout Revamp"
+        nav={<Navigator active="swarm" />}
+        title="Otto — Swarm · Run Graph"
+        tabs={[...SWARM_TABS_RUN]}
+        width={1560}
+        height={884}
       >
-        <div style={{ display: 'flex', gap: 16, padding: 20, height: '100%', boxSizing: 'border-box' }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-              <Icon name="split" size={16} color={brand.cyan} />
-              <span style={{ fontFamily: fonts.ui, fontSize: 15, fontWeight: 700, color: T.text }}>Run Graph</span>
-              <Chip color={status.working}>2 active</Chip>
-              <span style={{ flex: 1 }} />
-              <Chip tone="default">pause</Chip>
-              <Chip tone="default">abort</Chip>
-              <Chip color={brand.cyan}>resume</Chip>
-            </div>
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <RunGraph />
-            </div>
+        <AbsoluteFill>
+          {/* SVG edge layer */}
+          <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
+            {DAG_EDGES.map(([x1, y1, x2, y2, d], i) => (
+              <DagEdge key={i} x1={x1} y1={y1} x2={x2} y2={y2} delay={d} />
+            ))}
+          </svg>
+
+          {/* Task nodes */}
+          {RUN_NODES.map((n) => <RunNode key={n.label} {...n} />)}
+
+          {/* Swarm controls banner */}
+          <div style={{ position: 'absolute', left: 32, right: 32, bottom: 42 }}>
+            <Appear delay={52}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '12px 20px', borderRadius: radius.m,
+                background: T.surface, border: `1px solid ${T.border}`, boxShadow: T.shadow,
+              }}>
+                <span style={{
+                  fontFamily: fonts.ui, fontSize: 12.5, fontWeight: 600,
+                  color: T.textDim, marginRight: 4,
+                }}>
+                  Swarm controls
+                </span>
+                <Button variant="ghost" icon="square">Pause</Button>
+                <Button variant="danger" icon="x">Abort all</Button>
+                <Button variant="primary" icon="play">Resume</Button>
+                <span style={{ flex: 1 }} />
+                <Chip color={brand.cyan}>worktree-isolated</Chip>
+                <Chip color={brand.violet}>merged back</Chip>
+              </div>
+            </Appear>
           </div>
-          <SwarmBoard />
-        </div>
+        </AbsoluteFill>
       </OttoWindow>
     </Stage>
     <Caption
       step={3}
-      title="Watch the run graph live"
-      sub="Delegation, hand-offs &amp; a shared board — pause/abort/resume anytime"
+      title="Org tree · run-graph · board — pause / abort / resume anytime"
+      sub="Per-agent worktree isolation. Leader goal-verify loop. Integration branch merged back on task completion."
     />
   </>
 );
 
-// ── Scene 5 — outro ───────────────────────────────────────────────────────────
-const Outro: React.FC = () => (
-  <WalkOutro
-    title="Agent Swarm"
-    tagline="Delegate to a team that runs itself."
-    pills={[
-      { label: 'Org tree', color: brand.cyan, icon: 'grid' },
-      { label: 'Recruiter', color: providers.claude, icon: 'user' },
-      { label: 'Kanban', color: '#0a84ff', icon: 'grid' },
-      { label: 'Run graph', color: brand.violet, icon: 'split' },
-      { label: 'Budgets', color: '#febc2e', icon: 'gauge' },
-    ]}
-  />
-);
+// ─────────────────────────────────────────────────────────────────────────────
+//  Scene list + exports
+// ─────────────────────────────────────────────────────────────────────────────
 
 const SCENES: SceneDef[] = [
-  { dur: 80, node: <Title />, name: 'Title' },
-  { dur: 230, node: <OrgTreeScene />, name: 'Org Tree' },
-  { dur: 230, node: <KanbanScene />, name: 'Kanban' },
-  { dur: 210, node: <RunGraphScene />, name: 'Run Graph' },
-  { dur: 130, node: <Outro />, name: 'Outro' },
+  { dur: 75,  name: 'Title',    node: <TitleScene />    },
+  { dur: 190, name: 'OrgTree',  node: <OrgTreeScene />  },
+  { dur: 190, name: 'Kanban',   node: <KanbanScene />   },
+  { dur: 170, name: 'RunGraph', node: <RunGraphScene />  },
+  {
+    dur: 130,
+    name: 'Outro',
+    node: (
+      <WalkOutro
+        title="Agent Swarm"
+        tagline="Stand up a whole team of agents — and stay in control"
+        pills={[
+          { label: 'Org hierarchy', icon: 'grid'    },
+          { label: 'Coordinator',   icon: 'refresh' },
+          { label: 'Kanban + DAG',  icon: 'split'   },
+          { label: '5 presets',     icon: 'box'     },
+        ]}
+      />
+    ),
+  },
 ];
 
 export const swarmDuration = scenesDuration(SCENES);
