@@ -252,9 +252,11 @@ you actually want and ranks the results so the useful ones come first.
   position → that collection's fields, **index fields first** (from `listIndexes`),
   then sampled fields. Embedded paths are first-class: an index on `address.city`
   offers **`address`** first, and once you type `address.` it offers
-  **`address.city`** / `address.zip` (nested paths are sampled up to depth 3). When
-  no database is selected yet (a connection with no default db), Mongo falls back to
-  the first user database so `db.` still lists collections instead of nothing.
+  **`address.city`** / `address.zip` (nested paths are sampled up to depth 3). A
+  dotted key is inserted **quoted** (`{ "address.city": … }`) because the bare form
+  is a Mongo parse error; a simple key inserts bare. When no database is selected
+  yet (a connection with no default db), Mongo falls back to the first user database
+  so `db.` still lists collections instead of nothing.
 - **Mongo in the SQL dialect, too.** The Mongo runner also accepts
   `SELECT … FROM <coll> WHERE …` (translated to `find`/`aggregate`), so completion
   speaks SQL there as well: `FROM` → **collections**, `WHERE` → that collection's
@@ -303,6 +305,9 @@ Press **Run** (the toolbar button) or **⌘↵ / Ctrl+Enter**. The toolbar also 
 - **Save** — name and store the statement as a workspace **saved query** (visible
   in the sidebar's **Saved** switch; see §11).
 - **Explain** — runs the *real* query plan (`EXPLAIN` / Mongo `explain`).
+- **Format** — beautify the statement. Engine-aware: SQL engines use sql-formatter,
+  **Mongo** uses a structural JS/JSON re-indenter (`db.coll.op({…})` / pipelines —
+  the SQL formatter can't parse it), Redis (one-line commands) is a no-op.
 - **Ask AI** — the examine-with-agent hand-off (see §9).
 - **Active database** selector — scope queries to a DB (or a Redis keyspace) so
   you can drop the `db.` prefix.

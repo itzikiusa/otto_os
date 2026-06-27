@@ -214,7 +214,7 @@ pub fn assemble(
         MongoExpect::Method => push_methods(&mut items, methods),
         MongoExpect::Field { .. } => {
             if let Some(fields) = fields {
-                push_fields(&mut items, fields);
+                push_fields(&mut items, fields, /* quote_dotted */ true);
             }
             // Top-level logical operators (`$and`, `$or`, `$expr`, …) are also
             // valid keys — offer them, ranked below real fields.
@@ -259,7 +259,8 @@ pub fn assemble_sql(
         // collection, index-first, then functions + keywords below.
         SqlExpect::Column { .. } => {
             if let Some(fields) = fields {
-                push_fields(&mut items, fields);
+                // SQL columns are valid unquoted even when dotted (`a.b`).
+                push_fields(&mut items, fields, /* quote_dotted */ false);
             }
             push_functions(&mut items, functions);
             push_keywords(&mut items, keywords);
@@ -318,7 +319,13 @@ fn push_operators(items: &mut Vec<CompletionItem>, operators: &[(&str, &str)]) {
 
 /// Push field paths index-first. Indexed paths keep their definition order via a
 /// small decreasing offset; sampled (non-indexed) paths sit below.
-fn push_fields(items: &mut Vec<CompletionItem>, fields: &[FieldSnap]) {
+///
+/// `quote_dotted`: in a **native** Mongo filter object a dotted key MUST be
+/// quoted — `{ "address.city": … }` parses but `{ address.city: … }` does not
+/// (the parser hits `.` where it expects `:`). So for the native path we set the
+/// inserted text to the quoted form. In the **SQL** dialect a dotted column
+/// (`address.city`) is valid bare, so it's left unquoted there.
+fn push_fields(items: &mut Vec<CompletionItem>, fields: &[FieldSnap], quote_dotted: bool) {
     let mut indexed_rank = 0i32;
     for f in fields {
         let sc = if f.rank == Rank::Plain {
@@ -336,6 +343,9 @@ fn push_fields(items: &mut Vec<CompletionItem>, fields: &[FieldSnap]) {
         };
         let mut item = CompletionItem::new(f.name.clone(), CompletionKind::Field).scored(sc);
         item.detail = detail;
+        if quote_dotted && f.name.contains('.') {
+            item.insert_text = Some(format!("\"{}\"", f.name));
+        }
         items.push(item);
     }
 }
@@ -457,6 +467,29 @@ mod tests {
             labels.contains(&"addr.city"),
             "child path offered: {labels:?}"
         );
+    }
+
+    #[test]
+    fn native_dotted_field_inserts_quoted() {
+        // `db.orders.find({ addr.city … })` is invalid; the key must be quoted.
+        // So the dotted field's INSERTED text is `"addr.city"`, while a simple
+        // field inserts bare. Labels stay bare (what the user reads).
+        let c = analyze("db.orders.find({ ");
+        let items = assemble(&c, &[], Some(&fields()), &[], &[]);
+        let dotted = items.iter().find(|i| i.label == "addr.city").unwrap();
+        assert_eq!(dotted.insert_text.as_deref(), Some("\"addr.city\""));
+        let simple = items.iter().find(|i| i.label == "note").unwrap();
+        assert_eq!(simple.insert_text, None, "simple key inserts bare");
+    }
+
+    #[test]
+    fn sql_dotted_field_inserts_bare() {
+        // In the SQL dialect a dotted column is valid bare (`WHERE addr.city = …`),
+        // so it is NOT quoted (that would break the SQL→Mongo translation).
+        let sctx = crate::complete::sql::analyze("SELECT * FROM orders WHERE ", "");
+        let items = assemble_sql(&sctx, &[], Some(&fields()), &[], &[]);
+        let dotted = items.iter().find(|i| i.label == "addr.city").unwrap();
+        assert_eq!(dotted.insert_text, None, "SQL dotted column stays bare");
     }
 
     #[test]

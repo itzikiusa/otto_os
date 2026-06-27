@@ -34,6 +34,7 @@ import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
 import { downloadText } from '../components/exporters';
 import { format as formatSql } from 'sql-formatter';
+import { formatMongo } from '../../modules/database/mongo-format';
 import { defaultVarSpec, type VarSpec } from '../../modules/database/sql-util';
 
 /** Connection kinds the explorer can browse (the four DB engines). */
@@ -744,14 +745,19 @@ class DatabaseStore {
     this.persistTabs();
   }
 
-  /** Beautify the active tab's statement with sql-formatter. Applies to the SQL
-   *  engines + the Mongo SQL-subset; redis (one-line commands) has nothing to
-   *  format. Leaves the editor untouched on a parse error. */
+  /** Beautify the active tab's statement. Mongo uses a structural JS/JSON
+   *  re-indenter (`db.coll.op({…})` — the SQL formatter chokes on it); the SQL
+   *  engines use sql-formatter; redis (one-line commands) has nothing to format.
+   *  Leaves the editor untouched on a parse error. */
   formatStatement(): void {
     const t = this.tab;
     if (!t || !t.statement.trim() || this.queryLanguage === 'redis') return;
-    const dialect: 'mysql' | 'sql' = this.selectedConn?.kind === 'mysql' ? 'mysql' : 'sql';
     try {
+      if (this.queryLanguage === 'mongo') {
+        this.setStatement(formatMongo(t.statement));
+        return;
+      }
+      const dialect: 'mysql' | 'sql' = this.selectedConn?.kind === 'mysql' ? 'mysql' : 'sql';
       this.setStatement(formatSql(t.statement, { language: dialect, keywordCase: 'upper' }));
     } catch (e) {
       toasts.error('Format failed', e instanceof Error ? e.message : String(e));

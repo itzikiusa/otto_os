@@ -125,3 +125,36 @@ test('Mongo editor highlights as JavaScript', async ({ page }) => {
   // Native Mongo queries are JS-like, so the editor uses the JS highlighter.
   await expect(page.locator('.qe-edit .code-editor-outer')).toHaveAttribute('data-lang', 'js');
 });
+
+test('Format beautifies a Mongo query (no SQL-formatter error)', async ({ page }) => {
+  await openMongo(page);
+  const content = page.locator('.qe-edit .cm-content');
+  await content.click();
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.press('Delete');
+  await content.pressSequentially('db.customers.find({email:"a@b.com",country:"GB"})', { delay: 4 });
+  await page.keyboard.press('Escape'); // dismiss any autocomplete popup
+  await page.getByRole('button', { name: /Format/ }).click();
+  // The SQL formatter used to throw "Format failed" on Mongo — it must NOT now.
+  await expect(page.locator('.toast', { hasText: 'Format failed' })).toHaveCount(0);
+  // The one-liner is reflowed onto multiple lines (object entries each on a line).
+  await expect.poll(() => page.locator('.qe-edit .cm-line').count()).toBeGreaterThan(2);
+});
+
+test('autocomplete inserts a dotted field key QUOTED (valid Mongo)', async ({ page }) => {
+  await openMongo(page);
+  const content = page.locator('.qe-edit .cm-content');
+  await content.click();
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.press('Delete');
+  // profiles has an index on the embedded path address.city.
+  await content.pressSequentially('db.profiles.find({ address.ci', { delay: 6 });
+  await page.keyboard.press('Control+Space');
+  const opt = page.locator('.cm-tooltip-autocomplete .cm-completionLabel', {
+    hasText: 'address.city',
+  });
+  await expect(opt.first()).toBeVisible({ timeout: 10_000 });
+  await opt.first().click(); // accept it
+  // The inserted key must be quoted — `{ "address.city": … }` parses; bare does not.
+  await expect(page.locator('.qe-edit .cm-line').first()).toContainText('"address.city"');
+});
