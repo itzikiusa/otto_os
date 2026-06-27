@@ -942,11 +942,12 @@
   .qe-acc-head {
     display: none;
   }
-  /* Tablet (641–1024px): the side-by-side DB layout narrows the editor column,
+  /* Tablet (641–1200px): the side-by-side DB layout narrows the editor column,
      so wrap the dense toolbar (Run/Save/Explain/Ask-AI + Limit/Timeout/Mask)
      onto multiple rows instead of letting it overflow and get clipped — the same
-     wrap the phone layout uses, but WITHOUT forcing the compact editor height. */
-  @media (min-width: 641px) and (max-width: 1024px) {
+     wrap the phone layout uses, but WITHOUT forcing the compact editor height.
+     Upper bound covers iPad landscape (1194px); desktop (≥1280) keeps one row. */
+  @media (min-width: 641px) and (max-width: 1200px) {
     .qe-toolbar {
       flex-wrap: wrap;
       gap: 6px;

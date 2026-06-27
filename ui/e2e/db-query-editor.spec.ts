@@ -132,8 +132,12 @@ test.describe('DB Explorer · query editor', () => {
     test.skip(connId == null, 'mysql unavailable');
     await openMysql(page);
     await setEditor(page, "SELECT 'AAA' AS tag;\nSELECT 'BBB' AS tag;");
-    // Click into the FIRST line (cursor only, no selection), then Run.
-    await page.locator('.qe-edit .cm-line').first().click();
+    // Put the cursor (no selection) in the FIRST statement, then Run. Click to
+    // focus, then jump to the document start deterministically — a bare line click
+    // can miss the target line on a narrow/tablet layout.
+    await page.locator('.qe-edit .cm-content').click();
+    await page.keyboard.press('ControlOrMeta+ArrowUp');
+    await page.keyboard.press('ControlOrMeta+Home');
     await clickRun(page);
 
     const bodyc = page.locator('.grid tbody');
