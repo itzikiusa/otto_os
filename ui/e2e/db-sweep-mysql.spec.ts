@@ -134,9 +134,9 @@ async function typeStatement(page: Page, sql: string): Promise<void> {
 
 async function runStatement(page: Page, sql: string): Promise<void> {
   await typeStatement(page, sql);
-  await page.getByRole('button', { name: /^Run/ }).first().click();
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
   // The Run button flips to "Stop" while running; wait for it to come back.
-  await expect(page.getByRole('button', { name: /^Run/ }).first()).toBeVisible({
+  await expect(page.locator('.btn.small.primary', { hasText: 'Run' }).first()).toBeVisible({
     timeout: 20_000,
   });
 }

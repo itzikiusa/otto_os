@@ -67,7 +67,7 @@ async function setEditor(page: Page, sql: string): Promise<void> {
 }
 
 async function clickRun(page: Page): Promise<void> {
-  await page.getByRole('button', { name: /^Run/ }).first().click();
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
   await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({ timeout: 20_000 });
 }
 

@@ -143,7 +143,7 @@ async function setEditorText(page: Page, statement: string): Promise<void> {
 async function runStatement(page: Page, statement: string): Promise<void> {
   await ensureEditorOpen(page);
   await setEditorText(page, statement);
-  await page.getByRole('button', { name: /Run/ }).first().click();
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
 }
 
 // Geometry probe: viewport width, the document's own horizontal scroll extent,

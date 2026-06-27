@@ -83,17 +83,20 @@ async function setEditor(page: Page, sql: string): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     await content.click();
     await page.keyboard.press(`${mod}+A`);
-    await page.keyboard.press('Delete');
-    await content.pressSequentially(sql, { delay: 6 });
+    // insertText injects the whole string in ONE input event — char-by-char
+    // typing would let auto-close-brackets double `(`/`{`/quotes and the
+    // debounced autocomplete accept a suggestion mid-string, corrupting it.
+    await page.keyboard.insertText(sql);
     await page.keyboard.press('Escape'); // dismiss any autocomplete popup
+    await page.waitForTimeout(150);
     const got = ((await content.textContent()) ?? '').replace(/\s+/g, ' ').trim();
     if (got.startsWith(want)) return;
   }
 }
 
 async function clickRun(page: Page): Promise<void> {
-  await page.getByRole('button', { name: /^Run/ }).first().click();
-  await expect(page.getByRole('button', { name: /^Run/ }).first()).toBeVisible({ timeout: 20_000 });
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  await expect(page.locator('.btn.small.primary', { hasText: 'Run' }).first()).toBeVisible({ timeout: 20_000 });
   await ensureResultsOpen(page);
 }
 

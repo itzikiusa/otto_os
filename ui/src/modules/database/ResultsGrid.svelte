@@ -271,7 +271,7 @@
   function cellStr(v: unknown): string {
     const b = bsonScalar(v);
     if (b !== null) return b;
-    return cellStr(v);
+    return isComplex(v) ? compactJson(v) : String(v);
   }
   /** Heuristic: does this string look like a SQL statement (DDL/DML/EXPLAIN)? */
   function looksLikeSql(s: string): boolean {

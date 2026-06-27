@@ -134,7 +134,7 @@ async function typeCommand(page: Page, cmd: string): Promise<void> {
 
 // Run the command currently in the editor (toolbar Run button).
 async function clickRun(page: Page): Promise<void> {
-  await page.getByRole('button', { name: /Run/ }).first().click();
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
 }
 
 // Run a command and wait for ≥1 data row to render in the grid.

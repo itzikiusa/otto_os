@@ -118,7 +118,7 @@ async function runSql(page: Page, sql: string): Promise<void> {
   }
   // Close the autocomplete popup so it can't intercept the Run shortcut/click.
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: /Run/ }).first().click();
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
 }
 
 // Wait until the grid shows ≥1 data row (a row-returning query landed).

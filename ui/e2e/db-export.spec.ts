@@ -141,8 +141,8 @@ async function runRead(page: Page, sql: string): Promise<void> {
     const got = ((await content.textContent()) ?? '').replace(/\s+/g, ' ').trim();
     if (got.startsWith(want)) break;
   }
-  await page.getByRole('button', { name: /^Run/ }).first().click();
-  await expect(page.getByRole('button', { name: /^Run/ }).first()).toBeVisible({ timeout: 20_000 });
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  await expect(page.locator('.btn.small.primary', { hasText: 'Run' }).first()).toBeVisible({ timeout: 20_000 });
   await ensureResultsOpen(page);
   await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({ timeout: 20_000 });
 }

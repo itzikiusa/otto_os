@@ -71,7 +71,7 @@ async function openAndQuery(page: Page): Promise<void> {
   const editor = page.locator('.qe-edit .cm-content');
   await editor.click();
   await page.keyboard.type('KEYS *');
-  await page.getByRole('button', { name: /Run/ }).first().click();
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
 
   // The grid renders ≥1 data row once the query returns.
   await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({
