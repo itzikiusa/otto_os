@@ -252,7 +252,14 @@ you actually want and ranks the results so the useful ones come first.
   position → that collection's fields, **index fields first** (from `listIndexes`),
   then sampled fields. Embedded paths are first-class: an index on `address.city`
   offers **`address`** first, and once you type `address.` it offers
-  **`address.city`** / `address.zip` (nested paths are sampled up to depth 3).
+  **`address.city`** / `address.zip` (nested paths are sampled up to depth 3). When
+  no database is selected yet (a connection with no default db), Mongo falls back to
+  the first user database so `db.` still lists collections instead of nothing.
+- **Mongo in the SQL dialect, too.** The Mongo runner also accepts
+  `SELECT … FROM <coll> WHERE …` (translated to `find`/`aggregate`), so completion
+  speaks SQL there as well: `FROM` → **collections**, `WHERE` → that collection's
+  **fields, index-first** (an embedded `WHERE address.` still refines to
+  `address.city`) — exactly like MySQL/ClickHouse, never the collection list.
 - **Never worse than before.** Anything the heuristic doesn't recognise falls back
   to the old keyword + function + table dump, so completion always returns
   *something*.
@@ -305,6 +312,12 @@ Press **Run** (the toolbar button) or **⌘↵ / Ctrl+Enter**. The toolbar also 
 - **Mask** toggle — when on, the **server** runs result cells through
   `otto_core::redact` before they leave the daemon (emails, tokens, keys); the
   grid shows a **🔒 Masked** badge. Raw values never reach the browser.
+
+**Syntax highlighting.** The editor colours your query by engine: **SQL** for
+MySQL/ClickHouse, a small **Redis** highlighter for Redis, and **JavaScript** for
+Mongo — native Mongo queries (`db.coll.find({…})`, aggregate pipelines, BSON
+literals) are JS-shaped, so JS highlighting reads naturally (the SQL subset Mongo
+also accepts still renders fine).
 
 ### Automatic read `LIMIT`
 

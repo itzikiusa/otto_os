@@ -658,16 +658,16 @@ impl MongoDriver {
     ) -> Result<CompletionResponse> {
         use crate::complete::mongo::{analyze, assemble, MongoExpect};
 
-        let db_name = ctx
-            .database
-            .clone()
-            .or_else(|| cfg.database.clone())
-            .or_else(|| {
-                ctx.node
-                    .as_deref()
-                    .and_then(|n| NodePath::parse(n).get("db").map(str::to_string))
-            })
-            .unwrap_or_default();
+        let db_name = self.completion_db(cfg, ctx).await;
+
+        // SQL-dialect completion. The runner accepts `SELECT … FROM <coll> WHERE …`
+        // (translated to find/aggregate by `mongo_sql`); when the statement under
+        // the cursor looks like SQL, complete it the SQL way — collections in a
+        // table slot, the in-scope collection's fields (index-first) in a column
+        // slot — so a SQL user gets the same smart completion as MySQL/ClickHouse.
+        if mongo_sql::looks_like_sql(crate::complete::sql::current_statement(&ctx.prefix)) {
+            return self.completion_sql(cfg, ctx, &db_name).await;
+        }
 
         let mctx = analyze(&ctx.prefix);
 
@@ -703,6 +703,84 @@ impl MongoDriver {
 }
 
 impl MongoDriver {
+    /// The database completions run against: the editor's active db, the
+    /// connection default, or the selected tree node's db — and, when none of
+    /// those is set, the first user (non-system) database on the server. Without
+    /// this last fallback `db.` lists nothing until the user first picks a
+    /// database (collections live under a db), which reads as "no completion".
+    async fn completion_db(&self, cfg: &ResolvedConfig, ctx: &CompletionContext) -> String {
+        if let Some(db) = ctx
+            .database
+            .clone()
+            .or_else(|| cfg.database.clone())
+            .or_else(|| {
+                ctx.node
+                    .as_deref()
+                    .and_then(|n| NodePath::parse(n).get("db").map(str::to_string))
+            })
+            .filter(|s| !s.trim().is_empty())
+        {
+            return db;
+        }
+        self.completion_first_db(cfg).await.unwrap_or_default()
+    }
+
+    /// The first user (non-system) database, used to seed collection completion
+    /// when the user hasn't selected a database yet. Best-effort: an unreachable
+    /// server yields `None` (completion degrades to empty, never errors).
+    async fn completion_first_db(&self, cfg: &ResolvedConfig) -> Option<String> {
+        let client = self.connect(cfg).await.ok()?;
+        let mut names = client.list_database_names().await.ok()?;
+        // User databases first, system ones (admin/local/config) last — same order
+        // as the schema tree, so the seed matches what the user would have picked.
+        names.sort_by(|a, b| {
+            let rank = |n: &str| SYSTEM_DBS.iter().position(|s| *s == n).map_or(0, |i| i + 1);
+            rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+        });
+        names.into_iter().find(|n| !SYSTEM_DBS.contains(&n.as_str()))
+    }
+
+    /// SQL-dialect completion (`SELECT … FROM <coll> WHERE …`): delegate context
+    /// analysis to the shared SQL analyzer, then assemble Mongo-flavored results
+    /// — collections in a table slot, the in-scope collection's fields
+    /// (index-first) in a column slot. Fields are sampled only when the cursor is
+    /// at a column position (the common, cheap case).
+    async fn completion_sql(
+        &self,
+        cfg: &ResolvedConfig,
+        ctx: &CompletionContext,
+        db_name: &str,
+    ) -> Result<CompletionResponse> {
+        use crate::complete::sql::{self, SqlExpect};
+
+        let sctx = sql::analyze(&ctx.prefix, &ctx.suffix);
+        let collections = self.completion_collections(cfg, db_name).await;
+
+        let fields = if matches!(sctx.expect, SqlExpect::Column { .. }) {
+            let node_coll = ctx
+                .node
+                .as_deref()
+                .and_then(|n| NodePath::parse(n).get("coll").map(str::to_string));
+            match resolve_sql_collection(&sctx, node_coll.as_deref()) {
+                Some(c) if !db_name.is_empty() => {
+                    Some(self.completion_fields(cfg, db_name, &c).await)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let items = crate::complete::mongo::assemble_sql(
+            &sctx,
+            &collections,
+            fields.as_deref().map(|v| v.as_slice()),
+            MONGO_SQL_KEYWORDS,
+            MONGO_SQL_FUNCTIONS,
+        );
+        Ok(CompletionResponse { items })
+    }
+
     /// The (cached) list of collection names for a database, backing collection
     /// completion. Cached as a snapshot's `objects` until refresh; an unavailable
     /// connection yields an empty list (not cached).
@@ -1869,6 +1947,54 @@ async fn collect_docs(
 
 // --- aggregation operator/stage catalog for completion ----------------------
 
+/// Resolve which collection a SQL column slot refers to, for field completion.
+/// Resolution order, mirroring how `mongo_sql` resolves field paths:
+///   1. an explicit `qualifier.` that names a FROM table or alias → that collection;
+///   2. otherwise the base (first) FROM collection — this also handles an embedded
+///      dotted path like `WHERE address.city`, where `address` is NOT a table but
+///      a field path on the base collection (the field list already carries the
+///      dotted paths, which the editor filters against the typed prefix);
+///   3. failing any FROM table, the collection selected in the schema tree.
+fn resolve_sql_collection(
+    sctx: &crate::complete::sql::SqlCtx,
+    node_coll: Option<&str>,
+) -> Option<String> {
+    use crate::complete::sql::SqlExpect;
+    if let SqlExpect::Column {
+        qualifier: Some(q),
+    } = &sctx.expect
+    {
+        if let Some(t) = sctx.tables.iter().find(|t| {
+            t.alias.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(q))
+                || t.name.eq_ignore_ascii_case(q)
+        }) {
+            return Some(t.name.clone());
+        }
+        // Unknown qualifier → fall through to the base collection (embedded path).
+    }
+    sctx.tables
+        .first()
+        .map(|t| t.name.clone())
+        .or_else(|| node_coll.map(str::to_string))
+}
+
+/// SQL keywords offered when completing the SQL dialect Mongo accepts — kept to
+/// the subset `mongo_sql` actually translates (single-word tokens so they match
+/// the editor's `[\w$.]` completion boundary).
+const MONGO_SQL_KEYWORDS: &[&str] = &[
+    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN", "GROUP",
+    "ORDER", "BY", "LIMIT", "ASC", "DESC", "AS", "JOIN", "INNER", "LEFT", "ON", "COUNT", "DISTINCT",
+];
+
+/// SQL aggregate functions `mongo_sql` maps to `$group` accumulators / countDocuments.
+const MONGO_SQL_FUNCTIONS: &[(&str, &str)] = &[
+    ("COUNT", "COUNT(*) — count documents"),
+    ("SUM", "SUM(field) — sum a numeric field"),
+    ("AVG", "AVG(field) — average a numeric field"),
+    ("MIN", "MIN(field) — minimum of a field"),
+    ("MAX", "MAX(field) — maximum of a field"),
+];
+
 /// Collection operations supported by the runner's `db.<coll>.<op>(…)` shorthand.
 const MONGO_METHODS: &[(&str, &str)] = &[
     ("find", "read documents matching a filter"),
@@ -1931,6 +2057,65 @@ const MONGO_OPERATORS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- SQL-dialect completion routing + collection resolution ----------------
+
+    #[test]
+    fn sql_routing_predicate() {
+        use crate::complete::sql::current_statement;
+        // SQL statements route to the SQL completion path…
+        assert!(mongo_sql::looks_like_sql(current_statement(
+            "SELECT * FROM customers WHERE "
+        )));
+        assert!(mongo_sql::looks_like_sql(current_statement(
+            "db.x.find({}); SELECT * FROM c WHERE "
+        )));
+        // …native Mongo shorthand / JSON commands do NOT.
+        assert!(!mongo_sql::looks_like_sql(current_statement(
+            "db.customers.find({ "
+        )));
+        assert!(!mongo_sql::looks_like_sql(current_statement(
+            "db.customers.aggregate([{ $match: { "
+        )));
+    }
+
+    #[test]
+    fn resolve_collection_unqualified_uses_base() {
+        let sctx = crate::complete::sql::analyze("SELECT * FROM customers WHERE ", "");
+        assert_eq!(
+            resolve_sql_collection(&sctx, None).as_deref(),
+            Some("customers")
+        );
+    }
+
+    #[test]
+    fn resolve_collection_alias_qualifier() {
+        let sctx = crate::complete::sql::analyze("SELECT * FROM orders o WHERE o.", "");
+        assert_eq!(
+            resolve_sql_collection(&sctx, None).as_deref(),
+            Some("orders")
+        );
+    }
+
+    #[test]
+    fn resolve_collection_embedded_path_falls_back_to_base() {
+        // `WHERE address.` — `address` is NOT a table; it's an embedded field path
+        // on the base collection, so completion targets the base collection.
+        let sctx = crate::complete::sql::analyze("SELECT * FROM profiles WHERE address.", "");
+        assert_eq!(
+            resolve_sql_collection(&sctx, None).as_deref(),
+            Some("profiles")
+        );
+    }
+
+    #[test]
+    fn resolve_collection_no_from_uses_tree_node() {
+        let sctx = crate::complete::sql::analyze("WHERE ", "");
+        assert_eq!(
+            resolve_sql_collection(&sctx, Some("customers")).as_deref(),
+            Some("customers")
+        );
+    }
 
     #[test]
     fn shorthand_find_basic() {

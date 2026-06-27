@@ -499,6 +499,13 @@ fn read_quoted_ident(b: &[u8], mut i: usize, q: u8) -> (String, usize) {
     (text, (i + 1).min(b.len()))
 }
 
+/// The statement the cursor sits in: everything after the last top-level `;` in
+/// the prefix. Exposed so other dialects (Mongo's SQL mode) can scope SQL
+/// detection to the current statement before deciding whether to treat it as SQL.
+pub fn current_statement(prefix: &str) -> &str {
+    last_statement(prefix)
+}
+
 /// The substring after the last top-level `;` (string/comment aware).
 fn last_statement(s: &str) -> &str {
     let idx = top_level_semis(s).last().copied();
@@ -686,6 +693,20 @@ mod tests {
                 name: "orders".into(),
                 alias: None
             }]
+        );
+    }
+
+    #[test]
+    fn current_statement_scopes_to_last_segment() {
+        assert_eq!(
+            current_statement("db.x.find({}); SELECT * FROM c WHERE "),
+            " SELECT * FROM c WHERE "
+        );
+        assert_eq!(current_statement("SELECT * FROM c"), "SELECT * FROM c");
+        // A `;` inside a string literal is not a statement boundary.
+        assert_eq!(
+            current_statement("SELECT * FROM c WHERE x = 'a;b' AND "),
+            "SELECT * FROM c WHERE x = 'a;b' AND "
         );
     }
 

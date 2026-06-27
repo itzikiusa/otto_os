@@ -10,6 +10,12 @@
 //!
 //! Key-vs-value detection is a cheap bracket/`:`/`,` scan — at a key position no
 //! `:` has appeared since the enclosing `{` or the last `,` at that brace level.
+//!
+//! The Mongo runner also accepts a **SQL dialect** (`SELECT … FROM <coll> WHERE
+//! …`, translated to `find`/`aggregate` by `drivers::mongo_sql`). For that case
+//! the driver delegates context analysis to the shared SQL analyzer and calls
+//! [`assemble_sql`] here, which maps tables→collections and columns→fields
+//! (index-first) so a SQL user gets the same smart completion as MySQL/ClickHouse.
 
 use super::{score, FieldSnap, Rank};
 use crate::types::{CompletionItem, CompletionKind};
@@ -223,6 +229,66 @@ pub fn assemble(
     items
 }
 
+/// Build completions for a **SQL-dialect** Mongo query — the `SELECT … FROM
+/// <collection> WHERE …` form the driver translates to `find`/`aggregate` (see
+/// `drivers::mongo_sql`). Reuses the shared, pure SQL context analyzer
+/// ([`crate::complete::sql::analyze`]) but speaks Mongo: a table slot offers
+/// **collections**, a column slot offers the in-scope collection's **fields**
+/// (index-first, identical ranking to native Mongo field completion), and a SQL
+/// keyword/function set rounds it out. This is what makes `WHERE ` complete to
+/// the collection's fields instead of the collection list, matching MySQL /
+/// ClickHouse smart completion. `fields` is the resolved collection's
+/// sampled+indexed paths (the caller resolves which collection); `None` when the
+/// scope can't be resolved.
+pub fn assemble_sql(
+    sctx: &crate::complete::sql::SqlCtx,
+    collections: &[String],
+    fields: Option<&[FieldSnap]>,
+    keywords: &[&str],
+    functions: &[(&str, &str)],
+) -> Vec<CompletionItem> {
+    use crate::complete::sql::SqlExpect;
+    let mut items = Vec::new();
+    match &sctx.expect {
+        // After FROM/JOIN/UPDATE/INTO → a collection (Mongo's "table").
+        SqlExpect::Table => {
+            push_collections(&mut items, collections);
+            push_keywords(&mut items, keywords);
+        }
+        // After WHERE/SELECT/AND/ON/ORDER BY/GROUP BY… → fields of the in-scope
+        // collection, index-first, then functions + keywords below.
+        SqlExpect::Column { .. } => {
+            if let Some(fields) = fields {
+                push_fields(&mut items, fields);
+            }
+            push_functions(&mut items, functions);
+            push_keywords(&mut items, keywords);
+        }
+        // Unknown slot → keywords + functions + collections (mirrors the SQL
+        // analyzer's own `Any` fallback so it's never worse than before).
+        SqlExpect::Any => {
+            push_keywords(&mut items, keywords);
+            push_functions(&mut items, functions);
+            push_collections(&mut items, collections);
+        }
+    }
+    items
+}
+
+fn push_keywords(items: &mut Vec<CompletionItem>, keywords: &[&str]) {
+    for kw in keywords {
+        items.push(CompletionItem::new(*kw, CompletionKind::Keyword).scored(score::KEYWORD));
+    }
+}
+
+fn push_functions(items: &mut Vec<CompletionItem>, functions: &[(&str, &str)]) {
+    for (name, sig) in functions {
+        items.push(
+            CompletionItem::detailed(*name, CompletionKind::Function, *sig).scored(score::FUNCTION),
+        );
+    }
+}
+
 fn push_collections(items: &mut Vec<CompletionItem>, collections: &[String]) {
     for c in collections {
         items.push(
@@ -426,5 +492,70 @@ mod tests {
         assert!(items
             .iter()
             .any(|i| i.label == "find" && i.kind == CompletionKind::Command));
+    }
+
+    // --- SQL-dialect assembly (the `SELECT … FROM <coll> WHERE …` form) --------
+
+    const KW: &[&str] = &["SELECT", "FROM", "WHERE", "AND"];
+    const FN: &[(&str, &str)] = &[("COUNT", "COUNT(*)")];
+
+    /// `SELECT * FROM customers WHERE ` must offer the collection's FIELDS
+    /// (index-first), never the collection list — the reported Mongo bug.
+    #[test]
+    fn sql_where_offers_fields_not_collections() {
+        let sctx = crate::complete::sql::analyze("SELECT * FROM customers WHERE ", "");
+        let items = assemble_sql(
+            &sctx,
+            &["customers".into(), "orders".into(), "products".into()],
+            Some(&fields()),
+            KW,
+            FN,
+        );
+        // Fields are present…
+        assert!(items
+            .iter()
+            .any(|i| i.label == "_id" && i.kind == CompletionKind::Field));
+        assert!(items
+            .iter()
+            .any(|i| i.label == "customer_id" && i.kind == CompletionKind::Field));
+        // …and NO collection is offered in a WHERE (column) slot.
+        assert!(
+            !items.iter().any(|i| i.kind == CompletionKind::Collection),
+            "collections must not appear after WHERE"
+        );
+        // Index fields out-rank the plain field and the keywords/functions.
+        let score_of = |label: &str| items.iter().find(|i| i.label == label).unwrap().score.unwrap();
+        assert!(score_of("_id") > score_of("note"));
+        let kw = items
+            .iter()
+            .find(|i| i.kind == CompletionKind::Keyword)
+            .unwrap()
+            .score
+            .unwrap();
+        assert!(score_of("note") > kw, "real fields rank above keywords");
+    }
+
+    /// `SELECT * FROM ` must offer COLLECTIONS (Mongo's "tables").
+    #[test]
+    fn sql_from_offers_collections() {
+        let sctx = crate::complete::sql::analyze("SELECT * FROM ", "");
+        let items = assemble_sql(&sctx, &["customers".into(), "orders".into()], None, KW, FN);
+        let colls: Vec<&str> = items
+            .iter()
+            .filter(|i| i.kind == CompletionKind::Collection)
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(colls.contains(&"customers") && colls.contains(&"orders"));
+        // No fields in a table slot.
+        assert!(!items.iter().any(|i| i.kind == CompletionKind::Field));
+    }
+
+    /// A bare prefix (no clear slot) falls back to keywords + collections.
+    #[test]
+    fn sql_any_offers_keywords_and_collections() {
+        let sctx = crate::complete::sql::analyze("SELECT * FROM orders LIMIT ", "");
+        let items = assemble_sql(&sctx, &["orders".into()], None, KW, FN);
+        assert!(items.iter().any(|i| i.kind == CompletionKind::Keyword));
+        assert!(items.iter().any(|i| i.kind == CompletionKind::Collection));
     }
 }

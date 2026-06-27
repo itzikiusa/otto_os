@@ -35,9 +35,17 @@
     { label: 'All', value: ROW_LIMIT_ALL },
   ];
 
-  // Editor language: a small Redis highlighter for redis; SQL for everything else
-  // (mysql, clickhouse, and Mongo's SQL subset).
-  const lang = $derived(database.queryLanguage === 'redis' ? 'redis' : 'sql');
+  // Editor language (drives syntax highlighting): a small Redis highlighter for
+  // redis; JavaScript for Mongo — native queries are JS-like (`db.coll.find({…})`,
+  // aggregate pipelines, BSON literals), so JS colourizes them properly (the
+  // SELECT subset still reads fine as JS); SQL for mysql / clickhouse.
+  const lang = $derived(
+    database.queryLanguage === 'redis'
+      ? 'redis'
+      : database.queryLanguage === 'mongo'
+        ? 'js'
+        : 'sql',
+  );
   // Re-key the editor on tab id + engine so it rebuilds cleanly per query tab.
   const editorPath = $derived(`query-${tab.id}.${lang}`);
   // Statement separator: redis is one command per line; others use `;`.
@@ -130,15 +138,23 @@
     // when the cursor sits in the SELECT list before it.
     const suffix = ctx.state.sliceDoc(ctx.pos);
 
-    // Where the accepted completion is inserted. In SQL, a `alias.`/`db.`
-    // qualifier is NOT part of the column/table identifier, so only the segment
-    // after the last dot is replaced (the qualifier is preserved, labels are
-    // bare). In Mongo the dotted path IS the identifier (`addr.city`), so the
-    // whole token is replaced with the full-path label.
+    // Where the accepted completion is inserted, and what text the popup filters
+    // against. A leading qualifier is NOT part of the identifier, so only the
+    // segment after the last dot is replaced/matched (the qualifier stays, labels
+    // are bare). This applies to:
+    //   • SQL `alias.`/`db.`/`table.` qualifiers, and
+    //   • Mongo's `db.` / `db.<coll>.` SELECTOR (collection / method completion).
+    // But a Mongo embedded FIELD path (`addr.city`, inside `find({…})`) IS the
+    // identifier and must be replaced/matched WHOLE — else the collection labels
+    // never match the typed `db.` and the popup shows nothing. Distinguish the
+    // two by the `db.` selector prefix.
     let from = before ? before.from : ctx.pos;
-    if (before && database.queryLanguage !== 'mongo') {
-      const dot = before.text.lastIndexOf('.');
-      if (dot >= 0) from = before.from + dot + 1;
+    if (before) {
+      const stripQualifier = database.queryLanguage !== 'mongo' || before.text.startsWith('db.');
+      if (stripQualifier) {
+        const dot = before.text.lastIndexOf('.');
+        if (dot >= 0) from = before.from + dot + 1;
+      }
     }
 
     return new Promise((resolve) => {
