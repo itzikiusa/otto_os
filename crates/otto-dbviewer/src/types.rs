@@ -57,10 +57,15 @@ impl Engine {
 pub enum TlsMode {
     /// No TLS (default).
     #[default]
+    #[serde(alias = "disable")]
     Disabled,
     /// Use TLS if the server offers it; don't fail if it doesn't.
+    #[serde(alias = "prefer")]
     Preferred,
-    /// TLS is mandatory.
+    /// TLS is mandatory. `require` is accepted as an alias (the Postgres/JDBC
+    /// spelling, and what older imports wrote) so a connection imported before the
+    /// importer was fixed still loads instead of failing with "unknown variant".
+    #[serde(alias = "require")]
     Required,
 }
 
@@ -950,6 +955,49 @@ pub type DbResult<T> = Result<T>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_mode_canonical_spellings_parse() {
+        for (s, want) in [
+            ("disabled", TlsMode::Disabled),
+            ("preferred", TlsMode::Preferred),
+            ("required", TlsMode::Required),
+        ] {
+            let m: TlsMode = serde_json::from_value(serde_json::json!(s)).unwrap();
+            assert_eq!(m, want, "{s}");
+        }
+    }
+
+    #[test]
+    fn tls_mode_accepts_legacy_aliases() {
+        // The importer used to emit "require" (and Postgres/JDBC uses these short
+        // spellings); a connection stored that way must still load, not fail with
+        // "unknown variant". This is what heals already-imported broken configs.
+        for (s, want) in [
+            ("require", TlsMode::Required),
+            ("prefer", TlsMode::Preferred),
+            ("disable", TlsMode::Disabled),
+        ] {
+            let m: TlsMode = serde_json::from_value(serde_json::json!(s)).unwrap();
+            assert_eq!(m, want, "{s}");
+        }
+        // A full TlsConfig with the legacy mode round-trips.
+        let cfg: TlsConfig =
+            serde_json::from_value(serde_json::json!({"mode":"require","verify":false})).unwrap();
+        assert_eq!(cfg.mode, TlsMode::Required);
+        assert!(!cfg.verify);
+    }
+
+    #[test]
+    fn tls_verify_defaults_true_only_when_absent() {
+        // Absent → defaults true (a hand-written secure config); explicit false is
+        // honoured (what the importer now writes so it doesn't force verification).
+        let absent: TlsConfig = serde_json::from_value(serde_json::json!({"mode":"required"})).unwrap();
+        assert!(absent.verify);
+        let explicit: TlsConfig =
+            serde_json::from_value(serde_json::json!({"mode":"required","verify":false})).unwrap();
+        assert!(!explicit.verify);
+    }
 
     #[test]
     fn cancel_token_round_trips_a_handle() {

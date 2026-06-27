@@ -449,7 +449,11 @@ Endpoints: see rows 30a–30c in the main table.
   needs_password: bool, note?: string}`. For a supported engine, `params` is the ready-to-create
   Otto shape (mysql/clickhouse `{host,port,user,db}`, redis `{host,port,db?}`, mongodb
   `{conn_string}`; plus nested `ssh{host,port,user,identity_file}` when the source had an SSH
-  tunnel, and `tls{mode:"require"}` when SSL was enabled). For an unsupported engine
+  tunnel, and `tls{mode,verify,ca_cert?}` when SSL was enabled — `mode` is a valid `TlsMode`
+  (`preferred`/`required`) and `verify` is emitted **explicitly**, defaulting to `false` so an
+  import doesn't force certificate verification on a self-signed/staging server. Workbench's
+  `useSSL` level maps precisely: 1→`preferred`/no-verify, 2→`required`/no-verify, 3·4→`required`
+  +verify). For an unsupported engine
   `kind=null, supported=false`, `params={}`, and `note` explains the skip (e.g. "PostgreSQL is not
   supported by Otto") — still listed so the user sees why it wasn't importable.
 - `ImportScanResult` = `{source, path?: string, connections: ParsedConnection[], warnings: string[]}`.

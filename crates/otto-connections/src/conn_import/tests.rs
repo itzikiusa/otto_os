@@ -131,14 +131,52 @@ fn workbench_normal_and_ssl() {
 
     let b = &conns[1];
     assert_eq!(b.name, "Secure DB (SSL)");
-    // Empty schema → no db; useSSL=2 → tls block with ca.
+    // Empty schema → no db; useSSL=2 → "Require" mode but NOT verify (level 2 only
+    // encrypts; verify is levels 3/4). mode is the valid `required` (not `require`)
+    // and verify is emitted explicitly as false so the import isn't forced to
+    // validate a self-signed cert. The CA is still carried through.
     assert_eq!(
         b.params,
         json!({
             "host":"secure.example.com","port":3307,"user":"admin",
-            "tls":{"mode":"require","ca_cert":"/etc/ssl/ca.pem"}
+            "tls":{"mode":"required","verify":false,"ca_cert":"/etc/ssl/ca.pem"}
         })
     );
+}
+
+#[test]
+fn workbench_ssl_levels_map_to_mode_and_verify() {
+    // useSSL 1=preferred/no-verify, 2=required/no-verify, 3=required/verify,
+    // 4=required/verify. One <db.mgmt.Connection> per level.
+    let mk = |level: i64| {
+        format!(
+            r#"<?xml version="1.0"?>
+<data><value type="list">
+ <value type="object" struct-name="db.mgmt.Connection" id="X">
+  <value type="dict" key="parameterValues">
+   <value type="string" key="hostName">h</value>
+   <value type="int" key="port">3306</value>
+   <value type="int" key="useSSL">{level}</value>
+  </value>
+  <value type="string" key="name">c</value>
+ </value>
+</value></data>"#
+        )
+    };
+    let cases = [
+        (1, "preferred", false),
+        (2, "required", false),
+        (3, "required", true),
+        (4, "required", true),
+    ];
+    for (level, mode, verify) in cases {
+        let (conns, _) = parse_mysql_workbench(&mk(level));
+        let tls = &conns[0].params["tls"];
+        // mode must be a valid TlsMode spelling (the bug emitted "require"); the
+        // round-trip through the real enum is asserted in otto-dbviewer's tests.
+        assert_eq!(tls["mode"], json!(mode), "useSSL={level}");
+        assert_eq!(tls["verify"], json!(verify), "useSSL={level}");
+    }
 }
 
 #[test]
@@ -237,7 +275,7 @@ fn dbeaver_clickhouse_with_ssl() {
     assert_eq!(ch.params["host"], json!("ch.example.com"));
     assert_eq!(ch.params["port"], json!(8443));
     assert_eq!(ch.params["db"], json!("metrics"));
-    assert_eq!(ch.params["tls"], json!({"mode":"require"}));
+    assert_eq!(ch.params["tls"], json!({"mode":"required","verify":false}));
 }
 
 #[test]
@@ -315,7 +353,7 @@ fn datagrip_mysql_joins_local_user_and_ssl() {
     assert_eq!(my.params["port"], json!(3306));
     assert_eq!(my.params["db"], json!("shop"));
     assert_eq!(my.params["user"], json!("shopadmin"));
-    assert_eq!(my.params["tls"], json!({"mode":"require"}));
+    assert_eq!(my.params["tls"], json!({"mode":"required","verify":false}));
     assert!(my.needs_password);
 }
 

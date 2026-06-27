@@ -290,13 +290,17 @@ fn ssh_block(t: &SshTunnel) -> Value {
     Value::Object(o)
 }
 
-/// A `tls` params block (mode require; optional verify/ca).
-fn tls_block(verify: Option<bool>, ca_cert: Option<&str>) -> Value {
+/// A `tls` params block. `mode` MUST be one of `disabled` / `preferred` /
+/// `required` (the `TlsMode` variants). `verify` is emitted **explicitly** —
+/// import defaults to NOT verifying the server certificate (accept self-signed /
+/// private CAs), because import sources rarely carry a reliable CA-verify intent
+/// and a forced `verify=true` breaks the common case of staging servers with
+/// self-signed certs. A CA cert (or a source mode that explicitly verifies) flips
+/// it back on.
+fn tls_block(mode: &str, verify: bool, ca_cert: Option<&str>) -> Value {
     let mut o = serde_json::Map::new();
-    o.insert("mode".into(), json!("require"));
-    if let Some(v) = verify {
-        o.insert("verify".into(), json!(v));
-    }
+    o.insert("mode".into(), json!(mode));
+    o.insert("verify".into(), json!(verify));
     if let Some(ca) = ca_cert.filter(|c| !c.is_empty()) {
         o.insert("ca_cert".into(), json!(ca));
     }
@@ -361,8 +365,20 @@ pub fn parse_mysql_workbench(content: &str) -> (Vec<ParsedConnection>, Vec<Strin
         if !schema.trim().is_empty() {
             params.insert("db".into(), json!(schema));
         }
+        // Workbench `useSSL`: 0=No, 1=If available, 2=Require, 3=Require+Verify CA,
+        // 4=Require+Verify Identity. Map the level to mode + verify precisely so a
+        // "Require" (2) connection is NOT silently forced to verify the cert — the
+        // exact surprise that broke imports. A provided CA implies verification.
         if use_ssl >= 1 {
-            params.insert("tls".into(), tls_block(None, ssl_ca.as_deref()));
+            // Only levels 3/4 verify the certificate; 1/2 just encrypt. The CA is
+            // still carried through (harmless when not verifying) so the user can
+            // flip verification on later without re-entering it.
+            let (mode, verify) = match use_ssl {
+                1 => ("preferred", false),
+                2 => ("required", false),
+                _ => ("required", true), // 3 = verify CA, 4 = verify identity
+            };
+            params.insert("tls".into(), tls_block(mode, verify, ssl_ca.as_deref()));
         }
 
         out.push(ParsedConnection {
@@ -867,7 +883,10 @@ fn build_db_params(
         p.insert("ssh".into(), ssh_block(ssh));
     }
     if tls {
-        p.insert("tls".into(), tls_block(None, None));
+        // DBeaver/DataGrip only tell us SSL is on, not whether they verify the
+        // cert — default to required-without-verify so the import connects to
+        // self-signed/private servers (the user can tighten verification later).
+        p.insert("tls".into(), tls_block("required", false, None));
     }
     Value::Object(p)
 }
