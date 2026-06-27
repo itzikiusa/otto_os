@@ -35,7 +35,14 @@ import { toasts } from '../toast.svelte';
 import { downloadText } from '../components/exporters';
 import { format as formatSql } from 'sql-formatter';
 import { formatMongo } from '../../modules/database/mongo-format';
-import { defaultVarSpec, type VarSpec } from '../../modules/database/sql-util';
+import {
+  defaultVarSpec,
+  stripJavaStringConcat,
+  maskQueryPlaceholders,
+  unmaskQueryPlaceholders,
+  type VarSpec,
+} from '../../modules/database/sql-util';
+import { bsonScalar } from '../../modules/database/bson';
 
 /** Connection kinds the explorer can browse (the four DB engines). */
 export const DB_KINDS = ['mysql', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -103,7 +110,13 @@ export function toFilterVal(value: unknown): FilterVal {
   if (typeof value === 'number' || typeof value === 'bigint')
     return { raw: String(value), numeric: true, isNull: false };
   if (typeof value === 'boolean') return { raw: value ? '1' : '0', numeric: true, isNull: false };
-  if (typeof value === 'object') return { raw: JSON.stringify(value), numeric: false, isNull: false };
+  if (typeof value === 'object') {
+    // A BSON sentinel filters by its display form (ObjectId("…")/ISODate("…")),
+    // matching how the cell renders, so a "Filter: _id = …" actually narrows.
+    const b = bsonScalar(value);
+    if (b !== null) return { raw: b, numeric: false, isNull: false };
+    return { raw: JSON.stringify(value), numeric: false, isNull: false };
+  }
   return { raw: String(value), numeric: false, isNull: false };
 }
 
@@ -748,7 +761,10 @@ class DatabaseStore {
   /** Beautify the active tab's statement. Mongo uses a structural JS/JSON
    *  re-indenter (`db.coll.op({…})` — the SQL formatter chokes on it); the SQL
    *  engines use sql-formatter; redis (one-line commands) has nothing to format.
-   *  Leaves the editor untouched on a parse error. */
+   *  For SQL we first unwrap Java/MyBatis string-concatenation (paste a
+   *  `"SELECT … " + ${x} + "…"` blob and Format turns it into clean SQL) and mask
+   *  query placeholders (`${x}`/`#{x}`/`:x`/`{x}`) so the formatter doesn't choke
+   *  on them, restoring them after. Leaves the editor untouched on a parse error. */
   formatStatement(): void {
     const t = this.tab;
     if (!t || !t.statement.trim() || this.queryLanguage === 'redis') return;
@@ -758,7 +774,10 @@ class DatabaseStore {
         return;
       }
       const dialect: 'mysql' | 'sql' = this.selectedConn?.kind === 'mysql' ? 'mysql' : 'sql';
-      this.setStatement(formatSql(t.statement, { language: dialect, keywordCase: 'upper' }));
+      const unwrapped = stripJavaStringConcat(t.statement);
+      const { masked, tokens } = maskQueryPlaceholders(unwrapped);
+      const formatted = formatSql(masked, { language: dialect, keywordCase: 'upper' });
+      this.setStatement(unmaskQueryPlaceholders(formatted, tokens));
     } catch (e) {
       toasts.error('Format failed', e instanceof Error ? e.message : String(e));
     }
@@ -1238,6 +1257,23 @@ class DatabaseStore {
     } catch (e) {
       toasts.error('Could not load object', errMsg(e));
       return null;
+    }
+  }
+
+  /** Copy a table/view's CREATE statement (the DDL the server already derives via
+   *  `SHOW CREATE` for MySQL + ClickHouse) to the clipboard. */
+  async copyCreateStatement(node: SchemaNode): Promise<void> {
+    const detail = await this.fetchObject(node.id);
+    const ddl = detail?.ddl?.trim();
+    if (!ddl) {
+      toasts.error('No create statement', `Could not derive the DDL for ${node.label}.`);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(ddl);
+      toasts.success('Create statement copied', node.label);
+    } catch {
+      toasts.error('Clipboard unavailable', 'Could not copy the create statement.');
     }
   }
 

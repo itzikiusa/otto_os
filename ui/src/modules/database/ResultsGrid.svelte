@@ -13,6 +13,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { buildFilteredQuery, type FilterMode } from './query-filter';
+  import { bsonScalar, highlightJsonHtml } from './bson';
   import type { QueryResult, DbExportFormat, ExportToPathResp, DbForeignKey } from '../../lib/api/types';
   import { api, postNdjsonStream } from '../../lib/api/client';
   import Modal from '../../lib/components/Modal.svelte';
@@ -103,19 +104,57 @@
   function rowMatches(row: unknown[]): boolean {
     for (const v of row) {
       if (v === null || v === undefined) continue;
-      const s = (isComplex(v) ? compactJson(v) : String(v)).toLowerCase();
+      const s = (cellStr(v)).toLowerCase();
       if (s.includes(searchLc)) return true;
     }
     return false;
   }
 
+  // ── Quick-filter chips, applied CLIENT-SIDE over the loaded rows ─────────────
+  // "Filter:"/"Exclude:" (database.filters) narrow the grid IMMEDIATELY here — the
+  // same chips also rewrite the statement so pressing Run re-queries the server
+  // for the full (uncapped) set. `raw` chips are hand-written SQL we can't
+  // evaluate in the browser, so they're skipped client-side.
+  const colIndexByName = $derived.by<Map<string, number>>(() => {
+    const m = new Map<string, number>();
+    result?.columns.forEach((c, i) => {
+      if (!m.has(c.name)) m.set(c.name, i);
+    });
+    return m;
+  });
+  // A chip is "active" (worth filtering on) only when it has at least one value.
+  const activeChips = $derived(
+    database.filters.filter((c) => c.kind === 'col' && c.values.length > 0),
+  );
+  function cellMatchesVal(cell: unknown, val: { raw: string; isNull: boolean }): boolean {
+    if (val.isNull) return cell === null || cell === undefined;
+    if (cell === null || cell === undefined) return false;
+    const s = cellStr(cell);
+    return s === val.raw;
+  }
+  function chipMatches(row: unknown[]): boolean {
+    for (const c of activeChips) {
+      if (c.kind !== 'col') continue;
+      const ci = colIndexByName.get(c.column);
+      if (ci === undefined) continue; // column not in this result — can't apply
+      const inSet = c.values.some((v) => cellMatchesVal(row[ci], v));
+      if (c.op === 'in' && !inSet) return false;
+      if (c.op === 'not_in' && inSet) return false;
+    }
+    return true;
+  }
+
   // Rows passing the filter, carrying their original index so edits target the
   // right entry in `liveRows`. Purely client-side over the fetched rows.
   const filteredRows = $derived.by<{ row: unknown[]; idx: number }[]>(() => {
-    if (!filtering) return liveRows.map((row, idx) => ({ row, idx }));
+    const hasChips = activeChips.length > 0;
+    if (!filtering && !hasChips) return liveRows.map((row, idx) => ({ row, idx }));
     const out: { row: unknown[]; idx: number }[] = [];
     for (let idx = 0; idx < liveRows.length; idx++) {
-      if (rowMatches(liveRows[idx])) out.push({ row: liveRows[idx], idx });
+      const row = liveRows[idx];
+      if (hasChips && !chipMatches(row)) continue;
+      if (filtering && !rowMatches(row)) continue;
+      out.push({ row, idx });
     }
     return out;
   });
@@ -223,7 +262,16 @@
   );
 
   function isComplex(v: unknown): boolean {
-    return v !== null && typeof v === 'object';
+    // A BSON sentinel ({"$oid":…}/{"$date":…}/{"$numberDecimal":…}) is a SCALAR
+    // for display purposes — it renders as ObjectId("…")/ISODate("…"), not JSON.
+    return v !== null && typeof v === 'object' && bsonScalar(v) === null;
+  }
+  /** Stringify a cell for display/search/copy: a BSON sentinel → its typed form
+   *  (ObjectId("…")/ISODate("…")), a complex value → compact JSON, else String. */
+  function cellStr(v: unknown): string {
+    const b = bsonScalar(v);
+    if (b !== null) return b;
+    return cellStr(v);
   }
   /** Heuristic: does this string look like a SQL statement (DDL/DML/EXPLAIN)? */
   function looksLikeSql(s: string): boolean {
@@ -245,8 +293,7 @@
   }
   function cellText(v: unknown): string {
     if (v === null || v === undefined) return '';
-    if (isComplex(v)) return compactJson(v);
-    return String(v);
+    return cellStr(v);
   }
   function openCell(v: unknown): void {
     if (typeof v === 'string') {
@@ -370,7 +417,7 @@
 
   // ── Quick-filter context menus (cell + header) ───────────────────────────────
   function shortLabel(v: unknown): string {
-    const s = v === null || v === undefined ? 'NULL' : isComplex(v) ? compactJson(v) : String(v);
+    const s = v === null || v === undefined ? 'NULL' : cellStr(v);
     return s.length > 28 ? s.slice(0, 28) + '…' : s;
   }
   /** The FK (if any) whose `columns` include `col` — drives in-grid FK nav. */
@@ -450,7 +497,7 @@
     items.push(
       { separator: true },
       { label: 'Expand value', icon: 'maximize', action: () => openCell(v) },
-      { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : isComplex(v) ? compactJson(v) : String(v)) },
+      { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : cellStr(v)) },
     );
     // Delete actions — only for editable results (single table/collection with a
     // resolved key). Builds a statement and opens the review modal; never runs
@@ -524,7 +571,7 @@
     for (let r = 0; r < n; r++) {
       const v = liveRows[r][colIndex];
       if (v === null || v === undefined) continue; // ∅ must not widen
-      const len = (isComplex(v) ? compactJson(v) : String(v)).length;
+      const len = (cellStr(v)).length;
       if (len > max) max = len;
     }
     // +2 ch padding allowance; clamp.
@@ -742,7 +789,7 @@
   function beginEdit(rowIdx: number, colIdx: number): void {
     if (!isEditableCell(colIdx) || reviewSql) return;
     const v = liveRows[rowIdx]?.[colIdx];
-    editing = { rowIdx, colIdx, value: v === null || v === undefined ? '' : isComplex(v) ? compactJson(v) : String(v) };
+    editing = { rowIdx, colIdx, value: v === null || v === undefined ? '' : cellStr(v) };
   }
   function cancelEdit(): void {
     editing = null;
@@ -779,7 +826,7 @@
     const { rowIdx, colIdx, value } = editing;
     const colName = result.columns[colIdx].name;
     const prev = liveRows[rowIdx][colIdx];
-    const prevStr = prev === null || prev === undefined ? '' : isComplex(prev) ? compactJson(prev) : String(prev);
+    const prevStr = prev === null || prev === undefined ? '' : cellStr(prev);
     if (value === prevStr) {
       editing = null; // no change → nothing to review
       return;
@@ -1463,7 +1510,7 @@
           {/if}
         {/each}
         <button class="fb-clear" onclick={() => database.clearFilters()} title="Clear all filters">Clear all</button>
-        <span class="fb-hint">filters update the query — press Run to apply</span>
+        <span class="fb-hint">filtering loaded rows — press Run to re-query the server</span>
       </div>
     {/if}
 
@@ -1479,7 +1526,9 @@
               <span class="jrec-n">#{ri + 1}</span>
               <button class="jrec-copy" title="Copy this row as JSON" aria-label="Copy row JSON" onclick={() => copyText(prettyJson(obj))}><Icon name="file" size={10} /></button>
             </div>
-            <pre class="alt-json mono">{prettyJson(obj)}</pre>
+            <!-- highlightJsonHtml HTML-escapes all text; only its own span markup is raw. -->
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+            <pre class="alt-json mono">{@html highlightJsonHtml(obj)}</pre>
           </div>
         {/each}
       </div>
@@ -1492,7 +1541,7 @@
             {#each result.columns as c (c.name)}
               <div class="vrow">
                 <span class="vk mono">{c.name}</span>
-                <span class="vv mono">{obj[c.name] === null || obj[c.name] === undefined ? '∅' : isComplex(obj[c.name]) ? compactJson(obj[c.name]) : String(obj[c.name])}</span>
+                <span class="vv mono">{obj[c.name] === null || obj[c.name] === undefined ? '∅' : cellStr(obj[c.name])}</span>
               </div>
             {/each}
           </div>
@@ -2120,6 +2169,26 @@
     line-height: 1.5;
     white-space: pre-wrap;
     color: var(--text);
+  }
+  /* JSON syntax highlighting (json view). Keys lead; BSON types (ObjectId/ISODate)
+     get the accent so they stand out as queryable typed values. */
+  .alt-json :global(.json-key) {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .alt-json :global(.json-str) {
+    color: var(--ok, #3fb950);
+  }
+  .alt-json :global(.json-num) {
+    color: var(--info, #58a6ff);
+  }
+  .alt-json :global(.json-bool),
+  .alt-json :global(.json-null) {
+    color: var(--warn, #d29922);
+  }
+  .alt-json :global(.json-bson) {
+    color: var(--accent);
+    font-style: italic;
   }
   /* Per-row JSON card (json view): a bordered, numbered block per row so each
      row's start/end is obvious. Mirrors the vertical view's .vrec idiom. */

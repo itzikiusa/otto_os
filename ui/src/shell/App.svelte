@@ -187,7 +187,10 @@
     ws.closeActiveTab();
   }
   function mobileFind(): void {
-    if (keyContext.terminalFocused && keyContext.openFind) {
+    // A focused component (terminal OR the DB query editor) can OWN find via
+    // keyContext.openFind — route to its in-component search; else the page-wide
+    // find-in-page overlay.
+    if (keyContext.openFind) {
       keyContext.openFind();
     } else {
       findInPage.show();
@@ -333,7 +336,7 @@
           ws.split('row');
           break;
         case 'find':
-          if (keyContext.terminalFocused && keyContext.openFind) {
+          if (keyContext.openFind) {
             keyContext.openFind();
           } else {
             findInPage.show();

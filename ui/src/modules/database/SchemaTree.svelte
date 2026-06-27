@@ -189,6 +189,15 @@
 
     items.push({ separator: true });
     items.push({ label: 'Copy name', icon: 'file', action: () => void copyName(node) });
+    // CREATE statement (DDL) — SQL tables/views only (MySQL + ClickHouse via SHOW
+    // CREATE); Mongo/Redis have no DDL.
+    if (isSqlTable) {
+      items.push({
+        label: 'Copy create statement',
+        icon: 'file',
+        action: () => void database.copyCreateStatement(node),
+      });
+    }
     if (node.has_children) {
       items.push({ label: 'Refresh', icon: 'refresh', action: () => void database.refreshSchema() });
     }

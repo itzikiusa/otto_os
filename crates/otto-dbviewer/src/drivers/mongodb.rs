@@ -239,6 +239,15 @@ impl Driver for MongoDriver {
                     .collect(),
             ),
         );
+        // Nested dotted field PATHS (e.g. `players.playerId`,
+        // `templatesAwardedCollections.succeededAwarded.templateId`) so the index
+        // builder can index embedded fields, not just the top-level ones.
+        if let Ok(paths) = sample_field_paths(&coll).await {
+            extra.insert(
+                "sampled_paths".into(),
+                Value::Array(paths.into_iter().map(|(p, _)| Value::String(p)).collect()),
+            );
+        }
         if let Some(s) = sample {
             extra.insert("sample".into(), bson_to_json(&Bson::Document(s)));
         }
@@ -1642,6 +1651,32 @@ fn bson_to_json(b: &Bson) -> Value {
     }
 }
 
+/// Like [`bson_to_json`] but PRESERVES the type of values whose plain JSON
+/// projection is an indistinguishable string — ObjectId, DateTime, Decimal128 —
+/// by emitting their MongoDB Extended JSON sentinel (`{"$oid": …}`, `{"$date":
+/// …}`, `{"$numberDecimal": …}`). The query-RESULTS path uses this so the UI can
+/// render `ObjectId("…")` / `ISODate("…")` (a real type hint the user can act on)
+/// and a cell "query by value" round-trips correctly — the runner's own parser
+/// (`mongo_parse` / `decode_ejson`) decodes these sentinels back to their BSON
+/// type. Recurses through documents/arrays so nested ids/dates are typed too.
+fn bson_to_json_typed(b: &Bson) -> Value {
+    match b {
+        Bson::ObjectId(oid) => json!({ "$oid": oid.to_hex() }),
+        Bson::DateTime(dt) => {
+            json!({ "$date": dt.try_to_rfc3339_string().unwrap_or_else(|_| dt.to_string()) })
+        }
+        Bson::Decimal128(d) => json!({ "$numberDecimal": d.to_string() }),
+        Bson::Array(arr) => Value::Array(arr.iter().map(bson_to_json_typed).collect()),
+        Bson::Document(doc) => Value::Object(
+            doc.iter()
+                .map(|(k, v)| (k.clone(), bson_to_json_typed(v)))
+                .collect(),
+        ),
+        // Everything else already has an unambiguous JSON projection.
+        _ => bson_to_json(b),
+    }
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -1924,7 +1959,7 @@ async fn collect_docs(
         .map(|doc| {
             columns
                 .iter()
-                .map(|col| doc.get(col).map(bson_to_json).unwrap_or(Value::Null))
+                .map(|col| doc.get(col).map(bson_to_json_typed).unwrap_or(Value::Null))
                 .collect()
         })
         .collect();
@@ -2234,6 +2269,33 @@ mod tests {
         assert_eq!(obj.get("n").unwrap(), &json!(42));
         assert_eq!(obj.get("active").unwrap(), &Value::Bool(true));
         assert_eq!(obj.get("tags").unwrap(), &json!(["x", "y"]));
+    }
+
+    #[test]
+    fn bson_to_json_typed_preserves_oid_and_date() {
+        let oid = mongodb::bson::oid::ObjectId::new();
+        let dt = mongodb::bson::DateTime::from_millis(1_565_191_869_123);
+        let doc = doc! {
+            "_id": oid,
+            "createdDate": dt,
+            "name": "x",
+            "nested": { "innerDate": dt },
+        };
+        let v = bson_to_json_typed(&Bson::Document(doc));
+        let obj = v.as_object().unwrap();
+        // ObjectId → {"$oid": hex}; the UI renders this as ObjectId("…").
+        assert_eq!(obj.get("_id").unwrap(), &json!({ "$oid": oid.to_hex() }));
+        // DateTime → {"$date": iso}; nested dates are typed too (recursive).
+        assert!(obj.get("createdDate").unwrap().get("$date").is_some());
+        assert!(obj
+            .get("nested")
+            .unwrap()
+            .get("innerDate")
+            .unwrap()
+            .get("$date")
+            .is_some());
+        // Plain scalars are unchanged.
+        assert_eq!(obj.get("name").unwrap(), "x");
     }
 }
 

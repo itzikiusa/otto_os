@@ -68,6 +68,114 @@ function codeMask(sql: string, mode: SplitMode = 'sql'): boolean[] {
   return mask;
 }
 
+/**
+ * Unwrap Java/MyBatis-style SQL string concatenation into plain SQL, e.g.
+ *
+ *   "SELECT * FROM " + ${table} +
+ *   "WHERE id = #{id}"      →   SELECT * FROM  ${table}  WHERE id = #{id}
+ *
+ * Only acts when there are ≥2 code-level double-quoted segments AND a code-level
+ * `+` (the hallmark of string building) — so ordinary SQL (a lone quoted
+ * identifier, a `a + b` expression) is returned untouched. Double-quoted segments
+ * become their unescaped inner text; a `+` joiner becomes a single space; other
+ * quoted strings (`'…'` / `` `…` ``) are preserved verbatim. Placeholders
+ * (`${x}` / `#{x}` / `:x` / `{x}`) inside or between segments are left intact for
+ * the formatter (and later variable substitution).
+ */
+export function stripJavaStringConcat(sql: string): string {
+  const n = sql.length;
+  // Pass 1: detect. Count code-level double-quoted segments and `+`.
+  let quoteSegs = 0;
+  let codePlus = 0;
+  for (let i = 0; i < n; ) {
+    const c = sql[i];
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < n) {
+        if (sql[j] === '\\') { j += 2; continue; }
+        if (sql[j] === c) { j++; break; }
+        j++;
+      }
+      if (c === '"') quoteSegs++;
+      i = j;
+      continue;
+    }
+    if (c === '+') codePlus++;
+    i++;
+  }
+  if (quoteSegs < 2 || codePlus < 1) return sql;
+
+  // Pass 2: unwrap.
+  let out = '';
+  for (let i = 0; i < n; ) {
+    const c = sql[i];
+    if (c === '"') {
+      let j = i + 1;
+      let inner = '';
+      while (j < n) {
+        if (sql[j] === '\\') {
+          const e = sql[j + 1] ?? '';
+          inner += e === 'n' ? '\n' : e === 't' ? '\t' : e;
+          j += 2;
+          continue;
+        }
+        if (sql[j] === '"') { j++; break; }
+        inner += sql[j];
+        j++;
+      }
+      out += inner;
+      i = j;
+      continue;
+    }
+    if (c === "'" || c === '`') {
+      // Preserve other-quoted strings verbatim.
+      out += c;
+      let j = i + 1;
+      while (j < n) {
+        if (sql[j] === '\\') { out += sql[j] + (sql[j + 1] ?? ''); j += 2; continue; }
+        out += sql[j];
+        if (sql[j] === c) { j++; break; }
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (c === '+') { out += ' '; i++; continue; }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Replace query placeholders (`${name}` / `#{name}` / `:name` / `{name}`) with
+ * inert identifier tokens so a formatter (sql-formatter) doesn't choke on them
+ * (`#{…}` reads as a MySQL line comment; `${…}` / `:name` / `{name}` are parse
+ * errors). Restore with [`unmaskQueryPlaceholders`] after formatting. The token
+ * carries a trailing `z` delimiter so `ottoph1z` can't match inside `ottoph10z`.
+ */
+export function maskQueryPlaceholders(sql: string): { masked: string; tokens: string[] } {
+  const tokens: string[] = [];
+  const masked = sql.replace(
+    /#\{[^}]*\}|\$\{[^}]*\}|:[A-Za-z_]\w*|\{[A-Za-z_]\w*\}/g,
+    (m) => {
+      const id = `ottoph${tokens.length}z`;
+      tokens.push(m);
+      return id;
+    },
+  );
+  return { masked, tokens };
+}
+
+/** Inverse of [`maskQueryPlaceholders`] — restore the original placeholders. */
+export function unmaskQueryPlaceholders(sql: string, tokens: string[]): string {
+  let out = sql;
+  for (let i = 0; i < tokens.length; i++) {
+    out = out.replace(new RegExp(`ottoph${i}z`, 'gi'), () => tokens[i]);
+  }
+  return out;
+}
+
 /** How statements are delimited: `;` (SQL/Mongo/ClickHouse) vs one-per-line (Redis). */
 export type SplitMode = 'sql' | 'line';
 

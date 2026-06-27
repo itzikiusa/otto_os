@@ -572,6 +572,7 @@
       language={lang}
       readOnly={false}
       minimal={true}
+      findOwner={true}
       completionSource={database.selectedConnId ? completionSource : null}
       onchange={(v) => database.setStatement(v)}
       onsubmit={run}

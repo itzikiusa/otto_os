@@ -5,8 +5,14 @@
   import { EditorView, lineNumbers, keymap, drawSelection } from '@codemirror/view';
   import { EditorState, Compartment, Prec } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll } from '@codemirror/commands';
-  import { search, searchKeymap } from '@codemirror/search';
-  import { autocompletion, completionKeymap, startCompletion } from '@codemirror/autocomplete';
+  import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
+  import {
+    autocompletion,
+    completionKeymap,
+    startCompletion,
+    closeBrackets,
+    closeBracketsKeymap,
+  } from '@codemirror/autocomplete';
   import type { CompletionSource } from '@codemirror/autocomplete';
   import { lintGutter, lintKeymap } from '@codemirror/lint';
   import {
@@ -40,6 +46,7 @@
   import type { LspCapabilities } from '../api/types';
   import { ws } from '../stores/workspace.svelte';
   import { ui } from '../stores/ui.svelte';
+  import { keyContext } from '../keys';
   import { toasts } from '../toast.svelte';
 
   // Editor theme follows the app scheme: oneDark for dark, a light theme keyed to
@@ -103,6 +110,14 @@
      */
     gotoLine?: number | null;
     gotoCol?: number | null;
+    /**
+     * When true, this editor OWNS Cmd/Ctrl+F while focused: it registers a global
+     * find opener (like the terminal) so the keymap opens CodeMirror's in-editor
+     * search/replace panel here instead of the page-wide find-in-page overlay
+     * (whose match navigation can't reach the editor's virtualized lines). Used
+     * by the DB query editor.
+     */
+    findOwner?: boolean;
   }
 
   let {
@@ -118,6 +133,7 @@
     onselect,
     gotoLine = null,
     gotoCol = null,
+    findOwner = false,
   }: Props = $props();
 
   // ── Container ─────────────────────────────────────────────────────────────
@@ -290,6 +306,9 @@
   function teardownEditor(): void {
     try { view?.destroy(); } catch { /* ignore */ }
     view = null;
+    // Release the global find opener if this editor still holds it (blur may not
+    // fire on unmount), so Cmd+F falls back to the page-wide overlay.
+    if (keyContext.openFind === openEditorSearch) keyContext.openFind = null;
   }
 
   // ── Attach LSP (fire-and-forget, never breaks editor) ─────────────────────
@@ -380,6 +399,12 @@
     },
   ]);
 
+  // Stable opener for the in-editor search panel (a fixed reference so the
+  // focus/blur handlers can register/deregister it on `keyContext.openFind`).
+  function openEditorSearch(): void {
+    if (view) openSearchPanel(view);
+  }
+
   function buildEditor(el: HTMLDivElement, filePath: string, fileContent: string, rootPath: string): void {
     teardownEditor();
     lspCompartment = new Compartment();
@@ -393,6 +418,9 @@
       ...(minimal ? [] : [lineNumbers(), foldGutter()]),
       indentOnInput(),
       bracketMatching(),
+      // Auto-close brackets/quotes, and WRAP the selection when you type a
+      // bracket/quote with text selected (e.g. select a word, press `"`).
+      ...(readOnly ? [] : [closeBrackets()]),
       lintGutter(),
       drawSelection(),
       completionCompartment.of(completionExt()),
@@ -402,6 +430,23 @@
       selectionListener,
       changeListener,
       submitKeymap,
+      // When this editor owns find, claim the global Cmd/Ctrl+F opener while it
+      // has focus so the keymap opens THIS editor's search/replace panel (with
+      // working next/prev + replace) instead of the page-wide find overlay.
+      ...(findOwner
+        ? [
+            EditorView.domEventHandlers({
+              focus: () => {
+                keyContext.openFind = openEditorSearch;
+                return false;
+              },
+              blur: () => {
+                if (keyContext.openFind === openEditorSearch) keyContext.openFind = null;
+                return false;
+              },
+            }),
+          ]
+        : []),
       EditorState.readOnly.of(readOnly),
       // Highest-precedence Cmd/Ctrl+A → select the WHOLE document. `defaultKeymap`
       // already binds this (selectAll operates on the doc model, not the rendered
@@ -412,6 +457,7 @@
       // lines exist in the DOM) — that path is outside CM's keymap.
       Prec.highest(keymap.of([{ key: 'Mod-a', run: selectAll }])),
       keymap.of([
+        ...(readOnly ? [] : closeBracketsKeymap),
         ...defaultKeymap,
         ...searchKeymap,
         ...lintKeymap,
@@ -483,11 +529,24 @@
     // rebuild when the content prop merely echoes back an edit we just emitted
     // (editable mode), which would remount the view and drop the cursor.
     const contentEchoed = curContent === lastEmitted;
-    if (!view || curPath !== prevPath || curRoot !== prevRoot || (curContent !== prevContent && !contentEchoed)) {
+    if (!view || curPath !== prevPath || curRoot !== prevRoot) {
+      // Structural (re)build: first mount, a different file, or a new root.
       prevPath = curPath;
       prevRoot = curRoot;
       prevContent = curContent;
       buildEditor(el, curPath, curContent, curRoot);
+    } else if (curContent !== prevContent && !contentEchoed) {
+      // EXTERNAL content change for the SAME doc (e.g. "Query by value", Format,
+      // var substitution). Apply it as an undoable transaction rather than
+      // rebuilding the view — a rebuild teardowns the EditorView and WIPES the
+      // undo history, so Cmd+Z couldn't revert a "Query by value". A transaction
+      // lands in the history stack, so undo restores the prior statement.
+      prevContent = curContent;
+      if (curContent !== view.state.doc.toString()) {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: curContent },
+        });
+      }
     } else if (curContent !== prevContent) {
       // Content equals our last emit — record it without rebuilding.
       prevContent = curContent;

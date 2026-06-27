@@ -83,9 +83,16 @@
   const indexFields = $derived.by(() => {
     if (!detail) return [] as string[];
     if (isSql) return detail.columns.map((c) => c.name);
-    const sampled = (detail.extra as Record<string, unknown> | null)?.sampled_fields as
-      | Record<string, unknown>
-      | undefined;
+    const extra = detail.extra as Record<string, unknown> | null;
+    // Prefer the nested dotted paths (so you can index `players.playerId` /
+    // `templatesAwardedCollections.succeededAwarded.templateId`); fall back to the
+    // top-level sampled fields when the server didn't return paths.
+    const paths = extra?.sampled_paths;
+    if (Array.isArray(paths) && paths.length > 0) {
+      const list = (paths as unknown[]).filter((p): p is string => typeof p === 'string');
+      return ['_id', ...list.filter((f) => f !== '_id')];
+    }
+    const sampled = extra?.sampled_fields as Record<string, unknown> | undefined;
     return ['_id', ...Object.keys(sampled ?? {}).filter((f) => f !== '_id')];
   });
   let idxOpen = $state(false);
