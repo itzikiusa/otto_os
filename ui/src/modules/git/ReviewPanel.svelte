@@ -2,6 +2,7 @@
   // AI review panel: start review agents, refresh via WS reviewBus (no poll),
   // approve/decline individual draft comments. Supports live per-agent progress
   // cards, a configure-agents modal, and a merge-readiness panel.
+  import { untrack } from 'svelte';
   import { api, ApiError } from '../../lib/api/client';
   import type {
     Review,
@@ -201,8 +202,15 @@
     const evStatus = reviewBus.status;
     if (!evReviewId) return;
     // Only react when the event matches our open review or when this PR just
-    // started a review (review may be null during the first tick).
-    if (review && review.id !== evReviewId) return;
+    // started a review (review may be null during the first tick). Read `review`
+    // WITHOUT subscribing: refreshFromBus reassigns `review` (a fresh object on
+    // every fetch), and if this effect tracked that read the write would
+    // re-invalidate the effect and re-fire the fetch forever — a self-feeding
+    // loop that hammered the endpoint and re-rendered the whole done-state panel
+    // (findings + proof packs) until a hard reload. We only want to re-run on a
+    // new reviewBus tick, never on our own review writes.
+    const cur = untrack(() => review);
+    if (cur && cur.id !== evReviewId) return;
     void refreshFromBus(evReviewId, evStatus);
   });
 
