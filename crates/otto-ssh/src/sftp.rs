@@ -81,9 +81,11 @@ impl SftpSession {
     }
 
     /// The common `sftp` args every op uses: batch/non-interactive auth, the
-    /// same host-key option [`crate::SshTunnel`] uses, a bounded connect, and a
-    /// per-session ControlMaster socket. The target (`user@host`) is appended
-    /// by the caller via [`Self::target`].
+    /// same trust-on-first-use host-key policy [`crate::SshTunnel`] uses
+    /// (`StrictHostKeyChecking=accept-new` — under `BatchMode` a first-time host
+    /// would otherwise fail with "Host key verification failed"), a bounded
+    /// connect, and a per-session ControlMaster socket. The target (`user@host`)
+    /// is appended by the caller via [`Self::target`].
     fn base_args(&self) -> Vec<String> {
         let p = &self.params;
         let mut args = vec![
@@ -91,6 +93,8 @@ impl SftpSession {
             "-".into(),
             "-o".into(),
             "BatchMode=yes".into(),
+            "-o".into(),
+            "StrictHostKeyChecking=accept-new".into(),
             "-o".into(),
             format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"),
             "-o".into(),
@@ -528,6 +532,7 @@ drwxr-xr-x  2 me staff 64 Jun 20 12:00 mydir/
         assert_eq!(args[0], "-b");
         assert_eq!(args[1], "-");
         assert!(args.iter().any(|a| a == "BatchMode=yes"));
+        assert!(args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"));
         assert!(args.iter().any(|a| a.starts_with("ControlPath=")));
         assert!(args.iter().any(|a| a == "ControlPersist=60s"));
         assert_eq!(args[args.iter().position(|a| a == "-P").unwrap() + 1], "2222");

@@ -60,8 +60,16 @@ fn maybe_wrap_ssh_tunnel(p: &Value, spec: CommandSpec, kind_name: &str) -> Resul
         Some(j) => j,
         None => return Ok(spec),
     };
-    // Build: ssh -t [-i identity] <jump> -- <original_program> <original_args…>
-    let mut ssh_args: Vec<String> = vec!["-t".into()];
+    // Build: ssh -t -o StrictHostKeyChecking=accept-new [-i identity] <jump>
+    //        -- <original_program> <original_args…>
+    // `accept-new` trusts a first-time bastion on first connect (recording its
+    // key in known_hosts) while still rejecting a changed key — so a brand-new
+    // jump host doesn't block the DB terminal on host-key verification.
+    let mut ssh_args: Vec<String> = vec![
+        "-t".into(),
+        "-o".into(),
+        "StrictHostKeyChecking=accept-new".into(),
+    ];
     if let Some(identity) = opt_str(p, "identity_file") {
         ssh_args.push("-i".into());
         ssh_args.push(identity.into());
@@ -90,7 +98,10 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                 Some(h) => h,
                 None => return Ok((login_shell(), false)),
             };
-            let mut args = Vec::new();
+            // Trust a first-time host on first connect (adds its key to
+            // known_hosts), matching what a user does by answering "yes" to the
+            // authenticity prompt; a *changed* known key is still refused.
+            let mut args = vec!["-o".to_string(), "StrictHostKeyChecking=accept-new".to_string()];
             if let Some(identity) = opt_str(p, "identity_file") {
                 args.push("-i".into());
                 args.push(identity.into());
@@ -362,6 +373,8 @@ mod tests {
         assert_eq!(
             spec.args,
             vec![
+                "-o",
+                "StrictHostKeyChecking=accept-new",
                 "-i",
                 "/home/me/.ssh/id_ed25519",
                 "-p",
@@ -379,7 +392,7 @@ mod tests {
     fn ssh_minimal_and_missing_host() {
         let c = conn(ConnectionKind::Ssh, json!({"host":"h1"}));
         let (spec, _) = build_command(&c, None).unwrap();
-        assert_eq!(spec.args, vec!["h1"]);
+        assert_eq!(spec.args, vec!["-o", "StrictHostKeyChecking=accept-new", "h1"]);
 
         // No host: we don't validate — fall back to a login shell so a
         // user-supplied first_command can run there.
@@ -578,6 +591,8 @@ mod tests {
             spec.args,
             vec![
                 "-t",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
                 "-i",
                 "/home/me/.ssh/id_rsa",
                 "bastion.example.com",
@@ -624,6 +639,8 @@ mod tests {
             spec.args,
             vec![
                 "-t",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
                 "bastion.example.com",
                 "--",
                 "redis-cli",

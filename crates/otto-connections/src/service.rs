@@ -467,11 +467,17 @@ impl ConnectionsService {
 fn probe_spec(kind: ConnectionKind, mut spec: CommandSpec) -> (CommandSpec, Option<&'static [u8]>) {
     match kind {
         ConnectionKind::Ssh => {
-            // ssh [opts] target  ->  ssh -o BatchMode=yes -o ConnectTimeout=5 [opts] target exit
+            // ssh [opts] target  ->  ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+            //                          -o ConnectTimeout=5 [opts] target exit
+            // `accept-new` lets a valid first-time host succeed (and records its
+            // key) instead of failing the probe with "Host key verification
+            // failed" under BatchMode; a *changed* known key is still rejected.
             let target = spec.args.pop();
             let mut args = vec![
                 "-o".to_string(),
                 "BatchMode=yes".to_string(),
+                "-o".to_string(),
+                "StrictHostKeyChecking=accept-new".to_string(),
                 "-o".to_string(),
                 "ConnectTimeout=5".to_string(),
             ];

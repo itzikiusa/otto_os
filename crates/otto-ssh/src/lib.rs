@@ -170,14 +170,24 @@ pub async fn free_local_port() -> Result<u16> {
 }
 
 /// The shared `ssh` options every tunnel uses: no remote command (`-N`),
-/// non-interactive auth (`BatchMode`), fail fast if the forward can't bind
+/// non-interactive auth (`BatchMode`), trust-on-first-use host keys
+/// (`StrictHostKeyChecking=accept-new`), fail fast if the forward can't bind
 /// (`ExitOnForwardFailure`), bounded connect, and a keep-alive probe. The
 /// forward flag and target are appended by the per-mode builders.
+///
+/// `BatchMode=yes` disables the interactive "authenticity of host … can't be
+/// established" prompt, so without an explicit policy a first-time host fails
+/// with "Host key verification failed". `accept-new` adds an *unknown* host's
+/// key to `~/.ssh/known_hosts` on first connect (what a user does by answering
+/// "yes"), while still refusing to connect if a *known* host's key later
+/// changes — the actual MITM signal. This is strictly safer than `=no`.
 fn base_args(cfg: &SshTunnelConfig) -> Vec<String> {
     let mut args = vec![
         "-N".into(),
         "-o".into(),
         "BatchMode=yes".into(),
+        "-o".into(),
+        "StrictHostKeyChecking=accept-new".into(),
         "-o".into(),
         "ExitOnForwardFailure=yes".into(),
         "-o".into(),
@@ -239,6 +249,7 @@ mod tests {
         assert_eq!(args[l + 1], "127.0.0.1:54321:db.internal:3306");
         assert!(!args.iter().any(|a| a == "-D"));
         assert!(args.iter().any(|a| a == "BatchMode=yes"));
+        assert!(args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"));
         assert!(args.iter().any(|a| a == "ExitOnForwardFailure=yes"));
         assert_eq!(args[args.iter().position(|a| a == "-p").unwrap() + 1], "2222");
         assert_eq!(
