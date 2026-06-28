@@ -1472,6 +1472,26 @@ pub(crate) fn resolve_skill_inline(library: &otto_context::Library, name: &str) 
     String::new()
 }
 
+/// Slugify a review agent's display name into a skill name: lowercase, runs of
+/// non-alphanumerics collapse to a single `-`, trimmed. "Correctness review" →
+/// `correctness-review`, "Grill" → `grill`. Used to find the lens skill when a
+/// review agent leaves its `skill` field empty and carries the lens in its name
+/// (which matches how the bundled lens skills are named).
+fn slug_skill_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !out.is_empty() && !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
 /// Stage the given review-lens skills into a shared out-of-tree bundle laid out
 /// as claude's `.claude/skills/<name>/`, and return that bundle dir. Wired into
 /// each review agent via `meta.extra_dirs` → `--add-dir=<bundle>`, it makes the
@@ -1777,9 +1797,19 @@ async fn run_review_core(
             let providers = effective_providers(a);
             let multi = providers.len() > 1;
             // Inline the agent's skill (body + references) ahead of its lens
-            // prompt so every provider runs the full method, not just ones with
-            // a native skill loader. Resolved once per agent, reused per provider.
-            let skill_text = resolve_skill_inline(&ctx.context_library, &a.skill);
+            // prompt so EVERY provider runs the full method, not just claude (which
+            // also gets it registered out-of-tree via `--add-dir`; codex/agy do
+            // not register `--add-dir` skills and would otherwise have to scavenge
+            // the bundle). Resolve by the explicit `skill` field, falling back to
+            // the slugified agent name ("Grill" -> grill, "Correctness review" ->
+            // correctness-review) since configs usually carry the lens in the name
+            // with `skill` empty. Resolved once per agent, reused per provider.
+            let lens = if a.skill.trim().is_empty() {
+                slug_skill_name(&a.name)
+            } else {
+                a.skill.clone()
+            };
+            let skill_text = resolve_skill_inline(&ctx.context_library, &lens);
             providers.into_iter().map(move |p| {
                 let display_name = if multi {
                     format!("{} \u{00b7} {}", a.name, p)
