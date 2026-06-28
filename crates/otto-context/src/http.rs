@@ -168,6 +168,12 @@ async fn delete_skill<C: ContextCtx>(
     s.library()
         .delete_skill(&name)
         .map_err(|e| Error::Invalid(format!("delete skill: {e}")))?;
+    // Also remove the user-level provider copies Otto owns (per-dir manifest);
+    // a user-authored skill of the same name is left untouched. Best-effort: the
+    // library delete already succeeded, so a provider-dir hiccup only warns.
+    if let Err(e) = crate::user_skills::uninstall(&name) {
+        tracing::warn!(skill = %name, error = %e, "remove user-level skill copies failed");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

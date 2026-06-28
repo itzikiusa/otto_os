@@ -11,6 +11,7 @@ pub mod materialize;
 pub mod merge;
 pub mod provisioner;
 pub mod repomap;
+pub mod user_skills;
 
 pub use http::{router, ContextCtx};
 pub use library::Library;

@@ -1033,7 +1033,7 @@ are root; per-workspace context selection is workspace-scoped.
 | GET /library/skills | root | — | `SkillEntry[]` |
 | GET /library/skills/{name} | root | — | skill body |
 | PUT /library/skills/{name} | root | skill body | 204 |
-| DELETE /library/skills/{name} | root | — | 204 |
+| DELETE /library/skills/{name} | root | — | 204 (also removes Otto-managed user-level provider copies — see Bundled skills) |
 | GET /library/souls | root | — | `SoulEntry[]` |
 | GET /library/souls/{name} | root | — | soul body |
 | PUT /library/souls/{name} | root | soul body | 204 |
@@ -1112,8 +1112,25 @@ choices. The UI surfaces this distinction in the preview.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /library/bundled | root | — | bundled skill catalog |
-| POST /library/bundled/{name}/install | root | — | install one bundled skill into the library |
-| POST /library/bundled/install-all | root | — | install all bundled skills |
+| POST /library/bundled/{name}/install | root | — | install/update one bundled skill |
+| POST /library/bundled/install-all | root | `?category=&backup=` | install all bundled skills (optionally one category) |
+
+Each catalog entry carries `{name, category, version, description, installed_version,
+state, update_available}`. `state` is `not_installed | up_to_date | update_available
+| ahead`; `update_available` is `true` only when the bundle is strictly newer than
+the installed copy (`bundled > installed`) — a hand-edited copy that is `ahead`
+stays `false`. The UI uses `update_available` to show an **Update** button.
+
+**Install also materializes user-level copies.** Installing/updating a bundled skill
+copies the full multi-file tree into the Otto library AND into each provider CLI's
+native global skills dir so the skill is discoverable everywhere: claude →
+`~/.claude/skills/<name>/`, codex → `$CODEX_HOME/skills/<name>/` (else
+`~/.codex/skills/<name>/`), agy → `~/.gemini/skills/<name>/`. The copy is a
+clean-overwrite (so install doubles as update), and each provider dir keeps an
+`.otto-managed.json` manifest listing the skills Otto owns there. Nothing is ever
+written into a working/repo tree. `DELETE /library/skills/{name}` (below) reconciles
+those user-level copies too, removing only skills the manifest owns — a user-authored
+skill of the same name is left untouched.
 
 ## Workflow engine
 

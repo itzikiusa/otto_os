@@ -2933,6 +2933,12 @@ export interface BundledSkill {
   /** Version of the currently-installed copy, or null if not installed. */
   installed_version: number | null;
   state: BundledSkillState;
+  /**
+   * True iff the bundle is strictly newer than the installed copy
+   * (`bundled > installed`) — the `update_available` state. Lets the UI show an
+   * "Update" button. A hand-edited copy that is `ahead` is NOT an update.
+   */
+  update_available: boolean;
 }
 
 /** Result of installing a single bundled skill. */

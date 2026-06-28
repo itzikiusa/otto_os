@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_context::http::ContextCtx;
-use otto_context::Library;
+use otto_context::{user_skills, Library};
 use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
 use otto_core::Error;
@@ -82,6 +82,11 @@ pub struct BundledView {
     pub installed_version: Option<u32>,
     /// `"not_installed" | "up_to_date" | "update_available" | "ahead"`.
     pub state: String,
+    /// `true` iff the bundle is strictly newer than the installed copy
+    /// (`bundled > installed`) — i.e. the `update_available` state. Lets the
+    /// Settings UI show an "Update" button without re-deriving from `state`.
+    /// A hand-edited copy that is `ahead` is NOT an update (this stays `false`).
+    pub update_available: bool,
 }
 
 /// Result of installing a single bundled skill.
@@ -158,7 +163,9 @@ async fn list_bundled_skills<C: ContextCtx>(
     let views = list_bundled()
         .into_iter()
         .map(|b| {
-            let (state, installed_version) = state_view(install_state(library, &b.name));
+            let st = install_state(library, &b.name);
+            let (state, installed_version) = state_view(st);
+            let update_available = matches!(st, Some(InstallState::UpdateAvailable { .. }));
             BundledView {
                 name: b.name,
                 category: b.category,
@@ -166,6 +173,7 @@ async fn list_bundled_skills<C: ContextCtx>(
                 description: b.description,
                 installed_version,
                 state,
+                update_available,
             }
         })
         .collect();
@@ -238,6 +246,16 @@ fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallRes
 
     let installed = install_into(library, name)
         .map_err(|e| Error::Internal(format!("install skill '{name}': {e}")))?;
+
+    // After the Library copy, mirror the freshly-installed skill tree into each
+    // provider's user-level skills dir (~/.claude/skills, $CODEX_HOME/skills,
+    // ~/.gemini/skills) so the CLIs discover it globally — not just inside Otto's
+    // per-session bundle. Clean-overwrite + per-dir manifest, so this doubles as
+    // the update path. Skipped when `name` isn't a bundled skill (installed=false).
+    if installed {
+        user_skills::install(name, &installed_dir)
+            .map_err(|e| Error::Internal(format!("materialize user-level skill '{name}': {e}")))?;
+    }
 
     Ok(InstallResult {
         name: name.to_string(),

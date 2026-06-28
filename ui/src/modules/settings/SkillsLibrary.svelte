@@ -3,8 +3,13 @@
   // shown grouped by category with their state relative to the installed library
   // copy. Installing/updating writes into the Otto library; the backend always
   // backs up an existing copy before overwriting (backup=true), so nothing is
-  // ever destroyed silently. Install/update/install-all are root-only on the
-  // server; this page is gated to root in Settings.svelte (like Context Library).
+  // ever destroyed silently. It ALSO materializes a copy into each provider CLI's
+  // global skills dir (~/.claude/skills, $CODEX_HOME/skills, ~/.gemini/skills) so
+  // the skill is discoverable everywhere; Remove reconciles those too (it only
+  // ever touches skills Otto's per-dir manifest owns). Install/update/install-all
+  // are root-only on the server; this page is gated to root in Settings.svelte
+  // (like Context Library). The "Update" button (shown when state is
+  // `update_available`/`ahead`) posts to the same install endpoint.
   import { contextApi } from '../../lib/api/context';
   import type { BundledSkill, BundledSkillState } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -212,7 +217,8 @@
     <div>
       <h1>Skills</h1>
       <div class="sub">
-        Skills that ship with Otto. Install or update them into your library — your edited copies are
+        Skills that ship with Otto. Installing adds them to your library and to each agent CLI's
+        global skills folder, so Claude, Codex and agy can all use them. Your edited copies are
         always backed up before being replaced.
       </div>
     </div>
