@@ -147,16 +147,25 @@ pub async fn run_agent_session(
     agent_index: usize,
     base_prompt: &str,
     timeout: Duration,
+    // Shared out-of-tree skills bundle (`<dir>/.claude/skills/<lens>/`) to load
+    // as first-class skills via `--add-dir`, so the agent's `Skill(<lens>)` call
+    // resolves. None → rely on the method already inlined in the prompt.
+    skills_add_dir: Option<&str>,
 ) -> RunOutcome {
     let path = findings_path(review_id, agent_index);
     let _ = std::fs::remove_file(&path); // clear any stale file
     let prompt = augment_prompt(base_prompt, &path.to_string_lossy());
 
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "source": "review",
         "review_id": review_id,
         "agent_index": agent_index,
     });
+    // `extra_dirs` becomes `--add-dir=<bundle>` on spawn (and resume) regardless
+    // of the review-session materialize skip, registering the lens skills.
+    if let Some(dir) = skills_add_dir.filter(|d| !d.is_empty()) {
+        meta["extra_dirs"] = serde_json::json!([dir]);
+    }
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(provider.to_string()),
@@ -287,6 +296,8 @@ pub async fn run_agent_session_with_recovery(
     timeout: Duration,
     max_attempts: Option<u32>,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    // Shared out-of-tree skills bundle for `--add-dir` (see `run_agent_session`).
+    skills_add_dir: Option<&str>,
 ) -> AgentRunResult {
     let attempts = effective_max_attempts(max_attempts);
     // Shared retry loop (kills the prior session + backs off between attempts).
@@ -300,7 +311,7 @@ pub async fn run_agent_session_with_recovery(
         |_attempt| {
             run_agent_session(
                 manager, reviews, states, ws, user, provider, cwd, review_id, agent_index,
-                base_prompt, timeout,
+                base_prompt, timeout, skills_add_dir,
             )
         },
     )

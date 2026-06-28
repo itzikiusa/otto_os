@@ -703,8 +703,10 @@ async fn host_agents_run(
     }
 }
 
-/// Recursively copy a directory (used to install a local plugin into the home).
-fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
+/// Recursively copy a directory (used to install a local plugin into the home,
+/// and to stage review-lens skills into a shared `--add-dir` bundle — see
+/// `modules::stage_review_skills`).
+pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
     for entry in std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
