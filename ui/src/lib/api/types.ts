@@ -3694,6 +3694,19 @@ export interface QueryResult {
   masked?: boolean;
 }
 
+/**
+ * Body for the read-only MCP query endpoint
+ * (`POST /api/v1/connections/{id}/db/mcp-query`) — the agent-facing query path used
+ * by `ottod mcp-tools`. Writes/DDL are refused server-side (`mcp_read_only:`); rows
+ * are hard-capped (200) and PII-masked. Mirrors `McpQueryReq` in
+ * `crates/otto-dbviewer/src/http.rs`.
+ */
+export interface McpDbQueryReq {
+  statement: string;
+  max_rows?: number | null;
+  node?: string | null;
+}
+
 /** Selectable output format for the streaming local-file export. */
 export type DbExportFormat =
   | 'csv'

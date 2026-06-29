@@ -117,6 +117,13 @@ Notes:
   the flag), so a genuine read still passes on its own classification while a raw write tagged
   `explain:true` is still blocked. The UI requires a typed confirmation before sending
   `confirm_write`.
+- DB read-only MCP query (`POST /api/v1/connections/{id}/db/mcp-query`, ws **viewer**;
+  global connections: root) — the agent-facing query path used by `ottod mcp-tools`. Body
+  `{statement, max_rows?, node?}` → `QueryResult`. Read-only is enforced **unconditionally**
+  (independent of the connection's write-guard): a statement classified as a write/DDL is
+  rejected with `403 forbidden` and a `Problem.message` prefixed `mcp_read_only: ` **before**
+  any driver runs; non-queryable connection kinds (ssh/custom) → `400 invalid`. Rows are
+  hard-capped (200) and cell values are PII-masked server-side.
 - Session create with kind=connection requires `connection_id`; provider is set server-side
   to the connection kind. Title defaults: agent → "<provider> #N", connection → conn name.
 - PR routes resolve the provider + account from the repo row (`provider`, `git_account_id`);
@@ -139,6 +146,13 @@ Notes:
   `loopback`/`none` are stricter postures suited to non-model shells. `providers`
   defaults to `["claude","codex","agy","shell"]`. Connection sessions are never
   sandboxed. (Settings:Admin via `PUT /settings`.)
+- `otto_mcp_enabled` — toggles the first-party `otto` MCP server (Otto's read-only tools +
+  the read-only DB connection tools: `otto_list_connections`, `otto_db_schema`/`_children`/
+  `_object`, `otto_db_query`) attached to every agent session. **Default ON** (opt-out): an
+  absent value or unlisted workspace resolves to enabled. A bare scalar `true`/`false` is the
+  global toggle; a `{ "<ws>": bool }` object overrides per workspace. Claude/agy receive it via
+  the workspace `.mcp.json`; Codex via per-spawn `-c mcp_servers.otto.*` overrides. (Settings via
+  `PUT /settings`.)
 
 ## Agent Swarm (#59–#86)
 
