@@ -850,6 +850,11 @@ async fn deliver_run_result(
     // `result_channel`/`result_thread`) — e.g. to post results to a #releases
     // channel, or to give a manual UI run a destination.
     let str_at = |k: &str| obj.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    // Token comes from the workspace whose integration received the message
+    // (workflows are global, so that may differ from the workflow's workspace).
+    let result_ws: String = str_at("origin_workspace_id")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| workflow.workspace_id.clone());
     let (channel, chat, thread) = match str_at("result_chat") {
         Some(c) => (str_at("result_channel").or_else(|| str_at("channel")), Some(c), str_at("result_thread")),
         None => (str_at("channel"), str_at("chat"), str_at("thread")),
@@ -875,7 +880,7 @@ async fn deliver_run_result(
         };
         if let Some(chan) = chan {
             match otto_state::IntegrationsRepo::new(ctx.pool.clone())
-                .get(&workflow.workspace_id, chan)
+                .get(&result_ws, chan)
                 .await
             {
                 Ok(Some(integ)) => {

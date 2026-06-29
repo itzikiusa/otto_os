@@ -125,6 +125,24 @@ impl WorkflowsRepo {
         rows.iter().map(row_to_workflow).collect()
     }
 
+    /// Resolve a workflow by name **globally** (across all workspaces),
+    /// case-insensitively. Workflows are a global library; a chat trigger that
+    /// names a workflow finds it regardless of which workspace's integration
+    /// received the message. Ties prefer `prefer_ws` (the message's workspace),
+    /// then the most recently updated.
+    pub async fn find_by_name(&self, name: &str, prefer_ws: &Id) -> Result<Option<Workflow>> {
+        let row = sqlx::query(
+            "SELECT * FROM workflows WHERE name = ? COLLATE NOCASE
+             ORDER BY (workspace_id = ?) DESC, updated_at DESC LIMIT 1",
+        )
+        .bind(name.trim())
+        .bind(prefer_ws)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("find workflow by name"))?;
+        row.map(|r| row_to_workflow(&r)).transpose()
+    }
+
     pub async fn update(
         &self,
         id: &Id,
@@ -477,6 +495,24 @@ mod tests {
         let got = repo.get_version(&wf.id, 2).await.unwrap().unwrap();
         assert_eq!(got.graph.nodes.len(), 1);
         assert!(repo.get_version(&wf.id, 99).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn find_by_name_is_global_and_prefers_workspace() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let g = WorkflowGraph::default();
+        let a = repo.create(&"wsA".into(), "Write tests", "", &g, &"u".into()).await.unwrap();
+        let b = repo.create(&"wsB".into(), "Write tests", "", &g, &"u".into()).await.unwrap();
+
+        // Global resolution finds it from a third workspace; case-insensitive.
+        let any = repo.find_by_name("write TESTS", &"wsC".into()).await.unwrap();
+        assert!(any.is_some(), "resolves across all workspaces");
+
+        // Ties prefer the requested workspace.
+        assert_eq!(repo.find_by_name("Write tests", &"wsA".into()).await.unwrap().unwrap().id, a.id);
+        assert_eq!(repo.find_by_name("Write tests", &"wsB".into()).await.unwrap().unwrap().id, b.id);
+        assert!(repo.find_by_name("nope", &"wsA".into()).await.unwrap().is_none());
     }
 
     #[tokio::test]

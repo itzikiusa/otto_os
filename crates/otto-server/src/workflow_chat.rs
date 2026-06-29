@@ -43,17 +43,49 @@ pub struct WorkflowCommand {
     pub raw: String,
 }
 
+/// Strip Slack entity tokens so the structured parser sees clean text: `<@U…>`
+/// mentions, `<#C…>` channel refs and `<!here>` are removed; `<url|label>` links
+/// keep their label. (A leading bot mention is what otherwise breaks the first
+/// `Action: Workflow` line.)
+fn strip_slack_tokens(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let bytes = text.as_bytes();
+    while i < text.len() {
+        if bytes[i] == b'<' {
+            if let Some(rel) = text[i..].find('>') {
+                let inner = &text[i + 1..i + rel];
+                if inner.starts_with('@') || inner.starts_with('#') || inner.starts_with('!') {
+                    // mention / channel / special command → drop entirely
+                } else if let Some(pipe) = inner.find('|') {
+                    out.push_str(&inner[pipe + 1..]); // <url|label> → label
+                } else {
+                    out.push_str(inner); // <url> → url
+                }
+                i += rel + 1;
+                continue;
+            }
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// Parse a structured workflow command. Returns `None` unless the text declares
-/// `Action: Workflow` and carries a non-empty `Name:`.
+/// `Action: Workflow` and carries a non-empty `Name:`. Tolerant of a leading
+/// Slack `@bot` mention.
 pub fn parse_workflow_command(text: &str) -> Option<WorkflowCommand> {
-    if !text.to_lowercase().contains("action:") {
+    let cleaned = strip_slack_tokens(text);
+    if !cleaned.to_lowercase().contains("action:") {
         return None;
     }
     let mut fields: HashMap<String, String> = HashMap::new();
     let mut goals: Vec<String> = vec![];
     let mut current_label: Option<String> = None;
 
-    for raw_line in text.lines() {
+    for raw_line in cleaned.lines() {
         let line = raw_line.trim();
         // Bullet line under the Goals label → a goal item.
         let bullet = line
@@ -145,13 +177,35 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
     ) -> Option<WorkflowChatAck> {
         let cmd = parse_workflow_command(text)?;
         let repo = WorkflowsRepo::new(self.ctx.pool.clone());
-        let wfs = repo.list(&workspace_id.to_string()).await.ok()?;
-        let wf = wfs
-            .into_iter()
-            .find(|w| w.name.trim().eq_ignore_ascii_case(cmd.name.trim()))?;
+        // Workflows are a GLOBAL library: resolve by name across all workspaces,
+        // preferring one in the message's own workspace.
+        let wf = match repo.find_by_name(&cmd.name, &workspace_id.to_string()).await {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                tracing::info!(
+                    "workflow chat: parsed Action:Workflow but no workflow named '{}' exists — ignoring",
+                    cmd.name
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!("workflow chat: lookup for '{}' failed: {e}", cmd.name);
+                return None;
+            }
+        };
+        tracing::info!(
+            "workflow chat: starting workflow '{}' (id {}, ws {}) from {channel}/{chat}",
+            wf.name,
+            wf.id,
+            wf.workspace_id
+        );
 
+        // The result is reported back via the workspace whose integration
+        // received the message (`origin_workspace_id`), not necessarily the
+        // workflow's own workspace (workflows are global).
         let input = json!({
             "trigger": "chat",
+            "origin_workspace_id": workspace_id,
             "channel": channel,
             "chat": chat,
             "thread": thread,
@@ -212,6 +266,22 @@ mod tests {
         assert_eq!(cmd.working_directory.as_deref(), Some("~/repo"));
         assert_eq!(cmd.relevant_info, vec!["~/a", "~/b"]);
         assert_eq!(cmd.goals, vec!["100% test coverage", "under 2 minutes runtime"]);
+    }
+
+    #[test]
+    fn tolerates_leading_slack_mention() {
+        // Slack prefixes the message with `<@Ubot>` — on the same line as the
+        // first field. This previously broke parsing (the run went to a chat
+        // session instead of the workflow).
+        let inline = "<@U08ABCDEF> Action: Workflow\nName: Write tests for a story\nMsg: go\n";
+        let cmd = parse_workflow_command(inline).expect("inline mention should parse");
+        assert_eq!(cmd.name, "Write tests for a story");
+
+        let own_line = "<@U08ABCDEF>\nAction: Workflow\nName: Write tests for a story\n";
+        assert_eq!(
+            parse_workflow_command(own_line).unwrap().name,
+            "Write tests for a story"
+        );
     }
 
     #[test]
