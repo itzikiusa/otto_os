@@ -15,6 +15,7 @@ pub mod swarm_trigger;
 pub mod telegram;
 pub mod transcript;
 pub mod webhook;
+pub mod workflow_trigger;
 
 pub use adapter::{Adapter, Inbound};
 pub use bridge::Bridge;

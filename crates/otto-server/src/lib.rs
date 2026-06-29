@@ -62,6 +62,7 @@ pub mod swarm_runtime;
 pub mod swarm_scheduler;
 pub mod swarm_verify;
 pub mod swarm_workspace;
+pub mod workflow_chat;
 pub mod workflow_engine;
 pub mod workflow_trigger_scheduler;
 pub mod workgraph_projector;

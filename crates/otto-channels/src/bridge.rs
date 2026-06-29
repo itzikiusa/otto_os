@@ -209,6 +209,9 @@ pub struct Bridge {
     /// `approve`/`reject` reply resolves an awaiting run's gate. Injected by
     /// otto-server (which owns the run engine).
     run_trigger: Option<Arc<dyn RunTrigger>>,
+    /// Optional hook: a structured `Action: Workflow` message starts a workflow
+    /// run (resolved by Name). Injected by otto-server (owns the workflow engine).
+    workflow_trigger: Option<Arc<dyn crate::workflow_trigger::WorkflowChatTrigger>>,
 }
 
 impl Bridge {
@@ -228,10 +231,13 @@ impl Bridge {
             sessions: Mutex::new(HashMap::new()),
             swarm_trigger: None,
             run_trigger: None,
+            workflow_trigger: None,
         })
     }
 
-    /// Builder variant that wires the swarm-launch + run hooks (used by otto-server).
+    /// Builder variant that wires the swarm-launch + run + workflow hooks (used by
+    /// otto-server).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_swarm_trigger(
         manager: Arc<SessionManager>,
         workspaces: WorkspacesRepo,
@@ -240,6 +246,7 @@ impl Bridge {
         root_user_id: String,
         swarm_trigger: Option<Arc<dyn SwarmTrigger>>,
         run_trigger: Option<Arc<dyn RunTrigger>>,
+        workflow_trigger: Option<Arc<dyn crate::workflow_trigger::WorkflowChatTrigger>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             manager,
@@ -250,6 +257,7 @@ impl Bridge {
             sessions: Mutex::new(HashMap::new()),
             swarm_trigger,
             run_trigger,
+            workflow_trigger,
         })
     }
 
@@ -362,6 +370,34 @@ impl Bridge {
                         .await;
                     return;
                 }
+            }
+        }
+
+        // --- 3d. Workflow trigger: a structured `Action: Workflow` message starts
+        // a workflow run (resolved by Name within the workspace). Available on all
+        // channels, including webhook.
+        if let Some(trigger) = &self.workflow_trigger {
+            if let Some(ack) = trigger
+                .try_start(
+                    &msg.workspace_id,
+                    adapter.channel().as_str(),
+                    &msg.chat,
+                    msg.thread.as_deref(),
+                    &msg.user,
+                    &msg.text,
+                )
+                .await
+            {
+                info!(
+                    channel = %adapter.channel().as_str(),
+                    workspace = %msg.workspace_id,
+                    chat = %msg.chat,
+                    "bridge: inbound message started a workflow"
+                );
+                let _ = adapter
+                    .send_formatted(&msg.chat, msg.thread.as_deref(), &ack.reply)
+                    .await;
+                return;
             }
         }
 

@@ -19,8 +19,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use otto_core::domain::{ScheduledTask, ScheduledTaskPreset, ScheduledTaskRun, WorkspaceRole};
+use otto_core::workflows::{ConvertTaskReq, ConvertTaskResp, WorkflowEdge, WorkflowGraph, WorkflowNode};
 use otto_core::Error;
-use otto_state::{NewScheduledTask, ScheduledTaskPatch};
+use otto_state::{NewScheduledTask, NewWorkflowTrigger, ScheduledTaskPatch, TriggersRepo, WorkflowsRepo};
 
 use crate::auth::{require_ws_role, CurrentUser};
 use crate::cadence;
@@ -42,6 +43,119 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/scheduled-tasks/{id}/run", post(run_now))
         .route("/scheduled-tasks/{id}/runs", get(list_runs))
         .route("/scheduled-tasks/runs/{run_id}/report", get(report))
+        .route(
+            "/scheduled-tasks/{id}/convert-to-workflow",
+            post(convert_to_workflow),
+        )
+}
+
+/// `POST /scheduled-tasks/{id}/convert-to-workflow` — materialize a scheduled
+/// task as a Workflow (`manual_trigger → agent_prompt [→ channel_notify]`) plus a
+/// `schedule` trigger mirroring its cadence (interval/daily/weekly/cron + tz).
+/// Optionally disables the source task. This is the bridge between the single-step
+/// Scheduled-Tasks surface and the multi-step Workflow surface.
+async fn convert_to_workflow(
+    Path(id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    body: Option<Json<ConvertTaskReq>>,
+) -> ApiResult<Json<ConvertTaskResp>> {
+    let task = ctx.scheduled_tasks.get(&id).await.map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    let req = body.map(|b| b.0).unwrap_or_default();
+
+    let node = |id: &str, kind: &str, name: &str, x: f64, params: Value| WorkflowNode {
+        id: id.into(),
+        kind: kind.into(),
+        name: name.into(),
+        x,
+        y: 80.0,
+        params,
+        retry: None,
+    };
+    let provider = if task.provider.trim().is_empty() {
+        "claude".to_string()
+    } else {
+        task.provider.clone()
+    };
+    let mut nodes = vec![
+        node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
+        node(
+            "agent",
+            "agent_prompt",
+            &task.name,
+            320.0,
+            json!({ "prompt": task.prompt, "provider": provider }),
+        ),
+    ];
+    let mut edges = vec![WorkflowEdge {
+        id: "trigger-agent".into(),
+        source: "trigger".into(),
+        target: "agent".into(),
+        condition: None,
+    }];
+    // If the task delivers to a chat channel, mirror it with a channel_notify node
+    // (channel_notify does {key} substitution from the agent output's `reply`).
+    let dest_type = task.destination.get("type").and_then(Value::as_str).unwrap_or("none");
+    if dest_type == "slack" || dest_type == "telegram" {
+        nodes.push(node(
+            "notify",
+            "channel_notify",
+            "Notify",
+            600.0,
+            json!({ "channel": dest_type, "message": "{reply}" }),
+        ));
+        edges.push(WorkflowEdge {
+            id: "agent-notify".into(),
+            source: "agent".into(),
+            target: "notify".into(),
+            condition: None,
+        });
+    }
+    let graph = WorkflowGraph { nodes, edges };
+
+    let wf = WorkflowsRepo::new(ctx.pool.clone())
+        .create(
+            &task.workspace_id,
+            &format!("{} (from scheduled task)", task.name),
+            &format!("Converted from scheduled task {}", task.id),
+            &graph,
+            &user.id,
+        )
+        .await
+        .map_err(ApiError)?;
+
+    // Mirror the cadence as a schedule trigger (carry the timezone too).
+    let mut spec = task.schedule.clone();
+    if let Some(obj) = spec.as_object_mut() {
+        if !task.timezone.trim().is_empty() {
+            obj.insert("timezone".into(), json!(task.timezone));
+        }
+    }
+    let trigger = TriggersRepo::new(ctx.pool.clone())
+        .create(NewWorkflowTrigger {
+            workflow_id: wf.id.clone(),
+            kind: "schedule".into(),
+            spec,
+            enabled: task.enabled,
+        })
+        .await
+        .ok();
+
+    if req.disable_task {
+        let _ = ctx
+            .scheduled_tasks
+            .update(
+                &task.id,
+                ScheduledTaskPatch { enabled: Some(false), ..Default::default() },
+            )
+            .await;
+    }
+
+    Ok(Json(ConvertTaskResp {
+        workflow_id: wf.id,
+        trigger_id: trigger.map(|t| t.id),
+    }))
 }
 
 // --- Request bodies --------------------------------------------------------

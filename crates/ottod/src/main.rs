@@ -606,6 +606,10 @@ async fn run(cfg: Config) -> Result<(), String> {
         // Otto run on the root user's behalf (the channel-trust model).
         .with_run_trigger(std::sync::Arc::new(
             otto_server::run_channels::ChannelRunTrigger::new(ctx.clone(), uid.clone()),
+        ))
+        // A structured `Action: Workflow` message starts a workflow run by name.
+        .with_workflow_trigger(std::sync::Arc::new(
+            otto_server::workflow_chat::WorkflowChatTriggerImpl { ctx: ctx.clone() },
         ));
         // When self-improvement is on, learn from each finished channel
         // interaction and reply with the result in the same thread (per-workspace

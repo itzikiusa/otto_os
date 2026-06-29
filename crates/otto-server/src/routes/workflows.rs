@@ -433,7 +433,14 @@ pub async fn get_run(
 
 /// `GET /workflows/templates`
 pub async fn list_templates() -> Json<Vec<WorkflowTemplate>> {
-    Json(game_templates())
+    Json(all_templates())
+}
+
+/// All built-in templates: the orchestrator examples first, then game pipelines.
+fn all_templates() -> Vec<WorkflowTemplate> {
+    let mut v = flow_templates();
+    v.extend(game_templates());
+    v
 }
 
 /// `POST /workspaces/{wid}/workflows/from-template`
@@ -444,7 +451,7 @@ pub async fn create_from_template(
     Json(req): Json<FromTemplateReq>,
 ) -> ApiResult<Json<Workflow>> {
     crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let tpl = game_templates()
+    let tpl = all_templates()
         .into_iter()
         .find(|t| t.id == req.template_id)
         .ok_or_else(|| ApiError(Error::NotFound("template".into())))?;
@@ -526,6 +533,177 @@ fn game_templates() -> Vec<WorkflowTemplate> {
                 "scratch",
                 "Design a scratch-card game: prize tiers and their win probabilities, panel layout, reveal mechanic, and RTP ~95%. Return a structured spec.",
             ),
+        },
+    ]
+}
+
+/// The orchestrator example templates: end-to-end flows that exercise the wired
+/// nodes (product/review), control flow (loop + edge conditions), goals-scored
+/// review, human approval, and a drafted PR. They expect the run **input** to
+/// carry `repo_id` (and optionally `base`, `story_id`, `goals`) — a Slack
+/// `Action: Workflow` message or the Run dialog supplies these; the first node
+/// consolidates the Jira ticket / working dir / relevant info into a brief.
+fn flow_templates() -> Vec<WorkflowTemplate> {
+    let node = |id: &str, kind: &str, name: &str, x: f64, params: serde_json::Value| WorkflowNode {
+        id: id.into(),
+        kind: kind.into(),
+        name: name.into(),
+        x,
+        y: 80.0,
+        params,
+        retry: None,
+    };
+    let edge = |s: &str, t: &str| WorkflowEdge {
+        id: format!("{s}-{t}"),
+        source: s.into(),
+        target: t.into(),
+        condition: None,
+    };
+    let prepare = |goal: &str| {
+        node(
+            "prepare",
+            "agent_prompt",
+            "Prepare relevant info",
+            300.0,
+            json!({ "prompt": format!(
+                "{goal}\n\nFrom the input data, read the Jira ticket (if any), the working \
+                 directory, and every 'relevant_info' path, plus the message and goals. Search \
+                 the codebase for references. Produce a single consolidated brief: scope, where \
+                 the code lives, acceptance criteria, and the goals to satisfy. This brief is \
+                 passed to the following steps."
+            ) }),
+        )
+    };
+    // Loop body: fix → review (scored, goals-aware) until score ≥ threshold.
+    let fix_review_loop = |max: u64, threshold: u64| {
+        node(
+            "iterate",
+            "loop",
+            "Fix → review until passing",
+            900.0,
+            json!({
+                "max_iterations": max,
+                "until": "last.passed == true",
+                "steps": [
+                    { "kind": "agent_prompt", "name": "fix", "params": {
+                        "prompt": "Address the review findings in the input (if any) and make all \
+                                   tests pass while satisfying the goals. If there are no findings \
+                                   yet, do the initial implementation."
+                    }},
+                    { "kind": "review_run", "name": "review", "params": { "threshold": threshold } }
+                ]
+            }),
+        )
+    };
+
+    vec![
+        // 1) Writing tests for a story.
+        WorkflowTemplate {
+            id: "write-tests".into(),
+            name: "Write tests for a story".into(),
+            description: "Read the story & search references → write tests → review-iterate until \
+                          the score passes the threshold → human approval → draft PR. Provide \
+                          repo_id (and base) in the run input."
+                .into(),
+            icon: "check-square".into(),
+            graph: WorkflowGraph {
+                nodes: vec![
+                    node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
+                    prepare("You are preparing context to WRITE TESTS."),
+                    node("implement", "agent_prompt", "Write tests", 600.0, json!({
+                        "prompt": "Using the brief, implement comprehensive tests (happy path, \
+                                   meaningful validations, realistic errors). Run the suite and make them pass."
+                    })),
+                    fix_review_loop(3, 80),
+                    node("approve", "human_approval", "Approve tests", 1200.0, json!({
+                        "prompt": "Review the generated tests before opening a PR."
+                    })),
+                    node("pr", "git_pr", "Draft PR", 1500.0, Value::Null),
+                ],
+                edges: vec![
+                    edge("trigger", "prepare"),
+                    edge("prepare", "implement"),
+                    edge("implement", "iterate"),
+                    edge("iterate", "approve"),
+                    edge("approve", "pr"),
+                ],
+            },
+        },
+        // 2) Implementing a feature from a story.
+        WorkflowTemplate {
+            id: "implement-feature".into(),
+            name: "Implement a feature from a story".into(),
+            description: "Analyze the story → search references → implement → tests → \
+                          review-iterate until passing → human approval → draft PR. Provide \
+                          repo_id and story_id in the run input."
+                .into(),
+            icon: "command".into(),
+            graph: WorkflowGraph {
+                nodes: vec![
+                    node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
+                    node("analyze", "product_analyze", "Analyze story", 300.0, Value::Null),
+                    prepare("You are preparing context to IMPLEMENT a feature."),
+                    node("implement", "agent_prompt", "Implement", 900.0, json!({
+                        "prompt": "Using the analysis + brief, implement the feature and its tests. \
+                                   Run the suite and make it pass."
+                    })),
+                    fix_review_loop(4, 80),
+                    node("approve", "human_approval", "Approve", 1500.0, json!({
+                        "prompt": "Review the implementation before opening a PR."
+                    })),
+                    node("pr", "git_pr", "Draft PR", 1800.0, Value::Null),
+                ],
+                edges: vec![
+                    edge("trigger", "analyze"),
+                    edge("analyze", "prepare"),
+                    edge("prepare", "implement"),
+                    edge("implement", "iterate"),
+                    edge("iterate", "approve"),
+                    edge("approve", "pr"),
+                ],
+            },
+        },
+        // 3) PO discovery → diagram → review → refine → RFC/Jira.
+        WorkflowTemplate {
+            id: "po-lifecycle".into(),
+            name: "PO discovery → RFC/Jira".into(),
+            description: "Discovery draft → Canvas diagram → review → refine/attach info → \
+                          review → publish as RFC or Jira (dry-run by default). Provide story_id \
+                          in the input to persist/publish."
+                .into(),
+            icon: "compass".into(),
+            graph: WorkflowGraph {
+                nodes: vec![
+                    node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
+                    node("discovery", "agent_prompt", "Discovery draft", 300.0, json!({
+                        "prompt": "Expand the idea/message in the input into a structured product \
+                                   draft: problem, target users, value, scope, out-of-scope, risks, \
+                                   and open questions."
+                    })),
+                    node("diagram", "canvas", "Diagram", 600.0, json!({
+                        "prompt": "Diagram the proposed solution flow described above.",
+                        "mode": "mermaid"
+                    })),
+                    node("review1", "human_approval", "Review discovery + diagram", 900.0, json!({
+                        "prompt": "Review the discovery draft and the diagram."
+                    })),
+                    node("refine", "product_rewrite", "Refine + attach info", 1200.0, Value::Null),
+                    node("review2", "human_approval", "Review refined story", 1500.0, json!({
+                        "prompt": "Review the refined story before publishing."
+                    })),
+                    node("publish", "product_publish", "Publish (RFC/Jira)", 1800.0, json!({
+                        "kind": "rfc", "dry_run": true
+                    })),
+                ],
+                edges: vec![
+                    edge("trigger", "discovery"),
+                    edge("discovery", "diagram"),
+                    edge("diagram", "review1"),
+                    edge("review1", "refine"),
+                    edge("refine", "review2"),
+                    edge("review2", "publish"),
+                ],
+            },
         },
     ]
 }
@@ -840,12 +1018,55 @@ mod tests {
             "db_query", "broker_peek", "channel_notify", "budget_gate",
             "human_approval", "swarm_task", "api_run",
             "product_analyze", "product_rewrite", "product_plan", "review_run",
+            "condition", "loop", "product_publish", "canvas", "git_pr",
         ];
         for kind in new_kinds {
             assert!(
                 workflow_engine::is_known_kind(kind),
                 "catalog missing new kind '{kind}'"
             );
+        }
+    }
+
+    #[test]
+    fn flow_templates_are_valid() {
+        let ids: Vec<String> = flow_templates().into_iter().map(|t| t.id).collect();
+        for want in ["write-tests", "implement-feature", "po-lifecycle"] {
+            assert!(ids.iter().any(|id| id == want), "missing flow template {want}");
+        }
+        for t in flow_templates() {
+            assert!(!t.graph.nodes.is_empty(), "{} has no nodes", t.id);
+            // Every top-level node kind is known to the executor.
+            for n in &t.graph.nodes {
+                assert!(
+                    workflow_engine::is_known_kind(&n.kind),
+                    "unknown kind '{}' in {}",
+                    n.kind,
+                    t.id
+                );
+            }
+            // Loop steps must also use known kinds.
+            for n in &t.graph.nodes {
+                if n.kind == "loop" {
+                    let steps = n.params.get("steps").and_then(|s| s.as_array());
+                    assert!(steps.is_some(), "{} loop has no steps", t.id);
+                    for step in steps.unwrap() {
+                        let k = step.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                        assert!(
+                            workflow_engine::is_known_kind(k),
+                            "loop step kind '{k}' unknown in {}",
+                            t.id
+                        );
+                    }
+                }
+            }
+            // Edges reference existing nodes (a precondition for a clean topo sort).
+            let ids: std::collections::HashSet<&str> =
+                t.graph.nodes.iter().map(|n| n.id.as_str()).collect();
+            for e in &t.graph.edges {
+                assert!(ids.contains(e.source.as_str()), "{}: dangling edge source", t.id);
+                assert!(ids.contains(e.target.as_str()), "{}: dangling edge target", t.id);
+            }
         }
     }
 
