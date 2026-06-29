@@ -23,6 +23,23 @@ use crate::state::ServerCtx;
 const SCAN: Duration = Duration::from_secs(60);
 const SLICE: Duration = Duration::from_millis(500);
 
+/// Clears a task id from the in-flight set on drop, so the entry is released even
+/// if `run_task` panics — otherwise the task would be wedged "in-flight" until the
+/// next daemon restart. Poison-tolerant.
+struct InFlightGuard {
+    set: Arc<Mutex<HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
 /// Start the supervisor. Returns a cancel flag; set to `true` to stop the loop
 /// (mirrors the swarm / workflow-trigger / cli-update schedulers).
 pub fn start(ctx: ServerCtx) -> Arc<AtomicBool> {
@@ -62,7 +79,7 @@ async fn tick(ctx: &ServerCtx, in_flight: &Arc<Mutex<HashSet<String>>>) -> otto_
         // Claim the in-flight guard FIRST. If busy or not due → skip, leaving the
         // cursor untouched (the engine advances it only on completion).
         {
-            let mut set = in_flight.lock().unwrap();
+            let mut set = in_flight.lock().unwrap_or_else(|e| e.into_inner());
             if set.contains(&task.id) {
                 continue;
             }
@@ -76,11 +93,14 @@ async fn tick(ctx: &ServerCtx, in_flight: &Arc<Mutex<HashSet<String>>>) -> otto_
 
         info!(task = %task.id, "scheduled tasks: firing due task");
         let ctx2 = ctx.clone();
-        let in_flight2 = Arc::clone(in_flight);
-        let task_id = task.id.clone();
+        let guard = InFlightGuard {
+            set: Arc::clone(in_flight),
+            id: task.id.clone(),
+        };
         tokio::spawn(async move {
+            // The guard clears the in-flight entry on drop — including on panic.
+            let _guard = guard;
             let _ = run_task(&ctx2, &task, "schedule").await;
-            in_flight2.lock().unwrap().remove(&task_id);
         });
     }
     Ok(())

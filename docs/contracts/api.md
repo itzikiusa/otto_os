@@ -2077,7 +2077,7 @@ status, trigger, started_at, finished_at?, summary, report_path?, report_rel?,
 delivered, delivery_error?, error?, session_id?, report_hash?, proof_pack_id?,
 attempts, skipped_delivery, workflow_run_id?, created_at}`.
 
-Persistence: `otto_state::scheduled_tasks` (migrations 0084 + 0085); scheduler:
+Persistence: `otto_state::scheduled_tasks` (migrations 0084 + 0086); scheduler:
 `otto_server::scheduled_tasks_scheduler` (60s tick, in-flight-guard-first,
 advance-cursor-on-completion, startup reaper, global run semaphore); engine:
 `scheduled_tasks_engine` (session-based provider-agnostic agent runs via
