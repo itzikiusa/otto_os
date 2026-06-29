@@ -647,12 +647,18 @@ pub async fn otto_server_config(
             .iter()
             .filter_map(|t| t["name"].as_str().map(|n| n.strip_prefix("otto.").unwrap_or(n).to_string()))
             .collect();
+        // The UI sends full `otto.*` names; the read path (`enabled_tools`) keys on
+        // the bare name. Accept either form, validate + STORE the bare name so the
+        // stored set matches what the dispatcher/status compare against.
+        let mut normalized: Vec<String> = Vec::with_capacity(tools.len());
         for t in tools {
-            if !known.contains(t) {
+            let bare = t.strip_prefix("otto.").unwrap_or(t).to_string();
+            if !known.contains(&bare) {
                 return Err(ApiError(Error::Invalid(format!("unknown otto tool '{t}'"))));
             }
+            normalized.push(bare);
         }
-        settings.put("mcp_otto_server_tools", &json!(tools)).await.map_err(ApiError)?;
+        settings.put("mcp_otto_server_tools", &json!(normalized)).await.map_err(ApiError)?;
     }
     let mut minted: Option<String> = None;
     if req.rotate_token {

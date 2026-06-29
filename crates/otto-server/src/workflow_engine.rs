@@ -313,6 +313,32 @@ pub async fn run_workflow(
         .collect();
     // Resolve the user this run acts as (for spawning visible agent sessions).
     let user = resolve_run_user(&ctx, &workflow.created_by).await;
+    // Seed the run input from the entry manual_trigger node's configured fields
+    // (its inspector — prompt/working_directory/repo_id/goals/…), letting the
+    // actual /run body or chat-trigger input override per key. This is what makes
+    // the Start node the place to set the input for a manual run.
+    let input = {
+        let mut seeded = serde_json::Map::new();
+        if let Some(mt) = workflow.graph.nodes.iter().find(|n| n.kind == "manual_trigger") {
+            if let Some(o) = mt.params.as_object() {
+                for (k, v) in o {
+                    if !v.is_null() {
+                        seeded.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        if let Some(o) = input.as_object() {
+            for (k, v) in o {
+                seeded.insert(k.clone(), v.clone());
+            }
+        }
+        if seeded.is_empty() {
+            input
+        } else {
+            Value::Object(seeded)
+        }
+    };
     // Run-level working directory: the `working_directory` from the run input
     // (e.g. a Slack `Working Directory:` field), else the workspace root. Agent
     // nodes run here — so a workflow owned by workspace A can operate on repo X.

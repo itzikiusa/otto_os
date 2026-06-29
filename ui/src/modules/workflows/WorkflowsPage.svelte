@@ -348,6 +348,29 @@
     toasts.success('Tidied layout');
   }
 
+  // Copy-paste Slack message that triggers THIS workflow by name (shown on the
+  // Start node inspector + the Triggers panel).
+  let mtCopied = $state(false);
+  const mtSlackSnippet = $derived(
+    `@otto\n` +
+      `Action: Workflow\n` +
+      `Name: ${current?.name ?? '<workflow name>'}\n` +
+      `Msg: what you want done — instructions for the agents\n` +
+      `Jira ticket: GS-1234\n` +
+      `Working Directory: ~/path/to/repo\n` +
+      `Relevant Info: ~/path/a, ~/path/b\n` +
+      `Goals:\n  - 100% test coverage (services)\n  - under 2 minutes runtime`,
+  );
+  async function copyMtSlack(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(mtSlackSnippet);
+      mtCopied = true;
+      setTimeout(() => (mtCopied = false), 1500);
+    } catch {
+      toasts.error('Copy failed', 'Select the text and copy it manually.');
+    }
+  }
+
   async function stop(): Promise<void> {
     if (!run) return;
     try {
@@ -773,7 +796,77 @@
             </div>
             <!-- Per-kind param forms. Each kind exposes only its meaningful
                  params; unrecognised kinds fall through to a raw JSON editor. -->
-            {#if selectedNode.kind === 'agent_prompt'}
+            {#if selectedNode.kind === 'manual_trigger'}
+              <p class="insp-note">
+                These fields are the <strong>run input</strong> the workflow starts with — fill them
+                in here, then press <strong>Run</strong> (top-right). A Slack trigger or the
+                <strong>Run…</strong> editor override them per key.
+              </p>
+              <label for="mt-msg">Message / prompt</label>
+              <textarea
+                id="mt-msg"
+                rows="3"
+                placeholder="What you want done — instructions for the agents"
+                value={paramStr('msg')}
+                oninput={(e) => onParam('msg', e.currentTarget.value)}
+              ></textarea>
+              <label for="mt-wd">Working directory (where agents run)</label>
+              <input
+                id="mt-wd"
+                type="text"
+                placeholder="~/path/to/repo (default: workspace root)"
+                value={paramStr('working_directory')}
+                oninput={(e) => onParam('working_directory', e.currentTarget.value)}
+              />
+              <label for="mt-repo">Repo ID (for review / PR steps)</label>
+              <input
+                id="mt-repo"
+                type="text"
+                placeholder="git repo id — copy from the Git tab"
+                value={paramStr('repo_id')}
+                oninput={(e) => onParam('repo_id', e.currentTarget.value)}
+              />
+              <label for="mt-base">Base branch</label>
+              <input
+                id="mt-base"
+                type="text"
+                placeholder="main"
+                value={paramStr('base')}
+                oninput={(e) => onParam('base', e.currentTarget.value)}
+              />
+              <label for="mt-story">Story ID (for product steps)</label>
+              <input
+                id="mt-story"
+                type="text"
+                placeholder="product story id"
+                value={paramStr('story_id')}
+                oninput={(e) => onParam('story_id', e.currentTarget.value)}
+              />
+              <label for="mt-jira">Jira ticket</label>
+              <input
+                id="mt-jira"
+                type="text"
+                placeholder="GS-1234"
+                value={paramStr('jira_ticket')}
+                oninput={(e) => onParam('jira_ticket', e.currentTarget.value)}
+              />
+              <label for="mt-goals">Goals (one per line)</label>
+              <textarea
+                id="mt-goals"
+                rows="3"
+                placeholder={'100% test coverage (services)\nunder 2 minutes runtime'}
+                value={paramLines('goals')}
+                oninput={(e) => onParamLines('goals', e.currentTarget.value)}
+              ></textarea>
+              <div class="insp-slack">
+                <div class="is-head">
+                  <strong>Or trigger from Slack</strong>
+                  <button class="btn small" onclick={copyMtSlack}>{mtCopied ? 'Copied' : 'Copy'}</button>
+                </div>
+                <p class="insp-note">Post this where the Otto bot is configured for your workspace (matched by Name):</p>
+                <pre class="is-snip">{mtSlackSnippet}</pre>
+              </div>
+            {:else if selectedNode.kind === 'agent_prompt'}
               <label for="np-prompt">Prompt</label>
               <textarea
                 id="np-prompt"
@@ -1560,6 +1653,39 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+  .insp-note {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .insp-slack {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .is-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .is-snip {
+    margin: 0;
+    padding: 8px 10px;
+    background: var(--bg, #0d0f13);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    color: var(--text);
+    overflow-x: auto;
   }
   .insp-h {
     display: flex;
