@@ -3,12 +3,21 @@
 
 import { api } from './client';
 import type {
+  EvalMatrix,
+  EvalScore,
+  GoldenTask,
+  GoldenTaskReq,
   ImplDiffResp,
   LibrarySkill,
+  PromoteGate,
   PromoteSkillReq,
+  RateIterationReq,
+  RegressionReq,
+  RunGoldenReq,
   SkillEval,
   SkillEvalConfig,
   SkillSourcesResp,
+  StartMatrixReq,
   StartSkillEvalReq,
 } from './types';
 
@@ -52,4 +61,75 @@ export const skillsEvalApi = {
     api.post<SkillEval>(
       `/skill-evaluations/${evalId}/iterations/${iterId}/agents/${index}/retry`,
     ),
+
+  // --- Eval lab: scoring, proof, rating, gate -----------------------------
+
+  /** An iteration's multi-signal score. */
+  iterScore: (evalId: string, iterId: string) =>
+    api.get<EvalScore>(`/skill-evaluations/${evalId}/iterations/${iterId}/score`),
+
+  /** An iteration's assembled proof pack (header + evidence artifacts). */
+  iterProofPack: (evalId: string, iterId: string) =>
+    api.get<{
+      exists: boolean;
+      id?: string;
+      status?: string;
+      risk_score?: number;
+      done_score?: number;
+      badges?: string[];
+      contract?: unknown;
+      artifacts?: Array<{
+        kind: string;
+        title: string;
+        status: string;
+        preview: string;
+        truncated: boolean;
+        metadata: unknown;
+      }>;
+    }>(`/skill-evaluations/${evalId}/iterations/${iterId}/proof-pack`),
+
+  /** Record a human rating (0–5) and re-derive the iteration's score. */
+  rate: (evalId: string, iterId: string, body: RateIterationReq) =>
+    api.post<SkillEval>(
+      `/skill-evaluations/${evalId}/iterations/${iterId}/rate`,
+      body,
+    ),
+
+  /** Whether (and why) the run's best (or a named) iteration may be promoted. */
+  promoteGate: (evalId: string, iterationId?: string) =>
+    api.get<PromoteGate>(
+      `/skill-evaluations/${evalId}/promote-gate${iterationId ? `?iteration_id=${encodeURIComponent(iterationId)}` : ''}`,
+    ),
+
+  /** Capture a (failed) iteration as a regression golden task. */
+  regression: (evalId: string, iterId: string, body: RegressionReq = {}) =>
+    api.post<GoldenTask>(
+      `/skill-evaluations/${evalId}/iterations/${iterId}/regression`,
+      body,
+    ),
+
+  // --- Golden tasks -------------------------------------------------------
+
+  listGolden: (wsId: string, repoKey?: string) =>
+    api.get<GoldenTask[]>(
+      `/workspaces/${wsId}/golden-tasks${repoKey ? `?repo_key=${encodeURIComponent(repoKey)}` : ''}`,
+    ),
+  createGolden: (wsId: string, body: GoldenTaskReq) =>
+    api.post<GoldenTask>(`/workspaces/${wsId}/golden-tasks`, body),
+  getGolden: (id: string) => api.get<GoldenTask>(`/golden-tasks/${id}`),
+  updateGolden: (id: string, body: GoldenTaskReq) =>
+    api.put<GoldenTask>(`/golden-tasks/${id}`, body),
+  deleteGolden: (id: string) => api.del<void>(`/golden-tasks/${id}`),
+  runGolden: (id: string, body: RunGoldenReq = {}) =>
+    api.post<SkillEval>(`/golden-tasks/${id}/run`, body),
+
+  // --- Matrices -----------------------------------------------------------
+
+  listMatrices: (wsId: string) =>
+    api.get<EvalMatrix[]>(`/workspaces/${wsId}/eval-matrices`),
+  createMatrix: (wsId: string, body: StartMatrixReq) =>
+    api.post<EvalMatrix>(`/workspaces/${wsId}/eval-matrices`, body),
+  getMatrix: (id: string) => api.get<EvalMatrix>(`/eval-matrices/${id}`),
+  cancelMatrix: (id: string) =>
+    api.post<EvalMatrix>(`/eval-matrices/${id}/cancel`),
 };

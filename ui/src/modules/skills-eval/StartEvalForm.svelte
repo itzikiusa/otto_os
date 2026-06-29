@@ -39,6 +39,9 @@
   let validatorPasses = $state(1);
   let improverProvider = $state('claude');
   let baseRef = $state('');
+  // Repo-specific commands → scored as tests/lint signals + proof-pack evidence.
+  let testCmd = $state('');
+  let lintCmd = $state('');
   let validations: SkillEvalValidationCfg[] = $state([]);
 
   let loaded = $state(false);
@@ -129,6 +132,8 @@
       })),
       improver: { provider: improverProvider, model: '' },
       base_ref: baseRef.trim() || null,
+      test_cmd: testCmd.trim() || null,
+      lint_cmd: lintCmd.trim() || null,
     };
     onstart(req);
   }
@@ -206,6 +211,18 @@
       <select id="se-imp" class="input" bind:value={improverProvider}>
         {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
       </select>
+    </div>
+  </section>
+
+  <!-- Repo-specific scoring commands -->
+  <section class="card block grid4">
+    <div style="grid-column: span 2;">
+      <label class="field-label" for="se-test">Test command <span class="hint-inline">(scored + proof)</span></label>
+      <input id="se-test" class="input" bind:value={testCmd} placeholder="e.g. cargo test  /  npm test" data-testid="eval-test-cmd" />
+    </div>
+    <div style="grid-column: span 2;">
+      <label class="field-label" for="se-lint">Lint command <span class="hint-inline">(optional)</span></label>
+      <input id="se-lint" class="input" bind:value={lintCmd} placeholder="e.g. cargo clippy  /  npm run check" data-testid="eval-lint-cmd" />
     </div>
   </section>
 
