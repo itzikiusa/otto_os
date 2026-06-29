@@ -79,6 +79,10 @@ pub struct ServerCtx {
     /// Persisted Proof Pack snapshots (review evidence bundles).
     pub proof_packs_store: otto_state::ReviewProofPacksRepo,
     pub skill_evals_store: SkillEvalsRepo,
+    /// Eval-lab: per-repo golden tasks + regression cases.
+    pub golden_tasks_store: otto_state::GoldenTasksRepo,
+    /// Eval-lab: provider × skill × prompt matrices.
+    pub eval_matrices_store: otto_state::EvalMatricesRepo,
     /// Per-run cancellation flags for in-flight skill evaluations.
     pub skill_eval_cancels: crate::skill_eval::CancelRegistry,
     pub orchestrator: Arc<Orchestrator>,

@@ -1466,6 +1466,21 @@ pub struct EvalIteration {
     /// Unified-ish diff between this iteration's skill and the improved one.
     #[serde(default)]
     pub skill_diff: String,
+    /// Multi-signal score (tests, lint, diff, review, human) for this iteration's
+    /// produced code. `None` until the scoring pipeline has run.
+    #[serde(default)]
+    pub scoring: Option<EvalScore>,
+    /// The Proof Pack assembled for this iteration's evidence (tests/lint/diff/
+    /// review/human). Openable in the UI.
+    #[serde(default)]
+    pub proof_pack_id: Option<String>,
+    /// Human quality rating 0–5 (None when not yet rated).
+    #[serde(default)]
+    pub human_rating: Option<u8>,
+    #[serde(default)]
+    pub human_note: String,
+    #[serde(default)]
+    pub human_rater: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -1501,7 +1516,202 @@ pub struct SkillEval {
     /// a single validation can be re-run and the run can be relaunched.
     #[serde(default)]
     pub config: Value,
+    /// "generate" (agent implements the task) | "score_only" (no agent — score an
+    /// existing target).
+    #[serde(default)]
+    pub mode: String,
+    /// Golden task this run evaluates, when started from one.
+    #[serde(default)]
+    pub golden_task_id: Option<String>,
+    /// Matrix this run is a cell of, plus the cell's dimensions.
+    #[serde(default)]
+    pub matrix_id: Option<String>,
+    #[serde(default)]
+    pub dim_provider: Option<String>,
+    #[serde(default)]
+    pub dim_skill: Option<String>,
+    #[serde(default)]
+    pub dim_prompt: Option<String>,
+    /// Best iteration's composite score (0–100) — the run's headline number.
+    #[serde(default)]
+    pub composite_score: Option<f64>,
+    /// Whether the run's winning skill was promoted to the library.
+    #[serde(default)]
+    pub promoted: bool,
+    #[serde(default)]
+    pub promoted_at: Option<String>,
+    #[serde(default)]
+    pub promoted_by: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Eval lab — multi-signal scoring, golden tasks, matrices, promote gate
+// ---------------------------------------------------------------------------
+
+/// One scored signal (tests, lint, review) on a 0–100 scale. `ran=false` means the
+/// signal was not collected (e.g. no lint command) and is excluded from the
+/// composite's denominator.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SignalScore {
+    pub ran: bool,
+    pub score: f64,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// The diff-quality signal: parsimony + risk of the produced change.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiffScore {
+    pub ran: bool,
+    pub files_changed: u32,
+    pub additions: u32,
+    pub deletions: u32,
+    /// Count of risky files touched (migrations, lockfiles, secrets, …).
+    pub risky: u32,
+    pub score: f64,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// The human-rating signal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HumanScore {
+    pub rating: Option<u8>,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub rater: String,
+    pub score: f64,
+}
+
+/// Relative weights for the composite. Renormalized over the signals that ran.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoreWeights {
+    pub tests: f64,
+    pub lint: f64,
+    pub diff: f64,
+    pub review: f64,
+    pub human: f64,
+}
+
+impl Default for ScoreWeights {
+    fn default() -> Self {
+        Self { tests: 0.35, lint: 0.10, diff: 0.15, review: 0.25, human: 0.15 }
+    }
+}
+
+/// The full multi-signal score for one iteration's produced code, plus the proof
+/// pack's derived status/score (the gate reads these).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvalScore {
+    pub tests: SignalScore,
+    pub lint: SignalScore,
+    pub diff: DiffScore,
+    pub review: SignalScore,
+    pub human: HumanScore,
+    pub weights: ScoreWeights,
+    /// Weighted mean over the signals that ran, 0–100.
+    pub composite: f64,
+    /// Proof pack status: missing|partial|passed|failed|waived.
+    #[serde(default)]
+    pub proof_status: String,
+    /// Proof done-contract score 0–100.
+    #[serde(default)]
+    pub done_score: u8,
+}
+
+/// A reusable, per-repo evaluation task — the golden corpus an eval runs against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoldenTask {
+    pub id: Id,
+    pub workspace_id: Id,
+    /// Repo identity: a registered repo id, else the workspace id.
+    pub repo_key: String,
+    pub name: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub skill: String,
+    #[serde(default)]
+    pub test_cmd: String,
+    #[serde(default)]
+    pub lint_cmd: String,
+    #[serde(default)]
+    pub build_cmd: String,
+    #[serde(default)]
+    pub rubric: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// "manual" | "regression".
+    pub origin: String,
+    #[serde(default)]
+    pub source_eval_id: Option<String>,
+    #[serde(default)]
+    pub source_iter_id: Option<String>,
+    pub enabled: bool,
+    pub created_by: Id,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Whether a run's winning skill may be promoted, with the reasons if not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteGate {
+    pub allowed: bool,
+    pub score: f64,
+    pub threshold: f64,
+    pub proof_status: String,
+    pub require_proof: bool,
+    pub score_ok: bool,
+    pub proof_ok: bool,
+    pub reasons: Vec<String>,
+}
+
+/// One prompt column-input of a matrix: a golden task or an inline task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatrixPrompt {
+    pub label: String,
+    pub task: String,
+    #[serde(default)]
+    pub golden_task_id: Option<String>,
+}
+
+/// One executed cell of a matrix (a single skill_eval run).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatrixCell {
+    pub eval_id: Id,
+    pub provider: String,
+    pub skill: String,
+    pub prompt: String,
+    pub status: String,
+    #[serde(default)]
+    pub composite_score: Option<f64>,
+    #[serde(default)]
+    pub proof_status: String,
+    #[serde(default)]
+    pub best_iteration: Option<u32>,
+}
+
+/// A provider × skill × prompt comparison run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalMatrix {
+    pub id: Id,
+    pub workspace_id: Id,
+    pub name: String,
+    pub status: String,
+    #[serde(default)]
+    pub repo_key: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub providers: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub prompts: Vec<MatrixPrompt>,
+    #[serde(default)]
+    pub cells: Vec<MatrixCell>,
+    pub created_at: String,
 }
 
 // ---------------------------------------------------------------------------

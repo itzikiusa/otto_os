@@ -20,6 +20,19 @@ bridges so an agent can work a ticket from a chat thread.
 
 ## Features
 
+- **Run with Otto** — the flagship **one-button** flow. Point Otto at a single
+  source item — a **Jira** story, a **Confluence** page, a **GitHub** issue or PR,
+  a **Slack/Telegram** thread, a **Product** task, a **review finding**, a
+  **failing test**, or a **scheduled-task report** — and it runs a fixed pipeline
+  end to end: *normalize the source → build a Context Packet → cut an isolated
+  branch/worktree → do the work (a single agent **or** a full Goal Loop) →
+  assemble a Proof Pack → run AI review → **pause for human approval** → draft the
+  PR*. It chains the subsystems below behind one entity (`OttoRun`) and one
+  trigger so it feels like **one button, not eight modules**, and projects into
+  Mission Control. Launch it from the UI, a Slack/Telegram `/run <ref>`, a REST
+  call, or a key-guarded webhook (which can POST the result back to a
+  `callback_url` at the gate + each terminal state). It never opens a PR without
+  human approval **and** a passing/waived Proof Pack.
 - **Agent sessions** — run `claude`, `codex`, `agy` (and a plain shell) in real
   PTY-backed terminals you can watch, split, and type into. Sessions survive
   restarts (resumable), idle-suspend to save memory, and auto-trust their
@@ -33,11 +46,18 @@ bridges so an agent can work a ticket from a chat thread.
   Findings become **tracked items** — a review-findings workflow with statuses
   and fix / verify / open-Jira / false-positive / regression-test actions — and
   can be **ingested into a Proof Pack** or saved to the Vault.
-- **Proof Packs** — an evidence layer so "done" means *proven*. Each unit of work
-  collects **artifacts** (test output, diffs, PR links, screenshots, logs) into a
-  pack, and pure rules derive a **status, risk and badges** from them. Artifacts
-  are redacted and size-capped, and optional **gates** can require a PR, a Goal
-  Loop, or passing tests before work is allowed to close.
+- **Proof Packs — the trust layer** — an evidence layer so "done" means *proven*,
+  not asserted. Each unit of work collects **artifacts** — diffs, recognized test
+  output, **CI status**, **screenshots/video**, **API/DB/Kafka read** samples,
+  review findings, self-review, and human approvals — and pure rules derive its
+  **status, risk, badges, and an explainable "done contract" score** purely from
+  the evidence (the agent never sets it). On PR creation it auto-captures CI and
+  **checks the PR description against the actual change**; it enforces optional
+  **per-repo policy** ("a passing test / green CI required"), freezes
+  **immutable, tamper-evident snapshots**, exports a self-contained
+  **Markdown/HTML report**, and records an **accountable human waiver** (approver
+  + reason). Artifacts are redacted and size-capped, and a **gate** can block a PR
+  over an unproven pack (with an audited override).
 - **Product (Jira / Confluence)** — import a Jira issue or Confluence page
   (search by project or space — no key prefix needed) and run a product-owner
   workflow over it: multi-agent, multi-provider **analysis** with a summarizer

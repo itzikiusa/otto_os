@@ -21,6 +21,7 @@ import type {
   ProofSummaryResp,
   RepoProofConfig,
   RepoProofConfigResp,
+  WaiveReq,
 } from './types';
 
 /** Filters for the workspace pack list (all optional). */
@@ -78,9 +79,10 @@ export function assembleProof(id: string, body: AssembleReq): Promise<ProofPackR
   return api.post<ProofPackResp>(`/proof-packs/${id}/assemble`, body);
 }
 
-/** Waive a pack's gate with a human-supplied reason. */
+/** Waive a pack's gate with a human-supplied reason (recorded as the waiver). */
 export function waiveProof(id: string, reason: string): Promise<ProofPackResp> {
-  return api.post<ProofPackResp>(`/proof-packs/${id}/waive`, { reason });
+  const body: WaiveReq = { reason };
+  return api.post<ProofPackResp>(`/proof-packs/${id}/waive`, body);
 }
 
 /** Delete a single artifact (recomputes the owning pack server-side). */

@@ -16,17 +16,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path as AxPath, State};
+use axum::extract::{Path as AxPath, Query as AxQuery, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use otto_core::api::{
-    CreateSessionReq, ImplDiffResp, LibrarySkill, PromoteSkillReq, SkillEvalConfig,
-    SkillEvalImproverCfg, SkillEvalValidationCfg, SkillSourceInfo, SkillSourceReq, SkillSourcesResp,
-    StartSkillEvalReq,
+    CreateSessionReq, EvalTarget, ImplDiffResp, LibrarySkill, PromoteSkillReq, RateIterationReq,
+    RegressionReq, SkillEvalConfig, SkillEvalImproverCfg, SkillEvalValidationCfg, SkillSourceInfo,
+    SkillSourceReq, SkillSourcesResp, StartSkillEvalReq,
 };
 use otto_core::domain::{
-    EvalFinding, EvalValidationState, NoticeKind, NoticeSeverity, SessionKind, SkillEval,
-    SkillEvalStatus, User, Workspace, WorkspaceRole,
+    EvalFinding, EvalScore, EvalValidationState, GoldenTask, NoticeKind, NoticeSeverity, PromoteGate,
+    SessionKind, SkillEval, SkillEvalStatus, User, Workspace, WorkspaceRole,
 };
 use otto_core::event::Event;
 use otto_core::{Error, Id, Result};
@@ -562,7 +562,7 @@ fn merge_findings(acc: &mut Vec<EvalFinding>, incoming: Vec<EvalFinding>) {
 
 /// Score one validation from its findings: start at 100 and subtract per
 /// finding by severity. `passed` = no `fail`-severity findings.
-fn score_findings(findings: &[EvalFinding]) -> (bool, f64) {
+pub(crate) fn score_findings(findings: &[EvalFinding]) -> (bool, f64) {
     let mut score = 100.0_f64;
     let mut passed = true;
     for f in findings {
@@ -1069,6 +1069,9 @@ async fn run_skill_eval_core(
     req: &StartSkillEvalReq,
     cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
+    if req.mode == "score_only" {
+        return run_score_only_core(ctx, eval_id, ws, req).await;
+    }
     let resolved = resolve_skill_source(&ctx.context_library, &req.source)?;
     // Use the workspace repo when it's a git repo with commits; otherwise fall
     // back to a scratch repo (~/Otto/SkillsEvaluator), created + git-init'd on
@@ -1113,6 +1116,27 @@ async fn run_skill_eval_core(
     let mut next_skill = resolved.body.clone();
     let mut next_base: Option<u32> = None;
     let mut history: Vec<(u32, String, f64)> = Vec::new();
+
+    // Eval-lab scoring inputs (constant across iterations): golden task, resolved
+    // test/lint commands (request → golden → config default), and weights.
+    let cfg = load_skill_eval_config(ctx).await;
+    let golden = match &req.golden_task_id {
+        Some(id) => ctx.golden_tasks_store.get(id).await.ok(),
+        None => None,
+    };
+    let weights = req.weights.clone().unwrap_or_else(|| cfg.weights.clone());
+    let test_cmd = first_nonempty_opt(&[
+        req.test_cmd.clone(),
+        golden.as_ref().map(|g| g.test_cmd.clone()),
+        Some(cfg.default_test_cmd.clone()),
+    ]);
+    let lint_cmd = first_nonempty_opt(&[
+        req.lint_cmd.clone(),
+        golden.as_ref().map(|g| g.lint_cmd.clone()),
+        Some(cfg.default_lint_cmd.clone()),
+    ]);
+    let eval_snapshot = ctx.skill_evals_store.get_eval(eval_id).await?;
+    let mut iter_composites: Vec<(u32, f64)> = Vec::new();
 
     for iter in 1..=iterations {
         if is_cancelled(cancel) {
@@ -1359,6 +1383,33 @@ async fn run_skill_eval_core(
         ctx.skill_evals_store.set_iter_score(&iter_id, iter_score).await?;
         history.push((iter, skill_body.clone(), iter_score));
 
+        // --- 2b. Multi-signal scoring (tests/lint/diff/review → proof) -------
+        // The impl agent left uncommitted changes in the worktree, so the diff is
+        // working-tree vs HEAD (base = None).
+        if let Ok(scored_iter) = ctx.skill_evals_store.get_iteration(&iter_id).await {
+            match crate::eval_score::score_iteration(
+                ctx,
+                &eval_snapshot,
+                &scored_iter,
+                golden.as_ref(),
+                &weights,
+                None,
+                test_cmd.as_deref(),
+                lint_cmd.as_deref(),
+            )
+            .await
+            {
+                Ok((score, pack_id)) => {
+                    iter_composites.push((iter, score.composite));
+                    let _ = ctx
+                        .skill_evals_store
+                        .set_iter_scoring(&iter_id, &score, Some(&pack_id))
+                        .await;
+                }
+                Err(e) => tracing::warn!(eval = %eval_id, "iteration scoring failed: {e}"),
+            }
+        }
+
         if is_cancelled(cancel) {
             ctx.skill_evals_store
                 .set_iter_status(&iter_id, "done", &format!("score {iter_score:.0} · cancelled"))
@@ -1434,15 +1485,142 @@ async fn run_skill_eval_core(
         }
     }
 
-    // Pick the winner and write the run summary.
-    let (best_i, best_s) = history
-        .iter()
-        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _, s)| (*i, *s))
-        .unwrap_or((1, 0.0));
+    // Pick the winner by composite score (the eval-lab headline) when scoring
+    // produced one, else fall back to the validator-only score.
+    let (best_i, best_s) = if !iter_composites.is_empty() {
+        iter_composites
+            .iter()
+            .cloned()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((1, 0.0))
+    } else {
+        history
+            .iter()
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _, s)| (*i, *s))
+            .unwrap_or((1, 0.0))
+    };
     let summary = build_summary(&resolved.name, &history, best_i, best_s);
     ctx.skill_evals_store
         .set_summary(eval_id, &summary, Some(best_i), Some(best_s))
+        .await?;
+    if !iter_composites.is_empty() {
+        let _ = ctx.skill_evals_store.set_eval_composite(eval_id, best_s).await;
+    }
+    Ok(())
+}
+
+/// The first option whose trimmed value is non-empty.
+pub(crate) fn first_nonempty_opt(opts: &[Option<String>]) -> Option<String> {
+    opts.iter()
+        .flatten()
+        .find(|s| !s.trim().is_empty())
+        .cloned()
+}
+
+/// Score-only run: no agent. Resolve the `target` to a directory, build a single
+/// iteration around it, and run the scoring pipeline. Used to evaluate an existing
+/// branch / working tree / directory against a golden task (and as the engine for
+/// score-only matrix cells).
+async fn run_score_only_core(
+    ctx: &ServerCtx,
+    eval_id: &Id,
+    ws: &Workspace,
+    req: &StartSkillEvalReq,
+) -> Result<()> {
+    let eval = ctx.skill_evals_store.get_eval(eval_id).await?;
+    let cfg = load_skill_eval_config(ctx).await;
+    let golden = match &req.golden_task_id {
+        Some(id) => ctx.golden_tasks_store.get(id).await.ok(),
+        None => None,
+    };
+    let weights = req.weights.clone().unwrap_or_else(|| cfg.weights.clone());
+    let test_cmd = first_nonempty_opt(&[
+        req.test_cmd.clone(),
+        golden.as_ref().map(|g| g.test_cmd.clone()),
+        Some(cfg.default_test_cmd.clone()),
+    ]);
+    let lint_cmd = first_nonempty_opt(&[
+        req.lint_cmd.clone(),
+        golden.as_ref().map(|g| g.lint_cmd.clone()),
+        Some(cfg.default_lint_cmd.clone()),
+    ]);
+
+    // Resolve the target into (worktree, diff_base).
+    let target = req.target.clone().unwrap_or(EvalTarget {
+        kind: "working".into(),
+        git_ref: None,
+        path: None,
+    });
+    let base_ref = req.base_ref.clone().unwrap_or_else(|| "HEAD".to_string());
+    let (worktree, diff_base): (String, Option<String>) = match target.kind.as_str() {
+        "path" => {
+            let p = target
+                .path
+                .clone()
+                .filter(|p| !p.trim().is_empty())
+                .ok_or_else(|| Error::Invalid("target.path is required for kind=path".into()))?;
+            (p, None)
+        }
+        "branch" => {
+            let r = target
+                .git_ref
+                .clone()
+                .filter(|r| !r.trim().is_empty())
+                .ok_or_else(|| Error::Invalid("target.git_ref is required for kind=branch".into()))?;
+            let (repo_path, _scratch) = resolve_base_repo(&ws.root_path).await?;
+            let dest = std::env::temp_dir()
+                .join("otto-skilleval")
+                .join(eval_id)
+                .join("score");
+            add_worktree(&repo_path, &r, &dest).await?;
+            (dest.to_string_lossy().to_string(), Some(base_ref.clone()))
+        }
+        // "working": score the workspace repo's live working tree in place.
+        _ => (ws.root_path.clone(), None),
+    };
+
+    let it = ctx
+        .skill_evals_store
+        .add_iteration(eval_id, 1, None, "score-only", "", "score-only", &[])
+        .await?;
+    ctx.skill_evals_store
+        .set_iter_status(&it.id, "validating", "scoring target")
+        .await?;
+    ctx.skill_evals_store
+        .set_iter_impl(&it.id, None, "score-only run (no agent)", Some(&worktree))
+        .await?;
+
+    let scored_iter = ctx.skill_evals_store.get_iteration(&it.id).await?;
+    let (score, pack_id) = crate::eval_score::score_iteration(
+        ctx,
+        &eval,
+        &scored_iter,
+        golden.as_ref(),
+        &weights,
+        diff_base.as_deref(),
+        test_cmd.as_deref(),
+        lint_cmd.as_deref(),
+    )
+    .await?;
+    ctx.skill_evals_store
+        .set_iter_scoring(&it.id, &score, Some(&pack_id))
+        .await?;
+    ctx.skill_evals_store.set_iter_score(&it.id, score.composite).await?;
+    ctx.skill_evals_store
+        .set_iter_status(
+            &it.id,
+            "done",
+            &format!("composite {:.0} · proof {}", score.composite, score.proof_status),
+        )
+        .await?;
+    ctx.skill_evals_store.set_eval_composite(eval_id, score.composite).await?;
+    let summary = format!(
+        "score-only: composite {:.0}, proof {}",
+        score.composite, score.proof_status
+    );
+    ctx.skill_evals_store
+        .set_summary(eval_id, &summary, Some(1), Some(score.composite))
         .await?;
     Ok(())
 }
@@ -1661,10 +1839,15 @@ fn default_skill_eval_config(default_provider: &str) -> SkillEvalConfig {
         improver: SkillEvalImproverCfg { provider: default_provider.to_string(), model: String::new() },
         iterations: 2,
         validator_passes: 1,
+        weights: otto_core::domain::ScoreWeights::default(),
+        promote_min_score: 80.0,
+        require_proof_pass: true,
+        default_test_cmd: String::new(),
+        default_lint_cmd: String::new(),
     }
 }
 
-async fn load_skill_eval_config(ctx: &ServerCtx) -> SkillEvalConfig {
+pub(crate) async fn load_skill_eval_config(ctx: &ServerCtx) -> SkillEvalConfig {
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
     let global_default = repo.get("default_provider").await.ok().flatten();
     let default_provider = otto_core::provider::resolve_provider(&[
@@ -1688,30 +1871,76 @@ async fn start_eval(
     Json(req): Json<StartSkillEvalReq>,
 ) -> ApiResult<Json<SkillEval>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    if req.task.trim().is_empty() {
-        return Err(ApiError(Error::Invalid("task is required".into())));
-    }
-    if req.impl_cli.trim().is_empty() {
-        return Err(ApiError(Error::Invalid("impl_cli is required".into())));
-    }
-    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
+    let eval = launch_eval(&ctx, &ws_id, req, None).await.map_err(ApiError)?;
+    Ok(Json(eval))
+}
 
-    // Validate the skill source resolves before kicking off the background run.
-    let resolved = resolve_skill_source(&ctx.context_library, &req.source).map_err(ApiError)?;
+/// Create + spawn an eval run. Shared by `start_eval`, golden-task run, and matrix
+/// cells. `matrix_cell` is `(matrix_id, provider, skill, prompt)` when this run is
+/// one cell of a matrix. Caller is responsible for the workspace role check.
+pub(crate) async fn launch_eval(
+    ctx: &ServerCtx,
+    ws_id: &Id,
+    req: StartSkillEvalReq,
+    matrix_cell: Option<(String, String, String, String)>,
+) -> Result<SkillEval> {
+    let mode = if req.mode.trim().is_empty() {
+        "generate".to_string()
+    } else {
+        req.mode.trim().to_string()
+    };
+    let ws = ctx.workspaces.get(ws_id).await?;
+
+    // Resolve the run's source-skill name + task. `generate` requires an impl CLI
+    // and a resolvable skill; `score_only` runs no agent, so it tolerates an empty
+    // impl CLI and derives its task/name from the golden task when not given.
+    let golden = match &req.golden_task_id {
+        Some(id) => ctx.golden_tasks_store.get(id).await.ok(),
+        None => None,
+    };
+    let (source_name, task) = if mode == "score_only" {
+        let task = if req.task.trim().is_empty() {
+            golden.as_ref().map(|g| g.prompt.clone()).unwrap_or_default()
+        } else {
+            req.task.trim().to_string()
+        };
+        let name = golden
+            .as_ref()
+            .map(|g| g.skill.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some(req.source.reference.clone()).filter(|r| !r.is_empty()))
+            .unwrap_or_else(|| "(score-only)".to_string());
+        (name, task)
+    } else {
+        if req.impl_cli.trim().is_empty() {
+            return Err(Error::Invalid("impl_cli is required for generate mode".into()));
+        }
+        if req.task.trim().is_empty() {
+            return Err(Error::Invalid("task is required".into()));
+        }
+        let resolved = resolve_skill_source(&ctx.context_library, &req.source)?;
+        (resolved.name, req.task.trim().to_string())
+    };
 
     let config = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
+    let dims = matrix_cell
+        .as_ref()
+        .map(|(_, p, s, pr)| (p.as_str(), s.as_str(), pr.as_str()));
     let eval = ctx
         .skill_evals_store
-        .create_eval(
-            &ws_id,
-            &resolved.name,
-            req.task.trim(),
+        .create_eval_ex(
+            ws_id,
+            &source_name,
+            &task,
             req.impl_cli.trim(),
             req.iterations.max(1),
             &config,
+            &mode,
+            req.golden_task_id.as_deref(),
+            matrix_cell.as_ref().map(|(m, _, _, _)| m.as_str()),
+            dims,
         )
-        .await
-        .map_err(ApiError)?;
+        .await?;
 
     // Resolve the root user the autonomous sessions run as (like reviews).
     let run_user = otto_state::UsersRepo::new(ctx.pool.clone())
@@ -1719,7 +1948,7 @@ async fn start_eval(
         .await
         .ok()
         .and_then(|us| us.into_iter().find(|u| u.is_root))
-        .ok_or_else(|| ApiError(Error::Internal("no root user to run eval agents".into())))?;
+        .ok_or_else(|| Error::Internal("no root user to run eval agents".into()))?;
 
     let ctx_bg = ctx.clone();
     let eval_id = eval.id.clone();
@@ -1728,7 +1957,7 @@ async fn start_eval(
         run_skill_eval(ctx_bg, eval_id, ws, run_user, req, cancel).await;
     });
 
-    Ok(Json(eval))
+    Ok(eval)
 }
 
 async fn list_evals(
@@ -1870,10 +2099,21 @@ async fn archive_eval_sessions(manager: &Arc<SessionManager>, eval: &SkillEval) 
 }
 
 /// Remove every worktree a run created (best-effort), then prune.
+///
+/// SAFETY: only ever touches Otto-managed disposable worktrees (under the
+/// `otto-skilleval` temp dir). A `score_only` run can point `worktree_path` at the
+/// user's real repo (`kind=working`/`path`); those must NEVER be removed — the
+/// guard below skips any path that isn't an Otto temp worktree.
 async fn remove_eval_worktrees(repo_root: &str, eval: &SkillEval) {
+    let managed_root = std::env::temp_dir().join("otto-skilleval");
+    let managed_root = managed_root.to_string_lossy().to_string();
     let mut removed_any = false;
     for it in &eval.iterations {
         if let Some(path) = &it.worktree_path {
+            if !path.starts_with(&managed_root) {
+                // Not an Otto-created worktree (e.g. a score_only target) — leave it.
+                continue;
+            }
             let _ = tokio::process::Command::new("git")
                 .arg("-C")
                 .arg(repo_root)
@@ -1894,6 +2134,19 @@ async fn remove_eval_worktrees(repo_root: &str, eval: &SkillEval) {
             .output()
             .await;
     }
+}
+
+/// Signal-cancel a run, kill its live sessions, and mark it cancelled (idempotent;
+/// the background task also finalizes). Used by `cancel_eval` and matrix cancel.
+pub(crate) async fn cancel_run(ctx: &ServerCtx, eval_id: &Id) {
+    signal_cancel(&ctx.skill_eval_cancels, eval_id);
+    if let Ok(eval) = ctx.skill_evals_store.get_eval(eval_id).await {
+        archive_eval_sessions(&ctx.manager, &eval).await;
+    }
+    let _ = ctx
+        .skill_evals_store
+        .set_status(eval_id, SkillEvalStatus::Cancelled, Some("Cancelled by user"))
+        .await;
 }
 
 async fn cancel_eval(
@@ -1933,6 +2186,59 @@ async fn delete_eval(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// The promote gate for one iteration: composite ≥ threshold AND (proof passes OR
+/// proof not required). Reads the run's config thresholds.
+async fn iteration_gate(ctx: &ServerCtx, _eval: &SkillEval, it: &otto_core::domain::EvalIteration) -> PromoteGate {
+    let cfg = load_skill_eval_config(ctx).await;
+    let composite = it.scoring.as_ref().map(|s| s.composite);
+    let proof_status = it
+        .scoring
+        .as_ref()
+        .map(|s| s.proof_status.clone())
+        .unwrap_or_default();
+    otto_core::eval_score::promote_gate(
+        composite,
+        &proof_status,
+        cfg.promote_min_score,
+        cfg.require_proof_pass,
+    )
+}
+
+/// `GET /skill-evaluations/{id}/promote-gate?iteration_id=…` — whether (and why)
+/// the run's best (or a named) iteration may be promoted.
+async fn get_promote_gate(
+    AxPath(eval_id): AxPath<Id>,
+    AxQuery(q): AxQuery<std::collections::HashMap<String, String>>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<PromoteGate>> {
+    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Viewer).await?;
+    let it = pick_iteration(&eval, q.get("iteration_id").map(|s| s.as_str()))
+        .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?;
+    Ok(Json(iteration_gate(&ctx, &eval, it).await))
+}
+
+/// The named iteration, or the run's best, or the highest-composite one.
+fn pick_iteration<'a>(
+    eval: &'a SkillEval,
+    iteration_id: Option<&str>,
+) -> Option<&'a otto_core::domain::EvalIteration> {
+    if let Some(id) = iteration_id {
+        return eval.iterations.iter().find(|i| i.id == id);
+    }
+    if let Some(b) = eval.best_iteration {
+        if let Some(it) = eval.iterations.iter().find(|i| i.iter == b) {
+            return Some(it);
+        }
+    }
+    eval.iterations.iter().max_by(|a, b| {
+        let sa = a.scoring.as_ref().map(|s| s.composite).unwrap_or(a.score);
+        let sb = b.scoring.as_ref().map(|s| s.composite).unwrap_or(b.score);
+        sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+    })
+}
+
 async fn promote_skill(
     AxPath(eval_id): AxPath<Id>,
     State(ctx): State<ServerCtx>,
@@ -1946,6 +2252,17 @@ async fn promote_skill(
         .iter()
         .find(|i| i.id == req.iteration_id)
         .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?;
+
+    // Gate: promote only if the iteration's composite score + proof pack pass —
+    // unless a root user explicitly forces it (which is audited + waives proof).
+    let gate = iteration_gate(&ctx, &eval, it).await;
+    if !gate.allowed && !req.force {
+        return Err(ApiError(Error::Conflict(format!(
+            "promote gate not met: {}",
+            gate.reasons.join("; ")
+        ))));
+    }
+
     let body = match req.source.as_str() {
         "improved" => it
             .skill_after
@@ -1959,14 +2276,247 @@ async fn promote_skill(
             "skill name must be letters, digits, '-' or '_'".into(),
         )));
     }
+    if name.is_empty() {
+        return Err(ApiError(Error::Invalid("skill name is required".into())));
+    }
+
+    // A forced promotion past an unmet gate is an audited override; it also waives
+    // the iteration's proof pack so the bypass is visible there too.
+    if !gate.allowed && req.force {
+        if let Some(pack_id) = &it.proof_pack_id {
+            let _ = ctx
+                .proof_repo
+                .waive(pack_id, &user.id, "force-promoted past the eval-lab gate")
+                .await;
+        }
+        ctx.audit(otto_state::NewAuditEntry {
+            user_id: Some(user.id.clone()),
+            action: "skill_eval.force_promote".into(),
+            target: Some(name.to_string()),
+            detail: Some(serde_json::json!({
+                "eval_id": eval_id,
+                "iteration_id": req.iteration_id,
+                "reasons": gate.reasons,
+                "score": gate.score,
+            })),
+            ip: None,
+        })
+        .await;
+    }
+
     ctx.context_library
         .put_skill(name, &body)
         .map_err(|e| ApiError(Error::Internal(format!("write skill: {e}"))))?;
+    let _ = ctx.skill_evals_store.set_promoted(&eval_id, &user.id).await;
     ctx.context_library
         .get_skill(name)
         .map(Json)
         .ok_or_else(|| ApiError(Error::Internal("skill not found after promote".into())))
 }
+
+/// `GET /skill-evaluations/{id}/iterations/{iter_id}/score` — the iteration's
+/// multi-signal score (computing it on demand if not yet present).
+async fn get_iter_score(
+    AxPath((eval_id, iter_id)): AxPath<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<EvalScore>> {
+    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Viewer).await?;
+    let it = eval
+        .iterations
+        .iter()
+        .find(|i| i.id == iter_id)
+        .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?;
+    Ok(Json(it.scoring.clone().unwrap_or_default()))
+}
+
+/// `GET /skill-evaluations/{id}/iterations/{iter_id}/proof-pack` — the iteration's
+/// assembled proof pack (header + evidence artifacts), recomputed live.
+async fn get_iter_proof_pack(
+    AxPath((eval_id, iter_id)): AxPath<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Viewer).await?;
+    let it = eval
+        .iterations
+        .iter()
+        .find(|i| i.id == iter_id)
+        .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?;
+    let Some(pack_id) = it.proof_pack_id.clone() else {
+        return Ok(Json(serde_json::json!({ "exists": false })));
+    };
+    let pack = ctx.proof_repo.get_pack(&pack_id).await.map_err(ApiError)?;
+    let arts = ctx.proof_repo.list_artifacts(&pack_id).await.unwrap_or_default();
+    let badges = crate::proof::badge_strings(&pack, &arts);
+    let contract = crate::proof::live_contract(&ctx, &pack, &arts).await;
+    let artifacts: Vec<serde_json::Value> = arts
+        .iter()
+        .map(|a| {
+            let (preview, truncated) = crate::proof::preview(a.content_ref.as_deref().unwrap_or(""));
+            serde_json::json!({
+                "kind": a.kind.as_str(),
+                "title": a.title,
+                "status": a.status.as_str(),
+                "preview": preview,
+                "truncated": truncated,
+                "metadata": a.metadata,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "exists": true,
+        "id": pack.id,
+        "status": pack.status.as_str(),
+        "risk_score": pack.risk_score,
+        "done_score": pack.done_score,
+        "badges": badges,
+        "contract": contract,
+        "artifacts": artifacts,
+    })))
+}
+
+/// `POST /skill-evaluations/{id}/iterations/{iter_id}/rate` — record a human
+/// rating and re-derive the iteration's score (cheaply — no command re-run).
+async fn rate_iteration(
+    AxPath((eval_id, iter_id)): AxPath<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<RateIterationReq>,
+) -> ApiResult<Json<SkillEval>> {
+    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
+    let it = eval
+        .iterations
+        .iter()
+        .find(|i| i.id == iter_id)
+        .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?
+        .clone();
+    let rating = req.rating.min(5);
+    ctx.skill_evals_store
+        .set_iter_human(&iter_id, rating, &req.note, &user.id)
+        .await
+        .map_err(ApiError)?;
+    // Re-read so the rescore sees the persisted rating + prior signals.
+    let it = ctx.skill_evals_store.get_iteration(&iter_id).await.unwrap_or(it);
+    if let Ok((score, pack_id)) =
+        crate::eval_score::rescore_with_human(&ctx, &eval, &it, rating, &req.note, &user.id).await
+    {
+        let _ = ctx
+            .skill_evals_store
+            .set_iter_scoring(&iter_id, &score, Some(&pack_id))
+            .await;
+        // Refresh the run's headline composite if this is the best iteration.
+        if eval.best_iteration == Some(it.iter) {
+            let _ = ctx.skill_evals_store.set_eval_composite(&eval_id, score.composite).await;
+        }
+    }
+    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    Ok(Json(eval))
+}
+
+/// `POST /skill-evaluations/{id}/iterations/{iter_id}/regression` — capture a
+/// (typically failed) iteration as a regression golden task. Deduped by source
+/// iteration.
+async fn iteration_regression(
+    AxPath((eval_id, iter_id)): AxPath<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<RegressionReq>,
+) -> ApiResult<Json<GoldenTask>> {
+    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
+    let it = eval
+        .iterations
+        .iter()
+        .find(|i| i.id == iter_id)
+        .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?;
+
+    // Idempotent: a second capture from the same iteration returns the first.
+    if let Ok(Some(existing)) = ctx.golden_tasks_store.find_by_source_iter(&iter_id).await {
+        return Ok(Json(existing));
+    }
+
+    // Recover the run's commands from its config so the regression re-runs the same.
+    let cfg: StartSkillEvalReq =
+        serde_json::from_value(eval.config.clone()).unwrap_or(StartSkillEvalReq {
+            source: SkillSourceReq { kind: String::new(), reference: String::new(), provider: None },
+            task: eval.task.clone(),
+            impl_cli: eval.impl_cli.clone(),
+            validations: Vec::new(),
+            iterations: 1,
+            improver: None,
+            base_ref: None,
+            validator_passes: 1,
+            mode: eval.mode.clone(),
+            golden_task_id: eval.golden_task_id.clone(),
+            target: None,
+            test_cmd: None,
+            lint_cmd: None,
+            weights: None,
+        });
+    let golden = match &eval.golden_task_id {
+        Some(id) => ctx.golden_tasks_store.get(id).await.ok(),
+        None => None,
+    };
+    let conf = load_skill_eval_config(&ctx).await;
+    let test_cmd = first_nonempty_opt(&[
+        cfg.test_cmd.clone(),
+        golden.as_ref().map(|g| g.test_cmd.clone()),
+        Some(conf.default_test_cmd.clone()),
+    ])
+    .unwrap_or_default();
+    let lint_cmd = first_nonempty_opt(&[
+        cfg.lint_cmd.clone(),
+        golden.as_ref().map(|g| g.lint_cmd.clone()),
+        Some(conf.default_lint_cmd.clone()),
+    ])
+    .unwrap_or_default();
+    let repo_key = match it.worktree_path.as_deref() {
+        Some(wt) => crate::proof::resolve_repo_for_cwd(&ctx, &eval.workspace_id, wt)
+            .await
+            .unwrap_or_else(|| eval.workspace_id.clone()),
+        None => eval.workspace_id.clone(),
+    };
+    let proof_status = it.scoring.as_ref().map(|s| s.proof_status.clone()).unwrap_or_default();
+    let name = req
+        .name
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| format!("regression: {}", eval.source_skill));
+    let input = otto_state::GoldenTaskInput {
+        name,
+        prompt: eval.task.clone(),
+        skill: eval.source_skill.clone(),
+        test_cmd,
+        lint_cmd,
+        build_cmd: String::new(),
+        rubric: format!(
+            "Regression captured from eval {eval_id} iter {} (proof was '{proof_status}'). \
+             The produced change must keep the test command passing.",
+            it.iter
+        ),
+        tags: vec!["regression".to_string()],
+        enabled: true,
+    };
+    let task = ctx
+        .golden_tasks_store
+        .create(
+            &eval.workspace_id,
+            &repo_key,
+            &input,
+            "regression",
+            Some(&eval_id),
+            Some(&iter_id),
+            &user.id,
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(task))
+}
+
 
 async fn impl_diff(
     AxPath((eval_id, iter_id)): AxPath<(Id, Id)>,
@@ -2190,9 +2740,26 @@ pub fn routes() -> Router<ServerCtx> {
         )
         .route("/skill-evaluations/{id}/cancel", post(cancel_eval))
         .route("/skill-evaluations/{id}/promote", post(promote_skill))
+        .route("/skill-evaluations/{id}/promote-gate", get(get_promote_gate))
         .route(
             "/skill-evaluations/{id}/iterations/{iter_id}/diff",
             get(impl_diff),
+        )
+        .route(
+            "/skill-evaluations/{id}/iterations/{iter_id}/score",
+            get(get_iter_score),
+        )
+        .route(
+            "/skill-evaluations/{id}/iterations/{iter_id}/proof-pack",
+            get(get_iter_proof_pack),
+        )
+        .route(
+            "/skill-evaluations/{id}/iterations/{iter_id}/rate",
+            post(rate_iteration),
+        )
+        .route(
+            "/skill-evaluations/{id}/iterations/{iter_id}/regression",
+            post(iteration_regression),
         )
         .route(
             "/skill-evaluations/{id}/iterations/{iter_id}/agents/{index}/retry",

@@ -17,6 +17,7 @@ pub mod db;
 pub mod db_explorer;
 pub mod email_senders;
 pub mod git;
+pub mod eval_lab;
 pub mod grants;
 pub mod product;
 pub mod improvements;
@@ -125,6 +126,7 @@ pub use reviews::ReviewsRepo;
 pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
 pub use settings::{otto_mcp_enabled_for, SettingsRepo, OTTO_MCP_ENABLED_KEY};
+pub use eval_lab::{EvalMatricesRepo, GoldenTaskInput, GoldenTasksRepo};
 pub use skill_evals::SkillEvalsRepo;
 // Note: `swarm::NewTask` collides with `activity::NewTask`; access it via the
 // module path (`otto_state::swarm::NewTask`). The rest are re-exported here.

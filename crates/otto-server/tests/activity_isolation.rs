@@ -272,6 +272,8 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         repo_rules_store: otto_state::RepoRulesRepo::new(pool.clone()),
         proof_packs_store: otto_state::ReviewProofPacksRepo::new(pool.clone()),
         skill_evals_store: SkillEvalsRepo::new(pool.clone()),
+        golden_tasks_store: otto_state::GoldenTasksRepo::new(pool.clone()),
+        eval_matrices_store: otto_state::EvalMatricesRepo::new(pool.clone()),
         skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         orchestrator,
