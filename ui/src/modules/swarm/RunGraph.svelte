@@ -112,6 +112,12 @@
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     userTouchedZoom = true;
+    // Pinch (ctrl+wheel on macOS) zooms; a plain two-finger scroll pans.
+    if (!e.ctrlKey) {
+      tx -= e.deltaX;
+      ty -= e.deltaY;
+      return;
+    }
     const next = Math.min(2, Math.max(0.4, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
     scale = next;
   }

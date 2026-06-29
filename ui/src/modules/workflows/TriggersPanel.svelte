@@ -9,11 +9,36 @@
 
   interface Props {
     workflowId: string;
+    workflowName?: string;
     triggers: WorkflowTrigger[];
     ontriggers?: (ts: WorkflowTrigger[]) => void;
   }
 
-  let { workflowId, triggers = $bindable([]), ontriggers }: Props = $props();
+  let { workflowId, workflowName = '', triggers = $bindable([]), ontriggers }: Props = $props();
+
+  // A copy-paste Slack message that triggers THIS workflow by name.
+  const slackSnippet = $derived(
+    `@otto\n` +
+      `Action: Workflow\n` +
+      `Name: ${workflowName || '<workflow name>'}\n` +
+      `Msg: what you want done — instructions for the agents\n` +
+      `Jira ticket: GS-1111\n` +
+      `Working Directory: ~/path/to/repo\n` +
+      `Relevant Info: ~/path/a, ~/path/b\n` +
+      `Goals:\n` +
+      `  - 100% test coverage (services)\n` +
+      `  - under 2 minutes runtime`,
+  );
+  let copied = $state(false);
+  async function copySlack(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(slackSnippet);
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    } catch {
+      toasts.error('Copy failed', 'Select the text and copy manually.');
+    }
+  }
 
   // ---- state for the "add trigger" form ----------------------------------
   let adding = $state(false);
@@ -223,9 +248,59 @@
       </button>
     </div>
   {/each}
+
+  <!-- Trigger from Slack: a copy-paste message that starts this workflow by name. -->
+  <div class="slack-trig">
+    <div class="st-head">
+      <span class="tp-title">Trigger from Slack</span>
+      <button class="btn ghost small" onclick={copySlack}>
+        <Icon name={copied ? 'check' : 'copy'} size={12} /> {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+    <p class="st-hint">
+      Post this in a Slack channel where the Otto bot is configured for this
+      workspace. The bot matches the workflow by <strong>Name</strong> and starts a run.
+    </p>
+    <pre class="st-snip">{slackSnippet}</pre>
+  </div>
 </div>
 
 <style>
+  .slack-trig {
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .st-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .st-head .tp-title {
+    flex: 1;
+  }
+  .st-hint {
+    margin: 0;
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .st-snip {
+    margin: 0;
+    padding: 8px 10px;
+    background: var(--bg, #0d0f13);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    color: var(--text);
+    overflow-x: auto;
+  }
   .tp {
     display: flex;
     flex-direction: column;

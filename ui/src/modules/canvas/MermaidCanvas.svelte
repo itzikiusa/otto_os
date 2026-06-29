@@ -147,6 +147,12 @@
     e.preventDefault();
     if (!surface) return;
     userAdjusted = true;
+    // Pinch (ctrl+wheel on macOS) zooms; a plain two-finger scroll pans.
+    if (!e.ctrlKey) {
+      tx -= e.deltaX;
+      ty -= e.deltaY;
+      return;
+    }
     const r = surface.getBoundingClientRect();
     const cx = e.clientX - r.left;
     const cy = e.clientY - r.top;

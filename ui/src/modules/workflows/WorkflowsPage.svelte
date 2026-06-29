@@ -35,6 +35,10 @@
   let run = $state<WorkflowRun | null>(null);
   let runs = $state<WorkflowRun[]>([]);
   let runsOpen = $state(false);
+  // Manual-run input editor: where you provide repo_id / story_id / goals / msg
+  // that the trigger emits to the graph.
+  let runInputOpen = $state(false);
+  let runInputText = $state('');
   let paletteOpen = $state(false);
   let triggersOpen = $state(false);
   let triggers = $state<WorkflowTrigger[]>([]);
@@ -229,9 +233,113 @@
     }
   }
 
-  const runWorkflow = (): Promise<void> => execRun({});
-  const runFrom = (nodeId: string, only: boolean): Promise<void> =>
-    execRun({ start_node: nodeId, only_node: only });
+  // Every node kind in the graph, including the inner steps of `loop` nodes.
+  function collectKinds(): Set<string> {
+    const s = new Set<string>();
+    for (const n of graph.nodes) {
+      s.add(n.kind);
+      const steps = (n.params as { steps?: { kind?: string }[] } | null)?.steps;
+      if (n.kind === 'loop' && Array.isArray(steps)) {
+        for (const st of steps) if (st?.kind) s.add(st.kind);
+      }
+    }
+    return s;
+  }
+
+  // A starter run-input JSON tailored to what this graph needs (repo for
+  // review/PR nodes, story for product nodes), so the user knows what to fill in.
+  function suggestRunInput(): string {
+    const k = collectKinds();
+    const obj: Record<string, unknown> = {};
+    if (k.has('review_run') || k.has('git_pr')) {
+      obj.repo_id = '<repo id — copy it from the Git tab>';
+      obj.base = 'main';
+    }
+    if (k.has('product_analyze') || k.has('product_rewrite') || k.has('product_plan') || k.has('product_publish')) {
+      obj.story_id = '<product story id>';
+    }
+    obj.msg = 'What you want done — instructions for the agents.';
+    obj.jira_ticket = 'GS-0000';
+    obj.goals = ['e.g. 100% test coverage (services)', 'under 2 minutes runtime'];
+    return JSON.stringify(obj, null, 2);
+  }
+
+  function parseRunInput(): Record<string, unknown> | undefined | null {
+    const t = runInputText.trim();
+    if (!t) return undefined;
+    try {
+      return JSON.parse(t);
+    } catch {
+      toasts.error('Run input is not valid JSON', 'Fix the JSON or clear the field to run with no input.');
+      return null; // signal: invalid
+    }
+  }
+
+  function openRunInput(): void {
+    if (!runInputText.trim()) runInputText = suggestRunInput();
+    runInputOpen = !runInputOpen;
+  }
+
+  async function confirmRun(): Promise<void> {
+    const input = parseRunInput();
+    if (input === null) return; // invalid JSON; toast already shown
+    runInputOpen = false;
+    await execRun(input === undefined ? {} : { input });
+  }
+
+  const runFrom = (nodeId: string, only: boolean): Promise<void> => {
+    const input = parseRunInput();
+    if (input === null) return Promise.resolve();
+    return execRun({ start_node: nodeId, only_node: only, ...(input !== undefined ? { input } : {}) });
+  };
+
+  // Re-flow the graph into a few readable rows (topological order, snaking
+  // left→right then right→left) so a long chain isn't one wide line.
+  function tidy(): void {
+    if (!current) return;
+    const nodes = graph.nodes;
+    if (!nodes.length) return;
+    const indeg = new Map(nodes.map((n) => [n.id, 0]));
+    const adj = new Map(nodes.map((n) => [n.id, [] as string[]]));
+    for (const e of graph.edges) {
+      if (indeg.has(e.target) && indeg.has(e.source)) {
+        indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1);
+        adj.get(e.source)!.push(e.target);
+      }
+    }
+    const queue = nodes.filter((n) => (indeg.get(n.id) ?? 0) === 0).map((n) => n.id);
+    const order: string[] = [];
+    const seen = new Set<string>();
+    while (queue.length) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      order.push(id);
+      for (const s of adj.get(id) ?? []) {
+        indeg.set(s, (indeg.get(s) ?? 1) - 1);
+        if ((indeg.get(s) ?? 0) <= 0) queue.push(s);
+      }
+    }
+    for (const n of nodes) if (!seen.has(n.id)) order.push(n.id);
+    const PER = 4;
+    const COLW = 260;
+    const ROWH = 230;
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    order.forEach((id, i) => {
+      const row = Math.floor(i / PER);
+      let col = i % PER;
+      if (row % 2 === 1) col = PER - 1 - col; // snake so rows read end→start
+      const n = byId.get(id);
+      if (n) {
+        n.x = 40 + col * COLW;
+        n.y = 30 + row * ROWH;
+      }
+    });
+    graph = { ...graph, nodes: [...nodes] };
+    dirty = true;
+    void save();
+    toasts.success('Tidied layout');
+  }
 
   async function stop(): Promise<void> {
     if (!run) return;
@@ -506,6 +614,11 @@
           <Icon name="clock" size={12} /> Triggers
         </button>
 
+        <!-- Tidy: reflow the graph into a few readable rows -->
+        <button class="btn small" onclick={tidy} title="Tidy layout into rows">
+          <Icon name="grid" size={12} /> Tidy
+        </button>
+
         <!-- Version history toggle -->
         <button
           class="btn small"
@@ -518,10 +631,41 @@
         {#if running}
           <button class="btn small danger" onclick={stop}><Icon name="square" size={11} /> Stop</button>
         {/if}
-        <button class="btn primary small" disabled={running} onclick={runWorkflow}>
-          {#if running}<span class="spin"></span> Running{:else}<Icon name="play" size={12} /> Run{/if}
+        <button
+          class="btn primary small"
+          class:active={runInputOpen}
+          disabled={running}
+          onclick={openRunInput}
+          title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
+        >
+          {#if running}<span class="spin"></span> Running{:else}<Icon name="play" size={12} /> Run…{/if}
         </button>
       </header>
+
+      <!-- Manual-run input editor: this is WHERE you provide the run input the
+           trigger emits (repo_id, story_id, goals, msg, jira_ticket, …). -->
+      {#if runInputOpen}
+        <div class="run-input">
+          <div class="ri-head">
+            <strong>Run input</strong>
+            <span class="ri-hint">JSON the Start trigger emits to the graph — fill in repo_id / story_id / goals as needed. Leave empty to run with no input.</span>
+            <button class="btn small ghost" onclick={() => { runInputText = suggestRunInput(); }} title="Reset to a suggested template">Suggest</button>
+          </div>
+          <textarea
+            class="ri-text mono"
+            rows="8"
+            bind:value={runInputText}
+            spellcheck="false"
+            placeholder={'{\n  "repo_id": "…",\n  "goals": ["…"]\n}'}
+          ></textarea>
+          <div class="ri-actions">
+            <button class="btn primary small" disabled={running} onclick={confirmRun}>
+              <Icon name="play" size={12} /> Run
+            </button>
+            <button class="btn small" onclick={() => (runInputOpen = false)}>Cancel</button>
+          </div>
+        </div>
+      {/if}
 
       <!-- Human-approval banner: shown when a run is paused at a human_approval node -->
       {#if run?.waiting_approval && run.approval_node_id}
@@ -554,6 +698,7 @@
         <div class="triggers-wrap">
           <TriggersPanel
             workflowId={current.id}
+            workflowName={current.name}
             bind:triggers
             ontriggers={(ts) => (triggers = ts)}
           />
@@ -1634,6 +1779,44 @@
     overflow-y: auto;
   }
   /* Human-approval banner */
+  .run-input {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--panel, rgba(255, 255, 255, 0.03));
+    border-bottom: 1px solid var(--border);
+  }
+  .ri-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .ri-hint {
+    flex: 1;
+    min-width: 200px;
+    font-size: 11.5px;
+    color: var(--text-dim, #9aa0aa);
+  }
+  .ri-text {
+    width: 100%;
+    resize: vertical;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg, #0d0f13);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .ri-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
   .approval-banner {
     display: flex;
     align-items: center;

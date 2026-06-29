@@ -350,6 +350,32 @@ starts a run whose **input carries every parsed field** (`trigger:"chat"`, `chan
 info" agent) can consolidate the ticket / working dir / paths into a brief for the
 rest of the graph — and replies in-thread (*"🚀 Started workflow … (run `…`)"*).
 
+**Worked example — trigger the "Write tests for a story" template from Slack.**
+Instantiate the `write-tests` template (workflow name *"Write tests for a story"*),
+then post this where the Otto bot is configured for the workspace (`Name:` must
+match the workflow name):
+
+```text
+@otto
+Action: Workflow
+Name: Write tests for a story
+Msg: Add tests for the new deposit-limit rule; cover happy path + over-limit + boundary.
+Jira ticket: GS-1421
+Working Directory: ~/code/go_deposit
+Relevant Info: ~/code/go_deposit/internal/limits, ~/shared-rules/GO_TESTING_STANDARDS.md
+Goals:
+  - 100% coverage of the services package
+  - all component tests pass
+  - suite runs under 2 minutes
+```
+
+`implement-feature` and `po-lifecycle` use the same shape (add a `story_id` for the
+product steps). Slack carries `msg`/`jira_ticket`/`working_directory`/`goals` to
+every node; the `review_run` / `git_pr` steps additionally need a **`repo_id`**,
+which the chat message doesn't carry — either run those templates from the UI
+**Run…** editor (it pre-fills `repo_id`/`base`/`goals`) or have the first
+"prepare relevant info" node resolve the repo from `working_directory`.
+
 ### Human approval is **not** a trigger
 The `human_approval` *node* pauses a run mid-flight (it writes `waiting_approval`
 to the run row); the operator resumes via `POST /workflow-runs/{id}/approve`. This

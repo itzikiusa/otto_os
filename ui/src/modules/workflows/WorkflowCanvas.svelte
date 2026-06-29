@@ -29,8 +29,35 @@
     onedgeselect,
   }: Props = $props();
 
-  const NODE_W = 190;
+  const NODE_W = 210;
   const NODE_H = 62;
+  const HEAD_H = 60; // header row height (icon + title) inside any node
+  const STEP_H = 22; // one inner loop step row
+  const LOOP_FOOT = 24; // the "until … · max …" footer row
+
+  interface LoopStep {
+    name: string;
+    kind: string;
+  }
+  function loopSteps(n: WorkflowNode): LoopStep[] {
+    const p = n.params as { steps?: { name?: string; kind?: string }[] } | null;
+    const steps = Array.isArray(p?.steps) ? p!.steps : [];
+    return steps.map((s, i) => ({ name: s?.name || `step ${i + 1}`, kind: s?.kind || '?' }));
+  }
+  function loopUntil(n: WorkflowNode): string {
+    return (n.params as { until?: string } | null)?.until ?? '';
+  }
+  function loopMax(n: WorkflowNode): number | undefined {
+    return (n.params as { max_iterations?: number } | null)?.max_iterations;
+  }
+  /** The actual card height — loop nodes grow to show their inner steps. */
+  function nodeHeight(n: WorkflowNode): number {
+    if (n.kind === 'loop') {
+      const c = loopSteps(n).length;
+      return HEAD_H + c * STEP_H + (loopUntil(n) ? LOOP_FOOT : 0) + 8;
+    }
+    return NODE_H;
+  }
 
   let scale = $state(1);
   let tx = $state(40);
@@ -63,6 +90,14 @@
 
   function onWheel(e: WheelEvent): void {
     e.preventDefault();
+    // Only a trackpad PINCH (or ctrl+wheel) zooms — macOS delivers pinch as a
+    // wheel event with ctrlKey set. A plain two-finger scroll PANS instead, so
+    // scrolling no longer zooms the graph.
+    if (!e.ctrlKey) {
+      tx -= e.deltaX;
+      ty -= e.deltaY;
+      return;
+    }
     const r = surface?.getBoundingClientRect();
     const px = e.clientX - (r?.left ?? 0);
     const py = e.clientY - (r?.top ?? 0);
@@ -130,8 +165,8 @@
           n.id !== d.from &&
           g.x >= n.x - 14 &&
           g.x <= n.x + 30 &&
-          g.y >= n.y + NODE_H / 2 - 18 &&
-          g.y <= n.y + NODE_H / 2 + 18,
+          g.y >= n.y + nodeHeight(n) / 2 - 18 &&
+          g.y <= n.y + nodeHeight(n) / 2 + 18,
       );
       if (target) connect(d.from, target.id);
     }
@@ -155,16 +190,19 @@
   // Bezier path between an output port and an input port (graph coords).
   function edgePath(s: WorkflowNode, t: WorkflowNode): string {
     const x1 = s.x + NODE_W;
-    const y1 = s.y + NODE_H / 2;
+    const y1 = s.y + nodeHeight(s) / 2;
     const x2 = t.x;
-    const y2 = t.y + NODE_H / 2;
+    const y2 = t.y + nodeHeight(t) / 2;
     const dx = Math.max(40, Math.abs(x2 - x1) * 0.5);
     return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
   }
 
   /** Midpoint of an edge (for the condition badge). */
   function edgeMid(s: WorkflowNode, t: WorkflowNode): { x: number; y: number } {
-    return { x: (s.x + NODE_W + t.x) / 2, y: (s.y + t.y) / 2 + NODE_H / 2 };
+    return {
+      x: (s.x + NODE_W + t.x) / 2,
+      y: (s.y + nodeHeight(s) / 2 + t.y + nodeHeight(t) / 2) / 2,
+    };
   }
   function condLabel(c: string): string {
     return c.length > 18 ? `${c.slice(0, 17)}…` : c;
@@ -176,7 +214,7 @@
     const s = graph.nodes.find((n) => n.id === d.from);
     if (!s) return '';
     const x1 = s.x + NODE_W;
-    const y1 = s.y + NODE_H / 2;
+    const y1 = s.y + nodeHeight(s) / 2;
     const dx = Math.max(40, Math.abs(d.mx - x1) * 0.5);
     return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${d.mx - dx} ${d.my}, ${d.mx} ${d.my}`;
   }
@@ -244,17 +282,38 @@
       <div
         class="node"
         class:selected={selectedId === n.id}
+        class:loop={n.kind === 'loop'}
         data-status={st}
-        style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; --accent:{color(n.kind)};"
+        style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{nodeHeight(n)}px; --accent:{color(n.kind)};"
         onpointerdown={(e) => startNode(e, n)}
       >
         <span class="stripe"></span>
-        <span class="ic"><Icon name={spec(n.kind)?.icon ?? 'box'} size={14} /></span>
-        <span class="body">
-          <span class="title">{n.name || spec(n.kind)?.label || n.kind}</span>
-          <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>
-        </span>
-        {#if st}<span class="dot {st}" title={st}></span>{/if}
+        <div class="head">
+          <span class="ic"><Icon name={spec(n.kind)?.icon ?? 'box'} size={14} /></span>
+          <span class="body">
+            <span class="title">{n.name || spec(n.kind)?.label || n.kind}</span>
+            <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>
+          </span>
+          {#if st}<span class="dot {st}" title={st}></span>{/if}
+        </div>
+
+        {#if n.kind === 'loop'}
+          <!-- The exact loop, expanded: its inner steps + stop condition. -->
+          <div class="steps">
+            {#each loopSteps(n) as s, i}
+              <div class="step">
+                <span class="si">{i + 1}</span>
+                <span class="sn">{s.name}</span>
+                <span class="sk">{spec(s.kind)?.label ?? s.kind}</span>
+              </div>
+            {/each}
+            {#if loopUntil(n)}
+              <div class="until" title={loopUntil(n)}>
+                ↻ until <code>{condLabel(loopUntil(n))}</code>{#if loopMax(n)} · max {loopMax(n)}{/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
 
         {#if (spec(n.kind)?.inputs ?? 1) > 0}
           <span class="port in" title="input"></span>
@@ -357,17 +416,83 @@
   .node {
     position: absolute;
     display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 62px;
-    padding: 0 12px 0 14px;
+    flex-direction: column;
+    align-items: stretch;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     box-shadow: var(--shadow);
     cursor: grab;
     user-select: none;
+    overflow: hidden;
     transition: border-color 120ms ease-out;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 60px;
+    padding: 0 12px 0 14px;
+    flex-shrink: 0;
+  }
+  .node:not(.loop) .head {
+    height: 100%;
+  }
+  .node.loop .head {
+    border-bottom: 1px solid var(--border);
+  }
+  .steps {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 2px;
+    padding: 5px 10px 6px 14px;
+    min-height: 0;
+  }
+  .step {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .si {
+    display: grid;
+    place-items: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 700;
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+  .sn {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text);
+  }
+  .sk {
+    font-size: 8.5px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .until {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .until code {
+    color: var(--accent);
+    font-size: 10px;
   }
   .node:hover {
     border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
