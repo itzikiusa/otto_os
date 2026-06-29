@@ -113,6 +113,8 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
         outputs,
         color: color.to_string(),
         icon: icon.to_string(),
+        output_schema: output_schema_for(kind),
+        params_schema: None,
     };
     vec![
         n("manual_trigger", "Manual Trigger", "Triggers",
@@ -175,6 +177,80 @@ pub fn is_known_kind(kind: &str) -> bool {
     node_catalog().iter().any(|s| s.kind == kind)
 }
 
+/// Declared output shape per node kind (drives UI expression hints + warn-only
+/// runtime validation). Keys map to JSON types; `None` means free-form output.
+fn output_schema_for(kind: &str) -> Option<Value> {
+    let obj = |pairs: &[(&str, &str)]| {
+        let mut m = serde_json::Map::new();
+        for (k, t) in pairs {
+            m.insert((*k).to_string(), json!(t));
+        }
+        Some(json!({ "type": "object", "fields": Value::Object(m) }))
+    };
+    match kind {
+        "agent_prompt" => obj(&[("reply", "string")]),
+        "http_request" | "api_run" => obj(&[("status", "number"), ("body", "any")]),
+        "db_query" => obj(&[("columns", "array"), ("rows", "array"), ("rows_returned", "number")]),
+        "broker_peek" => obj(&[("topic", "string"), ("messages", "array"), ("count", "number")]),
+        "budget_gate" => obj(&[("exceeded", "boolean"), ("blocked", "boolean")]),
+        "human_approval" => obj(&[("approved", "boolean"), ("approved_by", "string")]),
+        "condition" => obj(&[("result", "boolean"), ("value", "any")]),
+        "loop" => obj(&[("iterations", "number"), ("satisfied", "boolean"), ("last", "any")]),
+        "review_run" => obj(&[
+            ("review_id", "string"),
+            ("status", "string"),
+            ("blocking", "number"),
+            ("advisory", "number"),
+            ("score", "number"),
+            ("threshold", "number"),
+            ("passed", "boolean"),
+        ]),
+        "product_analyze" => obj(&[("story_id", "string"), ("analysis", "string")]),
+        "product_rewrite" => obj(&[("story_id", "string"), ("body_md", "string")]),
+        "product_plan" => obj(&[("story_id", "string"), ("plan_md", "string")]),
+        "product_publish" => obj(&[("story_id", "string"), ("url", "string"), ("dry_run", "boolean")]),
+        "git_pr" => obj(&[("title", "string"), ("description", "string"), ("opened", "boolean")]),
+        "canvas" => obj(&[("scene_id", "string"), ("summary", "string")]),
+        "swarm_task" => obj(&[("task_id", "string"), ("title", "string")]),
+        _ => None,
+    }
+}
+
+/// Warn-only validation of a node's output against its declared schema. Returns a
+/// list of human-readable warnings (missing keys / wrong types). Never fails a run.
+fn validate_node_output(kind: &str, output: &Value) -> Vec<String> {
+    let Some(schema) = output_schema_for(kind) else {
+        return vec![];
+    };
+    let Some(fields) = schema.get("fields").and_then(Value::as_object) else {
+        return vec![];
+    };
+    let Some(obj) = output.as_object() else {
+        return vec![format!("{kind}: expected an object output")];
+    };
+    let mut warns = Vec::new();
+    for (key, ty) in fields {
+        let ty = ty.as_str().unwrap_or("any");
+        match obj.get(key) {
+            None => warns.push(format!("{kind}: missing output field '{key}'")),
+            Some(v) => {
+                let ok = match ty {
+                    "string" => v.is_string(),
+                    "number" => v.is_number(),
+                    "boolean" => v.is_boolean(),
+                    "array" => v.is_array(),
+                    "object" => v.is_object(),
+                    _ => true,
+                };
+                if !ok && !v.is_null() {
+                    warns.push(format!("{kind}: output field '{key}' is not {ty}"));
+                }
+            }
+        }
+    }
+    warns
+}
+
 /// Run a workflow to completion in the current task, persisting progress to the
 /// `workflow_runs` row after every node. Spawn this on a background task.
 ///
@@ -226,12 +302,21 @@ pub async fn run_workflow(
             error: None,
             logs: vec![],
             duration_ms: None,
+            attempts: None,
         })
         .collect();
-    let preds = predecessors(&workflow.graph);
-    let mut failed: std::collections::HashSet<String> = Default::default();
+    // Nodes that errored (or were poisoned by an errored upstream) — these
+    // propagate failure. `branch_skipped` nodes were pruned by an edge condition
+    // (or are downstream of a pruned node) and do NOT fail the run.
+    let mut errored: std::collections::HashSet<String> = Default::default();
+    let mut branch_skipped: std::collections::HashSet<String> = Default::default();
+    // Edge ids whose condition evaluated false (the branch was not taken).
+    let mut inactive_edges: std::collections::HashSet<String> = Default::default();
     let mut canceled = false;
     let mut timed_out = false;
+
+    // Record which workflow version this run executed (best-effort).
+    let _ = repo.set_run_version(&run_id, workflow.version).await;
 
     let _ = repo
         .update_run(&run_id, RunStatus::Running, &states, None, false)
@@ -273,21 +358,44 @@ pub async fn run_workflow(
             continue;
         }
 
-        // Skip if any predecessor failed/was skipped.
-        let upstream = preds.get(&node_id).cloned().unwrap_or_default();
-        if upstream.iter().any(|p| failed.contains(p)) {
-            states[idx].status = NodeStatus::Skipped;
-            states[idx].logs = vec!["skipped (upstream did not succeed)".into()];
-            failed.insert(node_id.clone());
-            let _ = repo
-                .update_run(&run_id, RunStatus::Running, &states, None, false)
-                .await;
-            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
-            continue;
-        }
-
-        // Assemble this node's input from its predecessors' outputs.
-        let node_input = assemble_input(&upstream, &outputs, &input);
+        // Decide whether to run this node based on its incoming edges. Only
+        // edges whose source is within the run scope constrain control flow (a
+        // start-from-here run leaves ancestors out of scope; their edges don't
+        // poison or branch-skip the entry node — it falls back to the run input).
+        let in_scope = |n: &str| run_set.as_ref().map(|s| s.contains(n)).unwrap_or(true);
+        let views: Vec<EdgeView> = incoming_edges(&workflow.graph, &node_id)
+            .iter()
+            .filter(|e| in_scope(&e.source))
+            .map(|e| EdgeView {
+                source: e.source.clone(),
+                errored: errored.contains(&e.source),
+                has_output: outputs.contains_key(&e.source),
+                edge_active: !inactive_edges.contains(&e.id),
+            })
+            .collect();
+        let node_input = match decide_node(&views) {
+            NodeDecision::ErrorSkip => {
+                states[idx].status = NodeStatus::Skipped;
+                states[idx].logs = vec!["skipped (upstream did not succeed)".into()];
+                errored.insert(node_id.clone());
+                let _ = repo
+                    .update_run(&run_id, RunStatus::Running, &states, None, false)
+                    .await;
+                emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+                continue;
+            }
+            NodeDecision::BranchSkip => {
+                states[idx].status = NodeStatus::Skipped;
+                states[idx].logs = vec!["skipped (branch not taken)".into()];
+                branch_skipped.insert(node_id.clone());
+                let _ = repo
+                    .update_run(&run_id, RunStatus::Running, &states, None, false)
+                    .await;
+                emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+                continue;
+            }
+            NodeDecision::Run(satisfied) => assemble_input(&satisfied, &outputs, &input),
+        };
 
         // --- node-result cache check ----------------------------------------
         // Cache is keyed by (workflow_id, node_id, params_hash, input_hash).
@@ -304,6 +412,12 @@ pub async fn run_workflow(
             states[idx].output = Some(cached_out.clone());
             states[idx].logs = vec!["Success (cached)".into()];
             states[idx].duration_ms = Some(0);
+            states[idx].attempts = Some(0);
+            // Prune outgoing edges whose condition fails on the cached output.
+            let (pruned, mut plogs) =
+                eval_outgoing(&workflow.graph, node, &cached_out, &node_input, &input);
+            inactive_edges.extend(pruned);
+            states[idx].logs.append(&mut plogs);
             outputs.insert(node_id.clone(), cached_out);
             let _ = repo
                 .update_run(&run_id, RunStatus::Running, &states, None, false)
@@ -323,12 +437,52 @@ pub async fn run_workflow(
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
 
         let started = Instant::now();
-        match execute_node(&ctx, &ws, node, node_input, &run_id).await {
+        // Run the node, honoring its retry policy (default: a single attempt).
+        let policy = resolve_retry(node);
+        let mut attempt: u32 = 0;
+        let mut backoff = policy.backoff_ms;
+        let mut retry_logs: Vec<String> = vec![];
+        let result = loop {
+            attempt += 1;
+            match execute_node(&ctx, &ws, node, node_input.clone(), &run_id).await {
+                Ok(ok) => break Ok(ok),
+                Err(e) => {
+                    let can_retry = attempt <= policy.max_attempts && is_retryable(&node.kind);
+                    if !can_retry {
+                        break Err(e);
+                    }
+                    retry_logs.push(format!(
+                        "attempt {attempt} failed: {e} — retrying in {backoff}ms"
+                    ));
+                    // Bail out of the backoff promptly if the run was canceled.
+                    if let Ok(r) = repo.get_run(&run_id).await {
+                        if r.status == RunStatus::Canceled {
+                            break Err(e);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                    backoff = ((backoff as f64) * policy.factor) as u64;
+                    backoff = backoff.min(60_000).max(1);
+                }
+            }
+        };
+        match result {
             Ok((out, mut logs)) => {
                 states[idx].status = NodeStatus::Success;
                 states[idx].output = Some(out.clone());
                 logs.insert(0, start_line);
+                logs.append(&mut retry_logs);
+                // Warn-only output validation against the node's declared schema.
+                for w in validate_node_output(&node.kind, &out) {
+                    logs.push(format!("⚠ {w}"));
+                }
+                // Prune outgoing edges whose condition fails on this output.
+                let (pruned, mut plogs) =
+                    eval_outgoing(&workflow.graph, node, &out, &node_input, &input);
+                inactive_edges.extend(pruned);
+                logs.append(&mut plogs);
                 states[idx].logs = logs;
+                states[idx].attempts = Some(attempt);
                 let elapsed = started.elapsed().as_millis() as u64;
                 states[idx].duration_ms = Some(elapsed);
                 // Persist to the node cache for future re-runs.
@@ -340,9 +494,13 @@ pub async fn run_workflow(
             Err(e) => {
                 states[idx].status = NodeStatus::Error;
                 states[idx].error = Some(e.to_string());
-                states[idx].logs = vec![start_line, format!("✗ {e}")];
+                let mut elogs = vec![start_line];
+                elogs.append(&mut retry_logs);
+                elogs.push(format!("✗ {e}"));
+                states[idx].logs = elogs;
+                states[idx].attempts = Some(attempt);
                 states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
-                failed.insert(node_id.clone());
+                errored.insert(node_id.clone());
             }
         }
         let _ = repo
@@ -1266,16 +1424,108 @@ async fn execute_node(
 // Graph helpers
 // ---------------------------------------------------------------------------
 
-/// Map of node id -> its predecessor node ids.
-fn predecessors(graph: &WorkflowGraph) -> HashMap<String, Vec<String>> {
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
-    for n in &graph.nodes {
-        map.entry(n.id.clone()).or_default();
+/// Edges entering `node_id` (in graph order).
+fn incoming_edges<'a>(graph: &'a WorkflowGraph, node_id: &str) -> Vec<&'a otto_core::workflows::WorkflowEdge> {
+    graph.edges.iter().filter(|e| e.target == node_id).collect()
+}
+
+/// Edges leaving `node_id` (in graph order).
+fn outgoing_edges<'a>(graph: &'a WorkflowGraph, node_id: &str) -> Vec<&'a otto_core::workflows::WorkflowEdge> {
+    graph.edges.iter().filter(|e| e.source == node_id).collect()
+}
+
+/// A reduced view of one in-scope incoming edge, for the branching decision.
+struct EdgeView {
+    source: String,
+    /// The source node errored (or was poisoned).
+    errored: bool,
+    /// The source produced an output (i.e. ran successfully or hit cache).
+    has_output: bool,
+    /// This edge's condition is satisfied (true / absent).
+    edge_active: bool,
+}
+
+/// The control-flow decision for a node, derived purely from its incoming edges.
+#[derive(Debug, PartialEq)]
+enum NodeDecision {
+    /// Run, assembling input from these satisfied source ids.
+    Run(Vec<String>),
+    /// Skip + propagate failure: an active-path predecessor errored.
+    ErrorSkip,
+    /// Skip without failure: the node has in-scope predecessors but no satisfied
+    /// edge (every branch into it was pruned, or upstream was branch-skipped).
+    BranchSkip,
+}
+
+/// Decide whether a node runs. Pure + unit-tested.
+///
+/// - An errored in-scope predecessor poisons the node (ErrorSkip).
+/// - Otherwise, "satisfied" sources are those that produced output via an active
+///   edge; if there are in-scope incoming edges but none satisfied, the node is
+///   BranchSkip; else Run with the satisfied sources (empty ⇒ an entry node that
+///   falls back to the run input).
+fn decide_node(views: &[EdgeView]) -> NodeDecision {
+    if views.iter().any(|v| v.errored) {
+        return NodeDecision::ErrorSkip;
     }
-    for e in &graph.edges {
-        map.entry(e.target.clone()).or_default().push(e.source.clone());
+    let satisfied: Vec<String> = views
+        .iter()
+        .filter(|v| v.has_output && v.edge_active)
+        .map(|v| v.source.clone())
+        .collect();
+    if !views.is_empty() && satisfied.is_empty() {
+        return NodeDecision::BranchSkip;
     }
-    map
+    NodeDecision::Run(satisfied)
+}
+
+/// Evaluate the conditions on a node's outgoing edges against its output. Returns
+/// `(inactive_edge_ids, log_lines)`. An edge with no condition is always active;
+/// a condition that fails to parse/evaluate is treated as *not taken* (and logged).
+fn eval_outgoing(
+    graph: &WorkflowGraph,
+    node: &WorkflowNode,
+    output: &Value,
+    node_input: &Value,
+    run_input: &Value,
+) -> (Vec<String>, Vec<String>) {
+    let mut inactive = Vec::new();
+    let mut logs = Vec::new();
+    let ctx = json!({
+        "output": output,
+        "input": node_input,
+        "node": { "id": node.id, "kind": node.kind, "name": node.name },
+        "run": { "input": run_input },
+    });
+    for e in outgoing_edges(graph, &node.id) {
+        if let Some(cond) = &e.condition {
+            if !otto_core::expr::eval_bool(cond, &ctx) {
+                inactive.push(e.id.clone());
+                logs.push(format!("edge → {} not taken ({cond})", e.target));
+            }
+        }
+    }
+    (inactive, logs)
+}
+
+/// The effective retry policy for a node: an explicit `node.retry`, else a
+/// `params.retry` object, else the default (no retry). Clamped to sane bounds.
+fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
+    if let Some(p) = &node.retry {
+        return p.clamped();
+    }
+    if let Some(rp) = node.params.get("retry") {
+        if let Ok(p) = serde_json::from_value::<otto_core::workflows::RetryPolicy>(rp.clone()) {
+            return p.clamped();
+        }
+    }
+    otto_core::workflows::RetryPolicy::default()
+}
+
+/// Whether a node kind should be retried on failure. Interactive / entry kinds
+/// are never retried.
+fn is_retryable(kind: &str) -> bool {
+    !matches!(kind, "human_approval" | "manual_trigger")
 }
 
 /// Kahn topological sort. Errors on a cycle.
@@ -1346,10 +1596,11 @@ mod tests {
             x: 0.0,
             y: 0.0,
             params: Value::Null,
+            retry: None,
         }
     }
     fn edge(s: &str, t: &str) -> WorkflowEdge {
-        WorkflowEdge { id: format!("{s}-{t}"), source: s.into(), target: t.into() }
+        WorkflowEdge { id: format!("{s}-{t}"), source: s.into(), target: t.into(), condition: None }
     }
 
     #[test]
@@ -1386,5 +1637,84 @@ mod tests {
         let set = descendants_inclusive(&g, "b");
         assert!(set.contains("b") && set.contains("c"), "self + downstream");
         assert!(!set.contains("a") && !set.contains("d"), "not upstream/siblings");
+    }
+
+    fn view(source: &str, errored: bool, has_output: bool, edge_active: bool) -> EdgeView {
+        EdgeView { source: source.into(), errored, has_output, edge_active }
+    }
+
+    #[test]
+    fn decide_entry_node_runs_with_no_sources() {
+        assert_eq!(decide_node(&[]), NodeDecision::Run(vec![]));
+    }
+
+    #[test]
+    fn decide_errored_predecessor_poisons() {
+        let v = vec![view("a", true, false, true)];
+        assert_eq!(decide_node(&v), NodeDecision::ErrorSkip);
+        // error wins even if a sibling succeeded
+        let v = vec![view("a", true, false, true), view("b", false, true, true)];
+        assert_eq!(decide_node(&v), NodeDecision::ErrorSkip);
+    }
+
+    #[test]
+    fn decide_active_branch_runs() {
+        let v = vec![view("a", false, true, true)];
+        assert_eq!(decide_node(&v), NodeDecision::Run(vec!["a".into()]));
+    }
+
+    #[test]
+    fn decide_inactive_only_branch_skips() {
+        // condition pruned the only incoming edge
+        let v = vec![view("a", false, true, false)];
+        assert_eq!(decide_node(&v), NodeDecision::BranchSkip);
+        // upstream was branch-skipped (no output, not errored)
+        let v = vec![view("a", false, false, true)];
+        assert_eq!(decide_node(&v), NodeDecision::BranchSkip);
+    }
+
+    #[test]
+    fn decide_join_runs_from_active_side_only() {
+        // if/else join: a=true branch produced output (active), b=false branch pruned
+        let v = vec![view("a", false, true, true), view("b", false, true, false)];
+        assert_eq!(decide_node(&v), NodeDecision::Run(vec!["a".into()]));
+        // and the other way
+        let v = vec![view("a", false, true, false), view("b", false, true, true)];
+        assert_eq!(decide_node(&v), NodeDecision::Run(vec!["b".into()]));
+    }
+
+    #[test]
+    fn eval_outgoing_prunes_false_edges() {
+        let mut g = WorkflowGraph {
+            nodes: vec![node("c", "condition"), node("t", "log"), node("f", "log")],
+            edges: vec![
+                WorkflowEdge { id: "c-t".into(), source: "c".into(), target: "t".into(), condition: Some("output.result == true".into()) },
+                WorkflowEdge { id: "c-f".into(), source: "c".into(), target: "f".into(), condition: Some("output.result == false".into()) },
+            ],
+        };
+        let cnode = g.nodes[0].clone();
+        let out = json!({ "result": true });
+        let (inactive, _logs) = eval_outgoing(&g, &cnode, &out, &Value::Null, &Value::Null);
+        assert_eq!(inactive, vec!["c-f".to_string()], "false branch pruned");
+        // flip
+        let out = json!({ "result": false });
+        let (inactive, _) = eval_outgoing(&g, &cnode, &out, &Value::Null, &Value::Null);
+        assert_eq!(inactive, vec!["c-t".to_string()]);
+        g.edges.clear();
+        let (inactive, _) = eval_outgoing(&g, &cnode, &out, &Value::Null, &Value::Null);
+        assert!(inactive.is_empty(), "no edges → nothing pruned");
+    }
+
+    #[test]
+    fn retry_policy_resolution_and_clamps() {
+        let mut n = node("a", "agent_prompt");
+        assert_eq!(resolve_retry(&n).max_attempts, 0, "default no retry");
+        n.params = json!({ "retry": { "max_attempts": 99, "backoff_ms": 999999 } });
+        let p = resolve_retry(&n);
+        assert_eq!(p.max_attempts, 5, "clamped to 5");
+        assert_eq!(p.backoff_ms, 60_000, "clamped to 60s");
+        assert!(is_retryable("agent_prompt"));
+        assert!(!is_retryable("human_approval"));
+        assert!(!is_retryable("manual_trigger"));
     }
 }

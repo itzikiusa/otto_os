@@ -8,6 +8,7 @@ pub mod auth;
 pub mod domain;
 pub mod error;
 pub mod event;
+pub mod expr;
 pub mod finding;
 pub mod hooks;
 pub mod id;

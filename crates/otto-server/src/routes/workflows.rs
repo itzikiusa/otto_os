@@ -224,6 +224,7 @@ fn fallback_graph(description: &str) -> WorkflowGraph {
                 x: 0.0,
                 y: 0.0,
                 params: Value::Null,
+                retry: None,
             },
             WorkflowNode {
                 id: "agent".into(),
@@ -232,12 +233,14 @@ fn fallback_graph(description: &str) -> WorkflowGraph {
                 x: 0.0,
                 y: 0.0,
                 params: serde_json::json!({ "prompt": description }),
+                retry: None,
             },
         ],
         edges: vec![WorkflowEdge {
             id: "e1".into(),
             source: "trigger".into(),
             target: "agent".into(),
+            condition: None,
         }],
     }
 }
@@ -394,11 +397,13 @@ fn game_templates() -> Vec<WorkflowTemplate> {
             x,
             y: 70.0,
             params,
+            retry: None,
         };
         let edge = |s: &str, t: &str| WorkflowEdge {
             id: format!("{s}-{t}"),
             source: s.into(),
             target: t.into(),
+            condition: None,
         };
         WorkflowGraph {
             nodes: vec![
