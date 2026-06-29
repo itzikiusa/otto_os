@@ -251,6 +251,9 @@
   function suggestRunInput(): string {
     const k = collectKinds();
     const obj: Record<string, unknown> = {};
+    // Where the agents run (the repo/path to work in). Defaults to the workspace
+    // root if omitted; set it to operate on a different repo.
+    obj.working_directory = '~/path/to/repo';
     if (k.has('review_run') || k.has('git_pr')) {
       obj.repo_id = '<repo id — copy it from the Git tab>';
       obj.base = 'main';
@@ -261,6 +264,10 @@
     obj.msg = 'What you want done — instructions for the agents.';
     obj.jira_ticket = 'GS-0000';
     obj.goals = ['e.g. 100% test coverage (services)', 'under 2 minutes runtime'];
+    // Optional: post the result somewhere specific (else it replies to the
+    // trigger's origin; a manual run posts nowhere unless you set this).
+    obj.result_channel = 'slack';
+    obj.result_chat = '<channel id — optional>';
     return JSON.stringify(obj, null, 2);
   }
 

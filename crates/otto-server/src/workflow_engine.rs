@@ -313,6 +313,15 @@ pub async fn run_workflow(
         .collect();
     // Resolve the user this run acts as (for spawning visible agent sessions).
     let user = resolve_run_user(&ctx, &workflow.created_by).await;
+    // Run-level working directory: the `working_directory` from the run input
+    // (e.g. a Slack `Working Directory:` field), else the workspace root. Agent
+    // nodes run here — so a workflow owned by workspace A can operate on repo X.
+    let run_cwd = input
+        .get("working_directory")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(expand_tilde)
+        .unwrap_or_else(|| ws.root_path.clone());
     // Nodes that errored (or were poisoned by an errored upstream) — these
     // propagate failure. `branch_skipped` nodes were pruned by an edge condition
     // (or are downstream of a pruned node) and do NOT fail the run.
@@ -459,7 +468,7 @@ pub async fn run_workflow(
         let (sess_tx, mut sess_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let result = loop {
             attempt += 1;
-            let fut = execute_node(&ctx, &ws, &user, node, node_input.clone(), &run_id, &sess_tx);
+            let fut = execute_node(&ctx, &ws, &user, node, node_input.clone(), &run_id, &run_cwd, &sess_tx);
             tokio::pin!(fut);
             let attempt_res = loop {
                 tokio::select! {
@@ -810,14 +819,16 @@ async fn deliver_run_result(
         Some(o) => o,
         None => return,
     };
-    let channel = obj.get("channel").and_then(Value::as_str);
-    let chat = obj.get("chat").and_then(Value::as_str).filter(|s| !s.is_empty());
-    let thread = obj.get("thread").and_then(Value::as_str).filter(|s| !s.is_empty());
-    let webhook = obj
-        .get("result_webhook")
-        .or_else(|| obj.get("callback_url"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
+    // Target = the incoming-hook origin (channel/chat/thread the trigger came
+    // from), unless explicitly overridden with `result_chat` (+ optional
+    // `result_channel`/`result_thread`) — e.g. to post results to a #releases
+    // channel, or to give a manual UI run a destination.
+    let str_at = |k: &str| obj.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let (channel, chat, thread) = match str_at("result_chat") {
+        Some(c) => (str_at("result_channel").or_else(|| str_at("channel")), Some(c), str_at("result_thread")),
+        None => (str_at("channel"), str_at("chat"), str_at("thread")),
+    };
+    let webhook = str_at("result_webhook").or_else(|| str_at("callback_url"));
 
     let has_chat = matches!(channel, Some("slack") | Some("telegram")) && chat.is_some();
     if !has_chat && webhook.is_none() {
@@ -931,6 +942,7 @@ async fn execute_node(
     node: &WorkflowNode,
     input: Value,
     run_id: &Id,
+    run_cwd: &str,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(Value, Vec<String>)> {
     let p = &node.params;
@@ -979,8 +991,9 @@ async fn execute_node(
             // so the run view can watch/inspect it — not the headless PTY.
             let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
             let full = format!("{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000));
+            let acwd = node_cwd(node, &input, run_cwd);
             let (reply, sid) =
-                run_node_agent(ctx, ws, user, node, provider, &full, session_tx).await?;
+                run_node_agent(ctx, ws, user, node, provider, &full, &acwd, session_tx).await?;
             Ok((
                 json!({ "reply": reply, "session_id": sid }),
                 vec!["agent turn complete".into()],
@@ -1671,7 +1684,7 @@ async fn execute_node(
                         params: step.get("params").cloned().unwrap_or(Value::Null),
                         retry: step.get("retry").and_then(|r| serde_json::from_value(r.clone()).ok()),
                     };
-                    match Box::pin(execute_node(ctx, ws, user, &sub, step_input, run_id, session_tx)).await {
+                    match Box::pin(execute_node(ctx, ws, user, &sub, step_input, run_id, run_cwd, session_tx)).await {
                         Ok((out, mut slogs)) => {
                             for l in slogs.drain(..) {
                                 logs.push(format!("  [{i}/{sname}] {l}"));
@@ -1794,7 +1807,7 @@ async fn execute_node(
                      where each score and the overall score are 0–100.\n\nGoals:\n- {}",
                     goals.join("\n- ")
                 );
-                match run_node_agent(ctx, ws, user, node, "claude", &gprompt, session_tx).await {
+                match run_node_agent(ctx, ws, user, node, "claude", &gprompt, &worktree, session_tx).await {
                     Ok((reply, _sid)) => match extract_json(&reply) {
                         Some(v) => {
                             let gs = v.get("score").and_then(Value::as_i64).unwrap_or(review_score).clamp(0, 100);
@@ -1868,7 +1881,8 @@ async fn execute_node(
                 "{skill}\n\n# Task\n{instruction}\n{extra}\n\n# Story context\n{}",
                 truncate(&context, 8000)
             );
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &prompt, session_tx).await?;
+            let acwd = node_cwd(node, &input, run_cwd);
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &prompt, &acwd, session_tx).await?;
             let mut out = serde_json::Map::new();
             out.insert("story_id".into(), json!(story_id));
             out.insert("session_id".into(), json!(sid));
@@ -1971,7 +1985,8 @@ async fn execute_node(
                 "Produce a {mode} diagram. {prompt_in}\nReply with ONLY a ```{mode} code block.\n\n[context]\n{}",
                 truncate(&input.to_string(), 4000)
             );
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &full, session_tx).await?;
+            let acwd = node_cwd(node, &input, run_cwd);
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &full, &acwd, session_tx).await?;
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
             // Write under the data dir (never the user's repo working tree).
             let ext = if mode == "excalidraw" { "json" } else { "mmd" };
@@ -2161,6 +2176,7 @@ async fn resolve_run_user(ctx: &ServerCtx, created_by: &Id) -> User {
 /// `run_session_turn` flow), reporting the session id over `session_tx` the
 /// moment the session exists so the run view can open it live. Returns
 /// `(reply, session_id)`.
+#[allow(clippy::too_many_arguments)]
 async fn run_node_agent(
     ctx: &ServerCtx,
     ws: &Workspace,
@@ -2168,6 +2184,7 @@ async fn run_node_agent(
     node: &WorkflowNode,
     provider: &str,
     prompt: &str,
+    cwd: &str,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(String, Id)> {
     let title = if node.name.is_empty() {
@@ -2175,7 +2192,7 @@ async fn run_node_agent(
     } else {
         format!("Workflow: {}", node.name)
     };
-    let meta = json!({ "source": "workflow", "node_id": node.id, "node_kind": node.kind });
+    let meta = json!({ "source": "workflow", "node_id": node.id, "node_kind": node.kind, "cwd": cwd });
     let tx = session_tx.clone();
     crate::agent_session::run_session_turn(
         ctx,
@@ -2183,7 +2200,7 @@ async fn run_node_agent(
         user,
         None,
         &title,
-        &ws.root_path,
+        cwd,
         provider,
         meta,
         prompt,
@@ -2193,6 +2210,35 @@ async fn run_node_agent(
     )
     .await
     .map_err(|e| e.0)
+}
+
+/// Expand a leading `~`/`~/` to the user's home directory.
+fn expand_tilde(p: &str) -> String {
+    if p == "~" {
+        return dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string());
+    }
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    p.to_string()
+}
+
+/// The directory an agent node runs in: a per-node `cwd`/`working_directory`
+/// param, else the run-level working dir, else the workspace root. Tilde-expanded.
+fn node_cwd(node: &WorkflowNode, input: &Value, run_cwd: &str) -> String {
+    let p = &node.params;
+    let pick = p
+        .get("cwd")
+        .or_else(|| p.get("working_directory"))
+        .and_then(Value::as_str)
+        .or_else(|| input.get("working_directory").and_then(Value::as_str))
+        .filter(|s| !s.trim().is_empty());
+    match pick {
+        Some(s) => expand_tilde(s),
+        None => run_cwd.to_string(),
+    }
 }
 
 /// Kahn topological sort. Errors on a cycle.
