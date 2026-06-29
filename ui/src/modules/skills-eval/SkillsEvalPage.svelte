@@ -10,14 +10,32 @@
   import StartEvalForm from './StartEvalForm.svelte';
   import RunDetail from './RunDetail.svelte';
   import CompareView from './CompareView.svelte';
+  import GoldenTasksView from './GoldenTasksView.svelte';
+  import MatrixView from './MatrixView.svelte';
 
   type Mode = 'form' | 'detail';
+  type Tab = 'runs' | 'golden' | 'matrix';
 
   let runs: SkillEval[] = $state([]);
   let loading = $state(true);
   let mode: Mode = $state('form');
   let selectedId: string | null = $state(null);
   let starting = $state(false);
+  let tab: Tab = $state('runs');
+
+  // Open a run from another tab (golden task run, matrix cell): switch to Runs,
+  // reload, and select it.
+  async function openRunById(id: string): Promise<void> {
+    tab = 'runs';
+    const wsId = ws.currentId;
+    if (wsId) await loadList(wsId);
+    selectedId = id;
+    mode = 'detail';
+  }
+  function openRun(e: SkillEval): void {
+    runs = [e, ...runs.filter((r) => r.id !== e.id)];
+    void openRunById(e.id);
+  }
 
   // Compare mode: pick 2+ runs from the list to view side by side.
   let compareMode = $state(false);
@@ -115,6 +133,24 @@
   }
 </script>
 
+<div class="se-wrap">
+  <div class="se-tabs" data-testid="eval-tabs">
+    <button class="se-tab" class:active={tab === 'runs'} onclick={() => (tab = 'runs')} data-testid="tab-runs">
+      <Icon name="zap" size={13} /> Runs
+    </button>
+    <button class="se-tab" class:active={tab === 'golden'} onclick={() => (tab = 'golden')} data-testid="tab-golden">
+      <Icon name="target" size={13} /> Golden Tasks
+    </button>
+    <button class="se-tab" class:active={tab === 'matrix'} onclick={() => (tab = 'matrix')} data-testid="tab-matrix">
+      <Icon name="grid" size={13} /> Matrix
+    </button>
+  </div>
+  <div class="se-content">
+    {#if tab === 'golden'}
+      <GoldenTasksView onopenrun={openRun} />
+    {:else if tab === 'matrix'}
+      <MatrixView onopenrun={openRunById} />
+    {:else}
 <div class="se-page">
   <aside class="se-side">
     <div class="se-side-head">
@@ -205,8 +241,52 @@
     {/if}
   </main>
 </div>
+    {/if}
+  </div>
+</div>
 
 <style>
+  .se-wrap {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .se-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 8px 12px 0;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .se-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 7px 12px;
+    border-radius: 8px 8px 0 0;
+    cursor: pointer;
+  }
+  .se-tab:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+  }
+  .se-tab.active {
+    color: #0b0b0b;
+    background: #7ee787;
+    border-color: #7ee787;
+  }
+  .se-content {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
   .se-page {
     display: flex;
     height: 100%;

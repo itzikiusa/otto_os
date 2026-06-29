@@ -1,21 +1,29 @@
 //! `ottod mcp-tools` — the first-party Otto **read-only** MCP tool server
 //! (Task B2b).
 //!
-//! Otto exposes a slice of its own data to an agent session as MCP tools. When a
-//! workspace opts in (`otto_mcp_enabled`), `otto-sessions` injects an `otto`
-//! server into the workspace `.mcp.json` whose command is `ottod mcp-tools`,
-//! with a **per-session token** in its env. claude/codex launch that command and
-//! speak MCP to it over stdio; this process answers `initialize` / `tools/list` /
-//! `tools/call`, calling back into the running daemon on 127.0.0.1 with the
-//! injected token.
+//! Otto exposes a slice of its own data to an agent session as MCP tools. When
+//! `otto_mcp_enabled` is on (default), `otto-sessions` injects an `otto` server
+//! whose command is `ottod mcp-tools`, carrying a **per-session token** — in the
+//! workspace `.mcp.json` for Claude, or a per-session creds file (`--config`) for
+//! Codex. claude/codex launch that command and speak MCP to it over stdio; this
+//! process answers `initialize` / `tools/list` / `tools/call`, calling back into
+//! the running daemon on 127.0.0.1 with the per-session token (which authorizes as
+//! the session's owner, so workspace RBAC applies).
+//!
+//! Beyond Otto's own data, the DB tools (`otto_list_connections`,
+//! `otto_db_schema`/`_children`/`_object`, `otto_db_query`) expose the user's
+//! database **connections**: schema introspection and **read-only** queries.
 //!
 //! Safety properties (every tool, no exceptions):
-//! - **Read-only** — only HTTP `GET`s to a hard-coded allow-list of endpoints.
-//!   There is no code path here that issues a write.
+//! - **Read-only** — all upstream calls are `GET`s, or `POST`s to a hard-coded
+//!   allow-list of **read-only-enforced** endpoints. The only query path,
+//!   `…/db/mcp-query`, refuses any write/DDL server-side (`run_read_only`) before a
+//!   driver runs, independent of the connection's write-guard. No tool here mutates.
 //! - **Capped** — each upstream call has a wall-clock timeout; the response body
 //!   is size-capped before parsing, and JSON arrays are row-capped.
 //! - **Redacted** — every tool result is passed through `otto_core::redact` so
-//!   tokens/PII never reach the agent transcript.
+//!   tokens/PII never reach the agent transcript (the query path also masks cells
+//!   server-side).
 //! - **Audited** — every call appends a row to `mcp_tool_calls` (best-effort).
 //!
 //! The transport is newline-delimited JSON-RPC 2.0 (one JSON object per line on
@@ -105,23 +113,47 @@ impl Ctx {
         serde_json::from_slice(&body).map_err(|e| format!("parse json: {e}"))
     }
 
-    /// POST an `/api/v1` path with the bearer token (used only for the governed
-    /// gateway proxy — the read-only first-party tools never call this).
+    /// POST an `/api/v1` path with the bearer token. Used by the governed gateway
+    /// proxy AND by the read-only DB tools (`otto_db_children` / `otto_db_object` /
+    /// `otto_db_query`), which post to **read-only-enforced** endpoints — the
+    /// `…/db/mcp-query` route refuses any write/DDL server-side before a driver runs.
+    /// Same body-size cap as [`Self::get_json`] so a large result can't blow the
+    /// agent transcript.
     async fn post_json(&self, path: &str, body: &Value) -> Result<Value, String> {
         let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
         let resp = tokio::time::timeout(
             CALL_TIMEOUT,
-            self.http.post(&url).bearer_auth(&self.token).json(body).send(),
+            self.http
+                .post(&url)
+                .bearer_auth(&self.token)
+                .header("X-Otto-Session", self.session_id.clone().unwrap_or_default())
+                .json(body)
+                .send(),
         )
         .await
         .map_err(|_| "upstream timeout".to_string())?
         .map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| format!("read body: {e}"))?;
-        if !status.is_success() {
-            return Err(format!("daemon returned {status}: {}", text.chars().take(300).collect::<String>()));
+        if let Some(len) = resp.content_length() {
+            if len as usize > MAX_BODY_BYTES {
+                return Err(format!("response too large ({len} bytes > {MAX_BODY_BYTES} cap)"));
+            }
         }
-        serde_json::from_slice(text.as_bytes()).map_err(|e| format!("parse json: {e}"))
+        let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
+        if bytes.len() > MAX_BODY_BYTES {
+            return Err(format!(
+                "response too large ({} bytes > {MAX_BODY_BYTES} cap)",
+                bytes.len()
+            ));
+        }
+        if !status.is_success() {
+            let snippet = String::from_utf8_lossy(&bytes);
+            return Err(format!(
+                "daemon returned {status}: {}",
+                snippet.chars().take(300).collect::<String>()
+            ));
+        }
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
     }
 
     /// The governed downstream tools the live-agent **gateway** exposes for this
@@ -199,14 +231,64 @@ fn tool_catalog() -> Value {
     json!({
         "tools": [
             {
+                "name": "otto_list_connections",
+                "description": "Read-only: list the database connections available to this session — id, name, kind, environment, read_only. Use this FIRST to discover connection ids, then call otto_db_schema / otto_db_query with a returned id. Only queryable DB kinds are listed (mysql, redis, mongodb, clickhouse).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "description": "Optional filter to one kind: mysql | redis | mongodb | clickhouse." }
+                    }
+                }
+            },
+            {
                 "name": "otto_db_schema",
-                "description": "Read-only: the schema tree (databases/tables/columns) for an Otto database connection. Returns the structure only — no row data.",
+                "description": "Read-only: the TOP of a connection's schema tree — databases (SQL/Mongo) or keyspaces (Redis). Returns structure only, no row data. Each node carries an `id` (a NodePath) you pass to otto_db_children / otto_db_object.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "connection_id": { "type": "string", "description": "Otto connection id (a DB-kind connection)." }
                     },
                     "required": ["connection_id"]
+                }
+            },
+            {
+                "name": "otto_db_children",
+                "description": "Read-only: expand ONE node of a connection's schema tree (engine-agnostic, lazy). `path` is a NodePath from otto_db_schema/otto_db_children — e.g. 'db:shop' → its folders, 'db:shop/folder:tables' → its tables, 'db:shop/folder:tables/table:orders' → its columns. Redis: 'kdb:0' → key prefixes (optional `filter`).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "connection_id": { "type": "string", "description": "Otto connection id." },
+                        "path": { "type": "string", "description": "NodePath of the node to expand, e.g. 'db:shop/folder:tables'." },
+                        "filter": { "type": "string", "description": "Optional substring/prefix filter (e.g. a Redis key prefix)." }
+                    },
+                    "required": ["connection_id", "path"]
+                }
+            },
+            {
+                "name": "otto_db_object",
+                "description": "Read-only: the FULL structure of one table/collection — columns (name + type), primary key, indexes, foreign keys, and the CREATE/DDL where the engine exposes it. `path` is the object's NodePath, e.g. 'db:shop/folder:tables/table:orders'.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "connection_id": { "type": "string", "description": "Otto connection id." },
+                        "path": { "type": "string", "description": "NodePath of the table/collection." }
+                    },
+                    "required": ["connection_id", "path"]
+                }
+            },
+            {
+                "name": "otto_db_query",
+                "description": "Run a READ-ONLY query against a connection and return rows {columns, rows, truncated}. SQL (mysql/clickhouse): a SELECT/SHOW/DESCRIBE/EXPLAIN/WITH statement. Redis: a read command per line (GET/HGETALL/SCAN/…). Mongo: a find/aggregate. Writes/DDL are REFUSED server-side. `database` scopes the active database (SQL/Mongo); Redis selects a keyspace via `node` 'kdb:N'. `max_rows` caps rows (server hard cap 200).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "connection_id": { "type": "string", "description": "Otto connection id." },
+                        "statement": { "type": "string", "description": "The read-only statement / command." },
+                        "database": { "type": "string", "description": "Optional active database to scope SQL/Mongo execution." },
+                        "node": { "type": "string", "description": "Optional raw node context (e.g. 'kdb:0' for a Redis keyspace); overrides `database`." },
+                        "max_rows": { "type": "integer", "description": "Optional row cap (clamped to 200)." }
+                    },
+                    "required": ["connection_id", "statement"]
                 }
             },
             {
@@ -293,12 +375,93 @@ fn seg(s: &str) -> String {
 /// audited row count, or an error string surfaced to the agent.
 async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<i64>), String> {
     match name {
+        "otto_list_connections" => {
+            let Some(ws) = ctx.workspace_id.as_deref() else {
+                return Err(
+                    "no workspace context (OTTO_WORKSPACE_ID unset); cannot list connections".into(),
+                );
+            };
+            let raw = ctx
+                .get_json(&format!("/workspaces/{}/connections", seg(ws)))
+                .await?;
+            // Keep only queryable DB kinds, optionally one kind, and slim each row
+            // so the agent sees ids/names/kinds without connection params/secrets.
+            let kind_filter = args.get("kind").and_then(Value::as_str);
+            let items: Vec<Value> = raw
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|c| {
+                    let kind = c.get("kind").and_then(Value::as_str).unwrap_or("");
+                    if !matches!(kind, "mysql" | "redis" | "mongodb" | "clickhouse") {
+                        return None;
+                    }
+                    if kind_filter.is_some_and(|kf| kf != kind) {
+                        return None;
+                    }
+                    Some(json!({
+                        "id": c.get("id").cloned().unwrap_or(Value::Null),
+                        "name": c.get("name").cloned().unwrap_or(Value::Null),
+                        "kind": kind,
+                        "environment": c.get("environment").cloned().unwrap_or(Value::Null),
+                        "read_only": c.get("read_only").cloned().unwrap_or(Value::Null),
+                    }))
+                })
+                .collect();
+            Ok(finalize(json!({ "connections": items })))
+        }
         "otto_db_schema" => {
             let conn = arg_str(args, "connection_id")?;
             let raw = ctx
                 .get_json(&format!("/connections/{}/db/schema", seg(&conn)))
                 .await?;
             Ok(finalize(json!({ "connection_id": conn, "schema": raw })))
+        }
+        "otto_db_children" => {
+            let conn = arg_str(args, "connection_id")?;
+            let path = arg_str(args, "path")?;
+            let mut body = json!({ "path": path });
+            if let Some(f) = args.get("filter").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                body["filter"] = json!(f);
+            }
+            let raw = ctx
+                .post_json(&format!("/connections/{}/db/schema/children", seg(&conn)), &body)
+                .await?;
+            Ok(finalize(json!({ "connection_id": conn, "path": path, "children": raw })))
+        }
+        "otto_db_object" => {
+            let conn = arg_str(args, "connection_id")?;
+            let path = arg_str(args, "path")?;
+            let body = json!({ "path": path });
+            let raw = ctx
+                .post_json(&format!("/connections/{}/db/object", seg(&conn)), &body)
+                .await?;
+            Ok(finalize(json!({ "connection_id": conn, "path": path, "object": raw })))
+        }
+        "otto_db_query" => {
+            let conn = arg_str(args, "connection_id")?;
+            let statement = arg_str(args, "statement")?;
+            let mut body = json!({ "statement": statement });
+            // `node` (raw) wins over `database`. The active-DB `node` is a PLAIN
+            // name for SQL/Mongo (e.g. "shopdb" → `USE shopdb`); Redis selects a
+            // keyspace via a raw `node` like "kdb:0".
+            if let Some(node) = args.get("node").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                body["node"] = json!(node);
+            } else if let Some(db) =
+                args.get("database").and_then(Value::as_str).filter(|s| !s.is_empty())
+            {
+                body["node"] = json!(db);
+            }
+            if let Some(mr) = args.get("max_rows").and_then(Value::as_u64) {
+                body["max_rows"] = json!(mr);
+            }
+            // POSTs to the read-only-enforced endpoint: any write/DDL is refused
+            // server-side (see otto-dbviewer `run_read_only`) before a driver runs.
+            let raw = ctx
+                .post_json(&format!("/connections/{}/db/mcp-query", seg(&conn)), &body)
+                .await?;
+            Ok(finalize(json!({ "connection_id": conn, "result": raw })))
         }
         "otto_git_pr_review" => {
             let repo = arg_str(args, "repo_id")?;
@@ -491,25 +654,92 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
     }
 }
 
+/// Resolved credentials + routing for the tools — from env (the Claude path) or a
+/// per-session creds file (the Codex path).
+struct Creds {
+    token: String,
+    base: Option<String>,
+    session_id: Option<String>,
+    workspace_id: Option<String>,
+}
+
+/// Find the creds-file path: `--config <path>` / `--config=<path>` in `args`, else
+/// the `OTTO_MCP_CONFIG` env. Pure over `args` for testability.
+fn config_path_in(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--config" {
+            return it.next().cloned();
+        }
+        if let Some(p) = a.strip_prefix("--config=") {
+            return Some(p.to_string());
+        }
+    }
+    std::env::var("OTTO_MCP_CONFIG").ok().filter(|s| !s.is_empty())
+}
+
+/// Parse a per-session creds JSON document (`{token, base?, session_id?,
+/// workspace_id?}`). Pure for testability; errors if the `token` is missing.
+fn parse_creds(body: &str) -> Result<Creds, String> {
+    let v: Value = serde_json::from_str(body).map_err(|e| format!("parse creds: {e}"))?;
+    let token = v.get("token").and_then(Value::as_str).unwrap_or("").to_string();
+    if token.is_empty() {
+        return Err("creds file has no `token`".into());
+    }
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Ok(Creds {
+        token,
+        base: s("base"),
+        session_id: s("session_id"),
+        workspace_id: s("workspace_id"),
+    })
+}
+
+/// Resolve credentials: env first (Claude — `OTTO_MCP_TOKEN` & friends), then a
+/// per-session creds file (Codex — `--config <path>` / `OTTO_MCP_CONFIG`).
+fn load_creds(args: &[String]) -> Result<Creds, String> {
+    if let Ok(token) = std::env::var("OTTO_MCP_TOKEN") {
+        if !token.is_empty() {
+            let s = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+            return Ok(Creds {
+                token,
+                base: s("OTTO_MCP_BASE"),
+                session_id: s("OTTO_SESSION_ID"),
+                workspace_id: s("OTTO_WORKSPACE_ID"),
+            });
+        }
+    }
+    let path = config_path_in(args).ok_or_else(|| {
+        "no OTTO_MCP_TOKEN and no --config/OTTO_MCP_CONFIG creds file (the first-party \
+         tools require a per-session token)"
+            .to_string()
+    })?;
+    let body = std::fs::read_to_string(&path).map_err(|e| format!("read creds {path}: {e}"))?;
+    parse_creds(&body)
+}
+
 /// Entry point for `ottod mcp-tools`. Reads JSON-RPC lines on stdin, writes
 /// responses on stdout, until EOF.
 pub async fn run() -> Result<(), String> {
-    // Credentials + routing come from the env the session manager injected.
-    let token = std::env::var("OTTO_MCP_TOKEN").unwrap_or_default();
-    if token.is_empty() {
-        return Err("OTTO_MCP_TOKEN not set (the first-party tools require a per-session token)".into());
-    }
-    let base = std::env::var("OTTO_MCP_BASE")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            let cfg = Config::load();
-            format!("http://127.0.0.1:{}", cfg.port)
-        });
-    let session_id = std::env::var("OTTO_SESSION_ID").ok().filter(|s| !s.is_empty());
-    let workspace_id = std::env::var("OTTO_WORKSPACE_ID")
-        .ok()
-        .filter(|s| !s.is_empty());
+    // Credentials + routing come from the env the session manager injected (the
+    // Claude path: `OTTO_MCP_TOKEN`/`OTTO_MCP_BASE`/`OTTO_SESSION_ID`/
+    // `OTTO_WORKSPACE_ID`), OR — when the token env is absent (the Codex path,
+    // which can't carry per-session env through `-c` cleanly) — from a per-session
+    // creds file named by `--config <path>` / `OTTO_MCP_CONFIG`.
+    let args: Vec<String> = std::env::args().collect();
+    let creds = load_creds(&args)?;
+    let token = creds.token;
+    let base = creds.base.unwrap_or_else(|| {
+        let cfg = Config::load();
+        format!("http://127.0.0.1:{}", cfg.port)
+    });
+    let session_id = creds.session_id;
+    let workspace_id = creds.workspace_id;
 
     // Open the same SQLite DB the daemon uses, for the audit ledger. Best-effort:
     // if it can't be opened the tools still run, audit just degrades to stderr.
@@ -629,6 +859,79 @@ mod tests {
         assert!(names.contains(&"otto_db_schema"));
         assert!(names.contains(&"otto_git_pr_review"));
         assert!(names.contains(&"otto_product_story"));
+    }
+
+    #[test]
+    fn tool_catalog_lists_the_connection_db_tools() {
+        let cat = tool_catalog();
+        let names: Vec<&str> = cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for t in [
+            "otto_list_connections",
+            "otto_db_schema",
+            "otto_db_children",
+            "otto_db_object",
+            "otto_db_query",
+        ] {
+            assert!(names.contains(&t), "catalog is missing {t}");
+        }
+        // Every advertised tool must carry an inputSchema object.
+        for tool in cat["tools"].as_array().unwrap() {
+            assert!(
+                tool["inputSchema"]["type"] == json!("object"),
+                "tool {} has no object inputSchema",
+                tool["name"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn list_connections_errors_without_workspace() {
+        // No OTTO_WORKSPACE_ID context ⇒ a clear tool error, no upstream call.
+        let mut ctx = test_ctx();
+        ctx.workspace_id = None;
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                    "params": { "name": "otto_list_connections", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("workspace"), "got: {text}");
+    }
+
+    #[test]
+    fn config_path_in_reads_flag_and_eq_forms() {
+        let a: Vec<String> = ["ottod", "mcp-tools", "--config", "/tmp/c.json"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(config_path_in(&a).as_deref(), Some("/tmp/c.json"));
+        let b: Vec<String> = ["ottod", "mcp-tools", "--config=/tmp/x.json"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(config_path_in(&b).as_deref(), Some("/tmp/x.json"));
+    }
+
+    #[test]
+    fn parse_creds_reads_fields_and_requires_token() {
+        let c = parse_creds(
+            r#"{"token":"t-1","base":"http://127.0.0.1:7700","session_id":"s-1","workspace_id":"ws-1"}"#,
+        )
+        .unwrap();
+        assert_eq!(c.token, "t-1");
+        assert_eq!(c.base.as_deref(), Some("http://127.0.0.1:7700"));
+        assert_eq!(c.session_id.as_deref(), Some("s-1"));
+        assert_eq!(c.workspace_id.as_deref(), Some("ws-1"));
+        // A token-less document is rejected.
+        assert!(parse_creds(r#"{"base":"x"}"#).is_err());
     }
 
     #[tokio::test]

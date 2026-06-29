@@ -5,11 +5,52 @@
   // auto-enabled — each server is off until you flip it on, and it's only written
   // to `.mcp.json` the next time a session spawns in the workspace.
   import { mcpApi } from '../../lib/api/mcp';
+  import { api } from '../../lib/api/client';
   import type { McpServer, CreateMcpServerReq } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+
+  // The first-party `otto` MCP server (Otto's read-only tools + the read-only DB
+  // connection tools). Global toggle backed by the `otto_mcp_enabled` setting;
+  // default ON (opt-out). Distinct from the per-workspace user servers below.
+  let ottoEnabled = $state(true);
+  let ottoLoaded = $state(false);
+  let ottoSaving = $state(false);
+
+  $effect(() => {
+    void loadOttoSetting();
+  });
+
+  async function loadOttoSetting(): Promise<void> {
+    try {
+      const all = await api.get<Record<string, unknown>>('/settings');
+      // Scalar bool is the global toggle; anything but an explicit `false`
+      // (absent / object / other) resolves to the default ON.
+      ottoEnabled = all['otto_mcp_enabled'] !== false;
+    } catch {
+      ottoEnabled = true;
+    } finally {
+      ottoLoaded = true;
+    }
+  }
+
+  async function toggleOtto(next: boolean): Promise<void> {
+    ottoSaving = true;
+    try {
+      await api.put('/settings', { otto_mcp_enabled: next });
+      ottoEnabled = next;
+      toasts.info(
+        next ? 'Connections MCP enabled' : 'Connections MCP disabled',
+        'Applies to agent sessions started from now on.',
+      );
+    } catch (e) {
+      toasts.error('Could not update setting', errMsg(e));
+    } finally {
+      ottoSaving = false;
+    }
+  }
 
   let servers: McpServer[] = $state([]);
   let loading = $state(false);
@@ -175,6 +216,33 @@
     {/if}
   </div>
 
+  <div class="card otto" data-testid="connections-mcp">
+    <div class="otto-row">
+      <div class="otto-text">
+        <div class="otto-title">
+          Connections MCP <span class="badge">read-only</span>
+        </div>
+        <div class="sub">
+          Gives every agent session Otto's <code>otto</code> MCP server — including tools to
+          discover your database connections and run <strong>read-only</strong> queries:
+          <code>otto_list_connections</code>, <code>otto_db_schema</code>,
+          <code>otto_db_children</code>, <code>otto_db_object</code>, <code>otto_db_query</code>.
+          Writes/DDL are refused server-side; rows are capped, PII-masked and audited. Attached to
+          Claude via <code>.mcp.json</code> and to Codex via <code>-c</code> overrides. Default on.
+        </div>
+      </div>
+      <label class="switch" title="Toggle the otto MCP server for agent sessions">
+        <input
+          type="checkbox"
+          checked={ottoEnabled}
+          disabled={!ottoLoaded || ottoSaving}
+          onchange={(e) => void toggleOtto((e.currentTarget as HTMLInputElement).checked)}
+        />
+        <span class="switch-label">{ottoEnabled ? 'On' : 'Off'}</span>
+      </label>
+    </div>
+  </div>
+
   {#if !wsId}
     <EmptyState
       icon="gear"
@@ -323,6 +391,41 @@
     border-radius: var(--radius-m, 8px);
     background: var(--surface-1, var(--surface-2));
     padding: 14px 16px;
+  }
+  .otto {
+    margin-bottom: 16px;
+  }
+  .otto-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .otto-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    cursor: pointer;
+    user-select: none;
+  }
+  .switch input {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+  }
+  .switch-label {
+    font-size: 12.5px;
+    color: var(--text-dim);
+    min-width: 22px;
   }
   .form {
     display: flex;

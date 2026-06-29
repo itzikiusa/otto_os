@@ -1161,6 +1161,25 @@ pub fn check_pr_consistency(input: &PrConsistencyInput) -> PrConsistencyReport {
     }
 }
 
+/// Map a PR-consistency report to the recorded `pr_check` artifact status. Pure,
+/// so the (non-gameable) policy lives in one testable place. The nuance is what
+/// keeps an auto-run-on-every-PR check non-disruptive:
+/// - **hard fail** (a *dishonest* PR — e.g. claims "tests pass" while tests fail)
+///   ⇒ `Failed`, which fails the pack and earns `pr_inconsistent`.
+/// - **passed** ⇒ `Passed` — positive evidence that can satisfy a repo's
+///   `require_pr_consistency`.
+/// - otherwise (an honest-but-thin description) ⇒ `Info` — neutral evidence that
+///   neither fails the pack nor satisfies a *required* consistency check.
+pub fn pr_check_artifact_status(report: &PrConsistencyReport) -> ProofArtifactStatus {
+    if report.hard_fail {
+        ProofArtifactStatus::Failed
+    } else if report.passed {
+        ProofArtifactStatus::Passed
+    } else {
+        ProofArtifactStatus::Info
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Report rendering (R9 — exportable Markdown / HTML)
 // ---------------------------------------------------------------------------
@@ -1771,6 +1790,49 @@ mod tests {
         });
         // mentions_change (25) fails → score capped below threshold path.
         assert!(r.checks.iter().any(|c| c.key == "mentions_change" && !c.passed));
+    }
+
+    #[test]
+    fn pr_check_status_maps_honestly() {
+        // A dishonest PR (false "tests pass" claim) → Failed (fails the pack).
+        let liar = check_pr_consistency(&PrConsistencyInput {
+            title: "Fix the bug".into(),
+            description: "Fixed it in proof.rs. All tests pass now and CI is green.".into(),
+            files_changed: vec!["crates/otto-core/src/proof.rs".into()],
+            additions: 5,
+            deletions: 1,
+            has_passing_tests: false,
+            has_failing_tests: true,
+        });
+        assert_eq!(pr_check_artifact_status(&liar), ProofArtifactStatus::Failed);
+
+        // A clean, consistent PR → Passed (positive evidence).
+        let good = check_pr_consistency(&PrConsistencyInput {
+            title: "Add proof snapshots".into(),
+            description: "This adds immutable snapshots to the proof module. \
+                          Testing: ran cargo test for otto-core."
+                .into(),
+            files_changed: vec!["crates/otto-core/src/proof.rs".into()],
+            additions: 120,
+            deletions: 4,
+            has_passing_tests: true,
+            has_failing_tests: false,
+        });
+        assert_eq!(pr_check_artifact_status(&good), ProofArtifactStatus::Passed);
+
+        // An honest-but-thin description (low score, no hard fail) → Info: neutral,
+        // it must NOT fail an otherwise-green pack.
+        let thin = check_pr_consistency(&PrConsistencyInput {
+            title: "x".into(),
+            description: "short".into(),
+            files_changed: vec!["crates/otto-keychain/src/lib.rs".into()],
+            additions: 50,
+            deletions: 0,
+            has_passing_tests: false,
+            has_failing_tests: false,
+        });
+        assert!(!thin.passed && !thin.hard_fail, "expected a soft fail: {thin:?}");
+        assert_eq!(pr_check_artifact_status(&thin), ProofArtifactStatus::Info);
     }
 
     #[test]

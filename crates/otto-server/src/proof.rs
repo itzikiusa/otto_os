@@ -642,8 +642,12 @@ pub async fn run_pr_check(
     let (mut additions, mut deletions) = (0u32, 0u32);
     if let Some(c) = cwd {
         let git = LocalGit::new(c);
+        // The PR's changes are `base..HEAD`, NOT the base commit's own patch.
+        // `DiffTarget::Commit(b)` is `git show <b>` (the wrong fileset) — the same
+        // trap `assemble_diff` documents. Use the range so files_changed/LOC
+        // describe the actual PR.
         let resp = match base {
-            Some(b) => git.diff(DiffTarget::Commit(b.to_string()), None).await,
+            Some(b) => git.diff(DiffTarget::Range(b.to_string(), "HEAD".to_string()), None).await,
             None => git.diff(DiffTarget::Working, None).await,
         };
         if let Ok(r) = resp {
@@ -675,15 +679,20 @@ pub async fn run_pr_check(
         has_failing_tests,
     });
 
-    let status = if report.passed {
-        ProofArtifactStatus::Passed
-    } else {
-        ProofArtifactStatus::Failed
-    };
+    // Pure, testable mapping (see `pr_check_artifact_status`): a *dishonest* PR
+    // fails the pack; a passing check is positive evidence; an honest-but-thin
+    // description is neutral — which keeps auto-running it on every PR non-disruptive.
+    let status = otto_core::proof::pr_check_artifact_status(&report);
     let mut body = format!(
         "PR consistency: {}/100 ({})\n",
         report.score,
-        if report.passed { "passed" } else { "FAILED" }
+        if report.hard_fail {
+            "FAILED — inconsistent with the change"
+        } else if report.passed {
+            "passed"
+        } else {
+            "weak — review the description"
+        }
     );
     for c in &report.checks {
         body.push_str(&format!(

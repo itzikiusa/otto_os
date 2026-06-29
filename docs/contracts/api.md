@@ -117,6 +117,13 @@ Notes:
   the flag), so a genuine read still passes on its own classification while a raw write tagged
   `explain:true` is still blocked. The UI requires a typed confirmation before sending
   `confirm_write`.
+- DB read-only MCP query (`POST /api/v1/connections/{id}/db/mcp-query`, ws **viewer**;
+  global connections: root) — the agent-facing query path used by `ottod mcp-tools`. Body
+  `{statement, max_rows?, node?}` → `QueryResult`. Read-only is enforced **unconditionally**
+  (independent of the connection's write-guard): a statement classified as a write/DDL is
+  rejected with `403 forbidden` and a `Problem.message` prefixed `mcp_read_only: ` **before**
+  any driver runs; non-queryable connection kinds (ssh/custom) → `400 invalid`. Rows are
+  hard-capped (200) and cell values are PII-masked server-side.
 - Session create with kind=connection requires `connection_id`; provider is set server-side
   to the connection kind. Title defaults: agent → "<provider> #N", connection → conn name.
 - PR routes resolve the provider + account from the repo row (`provider`, `git_account_id`);
@@ -139,6 +146,13 @@ Notes:
   `loopback`/`none` are stricter postures suited to non-model shells. `providers`
   defaults to `["claude","codex","agy","shell"]`. Connection sessions are never
   sandboxed. (Settings:Admin via `PUT /settings`.)
+- `otto_mcp_enabled` — toggles the first-party `otto` MCP server (Otto's read-only tools +
+  the read-only DB connection tools: `otto_list_connections`, `otto_db_schema`/`_children`/
+  `_object`, `otto_db_query`) attached to every agent session. **Default ON** (opt-out): an
+  absent value or unlisted workspace resolves to enabled. A bare scalar `true`/`false` is the
+  global toggle; a `{ "<ws>": bool }` object overrides per workspace. Claude/agy receive it via
+  the workspace `.mcp.json`; Codex via per-spawn `-c mcp_servers.otto.*` overrides. (Settings via
+  `PUT /settings`.)
 
 ## Agent Swarm (#59–#86)
 
@@ -1004,24 +1018,58 @@ config/mutations = `ws editor` (config write = `ws admin`).
 | POST /improvement/edits/{eid}/rollback | ws editor | — | roll back an applied edit |
 | POST /sessions/{id}/evolve | ws SelfImprovement:editor | — | trigger a manual per-session live-evolve pass; returns `{ run_id }` |
 
-## Skill evaluations
+## Skill evaluations (eval lab)
 
-Spawns agents that evaluate/iterate a skill against a workspace's sources. Reads =
-`ws viewer`, run/mutations = `ws editor`; config = root; promote = root.
+The eval lab evaluates/iterates a skill against a workspace's sources, scores the
+produced code from multiple signals (tests, lint, diff quality, review findings,
+human rating) backed by a **Proof Pack**, and gates promotion on score + proof.
+Reads = `ws viewer`, run/mutations = `ws editor`; config = root; promote = root.
+
+A run has a `mode`: `generate` (an agent implements the task, default) or
+`score_only` (no agent — score an existing `target`: `{kind: working|branch|path}`).
+`StartSkillEvalReq` additionally carries `golden_task_id`, `target`, `test_cmd`,
+`lint_cmd`, and `weights`. Each iteration gains a `scoring` (`EvalScore`:
+per-signal scores + `composite` + `proof_status` + `done_score`), a `proof_pack_id`,
+and a `human_rating`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{id}/skill-evaluations | ws editor | StartEvalReq | SkillEvaluation |
-| GET /workspaces/{id}/skill-evaluations | ws viewer | — | `SkillEvaluation[]` |
+| POST /workspaces/{id}/skill-evaluations | ws editor | StartSkillEvalReq | SkillEval |
+| GET /workspaces/{id}/skill-evaluations | ws viewer | — | `SkillEval[]` |
 | GET /workspaces/{id}/skill-sources | ws viewer | — | available evaluation sources |
-| GET /skill-evaluations/{id} | ws viewer | — | SkillEvaluation (with iterations) |
+| GET /skill-evaluations/{id} | ws viewer | — | SkillEval (with iterations) |
 | DELETE /skill-evaluations/{id} | ws editor | — | 204 |
 | POST /skill-evaluations/{id}/cancel | ws editor | — | cancel a running evaluation |
-| POST /skill-evaluations/{id}/promote | root | — | promote the winning skill into the library |
+| POST /skill-evaluations/{id}/promote | root | PromoteSkillReq (`force?`) | promote winning skill; 409 if the score+proof gate is unmet and not forced |
+| GET /skill-evaluations/{id}/promote-gate | ws viewer | `?iteration_id` | PromoteGate (allowed + reasons) |
 | GET /skill-evaluations/{id}/iterations/{iter_id}/diff | ws viewer | — | iteration impl diff |
+| GET /skill-evaluations/{id}/iterations/{iter_id}/score | ws viewer | — | EvalScore |
+| GET /skill-evaluations/{id}/iterations/{iter_id}/proof-pack | ws viewer | — | assembled proof pack (header + artifacts) |
+| POST /skill-evaluations/{id}/iterations/{iter_id}/rate | ws editor | RateIterationReq | SkillEval (re-scored; no command re-run) |
+| POST /skill-evaluations/{id}/iterations/{iter_id}/regression | ws editor | RegressionReq | GoldenTask (origin=regression; deduped by source iter) |
 | POST /skill-evaluations/{id}/iterations/{iter_id}/agents/{index}/retry | ws editor | — | re-run one validation agent |
-| GET /settings/skill-eval | root | — | skill-eval config |
+| GET /settings/skill-eval | root | — | skill-eval config (+ weights, promote_min_score, require_proof_pass, default cmds) |
 | PUT /settings/skill-eval | root | SkillEvalConfig | config |
+
+### Golden tasks (per-repo evaluation corpus)
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{id}/golden-tasks | ws viewer | `?repo_key` | `GoldenTask[]` |
+| POST /workspaces/{id}/golden-tasks | ws editor | GoldenTaskReq | GoldenTask |
+| GET /golden-tasks/{id} | ws viewer | — | GoldenTask |
+| PUT /golden-tasks/{id} | ws editor | GoldenTaskReq | GoldenTask |
+| DELETE /golden-tasks/{id} | ws editor | — | 204 |
+| POST /golden-tasks/{id}/run | ws editor | RunGoldenReq | SkillEval (started from the task) |
+
+### Matrices (provider × skill × prompt)
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{id}/eval-matrices | ws viewer | — | `EvalMatrix[]` |
+| POST /workspaces/{id}/eval-matrices | ws editor | StartMatrixReq | EvalMatrix (cells fan out as eval runs) |
+| GET /eval-matrices/{id} | ws viewer | — | EvalMatrix (with live cell composites/proof) |
+| POST /eval-matrices/{id}/cancel | ws editor | — | cancel all still-running cells |
 
 ## Context library (skills / souls / context)
 
@@ -1883,7 +1931,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?` | `ProofPackResp[]` |
-| 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?}` | ProofPackResp |
+| 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?, repo_id?}` | ProofPackResp (`repo_id` links the pack to a repo so its proof policy applies — strengthen-only) |
 | 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | — | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
 | 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract computed live) |
 | 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
@@ -1896,7 +1944,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | 126 | POST /api/v1/proof-packs/{id}/snapshot | ws editor · ProofPack Edit | CreateSnapshotReq `{note?}` | ProofSnapshotResp `{…meta, bundle, report_md, report_html}` (immutable) |
 | 127 | GET /api/v1/proof-packs/{id}/snapshots | ws viewer · ProofPack View | — | `ProofSnapshotMeta[]` (newest first) |
 | 128 | GET /api/v1/proof-snapshots/{id} | ws viewer · ProofPack View | — | ProofSnapshotResp |
-| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp |
+| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp — `415` if `mime` not in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` if the decoded blob exceeds 25 MiB |
 | 130 | GET /api/v1/proof-artifacts/{id}/blob | ws viewer · ProofPack View | — | raw bytes (`Content-Type` = blob mime, `Content-Disposition: inline`) |
 | 131 | POST /api/v1/proof-packs/{id}/evidence/api | ws editor · ProofPack Edit | ApiEvidenceReq `{title, method, url, status, duration_ms?, request?, response?, metadata?}` | ProofPackResp |
 | 132 | POST /api/v1/proof-packs/{id}/evidence/db | ws editor · ProofPack Edit | DbEvidenceReq `{title, engine?, query?, columns?, row_count?, sample?, error?, metadata?}` | ProofPackResp |
@@ -2097,6 +2145,17 @@ webhook; classified `Exempt` in `policy.rs`):
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}` |
+
+When a `callback_url` is supplied, the daemon POSTs the run's result back to it at
+the milestones a caller can act on — `awaiting_approval` and every terminal state
+(`completed`/`failed`/`rejected`/`cancelled`). The body is the run's public shape:
+`{run_id, workspace_id, status, awaiting_approval, terminal, title, source_kind,
+source_ref, source_url, mode, proof_status, risk_score, findings_total,
+findings_blocking, has_pr_draft, pr_url, approval_decision, error}`. Delivery is
+best-effort and SSRF-guarded (`otto_netguard::check_url` + redirect policy — a
+loopback/private/metadata target is refused); each attempt is recorded as a
+`delivery` `RunEvent`. With no `callback_url` the webhook is a fire-and-forget
+trigger (read the result via REST/WS/UI).
 
 Slack/Telegram entry: a `/run <ref>` (or "run with otto …") message launches a run;
 an `approve`/`reject` reply in the run's thread resolves the approval gate (authorized

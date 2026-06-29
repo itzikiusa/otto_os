@@ -180,6 +180,33 @@ pub fn enable_otto_tools(workspace_root: &str, server: &OttoToolsServer) -> Resu
     write_doc(&path, &doc)
 }
 
+/// TOML-quote a string value for a Codex `-c key=value` override (Codex parses the
+/// value as TOML). Wraps in double quotes, escaping `\` and `"`.
+fn toml_str(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// The Codex `-c` config overrides that attach Otto's `otto` MCP server to a Codex
+/// session. Codex doesn't read the workspace `.mcp.json`, so instead of editing its
+/// global `~/.codex/config.toml` (shared, and unable to carry a per-session token)
+/// we pass per-spawn overrides that run `<ottod> mcp-tools --config <creds_path>`.
+/// The per-session token lives in the (0600) creds file at `creds_path` — never on
+/// argv. Returns the args to append to the Codex launch command; non-destructive.
+pub fn codex_mcp_inject_args(ottod: &str, creds_path: &str) -> Vec<String> {
+    vec![
+        "-c".to_string(),
+        format!("mcp_servers.otto.command={}", toml_str(ottod)),
+        "-c".to_string(),
+        format!(
+            "mcp_servers.otto.args=[{},{},{}]",
+            toml_str("mcp-tools"),
+            toml_str("--config"),
+            toml_str(creds_path)
+        ),
+    ]
+}
+
 /// Remove Otto's first-party `otto` MCP tool server, preserving everything else.
 /// No-op if absent. Mirrors [`disable_browser`].
 pub fn disable_otto_tools(workspace_root: &str) -> Result<(), String> {
@@ -302,6 +329,30 @@ mod tests {
             !servers.contains_key("otto"),
             "a user server named 'otto' must be dropped by merge_user_servers"
         );
+    }
+
+    #[test]
+    fn codex_mcp_inject_args_builds_c_overrides() {
+        let args = codex_mcp_inject_args("/usr/local/bin/ottod", "/tmp/otto-mcp/s-1.json");
+        assert_eq!(
+            args,
+            vec![
+                "-c".to_string(),
+                "mcp_servers.otto.command=\"/usr/local/bin/ottod\"".to_string(),
+                "-c".to_string(),
+                "mcp_servers.otto.args=[\"mcp-tools\",\"--config\",\"/tmp/otto-mcp/s-1.json\"]"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_mcp_inject_args_escapes_quotes_and_backslashes() {
+        let args = codex_mcp_inject_args(r#"/p"q"#, r#"/p\a"#);
+        // command value: embedded double-quote is escaped.
+        assert_eq!(args[1], r#"mcp_servers.otto.command="/p\"q""#);
+        // backslash in the creds path is escaped inside the args array.
+        assert!(args[3].contains(r#"/p\\a"#), "got {}", args[3]);
     }
 
     /// Disabling removes only the `otto` key.

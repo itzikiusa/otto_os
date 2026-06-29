@@ -7,6 +7,7 @@ pub mod api;
 pub mod auth;
 pub mod domain;
 pub mod error;
+pub mod eval_score;
 pub mod event;
 pub mod expr;
 pub mod finding;

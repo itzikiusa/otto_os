@@ -31,3 +31,4 @@ webpki-roots = "1"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+sqlx = { workspace = true }

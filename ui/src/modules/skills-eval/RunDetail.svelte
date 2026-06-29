@@ -12,6 +12,7 @@
     EvalIteration,
     EvalValidationState,
     ImplDiffResp,
+    PromoteGate,
     PromoteSkillReq,
     SkillEval,
   } from '../../lib/api/types';
@@ -19,6 +20,7 @@
   import Terminal from '../../lib/components/Terminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import Scorecard from './Scorecard.svelte';
 
   interface Props {
     evalId: string;
@@ -251,16 +253,32 @@
     a.click();
     URL.revokeObjectURL(url);
   }
-  function openPromote(it: EvalIteration, source: 'tested' | 'improved'): void {
+  // Promote gate + force-override (root).
+  let promoteForce = $state(false);
+  let promoteGate = $state<PromoteGate | null>(null);
+  let gateLoading = $state(false);
+
+  async function openPromote(it: EvalIteration, source: 'tested' | 'improved'): Promise<void> {
     promoteIterId = it.id;
     promoteSource = source;
     promoteName = run?.source_skill ?? it.skill_name;
+    promoteForce = false;
+    promoteGate = null;
     promoteOpen = true;
+    if (!run) return;
+    gateLoading = true;
+    try {
+      promoteGate = await skillsEvalApi.promoteGate(run.id, it.id);
+    } catch {
+      promoteGate = null;
+    } finally {
+      gateLoading = false;
+    }
   }
   function promoteWinner(): void {
     if (!run || run.best_iteration == null) return;
     const it = run.iterations.find((i) => i.iter === run!.best_iteration);
-    if (it) openPromote(it, 'tested');
+    if (it) void openPromote(it, 'tested');
   }
   async function doPromote(): Promise<void> {
     if (!run || promoting) return;
@@ -275,10 +293,13 @@
         iteration_id: promoteIterId,
         source: promoteSource,
         name,
+        force: promoteForce,
       };
       await skillsEvalApi.promote(run.id, body);
       toasts.success('Skill saved to library', name);
       promoteOpen = false;
+      // Reflect promoted state.
+      void load(run.id);
     } catch (e) {
       toasts.error('Promote failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -290,6 +311,42 @@
     if (!run) return null;
     return run.iterations.find((it) => it.id === promoteIterId) ?? null;
   });
+
+  // --- eval-lab: human rating + regression capture ------------------------
+  let rating = $state<Set<string>>(new Set());
+  let savingReg = $state<Set<string>>(new Set());
+
+  async function rate(it: EvalIteration, n: number): Promise<void> {
+    if (!run || rating.has(it.id)) return;
+    rating = new Set(rating).add(it.id);
+    try {
+      const r = await skillsEvalApi.rate(run.id, it.id, { rating: n, note: '' });
+      run = r;
+      onupdate?.(r);
+      toasts.success('Rated', `${n}/5`);
+    } catch (e) {
+      toasts.error('Rating failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      const next = new Set(rating);
+      next.delete(it.id);
+      rating = next;
+    }
+  }
+
+  async function saveRegression(it: EvalIteration): Promise<void> {
+    if (!run || savingReg.has(it.id)) return;
+    savingReg = new Set(savingReg).add(it.id);
+    try {
+      const g = await skillsEvalApi.regression(run.id, it.id, {});
+      toasts.success('Saved as regression case', g.name);
+    } catch (e) {
+      toasts.error('Could not save regression', e instanceof Error ? e.message : String(e));
+    } finally {
+      const next = new Set(savingReg);
+      next.delete(it.id);
+      savingReg = next;
+    }
+  }
 </script>
 
 {#if loading && !run}
@@ -464,6 +521,37 @@
           {/each}
         </div>
 
+        <!-- Multi-signal scorecard (tests / lint / diff / review / human → proof) -->
+        {#if it.scoring}
+          <Scorecard score={it.scoring} evalId={run.id} iterId={it.id} />
+        {/if}
+
+        <!-- Human rating + regression capture -->
+        <div class="rate-row" data-testid="rate-row">
+          <span class="lbl">Your rating</span>
+          {#each [1, 2, 3, 4, 5] as n (n)}
+            <button
+              class="star"
+              class:on={(it.human_rating ?? 0) >= n}
+              disabled={rating.has(it.id)}
+              onclick={() => rate(it, n)}
+              title={`${n}/5`}
+              data-testid="rate-star"
+              aria-label={`Rate ${n} of 5`}
+            >★</button>
+          {/each}
+          <span class="grow"></span>
+          <button
+            class="btn small ghost"
+            disabled={savingReg.has(it.id)}
+            onclick={() => saveRegression(it)}
+            data-testid="save-regression"
+            title="Save this iteration as a per-repo regression golden task"
+          >
+            <Icon name="target" size={12} /> {savingReg.has(it.id) ? 'Saving…' : 'Save as regression case'}
+          </button>
+        </div>
+
         <!-- Export / promote this iteration's tested skill -->
         <div class="skill-actions">
           <span class="lbl">Skill ({it.skill_name})</span>
@@ -525,11 +613,38 @@
           </label>
         </div>
       {/if}
+
+      <!-- Promote gate: score + proof must pass, else show why. -->
+      <div class="gate" data-testid="promote-gate">
+        {#if gateLoading}
+          <p class="muted"><span class="spinner-xs"></span> Checking gate…</p>
+        {:else if promoteGate}
+          {#if promoteGate.allowed}
+            <p class="gate-ok" data-testid="gate-ok">
+              ✓ Gate passed — score {promoteGate.score.toFixed(0)} ≥ {promoteGate.threshold.toFixed(0)}, proof {promoteGate.proof_status || 'n/a'}.
+            </p>
+          {:else}
+            <p class="gate-bad" data-testid="gate-blocked">⚠ Promote gate not met:</p>
+            <ul class="gate-reasons">
+              {#each promoteGate.reasons as r, ri (ri)}<li>{r}</li>{/each}
+            </ul>
+            <label class="force-row">
+              <input type="checkbox" bind:checked={promoteForce} data-testid="promote-force" />
+              Force promote anyway (root override — audited, waives proof)
+            </label>
+          {/if}
+        {/if}
+      </div>
     {/snippet}
     {#snippet footer()}
       <button class="btn" onclick={() => (promoteOpen = false)}>Cancel</button>
-      <button class="btn primary" disabled={promoting} onclick={doPromote}>
-        {promoting ? 'Saving…' : 'Promote'}
+      <button
+        class="btn primary"
+        disabled={promoting || (promoteGate != null && !promoteGate.allowed && !promoteForce)}
+        onclick={doPromote}
+        data-testid="promote-confirm"
+      >
+        {promoting ? 'Saving…' : promoteGate && !promoteGate.allowed && promoteForce ? 'Force promote' : 'Promote'}
       </button>
     {/snippet}
   </Modal>
@@ -543,6 +658,59 @@
     gap: 12px;
     overflow-y: auto;
     height: 100%;
+  }
+  .rate-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 8px;
+  }
+  .rate-row .lbl {
+    margin-inline-end: 6px;
+  }
+  .star {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    color: var(--text-dim);
+    padding: 0 1px;
+  }
+  .star.on {
+    color: #f0c000;
+  }
+  .star:disabled {
+    cursor: default;
+  }
+  .gate {
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+  }
+  .gate-ok {
+    color: #1a7f37;
+    font-size: 12.5px;
+    margin: 0;
+  }
+  .gate-bad {
+    color: #a40e26;
+    font-size: 12.5px;
+    margin: 0 0 4px;
+    font-weight: 600;
+  }
+  .gate-reasons {
+    margin: 0 0 8px;
+    padding-inline-start: 18px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .force-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-dim);
   }
   .rd-loading,
   .muted {

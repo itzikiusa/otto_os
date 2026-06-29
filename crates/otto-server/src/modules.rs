@@ -204,12 +204,12 @@ impl otto_git::GitCtx for ServerCtx {
         &self,
         repo: &otto_core::domain::Repo,
         pr_number: u64,
-        proof_pack_id: Option<&str>,
+        req: &otto_core::api::CreatePrReq,
         ci: &otto_git::CiStatus,
     ) {
-        // Only act when a proof pack is linked. Best-effort throughout — a CI
-        // capture failure must never surface to the PR caller.
-        let Some(pack_id) = proof_pack_id else {
+        // Only act when a proof pack is linked. Best-effort throughout — a capture
+        // failure must never surface to the PR caller.
+        let Some(pack_id) = req.proof_pack_id.as_deref() else {
             return;
         };
         let Ok(pack) = self.proof_repo.get_pack(pack_id).await else {
@@ -227,6 +227,21 @@ impl otto_git::GitCtx for ServerCtx {
             url: ci.url.clone(),
         };
         let _ = crate::proof::record_ci_artifact(self, &pack, &summary).await;
+        // R7: run the PR-description consistency check against the actual change
+        // (target_branch..HEAD in the repo) and record a `pr_check` artifact. A
+        // dishonest description (false "tests pass" claim) flips the pack to
+        // `failed`; an honest-but-thin one is neutral. The endpoint remains for
+        // re-running on demand.
+        let _ = crate::proof::run_pr_check(
+            self,
+            &pack,
+            &req.title,
+            &req.description,
+            Some(&req.target_branch),
+            Some(&repo.path),
+            "otto",
+        )
+        .await;
     }
 }
 
@@ -4559,6 +4574,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::runs::routes(),
         review_config_routes(),
         crate::skill_eval::routes(),
+        crate::eval_lab_routes::routes(),
         provider_routes(),
         session_input_routes(),
         inject_session_routes(),

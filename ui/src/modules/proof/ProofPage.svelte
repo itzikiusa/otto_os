@@ -75,6 +75,28 @@
     expanded[id] = !expanded[id];
   }
 
+  /** One line of a PR-consistency report (mirrors PrConsistencyCheck). */
+  interface PrCheckLine {
+    label: string;
+    passed: boolean;
+    detail: string;
+  }
+  /** The PR-consistency report a `pr_check` artifact carries in `metadata.report`. */
+  interface PrCheckReport {
+    score: number;
+    passed: boolean;
+    hard_fail: boolean;
+    checks: PrCheckLine[];
+  }
+  /** Extract the structured PR-consistency report from a pr_check artifact's
+   *  metadata, or null when it isn't present/shaped as expected. */
+  function prReport(meta: unknown): PrCheckReport | null {
+    const r = (meta as { report?: unknown } | null | undefined)?.report as
+      | PrCheckReport
+      | undefined;
+    return r && Array.isArray(r.checks) ? r : null;
+  }
+
   async function loadFull(id: string): Promise<void> {
     try {
       const c = await artifactContent(id);
@@ -541,6 +563,9 @@
           <h2 class="ellipsis">{detail.pack.title || detail.pack.work_item_id}</h2>
           <ProofStatusChip status={detail.pack.status} risk={detail.pack.risk_score} />
           <span class="kind-tag">{detail.pack.work_item_kind}</span>
+          {#if detail.pack.pr_number != null}
+            <span class="kind-tag pr" title="Linked pull request">PR #{detail.pack.pr_number}</span>
+          {/if}
         </div>
         <div class="head-actions">
           <button class="btn small" onclick={assemble}><Icon name="refresh" size={12} /> Assemble</button>
@@ -623,6 +648,28 @@
                       {/if}
                     {:else}
                       <p class="dim media-loading">Loading media…</p>
+                    {/if}
+                  {/if}
+                  {#if a.kind === 'pr_check'}
+                    {@const rep = prReport(a.metadata)}
+                    {#if rep}
+                      <div class="pr-report">
+                        <div class="pr-report-head">
+                          Consistency <strong>{rep.score}/100</strong> ·
+                          <span class={rep.hard_fail ? 'bad' : rep.passed ? 'ok' : 'warn'}>
+                            {rep.hard_fail ? 'inconsistent with the change' : rep.passed ? 'consistent' : 'weak — review the description'}
+                          </span>
+                        </div>
+                        <ul class="pr-checks">
+                          {#each rep.checks as c (c.label)}
+                            <li class={c.passed ? 'ok' : 'miss'}>
+                              <span class="tick">{c.passed ? '✓' : '✗'}</span>
+                              <span class="lbl">{c.label}</span>
+                              <span class="dim">— {c.detail}</span>
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
                     {/if}
                   {/if}
                   {#if expanded[a.id]}
@@ -976,6 +1023,58 @@
     padding: 1px 6px;
     white-space: nowrap;
     text-transform: capitalize;
+  }
+  .kind-tag.pr {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    text-transform: none;
+  }
+  /* PR-consistency report (R7): the structured per-check breakdown a pr_check
+     artifact carries in metadata.report. */
+  .pr-report {
+    margin: 6px 0 2px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+  }
+  .pr-report-head {
+    font-size: 12px;
+    margin-bottom: 4px;
+  }
+  .pr-report-head .ok {
+    color: #7ee787;
+  }
+  .pr-report-head .warn {
+    color: #e3b341;
+  }
+  .pr-report-head .bad {
+    color: #ff7b72;
+  }
+  .pr-checks {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 12px;
+  }
+  .pr-checks li {
+    padding: 1px 0;
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+  }
+  .pr-checks .tick {
+    width: 12px;
+    flex: none;
+  }
+  .pr-checks li.ok .tick {
+    color: #7ee787;
+  }
+  .pr-checks li.miss .tick {
+    color: #ff7b72;
+  }
+  .pr-checks .lbl {
+    flex: none;
   }
   .empty {
     padding: 12px;

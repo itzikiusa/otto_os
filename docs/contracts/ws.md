@@ -406,6 +406,11 @@ its 2s×600 polling pattern and refresh on demand.
 - TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts`
   as `{ type: 'skill_eval_updated'; workspace_id: Id; run_id: Id; status:
   string }`.
+- Eval lab: each matrix **cell** is a `skill_evals` row, so it emits this same
+  event; the Matrix view also polls `GET /eval-matrices/{id}` (which lazily settles
+  the matrix to `done` once all cells are terminal) for the live grid. The eval
+  lab's per-iteration scoring additionally emits `proof_pack_updated` (the
+  iteration's Proof Pack), documented above.
 
 ## Self-improvement update (A8)
 

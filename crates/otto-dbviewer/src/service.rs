@@ -44,6 +44,38 @@ use crate::types::{
 /// prose. The text after it stays human-readable.
 pub const WRITE_BLOCKED_PREFIX: &str = "write_blocked: ";
 
+/// Stable marker prefixed to the **MCP read-only** rejection message. Distinct
+/// from [`WRITE_BLOCKED_PREFIX`] because there is no confirm path here — the
+/// read-only MCP query endpoint refuses writes outright, regardless of the
+/// connection's write-guard, so an agent-supplied statement can never mutate data.
+pub const MCP_READ_ONLY_PREFIX: &str = "mcp_read_only: ";
+
+/// Hard ceiling on rows a read-only MCP query may return, applied server-side
+/// regardless of the request (the `ottod mcp-tools` process caps again before the
+/// rows reach the agent transcript). Keeps a runaway `SELECT *` from flooding an
+/// agent's context.
+pub const MCP_MAX_ROWS: usize = 200;
+
+/// The MCP read-only policy gate: decide whether `statement` may run over the
+/// read-only MCP query path for `engine`. Pure (no I/O) so it is unit-tested
+/// exhaustively without a database. Returns:
+/// - `Err(Invalid)` for an empty statement,
+/// - `Err(Forbidden)` when the statement is classified as a write/DDL (reusing the
+///   conservative [`statement_is_write`] classifier — unknown counts as a write),
+/// - `Ok(())` for a recognised read.
+pub fn ensure_read_only(engine: Engine, statement: &str) -> Result<()> {
+    if statement.trim().is_empty() {
+        return Err(Error::Invalid("empty statement".into()));
+    }
+    if statement_is_write(engine, statement) {
+        return Err(Error::Forbidden(format!(
+            "{MCP_READ_ONLY_PREFIX}only read-only statements may run over MCP; \
+             this statement is classified as a write/DDL"
+        )));
+    }
+    Ok(())
+}
+
 /// Evict cached SSH tunnels that haven't been used for longer than this on the
 /// next `resolve` — dropping them kills the `ssh` child via `SshTunnel::Drop`.
 const TUNNEL_IDLE_TTL: Duration = Duration::from_secs(600);
@@ -580,6 +612,47 @@ impl DbViewerService {
         result
     }
 
+    /// Run a query on behalf of an **agent over MCP**, enforcing read-only
+    /// **unconditionally** — independent of the connection's write-guard. The
+    /// statement is classified *before* the driver is touched ([`ensure_read_only`]),
+    /// so a write/DDL (or a statement against a non-queryable connection kind) is
+    /// refused without ever connecting. Rows are hard-capped at [`MCP_MAX_ROWS`] and
+    /// PII masking is forced on, since the result lands in an agent's transcript.
+    ///
+    /// This is the trust boundary for LLM-supplied SQL: unlike [`Self::run`] /
+    /// [`Self::guard_write`] (which only block writes on *guarded* connections), no
+    /// write can pass here on any connection.
+    pub async fn run_read_only(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        req: &QueryRequest,
+    ) -> Result<QueryResult> {
+        let conn = self.connections.get(conn_id).await?;
+        let engine = Engine::from_kind(conn.kind).ok_or_else(|| {
+            Error::Invalid(format!(
+                "connection '{}' is not a queryable database (kind {:?})",
+                conn.name, conn.kind
+            ))
+        })?;
+        ensure_read_only(engine, &req.statement)?;
+        let max_rows = Some(req.max_rows.unwrap_or(MCP_MAX_ROWS).min(MCP_MAX_ROWS));
+        let safe = QueryRequest {
+            statement: req.statement.clone(),
+            max_rows,
+            node: req.node.clone(),
+            timeout_ms: req.timeout_ms,
+            // Force the safe defaults: never confirm a write, never use the
+            // explain/params side-channels, always mask PII for an agent.
+            confirm_write: false,
+            explain: false,
+            params: None,
+            query_id: None,
+            mask: Some(true),
+        };
+        self.run(conn_id, user_id, &safe).await
+    }
+
     /// Export a (potentially huge) **uncapped** read result to a local file, in
     /// the chosen [`ExportFormat`], **streaming** through the driver's native
     /// cursor/stream so daemon memory stays bounded regardless of result size.
@@ -1082,6 +1155,75 @@ mod tests {
             conn_id: conn_id.to_string(),
             token,
         }
+    }
+
+    // --- ensure_read_only: the MCP read-only policy gate (no DB needed) --------
+
+    #[test]
+    fn ensure_read_only_allows_sql_reads() {
+        for stmt in [
+            "SELECT * FROM users",
+            "  select 1",
+            "WITH t AS (SELECT 1) SELECT * FROM t",
+            "SHOW TABLES",
+            "DESCRIBE users",
+            "EXPLAIN SELECT 1",
+            "-- a comment\nSELECT 2",
+        ] {
+            assert!(
+                ensure_read_only(Engine::Mysql, stmt).is_ok(),
+                "expected read to be allowed: {stmt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_read_only_blocks_sql_writes_and_injection() {
+        for stmt in [
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a=1",
+            "DELETE FROM t",
+            "DROP TABLE t",
+            "ALTER TABLE t ADD c INT",
+            "TRUNCATE t",
+            "SELECT 1; DROP TABLE t", // injection via a trailing statement
+            "SET GLOBAL x=1",
+        ] {
+            let err = ensure_read_only(Engine::Mysql, stmt).unwrap_err();
+            assert!(
+                matches!(err, Error::Forbidden(_)),
+                "expected Forbidden for write {stmt:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_read_only_empty_statement_is_invalid() {
+        let err = ensure_read_only(Engine::Mysql, "   ").unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn ensure_read_only_redis_reads_vs_writes() {
+        assert!(ensure_read_only(Engine::Redis, "GET key").is_ok());
+        assert!(ensure_read_only(Engine::Redis, "SCAN 0").is_ok());
+        assert!(matches!(
+            ensure_read_only(Engine::Redis, "SET k v").unwrap_err(),
+            Error::Forbidden(_)
+        ));
+        assert!(matches!(
+            ensure_read_only(Engine::Redis, "DEL k").unwrap_err(),
+            Error::Forbidden(_)
+        ));
+    }
+
+    #[test]
+    fn ensure_read_only_mongo_reads_vs_writes() {
+        assert!(ensure_read_only(Engine::Mongodb, "db.users.find({})").is_ok());
+        assert!(matches!(
+            ensure_read_only(Engine::Mongodb, "db.users.deleteOne({})").unwrap_err(),
+            Error::Forbidden(_)
+        ));
     }
 
     #[test]

@@ -427,6 +427,76 @@ fn is_jira_key(s: &str) -> bool {
         && num.chars().all(|c| c.is_ascii_digit())
 }
 
+/// A human's verdict at the approval gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    Approve,
+    Reject,
+}
+
+/// Parse a free-text approval decision (from REST JSON, a Slack reply, etc.).
+/// Case-insensitive and trimmed. Returns `None` for anything unrecognized so the
+/// caller can surface a clear "decision must be 'approve' or 'reject'" error.
+pub fn parse_decision(raw: &str) -> Option<ApprovalDecision> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "approve" | "approved" | "yes" => Some(ApprovalDecision::Approve),
+        "reject" | "rejected" | "no" => Some(ApprovalDecision::Reject),
+        _ => None,
+    }
+}
+
+/// Why a run may NOT have its real PR opened yet. Returned by
+/// [`open_pr_block_reason`]; `None` means "go ahead".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenPrBlock {
+    /// The run was not approved at the gate.
+    NotApproved,
+    /// The proof pack is not `passed`/`waived` (the outward-action gate).
+    ProofNotPassed,
+    /// The run produced no PR draft to open.
+    NoDraft,
+    /// The run never resolved a registered repo.
+    NoRepo,
+}
+
+impl OpenPrBlock {
+    /// The exact user-facing message for each block (kept verbatim so the HTTP
+    /// surface is stable).
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::NotApproved => "run is not approved",
+            Self::ProofNotPassed => "proof pack is not passed/waived — cannot open a PR",
+            Self::NoDraft => "run has no PR draft",
+            Self::NoRepo => "run has no repo",
+        }
+    }
+}
+
+/// Decide whether a run may have its actual PR opened — the gate for the only
+/// outward-facing action in the flow. Pure: the caller maps the reason to its
+/// transport error (`ProofNotPassed` → conflict, the rest → invalid). The check
+/// order matches the v1 inline guards exactly: approval → proof → draft → repo.
+pub fn open_pr_block_reason(
+    approval_decision: Option<&str>,
+    proof_status: Option<&str>,
+    has_draft: bool,
+    has_repo: bool,
+) -> Option<OpenPrBlock> {
+    if approval_decision != Some("approved") {
+        return Some(OpenPrBlock::NotApproved);
+    }
+    if !matches!(proof_status, Some("passed") | Some("waived")) {
+        return Some(OpenPrBlock::ProofNotPassed);
+    }
+    if !has_draft {
+        return Some(OpenPrBlock::NoDraft);
+    }
+    if !has_repo {
+        return Some(OpenPrBlock::NoRepo);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,5 +662,68 @@ mod tests {
             Some((SourceKind::ScheduledReport, "r9".into(), None))
         );
         assert_eq!(parse_source_ref("   "), None);
+    }
+
+    #[test]
+    fn parse_decision_accepts_synonyms_case_insensitively() {
+        for ok in ["approve", "Approved", "  yes ", "YES", "approved"] {
+            assert_eq!(parse_decision(ok), Some(ApprovalDecision::Approve), "{ok}");
+        }
+        for no in ["reject", "Rejected", " no ", "NO"] {
+            assert_eq!(parse_decision(no), Some(ApprovalDecision::Reject), "{no}");
+        }
+        for bad in ["maybe", "", "   ", "approve please", "0"] {
+            assert_eq!(parse_decision(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn open_pr_gate_blocks_until_approved_and_proven() {
+        // Not approved → blocked regardless of proof.
+        assert_eq!(
+            open_pr_block_reason(None, Some("passed"), true, true),
+            Some(OpenPrBlock::NotApproved)
+        );
+        assert_eq!(
+            open_pr_block_reason(Some("rejected"), Some("passed"), true, true),
+            Some(OpenPrBlock::NotApproved)
+        );
+        // Approved but proof not passed/waived → blocked.
+        for proof in [None, Some("partial"), Some("failed"), Some("missing")] {
+            assert_eq!(
+                open_pr_block_reason(Some("approved"), proof, true, true),
+                Some(OpenPrBlock::ProofNotPassed),
+                "{proof:?}"
+            );
+        }
+        // Approved + proven but no draft / no repo.
+        assert_eq!(
+            open_pr_block_reason(Some("approved"), Some("passed"), false, true),
+            Some(OpenPrBlock::NoDraft)
+        );
+        assert_eq!(
+            open_pr_block_reason(Some("approved"), Some("waived"), true, false),
+            Some(OpenPrBlock::NoRepo)
+        );
+        // Fully cleared → may open (passed or waived).
+        assert_eq!(
+            open_pr_block_reason(Some("approved"), Some("passed"), true, true),
+            None
+        );
+        assert_eq!(
+            open_pr_block_reason(Some("approved"), Some("waived"), true, true),
+            None
+        );
+    }
+
+    #[test]
+    fn open_pr_block_messages_are_stable() {
+        assert_eq!(OpenPrBlock::NotApproved.message(), "run is not approved");
+        assert_eq!(
+            OpenPrBlock::ProofNotPassed.message(),
+            "proof pack is not passed/waived — cannot open a PR"
+        );
+        assert_eq!(OpenPrBlock::NoDraft.message(), "run has no PR draft");
+        assert_eq!(OpenPrBlock::NoRepo.message(), "run has no repo");
     }
 }
