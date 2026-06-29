@@ -12,8 +12,10 @@
     runStates?: Record<string, NodeRunState>;
     editable?: boolean;
     selectedId?: string | null;
+    selectedEdgeId?: string | null;
     onchange?: (graph: WorkflowGraph) => void;
     onselect?: (id: string | null) => void;
+    onedgeselect?: (id: string | null) => void;
   }
   let {
     graph = $bindable(),
@@ -21,8 +23,10 @@
     runStates = {},
     editable = true,
     selectedId = null,
+    selectedEdgeId = null,
     onchange,
     onselect,
+    onedgeselect,
   }: Props = $props();
 
   const NODE_W = 190;
@@ -72,6 +76,7 @@
   function startPan(e: PointerEvent): void {
     if (e.button !== 0) return;
     onselect?.(null);
+    onedgeselect?.(null);
     drag = { mode: 'pan', sx: e.clientX, sy: e.clientY, ox: tx, oy: ty };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   }
@@ -80,6 +85,7 @@
     e.stopPropagation();
     if (e.button !== 0) return;
     onselect?.(n.id);
+    onedgeselect?.(null);
     if (!editable) return;
     drag = { mode: 'node', id: n.id, sx: e.clientX, sy: e.clientY, nx: n.x, ny: n.y };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -141,10 +147,9 @@
     onchange?.(graph);
   }
 
-  function removeEdge(id: string): void {
-    if (!editable) return;
-    graph.edges = graph.edges.filter((e) => e.id !== id);
-    onchange?.(graph);
+  function selectEdge(id: string): void {
+    onselect?.(null);
+    onedgeselect?.(id);
   }
 
   // Bezier path between an output port and an input port (graph coords).
@@ -155,6 +160,14 @@
     const y2 = t.y + NODE_H / 2;
     const dx = Math.max(40, Math.abs(x2 - x1) * 0.5);
     return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  }
+
+  /** Midpoint of an edge (for the condition badge). */
+  function edgeMid(s: WorkflowNode, t: WorkflowNode): { x: number; y: number } {
+    return { x: (s.x + NODE_W + t.x) / 2, y: (s.y + t.y) / 2 + NODE_H / 2 };
+  }
+  function condLabel(c: string): string {
+    return c.length > 18 ? `${c.slice(0, 17)}…` : c;
   }
 
   function tempPath(): string {
@@ -199,17 +212,25 @@
         {@const s = nodeOf(e.source)}
         {@const t = nodeOf(e.target)}
         {#if s && t}
-          <path class="edge" d={edgePath(s, t)} />
+          <path class="edge" class:selected={selectedEdgeId === e.id} class:conditional={!!e.condition} d={edgePath(s, t)} />
           <path
             class="edge-hit"
             d={edgePath(s, t)}
             onpointerdown={(ev) => {
               ev.stopPropagation();
-              removeEdge(e.id);
+              selectEdge(e.id);
             }}
             role="button"
             tabindex="-1"
           />
+          {#if e.condition}
+            {@const m = edgeMid(s, t)}
+            <g class="edge-badge" pointer-events="none">
+              <title>{e.condition}</title>
+              <rect x={m.x - 30} y={m.y - 9} width="60" height="18" rx="9" />
+              <text x={m.x} y={m.y + 3} text-anchor="middle">ƒ {condLabel(e.condition)}</text>
+            </g>
+          {/if}
         {/if}
       {/each}
       {#if drag?.mode === 'connect'}
@@ -303,6 +324,24 @@
   .edge.temp {
     stroke: var(--accent);
     stroke-dasharray: 5 4;
+  }
+  .edge.conditional {
+    stroke: color-mix(in srgb, var(--accent) 70%, var(--text-dim));
+    stroke-dasharray: 6 4;
+  }
+  .edge.selected {
+    stroke: var(--accent);
+    stroke-width: 3;
+  }
+  .edge-badge rect {
+    fill: var(--surface);
+    stroke: color-mix(in srgb, var(--accent) 55%, var(--border));
+    stroke-width: 1;
+  }
+  .edge-badge text {
+    fill: var(--text-dim);
+    font-size: 10px;
+    font-family: var(--font-mono);
   }
   .edge-hit {
     fill: none;

@@ -3,6 +3,8 @@
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
   import { authedText } from '../../lib/api/client';
   import { scheduledTasksApi, type ScheduledTaskInput } from '../../lib/api/scheduledTasks';
+  import { router } from '../../lib/router.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
 
   let creating = $state(false);
@@ -15,6 +17,9 @@
   let reportOpen = $state(false);
   let reportText = $state('');
   let reportLoading = $state(false);
+
+  // Set after a successful "Convert to workflow" — surfaces a link to Workflows.
+  let convertedWfId = $state<string | null>(null);
 
   /** The browser's IANA timezone, e.g. "Europe/London" (default for new tasks). */
   const browserTz = (() => {
@@ -221,6 +226,20 @@
       expandedId = t.id;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Run failed';
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function convertToWorkflow(t: ScheduledTask): Promise<void> {
+    busy = true;
+    error = '';
+    try {
+      const res = await scheduledTasksApi.convertToWorkflow(t.id);
+      convertedWfId = res.workflow_id;
+      toasts.success('Converted to workflow', `Created a workflow from “${t.name}”.`);
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Convert failed';
     } finally {
       busy = false;
     }
@@ -482,6 +501,15 @@
 
     {#if error}<div class="err" role="alert">{error}</div>{/if}
 
+    {#if convertedWfId}
+      <div class="notice" role="status">
+        <span>Created a workflow from this task.</span>
+        <span class="grow"></span>
+        <button class="btn small" onclick={() => { convertedWfId = null; router.go('workflows'); }}>Open Workflows</button>
+        <button class="btn small" onclick={() => (convertedWfId = null)}>Dismiss</button>
+      </div>
+    {/if}
+
     {#if list.length === 0}
       <div class="empty">No scheduled tasks yet. Create one to run an agent on a cadence.</div>
     {:else}
@@ -501,6 +529,7 @@
                   {expandedId === t.id ? 'Hide runs' : 'Runs'}
                 </button>
                 <button class="btn small" onclick={() => toggle(t)}>{t.enabled ? 'Pause' : 'Enable'}</button>
+                <button class="btn small" title="Create a multi-step workflow (+ schedule trigger) from this task" onclick={() => convertToWorkflow(t)} disabled={busy}>To workflow</button>
                 <button class="btn small" onclick={() => startEdit(t)}>Edit</button>
                 <button class="btn small danger" onclick={() => remove(t)}>Delete</button>
               </div>
@@ -571,6 +600,13 @@
     color: var(--status-exited); padding: 0.5rem 0.75rem;
     border-radius: var(--radius-s); margin-bottom: 0.75rem; font-size: 0.85rem;
   }
+  .notice {
+    display: flex; align-items: center; gap: 0.5rem;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--text); padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-s); margin-bottom: 0.75rem; font-size: 0.85rem;
+  }
+  .grow { flex: 1; }
   .tasks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
   .task { border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m); padding: 0.6rem 0.75rem; color: var(--text); }
   .task-main { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; }

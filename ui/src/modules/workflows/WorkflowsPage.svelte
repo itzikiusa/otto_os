@@ -8,6 +8,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
+  import { listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
   import { workflowRunBus } from '../../lib/events.svelte';
   import type {
     Workflow,
@@ -17,6 +18,7 @@
     NodeRunState,
     WorkflowTemplate,
     WorkflowTrigger,
+    WorkflowVersion,
   } from '../../lib/api/types';
 
   let workflows = $state<Workflow[]>([]);
@@ -76,8 +78,11 @@
     const g = structuredClone($state.snapshot(wf.graph)) as WorkflowGraph;
     graph = g && g.nodes ? g : { nodes: [], edges: [] };
     selectedId = null;
+    selectedEdgeId = null;
     run = null;
     runsOpen = false;
+    versionsOpen = false;
+    versions = [];
     void loadRuns();
     dirty = false;
   }
@@ -159,6 +164,13 @@
     graph.nodes = graph.nodes.filter((n) => n.id !== selectedId);
     graph.edges = graph.edges.filter((e) => e.source !== selectedId && e.target !== selectedId);
     selectedId = null;
+    dirty = true;
+  }
+
+  function removeSelectedEdge(): void {
+    if (!selectedEdgeId) return;
+    graph.edges = graph.edges.filter((e) => e.id !== selectedEdgeId);
+    selectedEdgeId = null;
     dirty = true;
   }
 
@@ -308,6 +320,83 @@
       onParam(field, raw);
     }
   }
+
+  function paramBool(field: string, def = false): boolean {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    const v = p?.[field];
+    return typeof v === 'boolean' ? v : def;
+  }
+
+  /** A string[] param rendered one-per-line (e.g. review goals). */
+  function paramLines(field: string): string {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    const v = p?.[field];
+    if (Array.isArray(v)) return v.filter((x) => typeof x === 'string').join('\n');
+    return typeof v === 'string' ? v : '';
+  }
+  function onParamLines(field: string, raw: string): void {
+    const lines = raw.split('\n').map((s) => s.trim()).filter((s) => s !== '');
+    onParam(field, lines.length ? lines : undefined);
+  }
+
+  // --- Per-node retry policy (writes node.retry, not params) ----------------
+  function retryNum(field: 'max_attempts' | 'backoff_ms', def: number): number {
+    const r = selectedNode?.retry;
+    const v = r ? r[field] : undefined;
+    return typeof v === 'number' ? v : def;
+  }
+  function onRetry(field: 'max_attempts' | 'backoff_ms', value: number): void {
+    if (!selectedNode) return;
+    const cur = selectedNode.retry ?? { max_attempts: 0, backoff_ms: 0, factor: 2 };
+    const next = { ...cur, [field]: Number.isFinite(value) && value > 0 ? value : 0 };
+    // Drop the policy entirely when it's a no-op (no extra attempts).
+    selectedNode.retry = next.max_attempts > 0 ? next : null;
+    graph = graph;
+    dirty = true;
+  }
+
+  // --- Edge condition editing ----------------------------------------------
+  let selectedEdgeId = $state<string | null>(null);
+  const selectedEdge = $derived(graph.edges.find((e) => e.id === selectedEdgeId) ?? null);
+
+  function onEdgeCondition(raw: string): void {
+    if (!selectedEdge) return;
+    const e = selectedEdge;
+    const cond = raw.trim();
+    graph.edges = graph.edges.map((x) => (x.id === e.id ? { ...x, condition: cond || null } : x));
+    dirty = true;
+  }
+
+  // --- Version history ------------------------------------------------------
+  let versionsOpen = $state(false);
+  let versions = $state<WorkflowVersion[]>([]);
+  let versionsLoading = $state(false);
+
+  async function loadVersions(): Promise<void> {
+    if (!current) return;
+    versionsLoading = true;
+    try {
+      versions = await listWorkflowVersions(current.id);
+    } catch (e) {
+      toasts.error('Failed to load versions', e instanceof Error ? e.message : String(e));
+    } finally {
+      versionsLoading = false;
+    }
+  }
+
+  async function restoreVersion(v: WorkflowVersion): Promise<void> {
+    if (!current) return;
+    try {
+      const wf = await restoreWorkflowVersion(current.id, v.version);
+      current = wf;
+      workflows = workflows.map((w) => (w.id === wf.id ? wf : w));
+      open(wf);
+      await loadVersions();
+      toasts.success(`Restored v${v.version}`);
+    } catch (e) {
+      toasts.error('Restore failed', e instanceof Error ? e.message : String(e));
+    }
+  }
 </script>
 
 <div class="wf">
@@ -417,6 +506,15 @@
           <Icon name="clock" size={12} /> Triggers
         </button>
 
+        <!-- Version history toggle -->
+        <button
+          class="btn small"
+          onclick={() => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); }}
+          title="Version history"
+        >
+          <Icon name="commit" size={12} /> Versions
+        </button>
+
         {#if running}
           <button class="btn small danger" onclick={stop}><Icon name="square" size={11} /> Stop</button>
         {/if}
@@ -445,7 +543,9 @@
           {types}
           {runStates}
           {selectedId}
-          onselect={(id) => (selectedId = id)}
+          {selectedEdgeId}
+          onselect={(id) => { selectedId = id; selectedEdgeId = null; }}
+          onedgeselect={(id) => { selectedEdgeId = id; if (id) selectedId = null; }}
           onchange={() => (dirty = true)}
         />
       </div>
@@ -460,7 +560,35 @@
         </div>
       {/if}
 
-      {#if run || selectedNode}
+      {#if versionsOpen && current}
+        <div class="versions-wrap">
+          <div class="versions-h">
+            <span>Version history</span>
+            <span class="grow"></span>
+            <button class="btn small" disabled={versionsLoading} onclick={() => void loadVersions()}>
+              Refresh
+            </button>
+          </div>
+          {#if versionsLoading && versions.length === 0}
+            <p class="empty">Loading…</p>
+          {:else if versions.length === 0}
+            <p class="empty">No saved versions yet — edits and restores create them.</p>
+          {:else}
+            <ul class="versions">
+              {#each versions as v (v.id)}
+                <li class="ver">
+                  <span class="ver-num">v{v.version}</span>
+                  <span class="ver-note">{v.note || '(no note)'}</span>
+                  <span class="ver-when">{new Date(v.created_at).toLocaleString()}</span>
+                  <button class="btn small" onclick={() => restoreVersion(v)}>Restore</button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      {/if}
+
+      {#if run || selectedNode || selectedEdge}
         <div class="inspector">
           {#if run}
             <div class="timeline">
@@ -719,12 +847,229 @@
                 value={paramJson('body')}
                 oninput={(e) => onParamJson('body', e.currentTarget.value)}
               ></textarea>
-            {:else if selectedNode.kind === 'product_analyze' || selectedNode.kind === 'product_rewrite' || selectedNode.kind === 'product_plan' || selectedNode.kind === 'review_run'}
-              <p class="node-hint stub">
-                <Icon name="alert-circle" size={12} />
-                This node kind is registered but not yet wired in the engine. It will
-                run as a stub and pass a "not wired" marker to downstream nodes.
-              </p>
+            {:else if selectedNode.kind === 'condition'}
+              <label for="np-expr">Expression</label>
+              <input
+                id="np-expr"
+                type="text"
+                placeholder="e.g. score >= 80"
+                value={paramStr('expr')}
+                oninput={(e) => onParam('expr', e.currentTarget.value)}
+              />
+              <p class="node-hint">Truthy → downstream nodes run; falsy → they're skipped.</p>
+            {:else if selectedNode.kind === 'loop'}
+              <label for="np-maxiter">Max iterations (1–10)</label>
+              <input
+                id="np-maxiter"
+                type="number"
+                min="1"
+                max="10"
+                value={paramNum('max_iterations', 3)}
+                oninput={(e) => onParam('max_iterations', Number(e.currentTarget.value))}
+              />
+              <label for="np-until">Until (expression, optional)</label>
+              <input
+                id="np-until"
+                type="text"
+                placeholder="e.g. passed == true"
+                value={paramStr('until')}
+                oninput={(e) => onParam('until', e.currentTarget.value)}
+              />
+              <label for="np-steps">Steps (JSON array)</label>
+              <textarea
+                id="np-steps"
+                rows="5"
+                placeholder={'[ { "kind": "agent_prompt", "params": {} } ]'}
+                value={paramJson('steps')}
+                oninput={(e) => onParamJson('steps', e.currentTarget.value)}
+              ></textarea>
+              <label class="np-chk">
+                <input
+                  type="checkbox"
+                  checked={paramBool('continue_on_error')}
+                  onchange={(e) => onParam('continue_on_error', e.currentTarget.checked)}
+                /> Continue on step error
+              </label>
+            {:else if selectedNode.kind === 'review_run'}
+              <label for="np-repo">Repo ID</label>
+              <input
+                id="np-repo"
+                type="text"
+                placeholder="git repo id"
+                value={paramStr('repo_id')}
+                oninput={(e) => onParam('repo_id', e.currentTarget.value)}
+              />
+              <label for="np-base">Base branch</label>
+              <input
+                id="np-base"
+                type="text"
+                placeholder="main"
+                value={paramStr('base')}
+                oninput={(e) => onParam('base', e.currentTarget.value)}
+              />
+              <label for="np-threshold">Pass threshold (0–100)</label>
+              <input
+                id="np-threshold"
+                type="number"
+                min="0"
+                max="100"
+                value={paramNum('threshold', 80)}
+                oninput={(e) => onParam('threshold', Number(e.currentTarget.value))}
+              />
+              <label for="np-goals">Goals (one per line, optional)</label>
+              <textarea
+                id="np-goals"
+                rows="3"
+                placeholder={'No N+1 queries\nAll inputs validated'}
+                value={paramLines('goals')}
+                oninput={(e) => onParamLines('goals', e.currentTarget.value)}
+              ></textarea>
+              <label class="np-chk">
+                <input
+                  type="checkbox"
+                  checked={paramBool('await', true)}
+                  onchange={(e) => onParam('await', e.currentTarget.checked)}
+                /> Wait for the review to finish
+              </label>
+            {:else if selectedNode.kind === 'product_analyze' || selectedNode.kind === 'product_rewrite' || selectedNode.kind === 'product_plan'}
+              <label for="np-story">Story ID</label>
+              <input
+                id="np-story"
+                type="text"
+                placeholder="product story id"
+                value={paramStr('story_id')}
+                oninput={(e) => onParam('story_id', e.currentTarget.value)}
+              />
+              <label for="np-instruction">Extra instruction (optional)</label>
+              <input
+                id="np-instruction"
+                type="text"
+                placeholder="Focus on…"
+                value={paramStr('instruction')}
+                oninput={(e) => onParam('instruction', e.currentTarget.value)}
+              />
+              {#if selectedNode.kind !== 'product_analyze'}
+                <label class="np-chk">
+                  <input
+                    type="checkbox"
+                    checked={paramBool('persist')}
+                    onchange={(e) => onParam('persist', e.currentTarget.checked)}
+                  /> Persist as a product version
+                </label>
+              {/if}
+            {:else if selectedNode.kind === 'product_publish'}
+              <label for="np-story">Story ID</label>
+              <input
+                id="np-story"
+                type="text"
+                placeholder="product story id"
+                value={paramStr('story_id')}
+                oninput={(e) => onParam('story_id', e.currentTarget.value)}
+              />
+              <label for="np-pubkind">Publish as</label>
+              <select
+                id="np-pubkind"
+                value={paramStr('kind') || 'rfc'}
+                onchange={(e) => onParam('kind', e.currentTarget.value)}
+              >
+                <option value="rfc">RFC (Confluence)</option>
+                <option value="jira">Jira story</option>
+              </select>
+              <label class="np-chk">
+                <input
+                  type="checkbox"
+                  checked={paramBool('dry_run', true)}
+                  onchange={(e) => onParam('dry_run', e.currentTarget.checked)}
+                /> Dry run (preview only)
+              </label>
+              {#if !paramBool('dry_run', true)}
+                <label for="np-account">Account ID</label>
+                <input
+                  id="np-account"
+                  type="text"
+                  placeholder="Jira/Confluence account id"
+                  value={paramStr('account_id')}
+                  oninput={(e) => onParam('account_id', e.currentTarget.value)}
+                />
+                {#if (paramStr('kind') || 'rfc') === 'jira'}
+                  <label for="np-project">Project key</label>
+                  <input
+                    id="np-project"
+                    type="text"
+                    placeholder="e.g. PROJ"
+                    value={paramStr('project_key')}
+                    oninput={(e) => onParam('project_key', e.currentTarget.value)}
+                  />
+                  <label for="np-issuetype">Issue type</label>
+                  <input
+                    id="np-issuetype"
+                    type="text"
+                    placeholder="Story"
+                    value={paramStr('issue_type')}
+                    oninput={(e) => onParam('issue_type', e.currentTarget.value)}
+                  />
+                {:else}
+                  <label for="np-space">Space key</label>
+                  <input
+                    id="np-space"
+                    type="text"
+                    placeholder="Confluence space key"
+                    value={paramStr('space_key')}
+                    oninput={(e) => onParam('space_key', e.currentTarget.value)}
+                  />
+                  <label for="np-parent">Parent page id (optional)</label>
+                  <input
+                    id="np-parent"
+                    type="text"
+                    placeholder="parent page id"
+                    value={paramStr('parent_id')}
+                    oninput={(e) => onParam('parent_id', e.currentTarget.value)}
+                  />
+                  <label for="np-pubtitle">Title (optional)</label>
+                  <input
+                    id="np-pubtitle"
+                    type="text"
+                    placeholder="page title"
+                    value={paramStr('title')}
+                    oninput={(e) => onParam('title', e.currentTarget.value)}
+                  />
+                {/if}
+              {/if}
+            {:else if selectedNode.kind === 'canvas'}
+              <label for="np-cprompt">Prompt</label>
+              <textarea
+                id="np-cprompt"
+                rows="3"
+                placeholder="Diagram the request flow described in the input…"
+                value={paramStr('prompt')}
+                oninput={(e) => onParam('prompt', e.currentTarget.value)}
+              ></textarea>
+              <label for="np-cmode">Mode</label>
+              <select
+                id="np-cmode"
+                value={paramStr('mode') || 'mermaid'}
+                onchange={(e) => onParam('mode', e.currentTarget.value)}
+              >
+                <option value="mermaid">Mermaid</option>
+                <option value="excalidraw">Excalidraw</option>
+              </select>
+            {:else if selectedNode.kind === 'git_pr'}
+              <label for="np-repo">Repo ID</label>
+              <input
+                id="np-repo"
+                type="text"
+                placeholder="git repo id"
+                value={paramStr('repo_id')}
+                oninput={(e) => onParam('repo_id', e.currentTarget.value)}
+              />
+              <label for="np-base">Base branch</label>
+              <input
+                id="np-base"
+                type="text"
+                placeholder="main"
+                value={paramStr('base')}
+                oninput={(e) => onParam('base', e.currentTarget.value)}
+              />
             {:else if selectedNode.kind !== 'manual_trigger' && selectedNode.kind !== 'log' && selectedNode.kind !== 'verifier'}
               <!-- Fallback raw-JSON editor for unrecognised or future node kinds -->
               <label for="np-raw">Params (JSON)</label>
@@ -742,6 +1087,34 @@
                 }}
               ></textarea>
             {/if}
+
+            <!-- Retry policy (any node): extra attempts with exponential backoff. -->
+            {#if selectedNode.kind !== 'manual_trigger'}
+              <div class="retry-form">
+                <span class="retry-h">Retry</span>
+                <div class="retry-row">
+                  <label for="np-retry-max">Max retries (0–5)</label>
+                  <input
+                    id="np-retry-max"
+                    type="number"
+                    min="0"
+                    max="5"
+                    value={retryNum('max_attempts', 0)}
+                    oninput={(e) => onRetry('max_attempts', Number(e.currentTarget.value))}
+                  />
+                  <label for="np-retry-bo">Backoff (ms)</label>
+                  <input
+                    id="np-retry-bo"
+                    type="number"
+                    min="0"
+                    max="60000"
+                    step="100"
+                    value={retryNum('backoff_ms', 0)}
+                    oninput={(e) => onRetry('backoff_ms', Number(e.currentTarget.value))}
+                  />
+                </div>
+              </div>
+            {/if}
             {#if selectedRun?.error}
               <div class="err">{selectedRun.error}</div>
             {/if}
@@ -751,8 +1124,26 @@
             {#if selectedRun?.output !== undefined && selectedRun?.output !== null}
               <pre class="out">{JSON.stringify(selectedRun.output, null, 2).slice(0, 1200)}</pre>
             {/if}
+          {:else if selectedEdge}
+            <div class="insp-h">
+              <strong>Connection</strong>
+              <span class="mono dim">{nodeName(selectedEdge.source)} → {nodeName(selectedEdge.target)}</span>
+              <span class="grow"></span>
+              <button class="btn small danger" title="Delete connection" onclick={removeSelectedEdge}>
+                <Icon name="trash" size={12} />
+              </button>
+            </div>
+            <label for="np-edge-cond">Condition (expression, optional)</label>
+            <input
+              id="np-edge-cond"
+              type="text"
+              placeholder="e.g. passed == true"
+              value={selectedEdge.condition ?? ''}
+              oninput={(e) => onEdgeCondition(e.currentTarget.value)}
+            />
+            <p class="node-hint">The target runs only when this is truthy. Leave blank for an unconditional edge.</p>
           {:else}
-            <p class="empty">Select a step above to see its logs and output.</p>
+            <p class="empty">Select a step or connection above to edit it.</p>
           {/if}
         </div>
       {/if}
@@ -1265,10 +1656,96 @@
     color: var(--text-dim);
     margin: 2px 0 0;
   }
-  .node-hint.stub {
+  /* Inspector checkbox row */
+  .np-chk {
     display: flex;
     align-items: center;
-    gap: 5px;
-    color: var(--warn, #b07a00);
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text);
+    margin-top: 2px;
+  }
+  .np-chk input {
+    width: auto;
+  }
+  /* Per-node retry sub-form */
+  .retry-form {
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 2px;
+  }
+  .retry-h {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+  }
+  .retry-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .retry-row label {
+    white-space: nowrap;
+  }
+  .retry-row input {
+    width: 90px;
+  }
+  /* Versions panel: collapsible section below the canvas */
+  .versions-wrap {
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 10px 12px;
+  }
+  .versions-h {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .versions {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .ver {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    font-size: 12px;
+  }
+  .ver-num {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .ver-note {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ver-when {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    flex-shrink: 0;
   }
 </style>

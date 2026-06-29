@@ -3,6 +3,9 @@
   // logs, error, and rendered "work product" (agent reply / JSON).
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { proof } from '../../lib/stores/proof.svelte';
+  import { router } from '../../lib/router.svelte';
   import type { WorkflowRun, NodeRunState } from '../../lib/api/types';
 
   interface Props {
@@ -27,6 +30,44 @@
     return ns.output !== undefined && ns.output !== null;
   }
 
+  /** A review id surfaced by a review_run step's output (if any). */
+  function reviewIdOf(out: unknown): string | null {
+    if (out && typeof out === 'object') {
+      const r = (out as { review_id?: unknown }).review_id;
+      if (typeof r === 'string' && r) return r;
+    }
+    return null;
+  }
+
+  /** Best-effort repo id for a step (step output, falling back to run input). */
+  function repoIdOf(out: unknown): string | null {
+    const fromOut = out && typeof out === 'object' ? (out as { repo_id?: unknown }).repo_id : undefined;
+    if (typeof fromOut === 'string' && fromOut) return fromOut;
+    const inp = run.input;
+    const fromIn = inp && typeof inp === 'object' ? (inp as { repo_id?: unknown }).repo_id : undefined;
+    return typeof fromIn === 'string' && fromIn ? fromIn : null;
+  }
+
+  /** Navigate to an agent session this step drove (reuses the real router nav). */
+  function openSession(id: string): void {
+    ws.navigateToSession(id);
+  }
+
+  /** Open the proof pack assembled for this run in the Proof module. */
+  function viewProof(id: string): void {
+    void proof.open(id);
+    router.go('proof');
+  }
+
+  /** Open the review a step produced. There's no standalone review-by-id route,
+   *  so land the user in the repo's git view (which surfaces its reviews) when
+   *  the repo is resolvable; otherwise the git module. The review id is in the
+   *  link tooltip. */
+  function openReview(out: unknown): void {
+    const repo = repoIdOf(out);
+    router.go(repo ? `git/${repo}` : 'git');
+  }
+
   async function copy(text: string, label = 'output'): Promise<void> {
     try {
       await navigator.clipboard.writeText(text);
@@ -40,6 +81,23 @@
   }
 </script>
 
+{#if run.proof_pack_id || run.workflow_version != null}
+  <div class="run-meta">
+    {#if run.workflow_version != null}
+      <span class="rm-ver" title="workflow version this run executed">v{run.workflow_version}</span>
+    {/if}
+    {#if run.proof_pack_id}
+      <button
+        class="link-btn"
+        title="Open the proof pack assembled for this run"
+        onclick={() => { if (run.proof_pack_id) viewProof(run.proof_pack_id); }}
+      >
+        <Icon name="check" size={11} /> View proof pack
+      </button>
+    {/if}
+  </div>
+{/if}
+
 <div class="steps">
   {#each run.nodes as ns (ns.node_id)}
     <details class="step" open={ns.status === 'error'} data-status={ns.status}>
@@ -47,11 +105,31 @@
         <span class="dot {ns.status}"></span>
         <span class="name">{nodeName(ns.node_id)}</span>
         <span class="status">{ns.status}</span>
+        {#if (ns.attempts ?? 1) > 1}<span class="chip" title="step was retried">×{ns.attempts} attempts</span>{/if}
         {#if ns.duration_ms != null}<span class="ms">{fmtMs(ns.duration_ms)}</span>{/if}
       </summary>
       <div class="body">
         {#if ns.error}
           <div class="err">{ns.error}</div>
+        {/if}
+
+        {#if ns.sessions?.length || reviewIdOf(ns.output)}
+          <div class="links">
+            {#each ns.sessions ?? [] as sid (sid)}
+              <button class="link-btn" title={`Open session ${sid}`} onclick={() => openSession(sid)}>
+                <Icon name="terminal" size={11} /> Open session
+              </button>
+            {/each}
+            {#if reviewIdOf(ns.output)}
+              <button
+                class="link-btn"
+                title={`Open review ${reviewIdOf(ns.output)}`}
+                onclick={() => openReview(ns.output)}
+              >
+                <Icon name="eye" size={11} /> Open review
+              </button>
+            {/if}
+          </div>
         {/if}
         {#if ns.logs?.length}
           <div class="logs">{#each ns.logs as l}<div>{l}</div>{/each}</div>
@@ -86,6 +164,48 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+  .run-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .rm-ver {
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    padding: 1px 7px;
+    border-radius: 99px;
+  }
+  .chip {
+    font-size: 10px;
+    color: var(--status-warn, #b07a00);
+    background: color-mix(in srgb, var(--status-warn, #b07a00) 16%, transparent);
+    padding: 1px 7px;
+    border-radius: 99px;
+  }
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .link-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+  }
+  .link-btn:hover {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
   }
   .step {
     border: 1px solid var(--border);

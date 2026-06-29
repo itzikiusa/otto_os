@@ -35,6 +35,12 @@ export const scheduledTasksApi = {
   run: (id: string) => api.post<ScheduledTaskRun>(`/scheduled-tasks/${id}/run`, {}),
   runs: (id: string) => api.get<ScheduledTaskRun[]>(`/scheduled-tasks/${id}/runs`),
   presets: () => api.get<ScheduledTaskPreset[]>(`/scheduled-tasks/presets`),
+  /** Materialize a scheduled task as a multi-step workflow (+ schedule trigger). */
+  convertToWorkflow: (id: string, disable_task?: boolean) =>
+    api.post<{ workflow_id: string; trigger_id?: string }>(
+      `/scheduled-tasks/${id}/convert-to-workflow`,
+      disable_task ? { disable_task } : {},
+    ),
   /** The stored report path for a run (fetched as text/markdown). */
   reportPath: (runId: string) => `/scheduled-tasks/runs/${runId}/report`,
 };

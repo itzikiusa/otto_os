@@ -3435,6 +3435,13 @@ export interface SkillSourcesResp {
 // Workflow engine (mirrors otto_core::workflows)
 // ---------------------------------------------------------------------------
 
+/** Per-node retry policy (exponential backoff). */
+export interface RetryPolicy {
+  max_attempts: number;
+  backoff_ms: number;
+  factor: number;
+}
+
 export interface WorkflowNode {
   id: string;
   kind: string;
@@ -3442,12 +3449,16 @@ export interface WorkflowNode {
   x: number;
   y: number;
   params: unknown;
+  /** Optional retry policy for this node (null/absent = run once). */
+  retry?: RetryPolicy | null;
 }
 
 export interface WorkflowEdge {
   id: string;
   source: string;
   target: string;
+  /** Optional expression gating this edge: the target runs only when truthy. */
+  condition?: string | null;
 }
 
 export interface WorkflowGraph {
@@ -3461,6 +3472,8 @@ export interface Workflow {
   name: string;
   description: string;
   graph: WorkflowGraph;
+  /** Monotonic version counter, bumped on each graph edit/restore. */
+  version?: number;
   created_by: Id;
   created_at: string;
   updated_at: string;
@@ -3479,6 +3492,10 @@ export interface NodeRunState {
   error?: string | null;
   logs: string[];
   duration_ms?: number | null;
+  /** Number of attempts made (>1 when a retry policy fired). */
+  attempts?: number | null;
+  /** Session ids this node drove (e.g. agent_prompt / review_run). */
+  sessions?: string[];
 }
 
 export interface WorkflowRun {
@@ -3501,6 +3518,10 @@ export interface WorkflowRun {
   approval_note?: string | null;
   /** RFC-3339 timestamp when the decision was recorded. */
   approved_at?: string | null;
+  /** The workflow version this run executed against. */
+  workflow_version?: number | null;
+  /** Proof pack assembled for this run, if any. */
+  proof_pack_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -3549,6 +3570,23 @@ export interface NodeTypeSpec {
   outputs: number;
   color: string;
   icon: string;
+  /** JSON schema describing this node's output shape (for downstream wiring). */
+  output_schema?: unknown;
+  /** JSON schema describing this node's accepted params. */
+  params_schema?: unknown;
+}
+
+/** An immutable snapshot of a workflow's graph (append-only version history). */
+export interface WorkflowVersion {
+  id: string;
+  workflow_id: string;
+  version: number;
+  name: string;
+  description: string;
+  graph: WorkflowGraph;
+  note: string;
+  created_by: string;
+  created_at: string;
 }
 
 export interface CreateWorkflowReq {
