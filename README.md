@@ -20,6 +20,19 @@ bridges so an agent can work a ticket from a chat thread.
 
 ## Features
 
+- **Run with Otto** — the flagship **one-button** flow. Point Otto at a single
+  source item — a **Jira** story, a **Confluence** page, a **GitHub** issue or PR,
+  a **Slack/Telegram** thread, a **Product** task, a **review finding**, a
+  **failing test**, or a **scheduled-task report** — and it runs a fixed pipeline
+  end to end: *normalize the source → build a Context Packet → cut an isolated
+  branch/worktree → do the work (a single agent **or** a full Goal Loop) →
+  assemble a Proof Pack → run AI review → **pause for human approval** → draft the
+  PR*. It chains the subsystems below behind one entity (`OttoRun`) and one
+  trigger so it feels like **one button, not eight modules**, and projects into
+  Mission Control. Launch it from the UI, a Slack/Telegram `/run <ref>`, a REST
+  call, or a key-guarded webhook (which can POST the result back to a
+  `callback_url` at the gate + each terminal state). It never opens a PR without
+  human approval **and** a passing/waived Proof Pack.
 - **Agent sessions** — run `claude`, `codex`, `agy` (and a plain shell) in real
   PTY-backed terminals you can watch, split, and type into. Sessions survive
   restarts (resumable), idle-suspend to save memory, and auto-trust their
