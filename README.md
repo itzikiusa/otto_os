@@ -129,7 +129,14 @@ bridges so an agent can work a ticket from a chat thread.
   retention.
 - **API client** — a built-in REST workbench (collections, environments, history),
   with import/export (Postman / OpenAPI / HAR) and an SSRF-guarded executor.
-- **MCP Control Plane** — two-way Model Context Protocol. **Outbound:** every MCP
+- **MCP Control Plane** — two-way Model Context Protocol. **Inbound:** every agent
+  session gets a first-party `otto` MCP server (`ottod mcp-tools`) with read-only
+  tools over Otto's own data — including your **database connections**:
+  `otto_list_connections`, `otto_db_schema`/`_children`/`_object` (full table
+  structure), and `otto_db_query` to **run read-only queries and get rows**. Writes
+  and DDL are refused server-side (independent of the connection's write-guard);
+  results are row-capped, PII-masked, and audited. On by default; attached to Claude
+  via `.mcp.json` and to Codex via per-spawn `-c` overrides. **Outbound:** every MCP
   tool your agents call passes a governance pipeline (allowlist → policy →
   single-use approval → dry-run → fail-closed audit → stats). **Outward:**
   `ottod mcp-server` exposes a set of `otto.*` tools (codebase search, context
