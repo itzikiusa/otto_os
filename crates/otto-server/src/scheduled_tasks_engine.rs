@@ -2,10 +2,14 @@
 //! the agent's final reply into a Markdown report, store it, and deliver it to the
 //! task's destination — recording one `scheduled_task_runs` row.
 //!
-//! Execution uses [`Orchestrator::run_agent`] (the same headless primitive
-//! `otto-improve` uses), so a scheduled task "triggers an agent" exactly like the
-//! self-improvement engine, and inherits its built-in `OTTO_E2E` stub for
-//! deterministic tests. v1 is **claude-only** (validated at create time).
+//! A run is dispatched by kind/provider: a `kind == "workflow"` task hands off to
+//! the workflow engine; a `provider == "shell"` task runs the prompt as a shell
+//! command; every other provider (`claude` / `codex` / `agy` / a custom slug) runs
+//! as a **real, openable session** of that provider via the shared `agent_run`
+//! runner (the same path PR-review uses) — except under `OTTO_E2E`, which keeps the
+//! deterministic headless stub for offline tests. A task with **no owner** can only
+//! fall back to the claude-only headless [`Orchestrator::run_agent`]; a non-claude
+//! provider with no owner fails loudly rather than silently running claude.
 //!
 //! Concurrency contract (see the design's review fixes): the scheduler claims its
 //! in-flight guard *before* calling [`run_task`]; this engine advances the task
@@ -60,6 +64,12 @@ const WORKFLOW_WAIT: Duration = Duration::from_secs(600);
 
 /// Keep at most this many runs per task; older runs (+ their report files) are pruned.
 const KEEP_RUNS: i64 = 100;
+
+/// Keep at most this many sandbox worktrees per task; older worktrees (+ their
+/// branches) are removed on each new worktree creation. Without this a
+/// worktree-sandboxed *recurring* task would accumulate worktrees + branches
+/// without bound (the `weekly-*` presets enable the worktree sandbox by default).
+const KEEP_WORKTREES: usize = 3;
 
 /// What one execution produced — the report + how it was produced.
 struct ExecOutcome {
@@ -125,6 +135,14 @@ pub fn delivery_message(task_name: &str, summary: &str) -> String {
 /// The destination tag (`none` when absent/blank).
 pub fn destination_kind(dest: &Value) -> &str {
     dest.get("type").and_then(Value::as_str).unwrap_or("none")
+}
+
+/// Whether a no-owner task may use the claude-only headless fallback. Only claude
+/// (or an unset provider, which defaults to claude downstream) can; any other
+/// provider needs an owning user to open a session under, so we fail rather than
+/// silently swap the chosen provider for claude.
+fn headless_fallback_ok(provider: &str) -> bool {
+    matches!(provider.trim(), "" | "claude")
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +335,16 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> R
     let owner = match task.created_by.as_deref().filter(|s| !s.is_empty()) {
         Some(o) => o.to_string(),
         None => {
+            // No owner ⇒ no user to open a visible session under. The headless
+            // fallback can only run claude, so honour a non-claude provider by
+            // failing loudly instead of silently running claude under its name.
+            if !headless_fallback_ok(&task.provider) {
+                return Err(Error::Invalid(format!(
+                    "scheduled task '{}' uses provider '{}' but has no owner to open a \
+                     session under; non-claude providers require an owning user",
+                    task.name, task.provider
+                )));
+            }
             let report = ctx
                 .orchestrator
                 .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
@@ -362,7 +390,7 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> R
     })
     .await;
 
-    let session_id = captured_sid.lock().unwrap().clone();
+    let session_id = captured_sid.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if outcome.errored() {
         return Err(Error::Internal(format!(
             "agent run failed: {}",
@@ -417,7 +445,7 @@ async fn run_one_agent_session(
         }
     };
     let sid = session.id.clone();
-    *captured_sid.lock().unwrap() = Some(sid.clone());
+    *captured_sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.clone());
     // Persist the session id immediately so the UI can Open the run live.
     let _ = ctx.scheduled_tasks.set_run_session(run_id, &sid).await;
 
@@ -456,30 +484,74 @@ async fn execute_shell(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecOutc
         .await
         .map_err(|_| Error::Internal("scheduled-task semaphore closed".into()))?;
     let cmd = task.prompt.clone();
-    let cwd2 = cwd.clone();
-    let run = tokio::time::timeout(
-        SHELL_TIMEOUT,
-        tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&cmd)
-            .current_dir(&cwd2)
-            .output(),
-    )
-    .await
-    .map_err(|_| Error::Internal("shell command timed out".into()))?
-    .map_err(|e| Error::Internal(format!("spawn shell: {e}")))?;
-
+    // The retry policy applies to shell tasks too: a failing command (spawn error,
+    // timeout, or non-zero exit) is retried up to `1 + max_retries` times.
+    let (res, attempts) =
+        run_shell_with_retry(&cmd, &cwd, task.max_retries, SHELL_TIMEOUT, &RETRY_BACKOFF).await;
+    let run = res?; // a spawn error / timeout on the final attempt → no report
     let report = shell_report(&task.name, &cmd, &run);
     let summary = extract_summary(&report);
     if !run.status.success() {
-        // Non-zero exit is a run error (so retries / error status apply), but we
-        // still produced a report for the run record.
+        // Non-zero exit is a run error (so error status applies), but we still
+        // produced a report for the run record.
         return Err(Error::Internal(format!(
-            "shell command exited with {}",
+            "shell command exited with {} after {attempts} attempt(s)",
             run.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
         )));
     }
-    Ok(ExecOutcome { report, summary, session_id: None, workflow_run_id: None, attempts: 1 })
+    Ok(ExecOutcome { report, summary, session_id: None, workflow_run_id: None, attempts })
+}
+
+/// Run `/bin/sh -c <cmd>` up to `1 + max_retries` times (clamped to 6), returning
+/// the final attempt's captured output and the number of attempts made. Retries on
+/// spawn error, timeout, or non-zero exit, sleeping `backoff[min(i, len-1)]` between
+/// attempts. `ServerCtx`-free and provider-agnostic so it is directly unit-tested.
+async fn run_shell_with_retry(
+    cmd: &str,
+    cwd: &str,
+    max_retries: i64,
+    timeout: Duration,
+    backoff: &[Duration],
+) -> (Result<std::process::Output>, i64) {
+    let max_attempts = (1 + max_retries).clamp(1, 6);
+    let mut attempts = 0i64;
+    let mut last: Option<Result<std::process::Output>> = None;
+    for i in 0..max_attempts {
+        attempts += 1;
+        let res = match tokio::time::timeout(
+            timeout,
+            tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(cwd)
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(out)) => Ok(out),
+            Ok(Err(e)) => Err(Error::Internal(format!("spawn shell: {e}"))),
+            Err(_) => Err(Error::Internal("shell command timed out".into())),
+        };
+        let success = matches!(&res, Ok(out) if out.status.success());
+        last = Some(res);
+        if success {
+            break;
+        }
+        if i + 1 < max_attempts {
+            let b = backoff
+                .get(i as usize)
+                .or_else(|| backoff.last())
+                .copied()
+                .unwrap_or_default();
+            if !b.is_zero() {
+                tokio::time::sleep(b).await;
+            }
+        }
+    }
+    (
+        last.unwrap_or_else(|| Err(Error::Internal("shell command never ran".into()))),
+        attempts,
+    )
 }
 
 /// Hand off to a workflow: launch a [`WorkflowRun`], wait (bounded) for it to
@@ -568,21 +640,45 @@ async fn resolve_cwd(ctx: &ServerCtx, task: &ScheduledTask) -> Result<String> {
     let base_dir = (!trimmed.is_empty() && std::path::Path::new(trimmed).is_dir())
         .then(|| trimmed.to_string());
 
-    if task.sandbox == "worktree" {
-        if let Some(repo_path) = &base_dir {
-            if let Some(wt) = make_worktree(ctx, task, repo_path).await {
-                return Ok(wt);
+    match plan_cwd(&task.sandbox, base_dir.is_some()) {
+        CwdPlan::Worktree => {
+            if let Some(repo_path) = &base_dir {
+                if let Some(wt) = make_worktree(ctx, task, repo_path).await {
+                    return Ok(wt);
+                }
+                // worktree add failed (not a git repo / git error) → run in the dir.
+                return Ok(repo_path.clone());
             }
         }
-    }
-    if let Some(dir) = base_dir {
-        return Ok(dir);
+        CwdPlan::Dir => {
+            if let Some(dir) = base_dir {
+                return Ok(dir);
+            }
+        }
+        CwdPlan::Scratch => {}
     }
     let scratch = ctx.data_dir.join("scheduled").join(&task.id).join("work");
     tokio::fs::create_dir_all(&scratch)
         .await
         .map_err(|e| Error::Internal(format!("create scratch dir: {e}")))?;
     Ok(scratch.to_string_lossy().to_string())
+}
+
+/// Pure cwd decision (unit-tested): a fresh worktree when sandboxed with a real
+/// base dir, the base dir when one is present, else a per-task scratch dir.
+#[derive(Debug, PartialEq, Eq)]
+enum CwdPlan {
+    Worktree,
+    Dir,
+    Scratch,
+}
+
+fn plan_cwd(sandbox: &str, base_dir_present: bool) -> CwdPlan {
+    match (sandbox, base_dir_present) {
+        ("worktree", true) => CwdPlan::Worktree,
+        (_, true) => CwdPlan::Dir,
+        (_, false) => CwdPlan::Scratch,
+    }
 }
 
 /// Provision a fresh git worktree for a sandboxed run (best-effort). Returns the
@@ -593,19 +689,57 @@ async fn make_worktree(ctx: &ServerCtx, task: &ScheduledTask, repo_path: &str) -
     let base = git.current_branch().await.unwrap_or_else(|_| "HEAD".into());
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     let branch = format!("otto/scheduled/{}/{stamp}", short(&task.id));
-    let wt_path = ctx
+    let worktrees_dir = ctx
         .data_dir
         .join("scheduled")
         .join(&task.id)
-        .join("worktrees")
-        .join(stamp.to_string());
-    let wt = wt_path.to_string_lossy().to_string();
+        .join("worktrees");
+    let wt = worktrees_dir
+        .join(stamp.to_string())
+        .to_string_lossy()
+        .to_string();
     match git.worktree_add(&wt, &branch, &base).await {
-        Ok(()) => Some(wt),
+        Ok(()) => {
+            // Bound the leak: keep only the newest KEEP_WORKTREES worktrees +
+            // branches for this task (best-effort; the new one is the newest).
+            gc_old_worktrees(&git, &task.id, &worktrees_dir, KEEP_WORKTREES).await;
+            Some(wt)
+        }
         Err(e) => {
             warn!(task = %task.id, "scheduled task: worktree add failed ({repo_path}): {e}; running in repo");
             None
         }
+    }
+}
+
+/// Remove all but the newest `keep` sandbox worktrees for a task (and their derived
+/// `otto/scheduled/<short-id>/<stamp>` branches). Best-effort: failures are logged
+/// inside the git helpers, never propagated. Dir names are server-generated UTC
+/// stamps, so lexicographic order is chronological. The per-task in-flight guard
+/// guarantees no older worktree is in active use when this runs.
+async fn gc_old_worktrees(
+    git: &otto_git::LocalGit,
+    task_id: &str,
+    worktrees_dir: &std::path::Path,
+    keep: usize,
+) {
+    let mut stamps: Vec<String> = match std::fs::read_dir(worktrees_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect(),
+        Err(_) => return,
+    };
+    stamps.sort();
+    stamps.reverse(); // newest first
+    for stamp in stamps.into_iter().skip(keep) {
+        let path = worktrees_dir.join(&stamp);
+        let branch = format!("otto/scheduled/{}/{stamp}", short(task_id));
+        let _ = git.worktree_remove(&path.to_string_lossy()).await;
+        let _ = git.delete_branch(&branch, true).await;
+        // worktree_remove --force usually deletes the dir; ensure it (best-effort).
+        let _ = std::fs::remove_dir_all(&path);
     }
 }
 
@@ -970,5 +1104,111 @@ mod tests {
     fn short_truncates_to_8() {
         assert_eq!(short("0123456789abcdef"), "01234567");
         assert_eq!(short("abc"), "abc");
+    }
+
+    #[test]
+    fn headless_fallback_only_for_claude() {
+        // A no-owner task may only fall back to the claude-only headless runner.
+        assert!(headless_fallback_ok(""));
+        assert!(headless_fallback_ok("claude"));
+        assert!(headless_fallback_ok("  claude  "));
+        assert!(!headless_fallback_ok("codex"));
+        assert!(!headless_fallback_ok("agy"));
+        assert!(!headless_fallback_ok("my-custom-agent"));
+    }
+
+    #[test]
+    fn plan_cwd_decision() {
+        assert_eq!(plan_cwd("worktree", true), CwdPlan::Worktree);
+        assert_eq!(plan_cwd("worktree", false), CwdPlan::Scratch);
+        assert_eq!(plan_cwd("none", true), CwdPlan::Dir);
+        assert_eq!(plan_cwd("none", false), CwdPlan::Scratch);
+        assert_eq!(plan_cwd("", true), CwdPlan::Dir);
+    }
+
+    #[tokio::test]
+    async fn shell_retry_counts_attempts_and_stops_on_success() {
+        let cwd = std::env::temp_dir();
+        let cwd = cwd.to_string_lossy();
+        let zero = [Duration::ZERO];
+        // An always-failing command runs 1 + max_retries times, and still returns
+        // its (failed) output so a report can be built.
+        let (res, attempts) =
+            run_shell_with_retry("exit 3", &cwd, 2, Duration::from_secs(10), &zero).await;
+        assert_eq!(attempts, 3);
+        let out = res.expect("output captured even when the command fails");
+        assert!(!out.status.success());
+        // A succeeding command runs exactly once.
+        let (res, attempts) =
+            run_shell_with_retry("exit 0", &cwd, 2, Duration::from_secs(10), &zero).await;
+        assert_eq!(attempts, 1);
+        assert!(res.unwrap().status.success());
+        // max_retries = 0 ⇒ a single attempt even on failure.
+        let (_res, attempts) =
+            run_shell_with_retry("exit 1", &cwd, 0, Duration::from_secs(10), &zero).await;
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn worktree_gc_keeps_newest_and_deletes_old_branches() {
+        // Real temp git repo: create several sandbox worktrees, GC down to `keep`,
+        // and confirm only the newest dirs + branches survive.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("otto-st-gc-{}-{nanos}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sh = |args: &str| {
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+        };
+        sh("git init -q && git config user.email a@b.c && git config user.name t \
+            && git commit -q --allow-empty -m init");
+        let git = otto_git::LocalGit::new(repo.to_string_lossy().to_string());
+        let base = git.current_branch().await.unwrap();
+        let task_id = "0123456789abcdef";
+        let wtdir = root.join("worktrees");
+        std::fs::create_dir_all(&wtdir).unwrap();
+        let stamps = [
+            "20260101T000001Z",
+            "20260101T000002Z",
+            "20260101T000003Z",
+            "20260101T000004Z",
+            "20260101T000005Z",
+        ];
+        for s in stamps {
+            let p = wtdir.join(s);
+            let branch = format!("otto/scheduled/{}/{s}", short(task_id));
+            git.worktree_add(&p.to_string_lossy(), &branch, &base)
+                .await
+                .unwrap();
+        }
+
+        gc_old_worktrees(&git, task_id, &wtdir, 3).await;
+
+        let mut remaining: Vec<String> = std::fs::read_dir(&wtdir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            vec!["20260101T000003Z", "20260101T000004Z", "20260101T000005Z"]
+        );
+        let b = |s: &str| format!("otto/scheduled/{}/{s}", short(task_id));
+        assert!(!git.branch_exists(&b("20260101T000001Z")).await);
+        assert!(!git.branch_exists(&b("20260101T000002Z")).await);
+        assert!(git.branch_exists(&b("20260101T000005Z")).await);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -96,6 +96,37 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
     await ctx.dispose();
   });
 
+  test('v2: shell provider runs a REAL command end-to-end (no agent stub)', async () => {
+    // The shell path has no OTTO_E2E stub — it actually runs `/bin/sh -c <prompt>`,
+    // so this proves a non-claude provider executes route→engine→report→fetch.
+    const { ctx } = await apiCtx();
+    const t = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/scheduled-tasks`, {
+        data: {
+          name: 'E2E shell echo',
+          provider: 'shell',
+          prompt: 'echo otto-shell-e2e-marker',
+          schedule: { cadence: 'interval', every_min: 60 },
+        },
+      })
+    ).json();
+    expect(t.provider).toBe('shell');
+
+    const run = await (await ctx.post(`${base}${V1}/scheduled-tasks/${t.id}/run`, { data: {} })).json();
+    let final = run;
+    for (let i = 0; i < 40 && final.status === 'running'; i++) {
+      await new Promise((res) => setTimeout(res, 250));
+      const runs = await (await ctx.get(`${base}${V1}/scheduled-tasks/${t.id}/runs`)).json();
+      final = runs.find((x: any) => x.id === run.id) ?? final;
+    }
+    expect(final.status, JSON.stringify(final)).toBe('ok');
+    expect(final.report_rel).toBeTruthy();
+    // The stored report embeds the real /bin/sh stdout.
+    const md = await (await ctx.get(`${base}${V1}/scheduled-tasks/runs/${run.id}/report`)).text();
+    expect(md).toContain('otto-shell-e2e-marker');
+    await ctx.dispose();
+  });
+
   test('list is workspace-scoped (A task absent from B)', async () => {
     const { ctx } = await apiCtx();
     const a = await (await ctx.get(`${base}${V1}/workspaces/${wsA}/scheduled-tasks`)).json();
@@ -232,5 +263,30 @@ test.describe('scheduled tasks UI', () => {
     await expect(page.getByText('Timezone', { exact: true })).toBeVisible();
     // Sandbox control is present for an agent task.
     await expect(page.getByText('Sandbox', { exact: true })).toBeVisible();
+  });
+
+  test('create form: "Custom…" provider reveals a slug input and persists it', async ({ page }) => {
+    await openPage(page, 'scheduled-tasks');
+    await page.getByRole('button', { name: 'New task' }).click();
+    await page.getByPlaceholder('Nightly ticket review').fill('E2E custom provider');
+
+    // The provider <select> is the one carrying a 'codex' option.
+    const providerSel = page
+      .locator('select')
+      .filter({ has: page.locator('option', { hasText: 'codex' }) });
+    await providerSel.selectOption('custom');
+
+    const slug = page.getByPlaceholder(/register it in Settings first/);
+    await expect(slug).toBeVisible();
+    await slug.fill('my-custom-agent');
+    await page.getByRole('button', { name: 'Save' }).click();
+
+    // The task appears in the list, and the persisted provider is the custom slug.
+    await expect(page.getByText('E2E custom provider').first()).toBeVisible({ timeout: 15_000 });
+    const { ctx } = await apiCtx();
+    const tasks = await (await ctx.get(`${base}${V1}/workspaces/${wsA}/scheduled-tasks`)).json();
+    const created = tasks.find((x: { name: string }) => x.name === 'E2E custom provider');
+    expect(created?.provider).toBe('my-custom-agent');
+    await ctx.dispose();
   });
 });

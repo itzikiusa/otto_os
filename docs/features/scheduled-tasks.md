@@ -44,17 +44,18 @@ runs, `cwd` not a sandbox, one-agent-run-per-task):
 
 All v2 fields default to backward-compatible values (provider unchanged,
 `timezone=UTC`, `sandbox=none`, `max_retries=0`, no notify-gate, no proof), so every
-pre-v2 task keeps behaving exactly as before. Schema: migration
-`0085_scheduled_tasks_v2.sql`. Implementation note: agent runs go through the shared
-`agent_run` session runner (the same one PR-review uses), not the headless
-`run_agent` — except under `OTTO_E2E`, which keeps the deterministic stub.
+pre-v2 task keeps behaving exactly as before. Schema: the base table is migration
+`0084_scheduled_tasks.sql`; v2 adds its columns in `0086_scheduled_tasks_v2.sql`.
+Implementation note: agent runs go through the shared `agent_run` session runner
+(the same one PR-review uses), not the headless `run_agent` — except under
+`OTTO_E2E`, which keeps the deterministic stub.
 
 This is the definitive end-user + operator guide. It documents what the code in
 `crates/otto-server/src/scheduled_tasks_engine.rs`,
 `crates/otto-server/src/scheduled_tasks_scheduler.rs`,
 `crates/otto-server/src/cadence.rs`,
 `crates/otto-server/src/routes/scheduled_tasks.rs`,
-`crates/otto-state/migrations/0084_scheduled_tasks.sql`, and
+`crates/otto-state/migrations/0084_scheduled_tasks.sql` (+ `0086_scheduled_tasks_v2.sql`), and
 `ui/src/modules/scheduled-tasks/` actually does — the real cadence kinds, the
 report/delivery flow, the MCP tool names, the routes, and the WS event.
 
@@ -73,13 +74,13 @@ report/delivery flow, the MCP tool names, the routes, and the WS event.
 | | |
 |---|---|
 | **What it is** | Recurring agent jobs: a prompt + cadence → a Markdown report → an optional delivery. |
-| **Task kind (v1)** | `agent_prompt` — runs a **claude** agent headlessly via `Orchestrator::run_agent`. Other kinds are reserved. |
-| **Cadence** | `interval` (`every_min`, floor **5**), `daily` (`at:"HH:MM"` UTC), or `weekly` (`at` + `weekday` 0=Mon…6=Sun). |
+| **Task kind** | `agent_prompt` — runs an agent of the task's `provider` (`claude`/`codex`/`agy`/`shell`/custom) as a real, openable session; or `workflow` — hands off to a workflow run. |
+| **Cadence** | `interval` (`every_min`, floor **5**), `daily` (`at:"HH:MM"`), `weekly` (`at` + `weekday` 0=Mon…6=Sun), or `cron` (5-field `expr`). Daily/weekly/cron times use the task's IANA `timezone`. |
 | **Report** | The agent's final message, saved verbatim as Markdown; a short `summary` is extracted for the list + delivery. |
 | **Destinations** | `none` (store only), `slack`, `telegram`, `email`, `webhook`. Delivered text + attachment are **redacted**. |
 | **Driven by** | The Scheduled Tasks page, REST (`/scheduled-tasks/*`), and 7 outward `otto.*` MCP tools. |
 | **Scheduler** | A 60-second tick in `ottod` that fires every enabled, due task (the `cli_update` `is_due`/`run` pattern). |
-| **Persistence** | SQLite tables `scheduled_tasks` + `scheduled_task_runs` (migration **0084**). Reports on disk under `<data_dir>/scheduled/`. |
+| **Persistence** | SQLite tables `scheduled_tasks` + `scheduled_task_runs` (base **0084**, v2 columns **0086**). Reports on disk under `<data_dir>/scheduled/`. |
 | **RBAC** | `Feature::ScheduledTasks` (snake `scheduled_tasks`): **View** for reads, **Edit** for writes; plus a per-workspace role check on every route. |
 | **WS event** | `scheduled_task_run_updated` (`running` / `ok` / `error`), workspace-scoped. |
 
@@ -99,7 +100,7 @@ and deliver it to Slack, email, or a webhook. Also driveable over MCP."*
 | **Scheduler** | `crates/otto-server/src/scheduled_tasks_scheduler.rs` | The 60-s supervisor tick + per-task in-flight guard + startup reaper. |
 | **HTTP routes** | `crates/otto-server/src/routes/scheduled_tasks.rs` | The `/scheduled-tasks/*` endpoints + the preset list + the report server. |
 | **MCP surface** | `crates/otto-server/src/mcp_outward.rs` | The 7 `otto.*` scheduled-task tools (read + write). |
-| **Persistence** | `crates/otto-state/migrations/0084_scheduled_tasks.sql` + repo | `scheduled_tasks` + `scheduled_task_runs` tables. |
+| **Persistence** | `migrations/0084_scheduled_tasks.sql` (+ v2 `0086_scheduled_tasks_v2.sql`) + repo | `scheduled_tasks` + `scheduled_task_runs` tables. |
 | **Domain types** | `otto-core` | `ScheduledTask`, `ScheduledTaskRun`, `ScheduledTaskPreset`, `Feature::ScheduledTasks`, `Event::ScheduledTaskRunUpdated`. |
 | **UI** | `ui/src/modules/scheduled-tasks/ScheduledTasksPage.svelte` | The list, the create/edit form, the runs drill-down, and the report modal. |
 
@@ -111,7 +112,7 @@ Scheduler (60s tick, ottod)              REST  POST /scheduled-tasks/{id}/run  (
 MCP otto.create/run/… ──▶ REST endpoints                         │
                                             run_task(task, trigger):
                                               create scheduled_task_runs(running) → emit ws "running"
-                                              run agent (Orchestrator::run_agent, claude, OTTO_E2E stub in tests)
+                                              run by kind/provider (agent session / shell / workflow; OTTO_E2E stub for agents)
                                               extract_summary(report) + write report.md
                                               deliver to destination (redacted) → record delivered/err
                                               finish_run(ok) ; if trigger==schedule: advance last_run_at + next_run_at
@@ -119,14 +120,15 @@ MCP otto.create/run/… ──▶ REST endpoints                         │
                                             (any failure ⇒ finish_run(error), emit ws "error")
 ```
 
-- **Execution** uses `Orchestrator::run_agent(prompt, cwd, model_opt, no_progress)`
-  — the same headless primitive the self-improvement engine uses — so a task
-  "triggers an agent" exactly like self-improvement, and inherits its built-in
-  `OTTO_E2E` stub for deterministic Playwright/CI runs (the prompt-wrap embeds an
-  `OTTO_TASK: scheduled_task` sentinel that the stub recognizes). **v1 runs
-  claude**; an optional `skill` is inlined into the prompt
-  (`resolve_skill_inline` + `compose_draft_prompt`). A process-wide semaphore
-  (`OTTO_SCHEDULED_MAX_CONCURRENT`, default **2**) bounds concurrent agent runs.
+- **Execution** is dispatched by kind/provider: a `workflow` task hands off to the
+  workflow engine; a `shell` task runs the prompt as a command; every other
+  provider runs as a **real, openable session** of that provider via the shared
+  `agent_run` runner (the same path PR-review uses). Under `OTTO_E2E`, agent runs
+  use the deterministic headless stub (the prompt-wrap embeds an
+  `OTTO_TASK: scheduled_task` sentinel the stub recognizes). An optional `skill` is
+  inlined into the prompt (`resolve_skill_inline` + `compose_draft_prompt`). A
+  process-wide semaphore (`OTTO_SCHEDULED_MAX_CONCURRENT`, default **2**) bounds
+  concurrent runs.
 - **Cadence** is computed in pure code (see §5). The scheduler advances the
   `last_run_at` cursor only **on run completion** and only for `trigger=="schedule"`,
   and claims a per-task in-flight guard **first**, so an overlapping or
@@ -140,10 +142,12 @@ MCP otto.create/run/… ──▶ REST endpoints                         │
 There is no per-feature install step beyond the daemon being up. To use it
 productively:
 
-1. **An agent CLI on `PATH`.** Tasks run **claude** headlessly (the daemon's
-   `claude` environment). The same `~/.claude` config a normal Otto claude session
-   uses applies — including any MCP servers configured there (this is what makes
-   the ticket-review preset work; see §8).
+1. **The task's provider CLI on `PATH`.** An agent task spawns its `provider`
+   (`claude`/`codex`/`agy`/a custom slug) in the daemon's environment; the same
+   per-provider config a normal Otto session uses applies — including any MCP
+   servers configured there (this is what makes the ticket-review preset work; see
+   §8). A `shell` task needs only `/bin/sh`; a custom provider must be registered
+   in Settings first.
 2. **A workspace.** Tasks are workspace-scoped; you create them on the workspace
    you have an **Editor** role in.
 3. **A destination (optional).** To deliver beyond local storage you need the
@@ -169,10 +173,13 @@ or *"Edit scheduled task"* when editing) has these fields, in order:
 2. **Name** — e.g. *"Nightly ticket review"*. Required.
 3. **Prompt (the agent's instructions)** — a 6-row textarea; the agent's full
    instructions. Placeholder: *"Go over every ticket updated in the last 24h…"*.
-4. **Cadence** — `Interval` / `Daily` / `Weekly`, which reveals the matching fields:
+4. **Cadence** — `Interval` / `Daily` / `Weekly` / `Cron`, which reveals the
+   matching fields:
    - **Interval** → **Every (minutes, min 5)** (a number input, `min=5`).
-   - **Daily / Weekly** → **At (HH:MM UTC)** (placeholder `03:00`).
-   - **Weekly** also → **Weekday** (`Mon`…`Sun`).
+   - **Daily / Weekly** → **At (HH:MM)** (placeholder `03:00`), interpreted in the
+     **Timezone** field (defaults to your browser's IANA zone, e.g. `Europe/London`).
+     **Weekly** also → **Weekday** (`Mon`…`Sun`).
+   - **Cron** → **Cron expression (5 fields)** (e.g. `0 9 * * 1`) + **Timezone**.
 5. **Destination** — `None (store only)` / `Slack` / `Telegram` / `Email` /
    `HTTP webhook`, which reveals:
    - **Slack / Telegram** → **Chat / channel id (optional)** (defaults to the
@@ -185,10 +192,18 @@ or *"Edit scheduled task"* when editing) has these fields, in order:
    *"repo path — not a sandbox"* (see §9 — `cwd` is **not** a security boundary).
 8. **Enabled** — a checkbox.
 
+Above the prompt, a task also chooses a **Type** (`Run an agent` vs `Hand off to a
+workflow`) and, for an agent, a **Provider** (claude / codex / agy / shell /
+**Custom…**, which reveals a slug field — register the custom provider in Settings
+first). Agent tasks additionally expose a **Sandbox** (run in the working dir or an
+isolated git worktree) and **Retries on failure (0–5)**; two checkboxes — **Only
+notify on meaningful change** and **Attach a proof pack to each run** — apply to
+every task.
+
 **Save** (or **Saving…**) / **Cancel**. After saving, the task appears in the list
-with its cadence label (*"every X min"* / *"daily at HH:MM UTC"* / *"weekly DAY at
-HH:MM UTC"*), destination badge, last-status pill (`ok` / `error` / `running`), and
-a *paused* pill when disabled.
+with its cadence label (*"every X min"* / *"daily at HH:MM &lt;tz&gt;"* / *"weekly DAY at
+HH:MM &lt;tz&gt;"* / *"cron `expr` &lt;tz&gt;"*), destination badge, last-status pill
+(`ok` / `error` / `running`), and a *paused* pill when disabled.
 
 Each task row has **Run now**, **Runs** / **Hide runs**, **Pause** / **Enable**,
 **Edit**, and **Delete**.
@@ -217,16 +232,15 @@ pattern so that editing the schedule can never clobber the cursor.
 | **`interval`** | `{ "cadence":"interval", "every_min": 60 }` | Drift-based: due when never run, or `now - last_run >= every_min`. `every_min` is floored to **5**. Naturally catch-up-safe. |
 | **`daily`** | `{ "cadence":"daily", "at":"03:00" }` | Due when `now >= today@at` **and** the task hasn't run since `today@at`. A missed window still fires at the next tick (`cli_update` catch-up comparison). |
 | **`weekly`** | `{ "cadence":"weekly", "at":"03:00", "weekday":4 }` | As daily, but only on the matching `weekday` (`0`=Mon … `6`=Sun; default Monday). |
+| **`cron`** | `{ "cadence":"cron", "expr":"0 9 * * 1" }` | Standard 5-field cron (min hour dom month dow; Vixie DOM-OR-DOW semantics), evaluated in the task's `timezone`. |
 
-`at` defaults to **09:00** and `weekday` to **0** (Monday); times are **UTC**.
-`next_run(spec, now)` computes the displayed `next_run_at`. Create/update
-**validates** the spec (`cadence::validate`) and rejects: an unknown cadence
-(only `interval|daily|weekly`), an interval below the 5-minute floor, a malformed
-`at` (must be `HH:MM`, `h<24`, `m<60`), or a `weekday` outside `0..=6` — all `400`.
-
-> There are **no** true five-field cron expressions; the cadence enum is the house
-> style (matching the swarm and workflow-trigger schedulers). This is a documented
-> non-goal.
+`at` defaults to **09:00** and `weekday` to **0** (Monday). Daily/weekly/cron times
+are interpreted in the task's IANA **`timezone`** (default `UTC`), DST-correctly.
+`next_run(spec, now, tz)` computes the displayed `next_run_at`. Create/update
+**validates** the spec (`cadence::validate`) and rejects: an unknown cadence, an
+interval below the 5-minute floor, a malformed `at` (must be `HH:MM`, `h<24`,
+`m<60`), a `weekday` outside `0..=6`, an unparseable cron `expr`, or an unknown
+`timezone` — all `400`.
 
 ---
 
@@ -355,10 +369,13 @@ All routes are under `/api/v1`. Authoritative contract: `docs/contracts/api.md`
 | 143 | `GET /scheduled-tasks/runs/{run_id}/report` | The stored report → `text/markdown` | ws Viewer · View |
 
 **Create / update body** (all optional except `name` on create): `name`, `prompt`,
-`kind`, `skill`, `provider` (claude or blank only — others are rejected `400`),
-`model` (blank ⇒ provider default), `cwd`, `schedule` (the cadence spec),
-`destination`, `enabled`. On update, `skill` distinguishes *absent* (leave unchanged)
-from *present-and-null* (clear). `report_path` is **output-only** — never settable.
+`kind` (`agent_prompt`|`workflow`), `skill`, `provider`
+(`claude`|`codex`|`agy`|`shell`|custom slug; blank ⇒ `claude`), `model` (blank ⇒
+provider default), `cwd`, `schedule` (the cadence spec), `destination`, `enabled`,
+`timezone`, `workflow_id`, `sandbox` (`none`|`worktree`), `max_retries` (0–5),
+`notify_on_change`, `attach_proof`. On update, `skill`/`workflow_id` distinguish
+*absent* (leave unchanged) from *present-and-null* (clear). `report_path` is
+**output-only** — never settable.
 
 ### 10.1 WebSocket event
 
@@ -389,19 +406,20 @@ matching tick instead of polling.
 
 **Limitations**
 
-- **v1 is claude-only.** `provider` is persisted for forward-compat (codex/agy via
-  `run_cli_exec` is a documented follow-up); non-claude providers are rejected at
-  create/update.
 - **No server-side ticket fetching.** The engine is generic — the agent's own MCP
-  tools do the fetching (the preset needs an authenticated Atlassian MCP in the
-  daemon's claude env).
-- **No five-field cron.** Only the `interval / daily / weekly` enum.
-- **`cwd` is not a sandbox** (see §12).
-- **`session_id` on a run is reserved** — v1 runs are headless (an ephemeral PTY, no
-  Otto session row).
-- **Times are UTC** (`at` is interpreted in UTC, not local time).
-- **Single-step only** — a task is one agent run + a delivery. Multi-step / DAG
-  automation is the Workflows feature.
+  tools do the fetching (the ticket preset needs an authenticated Atlassian MCP in
+  the daemon's provider env).
+- **A custom provider must be registered in Settings first.** An unknown provider
+  slug is accepted at create but fails the *run* with `unknown provider '<slug>'`.
+- **A no-owner task is claude-only.** Every UI/REST/MCP-created task has an owner; a
+  task with no owner can only use the headless claude fallback (a non-claude
+  provider with no owner fails the run loudly rather than silently running claude).
+- **`cwd` / worktree is not a security sandbox** (see §12) — the worktree isolates
+  the *git working tree*, not the filesystem.
+- **Retry covers agent and shell runs**, not the workflow handoff (a workflow owns
+  its own run/retry lifecycle).
+- **Workflow handoff is single-launch** — a `workflow` task launches one workflow
+  run per fire and reports its node outcome.
 
 ---
 
@@ -421,8 +439,9 @@ matching tick instead of polling.
   daemon user can; the prompt and any external content it reads are treated as
   **untrusted** (the prompt-wrap explicitly tells the agent never to follow
   instructions found in tickets/comments/files). Point tasks at repos you are
-  comfortable an unattended agent operating in. Per-task tool sandboxing is a planned
-  enhancement.
+  comfortable an unattended agent operating in. The optional per-task **worktree
+  sandbox** isolates the git working tree (a fresh worktree + branch per run, GC'd
+  to the few most-recent per task); it is **not** a filesystem/tool sandbox.
 - **Redaction on exfil.** Delivered text + attachments are run through
   `redact_text`; webhooks additionally pass the SSRF guard + redirect policy. The
   **locally-stored** report is the full (un-redacted) artifact, behind RBAC — the
@@ -465,9 +484,10 @@ report is still stored — only delivery failed.
 Correct — **Run now** is `trigger=manual`; it never advances `last_run_at` or
 `next_run_at`. Use it freely to test without disturbing the cadence.
 
-**Create rejected with a `400`.** The schedule spec failed validation — an interval
-below 5 minutes, a bad `at` (`HH:MM`, `h<24`, `m<60`), a `weekday` outside `0..=6`,
-an unknown cadence, or a non-claude `provider`.
+**Create rejected with a `400`.** Validation failed — an interval below 5 minutes, a
+bad `at` (`HH:MM`, `h<24`, `m<60`), a `weekday` outside `0..=6`, an unknown cadence,
+an unparseable cron `expr`, an unknown `timezone`, a malformed `provider` slug,
+`max_retries` outside 0–5, or `kind=workflow` without a valid `workflow_id`.
 
 **An agent's `otto.create_scheduled_task` keeps returning "pending approval".** The
 write tools are `DANGEROUS` and approval-gated by default. Approve the request in
@@ -491,5 +511,5 @@ tool itself must also be enabled in the Otto Server tab.
 - **Source:** `crates/otto-server/src/{scheduled_tasks_engine,scheduled_tasks_scheduler,cadence}.rs`,
   `crates/otto-server/src/routes/scheduled_tasks.rs`,
   `crates/otto-server/src/mcp_outward.rs`,
-  `crates/otto-state/migrations/0084_scheduled_tasks.sql`,
+  `crates/otto-state/migrations/0084_scheduled_tasks.sql` (+ `0086_scheduled_tasks_v2.sql`),
   `ui/src/modules/scheduled-tasks/`.

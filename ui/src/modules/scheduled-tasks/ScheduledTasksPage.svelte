@@ -168,6 +168,16 @@
     }
   }
 
+  /** Provider <select> change: a known provider sets the slug directly; "Custom…"
+   * clears it (only when currently a known provider) so the slug text field shows. */
+  function onProviderSelect(v: string): void {
+    if (v === 'custom') {
+      if (PROVIDERS.includes(fProvider)) fProvider = '';
+    } else {
+      fProvider = v;
+    }
+  }
+
   async function save(): Promise<void> {
     error = '';
     if (!fName.trim()) {
@@ -325,9 +335,12 @@
         {#if fKind === 'agent_prompt'}
           <label class="fld">
             <span>Provider</span>
-            <select bind:value={fProvider}>
+            <select
+              value={PROVIDERS.includes(fProvider) ? fProvider : 'custom'}
+              onchange={(e) => onProviderSelect((e.currentTarget as HTMLSelectElement).value)}
+            >
               {#each PROVIDERS as p}<option value={p}>{p}</option>{/each}
-              {#if !PROVIDERS.includes(fProvider)}<option value={fProvider}>{fProvider}</option>{/if}
+              <option value="custom">Custom…</option>
             </select>
           </label>
         {:else}
@@ -337,6 +350,13 @@
           </label>
         {/if}
       </div>
+
+      {#if fKind === 'agent_prompt' && !PROVIDERS.includes(fProvider)}
+        <label class="fld">
+          <span>Custom provider slug</span>
+          <input bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
+        </label>
+      {/if}
 
       {#if fKind === 'workflow'}
         <p class="hint">The task launches this workflow on its cadence and reports the run outcome.</p>
