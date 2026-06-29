@@ -217,6 +217,22 @@ test.describe('run-with-otto API (route → policy → engine → proof → revi
     await ctx.dispose();
   });
 
+  // NOTE: The webhook ENTRY (`POST /webhooks/{ws}/run`) needs the channel
+  // `Bridge`, which the daemon builds at boot only when a root user already
+  // exists. The E2E daemon boots empty and onboards root over HTTP afterwards, so
+  // the bridge is absent here (the generic webhook channel is un-E2E-able for the
+  // same reason). Webhook callback delivery is therefore verified end-to-end in
+  // Rust (`run_callback::deliver` against a real RunsRepo — SSRF-block + no-op
+  // cases) plus the `build_payload` unit tests; the no-op direction is also
+  // asserted at the API level below.
+  test('a non-webhook run records no callback delivery (no-op without callback_url)', async () => {
+    const { ctx } = await apiCtx();
+    // The seeded channel run carries no callback_url → deliver() is a pure no-op.
+    const events = await (await ctx.get(`${base}${V1}/runs/${seededRunId}/events`)).json();
+    expect(events.some((e: any) => e.kind === 'delivery')).toBe(false);
+    await ctx.dispose();
+  });
+
   test('a product-story source resolves and drives the full pipeline', async () => {
     const { ctx } = await apiCtx();
     // Mint a story via the offline-safe drafts endpoint; we only need its id.

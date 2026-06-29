@@ -611,11 +611,11 @@ async fn after_transition(ctx: &ServerCtx, run_id: &Id, new_status: RunStatus) {
     match new_status {
         RunStatus::AwaitingApproval => {
             post_origin(ctx, &run, &approval_prompt(&run)).await;
-            crate::run_callback::deliver(ctx, &run).await;
+            crate::run_callback::deliver(&ctx.runs, &run).await;
         }
         RunStatus::Completed => {
             post_origin(ctx, &run, &completion_message(&run)).await;
-            crate::run_callback::deliver(ctx, &run).await;
+            crate::run_callback::deliver(&ctx.runs, &run).await;
         }
         _ => {}
     }
@@ -638,7 +638,7 @@ async fn fail(ctx: &ServerCtx, run: &OttoRun, err: &str) {
         emit(ctx, &fresh);
         project(ctx, &fresh).await;
         post_origin(ctx, &fresh, &format!("❌ Run failed: {err}")).await;
-        crate::run_callback::deliver(ctx, &fresh).await;
+        crate::run_callback::deliver(&ctx.runs, &fresh).await;
     }
 }
 

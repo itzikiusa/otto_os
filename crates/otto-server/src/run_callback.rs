@@ -12,14 +12,16 @@
 //! Delivery is strictly best-effort: a missing URL is a silent no-op, and a
 //! blocked or failed POST is recorded as a `delivery` timeline event but never
 //! fails the run. The body is the run's public read shape — never a secret.
+//!
+//! Taking `&RunsRepo` (not the full `ServerCtx`) keeps the unit testable and
+//! reflects that delivery only ever reads the run + appends a timeline event.
 
 use std::time::Duration;
 
 use otto_core::run::{OttoRun, RunStatus};
 use otto_state::runs::NewRunEvent;
+use otto_state::RunsRepo;
 use serde_json::{json, Value};
-
-use crate::state::ServerCtx;
 
 /// How long a single callback POST may take before we give up.
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(20);
@@ -53,7 +55,7 @@ pub(crate) fn build_payload(run: &OttoRun) -> Value {
 /// Best-effort POST of the run's result to its `callback_url`. No-op when the run
 /// has none (every non-webhook origin). SSRF-guarded; records a `delivery`
 /// timeline event (delivered / blocked / failed) for transparency.
-pub(crate) async fn deliver(ctx: &ServerCtx, run: &OttoRun) {
+pub(crate) async fn deliver(runs: &RunsRepo, run: &OttoRun) {
     let Some(url) = run
         .callback_url
         .as_deref()
@@ -65,7 +67,7 @@ pub(crate) async fn deliver(ctx: &ServerCtx, run: &OttoRun) {
 
     if let Err(reason) = otto_netguard::check_url(url).await {
         record(
-            ctx,
+            runs,
             run,
             &format!("Callback blocked (SSRF guard): {reason}"),
         )
@@ -80,28 +82,32 @@ pub(crate) async fn deliver(ctx: &ServerCtx, run: &OttoRun) {
     {
         Ok(c) => c,
         Err(e) => {
-            record(ctx, run, &format!("Callback client error: {e}")).await;
+            record(runs, run, &format!("Callback client error: {e}")).await;
             return;
         }
     };
 
     match client.post(url).json(&build_payload(run)).send().await {
         Ok(resp) if resp.status().is_success() => {
-            record(ctx, run, &format!("Callback delivered ({})", resp.status())).await;
+            record(
+                runs,
+                run,
+                &format!("Callback delivered ({})", resp.status()),
+            )
+            .await;
         }
         Ok(resp) => {
-            record(ctx, run, &format!("Callback returned {}", resp.status())).await;
+            record(runs, run, &format!("Callback returned {}", resp.status())).await;
         }
         Err(e) => {
-            record(ctx, run, &format!("Callback failed: {e}")).await;
+            record(runs, run, &format!("Callback failed: {e}")).await;
         }
     }
 }
 
 /// Append a `delivery` timeline event (best-effort; swallows store errors).
-async fn record(ctx: &ServerCtx, run: &OttoRun, message: &str) {
-    let _ = ctx
-        .runs
+async fn record(runs: &RunsRepo, run: &OttoRun, message: &str) {
+    let _ = runs
         .add_event(NewRunEvent {
             run_id: run.id.clone(),
             workspace_id: run.workspace_id.clone(),
@@ -118,6 +124,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use otto_core::run::{RunMode, RunOrigin, SourceKind};
+    use otto_state::runs::NewRun;
 
     fn run_fixture(status: RunStatus) -> OttoRun {
         OttoRun {
@@ -199,5 +206,79 @@ mod tests {
         assert_eq!(p["status"], "failed");
         assert_eq!(p["terminal"], true);
         assert_eq!(p["error"], "boom");
+    }
+
+    // --- deliver() end-to-end against a real RunsRepo --------------------------
+
+    async fn seed_repo() -> (RunsRepo, otto_core::Id) {
+        let pool = otto_state::db::test_pool().await;
+        let ws = otto_core::new_id();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'ws', '/tmp', ?)",
+        )
+        .bind(&ws)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+        (RunsRepo::new(pool), ws)
+    }
+
+    fn new_run(ws: &str, callback_url: Option<String>) -> NewRun {
+        NewRun {
+            workspace_id: ws.to_string(),
+            title: "t".into(),
+            source_kind: SourceKind::Channel,
+            source_ref: "x".into(),
+            source_url: None,
+            goal: "g".into(),
+            mode: RunMode::SingleAgent,
+            provider: "claude".into(),
+            repo_id: None,
+            origin_kind: RunOrigin::Webhook,
+            origin_chat: None,
+            origin_thread: None,
+            origin_user: None,
+            callback_url,
+            auto_open_pr: false,
+            context_summary: None,
+            created_by: "root".into(),
+        }
+    }
+
+    /// The SSRF guard refuses a loopback callback target, and `deliver` records
+    /// that as a `delivery` timeline event — proving the path runs end to end and
+    /// the guard is enforced (a key-holder can't turn Otto into an SSRF proxy).
+    #[tokio::test]
+    async fn deliver_records_ssrf_block_for_loopback_callback() {
+        let (runs, ws) = seed_repo().await;
+        let run = runs
+            .create(new_run(&ws, Some("http://127.0.0.1:9/cb".into())))
+            .await
+            .unwrap();
+        deliver(&runs, &run).await;
+        let events = runs.list_events(&run.id).await.unwrap();
+        let d = events
+            .iter()
+            .find(|e| e.kind == "delivery")
+            .expect("a delivery event was recorded");
+        assert!(
+            d.message.contains("SSRF") || d.message.to_lowercase().contains("blocked"),
+            "unexpected message: {}",
+            d.message
+        );
+    }
+
+    /// With no `callback_url`, `deliver` is a pure no-op — no timeline noise.
+    #[tokio::test]
+    async fn deliver_is_noop_without_callback_url() {
+        let (runs, ws) = seed_repo().await;
+        let run = runs.create(new_run(&ws, None)).await.unwrap();
+        deliver(&runs, &run).await;
+        let events = runs.list_events(&run.id).await.unwrap();
+        assert!(
+            !events.iter().any(|e| e.kind == "delivery"),
+            "no delivery event expected without a callback_url"
+        );
     }
 }

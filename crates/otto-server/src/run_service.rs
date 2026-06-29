@@ -210,7 +210,7 @@ pub async fn approve(
             log_approval(ctx, &run, "rejected", req.note.as_deref()).await;
             if let Ok(fresh) = ctx.runs.get(run_id).await {
                 run_engine::project(ctx, &fresh).await;
-                crate::run_callback::deliver(ctx, &fresh).await;
+                crate::run_callback::deliver(&ctx.runs, &fresh).await;
             }
             crate::run_workspace::remove_worktree(ctx, &run).await;
         }
@@ -261,7 +261,7 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
         .await;
     if let Ok(fresh) = ctx.runs.get(run_id).await {
         run_engine::project(ctx, &fresh).await;
-        crate::run_callback::deliver(ctx, &fresh).await;
+        crate::run_callback::deliver(&ctx.runs, &fresh).await;
     }
     crate::run_workspace::remove_worktree(ctx, &run).await;
     ctx.runs.get(run_id).await
