@@ -1162,10 +1162,10 @@ is written on create (v1) and on **every graph-changing PATCH** (`bump_version` 
 `snapshot_version`, note `"edited graph"`); restoring writes a new version equal to
 the chosen one rather than rewinding the counter (note `"restored from v{n}"`).
 `WorkflowVersion` = `{id, workflow_id, version, name, description, graph, note,
-created_by, created_at}`. Backed by migration **0088** (`workflows.version`,
+created_by, created_at}`. Backed by migration **0089** (`workflows.version`,
 `workflow_versions` table).
 
-**Run fields (0088).** A `WorkflowRun` now also carries `workflow_version` (the
+**Run fields (0089).** A `WorkflowRun` now also carries `workflow_version` (the
 version snapshot it executed) and `proof_pack_id` (the Proof Pack assembled on
 completion — each node output becomes a `log` artifact, each `human_approval` an
 `approval` artifact). Each `NodeRunState` gains `attempts` (retry count; `0` =

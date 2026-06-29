@@ -24,7 +24,7 @@ The doc is grounded in the code in `crates/otto-server/src/workflow_engine.rs`,
 `crates/otto-server/src/workflow_trigger_scheduler.rs`,
 `crates/otto-server/src/workflow_chat.rs`, `crates/otto-core/src/expr.rs`,
 `ui/src/modules/workflows/`, `ui/src/modules/api/AutomationsView.svelte`, the
-migrations under `crates/otto-state/migrations/` (incl. **0088** — versioning +
+migrations under `crates/otto-state/migrations/` (incl. **0089** — versioning +
 run→proof link), and the authoritative contracts `docs/contracts/api.md`
 (§ "Workflow engine", § "API client", Wave-3/Wave-4 routes) and
 `docs/contracts/ws.md` (Workflow run progress).
@@ -63,7 +63,7 @@ crates/otto-core (otto_core::workflows)                — the Workflow/Workflow
 crates/otto-state/migrations/0020_workflows.sql        — workflows + workflow_runs
 crates/otto-state/migrations/0051_workflow_node_cache.sql — per-node output cache
 crates/otto-state/migrations/0058_workflow_triggers.sql   — workflow_triggers + run approval columns
-crates/otto-state/migrations/0088_workflow_orchestrator.sql — workflow versioning + run→proof-pack link
+crates/otto-state/migrations/0089_workflow_orchestrator.sql — workflow versioning + run→proof-pack link
 crates/otto-state/migrations/0014_api_client.sql          — API client base
 crates/otto-state/migrations/0015_api_automations.sql     — API-client automations
 ```
@@ -583,7 +583,7 @@ report synchronously from the run endpoint and have no dedicated WS event.
   `waiting_approval`, `approval_node_id`, `approved_by`, `approval_note`,
   `approved_at` (human-approval pause/resume is tracked on the run row, not a
   trigger).
-- **0088** workflow versioning + run→proof link: `workflows.version` (default 1),
+- **0089** workflow versioning + run→proof link: `workflows.version` (default 1),
   `workflow_runs.workflow_version` + `workflow_runs.proof_pack_id`, and a
   `workflow_versions` history table (`id, workflow_id, version, name, description,
   graph_json, note, created_by, created_at`; `UNIQUE(workflow_id, version)`). The
