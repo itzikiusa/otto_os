@@ -226,6 +226,31 @@ test('convert a scheduled task into a workflow', async () => {
   expect(trigs.some((tr: any) => tr.kind === 'schedule')).toBeTruthy();
 });
 
+test('manual_trigger node fields seed the run input', async () => {
+  // Fields configured on the Start node become the run input (overridable by /run).
+  const wfId = await createWorkflow(
+    'E2E Trigger Fields',
+    [
+      {
+        id: 'trigger',
+        kind: 'manual_trigger',
+        name: 'Start',
+        x: 0,
+        y: 0,
+        params: { msg: 'do the thing', goals: ['g1', 'g2'], working_directory: '~/x' },
+      },
+      node('echo', 'log'),
+    ],
+    [edge('trigger', 'echo')],
+  );
+  const run = await runToCompletion(wfId);
+  expect(run.status).toBe('success');
+  const out = nodeState(run, 'trigger').output;
+  expect(out.msg).toBe('do the thing');
+  expect(out.goals).toEqual(['g1', 'g2']);
+  expect(out.working_directory).toBe('~/x');
+});
+
 test('orchestrator example templates are offered', async () => {
   const r = await ctx.get(`${base}${V1}/workflows/templates`);
   expect(r.ok()).toBeTruthy();
