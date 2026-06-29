@@ -223,6 +223,16 @@ async fn create(
             .await
             .map_err(ApiError)?
     };
+    // Optionally link to a registered repo so its proof policy applies. Best-effort
+    // and strengthen-only — an unresolvable repo just leaves the pack unlinked.
+    if let Some(repo_id) = req.repo_id.as_deref() {
+        if pack.repo_id.as_deref() != Some(repo_id) {
+            ctx.proof_repo
+                .set_repo_link(&pack.id, Some(repo_id), None)
+                .await
+                .map_err(ApiError)?;
+        }
+    }
     let pack = engine::recompute_and_emit(&ctx, &pack.id)
         .await
         .map_err(ApiError)?;
@@ -532,9 +542,10 @@ async fn add_media(
         )));
     }
     if !engine::ALLOWED_MEDIA_MIMES.contains(&req.mime.as_str()) {
-        return Err(ApiError(Error::Invalid(format!(
-            "unsupported media mime '{}'",
-            req.mime
+        return Err(ApiError(Error::UnsupportedMedia(format!(
+            "unsupported media mime '{}' (allowed: {})",
+            req.mime,
+            engine::ALLOWED_MEDIA_MIMES.join(", ")
         ))));
     }
     let data = base64::engine::general_purpose::STANDARD
@@ -544,8 +555,9 @@ async fn add_media(
         return Err(ApiError(Error::Invalid("empty media".into())));
     }
     if data.len() > MEDIA_CAP {
-        return Err(ApiError(Error::Invalid(format!(
-            "media exceeds {} byte cap",
+        return Err(ApiError(Error::PayloadTooLarge(format!(
+            "media is {} bytes, exceeds the {} byte cap",
+            data.len(),
             MEDIA_CAP
         ))));
     }
