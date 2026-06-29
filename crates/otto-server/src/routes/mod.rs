@@ -405,6 +405,16 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/workflows/{id}/run", post(workflows::run_workflow))
         .route("/workflows/{id}/runs", get(workflows::list_runs))
+        // Workflow versioning (history + restore).
+        .route("/workflows/{id}/versions", get(workflows::list_versions))
+        .route(
+            "/workflows/{id}/versions/{v}",
+            get(workflows::get_version),
+        )
+        .route(
+            "/workflows/{id}/versions/{v}/restore",
+            post(workflows::restore_version),
+        )
         // Workflow triggers CRUD (schedule / event kinds; webhook is in public_routes).
         .route(
             "/workflows/{id}/triggers",

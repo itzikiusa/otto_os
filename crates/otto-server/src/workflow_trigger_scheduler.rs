@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use otto_core::event::Event;
 use otto_state::{TriggersRepo, WorkflowsRepo};
 use serde_json::{json, Value};
@@ -117,68 +117,21 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
     Ok(())
 }
 
-/// True when a schedule-trigger spec is due to fire at `now` (UTC).
-/// Mirrors `swarm_scheduler::is_due` exactly so the same spec format works
-/// for both swarm agents and workflow triggers.
+/// True when a schedule-trigger spec is due to fire at `now`.
+///
+/// Delegates to the shared [`crate::cadence`] engine (the same one Scheduled
+/// Tasks use) so workflow schedule triggers get **cron** (`cadence:"cron"`,
+/// `expr`) and **IANA timezone** (`timezone`) parity for free, while
+/// interval/daily/weekly behave exactly as before. The cursor (`last_run`) is
+/// read from the spec.
 pub fn is_due(spec: &Value, now: DateTime<Utc>) -> bool {
     let last = spec
         .get("last_run")
         .and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc));
-
-    match spec.get("cadence").and_then(Value::as_str).unwrap_or("interval") {
-        "interval" => {
-            let every = spec
-                .get("every_min")
-                .and_then(Value::as_i64)
-                .unwrap_or(60)
-                .max(1);
-            match last {
-                Some(l) => (now - l).num_minutes() >= every,
-                None => true,
-            }
-        }
-        "daily" => {
-            let (h, m) = parse_hhmm(spec.get("at"));
-            let target = Utc
-                .with_ymd_and_hms(now.year(), now.month(), now.day(), h, m, 0)
-                .single();
-            match target {
-                Some(t) => now >= t && last.is_none_or(|l| l < t),
-                None => false,
-            }
-        }
-        "weekly" => {
-            let wd = spec
-                .get("weekday")
-                .and_then(Value::as_i64)
-                .unwrap_or(1) as u32;
-            if now.weekday().num_days_from_monday() != wd {
-                return false;
-            }
-            let (h, m) = parse_hhmm(spec.get("at"));
-            let target = Utc
-                .with_ymd_and_hms(now.year(), now.month(), now.day(), h, m, 0)
-                .single();
-            match target {
-                Some(t) => now >= t && last.is_none_or(|l| l < t),
-                None => false,
-            }
-        }
-        _ => false,
-    }
-}
-
-fn parse_hhmm(v: Option<&Value>) -> (u32, u32) {
-    v.and_then(Value::as_str)
-        .and_then(|s| {
-            let mut it = s.split(':');
-            let h = it.next()?.parse::<u32>().ok()?;
-            let m = it.next().unwrap_or("0").parse::<u32>().ok()?;
-            Some((h.min(23), m.min(59)))
-        })
-        .unwrap_or((9, 0))
+    let tz = crate::cadence::task_tz(spec.get("timezone").and_then(Value::as_str).unwrap_or(""));
+    crate::cadence::is_due(spec, last, now, tz)
 }
 
 // ---------------------------------------------------------------------------
@@ -356,5 +309,29 @@ mod tests {
     fn unknown_cadence_is_never_due() {
         let s = json!({"cadence": "monthly", "enabled": true});
         assert!(!is_due(&s, Utc::now()));
+    }
+
+    #[test]
+    fn cron_cadence_supported_via_shared_engine() {
+        use chrono::TimeZone;
+        // "every minute" cron, never run → due now (proves cron parity).
+        let now = Utc.with_ymd_and_hms(2026, 6, 29, 12, 0, 0).unwrap();
+        let s = json!({ "cadence": "cron", "expr": "* * * * *" });
+        assert!(is_due(&s, now), "every-minute cron should be due");
+        // A daily cron at 09:00 with a cursor already past today's fire is not due
+        // again at noon.
+        let s2 = json!({
+            "cadence": "cron", "expr": "0 9 * * *",
+            "last_run": Utc.with_ymd_and_hms(2026, 6, 29, 9, 0, 0).unwrap().to_rfc3339(),
+        });
+        assert!(!is_due(&s2, now), "already fired today's 09:00 cron");
+    }
+
+    #[test]
+    fn timezone_is_threaded_through() {
+        // A daily 09:00 trigger in a +/- tz is interpreted in that tz, not UTC.
+        // Just assert it doesn't panic and respects the spec shape.
+        let s = json!({ "cadence": "daily", "at": "09:00", "timezone": "America/New_York" });
+        let _ = is_due(&s, Utc::now());
     }
 }

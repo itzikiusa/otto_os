@@ -7,8 +7,9 @@ use axum::http::StatusCode;
 use axum::Json;
 use otto_core::domain::WorkspaceRole;
 use otto_core::workflows::{
-    CreateWorkflowReq, FromTemplateReq, NodeTypeSpec, RunStatus, RunWorkflowReq, UpdateWorkflowReq,
-    Workflow, WorkflowEdge, WorkflowGraph, WorkflowNode, WorkflowRun, WorkflowTemplate,
+    CreateWorkflowReq, FromTemplateReq, NodeTypeSpec, RestoreVersionReq, RunStatus, RunWorkflowReq,
+    UpdateWorkflowReq, Workflow, WorkflowEdge, WorkflowGraph, WorkflowNode, WorkflowRun,
+    WorkflowTemplate, WorkflowVersion,
 };
 use otto_core::{Error, Id};
 use otto_state::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger, WorkflowsRepo};
@@ -79,6 +80,7 @@ pub async fn update_workflow(
 ) -> ApiResult<Json<Workflow>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
+    let graph_changed = req.graph.is_some();
     let updated = repo(&ctx)
         .update(
             &id,
@@ -88,7 +90,81 @@ pub async fn update_workflow(
         )
         .await
         .map_err(ApiError)?;
+    // A graph-changing edit bumps the version and snapshots the new graph.
+    if graph_changed {
+        let v = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
+        repo(&ctx)
+            .snapshot_version(
+                &id,
+                v,
+                &updated.name,
+                &updated.description,
+                &updated.graph,
+                "edited graph",
+                &user.id,
+            )
+            .await
+            .map_err(ApiError)?;
+        return Ok(Json(repo(&ctx).get(&id).await.map_err(ApiError)?));
+    }
     Ok(Json(updated))
+}
+
+/// `GET /workflows/{id}/versions` — version history (newest first).
+pub async fn list_versions(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<WorkflowVersion>>> {
+    let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(repo(&ctx).list_versions(&id).await.map_err(ApiError)?))
+}
+
+/// `GET /workflows/{id}/versions/{v}` — a single snapshot.
+pub async fn get_version(
+    Path((id, v)): Path<(Id, i64)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<WorkflowVersion>> {
+    let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Viewer).await?;
+    repo(&ctx)
+        .get_version(&id, v)
+        .await
+        .map_err(ApiError)?
+        .map(Json)
+        .ok_or_else(|| ApiError(Error::NotFound(format!("version {v}"))))
+}
+
+/// `POST /workflows/{id}/versions/{v}/restore` — copy a version's graph back in
+/// as a NEW version (append-only history).
+pub async fn restore_version(
+    Path((id, v)): Path<(Id, i64)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    body: Option<Json<RestoreVersionReq>>,
+) -> ApiResult<Json<Workflow>> {
+    let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
+    let ver = repo(&ctx)
+        .get_version(&id, v)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound(format!("version {v}"))))?;
+    repo(&ctx)
+        .update(&id, None, None, Some(&ver.graph))
+        .await
+        .map_err(ApiError)?;
+    let newv = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
+    let note = body
+        .and_then(|b| b.0.note)
+        .unwrap_or_else(|| format!("restored from v{v}"));
+    repo(&ctx)
+        .snapshot_version(&id, newv, &ver.name, &ver.description, &ver.graph, &note, &user.id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(repo(&ctx).get(&id).await.map_err(ApiError)?))
 }
 
 /// `DELETE /workflows/{id}`

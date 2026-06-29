@@ -591,8 +591,10 @@ pub async fn run_workflow(
         .update_run(&run_id, final_status, &states, err_msg.as_deref(), true)
         .await;
     // Proof pack: package the run's node outputs, human approvals, and budget
-    // gate into inspectable evidence. Best-effort.
-    assemble_workflow_proof(&ctx, &workflow, &run_id, &states).await;
+    // gate into inspectable evidence; link the pack to the run. Best-effort.
+    if let Some(pack_id) = assemble_workflow_proof(&ctx, &workflow, &run_id, &states).await {
+        let _ = repo.set_run_proof_pack(&run_id, &pack_id).await;
+    }
     // Final event: run complete.
     emit_run_updated(&ctx, &workflow.workspace_id, &run_id, final_status.as_str(), None);
 }
@@ -606,7 +608,7 @@ async fn assemble_workflow_proof(
     workflow: &Workflow,
     run_id: &Id,
     states: &[NodeRunState],
-) {
+) -> Option<String> {
     use otto_core::proof::{ProofArtifactKind as K, ProofArtifactStatus as S, WorkItemKind};
     use sqlx::Row;
 
@@ -623,7 +625,7 @@ async fn assemble_workflow_proof(
         Ok(p) => p,
         Err(e) => {
             tracing::debug!(run = %run_id, "workflow proof gate failed: {e}");
-            return;
+            return None;
         }
     };
 
@@ -682,6 +684,7 @@ async fn assemble_workflow_proof(
     }
 
     let _ = crate::proof::recompute_and_emit(ctx, &pack.id).await;
+    Some(pack.id)
 }
 
 /// `start` plus every node reachable from it via edges.

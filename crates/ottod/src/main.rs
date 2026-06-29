@@ -733,6 +733,14 @@ async fn run(cfg: Config) -> Result<(), String> {
     let _workflow_event_trigger_handle = spawn_workflow_event_trigger_listener(ctx.clone());
     tracing::info!("workflow event-trigger listener started");
 
+    // --- Workflow schedule-trigger scheduler ---
+    // 60 s tick that fires `schedule`-kind triggers on their cadence (interval /
+    // daily / weekly / cron, timezone-aware via the shared cadence engine) and
+    // starts a workflow run. Mirrors the swarm / scheduled-tasks supervisors.
+    let _workflow_schedule_trigger_handle =
+        otto_server::workflow_trigger_scheduler::start(ctx.clone());
+    tracing::info!("workflow schedule-trigger scheduler started");
+
     // --- Mission Control / work-graph projector ---
     // Subscribes to the daemon event bus and materializes every agentic activity
     // into the unified work graph (live), plus a 60 s reconcile + boot backfill
