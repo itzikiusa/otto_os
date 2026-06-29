@@ -1881,7 +1881,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?` | `ProofPackResp[]` |
-| 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?}` | ProofPackResp |
+| 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?, repo_id?}` | ProofPackResp (`repo_id` links the pack to a repo so its proof policy applies — strengthen-only) |
 | 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | — | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
 | 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract computed live) |
 | 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
@@ -1894,7 +1894,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | 126 | POST /api/v1/proof-packs/{id}/snapshot | ws editor · ProofPack Edit | CreateSnapshotReq `{note?}` | ProofSnapshotResp `{…meta, bundle, report_md, report_html}` (immutable) |
 | 127 | GET /api/v1/proof-packs/{id}/snapshots | ws viewer · ProofPack View | — | `ProofSnapshotMeta[]` (newest first) |
 | 128 | GET /api/v1/proof-snapshots/{id} | ws viewer · ProofPack View | — | ProofSnapshotResp |
-| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp |
+| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp — `415` if `mime` not in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` if the decoded blob exceeds 25 MiB |
 | 130 | GET /api/v1/proof-artifacts/{id}/blob | ws viewer · ProofPack View | — | raw bytes (`Content-Type` = blob mime, `Content-Disposition: inline`) |
 | 131 | POST /api/v1/proof-packs/{id}/evidence/api | ws editor · ProofPack Edit | ApiEvidenceReq `{title, method, url, status, duration_ms?, request?, response?, metadata?}` | ProofPackResp |
 | 132 | POST /api/v1/proof-packs/{id}/evidence/db | ws editor · ProofPack Edit | DbEvidenceReq `{title, engine?, query?, columns?, row_count?, sample?, error?, metadata?}` | ProofPackResp |
@@ -2087,6 +2087,17 @@ webhook; classified `Exempt` in `policy.rs`):
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}` |
+
+When a `callback_url` is supplied, the daemon POSTs the run's result back to it at
+the milestones a caller can act on — `awaiting_approval` and every terminal state
+(`completed`/`failed`/`rejected`/`cancelled`). The body is the run's public shape:
+`{run_id, workspace_id, status, awaiting_approval, terminal, title, source_kind,
+source_ref, source_url, mode, proof_status, risk_score, findings_total,
+findings_blocking, has_pr_draft, pr_url, approval_decision, error}`. Delivery is
+best-effort and SSRF-guarded (`otto_netguard::check_url` + redirect policy — a
+loopback/private/metadata target is refused); each attempt is recorded as a
+`delivery` `RunEvent`. With no `callback_url` the webhook is a fire-and-forget
+trigger (read the result via REST/WS/UI).
 
 Slack/Telegram entry: a `/run <ref>` (or "run with otto …") message launches a run;
 an `approve`/`reject` reply in the run's thread resolves the approval gate (authorized

@@ -2580,6 +2580,12 @@ pub struct CreateProofPackReq {
     pub work_item_id: String,
     pub title: Option<String>,
     pub parent_pack_id: Option<String>,
+    /// Optionally link the pack to a registered repo, so that repo's proof policy
+    /// (`RepoProofConfig` — "test command required", "CI green required", …)
+    /// applies on recompute. Strengthen-only: linking can never *relax* a pack's
+    /// requirements, only add to them. Ignored if the repo can't be resolved.
+    #[serde(default)]
+    pub repo_id: Option<String>,
 }
 
 /// `POST /proof-packs/{id}/artifacts`. Provide at most one of `content`/`content_url`.
