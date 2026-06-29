@@ -353,6 +353,17 @@ All routes are under `/api/v1`. Authoritative contract: `docs/contracts/api.md`
 | 141 | `POST /scheduled-tasks/{id}/run` | Run now (manual; cursor untouched) → `ScheduledTaskRun` | ws Editor · Edit |
 | 142 | `GET /scheduled-tasks/{id}/runs` | Run history (newest first, ≤100) → `ScheduledTaskRun[]` | ws Viewer · View |
 | 143 | `GET /scheduled-tasks/runs/{run_id}/report` | The stored report → `text/markdown` | ws Viewer · View |
+| 144 | `POST /scheduled-tasks/{id}/convert-to-workflow` | Materialize the task as a Workflow + schedule trigger → `{workflow_id, trigger_id?}` | ws Editor · Edit |
+
+**Convert to workflow (#144).** A one-shot bridge from the single-step
+Scheduled-Tasks surface to the multi-step **Workflows** engine. It creates a
+workflow graph `manual_trigger → agent_prompt [→ channel_notify]` — the
+`agent_prompt` carries the task's prompt + provider, and the `channel_notify` node
+is added only when the task delivers to Slack/Telegram (it forwards the agent's
+`{reply}`) — plus a `schedule` **workflow trigger** mirroring the task's cadence and
+timezone. Pass `{ "disable_task": true }` to pause the source task after
+converting. Use this once you outgrow a single agent run and want branching, loops,
+review/PR steps, or human approval (see `./workflows.md`).
 
 **Create / update body** (all optional except `name` on create): `name`, `prompt`,
 `kind`, `skill`, `provider` (claude or blank only — others are rejected `400`),
@@ -401,7 +412,9 @@ matching tick instead of polling.
   Otto session row).
 - **Times are UTC** (`at` is interpreted in UTC, not local time).
 - **Single-step only** — a task is one agent run + a delivery. Multi-step / DAG
-  automation is the Workflows feature.
+  automation is the Workflows feature; **`POST /scheduled-tasks/{id}/convert-to-workflow`**
+  (§10, #144) materializes a task as a workflow + schedule trigger when you outgrow
+  the single step.
 
 ---
 
@@ -481,6 +494,9 @@ tool itself must also be enabled in the Otto Server tab.
 - **[MCP Control Plane](./mcp-control-plane.md)** — the outward `otto.*` server that
   exposes the 7 scheduled-task tools, and the governance/approval pipeline they run
   through.
+- **[Workflows](./workflows.md)** — the multi-step DAG engine; `convert-to-workflow`
+  (#144) turns a scheduled task into a workflow + schedule trigger, and Workflows
+  share this feature's cadence engine (cron + timezone).
 - **[Self-improvement](./self-improvement.md)** — the other consumer of the headless
   `Orchestrator::run_agent` primitive.
 - **[Daemon HTTP API](./daemon-http-api.md)** — auth, tokens, and calling the

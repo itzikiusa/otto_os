@@ -37,7 +37,7 @@ Otto has **two unrelated automation surfaces**. Keep them straight:
 
 | Surface | What it is | Where | Model | Backed by |
 |---|---|---|---|---|
-| **Workflow engine** | A visual node-graph you build and run; nodes call agents, HTTP, DB, brokers, channels, swarm, etc. | `#/workflows` page | `Workflow` / `WorkflowRun` / `WorkflowGraph` | `workflows`, `workflow_runs`, `workflow_node_cache`, `workflow_triggers` tables |
+| **Workflow engine** | A visual node-graph you build and run, with branching, loops, retry, and versioning; nodes call agents, HTTP, DB, brokers, channels, swarm, product, review, git, etc. | `#/workflows` page | `Workflow` / `WorkflowRun` / `WorkflowGraph` / `WorkflowVersion` | `workflows`, `workflow_runs`, `workflow_node_cache`, `workflow_triggers`, `workflow_versions` tables |
 | **API-client "Automations"** | A *collection runner*: an ordered list of saved API-client requests with per-step assertions + variable extraction (a tiny test/regression runner). | API client (`#/api`) → "Automations" view | `ApiAutomation` / `ApiAutomationStep` / `ApiRunResult` | `api_automations` table |
 
 This document covers **both**, but the bulk is the workflow engine. The
@@ -171,6 +171,20 @@ do simple `{key}` substitution from the incoming object (see §4).
   engine checks an overall `RUN_WALL_CLOCK_TIMEOUT`; exceeding it marks all
   un-run nodes `skipped` and fails the run with "run exceeded the N-minute time
   limit". Individual agent/approval nodes also have their own `NODE_AGENT_TIMEOUT`.
+- **Typed-output validation (warn-only):** after a node succeeds, its output is
+  checked against the kind's declared `output_schema` (`validate_node_output`);
+  mismatches are appended to the node log as `⚠ …` lines and **never fail the run**.
+- **Visible sessions per step:** agent / product / canvas / loop-inner nodes run as
+  **real, openable Otto sessions** (not the headless PTY). Each session id is
+  reported the moment it's created and recorded on `NodeRunState.sessions`, so the
+  run view can open it **while the step is still running** (`review_run` also
+  surfaces a `review_id` in its output).
+- **Run → Proof Pack:** on completion the engine assembles a Proof Pack from the
+  run (each node output → a `log` artifact with the node's pass/fail status; each
+  `human_approval` → an `approval` artifact) and links it on the run
+  (`WorkflowRun.proof_pack_id`). Best-effort.
+- **Versioning:** the run records the workflow `version` it executed
+  (`WorkflowRun.workflow_version`); see §9.
 
 ---
 
@@ -182,15 +196,16 @@ The catalog is returned by `GET /workflows/node-types` (`node_catalog()` in
 "+ Node" palette is built directly from this list, and per-kind parameter forms
 live in `WorkflowsPage.svelte`.
 
-**Status legend:** **Real** = executes against a live subsystem · **Stub** =
-registered and runnable but only emits a `{"stub": true, ... "not wired"}` marker
-that passes downstream (it does **not** error the run).
+**Status legend:** **Real** = executes against a live subsystem · **Real
+(scaffold)** = runs and produces real structured output but emits a canned spec
+pending an external engine (only `game_engine`/`verifier`). There are **no longer
+any "not wired" stub kinds** — the four former product/review stubs are now wired.
 
 | Kind | Label / category | Purpose | Params (UI form) | Status |
 |---|---|---|---|---|
 | `manual_trigger` | Manual Trigger / Triggers | Entry node; emits the run input. `inputs:0`. | — | **Real** |
-| `agent_prompt` | Agent / AI | Runs a **headless agent turn** with a prompt; output `{ "reply": "..." }`. | `prompt`, `model` (optional) | **Real** |
-| `http_request` | HTTP Request / Network | Calls an HTTP endpoint, captures response. | `method`, `url`, `body` (JSON) | **Real** |
+| `agent_prompt` | Agent / AI | Runs an agent turn as a **real, openable session**; output `{ "reply", "session_id" }`. | `prompt`, `provider` (default `claude`) | **Real** |
+| `http_request` | HTTP Request / Network | Calls an HTTP endpoint, captures response `{ status, body }`. | `method`, `url`, `body` (JSON) | **Real** |
 | `transform` | Set / Transform / Data | Merges a static JSON object into the data flowing through. | `json` (object) | **Real** |
 | `delay` | Delay / Flow | Sleeps `ms` milliseconds, then passes input through. | `ms` (0–10000) | **Real** |
 | `log` | Log / Flow | Records the incoming data in the run log; passes it through. | — | **Real** |
@@ -201,54 +216,61 @@ that passes downstream (it does **not** error the run).
 | `channel_notify` | Channel Notify / Integrations | Sends a message to a configured Slack/Telegram integration. Supports `{key}` substitution from the incoming object. | `message`, `channel` (`slack`/`telegram`/any) | **Real** |
 | `budget_gate` | Budget Gate / Flow | Checks the provider spend cap: **errors the run if blocked**; otherwise passes (`exceeded` is warn-only). | `provider` (`claude`/`codex`) | **Real** |
 | `human_approval` | Human Approval / Flow | **Pauses the run**; sets `waiting_approval=1` and polls until an operator approves/rejects via the approve endpoint (or times out at `NODE_AGENT_TIMEOUT`). | `prompt` | **Real** |
+| `condition` | Condition / Flow | Evaluates an `expr` on its input; outputs `{ result, value }` merged onto the input. Pair with **edge conditions** to branch. | `expr` (default `true`) | **Real** |
+| `loop` | Loop (Until) / Flow | Bounded **iterate-until**: re-runs inner `steps[]` until `until` holds or `max_iterations`. Reuses inner-node execution; threads run-level keys + prev-step output to each step. Output `{ iterations, satisfied, last, history }`. No nested loops. | `max_iterations` (1–10, default 3), `until` (expr), `steps[]` ({kind,name,params,retry}), `continue_on_error` | **Real** |
 | `swarm_task` | Swarm Task / AI | Enqueues a task in a running Agent-Swarm project (`todo` status; coordinator picks it up). | `swarm_id`, `project_id`, `title`, `description` | **Real** |
-| `api_run` | API Run / Network | Executes an HTTP request **through the API-client engine** so env-var substitution + auth apply. | `method`, `url`, `body` (JSON) | **Real** |
-| `product_analyze` | Product Analyze / Product | *Intended:* run a product-analysis agent on a story. | (raw JSON; not used) | **Stub — not wired** |
-| `product_rewrite` | Product Rewrite / Product | *Intended:* run a product-rewrite agent on a story. | (raw JSON; not used) | **Stub — not wired** |
-| `product_plan` | Product Plan / Product | *Intended:* run a product-planning agent on a story. | (raw JSON; not used) | **Stub — not wired** |
-| `review_run` | Review Run / AI | *Intended:* start a code-review run on a workspace repo. | (raw JSON; not used) | **Stub — not wired** |
+| `api_run` | API Run / Network | Executes an HTTP request **through the API-client engine** so env-var substitution + auth apply. | `method`, `url`, `headers`, `body` | **Real** |
+| `product_analyze` | Product Analyze / Product | Runs a real single-agent turn (the **`grill`** lens) over the story's built context; outputs `{ story_id, analysis, session_id }`. | `story_id`, `instruction?` | **Real** ² |
+| `product_rewrite` | Product Rewrite / Product | Rewrites the story (**`jira-story-writer`**); outputs `{ story_id, body_md, session_id }`; `persist:true` saves a `suggested` product version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
+| `product_plan` | Product Plan / Product | Breaks the story into a plan (**`story-task-breakdown`**); outputs `{ story_id, plan_md, session_id }`; `persist:true` saves a `plan` version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
+| `product_publish` | Product Publish / Product | Publishes a story as a Confluence **RFC** or a **Jira** issue. **`dry_run` defaults true** (no-op note); a real publish needs `account_id` (+ `project_key`/`space_key`). | `kind` (`rfc`/`jira`), `dry_run`, `account_id`, … | **Real** |
+| `review_run` | Review Run / AI | Runs the **local-review engine** (`run_review_for_branch`), polls to completion, emits a **0–100 `score`** (`100−20×blocking−5×advisory`), optional `goals` assessment blended in, `passed = score≥threshold && status==done`. | `repo_id`, `base` (default `main`), `threshold` (default 80), `await`, `timeout_s`, `goals[]` | **Real** |
+| `canvas` | Canvas Diagram / Product | Asks an agent for a **mermaid/excalidraw** diagram and writes it under the data dir (`workflow-canvas/{run}/{node}.{ext}`); output `{ scene_id, path, diagram, … }`. | `prompt`, `mode` (`mermaid`/`excalidraw`) | **Real** |
+| `git_pr` | Git PR / Network | **Drafts** a pull request for a repo branch (title/description via `draft_pr_core`); **`opened:false`** — opening is left to the Git tab. | `repo_id`, `base` (default `main`), `worktree_path?` | **Real** |
 
 > **¹ `game_engine` / `verifier` are real but "scaffold" nodes.** They execute
-> and produce usable structured output — unlike the four "not wired" stubs they
-> do real work and `verifier` genuinely errors on a missing/trivial game file in
-> the game path. But `game_engine` returns a **canned spec template** with the
+> and produce usable structured output — they do real work, and `verifier`
+> genuinely errors on a missing/trivial game file in the game path. But these are
+> now the **only** scaffold kinds: `game_engine` returns a **canned spec template**
+> with the
 > note *"Scaffold build: wire a real game engine here."* and `verifier`'s
 > non-game path emits a scaffold *"replace with the real certifier."* report.
 > They are intended as a game-pipeline scaffold (the built-in templates use
 > `agent_prompt → game_engine → verifier`), pending a real external game engine.
 > Treat their output as a scaffold, not a certified production artifact.
 
-### Why the four stubs are stubs (verbatim from the code)
-The catalog comments and the executor arms are explicit:
+> **² The four product/review nodes are now wired (formerly stubs).** They run a
+> **real single-agent turn** over the story's built context (`ctx.product.
+> build_agent_context`) with the matching product **skill inlined** (`grill` /
+> `jira-story-writer` / `story-task-breakdown`), as a visible session; `product_*`
+> can optionally `persist` a product version. `review_run` calls the in-process
+> **local-review engine** (`run_review_for_branch`), polls it to completion, and
+> computes a deterministic 0–100 score from the blocking/advisory finding counts
+> (`review_findings_counts`), optionally blending in an agent goals-assessment.
+> They no longer emit a `{"stub": true}` marker — older docs/UI hints about "not
+> wired" are obsolete.
 
-```rust
-// product_analyze / product_rewrite / product_plan: otto-product does
-// not expose a standalone synchronous call; a full run needs an active
-// ProductRunHandle and the product_run cancellation registry.  Stubbed.
-// review_run: otto-orchestrator's start_review requires a full ReviewsRepo
-// call chain + background session plumbing ... not reachable from the engine.
-```
+> **Heads-up — wired nodes still have prerequisites.** `db_query` (a saved
+> DB-Explorer connection), `broker_peek` (a broker cluster), `swarm_task` (a
+> running swarm/project), `review_run`/`git_pr` (a registered git repo + a
+> `repo_id` in params or run input), and `product_*`/`product_publish` (a
+> `story_id`, and an Atlassian `account_id` for a real publish) all depend on
+> other features being set up. A missing dependency causes the **node** to error
+> (and downstream active-path nodes to skip) — not a silent no-op.
 
-Each of the four executes like this (so the run does **not** crash — it succeeds
-with a marker that downstream nodes can branch/log on):
-
-```rust
-"product_analyze" => Ok((
-    json!({ "stub": true, "node_kind": "product_analyze",
-            "note": "product_analyze is not yet wired ..." }),
-    vec!["product_analyze: stub — not wired".into()]))
-```
-
-The UI mirrors this: selecting one of these four in the inspector shows a yellow
-hint — *"This node kind is registered but not yet wired in the engine. It will
-run as a stub and pass a 'not wired' marker to downstream nodes."*
-
-> **Heads-up on the `swarm_task`/`db_query`/`broker_peek`/`api_run` group:**
-> these are real but depend on other features being set up — a saved DB-Explorer
-> connection, a broker cluster, a running swarm/project, etc. A missing
-> dependency causes the **node** to error (and downstream nodes to skip), not a
-> stub marker. The api.md Wave-3 note lists all eleven non-core kinds together;
-> only the four above are stubs.
+### Branching & loops in practice
+- **`condition` + edge conditions** are the if/else primitive: a `condition` node
+  emits `{ result, value }`, and you put `output.result == true` / `== false`
+  conditions on its two outgoing edges. The false branch is **branch-skipped**
+  (clean, not a failure); a downstream join runs from whichever branch stayed
+  active. Any edge can carry a condition — you don't strictly need a `condition`
+  node if the prior node's output already has the field you want to test.
+- **`loop`** runs its inner `steps[]` (each a `{kind, name, params, retry}` object,
+  executed by the **same `execute_node`** path as top-level nodes) up to
+  `max_iterations`, stopping early when the `until` expression holds against
+  `{ iteration, last, steps, input }`. The previous step's output threads into the
+  next step, and run-level keys (e.g. `repo_id`, `goals`) flow to every step. The
+  built-in flow templates use a `fix → review_run until last.passed == true` loop.
 
 ---
 
@@ -268,7 +290,7 @@ interface WorkflowTrigger { id; workflow_id; kind; spec: object; enabled; create
 |---|---|---|---|---|
 | **webhook** | `{ token }` (32-byte URL-safe token auto-generated server-side on create) | An external system calls `POST /workflows/{id}/webhook/{token}`. The token **is** the credential — no bearer auth required. | The request body (JSON), or `null`. | **Yes** — handler `webhook_trigger` spawns the run. |
 | **event** | `{ event_kind, filter_json? }` | A daemon event whose mapped name equals `event_kind` fires on the event bus. | `{ "trigger": "event", "event_kind": "..." }` | **Yes** — `spawn_workflow_event_trigger_listener` is started at daemon boot (`ottod` main, "workflow event-trigger listener started"). |
-| **schedule** | `{ cadence, every_min, at, weekday, last_run, enabled }` (same format as the swarm scheduler) | Cadence comes due: `interval` (every N min, default 60), `daily` (at `HH:MM` UTC), or `weekly` (weekday 0=Mon at `HH:MM` UTC). | `{ "trigger": "schedule" }` | **Implemented + unit-tested, but NOT spawned at boot today — see warning below.** |
+| **schedule** | `{ cadence, every_min, at, weekday, expr, timezone, last_run, enabled }` (the **shared cadence** format — same as Scheduled Tasks) | Cadence comes due: `interval` (every N min, default 60), `daily` (at `HH:MM`), `weekly` (weekday 0=Mon at `HH:MM`), or **`cron`** (`expr`, 5-field). All interpreted in the spec's IANA **`timezone`** (default UTC). | `{ "trigger": "schedule" }` | **Yes** — `workflow_trigger_scheduler::start` is started at daemon boot (`ottod` main, "workflow schedule-trigger scheduler started"). |
 
 ### Event-kind mapping (configure by string in the trigger spec)
 The event listener maps daemon `Event` variants to stable strings; the UI default
@@ -288,18 +310,45 @@ Session/metric/notice/trail/task and other high-churn events are deliberately
 **excluded** (the listener returns `None` for them) — they are too noisy to be
 useful macro triggers.
 
-> **⚠️ Schedule triggers do not auto-fire in the running daemon (verified gap).**
-> `workflow_trigger_scheduler::start` (a 60-second supervisor that scans enabled
-> `schedule` triggers, checks `is_due`, advances the `last_run` cursor, and
-> spawns runs) is **fully written and has passing unit tests**, but is **not
-> called anywhere in `crates/ottod/src/main.rs`** — only the *event* listener is
-> started at boot. So in practice today: you can **create** a schedule trigger
-> and the UI will show "daily at 09:00 UTC" etc., but **no run will be started on
-> that cadence** until the scheduler is wired into `main` (mirroring how
-> `swarm_scheduler::start`, the insights scheduler, and the CLI-update scheduler
-> are launched). **Use webhook or event triggers for unattended runs today.**
-> *(If you are reading this after a later release, re-check `main.rs` for a
-> `workflow_trigger_scheduler::start(ctx.clone())` call before relying on it.)*
+> **✅ Schedule triggers fire at boot now (closed gap).**
+> `workflow_trigger_scheduler::start` — a 60-second supervisor that scans enabled
+> `schedule` triggers, checks `is_due`, advances the `last_run` cursor first
+> (idempotency: a slow/failing run can't double-fire), and spawns runs — is
+> **started in `crates/ottod/src/main.rs`** at boot (log line *"workflow
+> schedule-trigger scheduler started"*), alongside the event listener and the
+> swarm / scheduled-tasks supervisors. Its `is_due` **delegates to the shared
+> `cadence` engine** (the one Scheduled Tasks use), so workflow schedule triggers
+> get **cron** (`cadence:"cron"`, `expr`) and **IANA timezone** (`timezone`) parity
+> for free; `interval`/`daily`/`weekly` behave exactly as before. All three trigger
+> kinds — webhook, event, schedule — now start runs unattended.
+
+### Chat trigger: `Action: Workflow` (Slack / Telegram / webhook)
+A structured inbound channel message can **start a workflow run by name** instead of
+opening a normal session — wired through the channels `Bridge` via the
+`WorkflowChatTrigger` hook (`workflow_chat.rs`; `ottod` injects
+`WorkflowChatTriggerImpl`, mirroring the swarm/run triggers). The message shape
+(field labels case-insensitive; `Goals:` may be a bullet list **or** an inline
+comma/semicolon list):
+
+```text
+@otto
+Action: Workflow
+Name: Implement Feature        ← resolved case-insensitively against the workspace's workflows
+Msg: please do x y z, follow all relevant rules
+Jira ticket: GS-1111
+Working Directory: ~/repo
+Relevant Info: ~/a, ~/b
+Goals:
+  - 100% test coverage
+  - under 2 minutes runtime
+```
+
+The parser requires `Action: Workflow` **and** a non-empty `Name:`. On a match it
+starts a run whose **input carries every parsed field** (`trigger:"chat"`, `channel`,
+`chat`, `thread`, `user`, `name`, `msg`, `jira_ticket`, `working_directory`,
+`relevant_info[]`, `goals[]`, `raw`) — so the first node (e.g. a "prepare relevant
+info" agent) can consolidate the ticket / working dir / paths into a brief for the
+rest of the graph — and replies in-thread (*"🚀 Started workflow … (run `…`)"*).
 
 ### Human approval is **not** a trigger
 The `human_approval` *node* pauses a run mid-flight (it writes `waiting_approval`
@@ -326,9 +375,22 @@ to create a workflow; the center is the canvas editor.
      graph** of `manual_trigger → agent_prompt` (the agent node pre-seeded with
      your description). So generation **never fails** to produce a runnable graph.
 2. **Start blank** — creates `manual_trigger` ("Start") only; build by hand.
-3. **From a template** — the sidebar lists built-in **game-pipeline templates**
-   (`POST /workspaces/{wid}/workflows/from-template`), each chaining an agent
-   design step into the game engine + verifier.
+3. **From a template** (`POST /workspaces/{wid}/workflows/from-template`,
+   `GET /workflows/templates`) — built-in examples in two families:
+   - **Orchestrator flows** (`flow_templates`) exercising the wired nodes + control
+     flow:
+     - **`write-tests`** — *Write tests for a story*: prepare brief → write tests →
+       a `fix → review_run` **loop** (`until last.passed == true`) → `human_approval`
+       → `git_pr` draft.
+     - **`implement-feature`** — `product_analyze` → prepare → implement → the same
+       review loop → approval → PR draft.
+     - **`po-lifecycle`** — *PO discovery → RFC/Jira*: discovery draft → `canvas`
+       diagram → approval → `product_rewrite` → approval → `product_publish`
+       (RFC, dry-run). They expect the run **input** to carry `repo_id` (and
+       optionally `base`, `story_id`, `goals`) — a Slack `Action: Workflow` message
+       or the Run dialog supplies these.
+   - **Game pipelines** (`game-slots` / `game-crash` / `game-scratch`), each chaining
+     an agent design step into the game engine + verifier scaffold.
 
 ### Edit on the canvas (`WorkflowCanvas.svelte`)
 - **Pan**: drag the background. **Zoom**: mouse wheel (0.3×–2×), or the HUD
@@ -340,15 +402,16 @@ to create a workflow; the center is the canvas editor.
 - **Move/select**: drag a node to reposition; click to select (opens the
   inspector). **Trash** removes the selected node (and its edges).
 - **Configure params**: the bottom **inspector** shows a per-kind form for the
-  selected node (e.g. `agent_prompt` → prompt + model; `http_request` →
-  method/url/body). Unrecognized or future kinds fall back to a **raw-JSON
-  params editor**.
+  selected node (e.g. `agent_prompt` → prompt + provider; `http_request` →
+  method/url/body; `review_run` → repo_id/base/threshold/goals). Unrecognized or
+  future kinds fall back to a **raw-JSON params editor**.
 - **Save**: edits set an "unsaved" badge; **Save** (`PATCH /workflows/{id}` with
   the new `graph`) persists. Running while dirty auto-saves first.
 
 ### Triggers
 Top-bar **Triggers** toggles the `TriggersPanel`: add/enable/disable/delete
-schedule, webhook, or event triggers (subject to the §5 caveats).
+schedule, webhook, or event triggers — all three fire unattended in the running
+daemon (see §5).
 
 ---
 
@@ -392,9 +455,20 @@ node transition** (start, finish/cached, skip) and at **run completion**:
   keeps the UI live if the WS connection is unavailable.
 
 ### Inspect
-`RunSteps.svelte` renders each step's status, duration, logs, error, and the
-**"work product"** (an agent `reply` string is rendered as text; everything else
-as pretty JSON, copyable). The timeline strip at the top jumps between steps.
+`RunSteps.svelte` renders each step's status, duration, `attempts` (when a retry
+policy ran), logs (including `⚠` typed-output warnings and `edge → … not taken`
+branch lines), error, and the **"work product"** (an agent `reply` string is
+rendered as text; everything else as pretty JSON, copyable). Steps that spawned
+**openable sessions** (`NodeRunState.sessions` — agent / product / canvas / loop
+turns) link to them so you can watch/inspect the agent **while the step runs**; the
+timeline strip at the top jumps between steps.
+
+### Run → Proof Pack
+On completion the run links a **Proof Pack** (`WorkflowRun.proof_pack_id`)
+assembling each node's output as evidence (a `log` artifact carrying the node's
+pass/fail; each `human_approval` becomes an `approval` artifact recording the
+approver). The run also records the workflow `version` it executed
+(`WorkflowRun.workflow_version`).
 
 ### Human-approval pause
 When a run hits a `human_approval` node it pauses; the page shows a banner —
@@ -459,6 +533,13 @@ build on.
 | `GET /workflows/{id}/runs` | ws viewer | `WorkflowRun[]` |
 | `GET /workflow-runs/{id}` | ws viewer | one run (poll/refresh target) |
 | `POST /workflow-runs/{id}/cancel` | ws editor | cancel a run |
+| `GET /workflows/{id}/versions` | ws viewer | `WorkflowVersion[]` (snapshot history, newest first) |
+| `GET /workflows/{id}/versions/{v}` | ws viewer | one snapshot (404 if unknown) |
+| `POST /workflows/{id}/versions/{v}/restore` | ws editor | `{note?}` → copies `v`'s graph in as a **new** version |
+
+Plus, on the Scheduled-Tasks surface: `POST /scheduled-tasks/{id}/convert-to-workflow`
+(`{disable_task?}` → `{workflow_id, trigger_id?}`) materializes a task as a Workflow
++ schedule trigger — see `./scheduled-tasks.md`.
 
 Trigger / webhook / approval routes (api.md Wave-3 additions, lines 1295–1300):
 
@@ -502,7 +583,14 @@ report synchronously from the run endpoint and have no dedicated WS event.
   `waiting_approval`, `approval_node_id`, `approved_by`, `approval_note`,
   `approved_at` (human-approval pause/resume is tracked on the run row, not a
   trigger).
+- **0088** workflow versioning + run→proof link: `workflows.version` (default 1),
+  `workflow_runs.workflow_version` + `workflow_runs.proof_pack_id`, and a
+  `workflow_versions` history table (`id, workflow_id, version, name, description,
+  graph_json, note, created_by, created_at`; `UNIQUE(workflow_id, version)`). The
+  migration backfills a `v1` snapshot for every pre-existing workflow.
 - **0014/0015** `api_client` base + `api_automations` (name, `steps_json`).
+- `retry` and edge `condition` need **no migration** — they live inside
+  `graph_json`.
 
 All ids are ULID strings; timestamps are UTC RFC-3339; rows cascade-delete with
 their workspace (and triggers/runs/cache cascade with the workflow). Migrations
@@ -513,39 +601,49 @@ are **append-only** — never edit or renumber an existing one.
 ## 10. Capabilities & limitations (be explicit)
 
 **What works today**
-- Build graphs by description (AI), template, or hand; pan/zoom canvas editor.
+- Build graphs by description (AI), template (orchestrator flows + game pipelines),
+  or hand; pan/zoom canvas editor.
 - Topological execution with failure propagation, partial runs (from-here / only),
   per-node output caching, run cancellation, and a global wall-clock timeout.
-- **Real** node kinds: `manual_trigger`, `agent_prompt`, `http_request`,
+- **Branching & loops:** edge `condition`s + a `condition` node (if/else, with clean
+  branch-skip vs failure-poison semantics), and a bounded `loop` (iterate-until)
+  that reuses inner-node execution — all driven by the safe `otto_core::expr`
+  language (also available as `{{ }}` templating).
+- **Retry/backoff** per node (`retry`), and **typed outputs** (warn-only validation
+  against each kind's `output_schema`).
+- **All node kinds are real:** `manual_trigger`, `agent_prompt`, `http_request`,
   `transform`, `delay`, `log`, `db_query` (read-only), `broker_peek`,
-  `channel_notify`, `budget_gate`, `human_approval`, `swarm_task`, `api_run`.
-- **Real-but-scaffold** node kinds: `game_engine`, `verifier` — they run and
-  produce real structured output (and `verifier` errors on real game-file checks),
-  but emit canned/scaffold specs pending a real external game engine.
+  `channel_notify`, `budget_gate`, `human_approval`, `condition`, `loop`,
+  `swarm_task`, `api_run`, and the **now-wired** `product_analyze`,
+  `product_rewrite`, `product_plan`, `product_publish`, `review_run` (0–100 scored),
+  `canvas`, `git_pr` (PR draft).
+- **Visible sessions per step** (openable while running) and a **Proof Pack** linked
+  to each completed run.
+- **Versioning:** graph snapshot history with view + restore (append-only).
 - Live WS run progress + per-step logs/output/"work product".
-- **Webhook** and **event** triggers fire in the running daemon.
+- **All three trigger kinds fire in the running daemon** — webhook, event, **and
+  schedule** (spawned at boot; cron + IANA timezone via the shared cadence engine).
+- A **chat trigger** (`Action: Workflow` Slack/Telegram/webhook message) starts a
+  run by name. **Convert** a scheduled task into a workflow + schedule trigger.
 - Human-approval pause/resume.
 - API-client automations: ordered request runner with assertions + extracts.
 
-**Known gaps / not done (do not assume these work)**
-- **Four stub nodes** — `product_analyze`, `product_rewrite`, `product_plan`,
-  `review_run` — run but only emit a `{"stub": true, ...}` "not wired" marker.
-  Wiring them needs deeper coupling to otto-product's run handles and
-  otto-orchestrator's review plumbing (per the code comments).
+**Caveats (still honest about the edges)**
 - **`game_engine` / `verifier` are scaffolds** — real, runnable, useful for the
   game-pipeline templates, but they emit canned specs / scaffold reports awaiting
   a real external game engine + certifier (see footnote ¹ in §4).
-- **Schedule triggers do not auto-fire** — the cadence supervisor
-  (`workflow_trigger_scheduler::start`) is implemented + tested but **not
-  spawned at daemon boot**. Only webhook/event triggers actually start runs.
-- **No expression/templating engine** between nodes beyond `channel_notify`'s
-  simple `{key}` substitution and the predecessor-output input assembly rules.
-- **No branching/conditionals/loops** as first-class nodes — execution is a plain
-  topological pass; control flow is expressed only via which edges exist and
-  upstream-failure skipping.
+- **`product_publish` defaults to a dry run** — a real RFC/Jira publish requires
+  `dry_run:false` + an Atlassian `account_id` (and `project_key`/`space_key`).
+- **`git_pr` only drafts** (`opened:false`) — opening the PR is left to the Git tab
+  (engine auto-open is deliberately gated).
+- **Wired nodes have prerequisites** — `db_query`/`broker_peek`/`swarm_task`/
+  `review_run`/`git_pr`/`product_*` need their backing connection/cluster/swarm/repo/
+  story set up, or the node errors (and downstream active-path nodes skip).
 - **Agent-output caching is intentional but can surprise** — re-running a graph
   with unchanged params+input serves the **prior agent reply from cache**
-  (duration `0ms`), not a fresh LLM call.
+  (duration `0ms`, `attempts:0`), not a fresh LLM call.
+- **Typed-output validation is warn-only** — schema mismatches log `⚠` but never
+  fail a run; `params_schema` is currently unpopulated (UI hint only).
 - API-client automations have **no scheduler** — run-on-demand only.
 
 ---
@@ -563,6 +661,12 @@ are **append-only** — never edit or renumber an existing one.
   credential, matched against an enabled webhook trigger. Treat the URL as a
   secret; delete the trigger to revoke. Anyone with the URL can start runs (with
   attacker-controlled JSON input).
+- **Chat `Action: Workflow` runs on the channel-trust model.** A structured
+  message in a configured Slack/Telegram/webhook channel can start a run by name
+  (the run acts as the workflow's `created_by`, falling back to a synthetic
+  "Workflow" user for system-initiated runs). Anyone who can post to a wired
+  channel can start any workflow in that workspace by name — treat channel access
+  as run-start capability.
 - **`db_query` is read-only by construction** — the engine forces
   `confirm_write = false`, so a workflow can never silently issue DB writes (a
   graph that genuinely needs a write must set the param explicitly).
@@ -586,9 +690,11 @@ are **append-only** — never edit or renumber an existing one.
 
 | Symptom | Likely cause / fix |
 |---|---|
-| A `product_analyze` / `product_rewrite` / `product_plan` / `review_run` node "succeeds" but does nothing | It's a **stub** (§4). Its output is `{"stub": true, ... "not wired"}`. Remove it or replace with a real node. |
-| A scheduled run never starts | **Schedule triggers don't auto-fire** (§5 warning). Switch to a webhook or event trigger, or trigger the run via `POST /workflows/{id}/run`. |
+| A `product_*` / `review_run` node errors "missing story_id / repo_id" | These are **wired** now (§4) and need their target: a `story_id` (product) or `repo_id` (review/PR) in the node params or the run input. Provide it (the Run dialog / `Action: Workflow` message / template input). |
+| A `review_run` node "passes" too easily / never passes | `score = 100 − 20×blocking − 5×advisory` (optionally blended with a goals score), `passed` needs `score ≥ threshold` **and** the review reaching `done`. Tune `threshold` (default 80) or check the finding counts in the node output. |
+| A scheduled run never starts | The schedule scheduler **is** spawned at boot now (§5). Check the trigger is **enabled**, the cadence/`timezone` is right, and `last_run` shows it isn't mid-window; for cron, validate the `expr`. |
 | A node re-runs instantly with "Success (cached)" and stale output | Per-node cache hit (§3) — params + assembled input unchanged. Change a param to bust it, or accept the cached value. |
+| A branch I expected to run was `skipped (branch not taken)` | An incoming edge's `condition` evaluated false (or its upstream was branch-skipped). Inspect the `edge → … not taken` log line and the source node's output the condition tested. |
 | Run fails immediately, no node ran | The graph has a **cycle** (topo-sort failed) — remove the back-edge. |
 | A downstream node is `skipped` ("upstream did not succeed") | A predecessor errored or was skipped; fix/inspect the upstream node first. |
 | `db_query` errors "missing connection_id" / connection not found | The `connection_id` must be a saved Database-Explorer connection id; create it there first (`./connections-ssh-sftp.md`). |
@@ -609,13 +715,17 @@ are **append-only** — never edit or renumber an existing one.
   build on.
 - `./daemon-http-api.md` — how the daemon's HTTP+WS surface, auth tokens, and
   RBAC feature grants work (the `Workflows:View/Edit` grants used here).
-- `./agent-sessions.md` — agent sessions, which the `agent_prompt` node runs a
-  headless turn of (and which AI workflow generation uses). *(If this file does
-  not exist yet, see the Agents/Sessions material in `README.md` and
-  `docs/contracts/api.md`.)*
+- `./agent-sessions.md` — agent sessions, which the `agent_prompt` / product /
+  `canvas` nodes run as **openable** sessions (and which AI workflow generation
+  uses).
+- `./scheduled-tasks.md` — recurring agent jobs; the **convert-to-workflow** bridge
+  materializes a task as a workflow + schedule trigger, and Workflows borrow its
+  shared cadence engine (cron + timezone).
 - `./agent-swarm.md` — Agent Swarm, the target of the `swarm_task` node.
+- `./product.md` — product stories that the `product_analyze` / `product_rewrite` /
+  `product_plan` / `product_publish` nodes operate on.
 - `./channels-slack-telegram.md` — Slack/Telegram integrations used by
-  `channel_notify`.
+  `channel_notify` and the `Action: Workflow` chat trigger.
 - `./message-brokers.md` — Kafka clusters used by `broker_peek`.
 - `./connections-ssh-sftp.md` / Database Explorer — connections used by `db_query`.
 - Contracts: `docs/contracts/api.md` (§"Workflow engine", §"API client",
