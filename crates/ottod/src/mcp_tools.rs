@@ -443,13 +443,15 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             let conn = arg_str(args, "connection_id")?;
             let statement = arg_str(args, "statement")?;
             let mut body = json!({ "statement": statement });
-            // `node` (raw) wins over `database` (convenience → SQL/Mongo `db:<name>`).
+            // `node` (raw) wins over `database`. The active-DB `node` is a PLAIN
+            // name for SQL/Mongo (e.g. "shopdb" → `USE shopdb`); Redis selects a
+            // keyspace via a raw `node` like "kdb:0".
             if let Some(node) = args.get("node").and_then(Value::as_str).filter(|s| !s.is_empty()) {
                 body["node"] = json!(node);
             } else if let Some(db) =
                 args.get("database").and_then(Value::as_str).filter(|s| !s.is_empty())
             {
-                body["node"] = json!(format!("db:{db}"));
+                body["node"] = json!(db);
             }
             if let Some(mr) = args.get("max_rows").and_then(Value::as_u64) {
                 body["max_rows"] = json!(mr);
