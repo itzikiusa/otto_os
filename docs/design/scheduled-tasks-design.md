@@ -2,6 +2,17 @@
 
 **Status:** design (pre-review) · **Branch:** `feat/scheduled-tasks` · **Date:** 2026-06-26
 
+> **Superseded by v2 (2026-06).** This is the original v1 design. Scheduled Tasks
+> v2 lifted the v1 limitations recorded below: any provider
+> (`claude`/`codex`/`agy`/`shell`/custom) runs as a **real, openable session**,
+> plus 5-field **cron**, a per-task **timezone**, a per-task **worktree sandbox**,
+> **workflow handoff**, a **retry policy**, **notify-on-change**, and **proof-pack**
+> attachment. The end-user/operator guide
+> [`docs/features/scheduled-tasks.md`](../features/scheduled-tasks.md) and the
+> contract `docs/contracts/api.md` (Scheduled Tasks) are the current source of
+> truth; passages below describing "claude-only", "cron is a non-goal", "headless
+> runs", or "UTC-only" are historical.
+
 ## 1. Problem & goal
 
 Users want **recurring, autonomous jobs** in Otto. A job runs on a cadence
@@ -330,9 +341,14 @@ The prompt-wrap explicitly instructs the agent to separate the summary from deta
 `---` horizontal rule, matching `extract_summary`'s split key.
 
 ### Provider scope (architecture MINOR-4/5)
-v1 is **claude-only**: create/update **validate-reject** any non-`claude` provider (400);
-the UI provider field is fixed to claude. `session_id` is kept but commented "reserved"
-(run_agent uses an ephemeral PTY, no Otto session row in v1).
+> **Updated in v2.** Any provider (`claude`/`codex`/`agy`/`shell`/custom) is
+> accepted and runs as a **real, openable session** (`run.session_id` is now
+> populated); `shell` runs the prompt as a command; a no-owner task is the only
+> claude-only path (the headless fallback). The v1 text below is historical.
+
+v1 was **claude-only**: create/update validated-rejected any non-`claude` provider
+(400); the UI provider field was fixed to claude. `session_id` was kept but
+commented "reserved" (run_agent used an ephemeral PTY, no Otto session row in v1).
 
 ### MCP read tools default-enabled (architecture MINOR-7)
 Explicitly add `list_scheduled_tasks` + `list_scheduled_task_runs` to `DEFAULT_ENABLED` in
