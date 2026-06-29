@@ -17,6 +17,8 @@ pub mod embedder;
 pub mod memory_gov;
 pub mod cli_update;
 pub mod error;
+pub mod eval_lab_routes;
+pub mod eval_score;
 pub mod feature_guard;
 pub mod finding_agent;
 pub mod finding_context;

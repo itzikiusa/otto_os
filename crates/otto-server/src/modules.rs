@@ -4559,6 +4559,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::runs::routes(),
         review_config_routes(),
         crate::skill_eval::routes(),
+        crate::eval_lab_routes::routes(),
         provider_routes(),
         session_input_routes(),
         inject_session_routes(),

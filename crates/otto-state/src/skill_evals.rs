@@ -7,7 +7,9 @@
 //! validators never clobber each other's rows.
 
 use chrono::Utc;
-use otto_core::domain::{EvalIteration, EvalValidationState, SkillEval, SkillEvalStatus};
+use otto_core::domain::{
+    EvalIteration, EvalScore, EvalValidationState, SkillEval, SkillEvalStatus,
+};
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::{Row, SqlitePool};
 
@@ -26,6 +28,16 @@ fn row_to_iteration(r: &sqlx::sqlite::SqliteRow) -> Result<EvalIteration> {
     let agents_raw: String = r.try_get("agents_json").unwrap_or_default();
     let agents: Vec<EvalValidationState> = serde_json::from_str(&agents_raw).unwrap_or_default();
     let base_iter: Option<i64> = r.get("base_iter");
+    let scoring: Option<EvalScore> = r
+        .try_get::<Option<String>, _>("scoring_json")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let human_rating: Option<u8> = r
+        .try_get::<Option<i64>, _>("human_rating")
+        .ok()
+        .flatten()
+        .map(|v| v.clamp(0, 5) as u8);
     Ok(EvalIteration {
         id: r.get("id"),
         eval_id: r.get("eval_id"),
@@ -44,6 +56,11 @@ fn row_to_iteration(r: &sqlx::sqlite::SqliteRow) -> Result<EvalIteration> {
         agents,
         improvement_summary: r.get("improvement_summary"),
         skill_diff: r.get("skill_diff"),
+        scoring,
+        proof_pack_id: r.try_get("proof_pack_id").ok().flatten(),
+        human_rating,
+        human_note: r.try_get("human_note").unwrap_or_default(),
+        human_rater: r.try_get("human_rater").unwrap_or_default(),
         created_at: ts(&r.get::<String, _>("created_at"))?,
     })
 }
@@ -67,6 +84,16 @@ fn row_to_eval(r: &sqlx::sqlite::SqliteRow, iterations: Vec<EvalIteration>) -> R
         best_score: r.get("best_score"),
         iterations,
         config,
+        mode: r.try_get("mode").unwrap_or_else(|_| "generate".into()),
+        golden_task_id: r.try_get("golden_task_id").ok().flatten(),
+        matrix_id: r.try_get("matrix_id").ok().flatten(),
+        dim_provider: r.try_get("dim_provider").ok().flatten(),
+        dim_skill: r.try_get("dim_skill").ok().flatten(),
+        dim_prompt: r.try_get("dim_prompt").ok().flatten(),
+        composite_score: r.try_get("composite_score").ok().flatten(),
+        promoted: r.try_get::<i64, _>("promoted").map(|v| v != 0).unwrap_or(false),
+        promoted_at: r.try_get("promoted_at").ok().flatten(),
+        promoted_by: r.try_get("promoted_by").ok().flatten(),
         created_at: ts(&r.get::<String, _>("created_at"))?,
     })
 }
@@ -80,7 +107,7 @@ impl SkillEvalsRepo {
         Self { pool }
     }
 
-    /// Create a new run in status "running".
+    /// Create a new generate-mode run in status "running".
     #[allow(clippy::too_many_arguments)]
     pub async fn create_eval(
         &self,
@@ -91,13 +118,49 @@ impl SkillEvalsRepo {
         target_iterations: u32,
         config: &serde_json::Value,
     ) -> Result<SkillEval> {
+        self.create_eval_ex(
+            workspace_id,
+            source_skill,
+            task,
+            impl_cli,
+            target_iterations,
+            config,
+            "generate",
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Create a run with full eval-lab metadata (mode, golden link, matrix cell
+    /// dimensions). `dims` is `(provider, skill, prompt)` for a matrix cell.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_eval_ex(
+        &self,
+        workspace_id: &Id,
+        source_skill: &str,
+        task: &str,
+        impl_cli: &str,
+        target_iterations: u32,
+        config: &serde_json::Value,
+        mode: &str,
+        golden_task_id: Option<&str>,
+        matrix_id: Option<&str>,
+        dims: Option<(&str, &str, &str)>,
+    ) -> Result<SkillEval> {
         let id = new_id();
         let now = fmt(Utc::now());
         let config_json = serde_json::to_string(config).unwrap_or_else(|_| "{}".to_string());
+        let (dp, ds, dpr) = match dims {
+            Some((p, s, pr)) => (Some(p), Some(s), Some(pr)),
+            None => (None, None, None),
+        };
         sqlx::query(
             "INSERT INTO skill_evals
-                (id, workspace_id, source_skill, task, impl_cli, target_iterations, status, config_json, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+                (id, workspace_id, source_skill, task, impl_cli, target_iterations, status,
+                 config_json, mode, golden_task_id, matrix_id, dim_provider, dim_skill, dim_prompt, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(workspace_id)
@@ -106,6 +169,12 @@ impl SkillEvalsRepo {
         .bind(impl_cli)
         .bind(target_iterations as i64)
         .bind(&config_json)
+        .bind(mode)
+        .bind(golden_task_id)
+        .bind(matrix_id)
+        .bind(dp)
+        .bind(ds)
+        .bind(dpr)
         .bind(&now)
         .execute(&self.pool)
         .await
@@ -324,6 +393,92 @@ impl SkillEvalsRepo {
         Ok(())
     }
 
+    /// Persist an iteration's multi-signal score + its proof pack id.
+    pub async fn set_iter_scoring(
+        &self,
+        iter_id: &Id,
+        scoring: &EvalScore,
+        proof_pack_id: Option<&str>,
+    ) -> Result<()> {
+        let json = serde_json::to_string(scoring)
+            .map_err(|e| Error::Internal(format!("serialize eval scoring: {e}")))?;
+        sqlx::query(
+            "UPDATE skill_eval_iterations SET scoring_json = ?, proof_pack_id = ? WHERE id = ?",
+        )
+        .bind(&json)
+        .bind(proof_pack_id)
+        .bind(iter_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set eval iteration scoring"))?;
+        Ok(())
+    }
+
+    /// Record a human rating (0–5) for an iteration.
+    pub async fn set_iter_human(
+        &self,
+        iter_id: &Id,
+        rating: u8,
+        note: &str,
+        rater: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE skill_eval_iterations SET human_rating = ?, human_note = ?, human_rater = ? WHERE id = ?",
+        )
+        .bind(rating.min(5) as i64)
+        .bind(note)
+        .bind(rater)
+        .bind(iter_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set eval iteration human rating"))?;
+        Ok(())
+    }
+
+    /// Record the run's headline composite score (best iteration).
+    pub async fn set_eval_composite(&self, eval_id: &Id, composite: f64) -> Result<()> {
+        sqlx::query("UPDATE skill_evals SET composite_score = ? WHERE id = ?")
+            .bind(composite)
+            .bind(eval_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set eval composite"))?;
+        Ok(())
+    }
+
+    /// Mark a run as promoted to the library.
+    pub async fn set_promoted(&self, eval_id: &Id, by: &str) -> Result<()> {
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE skill_evals SET promoted = 1, promoted_at = ?, promoted_by = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(by)
+        .bind(eval_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set eval promoted"))?;
+        Ok(())
+    }
+
+    /// All cell runs of a matrix (by matrix_id), oldest first.
+    pub async fn list_for_matrix(&self, matrix_id: &str) -> Result<Vec<SkillEval>> {
+        let rows = sqlx::query(
+            "SELECT * FROM skill_evals WHERE matrix_id = ? ORDER BY created_at",
+        )
+        .bind(matrix_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list matrix evals"))?;
+        let mut evals = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let id: String = r.get("id");
+            let iterations = self.iterations_for_eval(&id).await?;
+            evals.push(row_to_eval(r, iterations)?);
+        }
+        Ok(evals)
+    }
+
     /// Fetch a single iteration.
     pub async fn get_iteration(&self, iter_id: &Id) -> Result<EvalIteration> {
         let row = sqlx::query("SELECT * FROM skill_eval_iterations WHERE id = ?")
@@ -477,5 +632,65 @@ mod tests {
 
         let list = repo.list_for_workspace(&"ws1".into()).await.unwrap();
         assert_eq!(list.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn scoring_human_and_matrix_dims_round_trip() {
+        let pool = mem_pool().await;
+        let repo = SkillEvalsRepo::new(pool.clone());
+
+        let eval = repo
+            .create_eval_ex(
+                &"ws1".into(),
+                "golang-feature",
+                "add X",
+                "claude",
+                1,
+                &serde_json::json!({}),
+                "score_only",
+                Some("gt1"),
+                Some("mx1"),
+                Some(("claude", "golang-feature", "task-A")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(eval.mode, "score_only");
+        assert_eq!(eval.golden_task_id.as_deref(), Some("gt1"));
+        assert_eq!(eval.matrix_id.as_deref(), Some("mx1"));
+        assert_eq!(eval.dim_provider.as_deref(), Some("claude"));
+
+        let it = repo
+            .add_iteration(&eval.id, 1, None, "x", "body", "claude", &[])
+            .await
+            .unwrap();
+
+        let mut sc = EvalScore::default();
+        sc.tests.ran = true;
+        sc.tests.score = 100.0;
+        sc.composite = 92.5;
+        sc.proof_status = "passed".into();
+        sc.done_score = 88;
+        repo.set_iter_scoring(&it.id, &sc, Some("pp1")).await.unwrap();
+        repo.set_iter_human(&it.id, 4, "looks good", "root").await.unwrap();
+        repo.set_eval_composite(&eval.id, 92.5).await.unwrap();
+        repo.set_promoted(&eval.id, "root").await.unwrap();
+
+        let loaded = repo.get_eval(&eval.id).await.unwrap();
+        assert_eq!(loaded.composite_score, Some(92.5));
+        assert!(loaded.promoted);
+        assert_eq!(loaded.promoted_by.as_deref(), Some("root"));
+        let it = &loaded.iterations[0];
+        let scoring = it.scoring.as_ref().expect("scoring persisted");
+        assert_eq!(scoring.proof_status, "passed");
+        assert_eq!(scoring.done_score, 88);
+        assert!((scoring.composite - 92.5).abs() < 1e-9);
+        assert_eq!(it.proof_pack_id.as_deref(), Some("pp1"));
+        assert_eq!(it.human_rating, Some(4));
+        assert_eq!(it.human_note, "looks good");
+
+        // Matrix listing finds the cell.
+        let cells = repo.list_for_matrix("mx1").await.unwrap();
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].id, eval.id);
     }
 }
