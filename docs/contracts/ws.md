@@ -358,10 +358,14 @@ the user can watch them (and answer questions when `interactive`).
 ## Workflow run progress (A11)
 
 Workspace-scoped. Emitted by `crates/otto-server/src/workflow_engine.rs` at
-every node transition (start, finish/cached) and when the overall run reaches a
-terminal status. Lets the Workflows page switch from a 700ms poll loop to
-event-driven refresh; a capped fallback poll (backing off to 3s, max 300 ticks)
-is kept for cases where the WS connection is unavailable.
+every node transition (start, finish/cached, error-skip, branch-skip — a not-taken
+edge), again whenever a node spawns an openable session (so the run view can open
+it live), and when the overall run reaches a terminal status. Lets the Workflows
+page switch from a 700ms poll loop to event-driven refresh; a capped fallback poll
+(backing off to 3s, max 300 ticks) is kept for cases where the WS connection is
+unavailable. The **payload is unchanged** (the new per-node `sessions`/`attempts`
+and the run's `workflow_version`/`proof_pack_id` ride the `GET /workflow-runs/{id}`
+the event triggers a refetch of, not the event itself).
 
 ```json
 {

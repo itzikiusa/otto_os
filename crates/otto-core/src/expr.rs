@@ -91,9 +91,8 @@ pub fn render_template(tmpl: &str, ctx: &Value) -> String {
         if i + 1 < tmpl.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
             if let Some(close) = tmpl[i + 2..].find("}}") {
                 let inner = &tmpl[i + 2..i + 2 + close];
-                match eval(inner.trim(), ctx) {
-                    Ok(v) => out.push_str(&stringify(&v)),
-                    Err(_) => {}
+                if let Ok(v) = eval(inner.trim(), ctx) {
+                    out.push_str(&stringify(&v));
                 }
                 i = i + 2 + close + 2;
                 continue;

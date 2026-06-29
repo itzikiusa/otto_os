@@ -1,23 +1,33 @@
 # Workflows & Automations
 
-> **Maturity: usable, with explicit gaps.** Otto's Workflows feature is a real,
-> working node-graph engine: you build a directed graph of nodes, run it (whole
-> graph, or "from here" / "only this"), and watch live per-node progress over
-> WebSocket. Most node kinds execute against real Otto subsystems. **However,
-> four node kinds are deliberate stubs** (they run but only emit a "not wired"
-> marker), and **schedule-cadence triggers, while fully implemented and tested,
-> are not spawned by the running daemon today** — only *webhook* and *event*
-> triggers actually fire. The separate **API-client "Automations"** surface
-> (a multi-step saved-request runner) is fully functional. This document states
-> each gap inline; do not assume parity with mature n8n/Zapier-style engines.
+> **Maturity: a real orchestrator.** Otto's Workflows feature is a working
+> node-graph engine: you build a directed graph of nodes, run it (whole graph, or
+> "from here" / "only this"), and watch live per-node progress — including the
+> openable agent **sessions** each step spawns — over WebSocket. Every node kind
+> now executes against a real Otto subsystem: the four formerly-stub
+> product/review kinds (`product_analyze`, `product_rewrite`, `product_plan`,
+> `review_run`) are **wired** (real single-agent turns + the local-review engine
+> with a 0–100 score), and the engine gained **branching** (edge conditions + a
+> `condition` node), **bounded loops** (`loop`, iterate-until), **retry/backoff**,
+> **typed outputs** (warn-only validation), **versioning** (graph snapshot
+> history), a per-run **Proof Pack** link, plus `canvas`, `git_pr`, and
+> `product_publish` nodes. **All three trigger kinds fire unattended now** —
+> webhook, event, *and* schedule (the cadence scheduler is spawned at daemon boot,
+> with cron + IANA-timezone parity). A structured `Action: Workflow` chat message
+> can start a run by name. The separate **API-client "Automations"** surface (a
+> multi-step saved-request runner) is also fully functional. A couple of honest
+> caveats remain (the game `game_engine`/`verifier` are scaffolds; agent output is
+> cached) — stated inline; do not assume full parity with mature n8n/Zapier engines.
 
 The doc is grounded in the code in `crates/otto-server/src/workflow_engine.rs`,
 `crates/otto-server/src/routes/workflows.rs`,
 `crates/otto-server/src/workflow_trigger_scheduler.rs`,
+`crates/otto-server/src/workflow_chat.rs`, `crates/otto-core/src/expr.rs`,
 `ui/src/modules/workflows/`, `ui/src/modules/api/AutomationsView.svelte`, the
-migrations under `crates/otto-state/migrations/`, and the authoritative contracts
-`docs/contracts/api.md` (§ "Workflow engine", § "API client", Wave-3/Wave-4 routes)
-and `docs/contracts/ws.md` (Workflow run progress).
+migrations under `crates/otto-state/migrations/` (incl. **0088** — versioning +
+run→proof link), and the authoritative contracts `docs/contracts/api.md`
+(§ "Workflow engine", § "API client", Wave-3/Wave-4 routes) and
+`docs/contracts/ws.md` (Workflow run progress).
 
 ---
 
@@ -44,13 +54,16 @@ ui/src/modules/workflows/RunSteps.svelte        — per-step run detail (status,
 ui/src/modules/workflows/TriggersPanel.svelte   — list/add/toggle/delete schedule|webhook|event triggers
 ui/src/modules/api/AutomationsView.svelte       — API-client collection runner (the *other* "automations")
 
-crates/otto-server/src/workflow_engine.rs              — the executor: node catalog, run loop, per-node exec
-crates/otto-server/src/routes/workflows.rs             — HTTP handlers: CRUD, generate, run, triggers, webhook, approve
-crates/otto-server/src/workflow_trigger_scheduler.rs   — schedule scheduler + event-bus listener
-crates/otto-core (otto_core::workflows)                — the Workflow/WorkflowRun/Node/Edge domain types
+crates/otto-server/src/workflow_engine.rs              — the executor: node catalog, run loop, per-node exec, branching/retry, proof
+crates/otto-server/src/routes/workflows.rs             — HTTP handlers: CRUD, generate, run, versions, triggers, webhook, approve, templates
+crates/otto-server/src/workflow_trigger_scheduler.rs   — schedule scheduler + event-bus listener (both spawned at boot)
+crates/otto-server/src/workflow_chat.rs                — `Action: Workflow` chat-message parser + WorkflowChatTrigger impl
+crates/otto-core/src/expr.rs                           — the safe expression language (edge conditions, condition/loop, {{ }} templating)
+crates/otto-core (otto_core::workflows)                — the Workflow/WorkflowRun/Node/Edge/Version domain types
 crates/otto-state/migrations/0020_workflows.sql        — workflows + workflow_runs
 crates/otto-state/migrations/0051_workflow_node_cache.sql — per-node output cache
 crates/otto-state/migrations/0058_workflow_triggers.sql   — workflow_triggers + run approval columns
+crates/otto-state/migrations/0088_workflow_orchestrator.sql — workflow versioning + run→proof-pack link
 crates/otto-state/migrations/0014_api_client.sql          — API client base
 crates/otto-state/migrations/0015_api_automations.sql     — API-client automations
 ```
@@ -74,16 +87,45 @@ interface Workflow {
   id; workspace_id; name; description;
   graph: WorkflowGraph;       // { nodes: WorkflowNode[]; edges: WorkflowEdge[] }
   created_by; created_at; updated_at;
+  version: number;            // monotonic; bumped + snapshotted on every graph-changing edit
 }
-interface WorkflowNode { id; kind; name; x; y; params: unknown }   // x/y are canvas layout
-interface WorkflowEdge { id; source; target }                       // source/target are node ids
+interface WorkflowNode {
+  id; kind; name; x; y; params: unknown;          // x/y are canvas layout
+  retry?: { max_attempts; backoff_ms; factor };   // optional per-node retry policy
+}
+interface WorkflowEdge {
+  id; source; target;          // source/target are node ids
+  condition?: string;          // optional expr; the edge is active only when truthy
+}
 ```
 
 - **Nodes** carry a `kind` (the node type, e.g. `agent_prompt`), a free-form
-  `params` object (kind-specific config), and `x`/`y` canvas coordinates.
-- **Edges** are directed `source → target` connections between node ids.
+  `params` object (kind-specific config), `x`/`y` canvas coordinates, and an
+  optional `retry` policy (see *Retry/backoff* below).
+- **Edges** are directed `source → target` connections between node ids, with an
+  optional `condition` (an expression — see below); an edge with no condition is
+  always active (the legacy behavior).
 - The graph is executed in **topological order** (`topo_order`). A cycle makes
   the whole run fail immediately with an error (no nodes execute).
+
+### The expression language (`otto_core::expr`)
+A tiny, **safe** (pure; no I/O, no `eval`) expression language evaluates against a
+JSON context. It powers **edge conditions**, the `condition` / `loop` nodes, and
+`{{ … }}` templating. Grammar supports `|| && == != < <= > >=`, `+ - * / %`, the
+infix `contains` / `in`, unary `! -`, parentheses, dotted/indexed paths
+(`output.result`, `input.rows[0]`), literals, and functions `len, lower, upper,
+default, has, int, float, str, bool, not`. Missing path segments resolve to `null`
+(never an error). For edge conditions the context is
+`{ output, input, node:{id,kind,name}, run:{input} }`; a condition that fails to
+parse or evaluate is treated as **not taken** (and logged), never a crash.
+
+### Retry/backoff (`WorkflowNode.retry`)
+`{ max_attempts (extra attempts after the first, clamped ≤5), backoff_ms (initial
+sleep, clamped ≤60000), factor (multiplier, default 2.0) }`. Default is **no
+retry** (single attempt), so existing graphs are unchanged. The policy can also be
+supplied as a `params.retry` object. `human_approval` and `manual_trigger` are
+never retried. `NodeRunState.attempts` records how many attempts ran (`0` = a cache
+hit).
 
 ### How node inputs flow (`assemble_input`)
 Each node's input is assembled from its **predecessors' outputs**:
@@ -95,12 +137,24 @@ Each node's input is assembled from its **predecessors' outputs**:
 - **N predecessors** → it receives an **object keyed by source node id**, e.g.
   `{ "nodeA": <outA>, "nodeB": <outB> }`.
 
-There is **no expression language**. The only templating is in `channel_notify`,
-which does simple `{key}` substitution from the incoming object (see §4).
+Beyond input assembly, the [expression language](#the-expression-language-otto_coreexpr)
+handles conditions and `{{ }}` templating; `channel_notify` and `swarm_task` also
+do simple `{key}` substitution from the incoming object (see §4).
 
 ### Run-time graph behavior
-- **Failure propagation:** if any predecessor of a node **failed or was
-  skipped**, the node is marked `skipped` ("skipped (upstream did not succeed)").
+- **Two kinds of skip (`decide_node`, pure + unit-tested):** the engine now
+  distinguishes:
+  - **error-skip (poison):** a predecessor on an active path **errored** → the node
+    is `skipped` ("skipped (upstream did not succeed)") **and propagates failure**
+    (the run ends `error`). This is the legacy failure propagation.
+  - **branch-skip (not taken):** the node has in-scope predecessors but **no
+    satisfied active edge** — every incoming edge's `condition` was false, or the
+    upstream was itself branch-skipped → the node is `skipped` ("skipped (branch not
+    taken)") and **does NOT fail the run**. This is what makes if/else branches and
+    pruned paths terminate cleanly. A join runs from whichever side stayed active.
+- **Edge conditions** are evaluated on a node's outgoing edges **against its
+  output** (`eval_outgoing`); a false edge is marked inactive so its target sees no
+  satisfied input.
 - **Partial runs:** `/run` accepts `start_node` and `only_node`:
   - `only_node: true` → run **only** that one node (everything else `skipped`).
   - `start_node` without `only_node` → run that node **and all descendants**

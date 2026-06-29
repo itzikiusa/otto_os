@@ -1153,6 +1153,35 @@ workspace from the workflow/run row.
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
 | POST /workflow-runs/{id}/cancel | ws editor | — | cancel a run |
+| GET /workflows/{id}/versions | ws viewer | — | `WorkflowVersion[]` — graph snapshot history, newest first |
+| GET /workflows/{id}/versions/{v} | ws viewer | — | `WorkflowVersion` — one snapshot (404 if `v` unknown) |
+| POST /workflows/{id}/versions/{v}/restore | ws editor | `RestoreVersionReq {note?}` | Workflow — copies `v`'s graph back in as a **new** version (append-only history) |
+
+**Versioning.** A `Workflow` carries a monotonic `version` (default 1). A snapshot
+is written on create (v1) and on **every graph-changing PATCH** (`bump_version` +
+`snapshot_version`, note `"edited graph"`); restoring writes a new version equal to
+the chosen one rather than rewinding the counter (note `"restored from v{n}"`).
+`WorkflowVersion` = `{id, workflow_id, version, name, description, graph, note,
+created_by, created_at}`. Backed by migration **0088** (`workflows.version`,
+`workflow_versions` table).
+
+**Run fields (0088).** A `WorkflowRun` now also carries `workflow_version` (the
+version snapshot it executed) and `proof_pack_id` (the Proof Pack assembled on
+completion — each node output becomes a `log` artifact, each `human_approval` an
+`approval` artifact). Each `NodeRunState` gains `attempts` (retry count; `0` =
+cache hit) and `sessions` (openable Otto session ids the node spawned — agent /
+product / canvas / loop-inner turns — reported live as they are created;
+`review_run` additionally surfaces a `review_id` in its output).
+
+**Node kinds (catalog).** `GET /workflows/node-types` returns each kind's
+`NodeTypeSpec`, now including `output_schema` (declared output shape; drives UI
+expression hints + warn-only runtime validation) and `params_schema`. The control
+flow / wired kinds added in this wave: `condition`, `loop`, `product_analyze`,
+`product_rewrite`, `product_plan`, `product_publish`, `review_run`, `canvas`,
+`git_pr` (see the Workflows feature doc for each kind's params/output).
+`WorkflowEdge` carries an optional `condition` (an `otto_core::expr` expression
+over `{output, input, node, run}`; the edge is active only when truthy) and
+`WorkflowNode` an optional `retry` `{max_attempts(≤5), backoff_ms(≤60000), factor}`.
 
 ## API client ("Postman") — collections, requests, environments, automations
 
@@ -1715,7 +1744,14 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status |
 
 New workflow node kinds (node-types catalog): product_analyze, product_rewrite, product_plan,
-review_run, swarm_task, api_run, db_query, broker_peek, channel_notify, budget_gate, human_approval.
+product_publish, review_run, canvas, git_pr, condition, loop, swarm_task, api_run, db_query,
+broker_peek, channel_notify, budget_gate, human_approval. The four formerly-stub product/review
+kinds are now wired (real single-agent turns + the local-review engine); `condition`/`loop` plus
+`WorkflowEdge.condition` provide branching and bounded iterate-until control flow. The schedule
+trigger scheduler (`workflow_trigger_scheduler::start`) is started at daemon boot (cron + IANA
+timezone parity via the shared cadence engine), so all three trigger kinds — webhook, event,
+schedule — fire unattended. A structured `Action: Workflow` chat message (Slack/Telegram/webhook)
+starts a run by name via the channels Bridge (`WorkflowChatTrigger`).
 
 First-party Otto MCP tools (no new HTTP route): the `otto` MCP server is injected into `.mcp.json`
 at spawn when the per-workspace `otto_mcp_enabled` setting is on (default off, via `PUT /settings`).
@@ -2012,6 +2048,14 @@ redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard
 | 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun (the manual run; poll for status) |
 | 142 | GET /api/v1/scheduled-tasks/{id}/runs | scheduled_tasks view + ws viewer | — | `ScheduledTaskRun[]` |
 | 143 | GET /api/v1/scheduled-tasks/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report) |
+| 144 | POST /api/v1/scheduled-tasks/{id}/convert-to-workflow | scheduled_tasks edit + ws editor | `ConvertTaskReq {disable_task?}` | `ConvertTaskResp {workflow_id, trigger_id?}` |
+
+**Convert to workflow (#144)** materializes a scheduled task as a Workflow
+(`manual_trigger → agent_prompt [→ channel_notify]`, the notify node added only
+when the task delivers to Slack/Telegram) plus a `schedule` trigger mirroring the
+task's cadence and timezone; `disable_task:true` pauses the source task. It is the
+bridge from the single-step Scheduled-Tasks surface to the multi-step Workflow
+engine.
 
 ### Scheduled-task MCP tools (on the outward `otto.*` surface, CP25-tunable)
 

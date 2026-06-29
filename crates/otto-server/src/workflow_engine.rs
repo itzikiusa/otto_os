@@ -491,7 +491,7 @@ pub async fn run_workflow(
                     }
                     tokio::time::sleep(Duration::from_millis(backoff)).await;
                     backoff = ((backoff as f64) * policy.factor) as u64;
-                    backoff = backoff.min(60_000).max(1);
+                    backoff = backoff.clamp(1, 60_000);
                 }
             }
         };
