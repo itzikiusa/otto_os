@@ -47,15 +47,18 @@ pub trait GitCtx: Clone + Send + Sync + 'static {
     }
 
     /// Optional hook after a PR is successfully created. `otto-server` overrides
-    /// it to link the proof pack to the new PR and capture its CI status as a
-    /// `ci` evidence artifact (Proof Packs v2 — automatic CI integration).
-    /// Best-effort: the default does nothing and overrides must never fail PR
-    /// creation. `ci` is the freshly-fetched aggregate for the new PR.
+    /// it to (1) link the proof pack to the new PR, (2) capture its CI status as a
+    /// `ci` evidence artifact, and (3) run the PR-description consistency check
+    /// against the actual change, recording a `pr_check` artifact (Proof Packs v2 —
+    /// automatic CI + PR-consistency integration). The full `req` is passed so the
+    /// override has the PR title/description and target branch. Best-effort: the
+    /// default does nothing and overrides must never fail PR creation. `ci` is the
+    /// freshly-fetched aggregate for the new PR.
     async fn after_pr_created(
         &self,
         _repo: &Repo,
         _pr_number: u64,
-        _proof_pack_id: Option<&str>,
+        _req: &CreatePrReq,
         _ci: &crate::types::CiStatus,
     ) {
     }
@@ -160,6 +163,8 @@ impl IntoResponse for ApiError {
             Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::Invalid(_) => StatusCode::BAD_REQUEST,
+            Error::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Error::UnsupportedMedia(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -1398,13 +1403,12 @@ async fn pr_create<S: GitCtx>(
     // Proof gate: refuse to open a PR over an unproven linked proof pack.
     s.check_pr_allowed(&repo.workspace_id, &req).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
-    let proof_pack_id = req.proof_pack_id.clone();
     let summary = provider.create_pr(&remote, &req).await?;
-    // Proof Packs v2: link the pack to the new PR and capture its CI status as a
-    // `ci` evidence artifact (best-effort; never fails the PR creation).
+    // Proof Packs v2: link the pack to the new PR, capture its CI status as a `ci`
+    // evidence artifact, and run the PR-description consistency check (best-effort;
+    // never fails the PR creation).
     let ci = provider.ci_status(&remote, summary.number).await;
-    s.after_pr_created(&repo, summary.number, proof_pack_id.as_deref(), &ci)
-        .await;
+    s.after_pr_created(&repo, summary.number, &req, &ci).await;
     Ok(Json(summary))
 }
 

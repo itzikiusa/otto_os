@@ -45,6 +45,8 @@ impl IntoResponse for ApiErr {
             Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::Invalid(_) => StatusCode::BAD_REQUEST,
+            Error::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Error::UnsupportedMedia(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

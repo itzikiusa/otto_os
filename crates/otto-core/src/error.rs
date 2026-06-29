@@ -18,6 +18,14 @@ pub enum Error {
     /// Invalid input (HTTP 400).
     #[error("invalid: {0}")]
     Invalid(String),
+    /// Payload exceeds an allowed size cap (HTTP 413). e.g. a proof media blob
+    /// over `proof::MEDIA_CAP`.
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+    /// Unsupported media / content type (HTTP 415). e.g. a proof media blob whose
+    /// MIME is not in the allow-list.
+    #[error("unsupported media type: {0}")]
+    UnsupportedMedia(String),
     /// Upstream dependency failed: git provider, CLI, network (HTTP 502).
     #[error("upstream: {0}")]
     Upstream(String),
@@ -38,6 +46,8 @@ impl Error {
             Error::Forbidden(_) => "forbidden",
             Error::Conflict(_) => "conflict",
             Error::Invalid(_) => "invalid",
+            Error::PayloadTooLarge(_) => "payload_too_large",
+            Error::UnsupportedMedia(_) => "unsupported_media_type",
             Error::Upstream(_) => "upstream",
             Error::Internal(_) => "internal",
         }

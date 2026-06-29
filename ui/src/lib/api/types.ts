@@ -2305,6 +2305,13 @@ export interface CreateProofPackReq {
   work_item_id: string;
   title?: string;
   parent_pack_id?: string;
+  /** Link the pack to a registered repo so its proof policy applies (strengthen-only). */
+  repo_id?: string;
+}
+
+/** `POST /proof-packs/{id}/waive` body. */
+export interface WaiveReq {
+  reason: string;
 }
 
 export interface AddArtifactReq {
