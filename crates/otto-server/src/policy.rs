@@ -784,6 +784,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/scheduled-tasks/runs/{run_id}/report" {
         return Require(ScheduledTasks, View);
     }
+    if p == "/scheduled-tasks/{id}/convert-to-workflow" {
+        return Require(ScheduledTasks, Edit);
+    }
 
     // Run with Otto — the one-button source→PR-draft pipeline. List/launch are
     // workspace-scoped; the flat by-id routes load the run and re-check the role on

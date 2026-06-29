@@ -421,6 +421,9 @@ pub async fn run_workflow(
             states[idx].logs = vec!["Success (cached)".into()];
             states[idx].duration_ms = Some(0);
             states[idx].attempts = Some(0);
+            // A cached agent/product/canvas node still carries its session id in
+            // the cached output — surface it so the run can open it.
+            harvest_session_ids(&cached_out, &mut states[idx].sessions);
             // Prune outgoing edges whose condition fails on the cached output.
             let (pruned, mut plogs) =
                 eval_outgoing(&workflow.graph, node, &cached_out, &node_input, &input);
@@ -518,6 +521,9 @@ pub async fn run_workflow(
                 logs.append(&mut plogs);
                 states[idx].logs = logs;
                 states[idx].attempts = Some(attempt);
+                // Also harvest a session id carried in the output (dedups with the
+                // live channel report).
+                harvest_session_ids(&out, &mut states[idx].sessions);
                 let elapsed = started.elapsed().as_millis() as u64;
                 states[idx].duration_ms = Some(elapsed);
                 // Persist to the node cache for future re-runs.
@@ -2051,6 +2057,27 @@ fn topo_order(graph: &WorkflowGraph) -> std::result::Result<Vec<String>, String>
         return Err("workflow graph has a cycle".into());
     }
     Ok(order)
+}
+
+/// Collect openable session id(s) from a node's output (`session_id` string
+/// and/or `sessions` array) into `into`, de-duplicated. Used so a node whose
+/// session id rode in its output — including a *cached* re-run — still surfaces
+/// the session on the run, complementing the live channel report.
+fn harvest_session_ids(output: &Value, into: &mut Vec<String>) {
+    if let Some(s) = output.get("session_id").and_then(Value::as_str) {
+        if !s.is_empty() && !into.iter().any(|x| x == s) {
+            into.push(s.to_string());
+        }
+    }
+    if let Some(arr) = output.get("sessions").and_then(Value::as_array) {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                if !s.is_empty() && !into.iter().any(|x| x == s) {
+                    into.push(s.to_string());
+                }
+            }
+        }
+    }
 }
 
 /// Tolerantly extract a JSON value from an agent reply: try the whole string,

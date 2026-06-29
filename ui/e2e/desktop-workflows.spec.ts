@@ -70,7 +70,14 @@ function nodeState(run: any, id: string): any {
   return (run.nodes ?? []).find((n: any) => n.node_id === id);
 }
 
-test.beforeAll(async () => {
+// Run on the desktop-browser project only (the API assertions don't need a
+// browser, and the UI smoke is desktop-only) — mobile projects skip.
+test.beforeEach(async ({}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-browser', 'desktop-browser only');
+});
+
+test.beforeAll(async ({}, testInfo) => {
+  if (testInfo.project.name !== 'desktop-browser') return;
   const a = await apiCtx();
   ctx = a.ctx;
   base = a.base;
