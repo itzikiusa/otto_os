@@ -2054,6 +2054,17 @@ webhook; classified `Exempt` in `policy.rs`):
 |---|---|---|---|
 | POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}` |
 
+When a `callback_url` is supplied, the daemon POSTs the run's result back to it at
+the milestones a caller can act on — `awaiting_approval` and every terminal state
+(`completed`/`failed`/`rejected`/`cancelled`). The body is the run's public shape:
+`{run_id, workspace_id, status, awaiting_approval, terminal, title, source_kind,
+source_ref, source_url, mode, proof_status, risk_score, findings_total,
+findings_blocking, has_pr_draft, pr_url, approval_decision, error}`. Delivery is
+best-effort and SSRF-guarded (`otto_netguard::check_url` + redirect policy — a
+loopback/private/metadata target is refused); each attempt is recorded as a
+`delivery` `RunEvent`. With no `callback_url` the webhook is a fire-and-forget
+trigger (read the result via REST/WS/UI).
+
 Slack/Telegram entry: a `/run <ref>` (or "run with otto …") message launches a run;
 an `approve`/`reject` reply in the run's thread resolves the approval gate (authorized
 by the integration's `allowed_users`, executed as the daemon root user).

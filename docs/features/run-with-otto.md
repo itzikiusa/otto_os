@@ -57,6 +57,7 @@ The API shape is specified in `docs/contracts/api.md` (Run with Otto) and
 | **Scheduler** | `crates/otto-server/src/run_scheduler.rs` | Boot reaper (fail interrupted, re-drive resumable) + a 30 s tick. |
 | **HTTP routes** | `crates/otto-server/src/routes/runs.rs` + `routes/channel_webhook.rs` | The `/runs` REST surface + the key-guarded `POST /webhooks/{ws}/run`. |
 | **Channel trigger** | `crates/otto-server/src/run_channels.rs` + `otto-channels::run_trigger` | `/run <ref>` launches; `approve`/`reject` replies resolve the gate (injected into the channel `Bridge`). |
+| **Webhook callback** | `crates/otto-server/src/run_callback.rs` | Best-effort, SSRF-guarded POST of the run result to `callback_url` at the gate + every terminal state (mirrors `otto-channels::WebhookAdapter`). |
 | **UI** | `ui/src/modules/run-with-otto/` | The launcher (the one button), the runs list, and the run detail (timeline, proof, approval, PR draft). |
 
 ### 2.1 Data flow
@@ -156,6 +157,8 @@ All four surfaces call `RunService::launch`.
   back to the thread.
 - **Webhook** — `POST /api/v1/webhooks/{workspace_id}/run`, authenticated by the same
   per-workspace `X-Otto-Webhook-Key` as the channel webhook; returns `202 {run_id}`.
+  Pass a `callback_url` to have the result POSTed back at the gate + each terminal
+  state (see §7 + `run_callback.rs`).
 - **REST** — `POST /api/v1/workspaces/{wid}/runs` (the canonical programmatic entry).
 - **UI** — the launcher on the **Run with Otto** page (sidebar, gated by the
   `run_with_otto` feature).
@@ -192,8 +195,16 @@ a webhook, REST, or the UI.
   are).
 - **Channel source = the trigger's seed message.** Deep Slack/Telegram thread-history
   ingestion is a follow-up.
-- **Webhook result callback is minimal.** The inbound trigger returns `202 {run_id}`;
-  the result is read via REST/WS/UI (a richer `callback_url` push is a follow-up).
+- **Webhook result callback** — delivered. The inbound trigger returns
+  `202 {run_id}`; if the request carried a `callback_url`, the daemon also POSTs the
+  run's result back to it at `awaiting_approval` and every terminal state
+  (`completed`/`failed`/`rejected`/`cancelled`). The body is the run's public shape
+  (`run_id, status, awaiting_approval, terminal, proof_status, risk_score,
+  findings_total/blocking, has_pr_draft, pr_url, approval_decision, error`, …).
+  Delivery is best-effort and SSRF-guarded (`otto_netguard::check_url` +
+  redirect policy); each attempt is logged as a `delivery` timeline event. With no
+  `callback_url` the webhook stays a fire-and-forget trigger (read via REST/WS/UI).
+  See `crates/otto-server/src/run_callback.rs`.
 - **Goal-loop mode** is wired and unit-tested, but the deterministic E2E exercises the
   `single_agent` path (the goal-loop controller spawns live agent PTYs the offline
   test stub can't satisfy).
