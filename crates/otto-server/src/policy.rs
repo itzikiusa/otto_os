@@ -243,7 +243,19 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         || p.starts_with("/skill-evaluations/")
         || p == "/skill-evaluations"
     {
-        // start eval (POST) / cancel / retry = Edit; list / get / diff = View.
+        // start eval (POST) / cancel / retry / rate / regression = Edit;
+        // list / get / diff / score / proof-pack / promote-gate = View.
+        return Require(SkillEval, if write { Edit } else { View });
+    }
+    // Eval lab: per-repo golden tasks + provider×skill×prompt matrices — same
+    // SkillEval feature. Reads=View, writes (create/update/delete/run/cancel)=Edit.
+    if p.starts_with("/workspaces/{id}/golden-tasks")
+        || p.starts_with("/golden-tasks/")
+        || p == "/golden-tasks"
+        || p.starts_with("/workspaces/{id}/eval-matrices")
+        || p.starts_with("/eval-matrices/")
+        || p == "/eval-matrices"
+    {
         return Require(SkillEval, if write { Edit } else { View });
     }
 
@@ -1233,6 +1245,41 @@ mod tests {
         assert_eq!(
             pol(Method::PUT, "/api/v1/settings/skill-eval"),
             Require(SkillEval, Admin)
+        );
+        // promote-gate is a read (must NOT match the Admin promote rule).
+        assert_eq!(
+            pol(Method::GET, "/api/v1/skill-evaluations/{id}/promote-gate"),
+            Require(SkillEval, View)
+        );
+        // eval-lab subroutes.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/skill-evaluations/{id}/iterations/{iter_id}/rate"),
+            Require(SkillEval, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/skill-evaluations/{id}/iterations/{iter_id}/proof-pack"),
+            Require(SkillEval, View)
+        );
+        // golden tasks + matrices.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{id}/golden-tasks"),
+            Require(SkillEval, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{id}/golden-tasks"),
+            Require(SkillEval, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/golden-tasks/{id}/run"),
+            Require(SkillEval, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{id}/eval-matrices"),
+            Require(SkillEval, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/eval-matrices/{id}"),
+            Require(SkillEval, View)
         );
     }
 

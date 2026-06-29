@@ -1004,24 +1004,58 @@ config/mutations = `ws editor` (config write = `ws admin`).
 | POST /improvement/edits/{eid}/rollback | ws editor | — | roll back an applied edit |
 | POST /sessions/{id}/evolve | ws SelfImprovement:editor | — | trigger a manual per-session live-evolve pass; returns `{ run_id }` |
 
-## Skill evaluations
+## Skill evaluations (eval lab)
 
-Spawns agents that evaluate/iterate a skill against a workspace's sources. Reads =
-`ws viewer`, run/mutations = `ws editor`; config = root; promote = root.
+The eval lab evaluates/iterates a skill against a workspace's sources, scores the
+produced code from multiple signals (tests, lint, diff quality, review findings,
+human rating) backed by a **Proof Pack**, and gates promotion on score + proof.
+Reads = `ws viewer`, run/mutations = `ws editor`; config = root; promote = root.
+
+A run has a `mode`: `generate` (an agent implements the task, default) or
+`score_only` (no agent — score an existing `target`: `{kind: working|branch|path}`).
+`StartSkillEvalReq` additionally carries `golden_task_id`, `target`, `test_cmd`,
+`lint_cmd`, and `weights`. Each iteration gains a `scoring` (`EvalScore`:
+per-signal scores + `composite` + `proof_status` + `done_score`), a `proof_pack_id`,
+and a `human_rating`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{id}/skill-evaluations | ws editor | StartEvalReq | SkillEvaluation |
-| GET /workspaces/{id}/skill-evaluations | ws viewer | — | `SkillEvaluation[]` |
+| POST /workspaces/{id}/skill-evaluations | ws editor | StartSkillEvalReq | SkillEval |
+| GET /workspaces/{id}/skill-evaluations | ws viewer | — | `SkillEval[]` |
 | GET /workspaces/{id}/skill-sources | ws viewer | — | available evaluation sources |
-| GET /skill-evaluations/{id} | ws viewer | — | SkillEvaluation (with iterations) |
+| GET /skill-evaluations/{id} | ws viewer | — | SkillEval (with iterations) |
 | DELETE /skill-evaluations/{id} | ws editor | — | 204 |
 | POST /skill-evaluations/{id}/cancel | ws editor | — | cancel a running evaluation |
-| POST /skill-evaluations/{id}/promote | root | — | promote the winning skill into the library |
+| POST /skill-evaluations/{id}/promote | root | PromoteSkillReq (`force?`) | promote winning skill; 409 if the score+proof gate is unmet and not forced |
+| GET /skill-evaluations/{id}/promote-gate | ws viewer | `?iteration_id` | PromoteGate (allowed + reasons) |
 | GET /skill-evaluations/{id}/iterations/{iter_id}/diff | ws viewer | — | iteration impl diff |
+| GET /skill-evaluations/{id}/iterations/{iter_id}/score | ws viewer | — | EvalScore |
+| GET /skill-evaluations/{id}/iterations/{iter_id}/proof-pack | ws viewer | — | assembled proof pack (header + artifacts) |
+| POST /skill-evaluations/{id}/iterations/{iter_id}/rate | ws editor | RateIterationReq | SkillEval (re-scored; no command re-run) |
+| POST /skill-evaluations/{id}/iterations/{iter_id}/regression | ws editor | RegressionReq | GoldenTask (origin=regression; deduped by source iter) |
 | POST /skill-evaluations/{id}/iterations/{iter_id}/agents/{index}/retry | ws editor | — | re-run one validation agent |
-| GET /settings/skill-eval | root | — | skill-eval config |
+| GET /settings/skill-eval | root | — | skill-eval config (+ weights, promote_min_score, require_proof_pass, default cmds) |
 | PUT /settings/skill-eval | root | SkillEvalConfig | config |
+
+### Golden tasks (per-repo evaluation corpus)
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{id}/golden-tasks | ws viewer | `?repo_key` | `GoldenTask[]` |
+| POST /workspaces/{id}/golden-tasks | ws editor | GoldenTaskReq | GoldenTask |
+| GET /golden-tasks/{id} | ws viewer | — | GoldenTask |
+| PUT /golden-tasks/{id} | ws editor | GoldenTaskReq | GoldenTask |
+| DELETE /golden-tasks/{id} | ws editor | — | 204 |
+| POST /golden-tasks/{id}/run | ws editor | RunGoldenReq | SkillEval (started from the task) |
+
+### Matrices (provider × skill × prompt)
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{id}/eval-matrices | ws viewer | — | `EvalMatrix[]` |
+| POST /workspaces/{id}/eval-matrices | ws editor | StartMatrixReq | EvalMatrix (cells fan out as eval runs) |
+| GET /eval-matrices/{id} | ws viewer | — | EvalMatrix (with live cell composites/proof) |
+| POST /eval-matrices/{id}/cancel | ws editor | — | cancel all still-running cells |
 
 ## Context library (skills / souls / context)
 
