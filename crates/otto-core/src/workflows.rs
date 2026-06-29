@@ -190,6 +190,11 @@ pub struct NodeRunState {
     /// policy is configured; `None`/`Some(1)` for the common single-attempt case.
     #[serde(default)]
     pub attempts: Option<u32>,
+    /// Openable Otto session id(s) this node spawned (agent / product / canvas /
+    /// loop-inner agents). Recorded live the moment a session is created so the
+    /// run view can open it while running. Empty for non-agent nodes.
+    #[serde(default)]
+    pub sessions: Vec<String>,
 }
 
 /// One execution of a workflow.

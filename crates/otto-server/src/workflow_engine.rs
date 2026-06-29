@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use otto_brokers::types::{ConsumeReq, ValueFormat};
 use otto_channels::adapter::Adapter;
-use otto_core::domain::{Channel, Workspace};
+use otto_core::domain::{Channel, User, Workspace};
 use otto_core::event::Event;
 use otto_core::workflows::{
     NodeRunState, NodeStatus, NodeTypeSpec, RunStatus, Workflow, WorkflowGraph, WorkflowNode,
@@ -144,27 +144,32 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
           "Check spend caps: continue if under budget, stop (error) if blocked.", 1, 1, "#e04c4c", "shield"),
         n("human_approval", "Human Approval", "Flow",
           "Pause the run until an operator calls the resume endpoint.", 1, 1, "#f0c040", "user-check"),
+        n("condition", "Condition", "Flow",
+          "Evaluate an expression on the input; outputs { result, value }. Pair with edge conditions to branch.", 1, 1, "#f0c040", "git-branch"),
+        n("loop", "Loop (Until)", "Flow",
+          "Re-run inner steps until an expression holds or max iterations (e.g. fix → review until score ≥ 80).", 1, 1, "#f0c040", "repeat"),
         // Swarm task: wired — enqueues via SwarmRepo. Requires swarm_id +
         // project_id in params; the task is created in "todo" status so the
         // swarm coordinator picks it up on its next tick.
         n("swarm_task", "Swarm Task", "AI",
           "Enqueue a task in a running Agent Swarm project.", 1, 1, "#a070ff", "users"),
-        // --- Stubbed nodes (in-process path is unreachable without deeper
-        // coupling; each returns a typed "not wired" result and is noted below).
-        // product_analyze / product_rewrite / product_plan: otto-product does
-        // not expose a standalone synchronous call; a full run needs an active
-        // ProductRunHandle and the product_run cancellation registry.  Stubbed.
+        // --- Product nodes (wired: run a real single-agent turn over the story's
+        // context + the matching product skill, as a visible session). ---------
         n("product_analyze", "Product Analyze", "Product",
-          "Run a product analysis agent on a story (stub — not yet wired).", 1, 1, "#ff8c42", "file-text"),
+          "Analyze a product story (grill lens) over its real context; outputs the analysis.", 1, 1, "#ff8c42", "file-text"),
         n("product_rewrite", "Product Rewrite", "Product",
-          "Run a product rewrite agent on a story (stub — not yet wired).", 1, 1, "#ff8c42", "edit"),
+          "Rewrite a product story (jira-story-writer); optionally save a new version.", 1, 1, "#ff8c42", "edit"),
         n("product_plan", "Product Plan", "Product",
-          "Run a product planning agent on a story (stub — not yet wired).", 1, 1, "#ff8c42", "map"),
-        // review_run: otto-orchestrator's start_review requires a full ReviewsRepo
-        // call chain + background session plumbing that is not reachable from the
-        // engine without surfacing the review router's private helpers.  Stubbed.
+          "Break a story into an implementation plan (story-task-breakdown); optional version.", 1, 1, "#ff8c42", "map"),
+        n("product_publish", "Product Publish", "Product",
+          "Publish a story as a Confluence RFC or a Jira issue (dry-run by default).", 1, 1, "#ff8c42", "upload"),
+        n("canvas", "Canvas Diagram", "Product",
+          "Generate/update a Canvas scene (mermaid/excalidraw) from a prompt via an agent.", 1, 1, "#57b9ff", "image"),
+        // review_run: wired to the local-review engine (run_review_for_branch).
         n("review_run", "Review Run", "AI",
-          "Start a code-review run on a workspace repo (stub — not yet wired).", 1, 1, "#c080ff", "search"),
+          "Run a code review on a repo branch; outputs findings + a 0–100 score.", 1, 1, "#c080ff", "search"),
+        n("git_pr", "Git PR", "Network",
+          "Draft (and optionally open) a pull request for a repo branch.", 1, 1, "#46c0a0", "git-pull-request"),
         // api_run: executes an HTTP request via the api-client engine so
         // environment variable substitution and auth apply.  Wired.
         n("api_run", "API Run", "Network",
@@ -303,8 +308,11 @@ pub async fn run_workflow(
             logs: vec![],
             duration_ms: None,
             attempts: None,
+            sessions: vec![],
         })
         .collect();
+    // Resolve the user this run acts as (for spawning visible agent sessions).
+    let user = resolve_run_user(&ctx, &workflow.created_by).await;
     // Nodes that errored (or were poisoned by an errored upstream) — these
     // propagate failure. `branch_skipped` nodes were pruned by an edge condition
     // (or are downstream of a pruned node) and do NOT fail the run.
@@ -438,13 +446,34 @@ pub async fn run_workflow(
 
         let started = Instant::now();
         // Run the node, honoring its retry policy (default: a single attempt).
+        // A node that spawns an openable agent session reports its id over
+        // `sess_tx` the moment it's created; we record it on the node state and
+        // persist+emit immediately so the run view can open it *while running*.
         let policy = resolve_retry(node);
         let mut attempt: u32 = 0;
         let mut backoff = policy.backoff_ms;
         let mut retry_logs: Vec<String> = vec![];
+        let (sess_tx, mut sess_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let result = loop {
             attempt += 1;
-            match execute_node(&ctx, &ws, node, node_input.clone(), &run_id).await {
+            let fut = execute_node(&ctx, &ws, &user, node, node_input.clone(), &run_id, &sess_tx);
+            tokio::pin!(fut);
+            let attempt_res = loop {
+                tokio::select! {
+                    biased;
+                    Some(sid) = sess_rx.recv() => {
+                        if !states[idx].sessions.contains(&sid) {
+                            states[idx].sessions.push(sid);
+                            let _ = repo
+                                .update_run(&run_id, RunStatus::Running, &states, None, false)
+                                .await;
+                            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+                        }
+                    }
+                    r = &mut fut => break r,
+                }
+            };
+            match attempt_res {
                 Ok(ok) => break Ok(ok),
                 Err(e) => {
                     let can_retry = attempt <= policy.max_attempts && is_retryable(&node.kind);
@@ -466,6 +495,12 @@ pub async fn run_workflow(
                 }
             }
         };
+        // Drain any session ids reported right as the node finished.
+        while let Ok(sid) = sess_rx.try_recv() {
+            if !states[idx].sessions.contains(&sid) {
+                states[idx].sessions.push(sid);
+            }
+        }
         match result {
             Ok((out, mut logs)) => {
                 states[idx].status = NodeStatus::Success;
@@ -699,12 +734,15 @@ fn assemble_input(
 ///
 /// `run_id` is passed so stateful nodes (e.g. `human_approval`) can write
 /// back to their own run row to record a pause / resume decision.
+#[allow(clippy::too_many_arguments)]
 async fn execute_node(
     ctx: &ServerCtx,
     ws: &Workspace,
+    user: &User,
     node: &WorkflowNode,
     input: Value,
     run_id: &Id,
+    session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(Value, Vec<String>)> {
     let p = &node.params;
     match node.kind.as_str() {
@@ -748,14 +786,16 @@ async fn execute_node(
             if prompt.trim().is_empty() {
                 return Err(otto_core::Error::Invalid("agent node: empty prompt".into()));
             }
-            let model = p.get("model").and_then(Value::as_str);
-            // Make the upstream data available to the agent.
+            // Run as a real, openable session (reusing the shared session runner)
+            // so the run view can watch/inspect it — not the headless PTY.
+            let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
             let full = format!("{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000));
-            let reply = ctx
-                .orchestrator
-                .run_agent(&full, &ws.root_path, model, NODE_AGENT_TIMEOUT)
-                .await?;
-            Ok((json!({ "reply": reply }), vec!["agent turn complete".into()]))
+            let (reply, sid) =
+                run_node_agent(ctx, ws, user, node, provider, &full, session_tx).await?;
+            Ok((
+                json!({ "reply": reply, "session_id": sid }),
+                vec!["agent turn complete".into()],
+            ))
         }
 
         "http_request" => {
@@ -1367,52 +1407,436 @@ async fn execute_node(
             ))
         }
 
-        // --- Stubbed nodes --------------------------------------------------
-        // These node kinds are registered in the catalog (so the UI palette and
-        // graph generator see them) but their in-process execution path is not
-        // yet wired. Each returns a typed result so a graph that contains them
-        // does not crash: it succeeds with a "not wired" marker that downstream
-        // nodes can act on (e.g. a log node can surface it to the run output).
+        // --- Condition (branching primitive) --------------------------------
+        "condition" => {
+            let expr = p.get("expr").and_then(Value::as_str).unwrap_or("true");
+            let value = otto_core::expr::eval(expr, &input)
+                .map_err(|e| otto_core::Error::Invalid(format!("condition: {e}")))?;
+            let result = otto_core::expr::truthy(&value);
+            let mut out = match &input {
+                Value::Object(m) => m.clone(),
+                other => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("input".into(), other.clone());
+                    m
+                }
+            };
+            out.insert("result".into(), json!(result));
+            out.insert("value".into(), value);
+            Ok((Value::Object(out), vec![format!("condition `{expr}` → {result}")]))
+        }
 
-        "product_analyze" => Ok((
-            json!({
-                "stub": true,
-                "node_kind": "product_analyze",
-                "note": "product_analyze is not yet wired in the workflow engine; \
-                         use a dedicated product run from the Product UI instead."
-            }),
-            vec!["product_analyze: stub — not wired".into()],
-        )),
+        // --- Loop (bounded iterate-until) -----------------------------------
+        "loop" => {
+            let max_iter = p.get("max_iterations").and_then(Value::as_u64).unwrap_or(3).clamp(1, 10);
+            let until = p.get("until").and_then(Value::as_str).unwrap_or("").to_string();
+            let steps = p.get("steps").and_then(Value::as_array).cloned().unwrap_or_default();
+            if steps.is_empty() {
+                return Err(otto_core::Error::Invalid("loop: requires at least one step".into()));
+            }
+            let continue_on_error = p.get("continue_on_error").and_then(Value::as_bool).unwrap_or(false);
+            // Run-level keys (repo_id, base, goals, …) flow to every step as a
+            // base; the threaded prev-step output overlays them.
+            let loop_base = input.as_object().cloned().unwrap_or_default();
+            let mut logs = vec![];
+            let mut history = vec![];
+            let mut satisfied = false;
+            let mut last = input.clone();
+            let mut iterations = 0u64;
+            for i in 1..=max_iter {
+                iterations = i;
+                if let Ok(rr) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
+                    if rr.status == RunStatus::Canceled {
+                        logs.push("loop: canceled".into());
+                        break;
+                    }
+                }
+                // `thread` carries across iterations (so a fix step sees the prior
+                // review's findings) and updates after each step within an iteration.
+                let mut thread = last.clone();
+                let mut step_outputs = serde_json::Map::new();
+                for (k, step) in steps.iter().enumerate() {
+                    let skind = step.get("kind").and_then(Value::as_str).unwrap_or("").to_string();
+                    if skind == "loop" {
+                        return Err(otto_core::Error::Invalid("loop: nested loops are not allowed".into()));
+                    }
+                    let sname = step
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("step{k}"));
+                    let mut merged = loop_base.clone();
+                    if let Value::Object(m) = &thread {
+                        for (mk, mv) in m {
+                            merged.insert(mk.clone(), mv.clone());
+                        }
+                    }
+                    merged.insert("_iteration".into(), json!(i));
+                    let step_input = Value::Object(merged);
+                    let sub = WorkflowNode {
+                        id: format!("{}#{i}.{k}", node.id),
+                        kind: skind.clone(),
+                        name: sname.clone(),
+                        x: 0.0,
+                        y: 0.0,
+                        params: step.get("params").cloned().unwrap_or(Value::Null),
+                        retry: step.get("retry").and_then(|r| serde_json::from_value(r.clone()).ok()),
+                    };
+                    match Box::pin(execute_node(ctx, ws, user, &sub, step_input, run_id, session_tx)).await {
+                        Ok((out, mut slogs)) => {
+                            for l in slogs.drain(..) {
+                                logs.push(format!("  [{i}/{sname}] {l}"));
+                            }
+                            step_outputs.insert(sname.clone(), out.clone());
+                            last = out.clone();
+                            thread = out;
+                        }
+                        Err(e) => {
+                            logs.push(format!("  [{i}/{sname}] ✗ {e}"));
+                            if !continue_on_error {
+                                return Err(otto_core::Error::Upstream(format!(
+                                    "loop step '{sname}' failed at iteration {i}: {e}"
+                                )));
+                            }
+                            break;
+                        }
+                    }
+                }
+                let ictx = json!({ "iteration": i, "last": last, "steps": Value::Object(step_outputs), "input": input });
+                history.push(ictx.clone());
+                if !until.is_empty() && otto_core::expr::eval_bool(&until, &ictx) {
+                    satisfied = true;
+                    logs.push(format!("loop: `{until}` satisfied at iteration {i}"));
+                    break;
+                }
+            }
+            if !until.is_empty() && !satisfied {
+                logs.push(format!("loop: reached max_iterations ({max_iter}) without satisfying `{until}`"));
+            }
+            Ok((
+                json!({ "iterations": iterations, "satisfied": satisfied, "last": last, "history": history }),
+                logs,
+            ))
+        }
 
-        "product_rewrite" => Ok((
-            json!({
-                "stub": true,
-                "node_kind": "product_rewrite",
-                "note": "product_rewrite is not yet wired in the workflow engine; \
-                         use a dedicated product run from the Product UI instead."
-            }),
-            vec!["product_rewrite: stub — not wired".into()],
-        )),
+        // --- Review Run (wired: local-review engine + 0–100 score + goals) ---
+        "review_run" => {
+            let repo_id = p
+                .get("repo_id")
+                .and_then(Value::as_str)
+                .or_else(|| input.get("repo_id").and_then(Value::as_str))
+                .ok_or_else(|| otto_core::Error::Invalid("review_run: missing repo_id".into()))?
+                .to_string();
+            let threshold = p.get("threshold").and_then(Value::as_u64).unwrap_or(80) as i64;
+            let await_done = p.get("await").and_then(Value::as_bool).unwrap_or(true);
+            let timeout_s = p.get("timeout_s").and_then(Value::as_u64).unwrap_or(900).min(1800);
+            let repo = ctx
+                .git_store
+                .get_repo(&repo_id)
+                .await
+                .map_err(|e| otto_core::Error::NotFound(format!("review_run: repo: {e}")))?;
+            let worktree = p
+                .get("worktree_path")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| repo.path.clone());
+            let base = p
+                .get("base")
+                .and_then(Value::as_str)
+                .or_else(|| input.get("base").and_then(Value::as_str))
+                .unwrap_or("main")
+                .to_string();
+            let review_id = crate::modules::run_review_for_branch(ctx, &repo_id, &worktree, &base).await?;
+            let mut logs = vec![format!("review_run: started review {review_id} ({worktree} vs {base})")];
+            let mut status = "running".to_string();
+            if await_done {
+                let deadline = Instant::now() + Duration::from_secs(timeout_s);
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if let Ok(r) = ctx.reviews_store.get_review(&review_id).await {
+                        use otto_core::domain::ReviewStatus as RS;
+                        match r.status {
+                            RS::Done => {
+                                status = "done".into();
+                                break;
+                            }
+                            RS::Error => {
+                                status = "error".into();
+                                break;
+                            }
+                            RS::Cancelled => {
+                                status = "cancelled".into();
+                                break;
+                            }
+                            RS::Running => {}
+                        }
+                    }
+                    if let Ok(rr) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
+                        if rr.status == RunStatus::Canceled {
+                            status = "cancelled".into();
+                            break;
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        status = "timeout".into();
+                        logs.push("review_run: timed out waiting for review".into());
+                        break;
+                    }
+                }
+            }
+            let (total, open, blocker) = crate::modules::review_findings_counts(ctx, &review_id).await;
+            let blocking = blocker as i64;
+            let advisory = (open.saturating_sub(blocker)) as i64;
+            let review_score = (100 - 20 * blocking - 5 * advisory).clamp(0, 100);
+            // Optional goals — assessed by an agent and blended into the score.
+            let goals: Vec<String> = p
+                .get("goals")
+                .and_then(Value::as_array)
+                .or_else(|| input.get("goals").and_then(Value::as_array))
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let (goals_score, goals_detail) = if goals.is_empty() {
+                (None, json!([]))
+            } else {
+                let gprompt = format!(
+                    "Assess whether each goal below is met for the repository at `{worktree}` \
+                     (review the code/tests). Reply with ONLY JSON of the form \
+                     {{\"goals\":[{{\"goal\":\"...\",\"met\":true,\"score\":0,\"note\":\"...\"}}],\"score\":0}} \
+                     where each score and the overall score are 0–100.\n\nGoals:\n- {}",
+                    goals.join("\n- ")
+                );
+                match run_node_agent(ctx, ws, user, node, "claude", &gprompt, session_tx).await {
+                    Ok((reply, _sid)) => match extract_json(&reply) {
+                        Some(v) => {
+                            let gs = v.get("score").and_then(Value::as_i64).unwrap_or(review_score).clamp(0, 100);
+                            (Some(gs), v.get("goals").cloned().unwrap_or(json!([])))
+                        }
+                        None => (Some(review_score), json!([{ "note": "goals eval reply not parseable" }])),
+                    },
+                    Err(e) => {
+                        logs.push(format!("review_run: goals eval failed: {e}"));
+                        (Some(review_score), json!([{ "note": "goals eval failed" }]))
+                    }
+                }
+            };
+            let score = match goals_score {
+                Some(gs) => (review_score + gs) / 2,
+                None => review_score,
+            };
+            let passed = score >= threshold && status == "done";
+            logs.push(format!(
+                "review_run: score {score} (review {review_score}{}) — {}",
+                goals_score.map(|g| format!(", goals {g}")).unwrap_or_default(),
+                if passed { "passed" } else { "below threshold" }
+            ));
+            Ok((
+                json!({
+                    "review_id": review_id, "status": status,
+                    "total": total, "open": open, "blocking": blocking, "advisory": advisory,
+                    "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
+                    "score": score, "threshold": threshold, "passed": passed,
+                }),
+                logs,
+            ))
+        }
 
-        "product_plan" => Ok((
-            json!({
-                "stub": true,
-                "node_kind": "product_plan",
-                "note": "product_plan is not yet wired in the workflow engine; \
-                         use a dedicated product run from the Product UI instead."
-            }),
-            vec!["product_plan: stub — not wired".into()],
-        )),
+        // --- Product nodes (wired: real single-agent turn over story context) -
+        "product_analyze" | "product_rewrite" | "product_plan" => {
+            let kind = node.kind.clone();
+            let story_id = p
+                .get("story_id")
+                .and_then(Value::as_str)
+                .or_else(|| input.get("story_id").and_then(Value::as_str))
+                .map(str::to_string);
+            let (skill_name, instruction, persist_kind) = match kind.as_str() {
+                "product_analyze" => (
+                    "grill",
+                    "Analyze this product story: surface scope gaps, ambiguities, non-testable acceptance criteria, unhandled edge cases, and risks. Be specific and evidence-based.",
+                    None,
+                ),
+                "product_rewrite" => (
+                    "jira-story-writer",
+                    "Rewrite this story so it is clear, valuable, and testable. Reply with the rewritten story in Markdown.",
+                    Some("suggested"),
+                ),
+                _ => (
+                    "story-task-breakdown",
+                    "Break this story into an ordered implementation plan of small, independently-verifiable tasks. Reply in Markdown.",
+                    Some("plan"),
+                ),
+            };
+            let skill = crate::modules::resolve_skill_inline(&ctx.context_library, skill_name);
+            let context = match &story_id {
+                Some(sid) => ctx
+                    .product
+                    .build_agent_context(sid, None)
+                    .await
+                    .unwrap_or_else(|_| truncate(&input.to_string(), 6000)),
+                None => truncate(&input.to_string(), 6000),
+            };
+            let extra = p.get("instruction").and_then(Value::as_str).unwrap_or("");
+            let prompt = format!(
+                "{skill}\n\n# Task\n{instruction}\n{extra}\n\n# Story context\n{}",
+                truncate(&context, 8000)
+            );
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &prompt, session_tx).await?;
+            let mut out = serde_json::Map::new();
+            out.insert("story_id".into(), json!(story_id));
+            out.insert("session_id".into(), json!(sid));
+            match kind.as_str() {
+                "product_analyze" => {
+                    out.insert("analysis".into(), json!(reply));
+                }
+                "product_rewrite" => {
+                    out.insert("body_md".into(), json!(reply));
+                }
+                _ => {
+                    out.insert("plan_md".into(), json!(reply));
+                }
+            }
+            // Optional: persist as a product version.
+            let persist = p.get("persist").and_then(Value::as_bool).unwrap_or(false);
+            if let (Some(pk), Some(sid_story)) = (persist_kind, story_id.as_ref()) {
+                if persist {
+                    let nv = otto_state::NewVersion {
+                        story_id: sid_story.clone(),
+                        kind: pk.into(),
+                        title: format!("Workflow {kind}"),
+                        body_md: reply.clone(),
+                        raw_json: None,
+                        change_notes: Some(format!("from workflow node {}", node.id)),
+                        created_by: user.id.clone(),
+                    };
+                    if let Ok(v) = ctx.product_repo.add_version(nv).await {
+                        out.insert("version_id".into(), json!(v.id));
+                    }
+                }
+            }
+            Ok((Value::Object(out), vec![format!("{kind}: complete")]))
+        }
 
-        "review_run" => Ok((
-            json!({
-                "stub": true,
-                "node_kind": "review_run",
-                "note": "review_run is not yet wired in the workflow engine; \
-                         use the Reviews UI or git integration to start a review."
-            }),
-            vec!["review_run: stub — not wired".into()],
-        )),
+        // --- Product Publish (RFC / Jira; dry-run by default) ----------------
+        "product_publish" => {
+            let story_id = p
+                .get("story_id")
+                .and_then(Value::as_str)
+                .or_else(|| input.get("story_id").and_then(Value::as_str))
+                .ok_or_else(|| otto_core::Error::Invalid("product_publish: missing story_id".into()))?
+                .to_string();
+            let kind = p.get("kind").and_then(Value::as_str).unwrap_or("rfc").to_string();
+            let dry_run = p.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
+            if dry_run {
+                return Ok((
+                    json!({ "story_id": story_id, "kind": kind, "dry_run": true,
+                            "note": "dry run — set dry_run=false with an account_id to publish" }),
+                    vec![format!("product_publish: dry run ({kind})")],
+                ));
+            }
+            let account_id = p
+                .get("account_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| otto_core::Error::Invalid("product_publish: account_id required to publish".into()))?
+                .to_string();
+            if kind == "jira" {
+                let project = p
+                    .get("project_key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| otto_core::Error::Invalid("product_publish: project_key required".into()))?;
+                let issue_type = p.get("issue_type").and_then(Value::as_str).unwrap_or("Story");
+                let detail = ctx
+                    .product
+                    .publish_as_story(&story_id, &account_id, project, issue_type, &user.id)
+                    .await?;
+                Ok((
+                    json!({ "story_id": story_id, "kind": "jira", "dry_run": false,
+                            "detail": serde_json::to_value(&detail).ok() }),
+                    vec!["product_publish: published to Jira".into()],
+                ))
+            } else {
+                let space = p
+                    .get("space_key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| otto_core::Error::Invalid("product_publish: space_key required".into()))?;
+                let parent = p.get("parent_id").and_then(Value::as_str);
+                let title = p.get("title").and_then(Value::as_str);
+                let detail = ctx
+                    .product
+                    .publish_as_rfc(&story_id, &account_id, space, parent, title, &user.id)
+                    .await?;
+                Ok((
+                    json!({ "story_id": story_id, "kind": "rfc", "dry_run": false,
+                            "detail": serde_json::to_value(&detail).ok() }),
+                    vec!["product_publish: published RFC to Confluence".into()],
+                ))
+            }
+        }
+
+        // --- Canvas (generate a mermaid/excalidraw diagram artifact) ---------
+        "canvas" => {
+            let prompt_in = p
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("Create a clear diagram of the system/flow described in the input.");
+            let mode = p.get("mode").and_then(Value::as_str).unwrap_or("mermaid");
+            let full = format!(
+                "Produce a {mode} diagram. {prompt_in}\nReply with ONLY a ```{mode} code block.\n\n[context]\n{}",
+                truncate(&input.to_string(), 4000)
+            );
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &full, session_tx).await?;
+            let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
+            // Write under the data dir (never the user's repo working tree).
+            let ext = if mode == "excalidraw" { "json" } else { "mmd" };
+            let rel = format!("workflow-canvas/{run_id}/{}.{ext}", node.id);
+            let path = ctx.data_dir.join(&rel);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let written = std::fs::write(&path, &diagram).is_ok();
+            Ok((
+                json!({ "scene_id": rel, "path": path.to_string_lossy(), "mode": mode,
+                        "diagram": diagram, "written": written, "session_id": sid }),
+                vec![format!("canvas: {mode} diagram ({} bytes)", diagram.len())],
+            ))
+        }
+
+        // --- Git PR (draft; opening is done from the Git tab) ----------------
+        "git_pr" => {
+            let repo_id = p
+                .get("repo_id")
+                .and_then(Value::as_str)
+                .or_else(|| input.get("repo_id").and_then(Value::as_str))
+                .ok_or_else(|| otto_core::Error::Invalid("git_pr: missing repo_id".into()))?
+                .to_string();
+            let repo = ctx
+                .git_store
+                .get_repo(&repo_id)
+                .await
+                .map_err(|e| otto_core::Error::NotFound(format!("git_pr: repo: {e}")))?;
+            let worktree = p
+                .get("worktree_path")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| repo.path.clone());
+            let base = p
+                .get("base")
+                .and_then(Value::as_str)
+                .or_else(|| input.get("base").and_then(Value::as_str))
+                .unwrap_or("main")
+                .to_string();
+            let draft = crate::modules::draft_pr_core(ctx, &worktree, &base).await?;
+            Ok((
+                json!({
+                    "title": draft.title, "description": draft.description,
+                    "source_branch": draft.source_branch, "target_branch": draft.target_branch,
+                    "opened": false,
+                    "note": "Drafted. Open the PR from the Git tab (engine auto-open is gated).",
+                }),
+                vec![format!(
+                    "git_pr: drafted '{}' ({} → {})",
+                    draft.title, draft.source_branch, draft.target_branch
+                )],
+            ))
+        }
 
         other => Err(otto_core::Error::Invalid(format!("unknown node kind '{other}'"))),
     }
@@ -1528,6 +1952,60 @@ fn is_retryable(kind: &str) -> bool {
     !matches!(kind, "human_approval" | "manual_trigger")
 }
 
+/// Resolve the user a run acts as. Falls back to a synthetic user for system /
+/// trigger-initiated runs whose `created_by` isn't a real account.
+async fn resolve_run_user(ctx: &ServerCtx, created_by: &Id) -> User {
+    otto_state::UsersRepo::new(ctx.pool.clone())
+        .get(created_by)
+        .await
+        .unwrap_or_else(|_| User {
+            id: created_by.clone(),
+            username: "workflow".into(),
+            display_name: "Workflow".into(),
+            is_root: false,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        })
+}
+
+/// Run one agent turn as a visible, openable session (reusing the shared
+/// `run_session_turn` flow), reporting the session id over `session_tx` the
+/// moment the session exists so the run view can open it live. Returns
+/// `(reply, session_id)`.
+async fn run_node_agent(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    user: &User,
+    node: &WorkflowNode,
+    provider: &str,
+    prompt: &str,
+    session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<(String, Id)> {
+    let title = if node.name.is_empty() {
+        format!("Workflow: {}", node.kind)
+    } else {
+        format!("Workflow: {}", node.name)
+    };
+    let meta = json!({ "source": "workflow", "node_id": node.id, "node_kind": node.kind });
+    let tx = session_tx.clone();
+    crate::agent_session::run_session_turn(
+        ctx,
+        ws,
+        user,
+        None,
+        &title,
+        &ws.root_path,
+        provider,
+        meta,
+        prompt,
+        move |id| {
+            let _ = tx.send(id.to_string());
+        },
+    )
+    .await
+    .map_err(|e| e.0)
+}
+
 /// Kahn topological sort. Errors on a cycle.
 fn topo_order(graph: &WorkflowGraph) -> std::result::Result<Vec<String>, String> {
     let mut indeg: HashMap<String, usize> = HashMap::new();
@@ -1570,6 +2048,33 @@ fn topo_order(graph: &WorkflowGraph) -> std::result::Result<Vec<String>, String>
         return Err("workflow graph has a cycle".into());
     }
     Ok(order)
+}
+
+/// Tolerantly extract a JSON value from an agent reply: try the whole string,
+/// else the first balanced `{ … }` span.
+fn extract_json(text: &str) -> Option<Value> {
+    if let Ok(v) = serde_json::from_str::<Value>(text.trim()) {
+        return Some(v);
+    }
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end > start {
+        serde_json::from_str(&text[start..=end]).ok()
+    } else {
+        None
+    }
+}
+
+/// Extract the body of the first fenced code block (preferring the `lang` fence).
+fn extract_code_block(text: &str, lang: &str) -> Option<String> {
+    let fence = format!("```{lang}");
+    let start = text
+        .find(&fence)
+        .map(|i| i + fence.len())
+        .or_else(|| text.find("```").map(|i| i + 3))?;
+    let rest = &text[start..];
+    let end = rest.find("```")?;
+    Some(rest[..end].trim().to_string())
 }
 
 fn truncate(s: &str, max: usize) -> String {
