@@ -61,6 +61,43 @@ fn model_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     vec!["--model".to_string(), model.to_string()]
 }
 
+/// Per-session creds file for the Codex `otto` MCP server: a daemon-private temp
+/// path (`<tmp>/otto-mcp/<session_id>.json`, mode 0600). Holds the per-session
+/// token so it never appears on Codex's argv; removed when the session is removed.
+fn codex_creds_path(session_id: &Id) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("otto-mcp")
+        .join(format!("{session_id}.json"))
+}
+
+/// Write the per-session Codex creds file (0600) carrying the token + routing the
+/// `ottod mcp-tools --config <path>` process reads. Returns the path on success.
+fn write_codex_creds(
+    session_id: &Id,
+    token: &str,
+    base: &str,
+    workspace_id: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let path = codex_creds_path(session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::json!({
+        "token": token,
+        "base": base,
+        "session_id": session_id.to_string(),
+        "workspace_id": workspace_id,
+    })
+    .to_string();
+    std::fs::write(&path, body)?;
+    // Lock down to owner-only — it holds a bearer token.
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&path)?.permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(&path, perms)?;
+    Ok(path)
+}
+
 /// Root directory codex writes session rollouts to: `$CODEX_HOME/sessions`,
 /// else `~/.codex/sessions`.
 fn codex_sessions_root() -> std::path::PathBuf {
@@ -890,22 +927,25 @@ impl SessionManager {
         otto_state::otto_mcp_enabled_for(value.as_ref(), workspace_id)
     }
 
-    /// When the workspace has opted into Otto's first-party tools, mint a
-    /// per-session token and inject the read-only `otto` MCP server into the
-    /// workspace `.mcp.json` (Task B2b).
+    /// When the `otto` MCP server is enabled for the workspace (default on), mint a
+    /// per-session token and attach the server to the session — for Claude/agy by
+    /// writing the workspace `.mcp.json`, for Codex by returning per-spawn `-c`
+    /// overrides (Codex doesn't read `.mcp.json`).
     ///
-    /// The token is a per-session auth token (the existing token system) minted
-    /// for the session's owner; its row id is recorded in `mcp_tokens` so it is
-    /// revoked when the session is removed. The tools binary is **read-only by
-    /// construction** (it issues only allow-listed GETs), so the token is the
-    /// owner's identity confined by what the tools choose to expose. Best-effort:
+    /// The token is a per-session auth token (the existing token system) minted for
+    /// the session's owner; its row id is recorded in `mcp_tokens` so it is revoked
+    /// when the session is removed. The tools authorize as the owner, confined to
+    /// what the tools expose (read-only data + read-only DB queries). Best-effort:
     /// any failure here is logged and never blocks the spawn.
-    async fn maybe_enable_otto_tools(&self, session: &Session) {
+    ///
+    /// Returns extra spawn args to append to the launch command (the Codex `-c`
+    /// overrides); empty for every other provider.
+    async fn maybe_enable_otto_tools(&self, session: &Session) -> Vec<String> {
         if !self.otto_mcp_enabled(&session.workspace_id).await {
-            return;
+            return Vec::new();
         }
         let Some(auth) = &self.auth else {
-            return; // feature wired off (no token minter)
+            return Vec::new(); // feature wired off (no token minter)
         };
         // Mint a per-session token for the owner. Labeled so it is identifiable
         // in the token list and revoked on session removal.
@@ -914,13 +954,13 @@ impl SessionManager {
             Ok(pair) => pair,
             Err(e) => {
                 tracing::warn!("otto MCP tools: mint token failed: {e}");
-                return;
+                return Vec::new();
             }
         };
         self.mcp_tokens.insert(session.id.clone(), info.id);
 
         let mut env = std::collections::BTreeMap::new();
-        env.insert("OTTO_MCP_TOKEN".to_string(), token);
+        env.insert("OTTO_MCP_TOKEN".to_string(), token.clone());
         env.insert("OTTO_MCP_BASE".to_string(), self.ingest_base.clone());
         env.insert("OTTO_SESSION_ID".to_string(), session.id.to_string());
         env.insert(
@@ -932,15 +972,37 @@ impl SessionManager {
             args: vec!["mcp-tools".to_string()],
             env,
         };
+        // Claude / agy read the workspace `.mcp.json`.
         if let Err(e) = crate::mcp::enable_otto_tools(&session.cwd, &server) {
             tracing::warn!("otto MCP tools: write .mcp.json failed: {e}");
         }
+        // Codex doesn't read `.mcp.json`: attach via per-spawn `-c` overrides that
+        // point at a per-session creds file (the token never touches argv).
+        if session.provider == "codex" {
+            match write_codex_creds(
+                &session.id,
+                &token,
+                &self.ingest_base,
+                &session.workspace_id,
+            ) {
+                Ok(path) => {
+                    return crate::mcp::codex_mcp_inject_args(
+                        &self.mcp_tools_bin,
+                        &path.to_string_lossy(),
+                    );
+                }
+                Err(e) => tracing::warn!("otto MCP tools: write codex creds failed: {e}"),
+            }
+        }
+        Vec::new()
     }
 
-    /// Revoke the per-session MCP token minted for `session_id` (if any). Called
-    /// from the session-removal path so the `otto` tool server's credential dies
-    /// with the session. Best-effort.
+    /// Revoke the per-session MCP token minted for `session_id` (if any), and
+    /// delete the Codex creds file if one was written. Called from the
+    /// session-removal path so the `otto` tool server's credential dies with the
+    /// session. Best-effort.
     async fn revoke_mcp_token(&self, owner: &Id, session_id: &Id) {
+        let _ = std::fs::remove_file(codex_creds_path(session_id));
         if let Some((_, token_id)) = self.mcp_tokens.remove(session_id) {
             if let Some(auth) = &self.auth {
                 if let Err(e) = auth.revoke_api_token(owner, &token_id).await {
@@ -1106,7 +1168,7 @@ impl SessionManager {
             // opted in (`otto_mcp_enabled`), mint a per-session token and inject
             // the `otto` MCP entry alongside the user/browser servers. Opt-in,
             // best-effort — never blocks spawn.
-            self.maybe_enable_otto_tools(&session).await;
+            spec.args.extend(self.maybe_enable_otto_tools(&session).await);
             // Otto context provisioning: materialize the workspace's active
             // skills + soul + context into this CLI's native form. Best-effort —
             // the hook logs and swallows its own errors, never blocking spawn.
