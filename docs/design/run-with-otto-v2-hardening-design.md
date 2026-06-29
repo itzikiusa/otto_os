@@ -168,11 +168,22 @@ Add to the existing spec (same isolated-daemon harness, `OTTO_E2E=1` seam):
   assert `source_kind == "product_story"` and the same evidence
   (`branch`/`proof_pack_id`).
 
-If seeding a webhook integration in the harness is cheap, also assert
-`POST /webhooks/{ws}/run` returns `202 {run_id}` and the run reaches
-awaiting_approval; otherwise the webhook launch funnel stays covered by the
-`run_service::launch` path the channel test already exercises, and callback
-delivery by the §2.2 payload unit test. (Documented, not hidden.)
+**Webhook callback E2E.** The webhook *entry* (`POST /webhooks/{ws}/run`) needs the
+channel `Bridge`, which the daemon builds at boot only when a root user already
+exists; the E2E daemon boots empty and onboards root over HTTP afterwards, so the
+bridge is absent there (the generic webhook channel is un-E2E-able for the same
+reason — not a product gap). Callback delivery is therefore verified **end-to-end
+in Rust**: `run_callback::deliver` is exercised against a real `RunsRepo`
+(`otto_state::db::test_pool`) for both the SSRF-blocked loopback case (asserts the
+`delivery` timeline event + that the guard refused the target) and the no-op case
+(no `callback_url` → no event), alongside the `build_payload` unit tests. The
+Playwright suite additionally asserts the no-op direction at the API level. The
+*successful* POST to a public host can't be exercised offline without weakening the
+SSRF guard, so it is covered by `WebhookAdapter` parity (identical client + guard)
+rather than a live network call. (Documented, not hidden.)
+
+To make `deliver` testable without constructing the heavy `ServerCtx`, it takes
+`&RunsRepo` (it only reads the run + appends a timeline event).
 
 ### 2.4 UI completeness
 
