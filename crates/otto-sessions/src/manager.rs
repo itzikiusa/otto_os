@@ -873,9 +873,11 @@ impl SessionManager {
         );
     }
 
-    /// Is Otto's first-party MCP tool server opted-in for `workspace_id`?
+    /// Is Otto's first-party MCP tool server enabled for `workspace_id`?
     /// Reads the `otto_mcp_enabled` setting and applies the shared precedence
-    /// rules (see [`otto_state::otto_mcp_enabled_for`]); default OFF.
+    /// rules (see [`otto_state::otto_mcp_enabled_for`]); **default ON** when the
+    /// setting is unset. Returns `false` only when no settings repo is wired (the
+    /// feature is plumbed off entirely, e.g. in a bare test harness).
     async fn otto_mcp_enabled(&self, workspace_id: &str) -> bool {
         let Some(settings) = &self.settings else {
             return false;
