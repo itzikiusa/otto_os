@@ -1231,6 +1231,20 @@ flow / wired kinds added in this wave: `condition`, `loop`, `product_analyze`,
 over `{output, input, node, run}`; the edge is active only when truthy) and
 `WorkflowNode` an optional `retry` `{max_attempts(≤5), backoff_ms(≤60000), factor}`.
 
+**New node params (this wave).** Agent-backed steps (`agent_prompt`) accept
+`skill`/`skills` (string / string[]) — each named skill's body is inlined ahead of
+the prompt. `review_run` runs the multi-agent PR-review engine per step: `providers`
+(string[]), `lenses` (string[]; `skills` is an alias), `threshold` (0–100, default
+80), `require_pass` (bool — errors the step below threshold); its output adds
+`score`/`passed`/`blocking`/`advisory`/`findings`/`providers`/`lenses` (empty
+`providers`+`lenses` ⇒ the stored/default review config). `git_pr` accepts
+`open` (bool, default `false`) — `true` opens the PR on the remote (gate it on the
+incoming edge passing). A run started from a chat (`Action: Workflow`) **streams
+live per-step progress** back into the trigger thread (origin `channel`/`chat`/
+`thread`, or a `result_chat`/`result_channel`/`result_thread` override) before the
+final `summary.md`; manual/webhook-only runs do not stream. See the Workflows
+feature doc for full per-kind params/output.
+
 ## API client ("Postman") — collections, requests, environments, automations
 
 A full in-app HTTP/gRPC client. All routes are workspace-scoped (`/workspaces/{wid}/...`);

@@ -14,8 +14,14 @@
 > `product_publish` nodes. **All three trigger kinds fire unattended now** —
 > webhook, event, *and* schedule (the cadence scheduler is spawned at daemon boot,
 > with cron + IANA-timezone parity). A structured `Action: Workflow` chat message
-> can start a run by name. The separate **API-client "Automations"** surface (a
-> multi-step saved-request runner) is also fully functional. A couple of honest
+> can start a run by name — and such a run now **streams live per-step progress
+> back into the same chat thread** (start line, per-step ▶/✅/❌, and a `🔍` review
+> block for the fix→review loop), flushed before the final `summary.md`. Agent steps
+> can inline named **skills**; `review_run` fans out the full multi-provider ×
+> multi-lens **PR-review engine** and scores it, and `git_pr` can **auto-open the
+> PR** once the review passes (the review is the approval — no human gate). The
+> separate **API-client "Automations"** surface (a multi-step saved-request runner)
+> is also fully functional. A couple of honest
 > caveats remain (the game `game_engine`/`verifier` are scaffolds; agent output is
 > cached) — stated inline; do not assume full parity with mature n8n/Zapier engines.
 
@@ -204,7 +210,7 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 | Kind | Label / category | Purpose | Params (UI form) | Status |
 |---|---|---|---|---|
 | `manual_trigger` | Manual Trigger / Triggers | Entry node; emits the run input. `inputs:0`. | — | **Real** |
-| `agent_prompt` | Agent / AI | Runs an agent turn as a **real, openable session**; output `{ "reply", "session_id" }`. | `prompt`, `provider` (default `claude`) | **Real** |
+| `agent_prompt` | Agent / AI | Runs an agent turn as a **real, openable session**; output `{ "reply", "session_id" }`. `skill`/`skills` inline a skill body ahead of the prompt (see *Per-step skills*). | `prompt`, `provider` (default `claude`), `skill?`, `skills?` | **Real** |
 | `http_request` | HTTP Request / Network | Calls an HTTP endpoint, captures response `{ status, body }`. | `method`, `url`, `body` (JSON) | **Real** |
 | `transform` | Set / Transform / Data | Merges a static JSON object into the data flowing through. | `json` (object) | **Real** |
 | `delay` | Delay / Flow | Sleeps `ms` milliseconds, then passes input through. | `ms` (0–10000) | **Real** |
@@ -224,9 +230,9 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 | `product_rewrite` | Product Rewrite / Product | Rewrites the story (**`jira-story-writer`**); outputs `{ story_id, body_md, session_id }`; `persist:true` saves a `suggested` product version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_plan` | Product Plan / Product | Breaks the story into a plan (**`story-task-breakdown`**); outputs `{ story_id, plan_md, session_id }`; `persist:true` saves a `plan` version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_publish` | Product Publish / Product | Publishes a story as a Confluence **RFC** or a **Jira** issue. **`dry_run` defaults true** (no-op note); a real publish needs `account_id` (+ `project_key`/`space_key`). | `kind` (`rfc`/`jira`), `dry_run`, `account_id`, … | **Real** |
-| `review_run` | Review Run / AI | Runs the **local-review engine** (`run_review_for_branch`), polls to completion, emits a **0–100 `score`** (`100−20×blocking−5×advisory`), optional `goals` assessment blended in, `passed = score≥threshold && status==done`. | `repo_id`, `base` (default `main`), `threshold` (default 80), `await`, `timeout_s`, `goals[]` | **Real** |
+| `review_run` | Review Run / AI | Runs the **PR-review engine** (multi-provider × multi-lens reviewer agents + a scoring summarizer), polls to completion, emits a **0–100 `score`** (`100−20×blocking−5×advisory`), optional `goals` assessment blended in, `passed = score≥threshold && status==done`. `require_pass:true` **errors** the step when below threshold. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]` | **Real** |
 | `canvas` | Canvas Diagram / Product | Asks an agent for a **mermaid/excalidraw** diagram and writes it under the data dir (`workflow-canvas/{run}/{node}.{ext}`); output `{ scene_id, path, diagram, … }`. | `prompt`, `mode` (`mermaid`/`excalidraw`) | **Real** |
-| `git_pr` | Git PR / Network | **Drafts** a pull request for a repo branch (title/description via `draft_pr_core`); **`opened:false`** — opening is left to the Git tab. | `repo_id`, `base` (default `main`), `worktree_path?` | **Real** |
+| `git_pr` | Git PR / Network | **Drafts** a pull request for a repo branch (title/description via `draft_pr_core`). Default is draft-only (`opened:false`); **`open:true`** actually OPENS the PR on the remote (outward-facing, per-step opt-in) — gate it on the incoming edge (e.g. the review passing). | `repo_id`, `base` (default `main`), `open` (default `false`), `worktree_path?` | **Real** |
 
 > **¹ `game_engine` / `verifier` are real but "scaffold" nodes.** They execute
 > and produce usable structured output — they do real work, and `verifier`
@@ -257,6 +263,40 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 > `story_id`, and an Atlassian `account_id` for a real publish) all depend on
 > other features being set up. A missing dependency causes the **node** to error
 > (and downstream active-path nodes to skip) — not a silent no-op.
+
+### Per-step skills (`skill` / `skills`)
+An `agent_prompt` step can name a skill to run *via prompt*: set `skill` (a string)
+and/or `skills` (an array of strings) on the node params. Each named skill's body
+(plus its references) is resolved from the bundled skill library and **prepended**
+ahead of the step's prompt in the shape `{skill}\n\n---\n\n{prompt}` (names are
+de-duplicated, in declared order). So a step can apply a specific method —
+e.g. `golang-feature-implementation` on a "implement" step, or a review lens on an
+agent step — without hand-copying the skill text. The four `product_*` nodes
+already inline their matching method skill **by kind** (`grill` / `jira-story-writer`
+/ `story-task-breakdown`), and `review_run` consumes `skills`/`lenses` as *reviewer
+lens* skills (below) rather than prompt-prepended text.
+
+### `review_run`, gating & auto-PR
+`review_run` drives the **same multi-agent engine as a PR review**: it fans out one
+reviewer agent per `providers[]` × `lenses[]` pair (e.g.
+`providers:["claude","codex"]` × `lenses:["correctness-review","security-review",
+"test-review"]`; `skills[]` is accepted as an alias for `lenses[]`), and a
+summarizer consolidates + scores the findings into a **0–100 `score`** with
+`passed`, `threshold` (0–100, default 80), `blocking`, `advisory`, `findings`
+(brief strings), `providers`, and `lenses` in the output. When **both** `providers`
+and `lenses` are empty it falls back to the stored/default PR-review config.
+`require_pass:true` makes the step **ERROR** when the score is below `threshold`, so
+any downstream step is error-skipped.
+
+Workflows gate "move forward" on the review through **edge conditions**, not a human
+approval: put `output.satisfied == true` (the loop's pass flag) — or rely on
+`require_pass` — on the edge from the fix→review loop into the PR step. The `git_pr`
+node's **`open:true`** then actually opens the PR on the remote; because the
+incoming edge only fires on a passing review, the PR opens automatically *and only*
+when the bar is cleared. `open` defaults to `false` (draft-only), so this is per-step
+opt-in. The bundled `write-tests` and `implement-feature` templates wire exactly
+this (their old `human_approval` nodes were removed — the review is the approval);
+`po-lifecycle` is unchanged and still uses `human_approval`.
 
 ### Branching & loops in practice
 - **`condition` + edge conditions** are the if/else primitive: a `condition` node
@@ -376,6 +416,30 @@ which the chat message doesn't carry — either run those templates from the UI
 **Run…** editor (it pre-fills `repo_id`/`base`/`goals`) or have the first
 "prepare relevant info" node resolve the repo from `working_directory`.
 
+**Live progress (streamed while the run executes).** A run started from a chat
+**streams brief, well-formatted progress lines back into the same thread** as it
+goes (Slack/Telegram). A single pump task posts them in order, so the engine never
+blocks on chat latency:
+
+- a **run-start** line — `🚀 <name> started — N step(s) queued.` (plus `Goals: …`
+  when the trigger carried goals);
+- per **meaningful** step, `▶ <step> started` then `✅ <step> done (<dur>)` with a
+  short summary of the work product (or `❌ <step> failed — <err>` on failure);
+- for the **fix→review loop**: a `🔁 Iteration N/M` header, the inner sub-steps as
+  `› ▶ …` / `› ✅ …` / `› ❌ …`, and a review block
+  `🔍 Review #N done — score X/100 (pass ≥ T) — ✅ passed` / `⚠️ below threshold`
+  followed by a bulleted findings list (or *"Findings: none 🎉"*).
+
+Structural/plumbing nodes (`log`, `transform`, `delay`, `condition`,
+`manual_trigger`) are intentionally **not** announced, to keep the thread readable;
+`review_run` is also excluded from the generic ▶/✅ lines because it streams its own
+richer `🔍` block. All streamed lines are **flushed before the final `summary.md`**
+is delivered, and every line is redacted. Manual UI runs and webhook-only triggers
+**do not stream** (there is no chat target). The target is the trigger origin
+(`channel`/`chat`/`thread`), or an explicit `result_chat` (+ `result_channel` /
+`result_thread`) override; the integration token is resolved **per-workspace** (from
+the origin/trigger workspace — workflows themselves are global).
+
 **Result delivery (done/failed + summary).** When a run that was started from a
 chat **finishes**, the engine replies in the **same channel + thread** it was
 triggered from with a brief status (`✅/❌` + `N/M steps ok · failed · skipped`,
@@ -417,13 +481,18 @@ to create a workflow; the center is the canvas editor.
    - **Orchestrator flows** (`flow_templates`) exercising the wired nodes + control
      flow:
      - **`write-tests`** — *Write tests for a story*: prepare brief → write tests →
-       a `fix → review_run` **loop** (`until last.passed == true`) → `human_approval`
-       → `git_pr` draft.
+       a `fix → review_run` **loop** (`until last.passed == true`, lenses
+       `correctness-review`/`test-review`) → **`git_pr` with `open:true`**, reached
+       only by an edge gated on `output.satisfied == true` — so the PR **opens
+       automatically once the loop passes** (the review is the approval; the old
+       `human_approval` node was removed).
      - **`implement-feature`** — `product_analyze` → prepare → implement → the same
-       review loop → approval → PR draft.
-     - **`po-lifecycle`** — *PO discovery → RFC/Jira*: discovery draft → `canvas`
-       diagram → approval → `product_rewrite` → approval → `product_publish`
-       (RFC, dry-run). They expect the run **input** to carry `repo_id` (and
+       review loop (lenses `correctness-review`/`security-review`) → **auto-opened
+       `git_pr`** on pass (same `output.satisfied == true` edge gate; no approval
+       node).
+     - **`po-lifecycle`** — *PO discovery → RFC/Jira* (**unchanged**): discovery draft
+       → `canvas` diagram → `human_approval` → `product_rewrite` → `human_approval`
+       → `product_publish` (RFC, dry-run). They expect the run **input** to carry `repo_id` (and
        optionally `base`, `story_id`, `goals`) — a Slack `Action: Workflow` message
        or the Run dialog supplies these.
    - **Game pipelines** (`game-slots` / `game-crash` / `game-scratch`), each chaining
@@ -652,8 +721,9 @@ are **append-only** — never edit or renumber an existing one.
   `transform`, `delay`, `log`, `db_query` (read-only), `broker_peek`,
   `channel_notify`, `budget_gate`, `human_approval`, `condition`, `loop`,
   `swarm_task`, `api_run`, and the **now-wired** `product_analyze`,
-  `product_rewrite`, `product_plan`, `product_publish`, `review_run` (0–100 scored),
-  `canvas`, `git_pr` (PR draft).
+  `product_rewrite`, `product_plan`, `product_publish`, `review_run` (multi-provider
+  × multi-lens PR-review engine, 0–100 scored, `require_pass`), `canvas`, `git_pr`
+  (PR draft, or `open:true` to auto-open on a passing review).
 - **Visible sessions per step** (openable while running) and a **Proof Pack** linked
   to each completed run.
 - **Versioning:** graph snapshot history with view + restore (append-only).
@@ -661,7 +731,13 @@ are **append-only** — never edit or renumber an existing one.
 - **All three trigger kinds fire in the running daemon** — webhook, event, **and
   schedule** (spawned at boot; cron + IANA timezone via the shared cadence engine).
 - A **chat trigger** (`Action: Workflow` Slack/Telegram/webhook message) starts a
-  run by name. **Convert** a scheduled task into a workflow + schedule trigger.
+  run by name, and the run **streams live per-step progress** (▶/✅/❌ + a `🔍`
+  review block) back into the same thread before the final `summary.md`. **Convert**
+  a scheduled task into a workflow + schedule trigger.
+- **Per-step skills** (`skill`/`skills` on an `agent_prompt` step inline a skill body
+  ahead of the prompt) and **threshold-gated auto-PR** (`review_run` →
+  `git_pr open:true` via an `output.satisfied == true` edge — the review is the
+  approval, no human gate).
 - Human-approval pause/resume.
 - API-client automations: ordered request runner with assertions + extracts.
 
@@ -671,8 +747,10 @@ are **append-only** — never edit or renumber an existing one.
   a real external game engine + certifier (see footnote ¹ in §4).
 - **`product_publish` defaults to a dry run** — a real RFC/Jira publish requires
   `dry_run:false` + an Atlassian `account_id` (and `project_key`/`space_key`).
-- **`git_pr` only drafts** (`opened:false`) — opening the PR is left to the Git tab
-  (engine auto-open is deliberately gated).
+- **`git_pr` defaults to draft-only** (`opened:false`) — set **`open:true`** (gate it
+  on the incoming edge so it only fires when the review passed) to actually open the
+  PR on the remote; the `write-tests`/`implement-feature` templates do exactly this
+  on a passing fix→review loop.
 - **Wired nodes have prerequisites** — `db_query`/`broker_peek`/`swarm_task`/
   `review_run`/`git_pr`/`product_*` need their backing connection/cluster/swarm/repo/
   story set up, or the node errors (and downstream active-path nodes skip).

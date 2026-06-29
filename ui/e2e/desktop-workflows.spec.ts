@@ -260,6 +260,74 @@ test('orchestrator example templates are offered', async () => {
   expect(ids).toContain('po-lifecycle');
 });
 
+test('code templates auto-open the PR on review pass (no human approval)', async () => {
+  const tmpls = await (await ctx.get(`${base}${V1}/workflows/templates`)).json();
+  for (const id of ['write-tests', 'implement-feature']) {
+    const t = tmpls.find((x: any) => x.id === id);
+    expect(t, `template ${id}`).toBeTruthy();
+    const kinds = t.graph.nodes.map((n: any) => n.kind);
+    // The manual-approval step was dropped — the review passing IS the approval.
+    expect(kinds, `${id} has no human_approval`).not.toContain('human_approval');
+    // git_pr opens the real PR (per-step opt-in).
+    const pr = t.graph.nodes.find((n: any) => n.kind === 'git_pr');
+    expect(pr, `${id} has a git_pr`).toBeTruthy();
+    expect(pr.params.open, `${id} PR opens`).toBe(true);
+    // The edge into the PR step is GATED on the review having passed.
+    const prEdge = t.graph.edges.find((e: any) => e.target === pr.id);
+    expect(prEdge?.condition, `${id} PR edge is conditional`).toBeTruthy();
+    // The fix→review loop carries reviewer lenses (multi-agent review).
+    const loop = t.graph.nodes.find((n: any) => n.kind === 'loop');
+    const review = loop.params.steps.find((s: any) => s.kind === 'review_run');
+    expect(Array.isArray(review.params.lenses), `${id} review has lenses`).toBeTruthy();
+    expect(review.params.lenses.length).toBeGreaterThan(0);
+  }
+});
+
+test('per-step skills + multi-provider/lens review params round-trip', async () => {
+  // The new node params persist through save → reload (the contract the engine
+  // reads at run time: skills injection, multi-provider/lens review, auto-PR gate).
+  const wfId = await createWorkflow(
+    'E2E Step Skills',
+    [
+      node('trigger', 'manual_trigger'),
+      {
+        id: 'impl',
+        kind: 'agent_prompt',
+        name: 'impl',
+        x: 0,
+        y: 0,
+        params: { prompt: 'implement', skills: ['golang-feature-implementation'] },
+      },
+      {
+        id: 'rev',
+        kind: 'review_run',
+        name: 'rev',
+        x: 0,
+        y: 0,
+        params: {
+          repo_id: 'r',
+          threshold: 85,
+          providers: ['claude', 'codex'],
+          lenses: ['correctness-review', 'security-review'],
+          require_pass: true,
+        },
+      },
+      { id: 'pr', kind: 'git_pr', name: 'pr', x: 0, y: 0, params: { open: true } },
+    ],
+    [edge('trigger', 'impl'), edge('impl', 'rev'), edge('rev', 'pr', 'output.passed == true')],
+  );
+  const wf = await (await ctx.get(`${base}${V1}/workflows/${wfId}`)).json();
+  const byId = (id: string) => wf.graph.nodes.find((n: any) => n.id === id);
+  expect(byId('impl').params.skills).toEqual(['golang-feature-implementation']);
+  expect(byId('rev').params.providers).toEqual(['claude', 'codex']);
+  expect(byId('rev').params.lenses).toEqual(['correctness-review', 'security-review']);
+  expect(byId('rev').params.threshold).toBe(85);
+  expect(byId('rev').params.require_pass).toBe(true);
+  expect(byId('pr').params.open).toBe(true);
+  const prEdge = wf.graph.edges.find((e: any) => e.target === 'pr');
+  expect(prEdge.condition).toBe('output.passed == true');
+});
+
 // --- Desktop UI smoke -------------------------------------------------------
 
 test.describe('workflows page (desktop)', () => {

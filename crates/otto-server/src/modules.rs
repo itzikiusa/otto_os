@@ -1689,6 +1689,7 @@ async fn run_review(
     repo_id: Id,
     pr_number: u64,
     branches: Option<ReviewBranches>,
+    cfg_override: Option<ReviewConfig>,
 ) {
     let result = run_review_core(
         &ctx,
@@ -1701,6 +1702,7 @@ async fn run_review(
         &repo_id,
         pr_number,
         branches.as_ref(),
+        cfg_override,
     )
     .await;
     match result {
@@ -1753,6 +1755,7 @@ async fn run_review_core(
     repo_id: &Id,
     pr_number: u64,
     branches: Option<&ReviewBranches>,
+    cfg_override: Option<ReviewConfig>,
 ) -> Result<()> {
     let jira_ctx = jira_context.unwrap_or_default();
     // Build the optional free-text guidance block (prepended to every agent
@@ -1786,8 +1789,12 @@ async fn run_review_core(
         _ => String::new(),
     };
 
-    // 1. Load config (or use default).
-    let cfg = load_review_config(ctx).await;
+    // 1. Load config: a per-call override (e.g. a workflow `review_run` step that
+    //    sets its own providers + lenses) wins; otherwise the stored/default config.
+    let cfg = match cfg_override {
+        Some(c) => c,
+        None => load_review_config(ctx).await,
+    };
 
     // 2. Expand agent×provider pairs.
     fn effective_providers(a: &ReviewAgentCfg) -> Vec<String> {
@@ -2254,6 +2261,121 @@ pub(crate) async fn review_findings_counts(ctx: &ServerCtx, review_id: &Id) -> (
     (total, open, blocker)
 }
 
+/// Short, human-facing one-liners for a review's OPEN findings (severity dot + a
+/// truncated first line + path:line), highest-severity first, capped at `max`.
+/// Used to stream a review step's findings into a chat thread.
+pub(crate) async fn review_finding_briefs(ctx: &ServerCtx, review_id: &Id, max: usize) -> Vec<String> {
+    let all = ctx
+        .findings_store
+        .list_for_review(review_id)
+        .await
+        .unwrap_or_default();
+    let is_open = |f: &otto_state::ReviewFindingRow| {
+        matches!(
+            f.state,
+            otto_state::FindingState::Open | otto_state::FindingState::Regressed
+        )
+    };
+    let sev_rank = |s: &str| match s {
+        "bug" => 0,
+        "warn" => 1,
+        _ => 2,
+    };
+    let mut open: Vec<&otto_state::ReviewFindingRow> = all.iter().filter(|f| is_open(f)).collect();
+    open.sort_by_key(|f| sev_rank(&f.severity));
+    open.into_iter()
+        .take(max)
+        .map(|f| {
+            let sev = match f.severity.as_str() {
+                "bug" => "🔴",
+                "warn" => "🟡",
+                _ => "🔵",
+            };
+            let first = f.body.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            let body = if first.chars().count() > 140 {
+                format!("{}…", first.chars().take(140).collect::<String>())
+            } else {
+                first.to_string()
+            };
+            match &f.path {
+                Some(p) if !p.is_empty() => {
+                    let loc = f.line.map(|l| format!(":{l}")).unwrap_or_default();
+                    format!("{sev} {body} (`{p}{loc}`)")
+                }
+                _ => format!("{sev} {body}"),
+            }
+        })
+        .collect()
+}
+
+/// Resolve the global default reviewer provider (the `default_provider` setting,
+/// else "claude"). Mirrors [`load_review_config`]'s provider resolution.
+pub(crate) async fn default_review_provider(ctx: &ServerCtx) -> String {
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
+        global_default.as_ref(),
+    )])
+}
+
+/// Prettify a lens skill name for display: "correctness-review" → "Correctness
+/// review", "test_review" → "Test review".
+fn title_case_lens(s: &str) -> String {
+    let spaced = s.replace(['-', '_'], " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Build a [`ReviewConfig`] for a workflow `review_run` step from its declared
+/// providers + lenses, reusing the same reviewer/summarizer prompts as the
+/// default PR-review config — so a workflow review fans out exactly like a PR
+/// review (multi-provider × multi-lens agents, one summarizer that consolidates +
+/// scores the findings). `providers` empty → the resolved global default;
+/// `lenses` empty → the two default lenses (correctness + security) retargeted to
+/// `providers`.
+pub(crate) fn workflow_review_config(
+    default_provider: &str,
+    providers: &[String],
+    lenses: &[String],
+) -> ReviewConfig {
+    let mut base = default_review_config(default_provider);
+    let provs: Vec<String> = if providers.is_empty() {
+        vec![default_provider.to_string()]
+    } else {
+        providers.to_vec()
+    };
+    if lenses.is_empty() {
+        for a in base.agents.iter_mut() {
+            a.provider = provs[0].clone();
+            a.providers = provs.clone();
+        }
+    } else {
+        let review_prompt = "You are reviewing a pull request diff. Output ONLY a JSON array \
+             (no prose, no markdown fence) of objects \
+             {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\"body\":string}. \
+             Review through your lens — the skill prepended above defines what to look for. Open and \
+             read the real files around you to verify each finding before reporting it.";
+        base.agents = lenses
+            .iter()
+            .map(|lens| ReviewAgentCfg {
+                name: title_case_lens(lens),
+                provider: provs[0].clone(),
+                providers: provs.clone(),
+                model: String::new(),
+                prompt: review_prompt.to_string(),
+                skill: lens.clone(),
+            })
+            .collect();
+    }
+    base
+}
+
 /// Build/update the review's proof pack with a `review` artifact whose status is
 /// Failed when unresolved findings remain, else Passed. Drives the
 /// `review_unresolved` badge. Best-effort.
@@ -2437,6 +2559,7 @@ async fn run_pr_review_inner(
         repo_id,
         pr_number,
         branches.as_ref(),
+        None,
     )
     .await;
 
@@ -2922,6 +3045,7 @@ pub(crate) async fn run_review_for_branch(
     repo_id: &Id,
     worktree_path: &str,
     base_commit: &str,
+    cfg_override: Option<ReviewConfig>,
 ) -> Result<Id> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
@@ -2964,8 +3088,11 @@ pub(crate) async fn run_review_for_branch(
             .filter(|c| !c.is_empty())
             .map(|source| ReviewBranches { source, dest: String::new() });
         tokio::spawn(async move {
-            run_review(ctx_bg, rid, wt, diff_text, None, None, workspace, repo_id_bg, 0, branches)
-                .await;
+            run_review(
+                ctx_bg, rid, wt, diff_text, None, None, workspace, repo_id_bg, 0, branches,
+                cfg_override,
+            )
+            .await;
         });
     }
     Ok(review_id)
@@ -3660,7 +3787,7 @@ async fn start_local_review(
             // accommodates pr 0).
             run_review(
                 ctx_bg, review_id, repo_path, diff_text, None, None, workspace, repo_id_bg, 0,
-                local_branches,
+                local_branches, None,
             )
             .await;
         });

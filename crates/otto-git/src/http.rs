@@ -1412,6 +1412,25 @@ async fn pr_create<S: GitCtx>(
     Ok(Json(summary))
 }
 
+/// Open a PR for `repo` on behalf of `user` **in-process** — the same path as the
+/// `POST /repos/{id}/pr` route (proof gate via `check_pr_allowed`, provider
+/// resolution, create, then the `after_pr_created` Proof-Packs hook), without
+/// going through HTTP. Exposed so the workflow engine's `git_pr` node can open a
+/// PR once a review step has passed.
+pub async fn create_pr_for_repo<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    repo: &Repo,
+    req: &CreatePrReq,
+) -> Result<PrSummary> {
+    s.check_pr_allowed(&repo.workspace_id, req).await?;
+    let (provider, remote) = provider_ctx(s, user, repo).await?;
+    let summary = provider.create_pr(&remote, req).await?;
+    let ci = provider.ci_status(&remote, summary.number).await;
+    s.after_pr_created(repo, summary.number, req, &ci).await;
+    Ok(summary)
+}
+
 async fn pr_detail<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,

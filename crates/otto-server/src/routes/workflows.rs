@@ -559,6 +559,15 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
         target: t.into(),
         condition: None,
     };
+    // A conditional edge: the target only runs when `cond` holds against the
+    // source's output (ctx = { output, input, node, run }). Used to gate the PR
+    // step on the review having passed.
+    let edge_if = |s: &str, t: &str, cond: &str| WorkflowEdge {
+        id: format!("{s}-{t}"),
+        source: s.into(),
+        target: t.into(),
+        condition: Some(cond.into()),
+    };
     let prepare = |goal: &str| {
         node(
             "prepare",
@@ -574,8 +583,11 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
             ) }),
         )
     };
-    // Loop body: fix → review (scored, goals-aware) until score ≥ threshold.
-    let fix_review_loop = |max: u64, threshold: u64| {
+    // Loop body: fix → multi-agent review (scored by the summarizer, goals-aware)
+    // until the score clears the threshold. `lenses` configures the reviewer
+    // agents (one per lens skill); leave providers default. The fix step can take
+    // its own implementation skill too.
+    let fix_review_loop = |max: u64, threshold: u64, lenses: serde_json::Value| {
         node(
             "iterate",
             "loop",
@@ -590,7 +602,8 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                                    tests pass while satisfying the goals. If there are no findings \
                                    yet, do the initial implementation."
                     }},
-                    { "kind": "review_run", "name": "review", "params": { "threshold": threshold } }
+                    { "kind": "review_run", "name": "review",
+                      "params": { "threshold": threshold, "lenses": lenses } }
                 ]
             }),
         )
@@ -601,9 +614,10 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
         WorkflowTemplate {
             id: "write-tests".into(),
             name: "Write tests for a story".into(),
-            description: "Read the story & search references → write tests → review-iterate until \
-                          the score passes the threshold → human approval → draft PR. Provide \
-                          repo_id (and base) in the run input."
+            description: "Read the story & search references → write tests → multi-agent \
+                          review-iterate until the score passes the threshold → open the PR \
+                          automatically on pass (the review IS the approval). Provide repo_id \
+                          (and base) in the run input."
                 .into(),
             icon: "check-square".into(),
             graph: WorkflowGraph {
@@ -614,18 +628,15 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                         "prompt": "Using the brief, implement comprehensive tests (happy path, \
                                    meaningful validations, realistic errors). Run the suite and make them pass."
                     })),
-                    fix_review_loop(3, 80),
-                    node("approve", "human_approval", "Approve tests", 1200.0, json!({
-                        "prompt": "Review the generated tests before opening a PR."
-                    })),
-                    node("pr", "git_pr", "Draft PR", 1500.0, Value::Null),
+                    fix_review_loop(3, 80, json!(["correctness-review", "test-review"])),
+                    node("pr", "git_pr", "Open PR (on pass)", 1300.0, json!({ "open": true })),
                 ],
                 edges: vec![
                     edge("trigger", "prepare"),
                     edge("prepare", "implement"),
                     edge("implement", "iterate"),
-                    edge("iterate", "approve"),
-                    edge("approve", "pr"),
+                    // Open the PR only when the fix→review loop passed.
+                    edge_if("iterate", "pr", "output.satisfied == true"),
                 ],
             },
         },
@@ -633,9 +644,9 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
         WorkflowTemplate {
             id: "implement-feature".into(),
             name: "Implement a feature from a story".into(),
-            description: "Analyze the story → search references → implement → tests → \
-                          review-iterate until passing → human approval → draft PR. Provide \
-                          repo_id and story_id in the run input."
+            description: "Analyze the story → search references → implement → tests → multi-agent \
+                          review-iterate until passing → open the PR automatically on pass (the \
+                          review IS the approval). Provide repo_id and story_id in the run input."
                 .into(),
             icon: "command".into(),
             graph: WorkflowGraph {
@@ -647,19 +658,16 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                         "prompt": "Using the analysis + brief, implement the feature and its tests. \
                                    Run the suite and make it pass."
                     })),
-                    fix_review_loop(4, 80),
-                    node("approve", "human_approval", "Approve", 1500.0, json!({
-                        "prompt": "Review the implementation before opening a PR."
-                    })),
-                    node("pr", "git_pr", "Draft PR", 1800.0, Value::Null),
+                    fix_review_loop(4, 80, json!(["correctness-review", "security-review"])),
+                    node("pr", "git_pr", "Open PR (on pass)", 1600.0, json!({ "open": true })),
                 ],
                 edges: vec![
                     edge("trigger", "analyze"),
                     edge("analyze", "prepare"),
                     edge("prepare", "implement"),
                     edge("implement", "iterate"),
-                    edge("iterate", "approve"),
-                    edge("approve", "pr"),
+                    // Open the PR only when the fix→review loop passed.
+                    edge_if("iterate", "pr", "output.satisfied == true"),
                 ],
             },
         },

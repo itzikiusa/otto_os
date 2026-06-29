@@ -63,6 +63,236 @@ fn emit_run_updated(ctx: &ServerCtx, workspace_id: &Id, run_id: &Id, status: &st
     }
 }
 
+// ---------------------------------------------------------------------------
+// Live progress streaming (Slack/Telegram thread the run was triggered from)
+// ---------------------------------------------------------------------------
+
+/// A best-effort sink for human-facing progress lines streamed back to the chat
+/// thread that triggered the run. Cloneable + cheap; a *disabled* sink (manual UI
+/// run, or webhook-only trigger) silently drops everything. Messages are sent
+/// non-blocking over a channel and posted, in order, by a single pump task so the
+/// engine never blocks on Slack/Telegram latency.
+#[derive(Clone)]
+struct ProgressSink {
+    tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+}
+
+impl ProgressSink {
+    fn disabled() -> Self {
+        Self { tx: None }
+    }
+    /// Queue a progress line (no-op when disabled).
+    fn post(&self, msg: impl Into<String>) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(msg.into());
+        }
+    }
+    fn enabled(&self) -> bool {
+        self.tx.is_some()
+    }
+}
+
+/// Where a run reports back to: the chat integration + channel/thread the trigger
+/// arrived on. Resolved once from the run input.
+struct ChatTarget {
+    /// Workspace whose integration received the trigger (workflows are global, so
+    /// this may differ from the workflow's own workspace).
+    ws: String,
+    channel: Channel,
+    chat: String,
+    thread: Option<String>,
+}
+
+/// Resolve the chat target for live progress + result delivery from the run input.
+/// Honors an explicit `result_chat`(+`result_channel`/`result_thread`) override,
+/// else the incoming-hook origin (`channel`/`chat`/`thread`). Returns `None` for a
+/// manual UI run or a webhook-only trigger (nothing to stream to).
+fn resolve_chat_target(workflow: &Workflow, input: &Value) -> Option<ChatTarget> {
+    let obj = input.as_object()?;
+    let str_at = |k: &str| obj.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let ws = str_at("origin_workspace_id")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| workflow.workspace_id.clone());
+    let (channel, chat, thread) = match str_at("result_chat") {
+        Some(c) => (
+            str_at("result_channel").or_else(|| str_at("channel")),
+            Some(c),
+            str_at("result_thread"),
+        ),
+        None => (str_at("channel"), str_at("chat"), str_at("thread")),
+    };
+    let channel = match channel {
+        Some("slack") => Channel::Slack,
+        Some("telegram") => Channel::Telegram,
+        _ => return None,
+    };
+    Some(ChatTarget {
+        ws,
+        channel,
+        chat: chat?.to_string(),
+        thread: thread.map(str::to_string),
+    })
+}
+
+/// Spawn the progress pump: a single task that owns the receiver + resolved
+/// integration and posts each queued line, in order, to the chat thread
+/// (redacted, best-effort). Returns the sink (held by `run_workflow`, threaded
+/// into nodes) and the task handle (awaited at run end to flush before the final
+/// summary is delivered). Drop the sink to close the channel and end the pump.
+fn spawn_progress_pump(ctx: ServerCtx, target: ChatTarget) -> (ProgressSink, tokio::task::JoinHandle<()>) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let handle = tokio::spawn(async move {
+        let integ = match otto_state::IntegrationsRepo::new(ctx.pool.clone())
+            .get(&target.ws, target.channel)
+            .await
+        {
+            Ok(Some(i)) => i,
+            _ => {
+                // No integration to post to — drain so senders don't block on a
+                // bounded buffer (it's unbounded, but keep the task tidy).
+                while rx.recv().await.is_some() {}
+                return;
+            }
+        };
+        while let Some(msg) = rx.recv().await {
+            let msg = otto_core::redact::redact_text(&msg).value;
+            let _ = otto_channels::improve_notify::send_to(
+                &ctx.secrets,
+                &integ,
+                &target.chat,
+                target.thread.as_deref(),
+                &msg,
+            )
+            .await;
+        }
+    });
+    (ProgressSink { tx: Some(tx) }, handle)
+}
+
+/// A label for a node in progress messages: its name, else its kind.
+fn node_label(node: &WorkflowNode) -> String {
+    if node.name.trim().is_empty() {
+        node.kind.clone()
+    } else {
+        node.name.clone()
+    }
+}
+
+/// Whether a node kind is worth a "started/finished" line in the chat thread.
+/// Structural/plumbing kinds (log/transform/delay/condition/manual_trigger) are
+/// skipped so a long pipeline doesn't drown the thread — the user asked for the
+/// meaningful steps, "without it being too overwhelming". `review_run` is excluded
+/// here because it streams its OWN richer block (started → score → findings).
+fn is_reportable(kind: &str) -> bool {
+    !matches!(
+        kind,
+        "manual_trigger" | "log" | "transform" | "delay" | "condition" | "review_run"
+    )
+}
+
+/// Collapse runs of whitespace/newlines into single spaces and trim.
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Truncate to at most `max` chars, preferring to cut at the last sentence
+/// terminator so the snippet reads as whole sentences (the user wants brief,
+/// well-formatted summaries — ≤ a short paragraph). Appends `…` if cut.
+fn truncate_sentences(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    // Prefer the last sentence boundary in the kept window (only if it keeps a
+    // reasonable amount, so we don't truncate to almost nothing).
+    if let Some(cut) = head.rfind(['.', '!', '?', '\n']) {
+        if cut >= max / 2 {
+            return format!("{}…", head[..=cut].trim());
+        }
+    }
+    format!("{}…", head.trim())
+}
+
+/// A short, chat-friendly summary of a node's product (agent reply / analysis /
+/// plan / summary text), whitespace-collapsed and truncated to a brief block.
+/// Returns `None` for purely structural outputs (nothing worth posting).
+fn brief_summary(output: &Value) -> Option<String> {
+    let raw = ["reply", "analysis", "plan_md", "body_md", "summary", "note"]
+        .iter()
+        .find_map(|k| output.get(*k).and_then(Value::as_str))
+        .map(str::to_string)?;
+    let s = truncate_sentences(&collapse_ws(&raw), 700);
+    if s.is_empty() || s == "…" {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Collect skill names a node wants injected: `skill` (string) and/or `skills`
+/// (array of strings), de-duplicated, in declared order.
+fn node_skill_names(params: &Value) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut push = |s: &str| {
+        let s = s.trim();
+        if !s.is_empty() && !out.iter().any(|x| x == s) {
+            out.push(s.to_string());
+        }
+    };
+    if let Some(s) = params.get("skill").and_then(Value::as_str) {
+        push(s);
+    }
+    for key in ["skills", "lenses"] {
+        if let Some(arr) = params.get(key).and_then(Value::as_array) {
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    push(s);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Prepend each resolved skill (body + references) ahead of `base`, in the same
+/// shape the review engine uses (`{skill}\n\n---\n\n{prompt}`). Lets any
+/// agent-backed step run a specific skill/method "via prompt".
+fn prepend_skills(ctx: &ServerCtx, params: &Value, base: &str) -> String {
+    let names = node_skill_names(params);
+    if names.is_empty() {
+        return base.to_string();
+    }
+    let mut out = String::new();
+    for name in &names {
+        let txt = crate::modules::resolve_skill_inline(&ctx.context_library, name);
+        if !txt.is_empty() {
+            out.push_str(&txt);
+            out.push_str("\n\n---\n\n");
+        }
+    }
+    out.push_str(base);
+    out
+}
+
+/// Parse a node param into a `Vec<String>` (accepts a JSON array of strings or a
+/// comma-separated string), trimmed + non-empty. Used for `providers`/`lenses`.
+fn param_str_list(params: &Value, key: &str) -> Vec<String> {
+    match params.get(key) {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Some(Value::String(s)) => s
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
+        _ => vec![],
+    }
+}
+
 /// Per-node turn budget for agent/LLM nodes.
 const NODE_AGENT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -120,7 +350,7 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
         n("manual_trigger", "Manual Trigger", "Triggers",
           "Starts the workflow and emits its input payload.", 0, 1, "#6b7bff", "play"),
         n("agent_prompt", "Agent", "AI",
-          "Run a headless agent turn with a prompt; outputs its reply.", 1, 1, "#d97cff", "command"),
+          "Run an agent turn with a prompt (params: provider, skill/skills to inject, cwd); outputs its reply.", 1, 1, "#d97cff", "command"),
         n("http_request", "HTTP Request", "Network",
           "Call an HTTP endpoint and capture the response.", 1, 1, "#46c0a0", "globe"),
         n("transform", "Set / Transform", "Data",
@@ -167,9 +397,9 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
           "Generate/update a Canvas scene (mermaid/excalidraw) from a prompt via an agent.", 1, 1, "#57b9ff", "image"),
         // review_run: wired to the local-review engine (run_review_for_branch).
         n("review_run", "Review Run", "AI",
-          "Run a code review on a repo branch; outputs findings + a 0–100 score.", 1, 1, "#c080ff", "search"),
+          "Multi-agent code review (params: providers[], lenses[]/skills[], threshold, require_pass) — fans out like PR review, summarizer scores; outputs findings + a 0–100 score + passed.", 1, 1, "#c080ff", "search"),
         n("git_pr", "Git PR", "Network",
-          "Draft (and optionally open) a pull request for a repo branch.", 1, 1, "#46c0a0", "git-pull-request"),
+          "Draft a PR; with open=true (gate the incoming edge on the review passing) opens it on the remote.", 1, 1, "#46c0a0", "git-pull-request"),
         // api_run: executes an HTTP request via the api-client engine so
         // environment variable substitution and auth apply.  Wired.
         n("api_run", "API Run", "Network",
@@ -366,6 +596,35 @@ pub async fn run_workflow(
         .await;
     emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", None);
 
+    // Live progress: if this run was triggered from a chat thread, stream brief
+    // per-step updates back to it. A single pump task posts them in order; manual
+    // UI / webhook-only runs get a disabled (no-op) sink.
+    let (progress, progress_pump) = match resolve_chat_target(&workflow, &input) {
+        Some(target) => {
+            let (sink, handle) = spawn_progress_pump(ctx.clone(), target);
+            (sink, Some(handle))
+        }
+        None => (ProgressSink::disabled(), None),
+    };
+    if progress.enabled() {
+        let goals: Vec<String> = input
+            .get("goals")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let goals_line = if goals.is_empty() {
+            String::new()
+        } else {
+            format!("\n*Goals:* {}", goals.join("; "))
+        };
+        progress.post(format!(
+            "🚀 *{}* started — {} step(s) queued.{}",
+            workflow.name,
+            order.len(),
+            goals_line
+        ));
+    }
+
     // Global wall clock: a run can't execute forever. Checked at each node
     // boundary; a node already executing finishes first (bounded per-node).
     let run_started = Instant::now();
@@ -481,6 +740,9 @@ pub async fn run_workflow(
             .await;
         // Signal node start so the UI can show live progress immediately.
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+        if progress.enabled() && is_reportable(&node.kind) {
+            progress.post(format!("▶ *{}* started", node_label(node)));
+        }
 
         let started = Instant::now();
         // Run the node, honoring its retry policy (default: a single attempt).
@@ -494,7 +756,8 @@ pub async fn run_workflow(
         let (sess_tx, mut sess_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let result = loop {
             attempt += 1;
-            let fut = execute_node(&ctx, &ws, &user, node, node_input.clone(), &run_id, &run_cwd, &sess_tx);
+            let fut =
+                execute_node(&ctx, &ws, &user, node, node_input.clone(), &run_id, &run_cwd, &sess_tx, &progress);
             tokio::pin!(fut);
             let attempt_res = loop {
                 tokio::select! {
@@ -561,6 +824,13 @@ pub async fn run_workflow(
                 harvest_session_ids(&out, &mut states[idx].sessions);
                 let elapsed = started.elapsed().as_millis() as u64;
                 states[idx].duration_ms = Some(elapsed);
+                if progress.enabled() && is_reportable(&node.kind) {
+                    let dur = format!("{:.1}s", elapsed as f64 / 1000.0);
+                    match brief_summary(&out) {
+                        Some(s) => progress.post(format!("✅ *{}* done ({dur})\n{s}", node_label(node))),
+                        None => progress.post(format!("✅ *{}* done ({dur})", node_label(node))),
+                    }
+                }
                 // Persist to the node cache for future re-runs.
                 let _ = repo
                     .set_cached_output(&workflow.id, &node_id, &params_hash, &input_hash, &out)
@@ -576,6 +846,9 @@ pub async fn run_workflow(
                 states[idx].logs = elogs;
                 states[idx].attempts = Some(attempt);
                 states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
+                if progress.enabled() && is_reportable(&node.kind) {
+                    progress.post(format!("❌ *{}* failed — {}", node_label(node), truncate(&e.to_string(), 200)));
+                }
                 errored.insert(node_id.clone());
             }
         }
@@ -584,6 +857,13 @@ pub async fn run_workflow(
             .await;
         // Signal node finish so the inspector can update without waiting for the next poll.
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+    }
+
+    // Flush all streamed progress lines (close the channel, await the pump) so the
+    // per-step updates land in the thread BEFORE the final summary is delivered.
+    drop(progress);
+    if let Some(h) = progress_pump {
+        let _ = h.await;
     }
 
     if canceled {
@@ -975,6 +1255,7 @@ async fn execute_node(
     run_id: &Id,
     run_cwd: &str,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    progress: &ProgressSink,
 ) -> Result<(Value, Vec<String>)> {
     let p = &node.params;
     match node.kind.as_str() {
@@ -1021,7 +1302,13 @@ async fn execute_node(
             // Run as a real, openable session (reusing the shared session runner)
             // so the run view can watch/inspect it — not the headless PTY.
             let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
-            let full = format!("{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000));
+            // Inject any per-step skills (`skill`/`skills`) ahead of the prompt so
+            // the step runs a specific method "via prompt".
+            let full = prepend_skills(
+                ctx,
+                p,
+                &format!("{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)),
+            );
             let acwd = node_cwd(node, &input, run_cwd);
             let (reply, sid) =
                 run_node_agent(ctx, ws, user, node, provider, &full, &acwd, session_tx).await?;
@@ -1684,6 +1971,9 @@ async fn execute_node(
                         break;
                     }
                 }
+                if progress.enabled() {
+                    progress.post(format!("🔁 *Iteration {i}/{max_iter}*"));
+                }
                 // `thread` carries across iterations (so a fix step sees the prior
                 // review's findings) and updates after each step within an iteration.
                 let mut thread = last.clone();
@@ -1706,6 +1996,9 @@ async fn execute_node(
                     }
                     merged.insert("_iteration".into(), json!(i));
                     let step_input = Value::Object(merged);
+                    if progress.enabled() && is_reportable(&skind) {
+                        progress.post(format!("› ▶ {sname} started"));
+                    }
                     let sub = WorkflowNode {
                         id: format!("{}#{i}.{k}", node.id),
                         kind: skind.clone(),
@@ -1715,7 +2008,11 @@ async fn execute_node(
                         params: step.get("params").cloned().unwrap_or(Value::Null),
                         retry: step.get("retry").and_then(|r| serde_json::from_value(r.clone()).ok()),
                     };
-                    match Box::pin(execute_node(ctx, ws, user, &sub, step_input, run_id, run_cwd, session_tx)).await {
+                    match Box::pin(execute_node(
+                        ctx, ws, user, &sub, step_input, run_id, run_cwd, session_tx, progress,
+                    ))
+                    .await
+                    {
                         Ok((out, mut slogs)) => {
                             for l in slogs.drain(..) {
                                 logs.push(format!("  [{i}/{sname}] {l}"));
@@ -1723,9 +2020,18 @@ async fn execute_node(
                             step_outputs.insert(sname.clone(), out.clone());
                             last = out.clone();
                             thread = out;
+                            if progress.enabled() && is_reportable(&skind) {
+                                match brief_summary(&last) {
+                                    Some(s) => progress.post(format!("› ✅ {sname} done\n{s}")),
+                                    None => progress.post(format!("› ✅ {sname} done")),
+                                }
+                            }
                         }
                         Err(e) => {
                             logs.push(format!("  [{i}/{sname}] ✗ {e}"));
+                            if progress.enabled() && is_reportable(&skind) {
+                                progress.post(format!("› ❌ {sname} failed — {}", truncate(&e.to_string(), 200)));
+                            }
                             if !continue_on_error {
                                 return Err(otto_core::Error::Upstream(format!(
                                     "loop step '{sname}' failed at iteration {i}: {e}"
@@ -1763,6 +2069,22 @@ async fn execute_node(
             let threshold = p.get("threshold").and_then(Value::as_u64).unwrap_or(80) as i64;
             let await_done = p.get("await").and_then(Value::as_bool).unwrap_or(true);
             let timeout_s = p.get("timeout_s").and_then(Value::as_u64).unwrap_or(900).min(1800);
+            // Reviewer providers + lenses (skills) — drive the SAME multi-agent
+            // engine as PR review (multi-provider × multi-lens, one summarizer that
+            // consolidates + scores). Empty → the stored/default PR-review config.
+            let providers = param_str_list(p, "providers");
+            let lenses = {
+                let mut l = param_str_list(p, "lenses");
+                for s in param_str_list(p, "skills") {
+                    if !l.contains(&s) {
+                        l.push(s);
+                    }
+                }
+                l
+            };
+            // When set, the step itself FAILS if the score is below threshold — so a
+            // downstream "create PR" step is error-skipped unless the review passed.
+            let require_pass = p.get("require_pass").and_then(Value::as_bool).unwrap_or(false);
             let repo = ctx
                 .git_store
                 .get_repo(&repo_id)
@@ -1779,7 +2101,35 @@ async fn execute_node(
                 .or_else(|| input.get("base").and_then(Value::as_str))
                 .unwrap_or("main")
                 .to_string();
-            let review_id = crate::modules::run_review_for_branch(ctx, &repo_id, &worktree, &base).await?;
+            // Iteration label so a fix→review loop streams "Review #1, #2, …".
+            let iter_label = input
+                .get("_iteration")
+                .and_then(Value::as_u64)
+                .map(|n| format!("Review #{n}"))
+                .unwrap_or_else(|| "Review".to_string());
+            let cfg_override = if providers.is_empty() && lenses.is_empty() {
+                None
+            } else {
+                let default_provider = crate::modules::default_review_provider(ctx).await;
+                Some(crate::modules::workflow_review_config(&default_provider, &providers, &lenses))
+            };
+            if progress.enabled() {
+                let lens_txt = if lenses.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · lenses: {}", lenses.join(", "))
+                };
+                let prov_txt = if providers.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · providers: {}", providers.join(", "))
+                };
+                progress.post(format!(
+                    "🔍 *{iter_label}* started (pass ≥ {threshold}){lens_txt}{prov_txt}"
+                ));
+            }
+            let review_id =
+                crate::modules::run_review_for_branch(ctx, &repo_id, &worktree, &base, cfg_override).await?;
             let mut logs = vec![format!("review_run: started review {review_id} ({worktree} vs {base})")];
             let mut status = "running".to_string();
             if await_done {
@@ -1862,15 +2212,38 @@ async fn execute_node(
                 goals_score.map(|g| format!(", goals {g}")).unwrap_or_default(),
                 if passed { "passed" } else { "below threshold" }
             ));
-            Ok((
-                json!({
-                    "review_id": review_id, "status": status,
-                    "total": total, "open": open, "blocking": blocking, "advisory": advisory,
-                    "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
-                    "score": score, "threshold": threshold, "passed": passed,
-                }),
-                logs,
-            ))
+            // Stream the verdict + top findings to the chat thread.
+            let finding_briefs = crate::modules::review_finding_briefs(ctx, &review_id, 10).await;
+            if progress.enabled() {
+                let verdict = if passed { "✅ passed" } else { "⚠️ below threshold" };
+                let mut msg = format!(
+                    "🔍 *{iter_label}* done — score *{score}/100* (pass ≥ {threshold}) — {verdict}"
+                );
+                if finding_briefs.is_empty() {
+                    msg.push_str("\nFindings: none 🎉");
+                } else {
+                    msg.push_str(&format!("\nFindings ({open} open):"));
+                    for b in &finding_briefs {
+                        msg.push_str(&format!("\n • {b}"));
+                    }
+                }
+                progress.post(msg);
+            }
+            let out = json!({
+                "review_id": review_id, "status": status,
+                "total": total, "open": open, "blocking": blocking, "advisory": advisory,
+                "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
+                "score": score, "threshold": threshold, "passed": passed,
+                "findings": finding_briefs, "providers": providers, "lenses": lenses,
+            });
+            // `require_pass`: fail the step (so downstream gates error-skip) when the
+            // score didn't clear the bar. The verdict is already streamed above.
+            if require_pass && !passed {
+                return Err(otto_core::Error::Upstream(format!(
+                    "review_run: score {score} below required threshold {threshold} (require_pass)"
+                )));
+            }
+            Ok((out, logs))
         }
 
         // --- Product nodes (wired: real single-agent turn over story context) -
@@ -2059,18 +2432,50 @@ async fn execute_node(
                 .unwrap_or("main")
                 .to_string();
             let draft = crate::modules::draft_pr_core(ctx, &worktree, &base).await?;
-            Ok((
-                json!({
-                    "title": draft.title, "description": draft.description,
-                    "source_branch": draft.source_branch, "target_branch": draft.target_branch,
-                    "opened": false,
-                    "note": "Drafted. Open the PR from the Git tab (engine auto-open is gated).",
-                }),
-                vec![format!(
-                    "git_pr: drafted '{}' ({} → {})",
-                    draft.title, draft.source_branch, draft.target_branch
-                )],
-            ))
+            // `open: true` actually opens the PR on the remote (outward-facing,
+            // per-step opt-in). The control-flow edge into this node carries the
+            // gate (e.g. `input.passed`), so a not-passed review branch-skips it.
+            let open = p.get("open").and_then(Value::as_bool).unwrap_or(false);
+            if !open {
+                return Ok((
+                    json!({
+                        "title": draft.title, "description": draft.description,
+                        "source_branch": draft.source_branch, "target_branch": draft.target_branch,
+                        "opened": false,
+                        "note": "Drafted. Set open=true (gated on the review passing) to open it.",
+                    }),
+                    vec![format!(
+                        "git_pr: drafted '{}' ({} → {})",
+                        draft.title, draft.source_branch, draft.target_branch
+                    )],
+                ));
+            }
+            let req = otto_core::api::CreatePrReq {
+                title: draft.title.clone(),
+                description: draft.description.clone(),
+                source_branch: draft.source_branch.clone(),
+                target_branch: draft.target_branch.clone(),
+                // The review pass IS the approval gate here; the workflow's own
+                // proof pack is linked separately. Allow opening without a passed
+                // pack so the workflow isn't double-gated.
+                proof_pack_id: None,
+                allow_unproven: Some(true),
+            };
+            let auth = otto_core::auth::AuthUser(user.clone());
+            match otto_git::http::create_pr_for_repo(ctx, &auth, &repo, &req).await {
+                Ok(summary) => Ok((
+                    json!({
+                        "title": draft.title, "description": draft.description,
+                        "source_branch": draft.source_branch, "target_branch": draft.target_branch,
+                        "opened": true, "number": summary.number, "url": summary.url,
+                    }),
+                    vec![format!(
+                        "git_pr: opened PR #{} '{}' ({} → {})",
+                        summary.number, draft.title, draft.source_branch, draft.target_branch
+                    )],
+                )),
+                Err(e) => Err(otto_core::Error::Upstream(format!("git_pr: open failed: {e}"))),
+            }
         }
 
         other => Err(otto_core::Error::Invalid(format!("unknown node kind '{other}'"))),
@@ -2548,5 +2953,95 @@ mod tests {
         assert!(full.contains("## Steps"));
         assert!(full.contains("review_run"));
         assert!(full.contains("pack1"), "full summary names the proof pack");
+    }
+
+    #[test]
+    fn skill_names_parse_skill_and_skills_deduped() {
+        let p = json!({ "skill": "golang-feature-implementation",
+                        "skills": ["correctness-review", " test-review ", "correctness-review"] });
+        assert_eq!(
+            node_skill_names(&p),
+            vec!["golang-feature-implementation", "correctness-review", "test-review"]
+        );
+        assert!(node_skill_names(&json!({})).is_empty());
+        // `lenses` is also folded in (review nodes carry lenses).
+        assert_eq!(node_skill_names(&json!({ "lenses": ["security-review"] })), vec!["security-review"]);
+    }
+
+    #[test]
+    fn param_str_list_accepts_array_or_csv() {
+        assert_eq!(
+            param_str_list(&json!({ "providers": ["claude", "codex"] }), "providers"),
+            vec!["claude", "codex"]
+        );
+        assert_eq!(
+            param_str_list(&json!({ "providers": "claude, codex ,  " }), "providers"),
+            vec!["claude", "codex"]
+        );
+        assert!(param_str_list(&json!({}), "providers").is_empty());
+    }
+
+    #[test]
+    fn brief_summary_collapses_and_truncates() {
+        // Short reply passes through, whitespace-collapsed.
+        let s = brief_summary(&json!({ "reply": "Did   the\n\nthing." })).unwrap();
+        assert_eq!(s, "Did the thing.");
+        // Long text is cut to a sentence boundary with an ellipsis.
+        let long = "First sentence. ".repeat(80);
+        let out = brief_summary(&json!({ "reply": long })).unwrap();
+        assert!(out.chars().count() <= 701);
+        assert!(out.ends_with('…'));
+        // Nothing to summarize → None.
+        assert!(brief_summary(&json!({ "score": 5 })).is_none());
+    }
+
+    #[test]
+    fn reportable_skips_structural_and_review() {
+        assert!(is_reportable("agent_prompt"));
+        assert!(is_reportable("loop"));
+        assert!(is_reportable("git_pr"));
+        // review_run self-reports; structural kinds stay quiet.
+        assert!(!is_reportable("review_run"));
+        assert!(!is_reportable("log"));
+        assert!(!is_reportable("condition"));
+        assert!(!is_reportable("manual_trigger"));
+    }
+
+    #[test]
+    fn chat_target_resolves_origin_and_override() {
+        let wf = Workflow {
+            id: "w".into(),
+            workspace_id: "wf-ws".into(),
+            name: "x".into(),
+            description: String::new(),
+            graph: WorkflowGraph { nodes: vec![], edges: vec![] },
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
+        };
+        // Slack origin from a chat trigger.
+        let t = resolve_chat_target(
+            &wf,
+            &json!({ "channel": "slack", "chat": "C123", "thread": "169.1",
+                     "origin_workspace_id": "trigger-ws" }),
+        )
+        .expect("slack target");
+        assert!(matches!(t.channel, Channel::Slack));
+        assert_eq!(t.chat, "C123");
+        assert_eq!(t.thread.as_deref(), Some("169.1"));
+        assert_eq!(t.ws, "trigger-ws", "reports via the integration's workspace");
+        // Explicit override wins.
+        let t = resolve_chat_target(
+            &wf,
+            &json!({ "channel": "slack", "chat": "C1", "result_chat": "C2", "result_channel": "telegram" }),
+        )
+        .unwrap();
+        assert!(matches!(t.channel, Channel::Telegram));
+        assert_eq!(t.chat, "C2");
+        assert_eq!(t.ws, "wf-ws", "no origin_workspace_id → workflow's own ws");
+        // A manual UI run (no chat) → no target → disabled progress.
+        assert!(resolve_chat_target(&wf, &json!({ "repo_id": "r" })).is_none());
+        assert!(resolve_chat_target(&wf, &json!({ "channel": "webhook", "chat": "x" })).is_none());
     }
 }

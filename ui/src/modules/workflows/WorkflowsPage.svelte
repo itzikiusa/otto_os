@@ -477,6 +477,18 @@
     onParam(field, lines.length ? lines : undefined);
   }
 
+  /** A string[] param rendered comma-separated (e.g. skills, providers, lenses). */
+  function paramList(field: string): string {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    const v = p?.[field];
+    if (Array.isArray(v)) return v.filter((x) => typeof x === 'string').join(', ');
+    return typeof v === 'string' ? v : '';
+  }
+  function onParamList(field: string, raw: string): void {
+    const items = raw.split(',').map((s) => s.trim()).filter((s) => s !== '');
+    onParam(field, items.length ? items : undefined);
+  }
+
   // --- Per-node retry policy (writes node.retry, not params) ----------------
   function retryNum(field: 'max_attempts' | 'backoff_ms', def: number): number {
     const r = selectedNode?.retry;
@@ -882,6 +894,14 @@
                 value={paramStr('model')}
                 oninput={(e) => onParam('model', e.currentTarget.value)}
               />
+              <label for="np-skills">Skills (comma-separated)</label>
+              <input
+                id="np-skills"
+                type="text"
+                placeholder="e.g. golang-testing, golang-code-review"
+                value={paramList('skills')}
+                oninput={(e) => onParamList('skills', e.currentTarget.value)}
+              />
             {:else if selectedNode.kind === 'http_request'}
               <label for="np-method">Method</label>
               <select
@@ -1161,6 +1181,22 @@
                 value={paramNum('threshold', 80)}
                 oninput={(e) => onParam('threshold', Number(e.currentTarget.value))}
               />
+              <label for="np-providers">Reviewer providers (comma-separated, e.g. claude, codex)</label>
+              <input
+                id="np-providers"
+                type="text"
+                placeholder="claude, codex"
+                value={paramList('providers')}
+                oninput={(e) => onParamList('providers', e.currentTarget.value)}
+              />
+              <label for="np-lenses">Review lenses / skills (comma-separated, e.g. correctness-review, security-review)</label>
+              <input
+                id="np-lenses"
+                type="text"
+                placeholder="correctness-review, security-review"
+                value={paramList('lenses')}
+                oninput={(e) => onParamList('lenses', e.currentTarget.value)}
+              />
               <label for="np-goals">Goals (one per line, optional)</label>
               <textarea
                 id="np-goals"
@@ -1175,6 +1211,13 @@
                   checked={paramBool('await', true)}
                   onchange={(e) => onParam('await', e.currentTarget.checked)}
                 /> Wait for the review to finish
+              </label>
+              <label class="np-chk">
+                <input
+                  type="checkbox"
+                  checked={paramBool('require_pass')}
+                  onchange={(e) => onParam('require_pass', e.currentTarget.checked)}
+                /> Require pass (fail this step if below threshold)
               </label>
             {:else if selectedNode.kind === 'product_analyze' || selectedNode.kind === 'product_rewrite' || selectedNode.kind === 'product_plan'}
               <label for="np-story">Story ID</label>
@@ -1315,6 +1358,13 @@
                 value={paramStr('base')}
                 oninput={(e) => onParam('base', e.currentTarget.value)}
               />
+              <label class="np-chk">
+                <input
+                  type="checkbox"
+                  checked={paramBool('open')}
+                  onchange={(e) => onParam('open', e.currentTarget.checked)}
+                /> Open PR automatically on pass (gate the incoming edge on the review passing)
+              </label>
             {:else if selectedNode.kind !== 'manual_trigger' && selectedNode.kind !== 'log' && selectedNode.kind !== 'verifier'}
               <!-- Fallback raw-JSON editor for unrecognised or future node kinds -->
               <label for="np-raw">Params (JSON)</label>
