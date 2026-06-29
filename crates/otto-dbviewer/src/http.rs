@@ -177,6 +177,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/object", post(object_detail::<S>))
         .route("/connections/{id}/db/schema-graph", post(schema_graph::<S>))
         .route("/connections/{id}/db/query", post(run_query::<S>))
+        .route("/connections/{id}/db/mcp-query", post(mcp_query::<S>))
         .route("/connections/{id}/db/export", post(export_query::<S>))
         .route(
             "/connections/{id}/db/export-to-path",
@@ -358,6 +359,43 @@ async fn run_query<S: DbViewerCtx>(
         ctx.on_confirmed_write(&user, &conn, &req.statement);
     }
     Ok(Json(result).into_response())
+}
+
+/// A read-only DB query issued by an agent over MCP. The body is intentionally a
+/// narrow subset of [`QueryRequest`] — no `confirm_write`, no `explain`, no raw
+/// `params` — so an agent can only ever ask for read data.
+#[derive(Debug, Deserialize)]
+struct McpQueryReq {
+    /// The statement: SQL (MySQL/ClickHouse), a Redis command per line, or a Mongo
+    /// `find`/`aggregate` (read shapes only — writes are refused server-side).
+    statement: String,
+    /// Soft cap on returned rows; hard-clamped to `MCP_MAX_ROWS` server-side.
+    #[serde(default)]
+    max_rows: Option<usize>,
+    /// Optional node context (e.g. `db:<name>` / `kdb:<n>`) to scope execution.
+    #[serde(default)]
+    node: Option<String>,
+}
+
+/// Read-only DB query for an agent over MCP (used by `ottod mcp-tools`). Gated at
+/// `Viewer` (read-only; global connections: root only). Writes/DDL are refused by
+/// [`DbViewerService::run_read_only`] **before** any driver call, independent of
+/// the connection's write-guard — the security trust boundary for LLM-supplied SQL.
+async fn mcp_query<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<McpQueryReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
+    let qreq = QueryRequest {
+        statement: req.statement,
+        max_rows: req.max_rows,
+        node: req.node,
+        ..Default::default()
+    };
+    Ok(Json(ctx.db().run_read_only(&id, &user.id, &qreq).await?).into_response())
 }
 
 /// Cancel an in-flight query (server-side, engine-native). Gated at the SAME
