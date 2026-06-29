@@ -606,10 +606,17 @@ async fn after_transition(ctx: &ServerCtx, run_id: &Id, new_status: RunStatus) {
     emit(ctx, &run);
     project(ctx, &run).await;
 
-    // Live origin updates for the key milestones only (avoid chat spam).
+    // Live origin updates for the key milestones only (avoid chat spam), plus a
+    // webhook callback (no-op unless the run carries a callback_url).
     match new_status {
-        RunStatus::AwaitingApproval => post_origin(ctx, &run, &approval_prompt(&run)).await,
-        RunStatus::Completed => post_origin(ctx, &run, &completion_message(&run)).await,
+        RunStatus::AwaitingApproval => {
+            post_origin(ctx, &run, &approval_prompt(&run)).await;
+            crate::run_callback::deliver(ctx, &run).await;
+        }
+        RunStatus::Completed => {
+            post_origin(ctx, &run, &completion_message(&run)).await;
+            crate::run_callback::deliver(ctx, &run).await;
+        }
         _ => {}
     }
 }
@@ -631,6 +638,7 @@ async fn fail(ctx: &ServerCtx, run: &OttoRun, err: &str) {
         emit(ctx, &fresh);
         project(ctx, &fresh).await;
         post_origin(ctx, &fresh, &format!("❌ Run failed: {err}")).await;
+        crate::run_callback::deliver(ctx, &fresh).await;
     }
 }
 

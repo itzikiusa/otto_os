@@ -9,7 +9,8 @@ use chrono::Utc;
 
 use otto_core::api::{CreatePrReq, PrSummary};
 use otto_core::run::{
-    parse_source_ref, ApproveRunReq, LaunchRunReq, OttoRun, RunOrigin, RunStatus, SourceKind,
+    open_pr_block_reason, parse_decision, parse_source_ref, ApprovalDecision, ApproveRunReq,
+    LaunchRunReq, OpenPrBlock, OttoRun, RunOrigin, RunStatus, SourceKind,
 };
 use otto_core::{Error, Id, Result};
 use otto_state::runs::{NewRun, NewRunEvent, RunPatch};
@@ -159,10 +160,9 @@ pub async fn approve(
     if run.status != RunStatus::AwaitingApproval {
         return Err(Error::Invalid("run is not awaiting approval".into()));
     }
-    let decision = req.decision.trim().to_ascii_lowercase();
     let now = Utc::now().to_rfc3339();
-    match decision.as_str() {
-        "approve" | "approved" | "yes" => {
+    match parse_decision(&req.decision) {
+        Some(ApprovalDecision::Approve) => {
             if !ctx
                 .runs
                 .set_status_cas(run_id, RunStatus::AwaitingApproval, RunStatus::DraftingPr)
@@ -188,7 +188,7 @@ pub async fn approve(
                 run_engine::resume_after_approval(&ctx2, rid).await;
             });
         }
-        "reject" | "rejected" | "no" => {
+        Some(ApprovalDecision::Reject) => {
             if !ctx
                 .runs
                 .set_status_cas(run_id, RunStatus::AwaitingApproval, RunStatus::Rejected)
@@ -210,10 +210,11 @@ pub async fn approve(
             log_approval(ctx, &run, "rejected", req.note.as_deref()).await;
             if let Ok(fresh) = ctx.runs.get(run_id).await {
                 run_engine::project(ctx, &fresh).await;
+                crate::run_callback::deliver(ctx, &fresh).await;
             }
             crate::run_workspace::remove_worktree(ctx, &run).await;
         }
-        _ => {
+        None => {
             return Err(Error::Invalid(
                 "decision must be 'approve' or 'reject'".into(),
             ))
@@ -260,6 +261,7 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
         .await;
     if let Ok(fresh) = ctx.runs.get(run_id).await {
         run_engine::project(ctx, &fresh).await;
+        crate::run_callback::deliver(ctx, &fresh).await;
     }
     crate::run_workspace::remove_worktree(ctx, &run).await;
     ctx.runs.get(run_id).await
@@ -269,13 +271,20 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
 /// be passed/waived (mirrors the `gate_pr` posture) — an outward action.
 pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
     let run = ctx.runs.get(run_id).await?;
-    if run.approval_decision.as_deref() != Some("approved") {
-        return Err(Error::Invalid("run is not approved".into()));
-    }
-    if !matches!(run.proof_status.as_deref(), Some("passed") | Some("waived")) {
-        return Err(Error::Conflict(
-            "proof pack is not passed/waived — cannot open a PR".into(),
-        ));
+    // The single outward-facing gate: approved AND proof passed/waived AND a
+    // draft + repo to point at. Pure decision in otto-core; mapped to the same
+    // transport errors as before (proof → Conflict, the rest → Invalid).
+    if let Some(block) = open_pr_block_reason(
+        run.approval_decision.as_deref(),
+        run.proof_status.as_deref(),
+        run.pr_draft_json.is_some(),
+        run.repo_id.is_some(),
+    ) {
+        let msg = block.message().to_string();
+        return Err(match block {
+            OpenPrBlock::ProofNotPassed => Error::Conflict(msg),
+            _ => Error::Invalid(msg),
+        });
     }
     let draft_json = run
         .pr_draft_json
