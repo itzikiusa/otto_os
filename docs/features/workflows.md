@@ -376,6 +376,17 @@ which the chat message doesn't carry — either run those templates from the UI
 **Run…** editor (it pre-fills `repo_id`/`base`/`goals`) or have the first
 "prepare relevant info" node resolve the repo from `working_directory`.
 
+**Result delivery (done/failed + summary).** When a run that was started from a
+chat **finishes**, the engine replies in the **same channel + thread** it was
+triggered from with a brief status (`✅/❌` + `N/M steps ok · failed · skipped`,
+the review score if any, the proof-pack id) and attaches a full **`summary.md`**
+(every step, its status/duration/attempts, and a peek at each output). This is
+origin-driven (`deliver_run_result` reads `channel`/`chat`/`thread` from the run
+input), so manual UI runs don't post anything. To also POST the summary to an
+external system, include a `result_webhook` (or `callback_url`) in the run input —
+it's delivered through the SSRF-guarded webhook path. Cancellations and time-outs
+report too.
+
 ### Human approval is **not** a trigger
 The `human_approval` *node* pauses a run mid-flight (it writes `waiting_approval`
 to the run row); the operator resumes via `POST /workflow-runs/{id}/approve`. This

@@ -560,6 +560,7 @@ pub async fn run_workflow(
         let _ = repo
             .update_run(&run_id, RunStatus::Canceled, &states, Some("canceled"), true)
             .await;
+        deliver_run_result(&ctx, &workflow, &states, RunStatus::Canceled, None, &input).await;
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "canceled", None);
         return;
     }
@@ -578,6 +579,7 @@ pub async fn run_workflow(
         let _ = repo
             .update_run(&run_id, RunStatus::Error, &states, Some(&msg), true)
             .await;
+        deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, None, &input).await;
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None);
         return;
     }
@@ -598,9 +600,13 @@ pub async fn run_workflow(
         .await;
     // Proof pack: package the run's node outputs, human approvals, and budget
     // gate into inspectable evidence; link the pack to the run. Best-effort.
-    if let Some(pack_id) = assemble_workflow_proof(&ctx, &workflow, &run_id, &states).await {
-        let _ = repo.set_run_proof_pack(&run_id, &pack_id).await;
+    let pack_id = assemble_workflow_proof(&ctx, &workflow, &run_id, &states).await;
+    if let Some(pid) = &pack_id {
+        let _ = repo.set_run_proof_pack(&run_id, pid).await;
     }
+    // Report the result back to wherever the run was triggered from (Slack
+    // thread / webhook): a brief status + the full summary.md. Best-effort.
+    deliver_run_result(&ctx, &workflow, &states, final_status, pack_id.as_deref(), &input).await;
     // Final event: run complete.
     emit_run_updated(&ctx, &workflow.workspace_id, &run_id, final_status.as_str(), None);
 }
@@ -691,6 +697,180 @@ async fn assemble_workflow_proof(
 
     let _ = crate::proof::recompute_and_emit(ctx, &pack.id).await;
     Some(pack.id)
+}
+
+/// Build a `(brief, full_markdown)` summary of a finished run. `brief` is the
+/// short chat message; `full_markdown` is the attached `summary.md`.
+fn build_run_summary(
+    workflow: &Workflow,
+    states: &[NodeRunState],
+    status: RunStatus,
+    proof_pack_id: Option<&str>,
+) -> (String, String) {
+    let emoji = match status {
+        RunStatus::Success => "✅",
+        RunStatus::Error => "❌",
+        RunStatus::Canceled => "⏹",
+        _ => "•",
+    };
+    let total = states.len();
+    let ok = states.iter().filter(|s| s.status == NodeStatus::Success).count();
+    let failed = states.iter().filter(|s| s.status == NodeStatus::Error).count();
+    let skipped = states.iter().filter(|s| s.status == NodeStatus::Skipped).count();
+
+    // Pull a review score out of any node output that carries one.
+    let score = states.iter().find_map(|s| {
+        s.output
+            .as_ref()
+            .and_then(|o| o.get("score"))
+            .and_then(Value::as_i64)
+    });
+
+    let counts = format!("{ok}/{total} steps ok · {failed} failed · {skipped} skipped");
+    let score_line = score.map(|sc| format!("\n*Review score:* {sc}/100")).unwrap_or_default();
+    let proof_line = proof_pack_id
+        .map(|p| format!("\n*Proof pack:* `{p}`"))
+        .unwrap_or_default();
+
+    let brief = format!(
+        "{emoji} *{}* — {}\n{counts}{score_line}{proof_line}\n_Full summary attached (summary.md)._",
+        workflow.name,
+        status.as_str(),
+    );
+
+    // Full markdown: per-step detail.
+    let mut md = String::new();
+    md.push_str(&format!("# Workflow run — {}\n\n", workflow.name));
+    md.push_str(&format!("- **Status:** {} {}\n", emoji, status.as_str()));
+    md.push_str(&format!("- **Steps:** {counts}\n"));
+    if let Some(sc) = score {
+        md.push_str(&format!("- **Review score:** {sc}/100\n"));
+    }
+    if let Some(p) = proof_pack_id {
+        md.push_str(&format!("- **Proof pack:** `{p}`\n"));
+    }
+    md.push_str("\n## Steps\n\n");
+    for (i, s) in states.iter().enumerate() {
+        let kind = workflow
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.id == s.node_id)
+            .map(|n| {
+                if n.name.is_empty() {
+                    n.kind.clone()
+                } else {
+                    format!("{} ({})", n.name, n.kind)
+                }
+            })
+            .unwrap_or_else(|| s.node_id.clone());
+        let dur = s.duration_ms.map(|d| format!(" · {d}ms")).unwrap_or_default();
+        let attempts = match s.attempts {
+            Some(a) if a > 1 => format!(" · {a} attempts"),
+            _ => String::new(),
+        };
+        md.push_str(&format!(
+            "{}. **{kind}** — {}{dur}{attempts}\n",
+            i + 1,
+            s.status.as_str()
+        ));
+        if let Some(err) = &s.error {
+            md.push_str(&format!("   - error: {}\n", truncate(err, 300)));
+        }
+        // A short peek at the work product (agent reply or compact JSON).
+        if let Some(out) = &s.output {
+            let peek = out
+                .get("reply")
+                .and_then(Value::as_str)
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| out.to_string());
+            let peek = truncate(peek.trim(), 240);
+            if !peek.is_empty() && peek != "null" {
+                md.push_str(&format!("   - {}\n", peek.replace('\n', " ")));
+            }
+        }
+    }
+    (brief, md)
+}
+
+/// Deliver a finished run's result to wherever it was triggered from: the chat
+/// channel + thread that started it (Slack/Telegram — the main path), and/or a
+/// `result_webhook`/`callback_url` in the run input. A brief status message is
+/// posted with the full `summary.md` attached. Manual UI runs (no origin) no-op.
+/// Best-effort; redacted before it leaves the machine.
+async fn deliver_run_result(
+    ctx: &ServerCtx,
+    workflow: &Workflow,
+    states: &[NodeRunState],
+    status: RunStatus,
+    proof_pack_id: Option<&str>,
+    input: &Value,
+) {
+    let obj = match input.as_object() {
+        Some(o) => o,
+        None => return,
+    };
+    let channel = obj.get("channel").and_then(Value::as_str);
+    let chat = obj.get("chat").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let thread = obj.get("thread").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let webhook = obj
+        .get("result_webhook")
+        .or_else(|| obj.get("callback_url"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+
+    let has_chat = matches!(channel, Some("slack") | Some("telegram")) && chat.is_some();
+    if !has_chat && webhook.is_none() {
+        return; // no origin to report back to (e.g. a manual UI run)
+    }
+
+    let (brief, full) = build_run_summary(workflow, states, status, proof_pack_id);
+    let brief = otto_core::redact::redact_text(&brief).value;
+    let full = otto_core::redact::redact_text(&full).value;
+    let bytes = full.into_bytes();
+
+    // --- chat (Slack / Telegram) ---
+    if let (Some(ch), Some(chat)) = (channel, chat) {
+        let chan = match ch {
+            "slack" => Some(Channel::Slack),
+            "telegram" => Some(Channel::Telegram),
+            _ => None,
+        };
+        if let Some(chan) = chan {
+            match otto_state::IntegrationsRepo::new(ctx.pool.clone())
+                .get(&workflow.workspace_id, chan)
+                .await
+            {
+                Ok(Some(integ)) => {
+                    let sent = otto_channels::improve_notify::send_to(
+                        &ctx.secrets, &integ, chat, thread, &brief,
+                    )
+                    .await;
+                    if sent {
+                        if let Some(adapter) =
+                            otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ)
+                        {
+                            if let Err(e) = adapter.upload(chat, thread, "summary.md", &bytes).await {
+                                tracing::debug!("workflow result: summary upload failed: {e}");
+                            }
+                        }
+                    } else {
+                        tracing::debug!("workflow result: chat send failed (token missing?)");
+                    }
+                }
+                _ => tracing::debug!("workflow result: no {ch} integration for workspace"),
+            }
+        }
+    }
+
+    // --- webhook (SSRF-guarded, reuses the scheduled-task delivery path) ---
+    if let Some(url) = webhook {
+        if let Err(e) =
+            crate::scheduled_tasks_engine::deliver_webhook(url, &brief, "summary.md", &bytes).await
+        {
+            tracing::debug!("workflow result: webhook delivery failed: {e}");
+        }
+    }
 }
 
 /// `start` plus every node reachable from it via edges.
@@ -2251,5 +2431,45 @@ mod tests {
         assert!(is_retryable("agent_prompt"));
         assert!(!is_retryable("human_approval"));
         assert!(!is_retryable("manual_trigger"));
+    }
+
+    #[test]
+    fn run_summary_has_status_steps_and_score() {
+        let wf = Workflow {
+            id: "w".into(),
+            workspace_id: "ws".into(),
+            name: "Write tests".into(),
+            description: String::new(),
+            graph: WorkflowGraph {
+                nodes: vec![node("a", "agent_prompt"), node("b", "review_run")],
+                edges: vec![],
+            },
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
+        };
+        let mk = |id: &str, status: NodeStatus, out: Value| NodeRunState {
+            node_id: id.into(),
+            status,
+            output: Some(out),
+            error: None,
+            logs: vec![],
+            duration_ms: Some(10),
+            attempts: Some(1),
+            sessions: vec![],
+        };
+        let states = vec![
+            mk("a", NodeStatus::Success, json!({ "reply": "implemented the tests" })),
+            mk("b", NodeStatus::Success, json!({ "score": 92, "passed": true })),
+        ];
+        let (brief, full) = build_run_summary(&wf, &states, RunStatus::Success, Some("pack1"));
+        assert!(brief.contains("Write tests"));
+        assert!(brief.contains("2/2 steps ok"));
+        assert!(brief.contains("92/100"), "brief shows the review score");
+        assert!(brief.contains("summary.md"));
+        assert!(full.contains("## Steps"));
+        assert!(full.contains("review_run"));
+        assert!(full.contains("pack1"), "full summary names the proof pack");
     }
 }
