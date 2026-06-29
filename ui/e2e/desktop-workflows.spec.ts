@@ -18,6 +18,7 @@ let ctx: APIRequestContext;
 let ws = '';
 let branchWfId = '';
 let loopWfId = '';
+let sessionWfId = '';
 
 interface Node {
   id: string;
@@ -118,6 +119,14 @@ test.beforeAll(async ({}, testInfo) => {
     ],
     [edge('trigger', 'loopn')],
   );
+
+  // Dedicated single-run workflow for the session assertion (its own agent prompt
+  // → guaranteed cache miss → the agent actually runs and spawns a session).
+  sessionWfId = await createWorkflow(
+    'E2E Session',
+    [node('trigger', 'manual_trigger'), node('agent', 'agent_prompt', { prompt: 'unique session probe' })],
+    [edge('trigger', 'agent')],
+  );
 });
 
 test.afterAll(async () => {
@@ -135,7 +144,7 @@ test('conditional branching: true branch runs, false branch is branch-skipped (n
 });
 
 test('agent node surfaces an openable session on its step', async () => {
-  const run = await runToCompletion(branchWfId);
+  const run = await runToCompletion(sessionWfId);
   const agent = nodeState(run, 'agent');
   expect(agent.status).toBe('success');
   expect(Array.isArray(agent.sessions) && agent.sessions.length >= 1).toBeTruthy();
