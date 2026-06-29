@@ -164,6 +164,83 @@ test.describe('run-with-otto API (route → policy → engine → proof → revi
     expect(r.status()).toBe(404);
     await ctx.dispose();
   });
+
+  test('cancel ends an active run as cancelled', async () => {
+    const { ctx } = await apiCtx();
+    const launched = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/runs`, {
+        data: {
+          source_kind: 'channel',
+          source_ref: 'e2e-cancel',
+          seed_text: 'A change we will abandon.',
+          mode: 'single_agent',
+          repo_id: repoId,
+        },
+      })
+    ).json();
+    const cr = await ctx.post(`${base}${V1}/runs/${launched.id}/cancel`, { data: {} });
+    expect(cr.ok(), await cr.text()).toBeTruthy();
+    const after = await pollUntil(ctx, launched.id, (s) => s === 'cancelled');
+    expect(after.status).toBe('cancelled');
+    await ctx.dispose();
+  });
+
+  test('open-pr is gated before approval and on an unproven pack (409)', async () => {
+    const { ctx } = await apiCtx();
+    const launched = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/runs`, {
+        data: {
+          source_kind: 'channel',
+          source_ref: 'e2e-openpr',
+          seed_text: 'A change to gate.',
+          mode: 'single_agent',
+          repo_id: repoId,
+        },
+      })
+    ).json();
+    await pollUntil(ctx, launched.id, (s) => s === 'awaiting_approval' || TERMINAL.includes(s));
+
+    // Before approval → blocked ("run is not approved").
+    const early = await ctx.post(`${base}${V1}/runs/${launched.id}/open-pr`, { data: {} });
+    expect(early.ok(), 'open-pr must be blocked before approval').toBeFalsy();
+    expect(await early.text()).toContain('not approved');
+
+    // Approve → completed, then open-pr → 409 (the e2e change has a diff but no
+    // passing test, so the proof pack is `partial`, not `passed`/`waived`).
+    await ctx.post(`${base}${V1}/runs/${launched.id}/approve`, { data: { decision: 'approve' } });
+    const done = await pollUntil(ctx, launched.id, (s) => TERMINAL.includes(s));
+    expect(done.status, `run ended in ${done.status}: ${done.error ?? ''}`).toBe('completed');
+    expect(['partial', 'missing', 'failed']).toContain(done.proof_status);
+    const late = await ctx.post(`${base}${V1}/runs/${launched.id}/open-pr`, { data: {} });
+    expect(late.status()).toBe(409);
+    expect(await late.text()).toContain('proof pack is not passed/waived');
+    await ctx.dispose();
+  });
+
+  test('a product-story source resolves and drives the full pipeline', async () => {
+    const { ctx } = await apiCtx();
+    // Mint a story via the offline-safe drafts endpoint; we only need its id.
+    const draft = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/product/drafts`, {
+        data: { title: 'E2E story: tidy the README' },
+      })
+    ).json();
+    const storyId = draft.story.id as string;
+
+    const launched = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/runs`, {
+        data: { source_ref: `story:${storyId}`, mode: 'single_agent', repo_id: repoId },
+      })
+    ).json();
+    expect(launched.source_kind).toBe('product_story');
+    expect(launched.source_ref).toBe(storyId);
+
+    const run = await pollUntil(ctx, launched.id, (s) => s === 'awaiting_approval' || TERMINAL.includes(s));
+    expect(run.status, `run ended in ${run.status}: ${run.error ?? ''}`).toBe('awaiting_approval');
+    expect(run.branch, 'isolated branch provisioned').toContain('otto-run/');
+    expect(run.proof_pack_id, 'proof pack assembled').toBeTruthy();
+    await ctx.dispose();
+  });
 });
 
 test.describe('run-with-otto UI', () => {
