@@ -62,8 +62,7 @@ const DEFAULT_ENABLED: &[&str] = &[
     "get_swarm",
     "list_swarm_runs",
     "get_swarm_board",
-    // Memory / sessions
-    "list_memory",
+    // Sessions  (memory/vault reads removed — Vault feature disabled)
     "list_sessions",
     "get_session",
     // Code review / product / channels / usage / skills
@@ -79,11 +78,7 @@ const DEFAULT_ENABLED: &[&str] = &[
     "list_improvement_runs",
     "get_improvement_run",
     "list_improvement_edits",
-    // Vault v2 (structural reads — no large content)
-    "vault_list_repos",
-    "vault_search_symbols",
-    "vault_code_graph",
-    "vault_node_neighborhood",
+    // (Vault v2 structural reads removed — Vault feature disabled.)
 ];
 const DANGEROUS: &[&str] = &[
     "run_goal_loop",
@@ -113,11 +108,7 @@ const DANGEROUS: &[&str] = &[
     "approve_improvement_edit",
     "reject_improvement_edit",
     "rollback_improvement_edit",
-    // Vault v2 writes (filesystem scan / knowledge writes / host install)
-    "vault_index_repo",
-    "vault_ingest_text",
-    "vault_upsert_doc",
-    "vault_install_backend",
+    // (Vault v2 writes removed — Vault feature disabled.)
 ];
 
 /// Non-mutating tools that are defined and enableable but stay **off by default**
@@ -131,10 +122,7 @@ const OPT_IN_READS: &[&str] = &[
     "query_db_readonly",
     "open_pr_draft",
     "consume_broker_messages",
-    "search_memory",
-    // Vault v2 content-streaming reads.
-    "vault_brain",
-    "vault_full_graph",
+    // (search_memory + Vault v2 content reads removed — Vault feature disabled.)
 ];
 const MAX_WAIT_SECS: u64 = 30;
 
@@ -303,15 +291,11 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "swarm_id":{"type":"string"},"body":{"type":"string"},
                 "project_id":{"type":"string"},"task_id":{"type":"string"}}}}),
 
-        // ================= Memory / Vault =================
-        json!({"name":"otto.list_memory","mutating":false,"category":"Memory",
-            "description":"List a workspace's vault memories (knowledge items). Optional `collection`/`story_id` filters. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
-                "workspace_id":{"type":"string"},"collection":{"type":"string"},"story_id":{"type":"string"}}}}),
-        json!({"name":"otto.search_memory","mutating":false,"category":"Memory",
-            "description":"Semantic/keyword search of a workspace's vault for a free-text query; returns the top hits. Off by default (streams stored content).",
-            "inputSchema":{"type":"object","required":["workspace_id","query"],"properties":{
-                "workspace_id":{"type":"string"},"query":{"type":"string"},"k":{"type":"integer"}}}}),
+        // Memory / Vault tools removed — the Vault feature is disabled pending a
+        // retrieval redesign (see sidebar.ts). The REST endpoints + route_for arms
+        // remain, so re-adding these specs (and their classification entries) brings
+        // the tools back. Categories: was "Memory" (list_memory, search_memory) and
+        // "Vault" (vault_* below).
 
         // ================= Sessions =================
         json!({"name":"otto.list_sessions","mutating":false,"category":"Sessions",
@@ -425,47 +409,11 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"}}}}),
 
-        // ================= Vault v2 (code intelligence) =================
-        json!({"name":"otto.vault_list_repos","mutating":false,"category":"Vault",
-            "description":"List repositories indexed into the Vault for a workspace (with symbol/edge/chunk counts + status). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
-        json!({"name":"otto.vault_search_symbols","mutating":false,"category":"Vault",
-            "description":"Search the Vault's tree-sitter symbol index by name substring; returns name/kind/file:line/signature. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id","query"],"properties":{
-                "workspace_id":{"type":"string"},"query":{"type":"string"},"repo_id":{"type":"string"},"limit":{"type":"integer"}}}}),
-        json!({"name":"otto.vault_code_graph","mutating":false,"category":"Vault",
-            "description":"Get the code dependency graph (nodes + typed edges: calls/imports/http_call/db_call/test_of/documents) for a workspace, optionally scoped to one repo. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
-                "workspace_id":{"type":"string"},"repo_id":{"type":"string"}}}}),
-        json!({"name":"otto.vault_node_neighborhood","mutating":false,"category":"Vault",
-            "description":"Breadth-first dependency neighborhood (subgraph) around a graph node id, up to `depth` hops. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id","node_id"],"properties":{
-                "workspace_id":{"type":"string"},"node_id":{"type":"string"},"depth":{"type":"integer"}}}}),
-        json!({"name":"otto.vault_brain","mutating":false,"category":"Vault",
-            "description":"Assemble the Repo Brain for a focus: relevant knowledge/docs, symbols, the dependency neighborhood, and git/test context — each annotated with WHY it was selected. Streams recalled content (off by default).",
-            "inputSchema":{"type":"object","required":["workspace_id","focus"],"properties":{
-                "workspace_id":{"type":"string"},"focus":{"type":"string"},"cwd":{"type":"string"},"budget":{"type":"integer"}}}}),
-        json!({"name":"otto.vault_full_graph","mutating":false,"category":"Vault",
-            "description":"The unified Vault graph (knowledge memories + code dependency graph) for the full graph view. Read-only; can be large (off by default).",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
-                "workspace_id":{"type":"string"},"repo_id":{"type":"string"}}}}),
-        json!({"name":"otto.vault_index_repo","mutating":true,"category":"Vault",
-            "description":"Scan a repository on disk into the Vault: tree-sitter symbols + dependency graph + embeddings. DANGEROUS: reads arbitrary filesystem paths and writes the index — approval-gated.",
-            "inputSchema":{"type":"object","required":["workspace_id","root"],"properties":{
-                "workspace_id":{"type":"string"},"root":{"type":"string"},"name":{"type":"string"}}}}),
-        json!({"name":"otto.vault_ingest_text","mutating":true,"category":"Vault",
-            "description":"Chunk + embed text into a Vault collection (default `code`). DANGEROUS: writes to the knowledge store — approval-gated.",
-            "inputSchema":{"type":"object","required":["workspace_id","path","content"],"properties":{
-                "workspace_id":{"type":"string"},"collection":{"type":"string"},"path":{"type":"string"},"content":{"type":"string"}}}}),
-        json!({"name":"otto.vault_upsert_doc","mutating":true,"category":"Vault",
-            "description":"Create/refresh a documentation note and link it into the code dependency graph (a `doc` node with `documents` edges to code node ids). DANGEROUS: writes — approval-gated.",
-            "inputSchema":{"type":"object","required":["workspace_id","title","body"],"properties":{
-                "workspace_id":{"type":"string"},"repo_id":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"},
-                "documents":{"type":"array","items":{"type":"string"}}}}}),
-        json!({"name":"otto.vault_install_backend","mutating":true,"category":"Vault",
-            "description":"Install a remote Vault backend locally (kind = qdrant|surreal|ollama) via Docker/Homebrew. DANGEROUS: changes the host — approval-gated.",
-            "inputSchema":{"type":"object","required":["workspace_id","kind"],"properties":{
-                "workspace_id":{"type":"string"},"kind":{"type":"string"}}}}),
+        // Vault v2 tools (vault_list_repos / vault_search_symbols / vault_code_graph
+        // / vault_node_neighborhood / vault_brain / vault_full_graph / vault_index_repo
+        // / vault_ingest_text / vault_upsert_doc / vault_install_backend) removed — the
+        // Vault feature is disabled pending a retrieval redesign. Re-add the specs +
+        // classification entries to restore them.
     ]
 }
 
