@@ -1326,19 +1326,23 @@
                 /> Continue on step error
               </label>
             {:else if selectedNode.kind === 'review_run'}
-              <label for="np-repo">Repo ID</label>
+              <p class="insp-note">
+                Leave Repo&nbsp;ID and Base empty to review exactly where the implementer worked
+                (the run's working directory + base). Set them only to override.
+              </p>
+              <label for="np-repo">Repo ID (optional — inherits from the implementer)</label>
               <input
                 id="np-repo"
                 type="text"
-                placeholder="git repo id"
+                placeholder="inherits from the working directory"
                 value={paramStr('repo_id')}
                 oninput={(e) => onParam('repo_id', e.currentTarget.value)}
               />
-              <label for="np-base">Base branch</label>
+              <label for="np-base">Base branch (optional — inherits, else main)</label>
               <input
                 id="np-base"
                 type="text"
-                placeholder="main"
+                placeholder="inherits from the run, else main"
                 value={paramStr('base')}
                 oninput={(e) => onParam('base', e.currentTarget.value)}
               />
@@ -1577,19 +1581,25 @@
                 <option value="excalidraw">Excalidraw</option>
               </select>
             {:else if selectedNode.kind === 'git_pr'}
-              <label for="np-repo">Repo ID</label>
+              <p class="insp-note">
+                Leave Repo&nbsp;ID and Base empty to <strong>inherit the reference</strong> the
+                implementer/reviewer used (the run's working directory and base, or the upstream
+                review). Set them only to override. A run that changed several repos opens
+                <strong>one PR per repo</strong> (from fanned-in reviews, or enable “detect changed”).
+              </p>
+              <label for="np-repo">Repo ID (optional — inherits from reference)</label>
               <input
                 id="np-repo"
                 type="text"
-                placeholder="git repo id"
+                placeholder="inherits from the upstream review / working directory"
                 value={paramStr('repo_id')}
                 oninput={(e) => onParam('repo_id', e.currentTarget.value)}
               />
-              <label for="np-base">Base branch</label>
+              <label for="np-base">Base branch (optional — inherits from reference)</label>
               <input
                 id="np-base"
                 type="text"
-                placeholder="main"
+                placeholder="inherits (per-repo base), else main"
                 value={paramStr('base')}
                 oninput={(e) => onParam('base', e.currentTarget.value)}
               />
@@ -1599,6 +1609,13 @@
                   checked={paramBool('open')}
                   onchange={(e) => onParam('open', e.currentTarget.checked)}
                 /> Open PR automatically on pass (gate the incoming edge on the review passing)
+              </label>
+              <label class="np-chk">
+                <input
+                  type="checkbox"
+                  checked={paramBool('detect_changed')}
+                  onchange={(e) => onParam('detect_changed', e.currentTarget.checked)}
+                /> Detect changed repos — open a PR for every registered repo that has changes
               </label>
             {:else if selectedNode.kind === 'self_improve'}
               <p class="insp-note">

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
 
@@ -382,6 +383,41 @@ test('review/PR repo_id derives from the working_directory (no "missing repo_id"
   expect(nodeState(run, 'trigger').output.repo_id, 'repo_id derived from working_directory').toBe(
     repoId,
   );
+});
+
+test('the implementer publishes its working directory; review_run publishes the reference', async () => {
+  // The reference (repo/base/worktree) flows FROM the implementer TO the
+  // reviewer/PR: the agent step emits `working_directory`, and review_run emits
+  // the exact `repo_id`/`base`/`worktree` it used — so a downstream git_pr
+  // inherits them with nothing re-typed.
+  const { repoId, dir } = await seedGitRepo(ctx, base, ws);
+  // Create the base branch so the review starts cleanly (empty diff vs develop).
+  execFileSync('git', ['-C', dir, 'branch', 'develop'], { stdio: 'ignore' });
+  const wfId = await createWorkflow(
+    'E2E Reference Flow',
+    [
+      {
+        id: 'trigger',
+        kind: 'manual_trigger',
+        name: 'Start',
+        x: 0,
+        y: 0,
+        params: { working_directory: dir, base: 'develop' },
+      },
+      node('implement', 'agent_prompt', { prompt: 'do the work' }),
+      // review_run with no repo_id/base/worktree — must inherit from the run.
+      node('review', 'review_run', { await: false }),
+    ],
+    [edge('trigger', 'implement'), edge('implement', 'review')],
+  );
+  const run = await runToCompletion(wfId);
+  // The implementer reports where it worked.
+  expect(nodeState(run, 'implement').output.working_directory, 'agent publishes its cwd').toBe(dir);
+  // The reviewer inherits + publishes the exact reference for the PR.
+  const rev = nodeState(run, 'review').output;
+  expect(rev.repo_id, 'review inherits repo from the implementer').toBe(repoId);
+  expect(rev.base, 'review inherits the run base').toBe('develop');
+  expect(rev.worktree, 'review reviews where the implementer worked').toBe(dir);
 });
 
 test('active-runs endpoint lists an in-flight run, then drops it on completion', async () => {

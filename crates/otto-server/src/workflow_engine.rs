@@ -428,7 +428,7 @@ fn output_schema_for(kind: &str) -> Option<Value> {
         Some(json!({ "type": "object", "fields": Value::Object(m) }))
     };
     match kind {
-        "agent_prompt" => obj(&[("reply", "string")]),
+        "agent_prompt" => obj(&[("reply", "string"), ("working_directory", "string")]),
         "http_request" | "api_run" => obj(&[("status", "number"), ("body", "any")]),
         "db_query" => obj(&[("columns", "array"), ("rows", "array"), ("rows_returned", "number")]),
         "broker_peek" => obj(&[("topic", "string"), ("messages", "array"), ("count", "number")]),
@@ -439,6 +439,9 @@ fn output_schema_for(kind: &str) -> Option<Value> {
         "review_run" => obj(&[
             ("review_id", "string"),
             ("status", "string"),
+            ("repo_id", "string"),
+            ("base", "string"),
+            ("worktree", "string"),
             ("blocking", "number"),
             ("advisory", "number"),
             ("score", "number"),
@@ -449,7 +452,13 @@ fn output_schema_for(kind: &str) -> Option<Value> {
         "product_rewrite" => obj(&[("story_id", "string"), ("body_md", "string")]),
         "product_plan" => obj(&[("story_id", "string"), ("plan_md", "string")]),
         "product_publish" => obj(&[("story_id", "string"), ("url", "string"), ("dry_run", "boolean")]),
-        "git_pr" => obj(&[("title", "string"), ("description", "string"), ("opened", "boolean")]),
+        "git_pr" => obj(&[
+            ("prs", "array"),
+            ("opened", "boolean"),
+            ("opened_count", "number"),
+            ("title", "string"),
+            ("description", "string"),
+        ]),
         "self_improve" => obj(&[
             ("run_id", "string"),
             ("summary", "string"),
@@ -589,6 +598,16 @@ pub async fn run_workflow(
         .filter(|s| !s.trim().is_empty())
         .map(expand_tilde)
         .unwrap_or_else(|| ws.root_path.clone());
+    // Run-level base branch: the ambient PR/review base for the whole run, so a
+    // `review_run`/`git_pr` is aware of the run's base even after intervening
+    // agent nodes (which return `{reply}`) drop it from the data flow. Per-node
+    // `base` params still win; this is the fallback the steps share.
+    let run_base = input
+        .get("base")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("main")
+        .to_string();
     // Resilience (design §B): many steps (review_run, git_pr, …) need a repo_id.
     // If the run wasn't given one but DOES carry a working_directory, resolve the
     // registered repo for that path ONCE here and seed it into the run input — so
@@ -791,7 +810,7 @@ pub async fn run_workflow(
         let result = loop {
             attempt += 1;
             let fut =
-                execute_node(&ctx, &ws, &user, node, node_input.clone(), &run_id, &run_cwd, &sess_tx, &progress);
+                execute_node(&ctx, &ws, &user, node, node_input.clone(), &run_id, &run_cwd, &run_base, &sess_tx, &progress);
             tokio::pin!(fut);
             let attempt_res = loop {
                 tokio::select! {
@@ -1288,6 +1307,7 @@ async fn execute_node(
     input: Value,
     run_id: &Id,
     run_cwd: &str,
+    run_base: &str,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
     progress: &ProgressSink,
 ) -> Result<(Value, Vec<String>)> {
@@ -1346,10 +1366,22 @@ async fn execute_node(
             let acwd = node_cwd(node, &input, run_cwd);
             let (reply, sid) =
                 run_node_agent(ctx, ws, user, node, provider, &full, &acwd, session_tx).await?;
-            Ok((
-                json!({ "reply": reply, "session_id": sid }),
-                vec!["agent turn complete".into()],
-            ))
+            // Publish WHERE the implementer worked (+ thread the ambient repo/base)
+            // so a downstream review/PR is aware of exactly this directory — even
+            // when the agent ran in its own per-node cwd. This is what carries the
+            // reference from the implementer to the reviewer and the PR.
+            let mut out = serde_json::Map::new();
+            out.insert("reply".into(), json!(reply));
+            out.insert("session_id".into(), json!(sid));
+            out.insert("working_directory".into(), json!(acwd));
+            for k in ["repo_id", "base"] {
+                if let Some(v) = input.get(k) {
+                    if !v.is_null() {
+                        out.insert(k.into(), v.clone());
+                    }
+                }
+            }
+            Ok((Value::Object(out), vec!["agent turn complete".into()]))
         }
 
         "http_request" => {
@@ -1997,6 +2029,10 @@ async fn execute_node(
             let mut satisfied = false;
             let mut last = input.clone();
             let mut iterations = 0u64;
+            // References (repo_id/base/worktree) any inner step published — so a
+            // git_pr after the loop knows the exact repo(s)/branch(es) to open,
+            // deduped by repo_id (latest wins). Carries multi-repo loops too.
+            let mut refs_by_repo: serde_json::Map<String, Value> = serde_json::Map::new();
             for i in 1..=max_iter {
                 iterations = i;
                 if let Ok(rr) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
@@ -2043,7 +2079,7 @@ async fn execute_node(
                         retry: step.get("retry").and_then(|r| serde_json::from_value(r.clone()).ok()),
                     };
                     match Box::pin(execute_node(
-                        ctx, ws, user, &sub, step_input, run_id, run_cwd, session_tx, progress,
+                        ctx, ws, user, &sub, step_input, run_id, run_cwd, run_base, session_tx, progress,
                     ))
                     .await
                     {
@@ -2052,6 +2088,19 @@ async fn execute_node(
                                 logs.push(format!("  [{i}/{sname}] {l}"));
                             }
                             step_outputs.insert(sname.clone(), out.clone());
+                            // Capture any repo reference this step published.
+                            if let Some(rid) = out.get("repo_id").and_then(Value::as_str) {
+                                if !rid.trim().is_empty() {
+                                    refs_by_repo.insert(
+                                        rid.to_string(),
+                                        json!({
+                                            "repo_id": rid,
+                                            "base": out.get("base").cloned().unwrap_or(Value::Null),
+                                            "worktree": out.get("worktree").cloned().unwrap_or(Value::Null),
+                                        }),
+                                    );
+                                }
+                            }
                             last = out.clone();
                             thread = out;
                             if progress.enabled() && is_reportable(&skind) {
@@ -2086,10 +2135,27 @@ async fn execute_node(
             if !until.is_empty() && !satisfied {
                 logs.push(format!("loop: reached max_iterations ({max_iter}) without satisfying `{until}`"));
             }
-            Ok((
-                json!({ "iterations": iterations, "satisfied": satisfied, "last": last, "history": history }),
-                logs,
-            ))
+            // Surface the loop's repo reference(s) at the top level so a
+            // downstream git_pr inherits them: a single `repo_id`/`base`/`worktree`
+            // (the common one-repo loop) plus a `repos` array for the multi-repo
+            // case (one PR per changed repo).
+            let repos: Vec<Value> = refs_by_repo.values().cloned().collect();
+            let mut out = serde_json::Map::new();
+            out.insert("iterations".into(), json!(iterations));
+            out.insert("satisfied".into(), json!(satisfied));
+            out.insert("last".into(), last);
+            out.insert("history".into(), json!(history));
+            if let Some((_, Value::Object(m))) = refs_by_repo.iter().next() {
+                for k in ["repo_id", "base", "worktree"] {
+                    if let Some(v) = m.get(k) {
+                        out.insert(k.to_string(), v.clone());
+                    }
+                }
+            }
+            if !repos.is_empty() {
+                out.insert("repos".into(), Value::Array(repos));
+            }
+            Ok((Value::Object(out), logs))
         }
 
         // --- Review Run (wired: local-review engine + 0–100 score + goals) ---
@@ -2126,23 +2192,33 @@ async fn execute_node(
             // When set, the step itself FAILS if the score is below threshold — so a
             // downstream "create PR" step is error-skipped unless the review passed.
             let require_pass = p.get("require_pass").and_then(Value::as_bool).unwrap_or(false);
-            let repo = ctx
+            // Validate the resolved repo exists (clear error if not); the review
+            // engine looks the repo up again by id internally.
+            let _ = ctx
                 .git_store
                 .get_repo(&repo_id)
                 .await
                 .map_err(|e| otto_core::Error::NotFound(format!("review_run: repo: {e}")))?;
+            // The directory the implementer worked in (the run's working_directory)
+            // IS what we review — fall back to it (run_cwd), not the bare repo
+            // checkout, so the reviewer sees the same place the agent changed. A
+            // prior step's published `worktree` (e.g. another review) wins first.
             let worktree = p
                 .get("worktree_path")
                 .and_then(Value::as_str)
+                .or_else(|| input.get("worktree").and_then(Value::as_str))
+                .or_else(|| input.get("worktree_path").and_then(Value::as_str))
                 .or_else(|| input.get("working_directory").and_then(Value::as_str))
+                .filter(|s| !s.trim().is_empty())
                 .map(expand_tilde)
-                .unwrap_or_else(|| repo.path.clone());
+                .unwrap_or_else(|| run_cwd.to_string());
             let base = p
                 .get("base")
                 .and_then(Value::as_str)
                 .or_else(|| input.get("base").and_then(Value::as_str))
-                .unwrap_or("main")
-                .to_string();
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| run_base.to_string());
             // Iteration label so a fix→review loop streams "Review #1, #2, …".
             let iter_label = input
                 .get("_iteration")
@@ -2314,6 +2390,10 @@ async fn execute_node(
             }
             let out = json!({
                 "review_id": review_id, "status": status,
+                // Publish the exact reference reviewed so a downstream git_pr (or
+                // another review) opens the PR on the SAME repo/branch/worktree —
+                // no need to re-type them on the PR node (design: PR is aware).
+                "repo_id": repo_id, "base": base, "worktree": worktree,
                 "total": total, "open": open, "blocking": blocking, "advisory": advisory,
                 "severity": { "bug": bugs, "warn": warns, "info": infos },
                 "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
@@ -2491,80 +2571,177 @@ async fn execute_node(
             ))
         }
 
-        // --- Git PR (draft; opening is done from the Git tab) ----------------
+        // --- Git PR (draft, or open with open=true) --------------------------
+        // Multi-repo aware: opens ONE PR per changed repo. Targets come from the
+        // reference the implementer/reviewer used — explicit `params.repos[]`, a
+        // loop's published `repos[]`, a single upstream review reference, or
+        // fan-in of several review branches — so a run that touched multiple
+        // repositories opens them all, each on its own base branch. The PR never
+        // needs the repo/base re-typed; it inherits them.
         "git_pr" => {
-            // Same resilient repo resolution as review_run (design §B).
-            let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
-                .await
-                .ok_or_else(|| {
+            let mut logs: Vec<String> = Vec::new();
+            let open = p.get("open").and_then(Value::as_bool).unwrap_or(false);
+            // The run-level worktree (where the work happened) + base, used when a
+            // target doesn't carry its own.
+            let run_worktree = input
+                .get("worktree")
+                .and_then(Value::as_str)
+                .or_else(|| input.get("worktree_path").and_then(Value::as_str))
+                .or_else(|| input.get("working_directory").and_then(Value::as_str))
+                .filter(|s| !s.trim().is_empty())
+                .map(expand_tilde)
+                .unwrap_or_else(|| run_cwd.to_string());
+            let run_input_base = input
+                .get("base")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| run_base.to_string());
+
+            // Resolve (repo_id, worktree, base) per target, deduped by repo_id.
+            // Targets come from the implementer/reviewer reference (input) or
+            // explicit `params.repos`. With `detect_changed: true`, ALSO consider
+            // every registered repo — the per-repo draft below keeps only the ones
+            // that actually changed, so the run opens a PR for exactly what the
+            // implementer touched, across repositories.
+            let mut targets = collect_pr_targets(p, &input);
+            if p.get("detect_changed").and_then(Value::as_bool).unwrap_or(false) {
+                if let Ok(repos) = ctx.git_store.list_repos(&ws.id).await {
+                    for r in repos {
+                        targets.push(json!({ "repo_id": r.id, "worktree": r.path }));
+                    }
+                }
+            }
+            let mut resolved: Vec<(String, String, String)> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            let mut notes: Vec<String> = Vec::new();
+            if targets.is_empty() {
+                // One implicit target from the run context (the common case).
+                let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd).await.ok_or_else(|| {
                     otto_core::Error::Invalid(
                         "git_pr: no repo_id; pass repo_id or a working_directory/worktree_path \
                          under a registered repo"
                             .into(),
                     )
                 })?;
-            let repo = ctx
-                .git_store
-                .get_repo(&repo_id)
-                .await
-                .map_err(|e| otto_core::Error::NotFound(format!("git_pr: repo: {e}")))?;
-            let worktree = p
-                .get("worktree_path")
-                .and_then(Value::as_str)
-                .or_else(|| input.get("working_directory").and_then(Value::as_str))
-                .map(expand_tilde)
-                .unwrap_or_else(|| repo.path.clone());
-            let base = p
-                .get("base")
-                .and_then(Value::as_str)
-                .or_else(|| input.get("base").and_then(Value::as_str))
-                .unwrap_or("main")
-                .to_string();
-            let draft = crate::modules::draft_pr_core(ctx, &worktree, &base).await?;
-            // `open: true` actually opens the PR on the remote (outward-facing,
-            // per-step opt-in). The control-flow edge into this node carries the
-            // gate (e.g. `input.passed`), so a not-passed review branch-skips it.
-            let open = p.get("open").and_then(Value::as_bool).unwrap_or(false);
-            if !open {
-                return Ok((
-                    json!({
-                        "title": draft.title, "description": draft.description,
-                        "source_branch": draft.source_branch, "target_branch": draft.target_branch,
-                        "opened": false,
-                        "note": "Drafted. Set open=true (gated on the review passing) to open it.",
-                    }),
-                    vec![format!(
-                        "git_pr: drafted '{}' ({} → {})",
-                        draft.title, draft.source_branch, draft.target_branch
-                    )],
-                ));
+                let base = p
+                    .get("base")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| run_input_base.clone());
+                seen.insert(repo_id.clone());
+                resolved.push((repo_id, run_worktree.clone(), base));
+            } else {
+                for t in &targets {
+                    let worktree = t
+                        .get("worktree")
+                        .and_then(Value::as_str)
+                        .or_else(|| t.get("worktree_path").and_then(Value::as_str))
+                        .filter(|s| !s.trim().is_empty())
+                        .map(expand_tilde)
+                        .unwrap_or_else(|| run_worktree.clone());
+                    let base = t
+                        .get("base")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| run_input_base.clone());
+                    let rid = match t.get("repo_id").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                        Some(r) => Some(r.to_string()),
+                        None => resolve_repo_id_for_path(ctx, &ws.id, &worktree).await,
+                    };
+                    match rid {
+                        Some(r) if seen.insert(r.clone()) => resolved.push((r, worktree, base)),
+                        Some(_) => {} // duplicate repo across targets — one PR each
+                        None => notes.push(format!("skipped a target (no registered repo for {worktree})")),
+                    }
+                }
+                if resolved.is_empty() {
+                    return Err(otto_core::Error::Invalid(
+                        "git_pr: no registered repo resolved for any target".into(),
+                    ));
+                }
             }
-            let req = otto_core::api::CreatePrReq {
-                title: draft.title.clone(),
-                description: draft.description.clone(),
-                source_branch: draft.source_branch.clone(),
-                target_branch: draft.target_branch.clone(),
-                // The review pass IS the approval gate here; the workflow's own
-                // proof pack is linked separately. Allow opening without a passed
-                // pack so the workflow isn't double-gated.
-                proof_pack_id: None,
-                allow_unproven: Some(true),
-            };
-            let auth = otto_core::auth::AuthUser(user.clone());
-            match otto_git::http::create_pr_for_repo(ctx, &auth, &repo, &req).await {
-                Ok(summary) => Ok((
-                    json!({
-                        "title": draft.title, "description": draft.description,
-                        "source_branch": draft.source_branch, "target_branch": draft.target_branch,
-                        "opened": true, "number": summary.number, "url": summary.url,
-                    }),
-                    vec![format!(
-                        "git_pr: opened PR #{} '{}' ({} → {})",
-                        summary.number, draft.title, draft.source_branch, draft.target_branch
-                    )],
-                )),
-                Err(e) => Err(otto_core::Error::Upstream(format!("git_pr: open failed: {e}"))),
+
+            // Draft (+ optionally open) a PR per resolved repo. A per-repo failure
+            // (no diff / open error) becomes a note + a skipped entry, so one bad
+            // repo never sinks the others.
+            let mut prs: Vec<Value> = Vec::new();
+            let mut opened_n: u64 = 0;
+            for (repo_id, worktree, base) in &resolved {
+                let repo = match ctx.git_store.get_repo(repo_id).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        notes.push(format!("{repo_id}: repo missing: {e}"));
+                        continue;
+                    }
+                };
+                let wt = if worktree.trim().is_empty() { repo.path.clone() } else { worktree.clone() };
+                let draft = match crate::modules::draft_pr_core(ctx, &wt, base).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        notes.push(format!("{}: nothing to PR ({e})", repo.name));
+                        continue;
+                    }
+                };
+                if !open {
+                    prs.push(json!({
+                        "repo_id": repo_id, "repo": repo.name, "title": draft.title,
+                        "description": draft.description, "source_branch": draft.source_branch,
+                        "target_branch": draft.target_branch, "opened": false,
+                    }));
+                    logs.push(format!(
+                        "git_pr: drafted '{}' on {} ({} → {})",
+                        draft.title, repo.name, draft.source_branch, draft.target_branch
+                    ));
+                    continue;
+                }
+                let req = otto_core::api::CreatePrReq {
+                    title: draft.title.clone(),
+                    description: draft.description.clone(),
+                    source_branch: draft.source_branch.clone(),
+                    target_branch: draft.target_branch.clone(),
+                    proof_pack_id: None,
+                    allow_unproven: Some(true),
+                };
+                let auth = otto_core::auth::AuthUser(user.clone());
+                match otto_git::http::create_pr_for_repo(ctx, &auth, &repo, &req).await {
+                    Ok(summary) => {
+                        opened_n += 1;
+                        prs.push(json!({
+                            "repo_id": repo_id, "repo": repo.name, "title": draft.title,
+                            "source_branch": draft.source_branch, "target_branch": draft.target_branch,
+                            "opened": true, "number": summary.number, "url": summary.url,
+                        }));
+                        logs.push(format!(
+                            "git_pr: opened PR #{} '{}' on {} ({} → {})",
+                            summary.number, draft.title, repo.name, draft.source_branch, draft.target_branch
+                        ));
+                    }
+                    Err(e) => {
+                        notes.push(format!("{}: open failed: {e}", repo.name));
+                        prs.push(json!({ "repo_id": repo_id, "repo": repo.name, "opened": false, "error": e.to_string() }));
+                    }
+                }
             }
+            if prs.is_empty() {
+                return Err(otto_core::Error::Upstream(format!(
+                    "git_pr: no PR could be drafted/opened ({})",
+                    notes.join("; ")
+                )));
+            }
+            // Back-compat: mirror the primary (first) PR's fields at the top level,
+            // alongside the full `prs[]` and an `opened` flag/count.
+            let mut outm = prs[0].as_object().cloned().unwrap_or_default();
+            outm.insert("prs".into(), Value::Array(prs.clone()));
+            outm.insert("opened".into(), json!(open && opened_n > 0));
+            outm.insert("opened_count".into(), json!(opened_n));
+            outm.insert("repos".into(), json!(resolved.iter().map(|(r, _, _)| r.clone()).collect::<Vec<_>>()));
+            if !notes.is_empty() {
+                outm.insert("notes".into(), json!(notes));
+            }
+            Ok((Value::Object(outm), logs))
         }
 
         // --- Self-improvement (offer-only) ----------------------------------
@@ -2847,6 +3024,40 @@ async fn resolve_step_repo_id(
         .map(str::to_string)
         .unwrap_or_else(|| run_cwd.to_string());
     resolve_repo_id_for_path(ctx, &ws.id, &hint).await
+}
+
+/// Gather the set of PR targets a `git_pr` node should open — one per changed
+/// repo. Sources: explicit `params.repos[]`, a loop's published `input.repos[]`,
+/// the input itself as a single reference (a review/loop output carrying
+/// `repo_id`/`worktree`), and fan-in (multiple predecessor outputs keyed by node
+/// id, each a review with its own `repo_id`). Each entry is `{repo_id?,
+/// worktree?, worktree_path?, base?}`. Empty ⇒ the caller uses one implicit
+/// target from the run context. Deduplication by resolved repo_id is the
+/// caller's job.
+fn collect_pr_targets(p: &Value, input: &Value) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let has_ref = |v: &Value| {
+        ["repo_id", "worktree", "worktree_path"].iter().any(|k| {
+            v.get(*k).and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false)
+        })
+    };
+    if let Some(arr) = p.get("repos").and_then(Value::as_array) {
+        out.extend(arr.iter().filter(|v| has_ref(v)).cloned());
+    }
+    if let Some(arr) = input.get("repos").and_then(Value::as_array) {
+        out.extend(arr.iter().filter(|v| has_ref(v)).cloned());
+    }
+    if has_ref(input) {
+        out.push(input.clone());
+    }
+    if let Value::Object(m) = input {
+        for v in m.values() {
+            if v.is_object() && has_ref(v) {
+                out.push(v.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Best-effort: find the registered repo whose checkout contains `path`, so a
@@ -3406,5 +3617,53 @@ mod tests {
             .expect("worktree resolves to origin");
         let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
         assert_eq!(canon(std::path::Path::new(&main)), canon(&repo));
+    }
+
+    // --- git_pr multi-target collection (design: PR opens one per changed repo) -
+
+    fn repo_ids(targets: &[Value]) -> Vec<String> {
+        targets
+            .iter()
+            .filter_map(|t| t.get("repo_id").and_then(Value::as_str).map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn collect_pr_targets_single_review_reference() {
+        // A direct review→git_pr: the review output carries one reference.
+        let input = json!({ "repo_id": "R1", "base": "develop", "worktree": "/w/r1", "passed": true });
+        let got = collect_pr_targets(&json!({}), &input);
+        assert_eq!(repo_ids(&got), vec!["R1"]);
+        assert_eq!(got[0].get("base").and_then(Value::as_str), Some("develop"));
+    }
+
+    #[test]
+    fn collect_pr_targets_fan_in_multiple_repos() {
+        // Two review branches fanned into one git_pr (keyed by node id).
+        let input = json!({
+            "revA": { "repo_id": "A", "base": "main", "worktree": "/w/a" },
+            "revB": { "repo_id": "B", "base": "release", "worktree": "/w/b" },
+        });
+        let mut ids = repo_ids(&collect_pr_targets(&json!({}), &input));
+        ids.sort();
+        assert_eq!(ids, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn collect_pr_targets_loop_repos_and_explicit_params() {
+        // A multi-repo loop publishes `repos[]`; explicit params.repos add more.
+        let input = json!({ "repos": [{ "repo_id": "L1", "base": "dev", "worktree": "/w/l1" }] });
+        let p = json!({ "repos": [{ "repo_id": "P1", "worktree": "/w/p1" }] });
+        let mut ids = repo_ids(&collect_pr_targets(&p, &input));
+        ids.sort();
+        assert_eq!(ids, vec!["L1", "P1"]);
+    }
+
+    #[test]
+    fn collect_pr_targets_empty_when_only_working_directory() {
+        // A plain run input with only a working_directory carries NO explicit
+        // reference → caller resolves a single implicit target instead.
+        let input = json!({ "working_directory": "/w/x", "goals": ["g"] });
+        assert!(collect_pr_targets(&json!({}), &input).is_empty());
     }
 }
