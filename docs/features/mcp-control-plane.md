@@ -7,8 +7,11 @@ command or remote `http`), discovers its tools, health-checks it, and routes eve
 `tools/call` through a single **governance pipeline** — allowlist → per-tool
 permission → policy-as-code → risk/approval gate → dry-run → execute → fail-closed
 audit → stats. The same daemon additionally runs an **outward** `ottod mcp-server`
-that exposes eight `otto.*` tools to other agents (Claude Code, Copilot, …) over a
-**restricted token**, itself governed by the same pipeline.
+that exposes Otto's own `otto.*` tools — spanning **every Otto feature** (workflows,
+message brokers, git/PRs, Jira/Confluence issues, the swarm, the vault, sessions,
+code-review findings, product stories, usage, channels, skills, self-improvement,
+scheduled tasks, …) — to other agents (Claude Code, Copilot, …) over a **restricted
+token**, itself governed by the same pipeline.
 
 This is the definitive end-user + operator guide. It documents what the code in
 `crates/otto-mcp/` (the engine), `crates/otto-server/src/mcp_outward.rs` +
@@ -35,7 +38,7 @@ the token kind, and the routes.
 | | |
 |---|---|
 | **What it is** | Otto governs MCP tool calls (in the call path) **and** exposes itself outward as an MCP server. |
-| **Two halves** | (A) a **control plane** for registered MCP servers/tools; (B) **Otto-as-MCP-server** — 8 `otto.*` tools served to external agents. |
+| **Two halves** | (A) a **control plane** for registered MCP servers/tools; (B) **Otto-as-MCP-server** — Otto's own `otto.*` feature tools (read + write, every feature) served to external agents. |
 | **Outbound client** | `otto-mcp` connects out to each server: `stdio` (spawn a command) or `http` (Streamable-HTTP, SSRF-pinned). |
 | **Governance** | One pipeline (`McpService::invoke`): allowlist → per-tool permission → policy → risk/approval → dry-run → execute → guaranteed audit → stats. |
 | **Outward server** | `ottod mcp-server` (stdio), authenticated by a **restricted `kind='mcp'` token** that can reach only the governed choke point. |
@@ -58,7 +61,7 @@ the token kind, and the routes.
       ▼         │   otto-mcp::McpService.invoke ── governance pipeline             │
  ottod          │        │        │   allowlist→perm→policy→risk/approval→dry-run   │
  mcp-server ───▶│  POST /mcp/otto-tools/invoke   →execute→fail-closed audit→stats  │
- (8 otto.* )    │        │        │                                                │
+ (otto.* tools) │        │        │                                                │
  kind='mcp' tok │        ▼        ▼                  SQLite (migration 0077):       │
                 │  outbound MCP client              mcp_servers(+cols) mcp_tools    │
                 │   stdio child / http(SSRF-pinned) mcp_allowlist mcp_policies      │
@@ -67,7 +70,9 @@ the token kind, and the routes.
         registered downstream MCP servers (Linear, GitHub, DB, web-fetch, …)
 
  Otto's own agents (inward): .mcp.json → ottod mcp-tools
-   ├─ 5 first-party read-only tools (otto_db_schema, otto_git_pr_review, …)
+   ├─ first-party read-only tools: DB (otto_db_schema/_query), git PR review,
+   │  product story, canvas, + feature reads (otto_list_workflows,
+   │  otto_list_broker_clusters, otto_search_memory, otto_list_findings, …)
    └─ gateway: governed downstream tools via /mcp/gateway/tools + /mcp/gateway/invoke
 ```
 
@@ -78,7 +83,7 @@ the token kind, and the routes.
 | **Risk labeling** | `crates/otto-mcp/src/risk.rs` | `read`/`write`/`dangerous` + `low`/`medium`/`high` injection from annotations + keywords. |
 | **Policy engine** | `crates/otto-mcp/src/policy.rs` | Most-restrictive-wins matcher (`mcp_policies`). |
 | **Control-plane HTTP** | `crates/otto-mcp/src/http.rs` (`api_router`) | The `/mcp/*` + `/workspaces/{wid}/mcp/*` governance routes. |
-| **Outward server** | `crates/otto-server/src/mcp_outward.rs` | `/mcp/otto-tools/invoke`, `/mcp/otto-server`, the gateway, the 8 `otto.*` tools. |
+| **Outward server** | `crates/otto-server/src/mcp_outward.rs` | `/mcp/otto-tools/invoke`, `/mcp/otto-server`, the gateway, the categorised `otto.*` tool catalog (`otto_tool_specs` + the pure `route_for` map). |
 | **Capability endpoints** | `crates/otto-server/src/mcp_capabilities.rs` | `code-search`, `context-packet`, `proof-pack` (injection-safe). |
 | **stdio binaries** | `crates/ottod/src/{mcp_server,mcp_tools}.rs` | The outward (`ottod mcp-server`) + inward (`ottod mcp-tools`) servers. |
 | **Persistence** | `crates/otto-state/migrations/0077_mcp_control_plane.sql` + `mcp_control.rs` | The six tables + repos. |
@@ -123,7 +128,8 @@ every managed, enabled server every `mcp_health_interval_secs` (default **300 s*
 
 ### 3.2 Enable the outward Otto MCP server
 
-In the **Otto Server** tab: toggle **Enable**, pick which `otto.*` tools to expose,
+In the **Otto Server** tab: toggle **Enable**, pick which `otto.*` tools to expose
+(a **filterable checklist grouped by feature category**, with per-group **All/None**),
 and **Mint token** / **Rotate token**. The minted token is a restricted `kind='mcp'`
 token shown **once** (*"New token — shown once. Copy it now."*); only its 12-char
 prefix is shown thereafter. The tab generates an **install snippet** to paste into an
@@ -144,6 +150,48 @@ external agent's `.mcp.json`:
 `ottod mcp-server` reads `OTTO_API_TOKEN` (the restricted token) and optionally
 `OTTO_MCP_BASE` (defaults to `http://127.0.0.1:<port>`). It is **off by default**
 (`mcp_otto_server_enabled = false`) — nothing is exposed until an admin enables it.
+
+### 3.3 The outward tool catalog — every Otto feature
+
+`otto_tool_specs()` is the authoritative catalog (each tool carries `name`,
+`description`, `mutating`, `category`, `inputSchema`). Each tool wraps an **existing**
+daemon REST endpoint via a self-call executed **as the token's user**, so it reuses
+that endpoint's native RBAC — no new privilege path. The `(tool, args) → (method,
+path, body)` binding is a **pure function** (`route_for`) covered by unit tests.
+
+Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
+
+| Category | Read tools | Mutating tools (DANGEROUS) |
+|---|---|---|
+| **Workflows** | ✅ list / get / list_runs / get_run | ⚠ run, cancel_run |
+| **Message Brokers** | ✅ list_clusters / list_topics / get_topic / list_consumer_groups / *consume*¹ | ⚠ produce |
+| **Git** | ✅ list_repos / status / list_prs / get_pr / *open_pr_draft*¹ | ⚠ create_pr, comment_pr, start_pr_review |
+| **Database** | ✅ list_connections / *query_db_readonly*¹ | — |
+| **Issues** | ✅ search_issues / get_issue / search_confluence | ⚠ comment_issue, transition_issue |
+| **Swarm** | ✅ list / get / list_runs / get_board / create_work_item² | ⚠ post_swarm_board |
+| **Memory/Vault** | ✅ list_memory / *search_memory*¹ | — |
+| **Sessions** | ✅ list / get | ⚠ broadcast_message |
+| **Code Review** | ✅ list_findings / get_finding | ⚠ start_pr_review |
+| **Product** | ✅ list_stories / get_story | — |
+| **Channels** | ✅ list_integrations | ⚠ test_integration |
+| **Usage / Skills** | ✅ get_usage_summary / list_bundled_skills | — |
+| **Self-Improvement** | ✅ get_config / list_runs / get_run / list_edits | ⚠ run, approve_edit, reject_edit, rollback_edit |
+| **Scheduled Tasks** | ✅ list / list_runs | ⚠ create / update / set_enabled / run / delete |
+| **Code & Context / Agents / Approvals** | ✅ *search_codebase*¹ / get_context_packet / get_proof_pack / ask_human_approval | ⚠ run_goal_loop |
+
+¹ Off by default (opt-in): non-mutating tools that stream large/sensitive *content*
+(messages, recalled knowledge, code, rows) are defined but not in `DEFAULT_ENABLED`.
+² `create_work_item` is the Swarm-task create (mutating).
+
+**Classification rule.** Every read tool is in exactly one of `DEFAULT_ENABLED`
+(surfaced when the server is on) or the opt-in set; every mutating tool is in
+`DANGEROUS` (off by default, approval-gated). A unit test enforces this invariant.
+
+The same feature **reads** (no writes) are also injected into Otto's *own* agent
+sessions through the inward `ottod mcp-tools` server (§5) as `otto_list_workflows`,
+`otto_list_broker_clusters`, `otto_search_memory`, `otto_list_findings`,
+`otto_list_improvement_edits`, … so an Otto session can inspect every feature while
+keeping that server's strict read-only invariant.
 
 ---
 
@@ -189,7 +237,7 @@ The terminal decision is one of `allowed` · `approved` · `denied` · `dry_run`
 
 ---
 
-## 5. The 8 outward `otto.*` tools
+## 5. The outward `otto.*` tools — core set + full feature catalog
 
 `ottod mcp-server` exposes a static catalog (`otto_tool_specs`), filtered to the
 admin-enabled set. `tools/list` reflects `GET /mcp/otto-server`; `tools/call`
@@ -197,6 +245,10 @@ forwards to `POST /mcp/otto-tools/invoke`, which governs (enabled? allowlisted?
 dangerous→approval?), audits (`direction='inbound'`), then executes the capability
 **as the token's user** via a short-lived **ephemeral self-call** so each tool reuses
 its endpoint's native RBAC (no privilege escalation).
+
+The catalog spans **every Otto feature** — see the category table in **§3.3** for the
+complete list and `otto_tool_specs()` / `route_for` for the authoritative source. The
+**core/original** tools are detailed here:
 
 | Tool | Mutating | Default-enabled | What it does |
 |---|---|---|---|
@@ -213,8 +265,11 @@ The **default-enabled** set (`mcp_otto_server_tools`) is the safe read subset �
 `get_context_packet`, `get_proof_pack`, `ask_human_approval` — **plus** the two
 scheduled-task reads (`list_scheduled_tasks`, `list_scheduled_task_runs`). DB +
 code-search are read-exfiltration vectors and are **opt-in**; all mutating tools are
-off by default and `DANGEROUS` (approval-gated). In addition to the eight above, the
-outward surface carries the **seven Scheduled-Tasks tools** — see the
+off by default and `DANGEROUS` (approval-gated). In addition to the core tools above,
+the outward surface carries **read + write tools for every Otto feature** (workflows,
+brokers, git/PRs, issues, swarm, vault, sessions, code-review, product, usage,
+channels, skills, self-improvement) and the **seven Scheduled-Tasks tools** — the full
+category table is in **§3.3**, and see the
 [Scheduled Tasks guide](./scheduled-tasks.md#9-mcp-surface-the-7-otto-tools).
 
 `otto.query_db_readonly` is enforced read-only **server-side**: the executor
@@ -314,10 +369,16 @@ updates server health rows without a WS push.
 routes** the restricted token may reach (see §10).
 
 **Inward — `ottod mcp-tools`** (`mcp_tools.rs`): the per-session server Otto injects
-into its own agents' `.mcp.json` (read-only by construction — GET-only, 20 s timeout,
-1 MiB body cap, 500-row cap, redacted, audited). It serves **five first-party
-read-only tools**: `otto_db_schema`, `otto_git_pr_review`, `otto_product_story`,
-`canvas_list_scenes`, `canvas_get_scene`.
+into its own agents' `.mcp.json` (read-only by construction — GETs or read-only-enforced
+viewer POSTs only; 20 s timeout, 1 MiB body cap, 500-row cap, redacted, audited). It
+serves the first-party **read-only** tools: the DB connection tools
+(`otto_list_connections`, `otto_db_schema`/`_children`/`_object`, `otto_db_query`),
+`otto_git_pr_review`, `otto_product_story`, `canvas_list_scenes`/`canvas_get_scene`,
+**plus per-feature reads** — `otto_list_workflows`, `otto_get_workflow_run`,
+`otto_list_broker_clusters`/`_topics`, `otto_search_issues`, `otto_list_swarms`,
+`otto_search_memory`, `otto_list_repos`, `otto_list_sessions`,
+`otto_list_product_stories`, `otto_list_findings`, `otto_usage_summary`,
+`otto_list_improvement_runs`/`_edits` (the pure `read_route` map, unit-tested).
 
 **The gateway.** The inward server *also* surfaces the workspace's **governed
 downstream tools** — fetched from `GET /mcp/gateway/tools?workspace_id=` and
@@ -430,8 +491,9 @@ reads), `mcp_require_approval_dangerous` (default `true`), `mcp_health_interval_
 - Automatic risk + injection labeling (with human override that survives
   rediscovery), background health sweeps, and a single-use, hash-bound, approver≠requester
   approval queue.
-- Otto-as-MCP-server: 8 `otto.*` tools (+ 7 scheduled-task tools) over a restricted
-  token that can reach only the governed choke point; mutating tools off by default.
+- Otto-as-MCP-server: `otto.*` tools spanning **every Otto feature** (read + write)
+  over a restricted token that can reach only the governed choke point; reads
+  default-on, mutating tools off by default and approval-gated.
 - A **gateway** that brings Otto's own agents' downstream MCP calls under the same
   pipeline.
 - Per-workspace governance with strict per-workspace authorization on flat routes.

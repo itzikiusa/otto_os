@@ -1,9 +1,10 @@
 <script lang="ts">
-  // Otto-as-MCP-server: Otto exposes itself OUTWARD as an MCP server (the 8
-  // `otto.*` tools) for an external agent over stdio. Opt-in (default off),
-  // authenticated by a restricted, single-purpose token (minted/rotated here and
-  // shown ONCE), with mutating tools default-disabled and dangerous calls
-  // approval-gated. Per-tool enable checklist + a copy-pasteable `.mcp.json`
+  // Otto-as-MCP-server: Otto exposes itself OUTWARD as an MCP server (its own
+  // `otto.*` tools, grouped by feature) for an external agent over stdio. Opt-in
+  // (default off), authenticated by a restricted, single-purpose token
+  // (minted/rotated here and shown ONCE), with mutating tools default-disabled and
+  // dangerous calls approval-gated. Per-tool enable checklist (filterable, grouped
+  // by category, with per-group enable/disable) + a copy-pasteable `.mcp.json`
   // install snippet for the external agent.
   import Icon from '../../lib/components/Icon.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -11,28 +12,48 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import type { McpOttoServerStatus, McpOttoToolInfo } from '../../lib/api/types';
 
-  // The documented 8-tool catalog (design §7). Used as a hint if the daemon's
-  // admin route isn't reachable, so the checklist is always meaningful.
+  // A small fallback catalog shown only if the daemon's admin route isn't
+  // reachable. The live, full catalog (every feature category) comes from the
+  // daemon's `GET /mcp/otto-server`.
   const CATALOG: McpOttoToolInfo[] = [
-    { name: 'otto.search_codebase', description: 'ripgrep over the workspace (file:line hits)', mutating: false, enabled: false },
-    { name: 'otto.get_context_packet', description: 'workspace summary + memory recall for a query', mutating: false, enabled: false },
-    { name: 'otto.run_goal_loop', description: 'create + start a bounded goal loop', mutating: true, enabled: false },
-    { name: 'otto.create_work_item', description: 'create a product story / swarm task', mutating: true, enabled: false },
-    { name: 'otto.query_db_readonly', description: 'read-only SQL against a connection', mutating: false, enabled: false },
-    { name: 'otto.open_pr_draft', description: 'draft PR title/description from the diff (no publish)', mutating: false, enabled: false },
-    { name: 'otto.get_proof_pack', description: 'evidence bundle for a branch / PR / goal loop', mutating: false, enabled: false },
-    { name: 'otto.ask_human_approval', description: 'create a pending human-approval request', mutating: false, enabled: false },
+    { name: 'otto.search_codebase', description: 'ripgrep over the workspace (file:line hits)', mutating: false, enabled: false, category: 'Code & Context' },
+    { name: 'otto.list_workflows', description: 'list a workspace’s workflows', mutating: false, enabled: false, category: 'Workflows' },
+    { name: 'otto.list_broker_clusters', description: 'list a workspace’s Kafka clusters', mutating: false, enabled: false, category: 'Message Brokers' },
+    { name: 'otto.query_db_readonly', description: 'read-only SQL against a connection', mutating: false, enabled: false, category: 'Database' },
+    { name: 'otto.get_proof_pack', description: 'evidence bundle for a branch / PR / goal loop', mutating: false, enabled: false, category: 'Code & Context' },
+    { name: 'otto.ask_human_approval', description: 'create a pending human-approval request', mutating: false, enabled: false, category: 'Approvals' },
   ];
 
   let status = $state<McpOttoServerStatus | null>(null);
   let loading = $state(false);
   let saving = $state(false);
   let loadError = $state<string | null>(null);
+  let filter = $state('');
   /** A freshly minted token, shown ONCE in this session. */
   let mintedToken = $state<string | null>(null);
 
   const tools = $derived(status && status.tools.length ? status.tools : CATALOG);
   const enabledNames = $derived(new Set(tools.filter((t) => t.enabled).map((t) => t.name)));
+
+  // Tools filtered by the search box, then grouped by `category` (first-seen order;
+  // tools with no category fall into "Other").
+  const filtered = $derived.by(() => {
+    const q = filter.trim().toLowerCase();
+    return q ? tools.filter((t) => `${t.name} ${t.description}`.toLowerCase().includes(q)) : tools;
+  });
+  const groups = $derived.by(() => {
+    const order: string[] = [];
+    const map = new Map<string, McpOttoToolInfo[]>();
+    for (const t of filtered) {
+      const cat = t.category || 'Other';
+      if (!map.has(cat)) {
+        map.set(cat, []);
+        order.push(cat);
+      }
+      map.get(cat)!.push(t);
+    }
+    return order.map((cat) => ({ cat, tools: map.get(cat)! }));
+  });
 
   async function load(): Promise<void> {
     loading = true;
@@ -72,6 +93,16 @@
     const next = new Set(enabledNames);
     if (next.has(name)) next.delete(name);
     else next.add(name);
+    await patch({ tools: [...next] });
+  }
+
+  /** Enable/disable every tool in one category at once. */
+  async function setCategory(catTools: McpOttoToolInfo[], enable: boolean): Promise<void> {
+    const next = new Set(enabledNames);
+    for (const t of catTools) {
+      if (enable) next.add(t.name);
+      else next.delete(t.name);
+    }
     await patch({ tools: [...next] });
   }
 
@@ -137,8 +168,9 @@
           {/if}
         </div>
         <p class="muted small">
-          Expose the 8 <code>otto.*</code> tools to an external agent over stdio. Opt-in; mutating tools
-          stay off by default; dangerous calls are approval-gated; every call is audited.
+          Expose Otto's own <code>otto.*</code> tools — across every feature (workflows, brokers, git,
+          issues, swarm, vault, …) — to an external agent over stdio. Opt-in; mutating tools stay off by
+          default; dangerous calls are approval-gated; every call is audited.
         </p>
       </div>
       <div class="hero-actions">
@@ -166,23 +198,46 @@
       <p class="token-hint muted small">A token is configured (<code>{status.token_prefix}…</code>). Rotate to mint a fresh one.</p>
     {/if}
 
-    <h4 class="sec">Tools</h4>
-    <div class="tool-list">
-      {#each tools as t (t.name)}
-        <label class="tool">
-          <input
-            type="checkbox"
-            checked={t.enabled}
-            disabled={saving || !status}
-            onchange={() => void toggleTool(t.name)}
-          />
-          <div class="t-meta">
-            <span class="t-name mono">{t.name}{#if t.mutating}<span class="mut">mutating</span>{/if}</span>
-            <span class="t-desc">{t.description}</span>
-          </div>
-        </label>
-      {/each}
+    <div class="tools-head">
+      <h4 class="sec">Tools</h4>
+      <input
+        class="filter"
+        type="search"
+        placeholder="Filter tools…"
+        bind:value={filter}
+        aria-label="Filter tools"
+      />
     </div>
+    {#each groups as g (g.cat)}
+      <div class="grp">
+        <div class="grp-head">
+          <span class="grp-name">{g.cat}</span>
+          <span class="grp-count muted">{g.tools.filter((t) => t.enabled).length}/{g.tools.length}</span>
+          <span class="grow"></span>
+          <button class="btn xs" disabled={saving || !status} onclick={() => void setCategory(g.tools, true)}>All</button>
+          <button class="btn xs" disabled={saving || !status} onclick={() => void setCategory(g.tools, false)}>None</button>
+        </div>
+        <div class="tool-list">
+          {#each g.tools as t (t.name)}
+            <label class="tool">
+              <input
+                type="checkbox"
+                checked={t.enabled}
+                disabled={saving || !status}
+                onchange={() => void toggleTool(t.name)}
+              />
+              <div class="t-meta">
+                <span class="t-name mono">{t.name}{#if t.mutating}<span class="mut">mutating</span>{/if}</span>
+                <span class="t-desc">{t.description}</span>
+              </div>
+            </label>
+          {/each}
+        </div>
+      </div>
+    {/each}
+    {#if !groups.length}
+      <p class="muted small pad">No tools match “{filter}”.</p>
+    {/if}
 
     <h4 class="sec">Install snippet</h4>
     <p class="muted small">Add this to the external agent's <code>.mcp.json</code> (e.g. another machine's Claude/Copilot).</p>
@@ -281,6 +336,43 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
+  }
+  .tools-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    justify-content: space-between;
+  }
+  .filter {
+    flex: 0 1 240px;
+    font-size: 12px;
+    padding: 5px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 6px);
+    background: var(--bg);
+    color: var(--text);
+  }
+  .grp {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .grp-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 2px 0;
+  }
+  .grp-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .grp-count {
+    font-size: 11px;
+  }
+  .grow {
+    flex: 1 1 auto;
   }
   .tool-list {
     display: flex;

@@ -22,6 +22,13 @@ use crate::providers::ProviderRegistry;
 /// Build `["--add-dir", path, ...]` args for providers that support `--add-dir`
 /// (claude, codex, agy — NOT shell).  Returns an empty vec for unknown/shell
 /// providers or when `meta` has no `extra_dirs` array.
+///
+/// NOTE: this is provider-agnostic on purpose (it just grants dir access). It is
+/// NOT a skill-registration mechanism: only claude first-class-loads skills from
+/// an added dir's `.claude/skills`. If you put a skill bundle in `extra_dirs`,
+/// gate it to claude at the CALL SITE (see
+/// `otto_server::review_session::review_skills_extra_dirs`) — handing a
+/// `.claude/skills` bundle to codex makes it scavenge and run the wrong skill.
 fn add_dir_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     if provider == "shell" {
         return vec![];
@@ -2422,6 +2429,30 @@ mod tests {
         let meta = serde_json::json!({ "model": "  opus  " });
         let args = model_args("claude", &meta);
         assert_eq!(args, vec!["--model", "opus"]);
+    }
+
+    /// `add_dir_args` is provider-agnostic: ANY non-shell provider handed
+    /// `extra_dirs` gets `--add-dir`. This is the contract that makes gating a
+    /// skill bundle to claude the CALLER's job (see
+    /// `otto_server::review_session::review_skills_extra_dirs`) — handing the
+    /// bundle to codex here would re-introduce the wrong-skill bug.
+    #[test]
+    fn add_dir_args_emits_for_any_non_shell_with_extra_dirs() {
+        let meta = serde_json::json!({ "extra_dirs": ["/bundle"] });
+        assert_eq!(add_dir_args("claude", &meta), vec!["--add-dir", "/bundle"]);
+        assert_eq!(add_dir_args("codex", &meta), vec!["--add-dir", "/bundle"]);
+        assert_eq!(add_dir_args("agy", &meta), vec!["--add-dir", "/bundle"]);
+    }
+
+    /// shell never gets `--add-dir`, and an absent/empty `extra_dirs` yields none.
+    #[test]
+    fn add_dir_args_empty_for_shell_or_no_dirs() {
+        let meta = serde_json::json!({ "extra_dirs": ["/bundle"] });
+        assert!(add_dir_args("shell", &meta).is_empty());
+        assert!(add_dir_args("codex", &serde_json::json!({})).is_empty());
+        // Empty-string entries are skipped.
+        let empties = serde_json::json!({ "extra_dirs": ["", " "] });
+        assert_eq!(add_dir_args("claude", &empties), vec!["--add-dir", " "]);
     }
 
     /// A session spawned with saved grid meta reports that size via screen_size().

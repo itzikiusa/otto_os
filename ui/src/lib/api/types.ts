@@ -474,6 +474,9 @@ export interface McpOttoToolInfo {
   description: string;
   mutating: boolean;
   enabled: boolean;
+  /** Feature group (e.g. "Workflows", "Message Brokers") for UI grouping. Optional
+   * for forward-compat with daemons that predate the categorised catalog. */
+  category?: string | null;
 }
 
 /** `GET /mcp/otto-server` (+ `PATCH` reply, which may also carry `token` once). */

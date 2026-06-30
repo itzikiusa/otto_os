@@ -129,6 +129,26 @@ pub struct AgentRunResult {
 /// Shared, persisted live state for all agents in a review.
 pub type SharedStates = Arc<Mutex<Vec<ReviewAgentState>>>;
 
+/// The `extra_dirs` value (→ `--add-dir=<bundle>`) that registers the staged
+/// review-lens skills as FIRST-CLASS skills for `provider`, or `None` when the
+/// bundle must NOT be wired.
+///
+/// This is a CLAUDE-ONLY mechanism: only claude loads skills from an added dir's
+/// `.claude/skills` (the layout `stage_review_skills` writes). codex has no
+/// first-class out-of-tree skills — and, spawned with `--search`, it would
+/// scavenge the add-dir'd bundle and run the WRONG skill (the reported bug). agy
+/// loads `.agents/skills`, not this bundle's claude layout, so it gets nothing
+/// from it either. For non-claude providers the lens method is delivered inline
+/// in the prompt (see `compose_review_lens_prompt` / `run_review_core`), so the
+/// bundle is pure downside and is withheld. An empty/None dir ⇒ `None`.
+pub(crate) fn review_skills_extra_dirs(
+    provider: &str,
+    skills_add_dir: Option<&str>,
+) -> Option<serde_json::Value> {
+    let dir = skills_add_dir.filter(|d| !d.is_empty())?;
+    (provider == "claude").then(|| serde_json::json!([dir]))
+}
+
 /// Spawn `provider` as a live session in the repo, inject the (augmented)
 /// review prompt, and wait until it writes its findings file (or `timeout`
 /// elapses / it exits). Updates + persists this agent's state throughout so the
@@ -148,8 +168,9 @@ pub async fn run_agent_session(
     base_prompt: &str,
     timeout: Duration,
     // Shared out-of-tree skills bundle (`<dir>/.claude/skills/<lens>/`) to load
-    // as first-class skills via `--add-dir`, so the agent's `Skill(<lens>)` call
-    // resolves. None → rely on the method already inlined in the prompt.
+    // as first-class skills via `--add-dir` — CLAUDE-ONLY (see
+    // `review_skills_extra_dirs`). codex/agy can't load it and rely on the lens
+    // method inlined in the prompt. None → inline only.
     skills_add_dir: Option<&str>,
 ) -> RunOutcome {
     let path = findings_path(review_id, agent_index);
@@ -161,10 +182,13 @@ pub async fn run_agent_session(
         "review_id": review_id,
         "agent_index": agent_index,
     });
-    // `extra_dirs` becomes `--add-dir=<bundle>` on spawn (and resume) regardless
-    // of the review-session materialize skip, registering the lens skills.
-    if let Some(dir) = skills_add_dir.filter(|d| !d.is_empty()) {
-        meta["extra_dirs"] = serde_json::json!([dir]);
+    // `extra_dirs` becomes `--add-dir=<bundle>` on spawn (and resume), registering
+    // the lens skills as first-class — but ONLY for claude, which is the only CLI
+    // that loads `.claude/skills` from an added dir. Wiring it for codex (which
+    // would scavenge the bundle and run the wrong skill) or agy (which loads
+    // `.agents/skills`) is the propagation bug; they get the lens method inline.
+    if let Some(dirs) = review_skills_extra_dirs(provider, skills_add_dir) {
+        meta["extra_dirs"] = dirs;
     }
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
@@ -407,6 +431,25 @@ mod tests {
         assert!(out.contains("Review it."));
         assert!(out.contains("/tmp/x.json"));
         assert!(out.to_lowercase().contains("json array"));
+    }
+
+    #[test]
+    fn review_skills_extra_dirs_is_claude_only() {
+        // claude first-class-loads `<dir>/.claude/skills` from `--add-dir`, so it
+        // gets the staged lens bundle wired as a single-element array.
+        assert_eq!(
+            review_skills_extra_dirs("claude", Some("/bundle")),
+            Some(serde_json::json!(["/bundle"]))
+        );
+        // codex has no first-class out-of-tree skills (and with `--search` would
+        // scavenge the bundle and run the WRONG skill); agy loads `.agents/skills`,
+        // not this bundle's claude layout. Both rely on the inlined lens method, so
+        // the bundle is NEVER wired for them.
+        assert_eq!(review_skills_extra_dirs("codex", Some("/bundle")), None);
+        assert_eq!(review_skills_extra_dirs("agy", Some("/bundle")), None);
+        // No/empty bundle ⇒ nothing, even for claude.
+        assert_eq!(review_skills_extra_dirs("claude", None), None);
+        assert_eq!(review_skills_extra_dirs("claude", Some("")), None);
     }
 
     #[test]
