@@ -580,12 +580,12 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
         target: t.into(),
         condition: Some(cond.into()),
     };
-    let prepare = |goal: &str| {
+    let prepare = |goal: &str, x: f64| {
         node(
             "prepare",
             "agent_prompt",
             "Prepare relevant info",
-            300.0,
+            x,
             json!({ "prompt": format!(
                 "{goal}\n\nFrom the input data, read the Jira ticket (if any), the working \
                  directory, and every 'relevant_info' path, plus the message and goals. Search \
@@ -601,12 +601,12 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
     // review (design §F): per-lens provider sets + a summarizer. Scoring is a
     // generic, configurable severity→deduction guideline (design §G). `reviewers`
     // is a JSON array of { lens, providers[] (, instructions?) }.
-    let fix_review_loop = |max: u64, threshold: u64, reviewers: serde_json::Value| {
+    let fix_review_loop = |max: u64, threshold: u64, reviewers: serde_json::Value, x: f64| {
         node(
             "iterate",
             "loop",
             "Review → fix until passing",
-            900.0,
+            x,
             json!({
                 "max_iterations": max,
                 // Pass iff the review step (by name) cleared the threshold.
@@ -632,8 +632,19 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
     };
     // A separate, terminal "offer improvements" block (design §I): after the
     // work + review loop, reflect on the session and OFFER skill/memory
-    // improvements — queued for approval, never auto-applied.
-    let offer_improvements = |x: f64| node("improve", "self_improve", "Offer improvements", x, Value::Null);
+    // improvements — queued for approval, never auto-applied. Placed BELOW the
+    // post-loop x (y=300) because it shares that x with the `git_pr` node — the
+    // two are PARALLEL branches off the loop (PR on pass, improvements always), so
+    // they must not render stacked on top of each other (which hid the PR node).
+    let offer_improvements = |x: f64| WorkflowNode {
+        id: "improve".into(),
+        kind: "self_improve".into(),
+        name: "Offer improvements".into(),
+        x,
+        y: 300.0,
+        params: Value::Null,
+        retry: None,
+    };
 
     vec![
         // 1) Writing tests for a story.
@@ -649,7 +660,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
             graph: WorkflowGraph {
                 nodes: vec![
                     node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
-                    prepare("You are preparing context to WRITE TESTS."),
+                    prepare("You are preparing context to WRITE TESTS.", 300.0),
                     node("implement", "agent_prompt", "Write tests", 600.0, json!({
                         "prompt": "Using the brief, implement comprehensive tests (happy path, \
                                    meaningful validations, realistic errors). Run the suite and make them pass."
@@ -661,6 +672,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                             { "lens": "correctness-review", "providers": ["claude", "codex"] },
                             { "lens": "test-review", "providers": ["claude"] }
                         ]),
+                        900.0,
                     ),
                     node("pr", "git_pr", "Open PR (on pass)", 1300.0, json!({ "open": true })),
                     offer_improvements(1300.0),
@@ -689,7 +701,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                 nodes: vec![
                     node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
                     node("analyze", "product_analyze", "Analyze story", 300.0, Value::Null),
-                    prepare("You are preparing context to IMPLEMENT a feature."),
+                    prepare("You are preparing context to IMPLEMENT a feature.", 600.0),
                     node("implement", "agent_prompt", "Implement", 900.0, json!({
                         "prompt": "Using the analysis + brief, implement the feature and its tests. \
                                    Run the suite and make it pass."
@@ -702,6 +714,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                             { "lens": "security-review", "providers": ["codex"] },
                             { "lens": "test-review", "providers": ["claude"] }
                         ]),
+                        1200.0,
                     ),
                     node("pr", "git_pr", "Open PR (on pass)", 1600.0, json!({ "open": true })),
                     offer_improvements(1600.0),
@@ -1044,6 +1057,38 @@ mod tests {
         let ids: Vec<String> = game_templates().into_iter().map(|t| t.id).collect();
         for want in ["game-slots", "game-crash", "game-scratch"] {
             assert!(ids.iter().any(|id| id == want), "missing template {want}");
+        }
+    }
+
+    #[test]
+    fn no_template_node_overlaps_another() {
+        // Two nodes at the same (x,y) render stacked — one hides the other (this is
+        // how the `git_pr` "Open PR" node disappeared behind "Offer improvements").
+        for t in all_templates() {
+            let mut seen: Vec<(i64, i64, String)> = Vec::new();
+            for n in &t.graph.nodes {
+                let key = (n.x as i64, n.y as i64);
+                if let Some((_, _, other)) = seen.iter().find(|(x, y, _)| (*x, *y) == key) {
+                    panic!(
+                        "template '{}': nodes '{}' and '{}' share position {:?}",
+                        t.id, other, n.id, key
+                    );
+                }
+                seen.push((key.0, key.1, n.id.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn flow_templates_open_a_pr() {
+        // The implement/test templates must end with a git_pr node so a passing run
+        // opens the PR (taking repo/branch from the run automatically).
+        for id in ["write-tests", "implement-feature"] {
+            let t = all_templates().into_iter().find(|t| t.id == id).unwrap();
+            assert!(
+                t.graph.nodes.iter().any(|n| n.kind == "git_pr"),
+                "template '{id}' must contain a git_pr node"
+            );
         }
     }
 
