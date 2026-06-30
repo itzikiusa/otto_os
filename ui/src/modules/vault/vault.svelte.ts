@@ -98,12 +98,17 @@ export interface SetEmbedderReq {
   ollama_url?: string;
 }
 
-/** Ollama embedding model options (model → dimension). All are small enough for
- * a 5–10 GB machine; nomic is the fast default, mxbai/bge are higher quality. */
+/** Ollama embedding model options (model → embedding dimension). The dim is the
+ * model's native output; the stored dim auto-matches the real vector anyway.
+ * Pick by the machine's RAM — the ones marked "light" suit a 5–10 GB box; the
+ * larger Qwen3 models are best on a 20+ GB machine. */
 export const OLLAMA_EMBED_MODELS: { model: string; dim: number; note: string }[] = [
-  { model: 'nomic-embed-text', dim: 768, note: 'fast · ~0.5 GB · great default' },
-  { model: 'mxbai-embed-large', dim: 1024, note: 'higher quality · ~1.2 GB' },
-  { model: 'bge-m3', dim: 1024, note: 'multilingual + long context · ~2.5 GB' },
+  { model: 'nomic-embed-text', dim: 768, note: 'light · ~0.5 GB · fast default' },
+  { model: 'qwen3-embedding:0.6b', dim: 1024, note: 'light · ~0.6 GB · great quality/size' },
+  { model: 'mxbai-embed-large', dim: 1024, note: 'light · ~1.2 GB · strong' },
+  { model: 'bge-m3', dim: 1024, note: 'medium · ~2.5 GB · multilingual + long ctx' },
+  { model: 'qwen3-embedding:4b', dim: 2560, note: 'heavy · ~3–4 GB · top quality' },
+  { model: 'qwen3-embedding:8b', dim: 4096, note: 'very heavy · ~6 GB · best (20+ GB box)' },
   { model: 'all-minilm', dim: 384, note: 'tiny · ~0.1 GB' },
 ];
 
