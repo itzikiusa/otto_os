@@ -21,7 +21,9 @@ use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 
-use otto_memory::embed::{Embedder, RemoteEmbedder, RemoteProvider, StubEmbedder};
+use otto_memory::embed::{
+    Embedder, LocalCodeEmbedder, OllamaEmbedder, RemoteEmbedder, RemoteProvider, StubEmbedder,
+};
 use otto_memory::MemoryService;
 use otto_state::SettingsRepo;
 
@@ -40,19 +42,32 @@ const STUB_DIM: usize = 256;
 /// reference resolved at build time).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbedderConfig {
-    /// `"stub"` (default) | `"openai"` | `"voyage"`.
+    /// `"local"` (default, code-aware) | `"ollama"` | `"openai"` | `"voyage"` |
+    /// `"stub"` (legacy).
     #[serde(default = "default_provider")]
     pub provider: String,
+    /// Ollama model (default `nomic-embed-text`), used when provider == ollama.
+    #[serde(default)]
+    pub ollama_model: Option<String>,
+    /// Ollama embedding dimension (default 768).
+    #[serde(default)]
+    pub ollama_dim: Option<usize>,
+    /// Ollama base URL (default `http://127.0.0.1:11434`).
+    #[serde(default)]
+    pub ollama_url: Option<String>,
 }
 
 fn default_provider() -> String {
-    "stub".to_string()
+    "local".to_string()
 }
 
 impl Default for EmbedderConfig {
     fn default() -> Self {
         Self {
             provider: default_provider(),
+            ollama_model: None,
+            ollama_dim: None,
+            ollama_url: None,
         }
     }
 }
@@ -81,6 +96,12 @@ pub struct SetEmbedderReq {
     /// the existing stored key (or `<PROVIDER>_API_KEY` env) is used.
     #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub ollama_model: Option<String>,
+    #[serde(default)]
+    pub ollama_dim: Option<usize>,
+    #[serde(default)]
+    pub ollama_url: Option<String>,
 }
 
 /// Response of `POST /workspaces/{ws}/memory/reindex`.
@@ -122,7 +143,16 @@ pub fn build_embedder(cfg: &EmbedderConfig, secrets: &Arc<dyn SecretStore>) -> R
             let key = resolve_key("voyage", secrets)?;
             Ok(Arc::new(RemoteEmbedder::new(RemoteProvider::Voyage, key)))
         }
-        _ => Ok(Arc::new(StubEmbedder::new(STUB_DIM))),
+        // Real *local neural* embeddings via a localhost Ollama server.
+        "ollama" => Ok(Arc::new(OllamaEmbedder::new(
+            cfg.ollama_model.clone(),
+            cfg.ollama_dim,
+            cfg.ollama_url.clone(),
+        ))),
+        // Legacy zero-dependency stub (FNV bag-of-words).
+        "stub" => Ok(Arc::new(StubEmbedder::new(STUB_DIM))),
+        // Default: the code-aware deterministic local embedder.
+        _ => Ok(Arc::new(LocalCodeEmbedder::default())),
     }
 }
 
@@ -141,8 +171,8 @@ pub async fn apply_configured_embedder(
         .flatten()
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
-    // `stub` is already the service default — nothing to change.
-    if cfg.provider == "stub" {
+    // `local` (the code-aware embedder) is already the service default.
+    if cfg.provider == "local" {
         return;
     }
     match build_embedder(&cfg, secrets) {
@@ -197,7 +227,7 @@ async fn put_embedder(
 ) -> ApiResult<Json<EmbedderStatusResp>> {
     require_root(&user)?;
     let provider = req.provider.trim().to_string();
-    if !matches!(provider.as_str(), "stub" | "openai" | "voyage") {
+    if !matches!(provider.as_str(), "local" | "ollama" | "stub" | "openai" | "voyage") {
         return Err(Error::Invalid(format!("unknown embedder provider: {provider}")).into());
     }
     // Store a freshly-provided key before building (so the build can resolve it).
@@ -210,6 +240,9 @@ async fn put_embedder(
     }
     let cfg = EmbedderConfig {
         provider: provider.clone(),
+        ollama_model: req.ollama_model.clone(),
+        ollama_dim: req.ollama_dim,
+        ollama_url: req.ollama_url.clone(),
     };
     // Build first so a missing key is a 400 instead of a silent downgrade.
     let embedder = build_embedder(&cfg, &ctx.secrets).map_err(crate::error::ApiError)?;

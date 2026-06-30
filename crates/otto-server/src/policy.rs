@@ -512,6 +512,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     {
         return Require(Product, if get { View } else { Edit });
     }
+    // ---- Vault v2 (code intelligence: repos / symbols / graph / brain / docs /
+    // remote backends). Same knowledge layer as memory → gated on Product:
+    // read=View, write=Edit. Backend config/install additionally require Admin/
+    // root at the handler (the feature axis stays Edit here). Root bypasses.
+    if p.starts_with("/workspaces/{ws}/vault/") {
+        return Require(Product, if get { View } else { Edit });
+    }
 
     // ---- Message Brokers (Kafka viewer: clusters / topics / groups / schema / --
     // sidebar cluster-sections) --

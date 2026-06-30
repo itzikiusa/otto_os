@@ -329,6 +329,157 @@ async fn entity_graph<C: MemoryCtx>(
 }
 
 // ---------------------------------------------------------------------------
+// Vault v2 — code intelligence handlers
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct IndexRepoReq {
+    root: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct SymbolsQ {
+    q: Option<String>,
+    repo_id: Option<String>,
+    limit: i64,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct CodeGraphQ {
+    repo_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct NeighborhoodQ {
+    depth: usize,
+}
+
+#[derive(Deserialize)]
+struct WsNodePath {
+    ws: Id,
+    node_id: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct BrainReq {
+    focus: String,
+    cwd: Option<String>,
+    budget: usize,
+}
+
+#[derive(Deserialize)]
+struct DocReq {
+    #[serde(default)]
+    repo_id: Option<String>,
+    title: String,
+    body: String,
+    #[serde(default)]
+    documents: Vec<String>,
+}
+
+async fn index_repo<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsPath { ws }): Path<WsPath>,
+    Json(req): Json<IndexRepoReq>,
+) -> ApiResult<Json<IndexResult>> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    let root = std::path::Path::new(&req.root);
+    if !root.is_dir() {
+        return Err(ApiErr(Error::Invalid(format!("not a directory: {}", req.root))));
+    }
+    Ok(Json(
+        c.memory().index_repo(&ws, &user.id, root, req.name.as_deref()).await?,
+    ))
+}
+
+async fn list_repos<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsPath { ws }): Path<WsPath>,
+) -> ApiResult<Json<Vec<otto_state::CodeRepo>>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    Ok(Json(c.memory().list_repos(&ws).await?))
+}
+
+async fn symbols<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsPath { ws }): Path<WsPath>,
+    Query(q): Query<SymbolsQ>,
+) -> ApiResult<Json<Vec<otto_state::CodeSymbol>>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    let limit = if q.limit > 0 { q.limit } else { 50 };
+    Ok(Json(
+        c.memory()
+            .search_symbols(&ws, q.q.as_deref().unwrap_or(""), q.repo_id.as_deref(), limit)
+            .await?,
+    ))
+}
+
+async fn code_graph<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsPath { ws }): Path<WsPath>,
+    Query(q): Query<CodeGraphQ>,
+) -> ApiResult<Json<otto_state::CodeGraph>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    Ok(Json(c.memory().code_graph(&ws, q.repo_id.as_deref()).await?))
+}
+
+async fn full_graph<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsPath { ws }): Path<WsPath>,
+    Query(q): Query<CodeGraphQ>,
+) -> ApiResult<Json<FullGraph>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    Ok(Json(c.memory().full_graph(&ws, q.repo_id.as_deref()).await?))
+}
+
+async fn neighborhood<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsNodePath { ws, node_id }): Path<WsNodePath>,
+    Query(q): Query<NeighborhoodQ>,
+) -> ApiResult<Json<otto_state::CodeGraph>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    let depth = if q.depth == 0 { 2 } else { q.depth };
+    Ok(Json(c.memory().code_neighborhood(&ws, &node_id, depth).await?))
+}
+
+async fn brain<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsPath { ws }): Path<WsPath>,
+    Json(req): Json<BrainReq>,
+) -> ApiResult<Json<RepoBrain>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    let cwd = req.cwd.as_deref().map(std::path::Path::new);
+    Ok(Json(c.memory().repo_brain(&ws, &req.focus, cwd, req.budget).await?))
+}
+
+async fn create_doc<C: MemoryCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsPath { ws }): Path<WsPath>,
+    Json(req): Json<DocReq>,
+) -> ApiResult<Json<Memory>> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    Ok(Json(
+        c.memory()
+            .upsert_doc(&ws, &user.id, req.repo_id.as_deref(), &req.title, &req.body, &req.documents)
+            .await?,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -353,4 +504,13 @@ pub fn router<C: MemoryCtx>() -> Router<C> {
             "/workspaces/{ws}/memory/entities/{id}/graph",
             get(entity_graph::<C>),
         )
+        // -- Vault v2: code intelligence --
+        .route("/workspaces/{ws}/vault/repos", get(list_repos::<C>))
+        .route("/workspaces/{ws}/vault/repos/index", post(index_repo::<C>))
+        .route("/workspaces/{ws}/vault/symbols", get(symbols::<C>))
+        .route("/workspaces/{ws}/vault/graph", get(code_graph::<C>))
+        .route("/workspaces/{ws}/vault/fullgraph", get(full_graph::<C>))
+        .route("/workspaces/{ws}/vault/graph/{node_id}", get(neighborhood::<C>))
+        .route("/workspaces/{ws}/vault/brain", post(brain::<C>))
+        .route("/workspaces/{ws}/vault/docs", post(create_doc::<C>))
 }

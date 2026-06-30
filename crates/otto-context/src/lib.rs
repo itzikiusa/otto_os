@@ -15,4 +15,4 @@ pub mod user_skills;
 
 pub use http::{router, ContextCtx};
 pub use library::Library;
-pub use provisioner::Provisioner;
+pub use provisioner::{Provisioner, RepoBrainSource};

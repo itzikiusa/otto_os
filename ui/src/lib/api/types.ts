@@ -4485,10 +4485,18 @@ export interface MemoryQuery {
   recency_half_life_days?: number;
 }
 
+/** Structured "why this was selected" reason (Vault v2 explainability). */
+export interface ContextReason {
+  kind: string; // vector|keyword|symbol|graph|recent|test|doc|scope|hybrid
+  detail: string;
+  score: number;
+}
+
 export interface MemoryHit {
   memory: Memory;
   score: number;
   why: string[];
+  reasons?: ContextReason[];
 }
 
 export interface BriefSection {
@@ -4538,6 +4546,159 @@ export interface IngestTextReq {
   collection?: string;
   path: string;
   content: string;
+}
+
+// ---------------------------------------------------------------------------
+// Vault v2 — code intelligence + remote backends
+// (mirror of crates/otto-memory + crates/otto-state code_index/vault_backends)
+// ---------------------------------------------------------------------------
+
+export interface CodeRepo {
+  id: string;
+  workspace_id: string;
+  root: string;
+  name: string;
+  head: string | null;
+  files: number;
+  symbols: number;
+  edges: number;
+  chunks: number;
+  status: string; // idle|indexing|ready|error
+  message: string | null;
+  indexed_at: string | null;
+  created_at: string;
+}
+
+export interface CodeSymbol {
+  id: string;
+  workspace_id: string;
+  repo_id: string;
+  name: string;
+  kind: string;
+  lang: string;
+  file: string;
+  line: number;
+  signature: string;
+}
+
+export interface CodeNode {
+  id: string;
+  workspace_id: string;
+  repo_id: string | null;
+  kind: string; // file|symbol|service|db_table|endpoint|doc|external
+  key: string;
+  label: string;
+  file: string | null;
+  line: number | null;
+  meta_json: string;
+}
+
+export interface CodeEdge {
+  id: string;
+  workspace_id: string;
+  repo_id: string | null;
+  src_id: string;
+  dst_id: string;
+  rel: string; // calls|imports|http_call|db_call|test_of|documents|defined_in|depends_on
+  detail: string;
+  weight: number;
+  file: string | null;
+  line: number | null;
+}
+
+export interface CodeGraph {
+  nodes: CodeNode[];
+  edges: CodeEdge[];
+}
+
+export interface IndexResult {
+  repo_id: string;
+  files: number;
+  symbols: number;
+  edges: number;
+  chunks: number;
+}
+
+/** Unified Vault graph (knowledge + code) for the full graph view. */
+export interface FullGraphNode {
+  id: string;
+  label: string;
+  kind: string;
+  group: string; // knowledge|code
+  file: string | null;
+  line: number | null;
+}
+export interface FullGraphEdge {
+  src: string;
+  dst: string;
+  rel: string;
+  detail?: string;
+}
+export interface FullGraph {
+  nodes: FullGraphNode[];
+  edges: FullGraphEdge[];
+}
+
+export interface RepoBrain {
+  focus: string;
+  sections: BriefSection[];
+  reasons: ContextReason[];
+  token_estimate: number;
+  markdown: string;
+}
+
+export interface IndexRepoReq {
+  root: string;
+  name?: string;
+}
+
+export interface VaultDocReq {
+  repo_id?: string;
+  title: string;
+  body: string;
+  documents?: string[];
+}
+
+/** Per-workspace remote backend config (Qdrant/SurrealDB/Ollama). */
+export interface VaultBackend {
+  id: string;
+  workspace_id: string;
+  kind: string; // qdrant|surreal|ollama
+  enabled: boolean;
+  url: string;
+  role: string; // vector|graph|embed
+  config_json: string;
+  status: string; // unknown|ok|error|installing
+  message: string | null;
+  updated_at: string;
+}
+
+export interface VaultBackendReq {
+  enabled: boolean;
+  url: string;
+  role: string;
+  config_json?: string;
+  /** secret (api key / password) — stored in the Keychain, never echoed back. */
+  secret?: string;
+}
+
+export interface VaultInstallPlan {
+  kind: string;
+  method: string; // docker|brew|script|none
+  steps: string[];
+  health_url: string;
+  ready: boolean;
+  notes: string;
+}
+
+export interface VaultInstallResult {
+  ok: boolean;
+  log: string;
+}
+
+export interface VaultHealth {
+  status: string; // ok|error
+  message: string | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -77,6 +77,11 @@ const DEFAULT_ENABLED: &[&str] = &[
     "list_improvement_runs",
     "get_improvement_run",
     "list_improvement_edits",
+    // Vault v2 (structural reads — no large content)
+    "vault_list_repos",
+    "vault_search_symbols",
+    "vault_code_graph",
+    "vault_node_neighborhood",
 ];
 const DANGEROUS: &[&str] = &[
     "run_goal_loop",
@@ -106,6 +111,11 @@ const DANGEROUS: &[&str] = &[
     "approve_improvement_edit",
     "reject_improvement_edit",
     "rollback_improvement_edit",
+    // Vault v2 writes (filesystem scan / knowledge writes / host install)
+    "vault_index_repo",
+    "vault_ingest_text",
+    "vault_upsert_doc",
+    "vault_install_backend",
 ];
 
 /// Non-mutating tools that are defined and enableable but stay **off by default**
@@ -120,6 +130,9 @@ const OPT_IN_READS: &[&str] = &[
     "open_pr_draft",
     "consume_broker_messages",
     "search_memory",
+    // Vault v2 content-streaming reads.
+    "vault_brain",
+    "vault_full_graph",
 ];
 const MAX_WAIT_SECS: u64 = 30;
 
@@ -409,6 +422,48 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Delete a scheduled task and its run history. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"}}}}),
+
+        // ================= Vault v2 (code intelligence) =================
+        json!({"name":"otto.vault_list_repos","mutating":false,"category":"Vault",
+            "description":"List repositories indexed into the Vault for a workspace (with symbol/edge/chunk counts + status). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.vault_search_symbols","mutating":false,"category":"Vault",
+            "description":"Search the Vault's tree-sitter symbol index by name substring; returns name/kind/file:line/signature. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id","query"],"properties":{
+                "workspace_id":{"type":"string"},"query":{"type":"string"},"repo_id":{"type":"string"},"limit":{"type":"integer"}}}}),
+        json!({"name":"otto.vault_code_graph","mutating":false,"category":"Vault",
+            "description":"Get the code dependency graph (nodes + typed edges: calls/imports/http_call/db_call/test_of/documents) for a workspace, optionally scoped to one repo. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
+                "workspace_id":{"type":"string"},"repo_id":{"type":"string"}}}}),
+        json!({"name":"otto.vault_node_neighborhood","mutating":false,"category":"Vault",
+            "description":"Breadth-first dependency neighborhood (subgraph) around a graph node id, up to `depth` hops. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id","node_id"],"properties":{
+                "workspace_id":{"type":"string"},"node_id":{"type":"string"},"depth":{"type":"integer"}}}}),
+        json!({"name":"otto.vault_brain","mutating":false,"category":"Vault",
+            "description":"Assemble the Repo Brain for a focus: relevant knowledge/docs, symbols, the dependency neighborhood, and git/test context — each annotated with WHY it was selected. Streams recalled content (off by default).",
+            "inputSchema":{"type":"object","required":["workspace_id","focus"],"properties":{
+                "workspace_id":{"type":"string"},"focus":{"type":"string"},"cwd":{"type":"string"},"budget":{"type":"integer"}}}}),
+        json!({"name":"otto.vault_full_graph","mutating":false,"category":"Vault",
+            "description":"The unified Vault graph (knowledge memories + code dependency graph) for the full graph view. Read-only; can be large (off by default).",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
+                "workspace_id":{"type":"string"},"repo_id":{"type":"string"}}}}),
+        json!({"name":"otto.vault_index_repo","mutating":true,"category":"Vault",
+            "description":"Scan a repository on disk into the Vault: tree-sitter symbols + dependency graph + embeddings. DANGEROUS: reads arbitrary filesystem paths and writes the index — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","root"],"properties":{
+                "workspace_id":{"type":"string"},"root":{"type":"string"},"name":{"type":"string"}}}}),
+        json!({"name":"otto.vault_ingest_text","mutating":true,"category":"Vault",
+            "description":"Chunk + embed text into a Vault collection (default `code`). DANGEROUS: writes to the knowledge store — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","path","content"],"properties":{
+                "workspace_id":{"type":"string"},"collection":{"type":"string"},"path":{"type":"string"},"content":{"type":"string"}}}}),
+        json!({"name":"otto.vault_upsert_doc","mutating":true,"category":"Vault",
+            "description":"Create/refresh a documentation note and link it into the code dependency graph (a `doc` node with `documents` edges to code node ids). DANGEROUS: writes — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","title","body"],"properties":{
+                "workspace_id":{"type":"string"},"repo_id":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"},
+                "documents":{"type":"array","items":{"type":"string"}}}}}),
+        json!({"name":"otto.vault_install_backend","mutating":true,"category":"Vault",
+            "description":"Install a remote Vault backend locally (kind = qdrant|surreal|ollama) via Docker/Homebrew. DANGEROUS: changes the host — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","kind"],"properties":{
+                "workspace_id":{"type":"string"},"kind":{"type":"string"}}}}),
     ]
 }
 
@@ -1089,6 +1144,90 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(20);
             let body = json!({ "text": arg_str(args, "query")?, "k": k });
             SelfCall::post(format!("/api/v1/workspaces/{}/memory/search", seg(&ws)), body)
+        }
+        // ---- Vault v2: code intelligence ----
+        "vault_list_repos" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/vault/repos", seg(&ws)))
+        }
+        "vault_search_symbols" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut q = vec![format!("q={}", seg(&arg_str(args, "query")?))];
+            if let Some(r) = args.get("repo_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                q.push(format!("repo_id={}", seg(r)));
+            }
+            if let Some(l) = args.get("limit").and_then(Value::as_u64) {
+                q.push(format!("limit={l}"));
+            }
+            SelfCall::get(format!("/api/v1/workspaces/{}/vault/symbols?{}", seg(&ws), q.join("&")))
+        }
+        "vault_code_graph" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut path = format!("/api/v1/workspaces/{}/vault/graph", seg(&ws));
+            if let Some(r) = args.get("repo_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                path.push_str(&format!("?repo_id={}", seg(r)));
+            }
+            SelfCall::get(path)
+        }
+        "vault_full_graph" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut path = format!("/api/v1/workspaces/{}/vault/fullgraph", seg(&ws));
+            if let Some(r) = args.get("repo_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                path.push_str(&format!("?repo_id={}", seg(r)));
+            }
+            SelfCall::get(path)
+        }
+        "vault_node_neighborhood" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let node = arg_str(args, "node_id")?;
+            let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(2);
+            SelfCall::get(format!("/api/v1/workspaces/{}/vault/graph/{}?depth={depth}", seg(&ws), seg(&node)))
+        }
+        "vault_brain" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut body = json!({ "focus": arg_str(args, "focus")? });
+            if let Some(c) = args.get("cwd").and_then(Value::as_str) {
+                body["cwd"] = json!(c);
+            }
+            if let Some(b) = args.get("budget").and_then(Value::as_u64) {
+                body["budget"] = json!(b);
+            }
+            SelfCall::post(format!("/api/v1/workspaces/{}/vault/brain", seg(&ws)), body)
+        }
+        "vault_index_repo" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut body = json!({ "root": arg_str(args, "root")? });
+            if let Some(n) = args.get("name").and_then(Value::as_str) {
+                body["name"] = json!(n);
+            }
+            SelfCall::post(format!("/api/v1/workspaces/{}/vault/repos/index", seg(&ws)), body)
+        }
+        "vault_ingest_text" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut body = json!({ "path": arg_str(args, "path")?, "content": arg_str(args, "content")? });
+            if let Some(c) = args.get("collection").and_then(Value::as_str) {
+                body["collection"] = json!(c);
+            }
+            SelfCall::post(format!("/api/v1/workspaces/{}/memory/ingest-text", seg(&ws)), body)
+        }
+        "vault_upsert_doc" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut body = json!({ "title": arg_str(args, "title")?, "body": arg_str(args, "body")? });
+            if let Some(r) = args.get("repo_id").and_then(Value::as_str) {
+                body["repo_id"] = json!(r);
+            }
+            if let Some(d) = args.get("documents") {
+                body["documents"] = d.clone();
+            }
+            SelfCall::post(format!("/api/v1/workspaces/{}/vault/docs", seg(&ws)), body)
+        }
+        "vault_install_backend" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let kind = arg_str(args, "kind")?;
+            SelfCall::post(
+                format!("/api/v1/workspaces/{}/vault/backends/{}/install", seg(&ws), seg(&kind)),
+                json!({}),
+            )
         }
         // ---- Sessions ----
         "list_sessions" => {

@@ -151,6 +151,200 @@ impl Embedder for RemoteEmbedder {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Local code-aware embedder (Vault v2 default). Deterministic + offline (no
+// model download, no native ONNX) but materially better than the FNV stub for
+// CODE: it splits identifiers (camelCase / snake_case / dotted paths) into
+// subtokens AND hashes character trigrams, so `GetLimits` and `GetUserLimits`
+// share dimensions (subword overlap) and near-miss spellings still land close.
+// This is the hermetic default E2E runs against; real *neural* local embeddings
+// are available via the Ollama provider (see `OllamaEmbedder`), and remote
+// neural via OpenAI/Voyage (`RemoteEmbedder`).
+// ---------------------------------------------------------------------------
+
+/// Split an identifier into lowercased subtokens on case + separator boundaries.
+/// `GetUserLimits` → [getuserlimits, get, user, limits]; `get_limits.v2` →
+/// [getlimits, get, limits, v2]. The whole joined token is kept too so exact
+/// identifier matches still align.
+pub(crate) fn code_subtokens(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for word in raw.split(|c: char| !c.is_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        // camelCase / PascalCase / digit boundaries → parts.
+        let mut parts: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let chars: Vec<char> = word.chars().collect();
+        for (i, &ch) in chars.iter().enumerate() {
+            let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+            let boundary = matches!(prev, Some(p)
+                if (ch.is_uppercase() && p.is_lowercase())
+                || (ch.is_ascii_digit() != p.is_ascii_digit()));
+            if boundary && !cur.is_empty() {
+                parts.push(std::mem::take(&mut cur));
+            }
+            cur.push(ch.to_ascii_lowercase());
+        }
+        if !cur.is_empty() {
+            parts.push(cur);
+        }
+        let joined = word.to_lowercase();
+        if parts.len() != 1 || parts.first().map(|p| p != &joined).unwrap_or(false) {
+            out.push(joined);
+        }
+        out.extend(parts.into_iter().filter(|p| !p.is_empty()));
+    }
+    out
+}
+
+/// FNV-1a of a string → a feature bucket.
+fn bucket(s: &str, dim: usize) -> usize {
+    let mut h = 1469598103934665603u64;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    (h as usize) % dim
+}
+
+/// Deterministic, offline, code-aware local embedder. Default dim 512.
+pub struct LocalCodeEmbedder {
+    dim: usize,
+}
+
+impl LocalCodeEmbedder {
+    pub fn new(dim: usize) -> Self {
+        Self { dim }
+    }
+}
+
+impl Default for LocalCodeEmbedder {
+    fn default() -> Self {
+        Self { dim: 512 }
+    }
+}
+
+#[async_trait]
+impl Embedder for LocalCodeEmbedder {
+    fn model_id(&self) -> &str {
+        "local-code-v1"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|t| {
+                let mut v = vec![0f32; self.dim];
+                for tok in code_subtokens(t) {
+                    // Whole subtoken (full weight).
+                    v[bucket(&tok, self.dim)] += 1.0;
+                    // Character trigrams (subword/fuzzy signal, down-weighted).
+                    if tok.len() >= 3 {
+                        let chars: Vec<char> = tok.chars().collect();
+                        for w in chars.windows(3) {
+                            let tri: String = w.iter().collect();
+                            v[bucket(&format!("#{tri}"), self.dim)] += 0.35;
+                        }
+                    }
+                }
+                let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+                for x in &mut v {
+                    *x /= n;
+                }
+                v
+            })
+            .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ollama — real *local neural* embeddings via a localhost Ollama server (e.g.
+// `nomic-embed-text`, 768-dim). Local by design, so it deliberately does NOT go
+// through the SSRF guard (which blocks loopback); the URL is an admin setting.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct OllamaEmbedReq<'a> {
+    model: &'a str,
+    input: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct OllamaEmbedResp {
+    embeddings: Vec<Vec<f32>>,
+}
+
+/// Embeddings client for a local Ollama server (`POST <base>/api/embed`).
+pub struct OllamaEmbedder {
+    base_url: String,
+    model: String,
+    model_id: String,
+    dim: usize,
+    http: reqwest::Client,
+}
+
+impl OllamaEmbedder {
+    /// Default local Ollama on `127.0.0.1:11434` with `nomic-embed-text` (768).
+    pub fn new(model: Option<String>, dim: Option<usize>, base_url: Option<String>) -> Self {
+        let model = model.unwrap_or_else(|| "nomic-embed-text".to_string());
+        Self {
+            base_url: base_url
+                .unwrap_or_else(|| "http://127.0.0.1:11434".to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            model_id: format!("ollama:{model}"),
+            dim: dim.unwrap_or(768),
+            model,
+            http: reqwest::Client::builder()
+                .timeout(EMBED_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[async_trait]
+impl Embedder for OllamaEmbedder {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let resp = self
+            .http
+            .post(format!("{}/api/embed", self.base_url))
+            .json(&OllamaEmbedReq {
+                model: &self.model,
+                input: texts,
+            })
+            .send()
+            .await
+            .map_err(|e| Error::Upstream(format!("ollama embed request: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(Error::Upstream(format!(
+                "ollama returned {} (is the model pulled? `ollama pull {}`)",
+                resp.status(),
+                self.model
+            )));
+        }
+        if let Some(len) = resp.content_length() {
+            if len > MAX_EMBED_BODY {
+                return Err(Error::Upstream(format!("ollama response too large: {len} bytes")));
+            }
+        }
+        let body: OllamaEmbedResp = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("ollama decode: {e}")))?;
+        Ok(body.embeddings)
+    }
+}
+
 /// Deterministic hashed bag-of-words embedder — unit-normalized. Shared tokens →
 /// closer vectors, which is enough to exercise the whole semantic path in tests
 /// and as a zero-dependency default. Not a substitute for a real model.

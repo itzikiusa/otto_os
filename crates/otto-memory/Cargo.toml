@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 otto-core.workspace = true
 otto-state.workspace = true
+otto-context.workspace = true
 axum.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
@@ -17,6 +18,18 @@ sha2.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
 otto-netguard.workspace = true
+# Code intelligence: tree-sitter symbol + dependency extraction over indexed
+# repos, walking the tree honoring .gitignore (same grammar set as otto-context).
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-go = { workspace = true }
+ignore = { workspace = true }
+# HNSW ANN over the SQLite-stored vectors (large-collection vector search). Pure
+# Rust, no native deps; exact cosine is used below a size threshold.
+instant-distance = "0.6"
 
 [dev-dependencies]
 ulid.workspace = true

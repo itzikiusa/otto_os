@@ -27,7 +27,9 @@ pub mod mcp_audit;
 pub mod mcp_control;
 pub mod goal_loops;
 pub mod mcp_servers;
+pub mod code_index;
 pub mod memory;
+pub mod vault_backends;
 pub mod name_themes;
 pub mod notifications;
 pub mod plugins;
@@ -100,7 +102,11 @@ pub use mcp_control::{
     NewServerRow,
 };
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
+pub use code_index::{
+    CodeEdge, CodeGraph, CodeIndexRepo, CodeNode, CodeRepo, CodeSymbol, NewEdge, NewNode,
+};
 pub use memory::{GovernedImport, MemoriesRepo};
+pub use vault_backends::{VaultBackend, VaultBackendsRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
 pub use plugins::{NewPlugin, PluginRecord, PluginsRepo};
 pub use canvas::{CanvasRepo, CanvasScene, CanvasSceneSummary, NewScene, SceneUpdate};
