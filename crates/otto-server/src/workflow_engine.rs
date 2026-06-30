@@ -298,10 +298,13 @@ const NODE_AGENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Global wall-clock budget for a whole run. A run can't execute forever: once
 /// the cumulative time across all nodes exceeds this, the run is failed at the
-/// next node boundary (a node already executing finishes first, bounded by
-/// `NODE_AGENT_TIMEOUT`). 30 min comfortably covers a multi-agent game pipeline
-/// while still guaranteeing termination.
-const RUN_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// next node boundary (a node already executing finishes first, bounded by the
+/// per-turn agent timeout). 10h is a deliberate, generous backstop — long
+/// multi-step agent pipelines (write tests → review → fix-until-passing → PR) can
+/// legitimately run for hours; the operator stops a run manually if they want it
+/// to end sooner. This only guarantees eventual termination, it does not curtail
+/// real work.
+const RUN_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60 * 60);
 
 /// Fail any workflow run left `pending`/`running` by a previous daemon process.
 ///
@@ -942,8 +945,8 @@ pub async fn run_workflow(
             }
         }
         let msg = format!(
-            "run exceeded the {}-minute time limit",
-            RUN_WALL_CLOCK_TIMEOUT.as_secs() / 60
+            "run exceeded the {}-hour time limit",
+            RUN_WALL_CLOCK_TIMEOUT.as_secs() / 3600
         );
         let _ = repo
             .update_run(&run_id, RunStatus::Error, &states, Some(&msg), true)

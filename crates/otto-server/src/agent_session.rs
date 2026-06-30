@@ -22,11 +22,17 @@ use crate::error::{ApiError, ApiResult};
 use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
 use crate::state::ServerCtx;
 
-/// Absolute cap on one turn (cold claude spawn + a long reply). The first turn
-/// pays the ~25-30s cold start; later turns are warm.
-const TURN_TIMEOUT: Duration = Duration::from_secs(600);
-/// Treat the session as wedged once it produces no output for this long.
-const STUCK_IDLE: Duration = Duration::from_secs(240);
+/// Absolute cap on one turn (cold claude spawn + a long reply). Deliberately very
+/// generous (10h): a workflow agent step (e.g. "write tests", a long refactor) can
+/// legitimately run for hours, and the operator stops a run manually rather than
+/// having it killed out from under them. A genuine claude API error still fails
+/// FAST (see below) — this cap only bounds *legitimate* long work.
+const TURN_TIMEOUT: Duration = Duration::from_secs(10 * 60 * 60);
+/// Treat the session as wedged once it produces no output for this long. Also very
+/// generous (10h) so a step that's quietly working — compiling, running a long
+/// test suite — is never mistaken for a hung session. The operator cancels if
+/// they truly want to stop it.
+const STUCK_IDLE: Duration = Duration::from_secs(10 * 60 * 60);
 /// Watch poll cadence.
 const POLL: Duration = Duration::from_millis(1000);
 
