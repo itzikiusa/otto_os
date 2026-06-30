@@ -1509,9 +1509,15 @@ fn slug_skill_name(name: &str) -> String {
 
 /// Stage the given review-lens skills into a shared out-of-tree bundle laid out
 /// as claude's `.claude/skills/<name>/`, and return that bundle dir. Wired into
-/// each review agent via `meta.extra_dirs` → `--add-dir=<bundle>`, it makes the
-/// skills resolve as FIRST-CLASS skills so an agent's reflexive
-/// `Skill(test-review)` succeeds — not just the method inlined in its prompt.
+/// CLAUDE review agents via `meta.extra_dirs` → `--add-dir=<bundle>` (see
+/// `review_session::review_skills_extra_dirs`), it makes the skills resolve as
+/// FIRST-CLASS skills so claude's reflexive `Skill(test-review)` succeeds.
+///
+/// This is a CLAUDE-ONLY vehicle. codex has no first-class out-of-tree skills
+/// (and would scavenge this bundle and run the wrong skill), and agy loads
+/// `.agents/skills`, not the `.claude/skills` layout written here — so for those
+/// providers the bundle is withheld and the lens method travels INLINE in the
+/// prompt instead (see `compose_review_lens_prompt`).
 ///
 /// Why a dedicated bundle (not the repo cwd): review sessions deliberately skip
 /// context materialization (see `SessionManager` spawn), and a reviewed repo
@@ -1838,11 +1844,7 @@ async fn run_review_core(
                 } else {
                     a.name.clone()
                 };
-                let prompt_lens = if skill_text.is_empty() {
-                    a.prompt.clone()
-                } else {
-                    format!("{skill_text}\n\n---\n\n{}", a.prompt)
-                };
+                let prompt_lens = compose_review_lens_prompt(&lens, &skill_text, &a.prompt);
                 AgentRun {
                     display_name,
                     provider: p,
@@ -1930,15 +1932,17 @@ async fn run_review_core(
         .lock()
         .ok()
         .and_then(|m| m.get(&review_id.to_string()).cloned());
-    // Make the FULL skill library available to every review agent as first-class
+    // Make the FULL skill library available to CLAUDE review agents as first-class
     // skills (`Skill(<name>)`), staged into a shared out-of-tree bundle wired in
-    // below via `meta.extra_dirs` → `--add-dir`. Skills are generic and
+    // below via `meta.extra_dirs` → `--add-dir` (claude-only — see
+    // `review_session::review_skills_extra_dirs`). Skills are generic and
     // cross-context (e.g. `grill` is useful for review, not only product), and a
     // review config usually carries the lens in the agent NAME rather than the
     // `skill` field — so rather than guess which one each agent needs, we register
-    // them all and let the agent invoke whichever it wants. Works in ANY repo, not
-    // only ones carrying an in-tree `.claude/skills`. Best-effort (None → the
-    // method stays available via the inlined prompt text only).
+    // them all and let claude invoke whichever it wants. Works in ANY repo, not
+    // only ones carrying an in-tree `.claude/skills`. codex/agy don't use this
+    // bundle; their lens method travels inline in the prompt. Best-effort (None →
+    // even claude falls back to the inlined prompt text).
     let review_skills_dir = {
         let names: Vec<String> = ctx
             .context_library
@@ -2842,6 +2846,36 @@ pub(crate) fn compose_draft_prompt(skill_text: &str, base_prompt: &str) -> Strin
     }
 }
 
+/// Compose a review agent's prompt body: prepend the inlined lens method
+/// (`skill_text`) ahead of the agent's lens prompt, fronted by a directive that
+/// makes the indicated lens AUTHORITATIVE on every provider.
+///
+/// This directive is the load-bearing fix for the codex skill-propagation bug:
+/// codex has no first-class skills, so without it codex reflexively goes looking
+/// for "a review skill" and runs the wrong one. The wording NAMES the lens and
+/// forbids substituting a *different* skill, while explicitly permitting the
+/// named lens itself — so it never suppresses the correct skill on claude (which
+/// may still invoke `Skill(<lens>)`, the same method). Empty `skill_text` ⇒ the
+/// agent prompt is returned unchanged (mirrors [`compose_draft_prompt`]).
+pub(crate) fn compose_review_lens_prompt(lens: &str, skill_text: &str, agent_prompt: &str) -> String {
+    if skill_text.trim().is_empty() {
+        return agent_prompt.to_string();
+    }
+    let lens = lens.trim();
+    let directive = if lens.is_empty() {
+        "Use the review method specified in full below. Do not search for, switch to, or \
+         substitute a different review skill or style — everything you need is already here."
+            .to_string()
+    } else {
+        format!(
+            "Use the `{lens}` review method specified in full below. Do not search for, switch \
+             to, or substitute a *different* review skill or style — its full method is already \
+             here. (Invoking `{lens}` itself is fine.)"
+        )
+    };
+    format!("{directive}\n\n{skill_text}\n\n---\n\n{agent_prompt}")
+}
+
 #[cfg(test)]
 mod commit_pr_draft_tests {
     use super::{compose_draft_prompt, jira_key_from_branch};
@@ -2896,6 +2930,50 @@ mod commit_pr_draft_tests {
     #[test]
     fn compose_prepends_skill() {
         assert_eq!(compose_draft_prompt("SKILL", "BASE"), "SKILL\n\n---\n\nBASE");
+    }
+}
+
+#[cfg(test)]
+mod review_lens_prompt_tests {
+    use super::compose_review_lens_prompt;
+
+    #[test]
+    fn empty_skill_returns_agent_prompt_unchanged() {
+        // No lens method resolved ⇒ the agent prompt is returned byte-for-byte
+        // (no directive, no separator), identical to the prior behaviour.
+        assert_eq!(compose_review_lens_prompt("grill", "", "DO REVIEW"), "DO REVIEW");
+        assert_eq!(compose_review_lens_prompt("", "   ", "DO REVIEW"), "DO REVIEW");
+    }
+
+    #[test]
+    fn names_lens_permits_it_and_forbids_substitution() {
+        let out = compose_review_lens_prompt("correctness-review", "METHOD BODY", "AGENT TASK");
+        let lower = out.to_lowercase();
+        // Names the indicated lens so it is authoritative on every provider.
+        assert!(out.contains("correctness-review"));
+        // Forbids substituting a DIFFERENT skill (this is what stops codex
+        // scavenging the wrong one)...
+        assert!(lower.contains("do not search for"));
+        assert!(lower.contains("different"));
+        // ...but explicitly PERMITS invoking the named lens itself, so it can't
+        // suppress the correct skill on claude (superpowers "must use a skill").
+        assert!(lower.contains("invoking `correctness-review`"));
+        // Method body precedes the agent task, separated by the divider.
+        let m = out.find("METHOD BODY").expect("method body present");
+        let t = out.find("AGENT TASK").expect("agent task present");
+        assert!(m < t, "the lens method must precede the agent task");
+        assert!(out.contains("\n\n---\n\n"));
+    }
+
+    #[test]
+    fn blank_lens_name_still_forbids_substitution() {
+        // A lens with no resolvable name still gets the anti-substitution guard
+        // (just without a name to reference).
+        let out = compose_review_lens_prompt("", "METHOD", "TASK");
+        let lower = out.to_lowercase();
+        assert!(lower.contains("do not search for"));
+        assert!(out.contains("METHOD"));
+        assert!(out.contains("TASK"));
     }
 }
 
@@ -3314,15 +3392,18 @@ async fn retry_review_agent(
     let manager = Arc::clone(&ctx.manager);
     let reviews = ctx.reviews_store.clone();
     let review_id_bg = review_id.clone();
-    // Re-stage the lens skills (idempotent, shared bundle) so the retried agent
-    // can invoke `Skill(<lens>)` exactly like the original run.
+    // Re-stage the FULL skill library (idempotent, shared bundle) so a retried
+    // CLAUDE agent can invoke `Skill(<lens>)` exactly like the original run —
+    // which also stages the whole library (a review config usually carries the
+    // lens in the agent NAME with `skill` empty, so filtering on `skill` here
+    // would leave the common case with an empty bundle). codex/agy ignore the
+    // bundle and re-read the lens method inline from the persisted prompt.
     let review_skills_dir = {
-        let retry_cfg = load_review_config(&ctx).await;
-        let names: Vec<String> = retry_cfg
-            .agents
-            .iter()
-            .map(|a| a.skill.clone())
-            .filter(|s| !s.is_empty())
+        let names: Vec<String> = ctx
+            .context_library
+            .list_skills()
+            .into_iter()
+            .map(|s| s.name)
             .collect();
         stage_review_skills(&ctx.context_library, &names)
     };

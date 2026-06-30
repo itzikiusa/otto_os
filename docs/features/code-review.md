@@ -236,6 +236,31 @@ allowed but the claude PTY runner is the supported path.
 Each agent has an optional `model` hint (`""` = provider default; e.g.
 `haiku`/`sonnet`/`opus` for claude). Empty means the CLI's default model.
 
+### 5.4 How a lens skill reaches each provider
+
+Review sessions deliberately **skip** the normal context-materialization hook, so
+the lens skill is delivered two ways, and the channel that matters differs by CLI:
+
+1. **Inline in the prompt (ALL providers).** The lens skill's full method (body +
+   `references/`) is resolved (`resolve_skill_inline`) and prepended to the agent
+   prompt by `compose_review_lens_prompt`, fronted by a directive that **names the
+   lens and makes it authoritative**: apply exactly this method, do not search for
+   or substitute a *different* review skill (invoking the named lens itself is
+   fine). This is the load-bearing channel for `codex` and `agy`.
+2. **First-class `--add-dir` skills bundle (CLAUDE ONLY).** The lenses are also
+   staged into a shared bundle laid out as `.claude/skills/<name>/`
+   (`stage_review_skills`) and wired via `meta.extra_dirs` → `--add-dir` — but
+   **only for claude** (`review_session::review_skills_extra_dirs`), the one CLI
+   that first-class-loads `.claude/skills` from an added dir, so its reflexive
+   `Skill(<lens>)` resolves.
+
+Why claude-only for the bundle: `codex` has no first-class out-of-tree skills and
+is spawned with `--search`; handed a `.claude/skills` bundle of *all* lenses it
+would scavenge it and run the **wrong** skill instead of the indicated lens (the
+original "codex used `review-skill`, not the one we indicated" bug). `agy` loads
+`.agents/skills`, not the claude layout, so the bundle is inert for it. Both rely
+on the inline method (1) instead — equivalent in outcome, and now authoritative.
+
 ---
 
 ## 6. Reading & acting on findings
