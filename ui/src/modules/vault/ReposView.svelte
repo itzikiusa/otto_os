@@ -4,10 +4,12 @@
   import { onMount } from 'svelte';
   import { vault } from './vault.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { CodeRepo } from '../../lib/api/types';
 
   let root = $state('');
   let name = $state('');
+  let showPicker = $state(false);
 
   onMount(() => {
     void vault.loadRepos();
@@ -51,11 +53,26 @@
         bind:value={root}
         onkeydown={(e) => e.key === 'Enter' && root.trim() && doIndex()}
       />
+      <button class="browse-btn" onclick={() => (showPicker = true)} title="Browse folders on this machine">
+        <Icon name="folder" size={13} /> Browse…
+      </button>
       <input class="name" type="text" placeholder="Name (optional)" bind:value={name} />
       <button class="index-btn" disabled={vault.indexing || !root.trim()} onclick={doIndex}>
         {#if vault.indexing}Indexing…{:else}<Icon name="zap" size={13} /> Index{/if}
       </button>
     </div>
+    {#if showPicker}
+      <FolderPicker
+        title="Choose a repository folder"
+        gitOnly
+        start={root}
+        onpick={(p) => {
+          root = p;
+          showPicker = false;
+        }}
+        onclose={() => (showPicker = false)}
+      />
+    {/if}
     {#if vault.lastIndex}
       <div class="last-index">
         Indexed: <b>{vault.lastIndex.files}</b> files · <b>{vault.lastIndex.symbols}</b> symbols ·
@@ -161,6 +178,20 @@
     cursor: pointer;
   }
   .index-btn:disabled { opacity: 0.45; cursor: default; }
+  .browse-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 12px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .browse-btn:hover { border-color: #7ee787; color: #7ee787; }
   .last-index {
     margin-top: 10px;
     font-size: 12px;
