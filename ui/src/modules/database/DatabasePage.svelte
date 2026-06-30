@@ -366,6 +366,48 @@
     window.addEventListener('pointerup', onUp);
   }
 
+  // ── Connection sidebar width (resizable, persisted) ───────────────────────────
+  // The tablet/desktop sidebar is drag-resizable so long, deeply-nested connection
+  // names ("DB MySQL - Platform Aggregates Prod") get the horizontal room they need;
+  // the chosen width survives reloads. Mirrors the assist-pane idiom above. (On
+  // phones the sidebar is a full-width band — the width binding is skipped there.)
+  const SIDE_W_DEFAULT = 300;
+  let sideW = $state(loadSideW());
+  function loadSideW(): number {
+    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
+    const v = Number(localStorage.getItem('db.sideW'));
+    return Number.isFinite(v) && v >= 220 ? v : SIDE_W_DEFAULT;
+  }
+  function persistSideW(): void {
+    try {
+      localStorage.setItem('db.sideW', String(Math.round(sideW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startSideResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sideW;
+    // Leave room for the editor/results area; cap so the sidebar can't eat the page.
+    const maxW = Math.min(640, Math.max(360, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 420));
+    const onMove = (ev: PointerEvent): void => {
+      // The sidebar is pinned to the LEFT edge, so dragging RIGHT widens it.
+      sideW = Math.max(220, Math.min(maxW, startW + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      persistSideW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetSideW(): void {
+    sideW = SIDE_W_DEFAULT;
+    persistSideW();
+  }
+
   // Open connections as top-level tabs (Workbench-style), resolved to their
   // Connection records for name + engine glyph.
   const openConns = $derived(
@@ -398,7 +440,7 @@
 </script>
 
 <div class="db-page">
-  <aside class="db-side">
+  <aside class="db-side" style={viewport.isPhone ? '' : `width:${sideW}px`}>
     {#if viewport.isPhone}
       <!-- PHONE: collapsible accordions (one section at a time), unchanged layout
            except the connection list now carries a filter box. -->
@@ -464,6 +506,19 @@
       </div>
     {/if}
   </aside>
+
+  {#if !viewport.isPhone}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="side-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Drag to resize the connections sidebar (double-click to reset)"
+      title="Drag to resize · double-click to reset"
+      ondblclick={resetSideW}
+      onpointerdown={startSideResize}
+    ></div>
+  {/if}
 
   <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
     {#if !database.selectedConnId}
@@ -649,7 +704,7 @@
   >
     <button class="conn-item" onclick={() => database.openConnection(c.id)} title="{c.name} · {c.kind}{isProdConn(c) ? ' · PRODUCTION' : c.read_only ? ' · read-only' : ''} — right-click to open beside agents">
       <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
-      <span class="conn-name ellipsis">{c.name}</span>
+      <span class="conn-name">{c.name}</span>
       {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
     </button>
     <div class="conn-actions">
@@ -805,7 +860,9 @@
     min-height: 0;
   }
   .db-side {
-    width: 280px;
+    /* Default width; on tablet/desktop an inline `width:{sideW}px` (drag-resizable,
+       persisted) overrides this, and the phone media query forces full width. */
+    width: 300px;
     flex-shrink: 0;
     border-inline-end: 1px solid var(--border);
     display: flex;
@@ -882,8 +939,9 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    height: 26px;
-    padding: 0 6px;
+    /* min-height (not a fixed height) so the row grows when a long name wraps. */
+    min-height: 26px;
+    padding: 3px 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -1030,6 +1088,16 @@
     min-width: 0;
     font-size: 12px;
     font-weight: 500;
+    line-height: 1.35;
+    /* Show the FULL connection name instead of clipping it: wrap onto extra lines
+       (breaking long unbroken tokens like host URLs), up to 3 lines (~50–75 chars)
+       before ellipsizing — so deeply-nested names stay readable at any width. */
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
   .side-switch {
     display: flex;
@@ -1417,6 +1485,22 @@
   .assist-divider:hover {
     background: var(--accent);
   }
+  /* Draggable divider between the connections sidebar and the main area. Sits flush
+     against the sidebar's inline-end border; a hit-area wider than its visible line
+     makes it easy to grab. */
+  .side-resizer {
+    flex: none;
+    width: 5px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    z-index: 2;
+    touch-action: none;
+  }
+  .side-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
   /* The DB Assistant pane — fixed (resizable) width, pinned to the right edge. */
   .assist-pane {
     flex: none;
@@ -1512,7 +1596,7 @@
       font-size: 15px;
     }
     .conn-item {
-      height: 40px;
+      min-height: 40px;
     }
     .conn-head-title {
       font-size: 12px;
