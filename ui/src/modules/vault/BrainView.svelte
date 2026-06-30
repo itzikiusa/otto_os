@@ -57,7 +57,7 @@
       {#if b.reasons.length}
         <div class="reasons">
           <span class="why-label">context selected by:</span>
-          {#each b.reasons as r (r.kind + r.detail)}
+          {#each b.reasons as r, i (i)}
             <span
               class="reason"
               style:--c={reasonColor(r.kind)}

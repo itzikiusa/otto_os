@@ -983,14 +983,23 @@ impl MemoriesRepo {
         if created.is_err() {
             return Ok(false);
         }
-        // Backfill memories missing from the index (cheap no-op once warm).
-        let _ = sqlx::query(
-            "INSERT INTO memories_fts (mid, ws, title, body) \
-             SELECT m.id, m.workspace_id, m.title, m.body FROM memories m \
-             WHERE NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.mid = m.id)",
-        )
-        .execute(&self.pool)
-        .await;
+        // Backfill ONCE, only when the index is empty — a full O(n) INSERT…SELECT.
+        // (The previous per-row `WHERE NOT EXISTS` scanned the UNINDEXED `mid`
+        // column for every memory → O(n²), seconds on a large vault. fts_index
+        // keeps it in sync on writes, so a one-time bulk fill is sufficient.)
+        let empty = sqlx::query("SELECT COUNT(*) AS c FROM memories_fts")
+            .fetch_one(&self.pool)
+            .await
+            .map(|r| r.get::<i64, _>("c") == 0)
+            .unwrap_or(false);
+        if empty {
+            let _ = sqlx::query(
+                "INSERT INTO memories_fts (mid, ws, title, body) \
+                 SELECT id, workspace_id, title, body FROM memories",
+            )
+            .execute(&self.pool)
+            .await;
+        }
         Ok(true)
     }
 
