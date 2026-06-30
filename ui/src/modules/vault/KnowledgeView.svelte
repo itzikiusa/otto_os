@@ -4,7 +4,7 @@
   // forget-with-undo, merge, split, provenance diff, governed import) and the
   // embedder config panel. Vault v2 adds "why selected" chips on each search
   // hit (vector / keyword / symbol / … reasons) and a quick Add-doc form.
-  import { vault } from './vault.svelte';
+  import { vault, OLLAMA_EMBED_MODELS } from './vault.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
   import type { ContextReason, Memory, MemoryHit, VaultDocReq } from '../../lib/api/types';
@@ -39,6 +39,8 @@
   let showEmbedder = $state(false);
   let embProvider = $state<'local' | 'ollama' | 'openai' | 'voyage'>('local');
   let embKey = $state('');
+  let embOllamaModel = $state(OLLAMA_EMBED_MODELS[0].model);
+  let embOllamaUrl = $state('');
 
   // Keep the provider selector in sync with the loaded status. A legacy `stub`
   // status maps onto the "local" option (both are the keyless local path).
@@ -49,8 +51,16 @@
   });
 
   async function applyEmbedder(): Promise<void> {
-    await vault.setEmbedder(embProvider, embKey);
+    const m = OLLAMA_EMBED_MODELS.find((x) => x.model === embOllamaModel);
+    await vault.setEmbedder(embProvider, {
+      apiKey: embKey,
+      ollamaModel: embOllamaModel,
+      ollamaDim: m?.dim,
+      ollamaUrl: embOllamaUrl,
+    });
     embKey = '';
+    // Switching the embedder leaves old vectors under the prior model — re-embed.
+    if (embProvider !== 'local') await vault.reindex();
   }
 
   // Load the superseded-by memory whenever the selected note changes.
@@ -319,6 +329,24 @@
                   data-testid="embedder-key"
                 />
               </label>
+            {/if}
+            {#if embProvider === 'ollama'}
+              <label class="embedder-row">
+                <span>Model</span>
+                <select bind:value={embOllamaModel} data-testid="embedder-ollama-model">
+                  {#each OLLAMA_EMBED_MODELS as m (m.model)}
+                    <option value={m.model}>{m.model} · {m.dim}d — {m.note}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="embedder-row">
+                <span>URL</span>
+                <input type="text" placeholder="http://127.0.0.1:11434" bind:value={embOllamaUrl} />
+              </label>
+              <p class="embedder-note">
+                Run <code>ollama pull {embOllamaModel}</code> first. Applying re-embeds existing
+                memories under the new model (may take a moment).
+              </p>
             {/if}
             <div class="embedder-actions">
               <button

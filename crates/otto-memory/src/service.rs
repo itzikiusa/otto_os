@@ -640,6 +640,34 @@ impl MemoryService {
 /// Cap on embedded code chunks per index pass (a huge repo can't run away).
 const MAX_CODE_CHUNKS: usize = 6000;
 
+/// Max nodes returned by the graph endpoints — keeps the force-graph view smooth
+/// on large repos (the UI also offers filters). Most-connected nodes are kept.
+const GRAPH_NODE_CAP: usize = 800;
+
+/// Pick the `cap` highest-degree node ids from an edge list. Orphans (degree 0)
+/// are included only to fill remaining slots after connected nodes.
+fn top_by_degree(
+    node_ids: impl Iterator<Item = String>,
+    edges: impl Iterator<Item = (String, String)>,
+    cap: usize,
+) -> std::collections::HashSet<String> {
+    let mut degree: HashMap<String, usize> = HashMap::new();
+    for id in node_ids {
+        degree.entry(id).or_insert(0);
+    }
+    for (s, d) in edges {
+        if let Some(v) = degree.get_mut(&s) {
+            *v += 1;
+        }
+        if let Some(v) = degree.get_mut(&d) {
+            *v += 1;
+        }
+    }
+    let mut ranked: Vec<(String, usize)> = degree.into_iter().collect();
+    ranked.sort_by_key(|x| std::cmp::Reverse(x.1));
+    ranked.into_iter().take(cap).map(|(id, _)| id).collect()
+}
+
 impl MemoryService {
     /// Index a repository on disk into the Vault: tree-sitter symbol extraction
     /// with dependency-graph heuristics (HTTP/DB/import/call edges), embeddings
@@ -812,6 +840,16 @@ impl MemoryService {
         for e in cg.edges {
             edges.push(FullGraphEdge { src: e.src_id, dst: e.dst_id, rel: e.rel, detail: e.detail });
         }
+        // Cap for a responsive force-graph: keep the most-connected nodes.
+        if nodes.len() > GRAPH_NODE_CAP {
+            let keep = top_by_degree(
+                nodes.iter().map(|n| n.id.clone()),
+                edges.iter().map(|e| (e.src.clone(), e.dst.clone())),
+                GRAPH_NODE_CAP,
+            );
+            nodes.retain(|n| keep.contains(&n.id));
+            edges.retain(|e| keep.contains(&e.src) && keep.contains(&e.dst));
+        }
         Ok(FullGraph { nodes, edges })
     }
 
@@ -826,7 +864,17 @@ impl MemoryService {
     }
 
     pub async fn code_graph(&self, ws: &str, repo_id: Option<&str>) -> Result<otto_state::CodeGraph> {
-        self.code.graph(ws, repo_id).await
+        let mut g = self.code.graph(ws, repo_id).await?;
+        if g.nodes.len() > GRAPH_NODE_CAP {
+            let keep = top_by_degree(
+                g.nodes.iter().map(|n| n.id.clone()),
+                g.edges.iter().map(|e| (e.src_id.clone(), e.dst_id.clone())),
+                GRAPH_NODE_CAP,
+            );
+            g.nodes.retain(|n| keep.contains(&n.id));
+            g.edges.retain(|e| keep.contains(&e.src_id) && keep.contains(&e.dst_id));
+        }
+        Ok(g)
     }
 
     pub async fn code_neighborhood(
@@ -953,15 +1001,12 @@ impl MemoryService {
                     r.name, r.symbols, r.edges, r.files, mark
                 ));
             }
-            // Key external dependencies (service / db_table nodes) of the active repo.
+            // Key external dependencies (service / db_table nodes) of the active
+            // repo — a cheap targeted query, not the full graph (which is huge).
             if let Some(a) = active {
-                if let Ok(g) = self.code.graph(ws, Some(&a.id)).await {
-                    let mut services: Vec<String> = g
-                        .nodes
-                        .iter()
-                        .filter(|n| n.kind == "service" || n.kind == "db_table")
-                        .map(|n| format!("{} ({})", n.label, n.kind))
-                        .collect();
+                if let Ok(deps) = self.code.dependency_labels(&a.id).await {
+                    let mut services: Vec<String> =
+                        deps.into_iter().map(|(label, kind)| format!("{label} ({kind})")).collect();
                     services.sort();
                     services.dedup();
                     if !services.is_empty() {
