@@ -329,9 +329,79 @@ impl PtyHandle {
     }
 }
 
+/// RAII: a [`PtyHandle`] owns its child process, so terminate it when the handle
+/// is fully dropped (its last `Arc` released). Without this, dropping a handle —
+/// e.g. evicting it from a tracking map, or overwriting it on respawn — would
+/// leave the child running forever (the leak that orphaned resumed agent
+/// processes). The `SIGKILL` is best-effort and idempotent: on an already-exited
+/// child the killer simply errors and we ignore it. Callers that want a tracked,
+/// observable shutdown still call [`PtyHandle::kill`] explicitly; this only
+/// catches the paths that drop a handle without an explicit kill.
+impl Drop for PtyHandle {
+    fn drop(&mut self) {
+        let _ = lock_unpoisoned(&self.killer).kill();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// True iff the OS still has a live (non-reaped) process for `pid`.
+    fn pid_alive(pid: &str) -> bool {
+        std::process::Command::new("/bin/kill")
+            .args(["-0", pid])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Dropping the handle SIGKILLs its child — the fix for the orphaned-process
+    /// leak (a handle evicted/overwritten without an explicit `kill()` used to
+    /// leave its child running forever).
+    #[tokio::test]
+    async fn drop_kills_the_child() {
+        // `exec sleep` so the printed `$$` pid IS the long-lived process the
+        // killer targets (no intermediate shell to leave behind).
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo $$; exec sleep 30".into()],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn(&spec).expect("spawn");
+
+        // Read the pid the shell printed on the PTY.
+        let mut pid = String::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let out = String::from_utf8_lossy(&handle.scrollback(5)).to_string();
+            if let Some(line) = out
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()))
+            {
+                pid = line.to_string();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!pid.is_empty(), "did not capture the child pid");
+        assert!(pid_alive(&pid), "child should be alive before drop");
+
+        drop(handle); // → Drop → SIGKILL; the waiter thread then reaps the zombie.
+
+        let mut gone = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if !pid_alive(&pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "child pid {pid} still alive after dropping the handle");
+    }
 
     #[tokio::test]
     async fn echo_output_lands_in_ring_and_exit_is_observed() {
