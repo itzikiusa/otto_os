@@ -93,7 +93,25 @@ export interface EmbedderStatus {
 export interface SetEmbedderReq {
   provider: EmbedderProvider;
   api_key?: string;
+  ollama_model?: string;
+  ollama_dim?: number;
+  ollama_url?: string;
 }
+
+/** Ollama embedding model options (model → embedding dimension). The dim is the
+ * model's native output; the stored dim auto-matches the real vector anyway.
+ * Pick by the machine's RAM — the ones marked "light" suit a 5–10 GB box; the
+ * larger Qwen3 models are best on a 20+ GB machine. */
+export const OLLAMA_EMBED_MODELS: { model: string; dim: number; note: string }[] = [
+  { model: 'nomic-embed-text-v2-moe', dim: 768, note: 'light · ~0.9 GB · v2 MoE (recommended)' },
+  { model: 'nomic-embed-text', dim: 768, note: 'light · ~0.5 GB · v1 (older)' },
+  { model: 'qwen3-embedding:0.6b', dim: 1024, note: 'light · ~0.6 GB · great quality/size' },
+  { model: 'mxbai-embed-large', dim: 1024, note: 'light · ~1.2 GB · strong' },
+  { model: 'bge-m3', dim: 1024, note: 'medium · ~2.5 GB · multilingual + long ctx' },
+  { model: 'qwen3-embedding:4b', dim: 2560, note: 'heavy · ~3–4 GB · top quality' },
+  { model: 'qwen3-embedding:8b', dim: 4096, note: 'very heavy · ~6 GB · best (20+ GB box)' },
+  { model: 'all-minilm', dim: 384, note: 'tiny · ~0.1 GB' },
+];
 
 // ---------------------------------------------------------------------------
 // Vault v2 — top-level tabs
@@ -250,12 +268,21 @@ class VaultStore {
     }
   }
 
-  /** Switch the embedder provider (optionally storing an API key), then refresh. */
-  async setEmbedder(provider: EmbedderProvider, apiKey?: string): Promise<void> {
+  /** Switch the embedder provider (optionally storing an API key or Ollama
+   * model/dim/url), then refresh. */
+  async setEmbedder(
+    provider: EmbedderProvider,
+    opts?: { apiKey?: string; ollamaModel?: string; ollamaDim?: number; ollamaUrl?: string },
+  ): Promise<void> {
     this.embedderBusy = true;
     try {
       const body: SetEmbedderReq = { provider };
-      if (apiKey && apiKey.trim()) body.api_key = apiKey.trim();
+      if (opts?.apiKey && opts.apiKey.trim()) body.api_key = opts.apiKey.trim();
+      if (provider === 'ollama') {
+        if (opts?.ollamaModel) body.ollama_model = opts.ollamaModel;
+        if (opts?.ollamaDim) body.ollama_dim = opts.ollamaDim;
+        if (opts?.ollamaUrl && opts.ollamaUrl.trim()) body.ollama_url = opts.ollamaUrl.trim();
+      }
       this.embedder = await api.put<EmbedderStatus>('/memory/embedder', body);
       toasts.info(`Embedder set to ${this.embedder.model ?? provider}`);
     } catch (e) {
@@ -271,8 +298,8 @@ class VaultStore {
     if (!wsId) return;
     this.embedderBusy = true;
     try {
-      const r = await api.post<{ embedded: number }>(`/workspaces/${wsId}/memory/reindex`, {});
-      toasts.info(`Re-embedded ${r.embedded} ${r.embedded === 1 ? 'memory' : 'memories'}`);
+      await api.post<{ embedded: number }>(`/workspaces/${wsId}/memory/reindex`, {});
+      toasts.info('Re-embedding started', 'Running in the background; search quality improves as it completes.');
     } catch (e) {
       toasts.error('Reindex failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -410,11 +437,34 @@ class VaultStore {
     try {
       const body: IndexRepoReq = { root: root.trim() };
       if (name && name.trim()) body.name = name.trim();
-      const r = await api.post<IndexResult>(`/workspaces/${wsId}/vault/repos/index`, body);
-      this.lastIndex = r;
-      toasts.success('Indexed', `${r.files} files · ${r.symbols} symbols · ${r.edges} edges`);
+      // Indexing runs in the BACKGROUND server-side (embedding can be slow with a
+      // neural model). Returns immediately; we poll the repo status to completion.
+      const started = await api.post<IndexResult>(`/workspaces/${wsId}/vault/repos/index`, body);
+      toasts.info('Indexing started', 'Building the code graph + embeddings in the background…');
       await this.loadRepos();
-      return r;
+      const id = started.repo_id;
+      for (let i = 0; i < 1800; i++) {
+        await new Promise((r) => setTimeout(r, 4000));
+        await this.loadRepos();
+        const repo = this.repos.find((r) => r.id === id);
+        if (!repo) break;
+        if (repo.status === 'ready') {
+          this.lastIndex = {
+            repo_id: id,
+            files: repo.files,
+            symbols: repo.symbols,
+            edges: repo.edges,
+            chunks: repo.chunks,
+          };
+          toasts.success('Indexed', `${repo.files} files · ${repo.symbols} symbols · ${repo.edges} edges`);
+          return this.lastIndex;
+        }
+        if (repo.status === 'error') {
+          toasts.error('Index failed', repo.message ?? 'see logs');
+          return null;
+        }
+      }
+      return started;
     } catch (e) {
       toasts.error('Index failed', e instanceof Error ? e.message : String(e));
       return null;

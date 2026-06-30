@@ -4,7 +4,7 @@
   // forget-with-undo, merge, split, provenance diff, governed import) and the
   // embedder config panel. Vault v2 adds "why selected" chips on each search
   // hit (vector / keyword / symbol / … reasons) and a quick Add-doc form.
-  import { vault } from './vault.svelte';
+  import { vault, OLLAMA_EMBED_MODELS } from './vault.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
   import type { ContextReason, Memory, MemoryHit, VaultDocReq } from '../../lib/api/types';
@@ -39,6 +39,9 @@
   let showEmbedder = $state(false);
   let embProvider = $state<'local' | 'ollama' | 'openai' | 'voyage'>('local');
   let embKey = $state('');
+  let embOllamaModel = $state(OLLAMA_EMBED_MODELS[0].model);
+  let embCustomModel = $state('');
+  let embOllamaUrl = $state('');
 
   // Keep the provider selector in sync with the loaded status. A legacy `stub`
   // status maps onto the "local" option (both are the keyless local path).
@@ -49,8 +52,20 @@
   });
 
   async function applyEmbedder(): Promise<void> {
-    await vault.setEmbedder(embProvider, embKey);
+    // Resolve the model: a known list entry, or a custom Ollama model name.
+    const custom = embOllamaModel === '__custom__';
+    const model = custom ? embCustomModel.trim() : embOllamaModel;
+    const known = OLLAMA_EMBED_MODELS.find((x) => x.model === model);
+    if (embProvider === 'ollama' && !model) return; // need a model name
+    await vault.setEmbedder(embProvider, {
+      apiKey: embKey,
+      ollamaModel: model,
+      ollamaDim: known?.dim, // unknown → backend default; stored dim auto-corrects
+      ollamaUrl: embOllamaUrl,
+    });
     embKey = '';
+    // Switching the embedder leaves old vectors under the prior model — re-embed.
+    if (embProvider !== 'local') await vault.reindex();
   }
 
   // Load the superseded-by memory whenever the selected note changes.
@@ -320,6 +335,37 @@
                 />
               </label>
             {/if}
+            {#if embProvider === 'ollama'}
+              <label class="embedder-row">
+                <span>Model</span>
+                <select bind:value={embOllamaModel} data-testid="embedder-ollama-model">
+                  {#each OLLAMA_EMBED_MODELS as m (m.model)}
+                    <option value={m.model}>{m.model} · {m.dim}d — {m.note}</option>
+                  {/each}
+                  <option value="__custom__">Custom model…</option>
+                </select>
+              </label>
+              {#if embOllamaModel === '__custom__'}
+                <label class="embedder-row">
+                  <span>Custom</span>
+                  <input
+                    type="text"
+                    placeholder="exact ollama model name (e.g. nomic-embed-text-v2-moe)"
+                    bind:value={embCustomModel}
+                    data-testid="embedder-custom-model"
+                  />
+                </label>
+              {/if}
+              <label class="embedder-row">
+                <span>URL</span>
+                <input type="text" placeholder="http://127.0.0.1:11434" bind:value={embOllamaUrl} />
+              </label>
+              <p class="embedder-note">
+                Run <code>ollama pull {embOllamaModel === '__custom__' ? embCustomModel || '<model>' : embOllamaModel}</code>
+                first. Any Ollama embedding model works — its dimension is detected automatically.
+                Applying re-embeds existing memories under the new model (may take a while).
+              </p>
+            {/if}
             <div class="embedder-actions">
               <button
                 class="embedder-apply"
@@ -396,7 +442,7 @@
       <header class="note-head">
         <h1>{m.title}</h1>
         <div class="badges">
-          <span class="badge" style:background={nodeColor(m.kind)}>{m.kind}</span>
+          <span class="badge kind-badge" style:--c={nodeColor(m.kind)}>{m.kind}</span>
           <span class="badge">{m.collection}</span>
           <span class="badge">{m.visibility}</span>
           <!-- Governance state chip -->
@@ -530,6 +576,20 @@
     width: 100%;
     padding: 6px 8px;
     border-radius: 6px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .vault-search input::placeholder {
+    color: var(--text-dim);
+  }
+  .embedder-row input,
+  .embedder-row select {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 7px;
   }
   .vault-chips {
     display: flex;
@@ -764,9 +824,11 @@
     line-height: 1.4;
     padding: 1px 6px;
     border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--c) 55%, transparent);
-    background: color-mix(in srgb, var(--c) 16%, transparent);
-    color: color-mix(in srgb, var(--c) 80%, var(--text, #ddd));
+    /* Calm, themed chip: a faint kind-tinted fill/border (works on any bg) with
+       neutral, high-contrast text. The kind word (b) carries the only emphasis. */
+    border: 1px solid color-mix(in srgb, var(--c) 35%, var(--border));
+    background: color-mix(in srgb, var(--c) 12%, transparent);
+    color: var(--text-dim);
     white-space: nowrap;
     max-width: 100%;
     overflow: hidden;
@@ -774,7 +836,7 @@
   }
   .reason b {
     font-weight: 700;
-    color: var(--c);
+    color: var(--text);
   }
   .reasons-head {
     margin-top: 8px;
@@ -811,9 +873,16 @@
   }
   .badge {
     font-size: 10px;
-    padding: 2px 6px;
+    padding: 2px 7px;
     border-radius: 5px;
-    background: var(--surface-2, #1e2330);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  /* Kind badge keeps a faint taxonomy tint on its border; text stays readable. */
+  .badge.kind-badge {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--c) 35%, var(--border));
   }
   .tag {
     font-size: 11px;
@@ -826,7 +895,7 @@
   }
   .prov.warn {
     opacity: 0.85;
-    color: #fab005;
+    color: var(--status-warn);
     display: flex;
     align-items: center;
     gap: 6px;
@@ -877,37 +946,45 @@
     font-size: 11px;
     padding: 2px 8px;
     border-radius: 4px;
-    background: var(--surface-2, #1e2330);
-    border: 1px solid var(--border, #333);
-    color: var(--text-dim, #888);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
   }
   .copy-btn {
     font-size: 11.5px;
     padding: 2px 10px;
     border-radius: 4px;
-    border: 1px solid var(--border, #333);
+    border: 1px solid var(--border);
     background: transparent;
     cursor: pointer;
-    color: var(--text-dim, #aaa);
+    color: var(--text);
   }
   .copy-btn:hover {
-    background: var(--surface-2, #1e2330);
+    background: var(--surface-2);
   }
   .danger {
-    color: #ff6b6b;
-    font-size: 12px;
+    font-size: 11.5px;
+    padding: 2px 10px;
+    border-radius: 4px;
+    border: 1px solid color-mix(in srgb, #f87171 40%, var(--border));
+    background: transparent;
+    cursor: pointer;
+    color: #f87171;
+  }
+  .danger:hover {
+    background: color-mix(in srgb, #f87171 14%, transparent);
   }
   .undo-btn {
     font-size: 12px;
     padding: 3px 10px;
     border-radius: 5px;
-    border: 1px solid #fab005;
-    color: #fab005;
+    border: 1px solid var(--status-warn);
+    color: var(--status-warn);
     background: transparent;
     cursor: pointer;
   }
   .undo-btn:hover {
-    background: color-mix(in srgb, #fab005 15%, transparent);
+    background: var(--status-warn-soft);
   }
 
   /* The phone "‹ Index" back button is hidden on desktop/tablet. */

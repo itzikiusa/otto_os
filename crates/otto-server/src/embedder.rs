@@ -273,8 +273,18 @@ async fn reindex_memory(
     Path(ws): Path<Id>,
 ) -> ApiResult<Json<ReindexResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
-    let embedded = ctx.memory.reindex(&ws).await?;
-    Ok(Json(ReindexResp { embedded }))
+    // Re-embedding can be slow with a neural model — run it in the BACKGROUND and
+    // return immediately so the request never blocks. Search quality recovers as
+    // vectors land under the new model (keyword search keeps working meanwhile).
+    let mem = ctx.memory.clone();
+    let ws2 = ws.to_string();
+    tokio::spawn(async move {
+        match mem.reindex(&ws2).await {
+            Ok(n) => tracing::info!("memory: reindexed {n} memories for {ws2}"),
+            Err(e) => tracing::warn!("memory: reindex failed for {ws2}: {e}"),
+        }
+    });
+    Ok(Json(ReindexResp { embedded: 0 }))
 }
 
 /// Router for the embedder + reindex endpoints (mounted under `/api/v1`).

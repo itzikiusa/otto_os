@@ -394,9 +394,40 @@ async fn index_repo<C: MemoryCtx>(
     if !root.is_dir() {
         return Err(ApiErr(Error::Invalid(format!("not a directory: {}", req.root))));
     }
-    Ok(Json(
-        c.memory().index_repo(&ws, &user.id, root, req.name.as_deref()).await?,
-    ))
+    // Register the repo + mark it indexing, then run the heavy scan+embed in the
+    // BACKGROUND — embedding with a large neural model can take many minutes, so
+    // we never block the request. The UI polls repo status (indexing → ready).
+    let canon = root
+        .canonicalize()
+        .map_err(|e| ApiErr(Error::Invalid(format!("repo path: {e}"))))?;
+    let canon_str = canon.to_string_lossy().to_string();
+    let name = req
+        .name
+        .clone()
+        .or_else(|| canon.file_name().map(|f| f.to_string_lossy().to_string()))
+        .unwrap_or_else(|| canon_str.clone());
+    let repo_id = c.memory().code().upsert_repo(&ws, &canon_str, &name).await?;
+    c.memory()
+        .code()
+        .set_repo_state(&repo_id, "indexing", None, None, None)
+        .await?;
+
+    let mem = c.memory().clone();
+    let ws2 = ws.to_string();
+    let by = user.id.clone();
+    let nm = req.name.clone();
+    let rid = repo_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mem.index_repo(&ws2, &by, &canon, nm.as_deref()).await {
+            tracing::warn!("vault: background index of {ws2} failed: {e}");
+            let _ = mem
+                .code()
+                .set_repo_state(&rid, "error", Some(&e.to_string()), None, None)
+                .await;
+        }
+    });
+    // Counts arrive once indexing completes (poll repo status).
+    Ok(Json(IndexResult { repo_id, files: 0, symbols: 0, edges: 0, chunks: 0 }))
 }
 
 async fn list_repos<C: MemoryCtx>(

@@ -411,55 +411,101 @@ impl CodeIndexRepo {
         Ok(r.as_ref().map(row_to_node))
     }
 
-    /// Breadth-first neighborhood of a node up to `depth` hops (bounded). Returns
-    /// the reachable subgraph (nodes + the edges traversed).
+    /// Breadth-first neighborhood of a node up to `depth` hops. HARD-BOUNDED so a
+    /// dense hub (a symbol referenced everywhere) can't explode: at most
+    /// `MAX_NODES` nodes and `MAX_EDGES` edges, with a per-node edge cap. Nodes
+    /// are batch-fetched at the end (one query per chunk) rather than per-neighbor
+    /// — the previous per-neighbor fetch was O(n²) and hung on big graphs.
     pub async fn neighborhood(&self, ws: &str, start: &str, depth: usize) -> Result<CodeGraph> {
-        use std::collections::{HashMap, HashSet};
-        let depth = depth.min(6);
+        use std::collections::HashSet;
+        const MAX_NODES: usize = 250;
+        const MAX_EDGES: usize = 600;
+        const PER_NODE_EDGES: i64 = 120;
+        let depth = depth.clamp(1, 4);
+
         let mut seen: HashSet<String> = HashSet::new();
         let mut frontier: Vec<String> = vec![start.to_string()];
-        let mut nodes: HashMap<String, CodeNode> = HashMap::new();
         let mut edges: Vec<CodeEdge> = Vec::new();
+        let mut edge_ids: HashSet<String> = HashSet::new();
         seen.insert(start.to_string());
-        if let Some(n) = self.get_node(ws, start).await? {
-            nodes.insert(n.id.clone(), n);
-        }
-        for _ in 0..depth {
+
+        'bfs: for _ in 0..depth {
             if frontier.is_empty() {
                 break;
             }
             let mut next: Vec<String> = Vec::new();
             for nid in frontier.drain(..) {
                 let rows = sqlx::query(
-                    "SELECT * FROM code_edges WHERE workspace_id = ? AND (src_id = ? OR dst_id = ?) LIMIT 500",
+                    "SELECT * FROM code_edges WHERE workspace_id = ? AND (src_id = ? OR dst_id = ?) LIMIT ?",
                 )
                 .bind(ws)
                 .bind(&nid)
                 .bind(&nid)
+                .bind(PER_NODE_EDGES)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(dberr("code_edges.neighborhood"))?;
                 for r in &rows {
                     let e = row_to_edge(r);
                     let other = if e.src_id == nid { e.dst_id.clone() } else { e.src_id.clone() };
-                    edges.push(e);
-                    if seen.insert(other.clone()) {
-                        if let Some(n) = self.get_node(ws, &other).await? {
-                            nodes.insert(n.id.clone(), n);
-                        }
+                    if edge_ids.insert(e.id.clone()) && edges.len() < MAX_EDGES {
+                        edges.push(e);
+                    }
+                    if seen.len() < MAX_NODES && seen.insert(other.clone()) {
                         next.push(other);
+                    }
+                    if seen.len() >= MAX_NODES || edges.len() >= MAX_EDGES {
+                        break 'bfs;
                     }
                 }
             }
             frontier = next;
         }
-        // Dedup edges (an edge can be touched from both endpoints).
-        edges.sort_by(|a, b| a.id.cmp(&b.id));
-        edges.dedup_by(|a, b| a.id == b.id);
-        Ok(CodeGraph {
-            nodes: nodes.into_values().collect(),
-            edges,
-        })
+
+        // Drop edges to nodes we didn't keep (cap overflow), then batch-fetch.
+        edges.retain(|e| seen.contains(&e.src_id) && seen.contains(&e.dst_id));
+        let ids: Vec<String> = seen.into_iter().collect();
+        let nodes = self.nodes_by_ids(ws, &ids).await?;
+        Ok(CodeGraph { nodes, edges })
+    }
+
+    /// Batch-fetch nodes by id (chunked `IN (...)`), preserving none-found gaps.
+    pub async fn nodes_by_ids(&self, ws: &str, ids: &[String]) -> Result<Vec<CodeNode>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(400) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT * FROM code_nodes WHERE workspace_id = ? AND id IN ({placeholders})"
+            );
+            let mut q = sqlx::query(&sql).bind(ws);
+            for id in chunk {
+                q = q.bind(id);
+            }
+            let rows = q.fetch_all(&self.pool).await.map_err(dberr("code_nodes.by_ids"))?;
+            out.extend(rows.iter().map(row_to_node));
+        }
+        Ok(out)
+    }
+
+    /// Distinct external-dependency labels (service + db_table) for a repo — a
+    /// cheap targeted query for the Repo Brain summary (avoids loading the full
+    /// graph). Returns (label, kind), capped.
+    pub async fn dependency_labels(&self, repo_id: &str) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT kind, label FROM code_nodes \
+             WHERE repo_id = ? AND kind IN ('service','db_table') ORDER BY kind, label LIMIT 200",
+        )
+        .bind(repo_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("code_nodes.deps"))?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<String, _>("label"), r.get::<String, _>("kind")))
+            .collect())
     }
 
     pub async fn get_node(&self, ws: &str, id: &str) -> Result<Option<CodeNode>> {
@@ -650,6 +696,30 @@ mod tests {
         let near2 = repo.neighborhood(&ws, &login, 2).await.unwrap();
         assert!(near2.nodes.iter().any(|n| n.key == "go_casino_kit"));
         assert!(near2.nodes.iter().any(|n| n.key == "limits"));
+    }
+
+    #[tokio::test]
+    async fn neighborhood_is_bounded_on_a_dense_hub() {
+        // A hub connected to 1200 leaves must NOT explode (the old per-neighbor
+        // fetch was O(n²) and hung). The result is capped + returns promptly.
+        let (pool, ws) = seed().await;
+        let repo = CodeIndexRepo::new(pool.clone());
+        let rid = repo.upsert_repo(&ws, "/r", "r").await.unwrap();
+        let hub = repo
+            .upsert_node(&ws, &NewNode { repo_id: Some(rid.clone()), kind: "symbol".into(), key: "Hub".into(), label: "Hub".into(), file: None, line: None, meta_json: "{}".into() })
+            .await
+            .unwrap();
+        for i in 0..1200 {
+            let leaf = repo
+                .upsert_node(&ws, &NewNode { repo_id: Some(rid.clone()), kind: "symbol".into(), key: format!("L{i}"), label: format!("L{i}"), file: None, line: None, meta_json: "{}".into() })
+                .await
+                .unwrap();
+            repo.upsert_edge(&ws, &NewEdge { repo_id: Some(rid.clone()), src_id: hub.clone(), dst_id: leaf, rel: "calls".into(), detail: String::new(), weight: 1.0, file: None, line: None }).await.unwrap();
+        }
+        let g = repo.neighborhood(&ws, &hub, 2).await.unwrap();
+        assert!(g.nodes.len() <= 251, "neighborhood must be bounded, got {}", g.nodes.len());
+        assert!(g.edges.len() <= 600, "edges must be bounded, got {}", g.edges.len());
+        assert!(g.nodes.iter().any(|n| n.key == "Hub"));
     }
 
     #[tokio::test]

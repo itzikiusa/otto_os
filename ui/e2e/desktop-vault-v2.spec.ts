@@ -80,18 +80,25 @@ test.beforeAll(async () => {
 });
 
 test('indexes a repo and builds the symbol index + dependency graph', async () => {
-  const res = await postJson(`/api/v1/workspaces/${wsId}/vault/repos/index`, {
+  const started = await postJson(`/api/v1/workspaces/${wsId}/vault/repos/index`, {
     root: repoDir,
     name: 'go_admission_fixture',
   });
-  repoId = res.repo_id;
-  expect(res.symbols).toBeGreaterThanOrEqual(2);
-  expect(res.edges).toBeGreaterThanOrEqual(3);
-  expect(res.chunks).toBeGreaterThanOrEqual(1);
+  repoId = started.repo_id;
+  expect(repoId).toBeTruthy();
 
-  const repos = await getJson(`/api/v1/workspaces/${wsId}/vault/repos`);
-  expect(repos.length).toBe(1);
-  expect(repos[0].status).toBe('ready');
+  // Indexing runs in the background — poll the repo status to completion.
+  let repo: any;
+  for (let i = 0; i < 60; i++) {
+    const repos = await getJson(`/api/v1/workspaces/${wsId}/vault/repos`);
+    repo = repos.find((r: any) => r.id === repoId);
+    if (repo && (repo.status === 'ready' || repo.status === 'error')) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  expect(repo?.status).toBe('ready');
+  expect(repo.symbols).toBeGreaterThanOrEqual(2);
+  expect(repo.edges).toBeGreaterThanOrEqual(3);
+  expect(repo.chunks).toBeGreaterThanOrEqual(1);
 
   const syms = await getJson(`/api/v1/workspaces/${wsId}/vault/symbols?q=limits`);
   expect(syms.some((s: any) => s.name === 'GetLimits')).toBeTruthy();

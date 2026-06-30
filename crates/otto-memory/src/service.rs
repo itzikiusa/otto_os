@@ -32,9 +32,10 @@ struct WsBackends {
 const FTS_UNKNOWN: u8 = 0;
 const FTS_YES: u8 = 1;
 const FTS_NO: u8 = 2;
-/// Batch size when re-embedding memories so a remote provider round-trips are
-/// amortized instead of one HTTP call per memory.
-const REINDEX_BATCH: usize = 64;
+/// Batch size when re-embedding memories. Kept modest so a slow local neural
+/// model (e.g. qwen3-embedding:8b) makes incremental progress per call and no
+/// single call runs unbounded.
+const REINDEX_BATCH: usize = 16;
 
 pub struct MemoryService {
     repo: MemoriesRepo,
@@ -199,7 +200,7 @@ impl MemoryService {
                 for (m, v) in chunk.iter().zip(vecs) {
                     if self
                         .repo
-                        .put_vector(&m.id, e.model_id(), e.dim(), &v)
+                        .put_vector(&m.id, e.model_id(), v.len(), &v)
                         .await
                         .is_ok()
                     {
@@ -292,10 +293,11 @@ impl MemoryService {
             let text = format!("{}\n{}", m.title, m.body);
             if let Ok(v) = e.embed(&[text]).await {
                 if let Some(v0) = v.into_iter().next() {
-                    let _ = self.repo.put_vector(&m.id, e.model_id(), e.dim(), &v0).await;
+                    // Store the ACTUAL vector length (robust to a misconfigured dim).
+                    let _ = self.repo.put_vector(&m.id, e.model_id(), v0.len(), &v0).await;
                     // Write-through to the workspace's remote vector layer.
                     if let Some(q) = self.ws_backends(&m.workspace_id).qdrant {
-                        let _ = q.ensure_collection(e.dim()).await;
+                        let _ = q.ensure_collection(v0.len()).await;
                         let _ = q.upsert(&m.id, &v0).await;
                     }
                 }
@@ -640,6 +642,35 @@ impl MemoryService {
 /// Cap on embedded code chunks per index pass (a huge repo can't run away).
 const MAX_CODE_CHUNKS: usize = 6000;
 
+/// Max nodes returned by the graph endpoints. An SVG force graph re-renders every
+/// node per frame, so this stays modest to keep the view smooth on large repos
+/// (the most-connected nodes are kept; the UI's filters narrow further).
+const GRAPH_NODE_CAP: usize = 300;
+
+/// Pick the `cap` highest-degree node ids from an edge list. Orphans (degree 0)
+/// are included only to fill remaining slots after connected nodes.
+fn top_by_degree(
+    node_ids: impl Iterator<Item = String>,
+    edges: impl Iterator<Item = (String, String)>,
+    cap: usize,
+) -> std::collections::HashSet<String> {
+    let mut degree: HashMap<String, usize> = HashMap::new();
+    for id in node_ids {
+        degree.entry(id).or_insert(0);
+    }
+    for (s, d) in edges {
+        if let Some(v) = degree.get_mut(&s) {
+            *v += 1;
+        }
+        if let Some(v) = degree.get_mut(&d) {
+            *v += 1;
+        }
+    }
+    let mut ranked: Vec<(String, usize)> = degree.into_iter().collect();
+    ranked.sort_by_key(|x| std::cmp::Reverse(x.1));
+    ranked.into_iter().take(cap).map(|(id, _)| id).collect()
+}
+
 impl MemoryService {
     /// Index a repository on disk into the Vault: tree-sitter symbol extraction
     /// with dependency-graph heuristics (HTTP/DB/import/call edges), embeddings
@@ -740,7 +771,9 @@ impl MemoryService {
             }
         }
 
-        // Embed source files into the `code` collection (bounded).
+        // Embed source files into the `code` collection (bounded). New chunks are
+        // embedded under the active model on write; unchanged chunks are
+        // de-duplicated (not re-written).
         let mut chunk_count = 0usize;
         for (path, content) in &scan.texts {
             if chunk_count >= MAX_CODE_CHUNKS {
@@ -751,6 +784,11 @@ impl MemoryService {
                 .await
                 .unwrap_or(0);
         }
+        // Ensure EVERY chunk (including de-duplicated ones from a previous index
+        // under a different embedder) is embedded under the CURRENTLY-ACTIVE model
+        // — so "Re-index" uses the embedder you've selected, not the original one.
+        // Idempotent: rows already at the active model are skipped.
+        let _ = self.reindex(ws).await;
 
         // Mirror the graph to SurrealDB if configured (rich remote traversal).
         if let Some(sr) = self.ws_backends(ws).surreal {
@@ -812,6 +850,16 @@ impl MemoryService {
         for e in cg.edges {
             edges.push(FullGraphEdge { src: e.src_id, dst: e.dst_id, rel: e.rel, detail: e.detail });
         }
+        // Cap for a responsive force-graph: keep the most-connected nodes.
+        if nodes.len() > GRAPH_NODE_CAP {
+            let keep = top_by_degree(
+                nodes.iter().map(|n| n.id.clone()),
+                edges.iter().map(|e| (e.src.clone(), e.dst.clone())),
+                GRAPH_NODE_CAP,
+            );
+            nodes.retain(|n| keep.contains(&n.id));
+            edges.retain(|e| keep.contains(&e.src) && keep.contains(&e.dst));
+        }
         Ok(FullGraph { nodes, edges })
     }
 
@@ -826,7 +874,17 @@ impl MemoryService {
     }
 
     pub async fn code_graph(&self, ws: &str, repo_id: Option<&str>) -> Result<otto_state::CodeGraph> {
-        self.code.graph(ws, repo_id).await
+        let mut g = self.code.graph(ws, repo_id).await?;
+        if g.nodes.len() > GRAPH_NODE_CAP {
+            let keep = top_by_degree(
+                g.nodes.iter().map(|n| n.id.clone()),
+                g.edges.iter().map(|e| (e.src_id.clone(), e.dst_id.clone())),
+                GRAPH_NODE_CAP,
+            );
+            g.nodes.retain(|n| keep.contains(&n.id));
+            g.edges.retain(|e| keep.contains(&e.src_id) && keep.contains(&e.dst_id));
+        }
+        Ok(g)
     }
 
     pub async fn code_neighborhood(
@@ -953,15 +1011,12 @@ impl MemoryService {
                     r.name, r.symbols, r.edges, r.files, mark
                 ));
             }
-            // Key external dependencies (service / db_table nodes) of the active repo.
+            // Key external dependencies (service / db_table nodes) of the active
+            // repo — a cheap targeted query, not the full graph (which is huge).
             if let Some(a) = active {
-                if let Ok(g) = self.code.graph(ws, Some(&a.id)).await {
-                    let mut services: Vec<String> = g
-                        .nodes
-                        .iter()
-                        .filter(|n| n.kind == "service" || n.kind == "db_table")
-                        .map(|n| format!("{} ({})", n.label, n.kind))
-                        .collect();
+                if let Ok(deps) = self.code.dependency_labels(&a.id).await {
+                    let mut services: Vec<String> =
+                        deps.into_iter().map(|(label, kind)| format!("{label} ({kind})")).collect();
                     services.sort();
                     services.dedup();
                     if !services.is_empty() {

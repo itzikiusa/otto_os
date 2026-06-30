@@ -180,9 +180,10 @@
     font-size: 10px;
     padding: 1px 7px;
     border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--c) 50%, transparent);
-    background: color-mix(in srgb, var(--c) 16%, transparent);
-    color: color-mix(in srgb, var(--c) 85%, var(--text));
+    /* Calm, themed chip — faint kind tint with readable, themed text. */
+    border: 1px solid color-mix(in srgb, var(--c) 35%, var(--border));
+    background: color-mix(in srgb, var(--c) 12%, transparent);
+    color: var(--text);
     white-space: nowrap;
   }
   .lang { color: var(--text-dim); }
