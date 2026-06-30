@@ -42,11 +42,11 @@
 <div class="state-wrap">
   <button
     class="state-chip"
-    style:background={color(curState)}
+    style:--c={color(curState)}
     onclick={() => (open = !open)}
     title="Lifecycle state — click to change"
   >
-    {curState}
+    <span class="chip-dot"></span>{curState}
   </button>
   {#if open}
     <ul class="state-menu" role="menu">
@@ -72,26 +72,39 @@
     position: relative;
     display: inline-block;
   }
+  /* Calm, themed chip: a state-coloured dot carries the signal; the label stays
+     readable in every theme. The dropdown keeps the full per-state colours. */
   .state-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     font-size: 9px;
     font-weight: 600;
     padding: 2px 7px;
     border-radius: 4px;
-    color: #000;
-    border: none;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border: 1px solid color-mix(in srgb, var(--c) 35%, var(--border));
     cursor: pointer;
     letter-spacing: 0.03em;
     text-transform: uppercase;
+  }
+  .chip-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--c);
+    flex: none;
   }
   .state-menu {
     position: absolute;
     top: calc(100% + 4px);
     inset-inline-start: 0;
     z-index: 100;
-    background: var(--surface, #1a1a1a);
-    border: 1px solid var(--border, #333);
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow, 0 4px 12px rgba(0, 0, 0, 0.4));
     list-style: none;
     margin: 0;
     padding: 4px 0;
@@ -107,12 +120,12 @@
     background: none;
     border: none;
     cursor: pointer;
-    color: var(--text, #ddd);
+    color: var(--text);
     text-align: start;
   }
   .state-opt:hover,
   .state-opt.current {
-    background: var(--surface-2, #1e2330);
+    background: var(--surface-2);
   }
   .dot {
     width: 8px;

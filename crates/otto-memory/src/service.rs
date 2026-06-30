@@ -32,9 +32,10 @@ struct WsBackends {
 const FTS_UNKNOWN: u8 = 0;
 const FTS_YES: u8 = 1;
 const FTS_NO: u8 = 2;
-/// Batch size when re-embedding memories so a remote provider round-trips are
-/// amortized instead of one HTTP call per memory.
-const REINDEX_BATCH: usize = 64;
+/// Batch size when re-embedding memories. Kept modest so a slow local neural
+/// model (e.g. qwen3-embedding:8b) makes incremental progress per call and no
+/// single call runs unbounded.
+const REINDEX_BATCH: usize = 16;
 
 pub struct MemoryService {
     repo: MemoriesRepo,
@@ -641,9 +642,10 @@ impl MemoryService {
 /// Cap on embedded code chunks per index pass (a huge repo can't run away).
 const MAX_CODE_CHUNKS: usize = 6000;
 
-/// Max nodes returned by the graph endpoints — keeps the force-graph view smooth
-/// on large repos (the UI also offers filters). Most-connected nodes are kept.
-const GRAPH_NODE_CAP: usize = 800;
+/// Max nodes returned by the graph endpoints. An SVG force graph re-renders every
+/// node per frame, so this stays modest to keep the view smooth on large repos
+/// (the most-connected nodes are kept; the UI's filters narrow further).
+const GRAPH_NODE_CAP: usize = 300;
 
 /// Pick the `cap` highest-degree node ids from an edge list. Orphans (degree 0)
 /// are included only to fill remaining slots after connected nodes.

@@ -102,7 +102,10 @@ impl HnswIndex {
         Self {
             repo: MemoriesRepo::new(pool),
             model,
-            exact_threshold: 1024,
+            // Exact cosine is sub-10ms for a few thousand vectors and avoids
+            // rebuilding the HNSW graph every time the set changes (e.g. during a
+            // re-embed). Only switch to ANN for genuinely large collections.
+            exact_threshold: 20_000,
             cache: RwLock::new(HashMap::new()),
         }
     }

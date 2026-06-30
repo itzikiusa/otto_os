@@ -8,8 +8,12 @@ use async_trait::async_trait;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-/// Outbound embed request timeout (matches the otto-mcp client posture).
+/// Outbound embed request timeout for REMOTE providers (OpenAI/Voyage are fast).
 const EMBED_TIMEOUT: Duration = Duration::from_secs(20);
+/// Ollama runs a local neural model — a large one (e.g. qwen3-embedding:8b) needs
+/// a slow first load + seconds per text, so a single (batched) call can take
+/// minutes. A generous timeout prevents silently dropping embeddings.
+const OLLAMA_TIMEOUT: Duration = Duration::from_secs(600);
 /// Hard cap on an embeddings response body (defends against a hostile/buggy
 /// endpoint streaming an unbounded body). 32 MiB is far above any real
 /// embeddings batch (dim × count × ~8 bytes of JSON).
@@ -299,7 +303,7 @@ impl OllamaEmbedder {
             dim: dim.unwrap_or(768),
             model,
             http: reqwest::Client::builder()
-                .timeout(EMBED_TIMEOUT)
+                .timeout(OLLAMA_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
         }

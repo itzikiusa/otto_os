@@ -2,7 +2,7 @@
   // Repos tab — indexed code repositories with status/counts, an "Index a repo"
   // form, and a per-repo "View graph" jump (scopes the Graph tab to that repo).
   import { onMount } from 'svelte';
-  import { vault } from './vault.svelte';
+  import { vault, OLLAMA_EMBED_MODELS } from './vault.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { CodeRepo } from '../../lib/api/types';
@@ -10,6 +10,35 @@
   let root = $state('');
   let name = $state('');
   let showPicker = $state(false);
+
+  onMount(() => void vault.loadEmbedder());
+
+  // The embedder the repo will be indexed with (global active embedder). Options
+  // mirror the Knowledge tab; changing it switches the embedder (and re-embeds).
+  const EMBED_OPTIONS = [
+    { value: 'local', label: 'Local — code-aware (no setup)' },
+    ...OLLAMA_EMBED_MODELS.map((m) => ({ value: `ollama:${m.model}`, label: `Ollama: ${m.model} (${m.dim}d)` })),
+    { value: 'openai', label: 'OpenAI (API key)' },
+    { value: 'voyage', label: 'Voyage (API key)' },
+  ];
+  // Map the active embedder status → the matching option value.
+  const activeEmbed = $derived.by(() => {
+    const m = vault.embedder?.model ?? '';
+    if (m.startsWith('ollama:')) return m;
+    const p = vault.embedder?.provider ?? 'local';
+    return p === 'openai' || p === 'voyage' ? p : 'local';
+  });
+  async function pickEmbedder(v: string): Promise<void> {
+    if (v === activeEmbed) return;
+    if (v === 'local' || v === 'openai' || v === 'voyage') {
+      await vault.setEmbedder(v);
+    } else if (v.startsWith('ollama:')) {
+      const model = v.slice('ollama:'.length);
+      const md = OLLAMA_EMBED_MODELS.find((x) => x.model === model);
+      await vault.setEmbedder('ollama', { ollamaModel: model, ollamaDim: md?.dim });
+    }
+    if (v !== 'local') await vault.reindex();
+  }
 
   onMount(() => {
     void vault.loadRepos();
@@ -60,6 +89,23 @@
       <button class="index-btn" disabled={vault.indexing || !root.trim()} onclick={doIndex}>
         {#if vault.indexing}Indexing…{:else}<Icon name="zap" size={13} /> Index{/if}
       </button>
+    </div>
+    <div class="embed-row">
+      <span class="embed-label">Embed with</span>
+      <select
+        class="embed-select"
+        value={activeEmbed}
+        onchange={(e) => pickEmbedder((e.currentTarget as HTMLSelectElement).value)}
+        disabled={vault.embedderBusy || vault.indexing}
+        title="Which embedder builds the vectors (global active embedder)"
+      >
+        {#each EMBED_OPTIONS as o (o.value)}
+          <option value={o.value}>{o.label}</option>
+        {/each}
+      </select>
+      {#if vault.embedder?.model}
+        <span class="embed-active">active: {vault.embedder.model}{#if vault.embedder.dim} · {vault.embedder.dim}d{/if}</span>
+      {/if}
     </div>
     {#if showPicker}
       <FolderPicker
@@ -192,6 +238,17 @@
     cursor: pointer;
   }
   .browse-btn:hover { border-color: #7ee787; color: #7ee787; }
+  .embed-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .embed-label { font-size: 12px; color: var(--text-dim); }
+  .embed-select {
+    background: var(--surface-2, rgba(255, 255, 255, 0.04));
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 6px 8px;
+    font-size: 12.5px;
+  }
+  .embed-active { font-size: 11.5px; color: var(--text-dim); }
   .last-index {
     margin-top: 10px;
     font-size: 12px;
