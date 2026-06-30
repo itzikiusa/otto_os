@@ -253,14 +253,33 @@
   }
 
   // ── animation loop ────────────────────────────────────────────────────────
+  // The SVG re-renders on every `frame` bump, so we THROTTLE the visual update
+  // (~25fps) and HARD-CAP the run (~8s) — the sim still steps each rAF, but the
+  // expensive DOM diff of hundreds of nodes can't peg the main thread, and the
+  // loop is guaranteed to terminate (fixes the "stuck after revisiting" freeze).
+  let destroyed = false;
+  let lastRender = 0;
+  let runStart = 0;
+  const MAX_RUN_MS = 8000;
   function loop() {
-    const alive = sim.step();
-    frame++;
+    if (destroyed) {
+      raf = 0;
+      return;
+    }
+    const now = performance.now();
+    const overtime = now - runStart > MAX_RUN_MS;
+    const alive = sim.step() && !overtime;
+    if (now - lastRender > 40 || !alive || dragId || panning) {
+      frame++;
+      lastRender = now;
+    }
     if (alive || dragId || panning) raf = requestAnimationFrame(loop);
     else raf = 0;
   }
   function kick() {
+    if (destroyed) return;
     sim.reheat();
+    runStart = performance.now();
     if (!raf) raf = requestAnimationFrame(loop);
   }
 
@@ -434,7 +453,9 @@
     kick();
   });
   onDestroy(() => {
+    destroyed = true;
     if (raf) cancelAnimationFrame(raf);
+    raf = 0;
     ro?.disconnect();
   });
 

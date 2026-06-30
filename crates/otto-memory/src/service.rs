@@ -771,7 +771,9 @@ impl MemoryService {
             }
         }
 
-        // Embed source files into the `code` collection (bounded).
+        // Embed source files into the `code` collection (bounded). New chunks are
+        // embedded under the active model on write; unchanged chunks are
+        // de-duplicated (not re-written).
         let mut chunk_count = 0usize;
         for (path, content) in &scan.texts {
             if chunk_count >= MAX_CODE_CHUNKS {
@@ -782,6 +784,11 @@ impl MemoryService {
                 .await
                 .unwrap_or(0);
         }
+        // Ensure EVERY chunk (including de-duplicated ones from a previous index
+        // under a different embedder) is embedded under the CURRENTLY-ACTIVE model
+        // — so "Re-index" uses the embedder you've selected, not the original one.
+        // Idempotent: rows already at the active model are skipped.
+        let _ = self.reindex(ws).await;
 
         // Mirror the graph to SurrealDB if configured (rich remote traversal).
         if let Some(sr) = self.ws_backends(ws).surreal {
