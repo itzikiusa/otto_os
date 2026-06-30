@@ -166,6 +166,13 @@ pub async fn import_settings(
         if key == "providers" {
             ctx.manager.providers().reload(Some(value));
         }
+        if key == "agent_skip_permissions" {
+            let skip = value.as_bool().unwrap_or(true);
+            let overrides = repo.get("providers").await.ok().flatten();
+            ctx.manager
+                .providers()
+                .set_skip_permissions(skip, overrides.as_ref());
+        }
     }
 
     accepted.sort();
@@ -341,6 +348,13 @@ pub async fn state_restore(
 
         if key == "providers" {
             ctx.manager.providers().reload(Some(value));
+        }
+        if key == "agent_skip_permissions" {
+            let skip = value.as_bool().unwrap_or(true);
+            let overrides = repo.get("providers").await.ok().flatten();
+            ctx.manager
+                .providers()
+                .set_skip_permissions(skip, overrides.as_ref());
         }
     }
 

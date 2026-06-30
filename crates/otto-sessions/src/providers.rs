@@ -2,6 +2,7 @@
 //! overridable from the `providers` settings JSON.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 use otto_core::{Error, Result};
@@ -47,6 +48,13 @@ struct ProviderOverride {
 #[derive(Debug)]
 pub struct ProviderRegistry {
     map: RwLock<HashMap<String, ProviderSpec>>,
+    /// Whether built-in agent CLIs launch with their "skip permission prompts"
+    /// flag (`--dangerously-skip-permissions` / codex
+    /// `--dangerously-bypass-approvals-and-sandbox`). Default **on** so sessions
+    /// run unattended. When an admin turns it OFF (the `agent_skip_permissions`
+    /// setting), the flag is omitted and each CLI falls back to its own default
+    /// permission mode (ask / auto), so tool use prompts in the session terminal.
+    skip_permissions: AtomicBool,
 }
 
 fn expand(template: &str, sid: &str, cwd: &str) -> String {
@@ -55,20 +63,42 @@ fn expand(template: &str, sid: &str, cwd: &str) -> String {
 
 impl ProviderRegistry {
     /// Built-in providers, optionally overridden/extended by the `providers`
-    /// settings value.
+    /// settings value. Skip-permissions defaults **on** (unattended); the boot
+    /// path applies the `agent_skip_permissions` setting via
+    /// [`Self::set_skip_permissions`].
     pub fn new(overrides: Option<&serde_json::Value>) -> Self {
         Self {
-            map: RwLock::new(Self::build_map(overrides)),
+            map: RwLock::new(Self::build_map(overrides, true)),
+            skip_permissions: AtomicBool::new(true),
         }
     }
 
     /// Rebuild the registry from builtins + `overrides` (settings `providers`
-    /// key). Existing sessions keep running; new spawns use the new map.
+    /// key), preserving the current skip-permissions mode. Existing sessions keep
+    /// running; new spawns use the new map.
     pub fn reload(&self, overrides: Option<&serde_json::Value>) {
-        *self.map.write().expect("provider registry lock") = Self::build_map(overrides);
+        let skip = self.skip_permissions.load(Ordering::Relaxed);
+        *self.map.write().expect("provider registry lock") = Self::build_map(overrides, skip);
     }
 
-    fn build_map(overrides: Option<&serde_json::Value>) -> HashMap<String, ProviderSpec> {
+    /// Set whether built-in agent CLIs launch with skip-permissions, and rebuild
+    /// the registry against `overrides` (the current `providers` setting). Called
+    /// at boot and whenever the `agent_skip_permissions` setting changes. New
+    /// spawns pick up the change immediately; running sessions are unaffected.
+    pub fn set_skip_permissions(&self, skip: bool, overrides: Option<&serde_json::Value>) {
+        self.skip_permissions.store(skip, Ordering::Relaxed);
+        *self.map.write().expect("provider registry lock") = Self::build_map(overrides, skip);
+    }
+
+    /// The current skip-permissions mode (for `/meta` / the settings UI).
+    pub fn skip_permissions(&self) -> bool {
+        self.skip_permissions.load(Ordering::Relaxed)
+    }
+
+    fn build_map(
+        overrides: Option<&serde_json::Value>,
+        skip_permissions: bool,
+    ) -> HashMap<String, ProviderSpec> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         // Give agent CLIs a BROAD working-dir scope (the user's home) via
         // `--add-dir`. Claude Code only resets the bash cwd when a `cd` leaves
@@ -84,6 +114,20 @@ impl ProviderRegistry {
         } else {
             vec![format!("--add-dir={home}")]
         };
+        // The "skip permission prompts" flags, injected only when `skip_permissions`
+        // is on (the default). When off, each CLI is launched WITHOUT them and uses
+        // its own default permission mode (ask / auto). `skip_flag` is the
+        // claude/agy form; `codex_bypass` is codex's equivalent.
+        let skip_flag: Vec<String> = if skip_permissions {
+            vec!["--dangerously-skip-permissions".into()]
+        } else {
+            vec![]
+        };
+        let codex_bypass: Vec<String> = if skip_permissions {
+            vec!["--dangerously-bypass-approvals-and-sandbox".into()]
+        } else {
+            vec![]
+        };
         let mut map = HashMap::new();
         // Each agent CLI is launched as-is (no `-p`) with its own
         // skip-permissions flag so unattended sessions never block on a
@@ -93,20 +137,14 @@ impl ProviderRegistry {
             ProviderSpec {
                 cmd: "claude".into(),
                 args: {
-                    let mut a = vec![
-                        "--session-id".into(),
-                        "{sid}".into(),
-                        "--dangerously-skip-permissions".into(),
-                    ];
+                    let mut a = vec!["--session-id".into(), "{sid}".into()];
+                    a.extend(skip_flag.iter().cloned());
                     a.extend(home_add_dir.iter().cloned());
                     a
                 },
                 resume_args: Some({
-                    let mut a = vec![
-                        "--resume".into(),
-                        "{sid}".into(),
-                        "--dangerously-skip-permissions".into(),
-                    ];
+                    let mut a = vec!["--resume".into(), "{sid}".into()];
+                    a.extend(skip_flag.iter().cloned());
                     a.extend(home_add_dir.iter().cloned());
                     a
                 }),
@@ -119,10 +157,11 @@ impl ProviderRegistry {
             "codex".to_string(),
             ProviderSpec {
                 cmd: "codex".into(),
-                args: vec![
-                    "--dangerously-bypass-approvals-and-sandbox".into(),
-                    "--search".into(),
-                ],
+                args: {
+                    let mut a = codex_bypass.clone();
+                    a.push("--search".into());
+                    a
+                },
                 // Codex doesn't accept a settable session id at launch — it mints
                 // its own UUID and records a rollout under `$CODEX_HOME/sessions`.
                 // Otto captures that UUID after spawn (see `capture_codex_session_id`)
@@ -130,12 +169,13 @@ impl ProviderRegistry {
                 // The bypass/search flags are valid on the `resume` subcommand too
                 // (verified against codex-cli 0.142), so resumed sessions stay
                 // unattended-safe with live web search, like a fresh launch.
-                resume_args: Some(vec![
-                    "resume".into(),
-                    "--dangerously-bypass-approvals-and-sandbox".into(),
-                    "--search".into(),
-                    "{sid}".into(),
-                ]),
+                resume_args: Some({
+                    let mut a = vec!["resume".into()];
+                    a.extend(codex_bypass.iter().cloned());
+                    a.push("--search".into());
+                    a.push("{sid}".into());
+                    a
+                }),
                 update_command: Some("codex update".into()),
                 captures_session_id: true,
             },
@@ -145,10 +185,8 @@ impl ProviderRegistry {
             ProviderSpec {
                 cmd: "agy".into(),
                 args: {
-                    let mut a = vec![
-                        "--dangerously-skip-permissions".into(),
-                        "--add-dir={cwd}".into(),
-                    ];
+                    let mut a = skip_flag.clone();
+                    a.push("--add-dir={cwd}".into());
                     a.extend(home_add_dir.iter().cloned());
                     a
                 },
@@ -161,12 +199,9 @@ impl ProviderRegistry {
                 // `agy --conversation <id>`. The skip-permissions/add-dir flags stay
                 // on resume so resumed sessions remain unattended-safe.
                 resume_args: Some({
-                    let mut a = vec![
-                        "--conversation".into(),
-                        "{sid}".into(),
-                        "--dangerously-skip-permissions".into(),
-                        "--add-dir={cwd}".into(),
-                    ];
+                    let mut a = vec!["--conversation".into(), "{sid}".into()];
+                    a.extend(skip_flag.iter().cloned());
+                    a.push("--add-dir={cwd}".into());
                     a.extend(home_add_dir.iter().cloned());
                     a
                 }),
@@ -299,5 +334,70 @@ impl ProviderRegistry {
             cwd: Some(cwd.to_string()),
             env: vec![],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_for(reg: &ProviderRegistry, provider: &str, resume: bool) -> Vec<String> {
+        reg.build_spec(provider, "SID", "/tmp/cwd", resume)
+            .expect("build_spec")
+            .args
+    }
+
+    /// Default (skip on): every built-in agent CLI carries its skip-permissions
+    /// flag on both launch and resume.
+    #[test]
+    fn skip_permissions_on_by_default() {
+        let reg = ProviderRegistry::new(None);
+        assert!(reg.skip_permissions());
+        assert!(args_for(&reg, "claude", false).contains(&"--dangerously-skip-permissions".into()));
+        assert!(args_for(&reg, "claude", true).contains(&"--dangerously-skip-permissions".into()));
+        assert!(args_for(&reg, "codex", false)
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+        assert!(args_for(&reg, "codex", true)
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+        assert!(args_for(&reg, "agy", false).contains(&"--dangerously-skip-permissions".into()));
+    }
+
+    /// Opted out: the skip/bypass flag is gone from every provider (launch + resume)
+    /// while the rest of the launch line is preserved.
+    #[test]
+    fn skip_permissions_off_drops_the_flag_only() {
+        let reg = ProviderRegistry::new(None);
+        reg.set_skip_permissions(false, None);
+        assert!(!reg.skip_permissions());
+
+        let claude = args_for(&reg, "claude", false);
+        assert!(!claude.iter().any(|a| a.contains("dangerously")));
+        assert!(claude.contains(&"--session-id".into())); // rest of the line intact
+        assert!(!args_for(&reg, "claude", true)
+            .iter()
+            .any(|a| a.contains("dangerously")));
+
+        let codex = args_for(&reg, "codex", false);
+        assert!(!codex.iter().any(|a| a.contains("dangerously")));
+        assert!(codex.contains(&"--search".into())); // search preserved
+        assert!(!args_for(&reg, "codex", true)
+            .iter()
+            .any(|a| a.contains("dangerously")));
+
+        let agy = args_for(&reg, "agy", false);
+        assert!(!agy.iter().any(|a| a.contains("dangerously")));
+        assert!(agy.iter().any(|a| a.starts_with("--add-dir="))); // add-dir preserved
+    }
+
+    /// A providers reload preserves the current skip-permissions mode.
+    #[test]
+    fn reload_preserves_skip_mode() {
+        let reg = ProviderRegistry::new(None);
+        reg.set_skip_permissions(false, None);
+        reg.reload(None); // e.g. a `providers` settings change
+        assert!(!reg.skip_permissions());
+        assert!(!args_for(&reg, "claude", false)
+            .iter()
+            .any(|a| a.contains("dangerously")));
     }
 }

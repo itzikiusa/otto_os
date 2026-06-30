@@ -146,6 +146,16 @@ async fn run(cfg: Config) -> Result<(), String> {
         .await
         .map_err(|e| format!("read providers setting: {e}"))?;
     let providers = ProviderRegistry::new(provider_overrides.as_ref());
+    // Apply the opt-out for "skip permission prompts" (default ON / unattended).
+    // When an admin turns `agent_skip_permissions` off, built-in agent CLIs launch
+    // without their bypass flag and fall back to their own ask/auto permission mode.
+    let skip_permissions = settings
+        .get("agent_skip_permissions")
+        .await
+        .map_err(|e| format!("read agent_skip_permissions setting: {e}"))?
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    providers.set_skip_permissions(skip_permissions, provider_overrides.as_ref());
 
     // Embedded ClickHouse usage + metrics store. Config lives in the settings
     // table (`usage` key); degrades to a no-op when the binary isn't installed.
