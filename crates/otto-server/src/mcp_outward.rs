@@ -1,6 +1,6 @@
 //! "Otto as an MCP server" — the OUTWARD surface. External agents (Claude Code,
 //! Copilot, …) connect to `ottod mcp-server` over stdio with a **restricted**
-//! `kind='mcp'` token and call the eight `otto.*` tools. Every call funnels
+//! `kind='mcp'` token and call the `otto.*` tools. Every call funnels
 //! through `POST /mcp/otto-tools/invoke` (the only route that token may reach —
 //! see feature_guard, design §14 F1), which governs (enabled? allowlisted?
 //! dangerous→approval?), audits (`mcp_call_log`, direction='inbound'), then
@@ -32,6 +32,51 @@ const DEFAULT_ENABLED: &[&str] = &[
     // existing jobs; the write tools below stay off until an admin enables them.
     "list_scheduled_tasks",
     "list_scheduled_task_runs",
+    // ---- Feature reads (metadata/list/get) — safe to expose by default once the
+    // outward server itself is turned on. Content-heavy reads (consume/search)
+    // stay off by default; see the two opt-in reads excluded from this list.
+    // Workflows
+    "list_workflows",
+    "get_workflow",
+    "list_workflow_runs",
+    "get_workflow_run",
+    // Message brokers
+    "list_broker_clusters",
+    "list_broker_topics",
+    "get_broker_topic",
+    "list_consumer_groups",
+    // Connections / git
+    "list_connections",
+    "list_repos",
+    "git_status",
+    "list_prs",
+    "get_pr",
+    // Issues (Jira / Confluence)
+    "search_issues",
+    "get_issue",
+    "search_confluence",
+    // Swarm
+    "list_swarms",
+    "get_swarm",
+    "list_swarm_runs",
+    "get_swarm_board",
+    // Memory / sessions
+    "list_memory",
+    "list_sessions",
+    "get_session",
+    // Code review / product / channels / usage / skills
+    "list_findings",
+    "get_finding",
+    "list_product_stories",
+    "get_product_story",
+    "list_integrations",
+    "get_usage_summary",
+    "list_bundled_skills",
+    // Self-improvement (reads)
+    "get_self_improvement_config",
+    "list_improvement_runs",
+    "get_improvement_run",
+    "list_improvement_edits",
 ];
 const DANGEROUS: &[&str] = &[
     "run_goal_loop",
@@ -43,60 +88,299 @@ const DANGEROUS: &[&str] = &[
     "delete_scheduled_task",
     "run_scheduled_task",
     "set_scheduled_task_enabled",
+    // ---- Feature writes — mutating / outward-facing / agent-spawning. Off by
+    // default, approval-gated by the control plane.
+    "run_workflow",
+    "cancel_workflow_run",
+    "produce_broker_message",
+    "create_pr",
+    "comment_pr",
+    "start_pr_review",
+    "comment_issue",
+    "transition_issue",
+    "post_swarm_board",
+    "test_integration",
+    "broadcast_message",
+    // Self-improvement (writes — apply/reject/rollback code & skill edits, run a pass)
+    "run_self_improvement",
+    "approve_improvement_edit",
+    "reject_improvement_edit",
+    "rollback_improvement_edit",
+];
+
+/// Non-mutating tools that are defined and enableable but stay **off by default**
+/// — either because they stream potentially large/sensitive payload *content*
+/// (message bodies, recalled knowledge, code, rows) or pre-date the default-on
+/// read policy. Every read tool is therefore in exactly one of `DEFAULT_ENABLED`
+/// or `OPT_IN_READS`; the classification invariant test asserts that.
+#[cfg(test)]
+const OPT_IN_READS: &[&str] = &[
+    "search_codebase",
+    "query_db_readonly",
+    "open_pr_draft",
+    "consume_broker_messages",
+    "search_memory",
 ];
 const MAX_WAIT_SECS: u64 = 30;
 
-/// Static catalog of the eight outward tools.
+/// Static catalog of the outward `otto.*` tools. Each entry carries a `category`
+/// so the control-plane UI can group the (now large) checklist. Adding a tool here
+/// surfaces it in the control plane automatically (`GET /mcp/otto-server`).
 pub fn otto_tool_specs() -> Vec<Value> {
     vec![
-        json!({"name":"otto.search_codebase","mutating":false,
+        json!({"name":"otto.search_codebase","mutating":false,"category":"Code & Context",
             "description":"Search a workspace's code for a literal query; returns file:line matches. Read-only, confined to the workspace root.",
             "inputSchema":{"type":"object","required":["workspace_id","query"],"properties":{
                 "workspace_id":{"type":"string"},"query":{"type":"string"},
                 "path":{"type":"string","description":"optional sub-path within the workspace"},
                 "max_results":{"type":"integer"}}}}),
-        json!({"name":"otto.get_context_packet","mutating":false,
+        json!({"name":"otto.get_context_packet","mutating":false,"category":"Code & Context",
             "description":"Assemble a code-grounded context packet for a workspace: metadata + the most relevant code excerpts for a query.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
                 "workspace_id":{"type":"string"},"query":{"type":"string"},"story_id":{"type":"string"}}}}),
-        json!({"name":"otto.run_goal_loop","mutating":true,
+        json!({"name":"otto.run_goal_loop","mutating":true,"category":"Agents",
             "description":"Create and start a bounded goal loop (Plan→Execute→Evaluate→Digest). Pass a goal-loop spec. DANGEROUS: spawns autonomous agents — approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id","name","repo_path","definition","limits","config"],"properties":{
                 "workspace_id":{"type":"string"},"name":{"type":"string"},"repo_path":{"type":"string"},
                 "definition":{"type":"object"},"limits":{"type":"object"},"config":{"type":"object"}}}}),
-        json!({"name":"otto.create_work_item","mutating":true,
+        json!({"name":"otto.create_work_item","mutating":true,"category":"Swarm",
             "description":"Create a work item (a Swarm task) under a project. DANGEROUS: mutates project state — approval-gated.",
             "inputSchema":{"type":"object","required":["project_id","title"],"properties":{
                 "project_id":{"type":"string"},"title":{"type":"string"},
                 "description":{"type":"string"},"priority":{"type":"string"}}}}),
-        json!({"name":"otto.query_db_readonly","mutating":false,
+        json!({"name":"otto.query_db_readonly","mutating":false,"category":"Database",
             "description":"Run a READ-ONLY SQL query against an Otto DB connection. Writes/DDL and multi-statement input are rejected server-side regardless of the connection's guard.",
             "inputSchema":{"type":"object","required":["connection_id","statement"],"properties":{
                 "connection_id":{"type":"string"},"statement":{"type":"string"},"max_rows":{"type":"integer"}}}}),
-        json!({"name":"otto.open_pr_draft","mutating":false,
+        json!({"name":"otto.open_pr_draft","mutating":false,"category":"Git",
             "description":"Draft a PR title + description from a repo's diff vs a base branch. Drafts text only — does NOT open/publish a PR.",
             "inputSchema":{"type":"object","required":["repo_id","base"],"properties":{
                 "repo_id":{"type":"string"},"base":{"type":"string"}}}}),
-        json!({"name":"otto.get_proof_pack","mutating":false,
+        json!({"name":"otto.get_proof_pack","mutating":false,"category":"Code & Context",
             "description":"Assemble an evidence bundle for a target: git status/recent-commits/diffstat for a repo and a goal loop's machine-checked acceptance criteria.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
                 "workspace_id":{"type":"string"},"repo_id":{"type":"string"},
                 "branch":{"type":"string"},"goal_loop_id":{"type":"string"}}}}),
-        json!({"name":"otto.ask_human_approval","mutating":false,
+        json!({"name":"otto.ask_human_approval","mutating":false,"category":"Approvals",
             "description":"Request a human's approval for an action and (optionally) wait for the decision. Creates a pending item in the MCP approval queue.",
             "inputSchema":{"type":"object","required":["title"],"properties":{
                 "workspace_id":{"type":"string"},"title":{"type":"string"},
                 "detail":{"type":"string"},"wait_seconds":{"type":"integer"}}}}),
+
+        // ================= Workflows =================
+        json!({"name":"otto.list_workflows","mutating":false,"category":"Workflows",
+            "description":"List a workspace's workflows (visual node-graph automations). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.get_workflow","mutating":false,"category":"Workflows",
+            "description":"Get one workflow's full definition (graph nodes + edges + metadata) by id. Read-only.",
+            "inputSchema":{"type":"object","required":["workflow_id"],"properties":{"workflow_id":{"type":"string"}}}}),
+        json!({"name":"otto.list_workflow_runs","mutating":false,"category":"Workflows",
+            "description":"List the recent runs of a workflow (status + timing). Read-only.",
+            "inputSchema":{"type":"object","required":["workflow_id"],"properties":{"workflow_id":{"type":"string"}}}}),
+        json!({"name":"otto.get_workflow_run","mutating":false,"category":"Workflows",
+            "description":"Get one workflow run's status, per-node step states and outputs by run id. Read-only.",
+            "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
+        json!({"name":"otto.run_workflow","mutating":true,"category":"Workflows",
+            "description":"Execute a workflow now; returns the new run. Optionally pass `input` (seed JSON) and `start_node` (run that node + downstream). DANGEROUS: spawns agents / external effects — approval-gated.",
+            "inputSchema":{"type":"object","required":["workflow_id"],"properties":{
+                "workflow_id":{"type":"string"},"input":{"type":"object"},"start_node":{"type":"string"}}}}),
+        json!({"name":"otto.cancel_workflow_run","mutating":true,"category":"Workflows",
+            "description":"Cancel a running workflow run by id. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
+
+        // ================= Message Brokers =================
+        json!({"name":"otto.list_broker_clusters","mutating":false,"category":"Message Brokers",
+            "description":"List a workspace's broker clusters (Kafka). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.list_broker_topics","mutating":false,"category":"Message Brokers",
+            "description":"List the topics of a broker cluster (name + partition/replication summary). Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{"cluster_id":{"type":"string"}}}}),
+        json!({"name":"otto.get_broker_topic","mutating":false,"category":"Message Brokers",
+            "description":"Get one topic's detail (partitions, offsets, config) on a cluster. Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id","topic"],"properties":{
+                "cluster_id":{"type":"string"},"topic":{"type":"string"}}}}),
+        json!({"name":"otto.list_consumer_groups","mutating":false,"category":"Message Brokers",
+            "description":"List a cluster's consumer groups (state + lag summary). Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{"cluster_id":{"type":"string"}}}}),
+        json!({"name":"otto.consume_broker_messages","mutating":false,"category":"Message Brokers",
+            "description":"Read recent messages from a topic (the latest `limit`, no offset commits — purely a read). Off by default (streams payloads); enable to inspect message content.",
+            "inputSchema":{"type":"object","required":["cluster_id","topic"],"properties":{
+                "cluster_id":{"type":"string"},"topic":{"type":"string"},"partition":{"type":"integer"},
+                "limit":{"type":"integer"},"value_filter":{"type":"string","description":"substring filter on the decoded value"}}}}),
+        json!({"name":"otto.produce_broker_message","mutating":true,"category":"Message Brokers",
+            "description":"Produce a message to a topic. `value` required; optional `key`/`partition`. Guarded clusters need `confirm=true`. DANGEROUS: writes to a broker — approval-gated.",
+            "inputSchema":{"type":"object","required":["cluster_id","topic","value"],"properties":{
+                "cluster_id":{"type":"string"},"topic":{"type":"string"},"value":{"type":"string"},
+                "key":{"type":"string"},"partition":{"type":"integer"},"confirm":{"type":"boolean"}}}}),
+
+        // ================= Connections =================
+        json!({"name":"otto.list_connections","mutating":false,"category":"Database",
+            "description":"List a workspace's connections (DB/SSH) — id, name, kind, environment. Secrets are never included. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+
+        // ================= Git =================
+        json!({"name":"otto.list_repos","mutating":false,"category":"Git",
+            "description":"List a workspace's git repositories (id, name, branch, remote). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.git_status","mutating":false,"category":"Git",
+            "description":"Get a repo's git status (current branch, staged/unstaged/untracked files). Read-only.",
+            "inputSchema":{"type":"object","required":["repo_id"],"properties":{"repo_id":{"type":"string"}}}}),
+        json!({"name":"otto.list_prs","mutating":false,"category":"Git",
+            "description":"List a repo's pull requests. Optional `state` filter (open|merged|declined|all). Read-only.",
+            "inputSchema":{"type":"object","required":["repo_id"],"properties":{
+                "repo_id":{"type":"string"},"state":{"type":"string"}}}}),
+        json!({"name":"otto.get_pr","mutating":false,"category":"Git",
+            "description":"Get one pull request's detail (title, description, state, branches) by number. Read-only.",
+            "inputSchema":{"type":"object","required":["repo_id","number"],"properties":{
+                "repo_id":{"type":"string"},"number":{"type":"integer"}}}}),
+        json!({"name":"otto.create_pr","mutating":true,"category":"Git",
+            "description":"Open a pull request on a repo's provider. DANGEROUS: outward-facing publish — approval-gated.",
+            "inputSchema":{"type":"object","required":["repo_id","title","description","source_branch","target_branch"],"properties":{
+                "repo_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},
+                "source_branch":{"type":"string"},"target_branch":{"type":"string"}}}}),
+        json!({"name":"otto.comment_pr","mutating":true,"category":"Git",
+            "description":"Post a comment on a pull request. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["repo_id","number","body"],"properties":{
+                "repo_id":{"type":"string"},"number":{"type":"integer"},"body":{"type":"string"}}}}),
+        json!({"name":"otto.start_pr_review","mutating":true,"category":"Code Review",
+            "description":"Start Otto's multi-agent review of a pull request (fan-out). DANGEROUS: spawns agents — approval-gated.",
+            "inputSchema":{"type":"object","required":["repo_id","pr_number"],"properties":{
+                "repo_id":{"type":"string"},"pr_number":{"type":"integer"}}}}),
+
+        // ================= Issues (Jira / Confluence) =================
+        json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
+            "description":"Search Jira issues for an issue account. `query` is JQL (empty → recent). Optional `project`. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id"],"properties":{
+                "account_id":{"type":"string"},"query":{"type":"string"},"project":{"type":"string"}}}}),
+        json!({"name":"otto.get_issue","mutating":false,"category":"Issues",
+            "description":"Get one Jira issue's full detail (description, comments, changelog, links) by key. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","key"],"properties":{
+                "account_id":{"type":"string"},"key":{"type":"string"}}}}),
+        json!({"name":"otto.search_confluence","mutating":false,"category":"Issues",
+            "description":"Search Confluence pages for an issue account. `query` is the search text; optional `space`. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","query"],"properties":{
+                "account_id":{"type":"string"},"query":{"type":"string"},"space":{"type":"string"}}}}),
+        json!({"name":"otto.comment_issue","mutating":true,"category":"Issues",
+            "description":"Add a comment to a Jira issue. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","key","body"],"properties":{
+                "account_id":{"type":"string"},"key":{"type":"string"},"body":{"type":"string"}}}}),
+        json!({"name":"otto.transition_issue","mutating":true,"category":"Issues",
+            "description":"Transition a Jira issue to a new status. `transition_id` from the issue's available transitions. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","key","transition_id"],"properties":{
+                "account_id":{"type":"string"},"key":{"type":"string"},"transition_id":{"type":"string"}}}}),
+
+        // ================= Swarm =================
+        json!({"name":"otto.list_swarms","mutating":false,"category":"Swarm",
+            "description":"List a workspace's agent swarms. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.get_swarm","mutating":false,"category":"Swarm",
+            "description":"Get a swarm's detail (agents, projects, counts) by id. Read-only.",
+            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string"}}}}),
+        json!({"name":"otto.list_swarm_runs","mutating":false,"category":"Swarm",
+            "description":"List a workspace's swarm runs. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.get_swarm_board","mutating":false,"category":"Swarm",
+            "description":"Read a swarm's shared message board. Read-only.",
+            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string"}}}}),
+        json!({"name":"otto.post_swarm_board","mutating":true,"category":"Swarm",
+            "description":"Post a message to a swarm's shared board. Optional `project_id`/`task_id` context. DANGEROUS: drives swarm agents — approval-gated.",
+            "inputSchema":{"type":"object","required":["swarm_id","body"],"properties":{
+                "swarm_id":{"type":"string"},"body":{"type":"string"},
+                "project_id":{"type":"string"},"task_id":{"type":"string"}}}}),
+
+        // ================= Memory / Vault =================
+        json!({"name":"otto.list_memory","mutating":false,"category":"Memory",
+            "description":"List a workspace's vault memories (knowledge items). Optional `collection`/`story_id` filters. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
+                "workspace_id":{"type":"string"},"collection":{"type":"string"},"story_id":{"type":"string"}}}}),
+        json!({"name":"otto.search_memory","mutating":false,"category":"Memory",
+            "description":"Semantic/keyword search of a workspace's vault for a free-text query; returns the top hits. Off by default (streams stored content).",
+            "inputSchema":{"type":"object","required":["workspace_id","query"],"properties":{
+                "workspace_id":{"type":"string"},"query":{"type":"string"},"k":{"type":"integer"}}}}),
+
+        // ================= Sessions =================
+        json!({"name":"otto.list_sessions","mutating":false,"category":"Sessions",
+            "description":"List a workspace's agent/terminal sessions (id, title, kind, status). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.get_session","mutating":false,"category":"Sessions",
+            "description":"Get one session's detail by id. Read-only.",
+            "inputSchema":{"type":"object","required":["session_id"],"properties":{"session_id":{"type":"string"}}}}),
+        json!({"name":"otto.broadcast_message","mutating":true,"category":"Sessions",
+            "description":"Relay a literal text message to a workspace's live agent sessions. DANGEROUS: drives running agents — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","text"],"properties":{
+                "workspace_id":{"type":"string"},"text":{"type":"string"}}}}),
+
+        // ================= Code Review / Findings =================
+        json!({"name":"otto.list_findings","mutating":false,"category":"Code Review",
+            "description":"List a code review's findings (with workflow state) by review id. Read-only.",
+            "inputSchema":{"type":"object","required":["review_id"],"properties":{"review_id":{"type":"string"}}}}),
+        json!({"name":"otto.get_finding","mutating":false,"category":"Code Review",
+            "description":"Get one review finding's detail + event timeline by id. Read-only.",
+            "inputSchema":{"type":"object","required":["finding_id"],"properties":{"finding_id":{"type":"string"}}}}),
+
+        // ================= Product =================
+        json!({"name":"otto.list_product_stories","mutating":false,"category":"Product",
+            "description":"List a workspace's product stories (Jira/Confluence-backed). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.get_product_story","mutating":false,"category":"Product",
+            "description":"Get one product story's detail by id. Read-only.",
+            "inputSchema":{"type":"object","required":["story_id"],"properties":{"story_id":{"type":"string"}}}}),
+
+        // ================= Channels =================
+        json!({"name":"otto.list_integrations","mutating":false,"category":"Channels",
+            "description":"List a workspace's channel integrations (Slack/Telegram/webhook). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.test_integration","mutating":true,"category":"Channels",
+            "description":"Send a test message to a configured channel integration (`channel` = slack|telegram|webhook). DANGEROUS: outward-facing send — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","channel"],"properties":{
+                "workspace_id":{"type":"string"},"channel":{"type":"string"}}}}),
+
+        // ================= Usage =================
+        json!({"name":"otto.get_usage_summary","mutating":false,"category":"Usage",
+            "description":"Token-usage rollups by provider/day/session/feature (root-only endpoint; non-root callers get a clean 403). Optional `days` (default 30). Read-only.",
+            "inputSchema":{"type":"object","properties":{"days":{"type":"integer"},"otto_only":{"type":"boolean"}}}}),
+
+        // ================= Skills =================
+        json!({"name":"otto.list_bundled_skills","mutating":false,"category":"Skills",
+            "description":"List Otto's bundled skill catalogue (name, version, install state). Read-only.",
+            "inputSchema":{"type":"object","properties":{}}}),
+
+        // ================= Self-Improvement =================
+        json!({"name":"otto.get_self_improvement_config","mutating":false,"category":"Self-Improvement",
+            "description":"Get a workspace's self-improvement config (cadence, autonomy). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.list_improvement_runs","mutating":false,"category":"Self-Improvement",
+            "description":"List a workspace's self-improvement runs (status + summary). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.get_improvement_run","mutating":false,"category":"Self-Improvement",
+            "description":"Get one self-improvement run's detail by id. Read-only.",
+            "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
+        json!({"name":"otto.list_improvement_edits","mutating":false,"category":"Self-Improvement",
+            "description":"List a workspace's self-improvement edit suggestions (pending/applied) with their status. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.run_self_improvement","mutating":true,"category":"Self-Improvement",
+            "description":"Trigger a self-improvement pass for a workspace now. DANGEROUS: spawns an analysis agent — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+        json!({"name":"otto.approve_improvement_edit","mutating":true,"category":"Self-Improvement",
+            "description":"Approve (apply) a self-improvement edit suggestion. DANGEROUS: mutates skills/config — approval-gated.",
+            "inputSchema":{"type":"object","required":["edit_id"],"properties":{"edit_id":{"type":"string"}}}}),
+        json!({"name":"otto.reject_improvement_edit","mutating":true,"category":"Self-Improvement",
+            "description":"Reject (deny) a pending self-improvement edit suggestion. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["edit_id"],"properties":{"edit_id":{"type":"string"}}}}),
+        json!({"name":"otto.rollback_improvement_edit","mutating":true,"category":"Self-Improvement",
+            "description":"Roll back (remove) a previously-applied self-improvement edit. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["edit_id"],"properties":{"edit_id":{"type":"string"}}}}),
+
         // ---- Scheduled Tasks ----
-        json!({"name":"otto.list_scheduled_tasks","mutating":false,
+        json!({"name":"otto.list_scheduled_tasks","mutating":false,"category":"Scheduled Tasks",
             "description":"List a workspace's scheduled tasks (recurring agent jobs). Read-only.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
                 "workspace_id":{"type":"string"}}}}),
-        json!({"name":"otto.list_scheduled_task_runs","mutating":false,
+        json!({"name":"otto.list_scheduled_task_runs","mutating":false,"category":"Scheduled Tasks",
             "description":"List the recent run history (status + summary) of a scheduled task. Read-only.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"}}}}),
-        json!({"name":"otto.create_scheduled_task","mutating":true,
+        json!({"name":"otto.create_scheduled_task","mutating":true,"category":"Scheduled Tasks",
             "description":"Create a scheduled task: a recurring job that runs an agent (or hands off to a workflow) on a cadence, writes a Markdown report, and delivers it to a destination. DANGEROUS: an autonomous recurring capability — approval-gated. `schedule` = {cadence:'interval'|'daily'|'weekly'|'cron', every_min, at:'HH:MM', weekday, expr:'<5-field cron>'} interpreted in `timezone` (IANA). `provider` = claude|codex|agy|shell|<custom>. `kind` = 'agent_prompt'|'workflow' (workflow requires workflow_id). `sandbox` = 'none'|'worktree'. `max_retries` 0..5. `notify_on_change` only delivers when the report changes. `attach_proof` builds a proof pack. `destination` = {type:'none'|'slack'|'telegram'|'email'|'webhook', ...}.",
             "inputSchema":{"type":"object","required":["workspace_id","name","prompt"],"properties":{
                 "workspace_id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},
@@ -105,7 +389,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "workflow_id":{"type":"string"},"sandbox":{"type":"string"},"max_retries":{"type":"integer"},
                 "notify_on_change":{"type":"boolean"},"attach_proof":{"type":"boolean"},
                 "cwd":{"type":"string"},"skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
-        json!({"name":"otto.update_scheduled_task","mutating":true,
+        json!({"name":"otto.update_scheduled_task","mutating":true,"category":"Scheduled Tasks",
             "description":"Update a scheduled task's fields (name/prompt/schedule/destination/provider/timezone/sandbox/max_retries/notify_on_change/attach_proof/workflow_id/skill/enabled). DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},
@@ -113,15 +397,15 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "timezone":{"type":"string"},"workflow_id":{"type":"string"},"sandbox":{"type":"string"},
                 "max_retries":{"type":"integer"},"notify_on_change":{"type":"boolean"},
                 "attach_proof":{"type":"boolean"},"skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
-        json!({"name":"otto.set_scheduled_task_enabled","mutating":true,
+        json!({"name":"otto.set_scheduled_task_enabled","mutating":true,"category":"Scheduled Tasks",
             "description":"Enable or disable a scheduled task. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id","enabled"],"properties":{
                 "task_id":{"type":"string"},"enabled":{"type":"boolean"}}}}),
-        json!({"name":"otto.run_scheduled_task","mutating":true,
+        json!({"name":"otto.run_scheduled_task","mutating":true,"category":"Scheduled Tasks",
             "description":"Run a scheduled task once now (does not change its schedule). Returns the run. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"}}}}),
-        json!({"name":"otto.delete_scheduled_task","mutating":true,
+        json!({"name":"otto.delete_scheduled_task","mutating":true,"category":"Scheduled Tasks",
             "description":"Delete a scheduled task and its run history. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"}}}}),
@@ -191,12 +475,87 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
                 "Recurring agent job '{name}' — cadence: {cad}; destination: {dest}; prompt: {prompt}"
             )
         }
+        // Surface the concrete target of each new outward-facing / mutating tool so
+        // the approver knows exactly what capability they are granting.
+        "run_workflow" => format!(
+            "Run workflow '{}'",
+            args.get("workflow_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "cancel_workflow_run" => format!(
+            "Cancel workflow run '{}'",
+            args.get("run_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "produce_broker_message" => format!(
+            "Produce a message to topic '{}' on cluster '{}'",
+            args.get("topic").and_then(Value::as_str).unwrap_or("?"),
+            args.get("cluster_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "create_pr" => format!(
+            "Open a PR on repo '{}': {} ({} → {})",
+            args.get("repo_id").and_then(Value::as_str).unwrap_or("?"),
+            args.get("title").and_then(Value::as_str).unwrap_or(""),
+            args.get("source_branch").and_then(Value::as_str).unwrap_or("?"),
+            args.get("target_branch").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "comment_pr" => format!(
+            "Comment on PR #{} of repo '{}'",
+            args.get("number").and_then(Value::as_i64).unwrap_or(0),
+            args.get("repo_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "start_pr_review" => format!(
+            "Start a multi-agent review of PR #{} on repo '{}'",
+            args.get("pr_number").and_then(Value::as_i64).unwrap_or(0),
+            args.get("repo_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "comment_issue" => format!(
+            "Comment on issue '{}'",
+            args.get("key").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "transition_issue" => format!(
+            "Transition issue '{}' (transition '{}')",
+            args.get("key").and_then(Value::as_str).unwrap_or("?"),
+            args.get("transition_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "post_swarm_board" => format!(
+            "Post to swarm '{}' board",
+            args.get("swarm_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "test_integration" => format!(
+            "Send a test message to the '{}' channel of a workspace",
+            args.get("channel").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "broadcast_message" => {
+            let text: String = args
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect();
+            format!("Broadcast a message to live agent sessions: {text}")
+        }
+        "run_self_improvement" => format!(
+            "Run a self-improvement pass on workspace '{}'",
+            args.get("workspace_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "approve_improvement_edit" => format!(
+            "Apply self-improvement edit '{}' (mutates skills/config)",
+            args.get("edit_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "reject_improvement_edit" => format!(
+            "Reject self-improvement edit '{}'",
+            args.get("edit_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "rollback_improvement_edit" => format!(
+            "Roll back applied self-improvement edit '{}'",
+            args.get("edit_id").and_then(Value::as_str).unwrap_or("?")
+        ),
         _ => format!("External agent requests the dangerous tool '{tool}'."),
     }
 }
 
 // ===========================================================================
-// POST /mcp/otto-tools/invoke  (the governed choke point for the 8 tools)
+// POST /mcp/otto-tools/invoke  (the governed choke point for every otto.* tool)
 // ===========================================================================
 
 #[derive(Deserialize)]
@@ -416,40 +775,81 @@ fn seg(s: &str) -> String {
     out
 }
 
-async fn run_tool(
-    client: &reqwest::Client,
-    base: &str,
-    token: &str,
-    tool: &str,
-    args: &Value,
-) -> Result<Value, Error> {
-    match tool {
+/// Optional required-integer argument extractor (PR numbers etc.).
+fn arg_i64(args: &Value, key: &str) -> Result<i64, Error> {
+    args.get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::Invalid(format!("missing required integer argument '{key}'")))
+}
+
+/// The HTTP verb a tool's self-call uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Method {
+    Get,
+    Post,
+    Patch,
+    Delete,
+}
+
+/// A resolved self-call: the verb, the `/api/v1/...` path (incl. query string),
+/// and an optional JSON body. Built purely from `(tool, args)` by [`route_for`]
+/// so the endpoint binding of every tool is unit-testable without a live server.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SelfCall {
+    pub method: Method,
+    pub path: String,
+    pub body: Option<Value>,
+}
+
+impl SelfCall {
+    fn get(path: String) -> Self {
+        Self { method: Method::Get, path, body: None }
+    }
+    fn post(path: String, body: Value) -> Self {
+        Self { method: Method::Post, path, body: Some(body) }
+    }
+    fn patch(path: String, body: Value) -> Self {
+        Self { method: Method::Patch, path, body: Some(body) }
+    }
+    fn delete(path: String) -> Self {
+        Self { method: Method::Delete, path, body: None }
+    }
+}
+
+/// Map an outward tool + its (validated) arguments to the exact self-call against
+/// the daemon's own REST API. Pure: no I/O, no token — every tool reuses its
+/// endpoint's native RBAC when the call is later executed as the user. `ask_human_approval`
+/// is handled earlier (in `execute_otto_tool`) and never reaches here.
+pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
+    Ok(match tool {
+        // ---- Code & context ----
         "search_codebase" => {
             let ws = arg_str(args, "workspace_id")?;
             let q = arg_str(args, "query")?;
-            let mut url = format!("{base}/api/v1/workspaces/{}/mcp/code-search?q={}", seg(&ws), seg(&q));
+            let mut path = format!("/api/v1/workspaces/{}/mcp/code-search?q={}", seg(&ws), seg(&q));
             if let Some(p) = args.get("path").and_then(Value::as_str) {
-                url.push_str(&format!("&path={}", seg(p)));
+                path.push_str(&format!("&path={}", seg(p)));
             }
             if let Some(m) = args.get("max_results").and_then(Value::as_u64) {
-                url.push_str(&format!("&max={m}"));
+                path.push_str(&format!("&max={m}"));
             }
-            self_get(client, token, &url).await
+            SelfCall::get(path)
         }
         "get_context_packet" => {
             let ws = arg_str(args, "workspace_id")?;
-            self_post(client, token, &format!("{base}/api/v1/workspaces/{}/mcp/context-packet", seg(&ws)), args).await
+            SelfCall::post(format!("/api/v1/workspaces/{}/mcp/context-packet", seg(&ws)), args.clone())
         }
         "get_proof_pack" => {
             let ws = arg_str(args, "workspace_id")?;
-            let mut url = format!("{base}/api/v1/workspaces/{}/mcp/proof-pack?", seg(&ws));
+            let mut path = format!("/api/v1/workspaces/{}/mcp/proof-pack?", seg(&ws));
             for k in ["repo_id", "branch", "goal_loop_id"] {
                 if let Some(v) = args.get(k).and_then(Value::as_str) {
-                    url.push_str(&format!("{k}={}&", seg(v)));
+                    path.push_str(&format!("{k}={}&", seg(v)));
                 }
             }
-            self_get(client, token, &url).await
+            SelfCall::get(path)
         }
+        // ---- Database ----
         "query_db_readonly" => {
             let conn = arg_str(args, "connection_id")?;
             let stmt = arg_str(args, "statement")?;
@@ -465,13 +865,325 @@ async fn run_tool(
                 "max_rows": args.get("max_rows").and_then(Value::as_u64).unwrap_or(200),
                 "confirm_write": false, // forced — never honored from the caller
             });
-            self_post(client, token, &format!("{base}/api/v1/connections/{}/db/query", seg(&conn)), &body).await
+            SelfCall::post(format!("/api/v1/connections/{}/db/query", seg(&conn)), body)
         }
+        "list_connections" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/connections", seg(&ws)))
+        }
+        // ---- Git ----
         "open_pr_draft" => {
             let repo = arg_str(args, "repo_id")?;
             let base_branch = arg_str(args, "base")?;
-            self_post(client, token, &format!("{base}/api/v1/repos/{}/pr/draft", seg(&repo)), &json!({"base": base_branch})).await
+            SelfCall::post(format!("/api/v1/repos/{}/pr/draft", seg(&repo)), json!({"base": base_branch}))
         }
+        "list_repos" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/repos", seg(&ws)))
+        }
+        "git_status" => {
+            let repo = arg_str(args, "repo_id")?;
+            SelfCall::get(format!("/api/v1/repos/{}/status", seg(&repo)))
+        }
+        "list_prs" => {
+            let repo = arg_str(args, "repo_id")?;
+            let mut path = format!("/api/v1/repos/{}/prs", seg(&repo));
+            if let Some(s) = args.get("state").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                path.push_str(&format!("?state={}", seg(s)));
+            }
+            SelfCall::get(path)
+        }
+        "get_pr" => {
+            let repo = arg_str(args, "repo_id")?;
+            let n = arg_i64(args, "number")?;
+            SelfCall::get(format!("/api/v1/repos/{}/prs/{}", seg(&repo), n))
+        }
+        "create_pr" => {
+            let repo = arg_str(args, "repo_id")?;
+            let body = json!({
+                "title": arg_str(args, "title")?,
+                "description": arg_str(args, "description")?,
+                "source_branch": arg_str(args, "source_branch")?,
+                "target_branch": arg_str(args, "target_branch")?,
+            });
+            SelfCall::post(format!("/api/v1/repos/{}/prs", seg(&repo)), body)
+        }
+        "comment_pr" => {
+            let repo = arg_str(args, "repo_id")?;
+            let n = arg_i64(args, "number")?;
+            let body = json!({ "body": arg_str(args, "body")? });
+            SelfCall::post(format!("/api/v1/repos/{}/prs/{}/comments", seg(&repo), n), body)
+        }
+        "start_pr_review" => {
+            let repo = arg_str(args, "repo_id")?;
+            let n = arg_i64(args, "pr_number")?;
+            SelfCall::post(format!("/api/v1/repos/{}/prs/{}/review", seg(&repo), n), json!({}))
+        }
+        // ---- Workflows ----
+        "list_workflows" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/workflows", seg(&ws)))
+        }
+        "get_workflow" => {
+            let id = arg_str(args, "workflow_id")?;
+            SelfCall::get(format!("/api/v1/workflows/{}", seg(&id)))
+        }
+        "list_workflow_runs" => {
+            let id = arg_str(args, "workflow_id")?;
+            SelfCall::get(format!("/api/v1/workflows/{}/runs", seg(&id)))
+        }
+        "get_workflow_run" => {
+            let id = arg_str(args, "run_id")?;
+            SelfCall::get(format!("/api/v1/workflow-runs/{}", seg(&id)))
+        }
+        "run_workflow" => {
+            let id = arg_str(args, "workflow_id")?;
+            let mut body = json!({});
+            if let Some(v) = args.get("input") {
+                body["input"] = v.clone();
+            }
+            if let Some(v) = args.get("start_node").and_then(Value::as_str) {
+                body["start_node"] = json!(v);
+            }
+            SelfCall::post(format!("/api/v1/workflows/{}/run", seg(&id)), body)
+        }
+        "cancel_workflow_run" => {
+            let id = arg_str(args, "run_id")?;
+            SelfCall::post(format!("/api/v1/workflow-runs/{}/cancel", seg(&id)), json!({}))
+        }
+        // ---- Message brokers ----
+        "list_broker_clusters" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/brokers/clusters", seg(&ws)))
+        }
+        "list_broker_topics" => {
+            let id = arg_str(args, "cluster_id")?;
+            SelfCall::get(format!("/api/v1/brokers/clusters/{}/topics", seg(&id)))
+        }
+        "get_broker_topic" => {
+            let id = arg_str(args, "cluster_id")?;
+            let topic = arg_str(args, "topic")?;
+            SelfCall::get(format!("/api/v1/brokers/clusters/{}/topics/{}", seg(&id), seg(&topic)))
+        }
+        "list_consumer_groups" => {
+            let id = arg_str(args, "cluster_id")?;
+            SelfCall::get(format!("/api/v1/brokers/clusters/{}/groups", seg(&id)))
+        }
+        "consume_broker_messages" => {
+            let id = arg_str(args, "cluster_id")?;
+            let topic = arg_str(args, "topic")?;
+            let mut body = json!({});
+            if let Some(p) = args.get("partition").and_then(Value::as_i64) {
+                body["partition"] = json!(p);
+            }
+            if let Some(l) = args.get("limit").and_then(Value::as_u64) {
+                body["limit"] = json!(l);
+            }
+            if let Some(f) = args.get("value_filter").and_then(Value::as_str) {
+                body["value_filter"] = json!(f);
+            }
+            SelfCall::post(format!("/api/v1/brokers/clusters/{}/topics/{}/consume", seg(&id), seg(&topic)), body)
+        }
+        "produce_broker_message" => {
+            let id = arg_str(args, "cluster_id")?;
+            let topic = arg_str(args, "topic")?;
+            let mut body = json!({ "value": arg_str(args, "value")? });
+            if let Some(k) = args.get("key").and_then(Value::as_str) {
+                body["key"] = json!(k);
+            }
+            if let Some(p) = args.get("partition").and_then(Value::as_i64) {
+                body["partition"] = json!(p);
+            }
+            if let Some(c) = args.get("confirm").and_then(Value::as_bool) {
+                body["confirm"] = json!(c);
+            }
+            SelfCall::post(format!("/api/v1/brokers/clusters/{}/topics/{}/produce", seg(&id), seg(&topic)), body)
+        }
+        // ---- Issues (Jira / Confluence) ----
+        "search_issues" => {
+            let acc = arg_str(args, "account_id")?;
+            let mut path = format!("/api/v1/issue/search?account_id={}", seg(&acc));
+            if let Some(q) = args.get("query").and_then(Value::as_str) {
+                path.push_str(&format!("&q={}", seg(q)));
+            }
+            if let Some(p) = args.get("project").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                path.push_str(&format!("&project={}", seg(p)));
+            }
+            SelfCall::get(path)
+        }
+        "get_issue" => {
+            let acc = arg_str(args, "account_id")?;
+            let key = arg_str(args, "key")?;
+            SelfCall::get(format!("/api/v1/issue/{}/{}/full", seg(&acc), seg(&key)))
+        }
+        "search_confluence" => {
+            let acc = arg_str(args, "account_id")?;
+            let q = arg_str(args, "query")?;
+            let mut path = format!("/api/v1/issue/confluence/search?account_id={}&q={}", seg(&acc), seg(&q));
+            if let Some(s) = args.get("space").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                path.push_str(&format!("&space={}", seg(s)));
+            }
+            SelfCall::get(path)
+        }
+        "comment_issue" => {
+            let acc = arg_str(args, "account_id")?;
+            let key = arg_str(args, "key")?;
+            let body = json!({ "body": arg_str(args, "body")? });
+            SelfCall::post(format!("/api/v1/issue/{}/{}/comment", seg(&acc), seg(&key)), body)
+        }
+        "transition_issue" => {
+            let acc = arg_str(args, "account_id")?;
+            let key = arg_str(args, "key")?;
+            let body = json!({ "transition_id": arg_str(args, "transition_id")? });
+            SelfCall::post(format!("/api/v1/issue/{}/{}/transitions", seg(&acc), seg(&key)), body)
+        }
+        // ---- Swarm ----
+        "list_swarms" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/swarm/swarms", seg(&ws)))
+        }
+        "get_swarm" => {
+            let id = arg_str(args, "swarm_id")?;
+            SelfCall::get(format!("/api/v1/swarm/swarms/{}", seg(&id)))
+        }
+        "list_swarm_runs" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/swarm/runs", seg(&ws)))
+        }
+        "get_swarm_board" => {
+            let id = arg_str(args, "swarm_id")?;
+            SelfCall::get(format!("/api/v1/swarm/swarms/{}/board", seg(&id)))
+        }
+        "post_swarm_board" => {
+            let id = arg_str(args, "swarm_id")?;
+            let mut body = json!({ "body": arg_str(args, "body")? });
+            if let Some(p) = args.get("project_id").and_then(Value::as_str) {
+                body["project_id"] = json!(p);
+            }
+            if let Some(t) = args.get("task_id").and_then(Value::as_str) {
+                body["task_id"] = json!(t);
+            }
+            SelfCall::post(format!("/api/v1/swarm/swarms/{}/board", seg(&id)), body)
+        }
+        // ---- Memory / vault ----
+        "list_memory" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut q: Vec<String> = Vec::new();
+            if let Some(c) = args.get("collection").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                q.push(format!("collection={}", seg(c)));
+            }
+            if let Some(s) = args.get("story_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                q.push(format!("story_id={}", seg(s)));
+            }
+            let mut path = format!("/api/v1/workspaces/{}/memories", seg(&ws));
+            if !q.is_empty() {
+                path.push('?');
+                path.push_str(&q.join("&"));
+            }
+            SelfCall::get(path)
+        }
+        "search_memory" => {
+            let ws = arg_str(args, "workspace_id")?;
+            // `k` defaults to 0 server-side (MemoryQuery), which would return nothing —
+            // supply a useful default so a caller that omits it still gets hits.
+            let k = args.get("k").and_then(Value::as_u64).unwrap_or(20);
+            let body = json!({ "text": arg_str(args, "query")?, "k": k });
+            SelfCall::post(format!("/api/v1/workspaces/{}/memory/search", seg(&ws)), body)
+        }
+        // ---- Sessions ----
+        "list_sessions" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/sessions", seg(&ws)))
+        }
+        "get_session" => {
+            let id = arg_str(args, "session_id")?;
+            SelfCall::get(format!("/api/v1/sessions/{}", seg(&id)))
+        }
+        "broadcast_message" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let body = json!({ "text": arg_str(args, "text")? });
+            SelfCall::post(format!("/api/v1/workspaces/{}/broadcast", seg(&ws)), body)
+        }
+        // ---- Code review / findings ----
+        "list_findings" => {
+            let rid = arg_str(args, "review_id")?;
+            SelfCall::get(format!("/api/v1/reviews/{}/findings", seg(&rid)))
+        }
+        "get_finding" => {
+            let id = arg_str(args, "finding_id")?;
+            SelfCall::get(format!("/api/v1/findings/{}", seg(&id)))
+        }
+        // ---- Product ----
+        "list_product_stories" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/product/stories", seg(&ws)))
+        }
+        "get_product_story" => {
+            let id = arg_str(args, "story_id")?;
+            SelfCall::get(format!("/api/v1/product/stories/{}", seg(&id)))
+        }
+        // ---- Channels ----
+        "list_integrations" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/integrations", seg(&ws)))
+        }
+        "test_integration" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let ch = arg_str(args, "channel")?;
+            SelfCall::post(format!("/api/v1/workspaces/{}/integrations/{}/test", seg(&ws), seg(&ch)), json!({}))
+        }
+        // ---- Usage ----
+        "get_usage_summary" => {
+            let mut q: Vec<String> = Vec::new();
+            if let Some(d) = args.get("days").and_then(Value::as_u64) {
+                q.push(format!("days={d}"));
+            }
+            if let Some(o) = args.get("otto_only").and_then(Value::as_bool) {
+                q.push(format!("otto_only={o}"));
+            }
+            let mut path = "/api/v1/usage/summary".to_string();
+            if !q.is_empty() {
+                path.push('?');
+                path.push_str(&q.join("&"));
+            }
+            SelfCall::get(path)
+        }
+        // ---- Skills ----
+        "list_bundled_skills" => SelfCall::get("/api/v1/library/bundled".to_string()),
+        // ---- Self-improvement ----
+        "get_self_improvement_config" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/self-improvement", seg(&ws)))
+        }
+        "list_improvement_runs" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/improvement/runs", seg(&ws)))
+        }
+        "get_improvement_run" => {
+            let id = arg_str(args, "run_id")?;
+            SelfCall::get(format!("/api/v1/improvement/runs/{}", seg(&id)))
+        }
+        "list_improvement_edits" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::get(format!("/api/v1/workspaces/{}/improvement/edits", seg(&ws)))
+        }
+        "run_self_improvement" => {
+            let ws = arg_str(args, "workspace_id")?;
+            SelfCall::post(format!("/api/v1/workspaces/{}/self-improvement/run", seg(&ws)), json!({}))
+        }
+        "approve_improvement_edit" => {
+            let id = arg_str(args, "edit_id")?;
+            SelfCall::post(format!("/api/v1/improvement/edits/{}/approve", seg(&id)), json!({}))
+        }
+        "reject_improvement_edit" => {
+            let id = arg_str(args, "edit_id")?;
+            SelfCall::post(format!("/api/v1/improvement/edits/{}/reject", seg(&id)), json!({}))
+        }
+        "rollback_improvement_edit" => {
+            let id = arg_str(args, "edit_id")?;
+            SelfCall::post(format!("/api/v1/improvement/edits/{}/rollback", seg(&id)), json!({}))
+        }
+        // ---- Goal loop / swarm task / scheduled tasks ----
         "run_goal_loop" => {
             let ws = arg_str(args, "workspace_id")?;
             let mut body = args.clone();
@@ -479,7 +1191,7 @@ async fn run_tool(
                 obj.remove("workspace_id");
                 obj.insert("autostart".into(), json!(true));
             }
-            self_post(client, token, &format!("{base}/api/v1/workspaces/{}/goal-loops", seg(&ws)), &body).await
+            SelfCall::post(format!("/api/v1/workspaces/{}/goal-loops", seg(&ws)), body)
         }
         "create_work_item" => {
             let project = arg_str(args, "project_id")?;
@@ -488,15 +1200,15 @@ async fn run_tool(
                 "description": args.get("description").and_then(Value::as_str),
                 "priority": args.get("priority").and_then(Value::as_str),
             });
-            self_post(client, token, &format!("{base}/api/v1/swarm/projects/{}/tasks", seg(&project)), &body).await
+            SelfCall::post(format!("/api/v1/swarm/projects/{}/tasks", seg(&project)), body)
         }
         "list_scheduled_tasks" => {
             let ws = arg_str(args, "workspace_id")?;
-            self_get(client, token, &format!("{base}/api/v1/workspaces/{}/scheduled-tasks", seg(&ws))).await
+            SelfCall::get(format!("/api/v1/workspaces/{}/scheduled-tasks", seg(&ws)))
         }
         "list_scheduled_task_runs" => {
             let id = arg_str(args, "task_id")?;
-            self_get(client, token, &format!("{base}/api/v1/scheduled-tasks/{}/runs", seg(&id))).await
+            SelfCall::get(format!("/api/v1/scheduled-tasks/{}/runs", seg(&id)))
         }
         "create_scheduled_task" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -504,7 +1216,7 @@ async fn run_tool(
             if let Some(o) = body.as_object_mut() {
                 o.remove("workspace_id");
             }
-            self_post(client, token, &format!("{base}/api/v1/workspaces/{}/scheduled-tasks", seg(&ws)), &body).await
+            SelfCall::post(format!("/api/v1/workspaces/{}/scheduled-tasks", seg(&ws)), body)
         }
         "update_scheduled_task" => {
             let id = arg_str(args, "task_id")?;
@@ -512,22 +1224,43 @@ async fn run_tool(
             if let Some(o) = body.as_object_mut() {
                 o.remove("task_id");
             }
-            self_patch(client, token, &format!("{base}/api/v1/scheduled-tasks/{}", seg(&id)), &body).await
+            SelfCall::patch(format!("/api/v1/scheduled-tasks/{}", seg(&id)), body)
         }
         "set_scheduled_task_enabled" => {
             let id = arg_str(args, "task_id")?;
             let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-            self_patch(client, token, &format!("{base}/api/v1/scheduled-tasks/{}", seg(&id)), &json!({"enabled": enabled})).await
+            SelfCall::patch(format!("/api/v1/scheduled-tasks/{}", seg(&id)), json!({"enabled": enabled}))
         }
         "run_scheduled_task" => {
             let id = arg_str(args, "task_id")?;
-            self_post(client, token, &format!("{base}/api/v1/scheduled-tasks/{}/run", seg(&id)), &json!({})).await
+            SelfCall::post(format!("/api/v1/scheduled-tasks/{}/run", seg(&id)), json!({}))
         }
         "delete_scheduled_task" => {
             let id = arg_str(args, "task_id")?;
-            self_delete(client, token, &format!("{base}/api/v1/scheduled-tasks/{}", seg(&id))).await
+            SelfCall::delete(format!("/api/v1/scheduled-tasks/{}", seg(&id)))
         }
-        other => Err(Error::Invalid(format!("unknown otto tool '{other}'"))),
+        other => return Err(Error::Invalid(format!("unknown otto tool '{other}'"))),
+    })
+}
+
+/// Resolve `(tool, args)` to a self-call and execute it as the user. Thin wrapper
+/// over the pure [`route_for`] so the routing of every tool is unit-tested.
+async fn run_tool(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, Error> {
+    let call = route_for(tool, args)?;
+    let url = format!("{base}{}", call.path);
+    let empty = json!({});
+    let body = call.body.as_ref().unwrap_or(&empty);
+    match call.method {
+        Method::Get => self_get(client, token, &url).await,
+        Method::Post => self_post(client, token, &url, body).await,
+        Method::Patch => self_patch(client, token, &url, body).await,
+        Method::Delete => self_delete(client, token, &url).await,
     }
 }
 
@@ -612,6 +1345,7 @@ pub async fn otto_server_status(
                 "name": name,
                 "description": t["description"],
                 "mutating": t["mutating"],
+                "category": t["category"],
                 "enabled": on.contains(&short),
             })
         })
@@ -824,5 +1558,207 @@ mod tests {
         assert!(d.contains("every 60 min"));
         assert!(d.contains("slack"));
         assert!(d.contains("do the thing"));
+    }
+
+    // ----- All-features expansion -----------------------------------------
+
+    /// (bare short name, mutating) for every spec.
+    fn spec_short_mut() -> Vec<(String, bool)> {
+        otto_tool_specs()
+            .iter()
+            .map(|t| {
+                let name = t["name"].as_str().unwrap();
+                let short = name.strip_prefix("otto.").unwrap_or(name).to_string();
+                (short, t["mutating"].as_bool().unwrap())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_spec_is_well_formed_and_classified() {
+        let specs = otto_tool_specs();
+        for (short, mutating) in spec_short_mut() {
+            let t = specs
+                .iter()
+                .find(|s| s["name"].as_str().unwrap().strip_prefix("otto.").unwrap() == short)
+                .unwrap();
+            // category present + non-empty (drives the control-plane UI grouping).
+            assert!(
+                t["category"].as_str().map(|c| !c.is_empty()).unwrap_or(false),
+                "{short} missing category"
+            );
+            // inputSchema is an object; every declared `required` key exists in `properties`.
+            assert_eq!(t["inputSchema"]["type"], json!("object"), "{short} schema not an object");
+            if let Some(reqd) = t["inputSchema"]["required"].as_array() {
+                for r in reqd {
+                    let key = r.as_str().unwrap();
+                    assert!(
+                        t["inputSchema"]["properties"].get(key).is_some(),
+                        "{short}: required '{key}' missing from properties"
+                    );
+                }
+            }
+            // Classification invariant: mutating ⟺ DANGEROUS; reads are default-on XOR opt-in.
+            let s = short.as_str();
+            if mutating {
+                assert!(DANGEROUS.contains(&s), "{short} is mutating but not DANGEROUS");
+                assert!(!DEFAULT_ENABLED.contains(&s), "{short} is mutating but default-enabled");
+            } else {
+                let de = DEFAULT_ENABLED.contains(&s);
+                let opt = OPT_IN_READS.contains(&s);
+                assert!(de ^ opt, "{short} (read) must be default-enabled XOR opt-in (de={de}, opt={opt})");
+                assert!(!DANGEROUS.contains(&s), "{short} (read) must not be DANGEROUS");
+            }
+        }
+    }
+
+    #[test]
+    fn classification_lists_reference_real_tools() {
+        let shorts: std::collections::HashSet<String> =
+            spec_short_mut().into_iter().map(|(s, _)| s).collect();
+        for n in DEFAULT_ENABLED.iter().chain(DANGEROUS.iter()).chain(OPT_IN_READS.iter()) {
+            assert!(shorts.contains(*n), "classification names a non-existent tool '{n}'");
+        }
+    }
+
+    #[test]
+    fn headline_features_present_and_governed() {
+        let names = spec_names();
+        for n in [
+            "otto.list_workflows",
+            "otto.get_workflow_run",
+            "otto.run_workflow",
+            "otto.cancel_workflow_run",
+            "otto.list_broker_clusters",
+            "otto.list_broker_topics",
+            "otto.consume_broker_messages",
+            "otto.produce_broker_message",
+        ] {
+            assert!(names.contains(&n.to_string()), "missing headline spec {n}");
+        }
+        assert!(DEFAULT_ENABLED.contains(&"list_workflows"));
+        assert!(DEFAULT_ENABLED.contains(&"list_broker_clusters"));
+        assert!(DANGEROUS.contains(&"run_workflow"));
+        assert!(DANGEROUS.contains(&"produce_broker_message"));
+        // Content-heavy reads stay off by default.
+        assert!(!DEFAULT_ENABLED.contains(&"consume_broker_messages"));
+        assert!(!DEFAULT_ENABLED.contains(&"search_memory"));
+    }
+
+    #[test]
+    fn route_for_maps_workflows_and_brokers() {
+        assert_eq!(
+            route_for("list_workflows", &json!({"workspace_id":"ws1"})).unwrap(),
+            SelfCall { method: Method::Get, path: "/api/v1/workspaces/ws1/workflows".into(), body: None }
+        );
+        let c = route_for("run_workflow", &json!({"workflow_id":"wf1","input":{"k":1},"start_node":"n2"})).unwrap();
+        assert_eq!(c.method, Method::Post);
+        assert_eq!(c.path, "/api/v1/workflows/wf1/run");
+        assert_eq!(c.body.unwrap(), json!({"input":{"k":1},"start_node":"n2"}));
+        assert_eq!(
+            route_for("cancel_workflow_run", &json!({"run_id":"r1"})).unwrap(),
+            SelfCall { method: Method::Post, path: "/api/v1/workflow-runs/r1/cancel".into(), body: Some(json!({})) }
+        );
+        assert_eq!(
+            route_for("get_broker_topic", &json!({"cluster_id":"c1","topic":"orders"})).unwrap().path,
+            "/api/v1/brokers/clusters/c1/topics/orders"
+        );
+        let c = route_for("produce_broker_message", &json!({"cluster_id":"c1","topic":"orders","value":"hi","key":"k","confirm":true})).unwrap();
+        assert_eq!(c.path, "/api/v1/brokers/clusters/c1/topics/orders/produce");
+        assert_eq!(c.body.unwrap(), json!({"value":"hi","key":"k","confirm":true}));
+        let c = route_for("consume_broker_messages", &json!({"cluster_id":"c1","topic":"orders","limit":10,"value_filter":"x"})).unwrap();
+        assert_eq!(c.path, "/api/v1/brokers/clusters/c1/topics/orders/consume");
+        assert_eq!(c.body.unwrap(), json!({"limit":10,"value_filter":"x"}));
+    }
+
+    #[test]
+    fn route_for_maps_git_issues_swarm_memory_usage() {
+        assert_eq!(route_for("get_pr", &json!({"repo_id":"r1","number":7})).unwrap().path, "/api/v1/repos/r1/prs/7");
+        let c = route_for("create_pr", &json!({"repo_id":"r1","title":"T","description":"D","source_branch":"feat","target_branch":"main"})).unwrap();
+        assert_eq!(c.path, "/api/v1/repos/r1/prs");
+        assert_eq!(c.body.unwrap(), json!({"title":"T","description":"D","source_branch":"feat","target_branch":"main"}));
+        assert_eq!(route_for("list_prs", &json!({"repo_id":"r1","state":"open"})).unwrap().path, "/api/v1/repos/r1/prs?state=open");
+
+        let c = route_for("search_issues", &json!({"account_id":"a1","query":"a = b","project":"X"})).unwrap();
+        assert!(c.path.starts_with("/api/v1/issue/search?account_id=a1"));
+        assert!(c.path.contains("&q=a%20%3D%20b"), "got {}", c.path);
+        assert!(c.path.contains("&project=X"));
+        let c = route_for("transition_issue", &json!({"account_id":"a1","key":"K-1","transition_id":"21"})).unwrap();
+        assert_eq!(c.path, "/api/v1/issue/a1/K-1/transitions");
+        assert_eq!(c.body.unwrap(), json!({"transition_id":"21"}));
+
+        let c = route_for("post_swarm_board", &json!({"swarm_id":"s1","body":"hello","project_id":"p1"})).unwrap();
+        assert_eq!(c.path, "/api/v1/swarm/swarms/s1/board");
+        assert_eq!(c.body.unwrap(), json!({"body":"hello","project_id":"p1"}));
+
+        let c = route_for("search_memory", &json!({"workspace_id":"ws1","query":"schema","k":5})).unwrap();
+        assert_eq!(c.path, "/api/v1/workspaces/ws1/memory/search");
+        assert_eq!(c.body.unwrap(), json!({"text":"schema","k":5}));
+        assert_eq!(route_for("list_memory", &json!({"workspace_id":"ws1","collection":"vault"})).unwrap().path, "/api/v1/workspaces/ws1/memories?collection=vault");
+
+        assert_eq!(route_for("get_usage_summary", &json!({"days":7})).unwrap().path, "/api/v1/usage/summary?days=7");
+        assert_eq!(route_for("get_usage_summary", &json!({})).unwrap().path, "/api/v1/usage/summary");
+        assert_eq!(
+            route_for("list_bundled_skills", &json!({})).unwrap(),
+            SelfCall { method: Method::Get, path: "/api/v1/library/bundled".into(), body: None }
+        );
+        assert_eq!(route_for("list_findings", &json!({"review_id":"rv1"})).unwrap().path, "/api/v1/reviews/rv1/findings");
+        assert_eq!(route_for("broadcast_message", &json!({"workspace_id":"ws1","text":"hi"})).unwrap().body.unwrap(), json!({"text":"hi"}));
+        assert_eq!(route_for("test_integration", &json!({"workspace_id":"ws1","channel":"slack"})).unwrap().path, "/api/v1/workspaces/ws1/integrations/slack/test");
+    }
+
+    #[test]
+    fn route_for_rejects_missing_args_and_unknown_tool() {
+        assert!(route_for("list_workflows", &json!({})).is_err());
+        assert!(route_for("get_pr", &json!({"repo_id":"r1"})).is_err()); // missing integer `number`
+        assert!(route_for("create_pr", &json!({"repo_id":"r1","title":"T"})).is_err());
+        assert!(route_for("transition_issue", &json!({"account_id":"a1","key":"K"})).is_err());
+        assert!(route_for("frobnicate", &json!({})).is_err());
+    }
+
+    #[test]
+    fn query_db_readonly_sql_guard_lives_in_route_for() {
+        assert!(route_for("query_db_readonly", &json!({"connection_id":"c1","statement":"SELECT 1"})).is_ok());
+        assert!(route_for("query_db_readonly", &json!({"connection_id":"c1","statement":"DELETE FROM t"})).is_err());
+        assert!(route_for("query_db_readonly", &json!({"connection_id":"c1","statement":"SELECT 1; DROP TABLE t"})).is_err());
+    }
+
+    #[test]
+    fn self_improvement_tools_present_classified_and_routed() {
+        let names = spec_names();
+        for n in [
+            "otto.list_improvement_runs",
+            "otto.list_improvement_edits",
+            "otto.approve_improvement_edit",
+            "otto.reject_improvement_edit",
+            "otto.rollback_improvement_edit",
+            "otto.run_self_improvement",
+        ] {
+            assert!(names.contains(&n.to_string()), "missing self-improvement spec {n}");
+        }
+        assert!(DEFAULT_ENABLED.contains(&"list_improvement_edits"));
+        assert!(DANGEROUS.contains(&"approve_improvement_edit"));
+        assert!(DANGEROUS.contains(&"reject_improvement_edit"));
+        assert!(DANGEROUS.contains(&"rollback_improvement_edit"));
+        assert_eq!(
+            route_for("list_improvement_edits", &json!({"workspace_id":"ws1"})).unwrap().path,
+            "/api/v1/workspaces/ws1/improvement/edits"
+        );
+        assert_eq!(
+            route_for("approve_improvement_edit", &json!({"edit_id":"e1"})).unwrap(),
+            SelfCall { method: Method::Post, path: "/api/v1/improvement/edits/e1/approve".into(), body: Some(json!({})) }
+        );
+        assert_eq!(route_for("reject_improvement_edit", &json!({"edit_id":"e1"})).unwrap().path, "/api/v1/improvement/edits/e1/reject");
+        assert_eq!(route_for("rollback_improvement_edit", &json!({"edit_id":"e1"})).unwrap().path, "/api/v1/improvement/edits/e1/rollback");
+        assert!(dangerous_detail("otto.approve_improvement_edit", &json!({"edit_id":"e9"})).contains("e9"));
+    }
+
+    #[test]
+    fn dangerous_detail_surfaces_new_tool_targets() {
+        assert!(dangerous_detail("otto.run_workflow", &json!({"workflow_id":"wf-9"})).contains("wf-9"));
+        assert!(dangerous_detail("otto.produce_broker_message", &json!({"topic":"orders","cluster_id":"c1"})).contains("orders"));
+        let d = dangerous_detail("otto.create_pr", &json!({"repo_id":"r1","title":"Fix","source_branch":"f","target_branch":"main"}));
+        assert!(d.contains("Fix") && d.contains("main"));
+        assert!(dangerous_detail("otto.broadcast_message", &json!({"text":"hello team"})).contains("hello team"));
     }
 }

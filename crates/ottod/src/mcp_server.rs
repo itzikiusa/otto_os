@@ -2,7 +2,7 @@
 //!
 //! An external agent launches this over stdio with an `OTTO_API_TOKEN` that is a
 //! restricted `kind='mcp'` token (minted in the MCP Control Plane UI). It speaks
-//! newline-delimited JSON-RPC 2.0 and exposes the eight `otto.*` tools. Every
+//! newline-delimited JSON-RPC 2.0 and exposes the `otto.*` tools. Every
 //! `tools/call` is forwarded to `POST /api/v1/mcp/otto-tools/invoke`, which is the
 //! ONLY route the restricted token may reach — the control plane governs (enabled?
 //! allowlisted? dangerous→approval?), audits, and executes each call. `tools/list`
@@ -60,7 +60,7 @@ impl Ctx {
         serde_json::from_str(&text).map_err(|e| format!("parse json: {e}"))
     }
 
-    /// The MCP `tools/list`: the eight specs filtered to the enabled set.
+    /// The MCP `tools/list`: the otto.* specs filtered to the enabled set.
     async fn tools_list(&self) -> Value {
         // The set of currently-enabled tools (best-effort; on error list all).
         let enabled: Option<Vec<String>> = self

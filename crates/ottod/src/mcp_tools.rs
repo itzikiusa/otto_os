@@ -16,9 +16,11 @@
 //!
 //! Safety properties (every tool, no exceptions):
 //! - **Read-only** — all upstream calls are `GET`s, or `POST`s to a hard-coded
-//!   allow-list of **read-only-enforced** endpoints. The only query path,
+//!   allow-list of **read-only-enforced** endpoints. The DB query path,
 //!   `…/db/mcp-query`, refuses any write/DDL server-side (`run_read_only`) before a
-//!   driver runs, independent of the connection's write-guard. No tool here mutates.
+//!   driver runs, independent of the connection's write-guard; the only other read
+//!   POST is the vault `…/memory/search` (a Viewer-gated search that never mutates).
+//!   No tool here mutates.
 //! - **Capped** — each upstream call has a wall-clock timeout; the response body
 //!   is size-capped before parsing, and JSON arrays are row-capped.
 //! - **Redacted** — every tool result is passed through `otto_core::redact` so
@@ -335,8 +337,180 @@ fn tool_catalog() -> Value {
                     },
                     "required": ["scene_id"]
                 }
+            },
+            {
+                "name": "otto_list_workflows",
+                "description": "Read-only: list this session's workspace's workflows (visual node-graph automations) — id, name, status.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_get_workflow_run",
+                "description": "Read-only: a workflow run's status, per-node step states and outputs, by run id.",
+                "inputSchema": { "type": "object", "properties": { "run_id": { "type": "string", "description": "Workflow run id." } }, "required": ["run_id"] }
+            },
+            {
+                "name": "otto_list_broker_clusters",
+                "description": "Read-only: list this workspace's message-broker clusters (Kafka).",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_list_broker_topics",
+                "description": "Read-only: list the topics of a broker cluster.",
+                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string", "description": "Broker cluster id." } }, "required": ["cluster_id"] }
+            },
+            {
+                "name": "otto_search_issues",
+                "description": "Read-only: search Jira issues for an issue account. `query` is JQL (empty → most recent). Optional `project`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "query": { "type": "string" }, "project": { "type": "string" } }, "required": ["account_id"] }
+            },
+            {
+                "name": "otto_list_swarms",
+                "description": "Read-only: list this workspace's agent swarms.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_search_memory",
+                "description": "Read-only: semantic/keyword search of this workspace's vault for a free-text query; returns the top hits.",
+                "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "k": { "type": "integer" } }, "required": ["query"] }
+            },
+            {
+                "name": "otto_list_repos",
+                "description": "Read-only: list this workspace's git repositories (id, name, branch, remote).",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_list_sessions",
+                "description": "Read-only: list this workspace's agent/terminal sessions (your own unless you are an admin).",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_list_product_stories",
+                "description": "Read-only: list this workspace's product stories.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_list_findings",
+                "description": "Read-only: list a code review's findings (with workflow state) by review id.",
+                "inputSchema": { "type": "object", "properties": { "review_id": { "type": "string" } }, "required": ["review_id"] }
+            },
+            {
+                "name": "otto_usage_summary",
+                "description": "Read-only: token-usage rollups by provider/day/session/feature (root-only endpoint; non-root callers get a clean error). Optional `days` (default 30).",
+                "inputSchema": { "type": "object", "properties": { "days": { "type": "integer" } } }
+            },
+            {
+                "name": "otto_list_improvement_runs",
+                "description": "Read-only: list this workspace's self-improvement runs (status + summary).",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_list_improvement_edits",
+                "description": "Read-only: list this workspace's self-improvement edit suggestions (pending/applied) with their status.",
+                "inputSchema": { "type": "object", "properties": {} }
             }
         ]
+    })
+}
+
+/// The new first-party feature read tools route through one pure mapping
+/// ([`read_route`]); this is the set the dispatcher recognises before the
+/// catch-all "unknown tool". All are reads (GET, or a read-only viewer POST).
+const FEATURE_READ_TOOLS: &[&str] = &[
+    "otto_list_workflows",
+    "otto_get_workflow_run",
+    "otto_list_broker_clusters",
+    "otto_list_broker_topics",
+    "otto_search_issues",
+    "otto_list_swarms",
+    "otto_search_memory",
+    "otto_list_repos",
+    "otto_list_sessions",
+    "otto_list_product_stories",
+    "otto_list_findings",
+    "otto_usage_summary",
+    "otto_list_improvement_runs",
+    "otto_list_improvement_edits",
+];
+
+/// A resolved upstream read call: GET (or a read-only viewer POST), the `/api/v1`-
+/// relative path, and an optional JSON body. Built purely from `(name, args, ws)`
+/// by [`read_route`] so each feature read's endpoint binding is unit-tested.
+#[derive(Debug, Clone, PartialEq)]
+struct ReadCall {
+    post: bool,
+    path: String,
+    body: Option<Value>,
+}
+
+impl ReadCall {
+    fn get(path: String) -> Self {
+        Self { post: false, path, body: None }
+    }
+    fn post(path: String, body: Value) -> Self {
+        Self { post: true, path, body: Some(body) }
+    }
+}
+
+/// Map a feature read tool + its arguments to the upstream daemon read. Pure: no
+/// I/O. Workspace-scoped tools use the session's workspace (`ws`); others take an
+/// explicit id argument. Every path is a GET or the read-only `/memory/search`
+/// viewer POST — no tool here mutates.
+fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, String> {
+    let ws_req = || {
+        ws.filter(|s| !s.is_empty())
+            .ok_or_else(|| "no workspace context (OTTO_WORKSPACE_ID unset)".to_string())
+    };
+    Ok(match name {
+        "otto_list_workflows" => ReadCall::get(format!("/workspaces/{}/workflows", seg(ws_req()?))),
+        "otto_get_workflow_run" => {
+            ReadCall::get(format!("/workflow-runs/{}", seg(&arg_str(args, "run_id")?)))
+        }
+        "otto_list_broker_clusters" => {
+            ReadCall::get(format!("/workspaces/{}/brokers/clusters", seg(ws_req()?)))
+        }
+        "otto_list_broker_topics" => {
+            ReadCall::get(format!("/brokers/clusters/{}/topics", seg(&arg_str(args, "cluster_id")?)))
+        }
+        "otto_search_issues" => {
+            let acc = arg_str(args, "account_id")?;
+            let mut path = format!("/issue/search?account_id={}", seg(&acc));
+            if let Some(q) = args.get("query").and_then(Value::as_str) {
+                path.push_str(&format!("&q={}", seg(q)));
+            }
+            if let Some(p) = args.get("project").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                path.push_str(&format!("&project={}", seg(p)));
+            }
+            ReadCall::get(path)
+        }
+        "otto_list_swarms" => ReadCall::get(format!("/workspaces/{}/swarm/swarms", seg(ws_req()?))),
+        "otto_search_memory" => {
+            // `k` defaults to 0 server-side (MemoryQuery) → no hits; supply a useful default.
+            let k = args.get("k").and_then(Value::as_u64).unwrap_or(20);
+            let body = json!({ "text": arg_str(args, "query")?, "k": k });
+            ReadCall::post(format!("/workspaces/{}/memory/search", seg(ws_req()?)), body)
+        }
+        "otto_list_repos" => ReadCall::get(format!("/workspaces/{}/repos", seg(ws_req()?))),
+        "otto_list_sessions" => ReadCall::get(format!("/workspaces/{}/sessions", seg(ws_req()?))),
+        "otto_list_product_stories" => {
+            ReadCall::get(format!("/workspaces/{}/product/stories", seg(ws_req()?)))
+        }
+        "otto_list_findings" => {
+            ReadCall::get(format!("/reviews/{}/findings", seg(&arg_str(args, "review_id")?)))
+        }
+        "otto_usage_summary" => {
+            let mut path = "/usage/summary".to_string();
+            if let Some(d) = args.get("days").and_then(Value::as_u64) {
+                path.push_str(&format!("?days={d}"));
+            }
+            ReadCall::get(path)
+        }
+        "otto_list_improvement_runs" => {
+            ReadCall::get(format!("/workspaces/{}/improvement/runs", seg(ws_req()?)))
+        }
+        "otto_list_improvement_edits" => {
+            ReadCall::get(format!("/workspaces/{}/improvement/edits", seg(ws_req()?)))
+        }
+        other => return Err(format!("unknown feature read tool `{other}`")),
     })
 }
 
@@ -512,6 +686,20 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .get_json(&format!("/canvas/scenes/{}", seg(&scene)))
                 .await?;
             Ok(finalize(json!({ "scene_id": scene, "scene": raw })))
+        }
+        // First-party feature reads (workflows / brokers / issues / swarm / vault /
+        // repos / sessions / product / findings / usage / self-improvement). All
+        // route through the pure `read_route` and post-process identically: the raw
+        // upstream value is capped + redacted by `finalize`.
+        name if FEATURE_READ_TOOLS.contains(&name) => {
+            let call = read_route(name, args, ctx.workspace_id.as_deref())?;
+            let raw = if call.post {
+                ctx.post_json(&call.path, call.body.as_ref().unwrap_or(&json!({})))
+                    .await?
+            } else {
+                ctx.get_json(&call.path).await?
+            };
+            Ok(finalize(raw))
         }
         other => Err(format!("unknown tool `{other}`")),
     }
@@ -987,6 +1175,77 @@ mod tests {
         assert_eq!(resp["result"]["isError"], json!(true));
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("nope"));
+    }
+
+    #[test]
+    fn catalog_lists_feature_read_tools() {
+        let cat = tool_catalog();
+        let names: Vec<&str> = cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for t in FEATURE_READ_TOOLS {
+            assert!(names.contains(t), "catalog missing feature read tool {t}");
+        }
+        // Every advertised tool carries an object inputSchema.
+        for tool in cat["tools"].as_array().unwrap() {
+            assert_eq!(
+                tool["inputSchema"]["type"],
+                json!("object"),
+                "tool {} has no object inputSchema",
+                tool["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn read_route_maps_workspace_and_arg_tools() {
+        let ws = Some("ws1");
+        assert_eq!(
+            read_route("otto_list_workflows", &json!({}), ws).unwrap(),
+            ReadCall { post: false, path: "/workspaces/ws1/workflows".into(), body: None }
+        );
+        assert_eq!(
+            read_route("otto_list_broker_clusters", &json!({}), ws).unwrap().path,
+            "/workspaces/ws1/brokers/clusters"
+        );
+        assert_eq!(read_route("otto_get_workflow_run", &json!({"run_id":"r1"}), ws).unwrap().path, "/workflow-runs/r1");
+        assert_eq!(read_route("otto_list_broker_topics", &json!({"cluster_id":"c1"}), ws).unwrap().path, "/brokers/clusters/c1/topics");
+        assert_eq!(read_route("otto_list_findings", &json!({"review_id":"rv1"}), ws).unwrap().path, "/reviews/rv1/findings");
+        let c = read_route("otto_search_memory", &json!({"query":"db","k":3}), ws).unwrap();
+        assert!(c.post);
+        assert_eq!(c.path, "/workspaces/ws1/memory/search");
+        assert_eq!(c.body.unwrap(), json!({"text":"db","k":3}));
+        assert_eq!(read_route("otto_usage_summary", &json!({"days":7}), ws).unwrap().path, "/usage/summary?days=7");
+        let c = read_route("otto_search_issues", &json!({"account_id":"a1","query":"a = b"}), ws).unwrap();
+        assert!(c.path.starts_with("/issue/search?account_id=a1"));
+        assert!(c.path.contains("&q=a%20%3D%20b"), "got {}", c.path);
+        assert_eq!(read_route("otto_list_improvement_edits", &json!({}), ws).unwrap().path, "/workspaces/ws1/improvement/edits");
+    }
+
+    #[test]
+    fn read_route_errors_without_workspace_or_required_arg() {
+        assert!(read_route("otto_list_workflows", &json!({}), None).is_err());
+        assert!(read_route("otto_get_workflow_run", &json!({}), Some("ws1")).is_err());
+        assert!(read_route("otto_search_issues", &json!({}), Some("ws1")).is_err());
+        assert!(read_route("nope", &json!({}), Some("ws1")).is_err());
+    }
+
+    #[tokio::test]
+    async fn feature_read_errors_without_workspace_context() {
+        let mut ctx = test_ctx();
+        ctx.workspace_id = None;
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": { "name": "otto_list_workflows", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("workspace"));
     }
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
