@@ -221,6 +221,26 @@
     }
   }
 
+  // Duplicate an existing WORKFLOW (a full copy of its graph), so several
+  // independently-named/triggerable workflows can share one starting point
+  // without going back through a template. Fetch the source fresh so we copy the
+  // complete, current graph regardless of what the list row carries.
+  async function duplicate(wf: Workflow): Promise<void> {
+    try {
+      const src = await api.get<Workflow>(`/workflows/${wf.id}`);
+      const copy = await api.post<Workflow>(`/workspaces/${ws.currentId}/workflows`, {
+        name: `${src.name} (copy)`,
+        description: src.description,
+        graph: src.graph,
+      });
+      workflows = [...workflows, copy];
+      toasts.success(`Duplicated → “${copy.name}”`, 'Rename it to trigger it independently.');
+      void open(copy);
+    } catch (e) {
+      toasts.error('Duplicate failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   // ── rename (sidebar + header) ─────────────────────────────────────────────
   // The same template can seed many workflows; each needs its OWN name so it can
   // be triggered independently from Slack/Telegram (triggers match by name).
@@ -812,6 +832,9 @@
             </button>
             <button class="row-edit" title="Rename" data-testid="wf-rename-btn" onclick={() => startRename(wf)}>
               <Icon name="edit" size={12} />
+            </button>
+            <button class="row-edit" title="Duplicate" data-testid="wf-duplicate-btn" onclick={() => duplicate(wf)}>
+              <Icon name="copy" size={12} />
             </button>
             <button class="row-del" title="Delete" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
           {/if}

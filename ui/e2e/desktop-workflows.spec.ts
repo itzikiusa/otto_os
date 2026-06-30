@@ -503,6 +503,35 @@ test.describe('workflows page (desktop)', () => {
     expect(wf.name).toBe('E2E Renamed Flow');
   });
 
+  test('duplicate a workflow creates an independent copy with the same graph', async ({ page }) => {
+    const wfId = await createWorkflow(
+      'E2E Dup Source',
+      [node('trigger', 'manual_trigger'), node('a', 'log')],
+      [edge('trigger', 'a')],
+    );
+    await page.goto('/#/workflows');
+    const row = page.getByTestId(`wf-row-${wfId}`);
+    await expect(row).toBeVisible({ timeout: 30_000 });
+    await row.getByTestId('wf-duplicate-btn').click();
+    // Server-side: a NEW workflow (different id) named "<src> (copy)" appears.
+    let copy: { id: string; name: string } | undefined;
+    await expect
+      .poll(
+        async () => {
+          const list = await (await ctx.get(`${base}${V1}/workspaces/${ws}/workflows`)).json();
+          copy = list.find((w: { name: string }) => w.name === 'E2E Dup Source (copy)');
+          return copy ? 1 : 0;
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(1);
+    expect(copy!.id).not.toBe(wfId);
+    // Its row is in the sidebar, and it carries the SAME graph (2 nodes).
+    await expect(page.getByTestId(`wf-row-${copy!.id}`)).toBeVisible({ timeout: 10_000 });
+    const full = await (await ctx.get(`${base}${V1}/workflows/${copy!.id}`)).json();
+    expect(full.graph.nodes.length).toBe(2);
+  });
+
   test('templates live in a dropdown (room freed); no always-open "Game templates"', async ({
     page,
   }) => {
