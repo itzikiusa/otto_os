@@ -576,6 +576,20 @@
     width: 100%;
     padding: 6px 8px;
     border-radius: 6px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .vault-search input::placeholder {
+    color: var(--text-dim);
+  }
+  .embedder-row input,
+  .embedder-row select {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 7px;
   }
   .vault-chips {
     display: flex;
