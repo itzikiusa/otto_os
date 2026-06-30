@@ -651,10 +651,43 @@ impl MemoryService {
 /// Cap on embedded code chunks per index pass (a huge repo can't run away).
 const MAX_CODE_CHUNKS: usize = 6000;
 
-/// Max nodes returned by the graph endpoints. An SVG force graph re-renders every
-/// node per frame, so this stays modest to keep the view smooth on large repos
-/// (the most-connected nodes are kept; the UI's filters narrow further).
-const GRAPH_NODE_CAP: usize = 300;
+/// Max nodes/edges returned by the graph endpoints. An SVG graph renders one
+/// element per node AND per edge, so a dense hub subgraph (thousands of edges)
+/// is unrenderable in a webview even when node count is small. Keep BOTH modest
+/// and readable — the most-connected nodes are kept; the UI filters narrow further.
+const GRAPH_NODE_CAP: usize = 150;
+const GRAPH_EDGE_CAP: usize = 400;
+
+/// Cap a node+edge graph (by id) to the most-connected `node_cap` nodes and at
+/// most `edge_cap` edges (preferring edges between higher-degree endpoints).
+fn cap_graph_ids(
+    node_ids: Vec<String>,
+    mut edges: Vec<(String, String)>,
+    node_cap: usize,
+    edge_cap: usize,
+) -> (std::collections::HashSet<String>, Vec<(String, String)>) {
+    let keep = if node_ids.len() > node_cap {
+        top_by_degree(node_ids.into_iter(), edges.iter().cloned(), node_cap)
+    } else {
+        node_ids.into_iter().collect()
+    };
+    edges.retain(|(s, d)| keep.contains(s) && keep.contains(d));
+    if edges.len() > edge_cap {
+        // Keep edges incident to the highest-degree nodes first.
+        let mut deg: HashMap<String, usize> = HashMap::new();
+        for (s, d) in &edges {
+            *deg.entry(s.clone()).or_default() += 1;
+            *deg.entry(d.clone()).or_default() += 1;
+        }
+        edges.sort_by(|a, b| {
+            let da = deg.get(&a.0).unwrap_or(&0) + deg.get(&a.1).unwrap_or(&0);
+            let db = deg.get(&b.0).unwrap_or(&0) + deg.get(&b.1).unwrap_or(&0);
+            db.cmp(&da)
+        });
+        edges.truncate(edge_cap);
+    }
+    (keep, edges)
+}
 
 /// Pick the `cap` highest-degree node ids from an edge list. Orphans (degree 0)
 /// are included only to fill remaining slots after connected nodes.
@@ -859,16 +892,17 @@ impl MemoryService {
         for e in cg.edges {
             edges.push(FullGraphEdge { src: e.src_id, dst: e.dst_id, rel: e.rel, detail: e.detail });
         }
-        // Cap for a responsive force-graph: keep the most-connected nodes.
-        if nodes.len() > GRAPH_NODE_CAP {
-            let keep = top_by_degree(
-                nodes.iter().map(|n| n.id.clone()),
-                edges.iter().map(|e| (e.src.clone(), e.dst.clone())),
-                GRAPH_NODE_CAP,
-            );
-            nodes.retain(|n| keep.contains(&n.id));
-            edges.retain(|e| keep.contains(&e.src) && keep.contains(&e.dst));
-        }
+        // Cap for a responsive force-graph: keep the most-connected nodes AND a
+        // bounded number of edges (a dense hub subgraph is unrenderable otherwise).
+        let (keep, kept_edges) = cap_graph_ids(
+            nodes.iter().map(|n| n.id.clone()).collect(),
+            edges.iter().map(|e| (e.src.clone(), e.dst.clone())).collect(),
+            GRAPH_NODE_CAP,
+            GRAPH_EDGE_CAP,
+        );
+        let kept: std::collections::HashSet<(String, String)> = kept_edges.into_iter().collect();
+        nodes.retain(|n| keep.contains(&n.id));
+        edges.retain(|e| kept.contains(&(e.src.clone(), e.dst.clone())));
         Ok(FullGraph { nodes, edges })
     }
 
@@ -884,15 +918,15 @@ impl MemoryService {
 
     pub async fn code_graph(&self, ws: &str, repo_id: Option<&str>) -> Result<otto_state::CodeGraph> {
         let mut g = self.code.graph(ws, repo_id).await?;
-        if g.nodes.len() > GRAPH_NODE_CAP {
-            let keep = top_by_degree(
-                g.nodes.iter().map(|n| n.id.clone()),
-                g.edges.iter().map(|e| (e.src_id.clone(), e.dst_id.clone())),
-                GRAPH_NODE_CAP,
-            );
-            g.nodes.retain(|n| keep.contains(&n.id));
-            g.edges.retain(|e| keep.contains(&e.src_id) && keep.contains(&e.dst_id));
-        }
+        let (keep, kept_edges) = cap_graph_ids(
+            g.nodes.iter().map(|n| n.id.clone()).collect(),
+            g.edges.iter().map(|e| (e.src_id.clone(), e.dst_id.clone())).collect(),
+            GRAPH_NODE_CAP,
+            GRAPH_EDGE_CAP,
+        );
+        let kept: std::collections::HashSet<(String, String)> = kept_edges.into_iter().collect();
+        g.nodes.retain(|n| keep.contains(&n.id));
+        g.edges.retain(|e| kept.contains(&(e.src_id.clone(), e.dst_id.clone())));
         Ok(g)
     }
 
