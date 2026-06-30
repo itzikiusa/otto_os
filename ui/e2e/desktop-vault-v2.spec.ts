@@ -78,20 +78,25 @@ func TestLogin(t *testing.T) {}
 function writeBigFixture(): string {
   const dir = mkdtempSync(join(tmpdir(), 'otto-vault-big-'));
   mkdirSync(join(dir, 'svc'), { recursive: true });
-  for (let i = 0; i < 40; i++) {
+  // A shared hub referenced by every file → high degree + many edges, plus 120
+  // files so node/edge counts exceed the caps (exercises cap_graph_ids).
+  writeFileSync(join(dir, 'svc', 'hub.go'), `package svc\nimport "context"\nfunc SharedHub(ctx context.Context, id int) error { return nil }\n`);
+  for (let i = 0; i < 120; i++) {
     writeFileSync(
       join(dir, 'svc', `mod${i}.go`),
       `package svc
 import "context"
 func Handler${i}(ctx context.Context, id int) error {
-    _ = Helper${(i + 1) % 40}(ctx, id)
-    url, _ := serviceLocator.GetBrandService(ctx, id, "SVC_${i % 5}")
+    _ = SharedHub(ctx, id)
+    _ = Helper${(i + 1) % 120}(ctx, id)
+    _ = Helper${(i + 7) % 120}(ctx, id)
+    url, _ := serviceLocator.GetBrandService(ctx, id, "SVC_${i % 8}")
     _ = url
-    row, _ := conn.GetContext(ctx, "SELECT v FROM tbl_data_${i % 7} WHERE id = ?")
+    row, _ := conn.GetContext(ctx, "SELECT v FROM tbl_data_${i % 9} WHERE id = ?")
     _ = row
     return nil
 }
-func Helper${i}(ctx context.Context, id int) error { return nil }
+func Helper${i}(ctx context.Context, id int) error { _ = SharedHub(ctx, id); return nil }
 `,
     );
   }
@@ -246,9 +251,13 @@ test('large graph: revisiting the Graph tab does NOT freeze the app', async ({ p
   const pageErrors: string[] = [];
   page.on('pageerror', (e) => pageErrors.push(e.message));
 
-  // Sanity: the fullgraph endpoint returns nodes for this ws.
+  // The fullgraph must be CAPPED to a renderable size (a dense hub subgraph with
+  // thousands of edges is unrenderable in a webview — this was the "blank" bug).
   const fg = await getJson(`/api/v1/workspaces/${wsId}/vault/fullgraph`);
-  expect(fg.nodes.length).toBeGreaterThan(0);
+  console.log(`[diag] fullgraph nodes=${fg.nodes.length} edges=${fg.edges.length}`);
+  expect(fg.nodes.length).toBeGreaterThan(10);
+  expect(fg.nodes.length).toBeLessThanOrEqual(150);
+  expect(fg.edges.length).toBeLessThanOrEqual(400);
 
   await page.goto('/#/vault');
   await page.getByTestId('vault-tab-graph').click();
