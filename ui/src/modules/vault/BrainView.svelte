@@ -158,12 +158,13 @@
     font-size: 10.5px;
     padding: 2px 8px;
     border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--c) 55%, transparent);
-    background: color-mix(in srgb, var(--c) 16%, transparent);
-    color: color-mix(in srgb, var(--c) 82%, var(--text));
+    /* Calm, themed chip — faint kind tint, neutral high-contrast text. */
+    border: 1px solid color-mix(in srgb, var(--c) 35%, var(--border));
+    background: color-mix(in srgb, var(--c) 12%, transparent);
+    color: var(--text-dim);
     white-space: nowrap;
   }
-  .reason b { color: var(--c); font-weight: 700; }
+  .reason b { color: var(--text); font-weight: 700; }
   .brain-md {
     line-height: 1.6;
     font-size: 13.5px;

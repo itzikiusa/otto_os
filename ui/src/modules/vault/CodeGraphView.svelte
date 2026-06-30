@@ -1024,10 +1024,11 @@
     font-size: 9.5px;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, #7ee787 16%, transparent);
-    border: 1px solid color-mix(in srgb, #7ee787 50%, transparent);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
   }
-  .tip-reason b { color: #7ee787; }
+  .tip-reason b { color: var(--text); }
   .cg-edge-tip {
     position: absolute;
     z-index: 5;

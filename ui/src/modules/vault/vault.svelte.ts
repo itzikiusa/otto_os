@@ -103,7 +103,8 @@ export interface SetEmbedderReq {
  * Pick by the machine's RAM — the ones marked "light" suit a 5–10 GB box; the
  * larger Qwen3 models are best on a 20+ GB machine. */
 export const OLLAMA_EMBED_MODELS: { model: string; dim: number; note: string }[] = [
-  { model: 'nomic-embed-text', dim: 768, note: 'light · ~0.5 GB · fast default' },
+  { model: 'nomic-embed-text-v2-moe', dim: 768, note: 'light · ~0.9 GB · v2 MoE (recommended)' },
+  { model: 'nomic-embed-text', dim: 768, note: 'light · ~0.5 GB · v1 (older)' },
   { model: 'qwen3-embedding:0.6b', dim: 1024, note: 'light · ~0.6 GB · great quality/size' },
   { model: 'mxbai-embed-large', dim: 1024, note: 'light · ~1.2 GB · strong' },
   { model: 'bge-m3', dim: 1024, note: 'medium · ~2.5 GB · multilingual + long ctx' },
