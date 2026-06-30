@@ -37,13 +37,15 @@
 
   // Embedder settings panel.
   let showEmbedder = $state(false);
-  let embProvider = $state<'stub' | 'openai' | 'voyage'>('stub');
+  let embProvider = $state<'local' | 'ollama' | 'openai' | 'voyage'>('local');
   let embKey = $state('');
 
-  // Keep the provider selector in sync with the loaded status.
+  // Keep the provider selector in sync with the loaded status. A legacy `stub`
+  // status maps onto the "local" option (both are the keyless local path).
   $effect(() => {
     const p = vault.embedder?.provider;
-    if (p === 'stub' || p === 'openai' || p === 'voyage') embProvider = p;
+    if (p === 'local' || p === 'ollama' || p === 'openai' || p === 'voyage') embProvider = p;
+    else if (p === 'stub') embProvider = 'local';
   });
 
   async function applyEmbedder(): Promise<void> {
@@ -289,11 +291,24 @@
             <label class="embedder-row">
               <span>Provider</span>
               <select bind:value={embProvider} data-testid="embedder-provider">
-                <option value="stub">Local stub (no key)</option>
-                <option value="openai">OpenAI</option>
-                <option value="voyage">Voyage</option>
+                <option value="local">Local — code-aware (no key, no install)</option>
+                <option value="ollama">Ollama — local neural (needs Ollama running)</option>
+                <option value="openai">OpenAI (API key)</option>
+                <option value="voyage">Voyage (API key)</option>
               </select>
             </label>
+            <p class="embedder-note">
+              {#if embProvider === 'local'}
+                The default. Deterministic, offline, no setup. Good baseline; upgrade to a neural
+                provider for stronger semantic recall.
+              {:else if embProvider === 'ollama'}
+                Real <b>local</b> neural embeddings via a localhost Ollama server (no API key). Install
+                it from the <b>Backends</b> tab, or run <code>ollama pull nomic-embed-text</code>.
+              {:else}
+                Neural embeddings via {embProvider === 'openai' ? 'OpenAI' : 'Voyage'} (cloud API key).
+                {#if embProvider === 'voyage'}Anthropic recommends Voyage — Claude has no embeddings API.{/if}
+              {/if}
+            </p>
             {#if embProvider === 'openai' || embProvider === 'voyage'}
               <label class="embedder-row">
                 <span>API key</span>

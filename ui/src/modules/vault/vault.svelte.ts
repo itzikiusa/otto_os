@@ -80,7 +80,7 @@ export interface GovImportResp {
 
 // -- Embedder configuration (mirror of crates/otto-server/src/embedder.rs) ----
 
-export type EmbedderProvider = 'stub' | 'openai' | 'voyage';
+export type EmbedderProvider = 'local' | 'ollama' | 'openai' | 'voyage' | 'stub';
 
 export interface EmbedderStatus {
   provider: string;

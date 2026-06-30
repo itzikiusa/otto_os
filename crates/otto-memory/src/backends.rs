@@ -357,7 +357,7 @@ pub mod installer {
                     (
                         "docker",
                         vec![format!(
-                            "docker run -d --name otto-qdrant -p 6333:6333 -v {data_dir}/qdrant:/qdrant/storage qdrant/qdrant:v1.12.4"
+                            "docker run -d --name otto-qdrant -p 6333:6333 -v '{data_dir}/qdrant':/qdrant/storage qdrant/qdrant:v1.12.4"
                         )],
                         true,
                     )
@@ -383,7 +383,7 @@ pub mod installer {
                         "brew",
                         vec![
                             "brew install surrealdb/tap/surreal".into(),
-                            format!("surreal start --user root --pass root file://{data_dir}/surreal &"),
+                            format!("surreal start --user root --pass root 'file://{data_dir}/surreal' &"),
                         ],
                         true,
                     )
@@ -391,7 +391,7 @@ pub mod installer {
                     (
                         "docker",
                         vec![format!(
-                            "docker run -d --name otto-surreal -p 8000:8000 -v {data_dir}/surreal:/data surrealdb/surrealdb:v2.1 start --user root --pass root file:/data/db"
+                            "docker run -d --name otto-surreal -p 8000:8000 -v '{data_dir}/surreal':/data surrealdb/surrealdb:v2.1 start --user root --pass root file:/data/db"
                         )],
                         true,
                     )
@@ -500,5 +500,24 @@ mod tests {
         let p = installer::plan("qdrant", "/tmp/data").await.unwrap();
         assert_eq!(p.kind, "qdrant");
         assert!(p.health_url.contains("6333"));
+    }
+
+    // Data dirs with spaces (macOS `~/Library/Application Support/…`) must be
+    // shell-quoted in install steps, else `sh -c` splits the path and docker/
+    // surreal mis-parse it. (Only asserts when the tool is present → steps exist.)
+    #[tokio::test]
+    async fn install_steps_quote_paths_with_spaces() {
+        let dd = "/Users/x/Library/Application Support/Otto/vault";
+        for kind in ["qdrant", "surreal"] {
+            let p = installer::plan(kind, dd).await.unwrap();
+            for step in &p.steps {
+                if step.contains("Application Support") {
+                    assert!(
+                        step.contains(&format!("'{dd}/")) || step.contains(&format!("'file://{dd}/")),
+                        "host path must be single-quoted in step: {step}"
+                    );
+                }
+            }
+        }
     }
 }
