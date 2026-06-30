@@ -199,7 +199,7 @@ impl MemoryService {
                 for (m, v) in chunk.iter().zip(vecs) {
                     if self
                         .repo
-                        .put_vector(&m.id, e.model_id(), e.dim(), &v)
+                        .put_vector(&m.id, e.model_id(), v.len(), &v)
                         .await
                         .is_ok()
                     {
@@ -292,10 +292,11 @@ impl MemoryService {
             let text = format!("{}\n{}", m.title, m.body);
             if let Ok(v) = e.embed(&[text]).await {
                 if let Some(v0) = v.into_iter().next() {
-                    let _ = self.repo.put_vector(&m.id, e.model_id(), e.dim(), &v0).await;
+                    // Store the ACTUAL vector length (robust to a misconfigured dim).
+                    let _ = self.repo.put_vector(&m.id, e.model_id(), v0.len(), &v0).await;
                     // Write-through to the workspace's remote vector layer.
                     if let Some(q) = self.ws_backends(&m.workspace_id).qdrant {
-                        let _ = q.ensure_collection(e.dim()).await;
+                        let _ = q.ensure_collection(v0.len()).await;
                         let _ = q.upsert(&m.id, &v0).await;
                     }
                 }
