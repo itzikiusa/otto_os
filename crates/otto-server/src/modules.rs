@@ -4876,6 +4876,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_memory::router::<ServerCtx>(),
         crate::memory_gov::memory_gov_routes(),
         crate::embedder::routes(),
+        crate::vault_routes::routes(),
         otto_git::router::<ServerCtx>(),
         otto_issues::router::<ServerCtx>(),
         otto_channels::router::<ServerCtx>(),

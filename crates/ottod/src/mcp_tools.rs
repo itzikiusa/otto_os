@@ -407,6 +407,26 @@ fn tool_catalog() -> Value {
                 "name": "otto_list_improvement_edits",
                 "description": "Read-only: list this workspace's self-improvement edit suggestions (pending/applied) with their status.",
                 "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_vault_list_repos",
+                "description": "Read-only: list repositories indexed into the Vault (symbol/edge/chunk counts + status).",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_vault_search_symbols",
+                "description": "Read-only: search the Vault's tree-sitter symbol index by name; returns name/kind/file:line/signature.",
+                "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "repo_id": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["query"] }
+            },
+            {
+                "name": "otto_vault_code_graph",
+                "description": "Read-only: the code dependency graph (nodes + typed edges) for this workspace, optionally scoped to one repo.",
+                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string" } } }
+            },
+            {
+                "name": "otto_vault_brain",
+                "description": "Read-only: assemble the Repo Brain for a focus — relevant knowledge/symbols/dependencies/git, each annotated with why it was selected.",
+                "inputSchema": { "type": "object", "properties": { "focus": { "type": "string" }, "cwd": { "type": "string" }, "budget": { "type": "integer" } }, "required": ["focus"] }
             }
         ]
     })
@@ -430,6 +450,10 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "otto_usage_summary",
     "otto_list_improvement_runs",
     "otto_list_improvement_edits",
+    "otto_vault_list_repos",
+    "otto_vault_search_symbols",
+    "otto_vault_code_graph",
+    "otto_vault_brain",
 ];
 
 /// A resolved upstream read call: GET (or a read-only viewer POST), the `/api/v1`-
@@ -509,6 +533,34 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
         }
         "otto_list_improvement_edits" => {
             ReadCall::get(format!("/workspaces/{}/improvement/edits", seg(ws_req()?)))
+        }
+        "otto_vault_list_repos" => ReadCall::get(format!("/workspaces/{}/vault/repos", seg(ws_req()?))),
+        "otto_vault_search_symbols" => {
+            let mut path = format!("/workspaces/{}/vault/symbols?q={}", seg(ws_req()?), seg(&arg_str(args, "query")?));
+            if let Some(r) = args.get("repo_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                path.push_str(&format!("&repo_id={}", seg(r)));
+            }
+            if let Some(l) = args.get("limit").and_then(Value::as_u64) {
+                path.push_str(&format!("&limit={l}"));
+            }
+            ReadCall::get(path)
+        }
+        "otto_vault_code_graph" => {
+            let mut path = format!("/workspaces/{}/vault/graph", seg(ws_req()?));
+            if let Some(r) = args.get("repo_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                path.push_str(&format!("?repo_id={}", seg(r)));
+            }
+            ReadCall::get(path)
+        }
+        "otto_vault_brain" => {
+            let mut body = json!({ "focus": arg_str(args, "focus")? });
+            if let Some(c) = args.get("cwd").and_then(Value::as_str) {
+                body["cwd"] = json!(c);
+            }
+            if let Some(b) = args.get("budget").and_then(Value::as_u64) {
+                body["budget"] = json!(b);
+            }
+            ReadCall::post(format!("/workspaces/{}/vault/brain", seg(ws_req()?)), body)
         }
         other => return Err(format!("unknown feature read tool `{other}`")),
     })

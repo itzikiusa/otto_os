@@ -2,7 +2,10 @@
 //! (vector) hybrid recall. First consumer: the Product section; the core is
 //! domain-agnostic (collections), so other areas can adopt it later.
 
+pub mod backends;
+pub mod code_scan;
 pub mod embed;
+pub mod git_context;
 pub mod governance;
 pub mod http;
 pub mod index;
@@ -10,6 +13,7 @@ pub mod ingest;
 pub mod remote;
 pub mod retrieve;
 pub mod service;
+pub mod test_map;
 pub mod test_support;
 pub mod types;
 pub mod vault;

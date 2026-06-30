@@ -10,6 +10,18 @@ import type {
   MemoryHit,
   MemoryLink,
   MemoryQuery,
+  CodeRepo,
+  CodeSymbol,
+  FullGraph,
+  IndexResult,
+  IndexRepoReq,
+  RepoBrain,
+  VaultBackend,
+  VaultBackendReq,
+  VaultDocReq,
+  VaultHealth,
+  VaultInstallPlan,
+  VaultInstallResult,
 } from '../../lib/api/types';
 
 // ---------------------------------------------------------------------------
@@ -84,6 +96,12 @@ export interface SetEmbedderReq {
 }
 
 // ---------------------------------------------------------------------------
+// Vault v2 — top-level tabs
+// ---------------------------------------------------------------------------
+
+export type VaultTab = 'knowledge' | 'graph' | 'repos' | 'symbols' | 'backends' | 'brain';
+
+// ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
@@ -106,6 +124,46 @@ class VaultStore {
   // Embedder configuration state
   embedder = $state<EmbedderStatus | null>(null);
   embedderBusy = $state(false);
+
+  // -- Vault v2: code intelligence + remote backends ----------------------
+  // The active top-level tab. Knowledge keeps the original Obsidian-like
+  // memory browser; the rest surface the code "Repo Brain".
+  tab = $state<VaultTab>('knowledge');
+
+  // Indexed code repositories (files/symbols/edges counts + status).
+  repos = $state<CodeRepo[]>([]);
+  reposLoading = $state(false);
+  indexing = $state(false);
+  lastIndex = $state<IndexResult | null>(null);
+
+  // Symbol browser.
+  symbols = $state<CodeSymbol[]>([]);
+  symbolQuery = $state('');
+  symbolRepoId = $state<string>('');
+  symbolsLoading = $state(false);
+
+  // Unified knowledge+code graph (the headline Obsidian-style view).
+  fullGraph = $state<FullGraph | null>(null);
+  graphRepoId = $state<string>('');
+  fullGraphLoading = $state(false);
+  /** A node id to centre/focus in the graph (bumped from the tree or a deep link). */
+  focusNodeId = $state<string | null>(null);
+
+  // Remote backends (Qdrant / SurrealDB / Ollama).
+  backends = $state<VaultBackend[]>([]);
+  backendsLoading = $state(false);
+
+  // Repo Brain (focus → assembled context).
+  brain = $state<RepoBrain | null>(null);
+  brainFocus = $state('');
+  brainBusy = $state(false);
+
+  /** Search hits keyed by memory id, so the index can show "why selected" chips. */
+  hitsById = $derived.by(() => {
+    const m = new Map<string, MemoryHit>();
+    for (const h of this.hits) m.set(h.memory.id, h);
+    return m;
+  });
 
   /** Distinct collections present, for the filter chips. */
   collections = $derived.by(() => {
@@ -328,6 +386,191 @@ class VaultStore {
     await this.load();
     toasts.success('Imported', `${resp.imported} memories created`);
     return resp;
+  }
+
+  // -- Vault v2: code repos ------------------------------------------------
+
+  /** List indexed code repositories for the current workspace. */
+  async loadRepos(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    this.reposLoading = true;
+    try {
+      this.repos = await api.get<CodeRepo[]>(`/workspaces/${wsId}/vault/repos`);
+    } finally {
+      this.reposLoading = false;
+    }
+  }
+
+  /** Index (or re-index) a repo by absolute path; returns the resulting counts. */
+  async indexRepo(root: string, name?: string): Promise<IndexResult | null> {
+    const wsId = ws.currentId;
+    if (!wsId || !root.trim()) return null;
+    this.indexing = true;
+    try {
+      const body: IndexRepoReq = { root: root.trim() };
+      if (name && name.trim()) body.name = name.trim();
+      const r = await api.post<IndexResult>(`/workspaces/${wsId}/vault/repos/index`, body);
+      this.lastIndex = r;
+      toasts.success('Indexed', `${r.files} files · ${r.symbols} symbols · ${r.edges} edges`);
+      await this.loadRepos();
+      return r;
+    } catch (e) {
+      toasts.error('Index failed', e instanceof Error ? e.message : String(e));
+      return null;
+    } finally {
+      this.indexing = false;
+    }
+  }
+
+  // -- Vault v2: symbols ---------------------------------------------------
+
+  /** Search code symbols (name/kind/file/signature), optionally scoped to a repo. */
+  async searchSymbols(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    this.symbolsLoading = true;
+    try {
+      const p = new URLSearchParams();
+      if (this.symbolQuery.trim()) p.set('q', this.symbolQuery.trim());
+      if (this.symbolRepoId) p.set('repo_id', this.symbolRepoId);
+      p.set('limit', '200');
+      this.symbols = await api.get<CodeSymbol[]>(`/workspaces/${wsId}/vault/symbols?${p.toString()}`);
+    } finally {
+      this.symbolsLoading = false;
+    }
+  }
+
+  // -- Vault v2: full graph ------------------------------------------------
+
+  /** Load the unified knowledge+code graph (optionally scoped to a repo). */
+  async loadFullGraph(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    this.fullGraphLoading = true;
+    try {
+      const q = this.graphRepoId ? `?repo_id=${encodeURIComponent(this.graphRepoId)}` : '';
+      this.fullGraph = await api.get<FullGraph>(`/workspaces/${wsId}/vault/fullgraph${q}`);
+    } finally {
+      this.fullGraphLoading = false;
+    }
+  }
+
+  /** Jump to the Graph tab scoped to one repo and (re)load it. */
+  async openRepoGraph(repoId: string): Promise<void> {
+    this.graphRepoId = repoId;
+    this.tab = 'graph';
+    await this.loadFullGraph();
+  }
+
+  // -- Vault v2: remote backends ------------------------------------------
+
+  /** List the workspace's remote-backend configs (Qdrant / SurrealDB / Ollama). */
+  async loadBackends(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    this.backendsLoading = true;
+    try {
+      this.backends = await api.get<VaultBackend[]>(`/workspaces/${wsId}/vault/backends`);
+    } finally {
+      this.backendsLoading = false;
+    }
+  }
+
+  /** Create/update a backend config (secret is stored in the Keychain server-side). */
+  async saveBackend(kind: string, req: VaultBackendReq): Promise<VaultBackend | null> {
+    const wsId = ws.currentId;
+    if (!wsId) return null;
+    try {
+      const updated = await api.put<VaultBackend>(`/workspaces/${wsId}/vault/backends/${kind}`, req);
+      this.backends = this.backends.some((b) => b.kind === kind)
+        ? this.backends.map((b) => (b.kind === kind ? updated : b))
+        : [...this.backends, updated];
+      toasts.success('Saved', `${kind} backend updated`);
+      return updated;
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      return null;
+    }
+  }
+
+  /** Ping a backend; reflects the result in the matching card's status. */
+  async testBackend(kind: string): Promise<VaultHealth | null> {
+    const wsId = ws.currentId;
+    if (!wsId) return null;
+    try {
+      const h = await api.post<VaultHealth>(`/workspaces/${wsId}/vault/backends/${kind}/health`, {});
+      this.backends = this.backends.map((b) =>
+        b.kind === kind ? { ...b, status: h.status, message: h.message } : b,
+      );
+      if (h.status === 'ok') toasts.success('Healthy', `${kind} reachable`);
+      else toasts.error('Unreachable', h.message ?? `${kind} did not respond`);
+      return h;
+    } catch (e) {
+      toasts.error('Health check failed', e instanceof Error ? e.message : String(e));
+      return null;
+    }
+  }
+
+  /** Fetch the install plan (method + steps) for a backend — shown before installing. */
+  async planInstall(kind: string): Promise<VaultInstallPlan | null> {
+    const wsId = ws.currentId;
+    if (!wsId) return null;
+    try {
+      return await api.post<VaultInstallPlan>(`/workspaces/${wsId}/vault/backends/${kind}/install/plan`, {});
+    } catch (e) {
+      toasts.error('Could not plan install', e instanceof Error ? e.message : String(e));
+      return null;
+    }
+  }
+
+  /** Run a backend install (deliberate, confirmed action); refreshes the list. */
+  async installBackend(kind: string): Promise<VaultInstallResult | null> {
+    const wsId = ws.currentId;
+    if (!wsId) return null;
+    try {
+      const r = await api.post<VaultInstallResult>(`/workspaces/${wsId}/vault/backends/${kind}/install`, {});
+      if (r.ok) toasts.success('Installed', kind);
+      else toasts.error('Install failed', kind);
+      await this.loadBackends();
+      return r;
+    } catch (e) {
+      toasts.error('Install failed', e instanceof Error ? e.message : String(e));
+      return null;
+    }
+  }
+
+  // -- Vault v2: repo brain + docs ----------------------------------------
+
+  /** Assemble the Repo Brain for a focus string (markdown + the reasons used). */
+  async runBrain(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId || !this.brainFocus.trim()) return;
+    this.brainBusy = true;
+    try {
+      this.brain = await api.post<RepoBrain>(`/workspaces/${wsId}/vault/brain`, {
+        focus: this.brainFocus.trim(),
+      });
+    } catch (e) {
+      toasts.error('Brain failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      this.brainBusy = false;
+    }
+  }
+
+  /** Add a knowledge doc (optionally linked to a repo + documented symbols). */
+  async addDoc(req: VaultDocReq): Promise<Memory | null> {
+    const wsId = ws.currentId;
+    if (!wsId) return null;
+    try {
+      const m = await api.post<Memory>(`/workspaces/${wsId}/vault/docs`, req);
+      toasts.success('Doc added', m.title);
+      await this.load();
+      return m;
+    } catch (e) {
+      toasts.error('Add doc failed', e instanceof Error ? e.message : String(e));
+      return null;
+    }
   }
 
   /** Replace one item in `items` in-place (after a state/patch mutation). */

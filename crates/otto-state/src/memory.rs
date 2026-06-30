@@ -942,3 +942,145 @@ fn row_to_governed_import(r: &sqlx::sqlite::SqliteRow) -> Result<GovernedImport>
         reverted_at: r.get("reverted_at"),
     })
 }
+
+// ---------------------------------------------------------------------------
+// FTS5 keyword index (Vault v2). A standalone, app-maintained FTS5 table —
+// `memories_fts(mid, ws, title, body)`. Created at runtime (not in a migration)
+// so a SQLite build without FTS5 degrades to the existing LIKE search instead of
+// aborting migrations. Callers check `ensure_fts()` once and fall back to
+// `search_keyword` when it returns `false`.
+// ---------------------------------------------------------------------------
+
+/// Tokenize free text into a safe FTS5 MATCH expression: each ≥2-char alnum term
+/// is quoted (so `:`/`-`/`*`/`(` can't be a MATCH syntax error) and OR-joined,
+/// matching `search_keyword`'s any-term semantics. `None` when there are no terms.
+fn fts_match_query(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| s.len() >= 2)
+        .map(|s| format!("\"{s}\""))
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
+}
+
+impl MemoriesRepo {
+    /// Create the FTS5 index if this SQLite build supports it, returning whether
+    /// FTS5 is available. Idempotent; backfills any not-yet-indexed memories on
+    /// first creation. A build without FTS5 returns `Ok(false)` (→ LIKE fallback)
+    /// rather than erroring.
+    pub async fn ensure_fts(&self) -> Result<bool> {
+        let created = sqlx::query(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(\
+             mid UNINDEXED, ws UNINDEXED, title, body, tokenize='porter unicode61')",
+        )
+        .execute(&self.pool)
+        .await;
+        if created.is_err() {
+            return Ok(false);
+        }
+        // Backfill memories missing from the index (cheap no-op once warm).
+        let _ = sqlx::query(
+            "INSERT INTO memories_fts (mid, ws, title, body) \
+             SELECT m.id, m.workspace_id, m.title, m.body FROM memories m \
+             WHERE NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.mid = m.id)",
+        )
+        .execute(&self.pool)
+        .await;
+        Ok(true)
+    }
+
+    /// Upsert a memory's text into the FTS index (delete-then-insert; FTS5
+    /// external tables have no UPSERT). Silent no-op when FTS5 is unavailable.
+    pub async fn fts_index(&self, mid: &str, ws: &str, title: &str, body: &str) -> Result<()> {
+        let _ = sqlx::query("DELETE FROM memories_fts WHERE mid = ?")
+            .bind(mid)
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("INSERT INTO memories_fts (mid, ws, title, body) VALUES (?,?,?,?)")
+            .bind(mid)
+            .bind(ws)
+            .bind(title)
+            .bind(body)
+            .execute(&self.pool)
+            .await;
+        Ok(())
+    }
+
+    /// Count active vectors for (workspace, model) — the cheap signature the
+    /// HNSW index uses to decide between its exact path and a cached ANN graph.
+    pub async fn count_vectors(&self, ws: &str, model: &str) -> Result<usize> {
+        let r = sqlx::query(
+            "SELECT COUNT(*) AS c FROM memory_vectors v \
+             JOIN memories m ON m.id = v.memory_id \
+             WHERE m.workspace_id = ? AND m.active = 1 AND v.model_id = ?",
+        )
+        .bind(ws)
+        .bind(model)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("memory.count_vectors"))?;
+        Ok(r.get::<i64, _>("c").max(0) as usize)
+    }
+
+    /// Remove a memory from the FTS index.
+    pub async fn fts_remove(&self, mid: &str) -> Result<()> {
+        let _ = sqlx::query("DELETE FROM memories_fts WHERE mid = ?")
+            .bind(mid)
+            .execute(&self.pool)
+            .await;
+        Ok(())
+    }
+
+    /// FTS5 keyword search ranked by bm25 (lower = better). Mirrors
+    /// `search_keyword`'s filters. Returns (memory, score) best-first; an empty
+    /// query yields no matches.
+    pub async fn search_fts(
+        &self,
+        ws: &str,
+        query: &str,
+        f: &SearchFilter,
+    ) -> Result<Vec<(Memory, f32)>> {
+        let Some(mq) = fts_match_query(query) else {
+            return Ok(vec![]);
+        };
+        let mut sql = String::from(
+            "SELECT m.*, bm25(memories_fts) AS rank FROM memories_fts \
+             JOIN memories m ON m.id = memories_fts.mid \
+             WHERE memories_fts MATCH ? AND memories_fts.ws = ?",
+        );
+        if !f.include_inactive {
+            sql.push_str(" AND m.active = 1");
+        }
+        if f.collection.is_some() {
+            sql.push_str(" AND m.collection = ?");
+        }
+        if f.story_id.is_some() {
+            sql.push_str(" AND m.story_id = ?");
+        }
+        sql.push_str(" ORDER BY rank ASC LIMIT ?");
+        let mut q = sqlx::query(&sql).bind(&mq).bind(ws);
+        if let Some(c) = &f.collection {
+            q = q.bind(c);
+        }
+        if let Some(s) = &f.story_id {
+            q = q.bind(s);
+        }
+        let lim = if f.limit > 0 { f.limit } else { 50 };
+        q = q.bind(lim);
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("memory.search_fts"))?;
+        let n = rows.len();
+        Ok(rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| row_to_memory(r).ok().map(|m| (m, (n - i) as f32)))
+            .collect())
+    }
+}
