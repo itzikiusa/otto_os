@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::Json;
+use otto_core::api::CreateMcpTokenReq;
+use otto_core::auth::{AuthContext, McpScope};
 use otto_core::{Error, Id};
 use otto_mcp::{canonical_hash, InvokeCtx};
 use otto_rbac::AuthRepo;
@@ -20,7 +22,7 @@ use otto_state::{NewApproval, NewCallLog, SettingsRepo};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
@@ -624,45 +626,96 @@ pub struct OttoInvokeReq {
     pub wait_seconds: Option<u64>,
 }
 
+/// True iff the bare tool name (`"run_workflow"`, no `otto.` prefix) is a
+/// **mutating** tool. The mutating set is exactly [`DANGEROUS`] (every catalog
+/// entry with `mutating:true` is approval-gated), so this is the single source of
+/// truth the per-token read-only axis keys on.
+pub(crate) fn tool_is_mutating(bare: &str) -> bool {
+    DANGEROUS.contains(&bare)
+}
+
 pub async fn otto_tools_invoke(
     State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<OttoInvokeReq>,
 ) -> ApiResult<Json<Value>> {
-    let short = req.tool.strip_prefix("otto.").unwrap_or(&req.tool).to_string();
+    governed_invoke(
+        &ctx,
+        &auth,
+        &req.tool,
+        &req.arguments,
+        req.dry_run,
+        req.wait_seconds,
+    )
+    .await
+    .map(Json)
+}
+
+/// The governed choke point for every `otto.*` tool call, shared by the bespoke
+/// `POST /mcp/otto-tools/invoke` endpoint AND the MCP HTTP transport's
+/// `tools/call`. It enforces — in order — the **per-token scope** (multi-token
+/// access control), the global enable + per-tool allow-list, dangerous→approval,
+/// dry-run, then executes the capability AS `auth.effective_user` (native RBAC
+/// reused via an ephemeral self-call) and audits the whole thing.
+///
+/// Returns the governed envelope `Value` (`{decision, executed, content, …}`).
+pub(crate) async fn governed_invoke(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    tool: &str,
+    arguments: &Value,
+    dry_run: bool,
+    wait_seconds: Option<u64>,
+) -> ApiResult<Value> {
+    let user = &auth.effective_user;
+    let short = tool.strip_prefix("otto.").unwrap_or(tool).to_string();
     let mut audit = NewCallLog {
-        tool: req.tool.clone(),
+        tool: tool.to_string(),
         direction: "inbound".into(),
         server_name: Some("otto".into()),
         caller_user_id: Some(user.id.clone()),
         caller_kind: Some("mcp_server".into()),
-        args_redacted_json: otto_core::redact::redact_json(&req.arguments).value.to_string(),
+        args_redacted_json: otto_core::redact::redact_json(arguments).value.to_string(),
         ..Default::default()
     };
 
-    if !outward_enabled(&ctx).await {
-        return Ok(Json(deny_audit(&ctx, &mut audit, "the Otto MCP server is disabled").await));
+    // PER-TOKEN SCOPE (multi-token access control). A `kind='mcp'` token carries an
+    // [`McpScope`]; a NULL column resolved to the unrestricted scope, so legacy
+    // tokens are unaffected. Normal (session/api) tokens have `mcp_scope == None`
+    // and are bounded only by the global enable + the user's own RBAC below. This
+    // is the gate that makes different tokens / users have different accesses, and
+    // it is identical for the HTTP transport and the legacy stdio path.
+    if let Some(scope) = &auth.mcp_scope {
+        let mutating = tool_is_mutating(&short);
+        let ws_arg = arguments.get("workspace_id").and_then(Value::as_str);
+        if let Some(reason) = scope.deny_reason(&short, mutating, ws_arg) {
+            return Ok(deny_audit(ctx, &mut audit, &format!("token scope: {reason}")).await);
+        }
     }
-    if !enabled_tools(&ctx).await.contains(&short) {
-        return Ok(Json(deny_audit(&ctx, &mut audit, "this tool is not enabled on the Otto MCP server").await));
+
+    if !outward_enabled(ctx).await {
+        return Ok(deny_audit(ctx, &mut audit, "the Otto MCP server is disabled").await);
+    }
+    if !enabled_tools(ctx).await.contains(&short) {
+        return Ok(deny_audit(ctx, &mut audit, "this tool is not enabled on the Otto MCP server").await);
     }
 
     let dangerous = DANGEROUS.contains(&short.as_str());
-    let needs_approval = dangerous && require_approval_dangerous(&ctx).await;
-    let args_hash = canonical_hash(&req.arguments);
-    let ws = req.arguments.get("workspace_id").and_then(Value::as_str).map(str::to_string);
+    let needs_approval = dangerous && require_approval_dangerous(ctx).await;
+    let args_hash = canonical_hash(arguments);
+    let ws = arguments.get("workspace_id").and_then(Value::as_str).map(str::to_string);
 
-    if needs_approval && !req.dry_run {
+    if needs_approval && !dry_run {
         match ctx
             .mcp
             .approvals()
-            .find_usable(ws.as_deref(), None, &req.tool, &args_hash)
+            .find_usable(ws.as_deref(), None, tool, &args_hash)
             .await
             .map_err(ApiError)?
         {
             Some(appr_id) => {
                 if !ctx.mcp.approvals().consume(&appr_id).await.map_err(ApiError)? {
-                    return Ok(Json(deny_audit(&ctx, &mut audit, "approval already used").await));
+                    return Ok(deny_audit(ctx, &mut audit, "approval already used").await);
                 }
                 audit.approval_id = Some(appr_id);
             }
@@ -675,9 +728,9 @@ pub async fn otto_tools_invoke(
                         kind: "tool_call".into(),
                         server_id: None,
                         server_name: Some("otto".into()),
-                        tool: Some(req.tool.clone()),
-                        title: format!("otto MCP server → {}", req.tool),
-                        detail: Some(dangerous_detail(&req.tool, &req.arguments)),
+                        tool: Some(tool.to_string()),
+                        title: format!("otto MCP server → {tool}"),
+                        detail: Some(dangerous_detail(tool, arguments)),
                         args_redacted_json: audit.args_redacted_json.clone(),
                         args_hash: Some(args_hash.clone()),
                         risk_label: Some("dangerous".into()),
@@ -687,7 +740,7 @@ pub async fn otto_tools_invoke(
                     })
                     .await
                     .map_err(ApiError)?;
-                match wait_for_decision(&ctx, &appr.id, req.wait_seconds).await {
+                match wait_for_decision(ctx, &appr.id, wait_seconds).await {
                     Some(true) => {
                         let _ = ctx.mcp.approvals().consume(&appr.id).await;
                         audit.approval_id = Some(appr.id.clone());
@@ -696,28 +749,28 @@ pub async fn otto_tools_invoke(
                         audit.decision = "denied".into();
                         audit.decision_reason = Some("human denied the request".into());
                         let _ = ctx.mcp.call_log().insert(audit).await;
-                        return Ok(Json(json!({"decision":"denied","executed":false,"reason":"human denied the request"})));
+                        return Ok(json!({"decision":"denied","executed":false,"reason":"human denied the request"}));
                     }
                     None => {
                         audit.decision = "pending_approval".into();
                         audit.approval_id = Some(appr.id.clone());
                         let _ = ctx.mcp.call_log().insert(audit).await;
-                        return Ok(Json(json!({"decision":"pending_approval","executed":false,
-                            "approval_id":appr.id,"reason":"awaiting human approval — resubmit after it is approved"})));
+                        return Ok(json!({"decision":"pending_approval","executed":false,
+                            "approval_id":appr.id,"reason":"awaiting human approval — resubmit after it is approved"}));
                     }
                 }
             }
         }
     }
 
-    if req.dry_run {
+    if dry_run {
         audit.decision = "dry_run".into();
         audit.dry_run = true;
         audit.ok = true;
         let _ = ctx.mcp.call_log().insert(audit).await;
-        return Ok(Json(json!({"decision":"dry_run","executed":false,"dry_run":true,
-            "preview":{"tool":req.tool,"arguments":otto_core::redact::redact_json(&req.arguments).value,
-                       "note":"dry-run: the tool was NOT executed"}})));
+        return Ok(json!({"decision":"dry_run","executed":false,"dry_run":true,
+            "preview":{"tool":tool,"arguments":otto_core::redact::redact_json(arguments).value,
+                       "note":"dry-run: the tool was NOT executed"}}));
     }
 
     // Fail-closed audit: insert before executing.
@@ -725,18 +778,18 @@ pub async fn otto_tools_invoke(
     let audit_id = ctx.mcp.call_log().insert(audit).await.map_err(ApiError)?;
 
     let started = std::time::Instant::now();
-    let result = execute_otto_tool(&ctx, &user, &short, &req.arguments).await;
+    let result = execute_otto_tool(ctx, user, &short, arguments).await;
     let latency = started.elapsed().as_millis() as i64;
     match result {
         Ok(value) => {
             let bytes = serde_json::to_vec(&value).map(|v| v.len() as i64).unwrap_or(0);
             let _ = ctx.mcp.call_log().finalize(&audit_id, true, None, Some(latency), Some(bytes), None).await;
-            Ok(Json(json!({"decision":"allowed","executed":true,"content":value})))
+            Ok(json!({"decision":"allowed","executed":true,"content":value}))
         }
         Err(e) => {
             let err = otto_core::redact::redact_text(&e.to_string()).value;
             let _ = ctx.mcp.call_log().finalize(&audit_id, false, Some(&err), Some(latency), None, None).await;
-            Ok(Json(json!({"decision":"error","executed":true,"is_error":true,"content":{"error":err}})))
+            Ok(json!({"decision":"error","executed":true,"is_error":true,"content":{"error":err}}))
         }
     }
 }
@@ -1552,6 +1605,136 @@ pub async fn otto_server_config(
         status.0["token"] = json!(tok);
     }
     Ok(status)
+}
+
+// ===========================================================================
+// MCP `tools/list` projection (scope-aware) — shared by the HTTP transport.
+// ===========================================================================
+
+/// The MCP `tools/list` payload for a caller, as `[{name, description,
+/// inputSchema}]`. A tool appears iff it is in the server's globally-enabled set
+/// AND permitted by the caller's per-token [`McpScope`] (`None` ⇒ no per-token
+/// narrowing — a normal token sees every enabled tool). This is what makes a
+/// read-only token never even *see* a mutating tool, and a workspace/tool-scoped
+/// token see only its slice. Listing is independent of the master on/off switch
+/// (so clients can introspect); execution still honours it in [`governed_invoke`].
+pub(crate) async fn mcp_tools_list(ctx: &ServerCtx, scope: Option<&McpScope>) -> Vec<Value> {
+    let enabled = enabled_tools(ctx).await;
+    otto_tool_specs()
+        .into_iter()
+        .filter(|s| {
+            let name = s.get("name").and_then(Value::as_str).unwrap_or("");
+            let bare = name.strip_prefix("otto.").unwrap_or(name);
+            if !enabled.iter().any(|e| e == bare) {
+                return false;
+            }
+            match scope {
+                None => true,
+                Some(sc) => sc.deny_reason(bare, tool_is_mutating(bare), None).is_none(),
+            }
+        })
+        .map(|s| json!({"name": s["name"], "description": s["description"], "inputSchema": s["inputSchema"]}))
+        .collect()
+}
+
+// ===========================================================================
+// MCP token management — multiple scoped tokens per user (the access layer).
+//   GET    /mcp/tokens        list all (admin)
+//   POST   /mcp/tokens        mint a scoped token (admin)
+//   DELETE /mcp/tokens/{id}   revoke one (admin)
+// ===========================================================================
+
+pub async fn list_mcp_tokens(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(_user): CurrentUser,
+) -> ApiResult<Json<Value>> {
+    let tokens = AuthRepo::new(ctx.pool.clone())
+        .list_mcp_tokens()
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(json!({ "tokens": tokens })))
+}
+
+pub async fn create_mcp_token(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<CreateMcpTokenReq>,
+) -> ApiResult<Json<Value>> {
+    // Owner: defaults to the caller. Minting a token for ANOTHER user hands out a
+    // credential that authenticates AS that user, so only root may do it (a non-root
+    // mcp:admin minting a root-owned token would otherwise be a privilege
+    // escalation — mirrors the impersonation "no minting up/sideways" rule).
+    let owner = req.user_id.clone().unwrap_or_else(|| user.id.clone());
+    if owner != user.id && !user.is_root {
+        return Err(ApiError(Error::Forbidden(
+            "only root may mint an MCP token owned by another user".into(),
+        )));
+    }
+    // Validate the scope's tool list against the live catalog so a typo can't
+    // silently produce a token that reaches nothing / drifts from the UI.
+    let scope = req.scope.clone().unwrap_or_else(McpScope::unrestricted);
+    if let Some(tools) = &scope.tools {
+        let known: Vec<String> = otto_tool_specs()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(|n| n.strip_prefix("otto.").unwrap_or(n).to_string()))
+            .collect();
+        for t in tools {
+            let bare = t.strip_prefix("otto.").unwrap_or(t);
+            if !known.iter().any(|k| k == bare) {
+                return Err(ApiError(Error::Invalid(format!("unknown otto tool '{t}'"))));
+            }
+        }
+    }
+    // Normalize tool names to bare form so enforcement (which keys on bare names)
+    // matches regardless of whether the UI sent `otto.x` or `x`.
+    let scope = McpScope {
+        tools: scope.tools.map(|ts| {
+            ts.iter()
+                .map(|t| t.strip_prefix("otto.").unwrap_or(t).to_string())
+                .collect()
+        }),
+        allow_writes: scope.allow_writes,
+        workspace_id: scope.workspace_id.filter(|w| !w.is_empty()),
+    };
+    let (token, info) = AuthRepo::new(ctx.pool.clone())
+        .issue_mcp_token_with_scope(&owner, req.label.as_deref(), &scope)
+        .await
+        .map_err(ApiError)?;
+    ctx.audit(otto_state::NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: "mcp.token.create".into(),
+        target: Some(info.id.clone()),
+        detail: Some(json!({ "owner": owner, "allow_writes": scope.allow_writes })),
+        ip: None,
+    })
+    .await;
+    Ok(Json(json!({ "token": token, "info": info })))
+}
+
+pub async fn revoke_mcp_token(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<axum::http::StatusCode> {
+    // Use the SHARED auth cache so the revocation takes effect immediately: the
+    // authenticator caches mcp tokens by hash, and `revoke_mcp_token_by_id`
+    // evicts the owner from this same cache once it knows who owned the token.
+    let removed = AuthRepo::with_cache(ctx.pool.clone(), ctx.auth_cache.clone())
+        .revoke_mcp_token_by_id(&id)
+        .await
+        .map_err(ApiError)?;
+    if !removed {
+        return Err(ApiError(Error::NotFound("mcp token not found".into())));
+    }
+    ctx.audit(otto_state::NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: "mcp.token.revoke".into(),
+        target: Some(id),
+        detail: None,
+        ip: None,
+    })
+    .await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 // ===========================================================================

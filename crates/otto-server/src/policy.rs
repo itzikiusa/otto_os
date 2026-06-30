@@ -547,6 +547,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // (stdio-server registration additionally requires MCP Admin *in the handler*,
     // since it runs an arbitrary command as the daemon — see otto-mcp F10.)
     if p.starts_with("/mcp/") || p.starts_with("/workspaces/{wid}/mcp/") {
+        // MCP token management (mint/list/revoke the scoped access tokens) is an
+        // Admin surface across ALL methods: it is cross-user, hands out a
+        // credential, and governs who can reach Otto's tools over the (optionally
+        // network-exposed) HTTP transport. Gate it tightest, before the
+        // read/posture split below.
+        if p == "/mcp/tokens" || p == "/mcp/tokens/{id}" {
+            return Require(Mcp, Admin);
+        }
         // Posture-changing routes → Admin: outward-server config, policy
         // create/update/delete/import, and approval decisions (separation of
         // duties is additionally enforced in the handler).
@@ -1146,6 +1154,24 @@ mod tests {
         );
         // The legacy config CRUD is still Exempt (workspace-role axis only).
         assert_eq!(pol(Method::GET, "/api/v1/mcp-servers/{id}"), Exempt);
+    }
+
+    #[test]
+    fn mcp_http_transport_and_tokens_rbac() {
+        // The HTTP transport: a non-mcp caller (the UI's own token) reaching it
+        // needs Mcp:Edit to POST; the GET 405-probe is a read (View). (A
+        // kind='mcp' token never reaches policy_for — the feature guard
+        // short-circuits it before this.)
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/http"), Require(Mcp, Edit));
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/http"), Require(Mcp, View));
+        // MCP token management is Admin across EVERY method (mint/list/revoke a
+        // credential that governs network-exposed tool access).
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/tokens"), Require(Mcp, Admin));
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/tokens"), Require(Mcp, Admin));
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/mcp/tokens/{id}"),
+            Require(Mcp, Admin)
+        );
     }
 
     #[test]

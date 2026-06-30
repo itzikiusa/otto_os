@@ -24,8 +24,8 @@
 //!   [`AUTH_CACHE_ENABLED`] is `false`.
 
 use chrono::{DateTime, Duration, Utc};
-use otto_core::api::{ApiTokenInfo, ShareInfo};
-use otto_core::auth::{AuthContext, SessionScope};
+use otto_core::api::{ApiTokenInfo, McpTokenInfo, ShareInfo};
+use otto_core::auth::{AuthContext, McpScope, SessionScope};
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{new_id, Error, Id, Result};
 use rand::RngCore;
@@ -182,7 +182,7 @@ impl AuthRepo {
         let row = sqlx::query(
             "SELECT a.token_hash, a.expires_at, a.last_seen_at, a.kind, a.acting_as_user_id,
                     a.session_scope, a.scope_role, a.revoked,
-                    a.recipient_email, a.verified_at, a.max_expires_at,
+                    a.recipient_email, a.verified_at, a.max_expires_at, a.mcp_scope,
                     u.id, u.username, u.display_name, u.is_root, u.disabled, u.created_at
              FROM auth_sessions a JOIN users u ON u.id = a.user_id
              WHERE a.token_hash = ?",
@@ -285,6 +285,7 @@ impl AuthRepo {
                 // in mobile plan Task 1.3).
                 scope: None,
                 mcp_only: false,
+                mcp_scope: None,
             });
         }
 
@@ -340,19 +341,39 @@ impl AuthRepo {
                     otp_pending,
                 }),
                 mcp_only: false,
+                mcp_scope: None,
             });
         }
 
-        // Normal token (kind='session'/'api'): the real (token owner) and
+        // Normal token (kind='session'/'api'/'mcp'): the real (token owner) and
         // effective (acted-as) user are the same, and it reaches the whole
-        // authorized surface (no scope). These are the ONLY kinds we cache.
+        // authorized surface (no session scope). These are the ONLY kinds we cache.
+        //
+        // For a `kind='mcp'` token we additionally resolve its per-token
+        // [`McpScope`] from the `mcp_scope` JSON column: a NULL/absent/garbled
+        // column resolves to [`McpScope::unrestricted`] so a legacy token (minted
+        // before per-token scopes existed) keeps full access. The scope is cached
+        // alongside the context — it is immutable for the life of a token (changing
+        // access = revoke + re-mint), so the cache never goes stale on it.
+        let mcp_only = kind == "mcp";
+        let mcp_scope = if mcp_only {
+            let raw: Option<String> = row.get("mcp_scope");
+            Some(
+                raw.as_deref()
+                    .and_then(|s| serde_json::from_str::<McpScope>(s).ok())
+                    .unwrap_or_else(McpScope::unrestricted),
+            )
+        } else {
+            None
+        };
         let ctx = AuthContext {
             real_user: real_user.clone(),
             effective_user: real_user,
             scope: None,
             // A `kind='mcp'` token is route-restricted by the feature guard to the
-            // governed invoke choke point (design §14 F1).
-            mcp_only: kind == "mcp",
+            // governed invoke choke point + the HTTP transport (design §14 F1).
+            mcp_only,
+            mcp_scope,
         };
 
         // Populate the cache so the next request for this token avoids the DB.
@@ -454,6 +475,35 @@ impl AuthRepo {
     /// other route is 403. Returns the RAW token (shown once). Revoking the row
     /// (or rotating) disables the outward server. Design §14 F1.
     pub async fn issue_mcp_token(&self, user_id: &Id, label: Option<&str>) -> Result<String> {
+        // Legacy/unrestricted: full access to every globally-enabled tool. Used by
+        // the back-compat rotate path; the scoped variant powers multi-token UX.
+        let (token, _info) = self
+            .issue_mcp_token_with_scope(user_id, label, &McpScope::unrestricted())
+            .await?;
+        Ok(token)
+    }
+
+    /// Mint a **scoped** MCP token for `user_id`: a `kind='mcp'` token whose
+    /// per-token [`McpScope`] is persisted in the `mcp_scope` column and enforced
+    /// at the governed invoke choke point. This is the primitive behind multiple
+    /// MCP tokens with different accesses. Returns the RAW token (shown once) plus
+    /// its [`McpTokenInfo`] metadata (no secret).
+    pub async fn issue_mcp_token_with_scope(
+        &self,
+        user_id: &Id,
+        label: Option<&str>,
+        scope: &McpScope,
+    ) -> Result<(String, McpTokenInfo)> {
+        // Resolve the owning user's username up front (and prove the user exists)
+        // so the returned metadata can be displayed without a second round-trip.
+        let username: String = sqlx::query("SELECT username FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("issue mcp token (user): {e}")))?
+            .map(|r| r.get::<String, _>("username"))
+            .ok_or_else(|| Error::Invalid(format!("unknown user '{user_id}'")))?;
+
         let mut buf = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut buf);
         let token = hex::encode(buf);
@@ -461,10 +511,12 @@ impl AuthRepo {
         let id = new_id();
         let now = Utc::now();
         let expires_at = now + Duration::days(API_TOKEN_TTL_DAYS);
+        let scope_json = serde_json::to_string(scope)
+            .map_err(|e| Error::Internal(format!("serialize mcp scope: {e}")))?;
         sqlx::query(
             "INSERT INTO auth_sessions
-               (id, user_id, token_hash, created_at, expires_at, last_seen_at, kind, label, token_prefix)
-             VALUES (?, ?, ?, ?, ?, ?, 'mcp', ?, ?)",
+               (id, user_id, token_hash, created_at, expires_at, last_seen_at, kind, label, token_prefix, mcp_scope)
+             VALUES (?, ?, ?, ?, ?, ?, 'mcp', ?, ?, ?)",
         )
         .bind(&id)
         .bind(user_id)
@@ -474,10 +526,85 @@ impl AuthRepo {
         .bind(now.to_rfc3339())
         .bind(label)
         .bind(&prefix)
+        .bind(&scope_json)
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("issue mcp token: {e}")))?;
-        Ok(token)
+        Ok((
+            token,
+            McpTokenInfo {
+                id,
+                user_id: user_id.clone(),
+                username,
+                label: label.map(str::to_owned),
+                token_prefix: prefix,
+                scope: scope.clone(),
+                created_at: now,
+                last_seen_at: now,
+                expires_at,
+            },
+        ))
+    }
+
+    /// List every outward MCP token (across all users), newest first, with the
+    /// owning username + per-token scope. Never returns secrets. For the admin
+    /// management UI.
+    pub async fn list_mcp_tokens(&self) -> Result<Vec<McpTokenInfo>> {
+        let rows = sqlx::query(
+            "SELECT a.id, a.user_id, a.label, a.token_prefix, a.mcp_scope,
+                    a.created_at, a.last_seen_at, a.expires_at, u.username
+             FROM auth_sessions a JOIN users u ON u.id = a.user_id
+             WHERE a.kind = 'mcp'
+             ORDER BY a.created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("list mcp tokens: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let raw: Option<String> = r.get("mcp_scope");
+            let scope = raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<McpScope>(s).ok())
+                .unwrap_or_else(McpScope::unrestricted);
+            out.push(McpTokenInfo {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                username: r.get("username"),
+                label: r.get("label"),
+                token_prefix: r.get("token_prefix"),
+                scope,
+                created_at: parse_ts(&r.get::<String, _>("created_at"))?,
+                last_seen_at: parse_ts(&r.get::<String, _>("last_seen_at"))?,
+                expires_at: parse_ts(&r.get::<String, _>("expires_at"))?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Revoke ONE outward MCP token by id. Returns `true` iff a `kind='mcp'` row
+    /// with that id existed and was deleted. Evicts the owner from the auth cache
+    /// so the revocation takes effect immediately (the token's cached context, if
+    /// any, is dropped). Used by the per-token management UI.
+    pub async fn revoke_mcp_token_by_id(&self, id: &Id) -> Result<bool> {
+        // Read the owner first so we can evict the cache (keyed by token hash, but
+        // evict_user is the precise, cheap coarse hammer we already expose).
+        let owner: Option<String> =
+            sqlx::query("SELECT user_id FROM auth_sessions WHERE id = ? AND kind = 'mcp'")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| Error::Internal(format!("revoke mcp token (lookup): {e}")))?
+                .map(|r| r.get::<String, _>("user_id"));
+        let res = sqlx::query("DELETE FROM auth_sessions WHERE id = ? AND kind = 'mcp'")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("revoke mcp token: {e}")))?;
+        if let (Some(cache), Some(uid)) = (&self.cache, owner) {
+            cache.evict_user(&uid);
+        }
+        Ok(res.rows_affected() > 0)
     }
 
     /// Revoke every `kind='mcp'` token for a user (used when rotating/disabling the
@@ -488,6 +615,9 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke mcp tokens: {e}")))?;
+        if let Some(cache) = &self.cache {
+            cache.evict_user(user_id);
+        }
         Ok(res.rows_affected())
     }
 
@@ -1152,6 +1282,118 @@ mod tests {
         assert!(repo.list_api_tokens(&uid).await.unwrap().is_empty());
         // A second revoke of the same id is a no-op (returns false).
         assert!(!repo.revoke_api_token(&uid, &info.id).await.unwrap());
+    }
+
+    /// A scoped MCP token: mint with a non-trivial [`McpScope`] → authenticate →
+    /// the resolved [`AuthContext`] carries `mcp_only` AND the exact scope → it
+    /// appears in the cross-user list with the owning username → revoke by id.
+    #[tokio::test]
+    async fn mcp_token_scope_round_trips_through_authenticate() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let uid = seed_user(&pool, "carol").await;
+
+        let scope = McpScope {
+            tools: Some(vec!["list_workflows".into(), "get_workflow".into()]),
+            allow_writes: false,
+            workspace_id: Some("ws-1".into()),
+        };
+        let (token, info) = repo
+            .issue_mcp_token_with_scope(&uid, Some("ci-readonly"), &scope)
+            .await
+            .unwrap();
+        assert_eq!(info.user_id, uid);
+        assert_eq!(info.username, "carol");
+        assert_eq!(info.scope, scope);
+        assert_eq!(info.token_prefix, token.chars().take(12).collect::<String>());
+
+        // authenticate() resolves the per-token scope onto the AuthContext.
+        let ctx = repo.authenticate(&token).await.unwrap();
+        assert!(ctx.mcp_only, "an mcp token must be mcp_only");
+        let resolved = ctx.mcp_scope.expect("mcp token must carry a scope");
+        assert_eq!(resolved, scope);
+        // The scope actually denies an out-of-scope / mutating tool.
+        assert!(resolved.deny_reason("list_repos", false, None).is_some());
+        assert!(resolved.deny_reason("run_workflow", true, None).is_some());
+        assert!(resolved
+            .deny_reason("list_workflows", false, Some("ws-1"))
+            .is_none());
+
+        // It is listed across users with owner metadata (never the secret).
+        let listed = repo.list_mcp_tokens().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, info.id);
+        assert_eq!(listed[0].username, "carol");
+        assert_eq!(listed[0].scope, scope);
+
+        // Revoke by id; it stops authenticating and leaves the list empty.
+        assert!(repo.revoke_mcp_token_by_id(&info.id).await.unwrap());
+        assert!(
+            matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
+            "revoked mcp token must no longer authenticate"
+        );
+        assert!(repo.list_mcp_tokens().await.unwrap().is_empty());
+        assert!(!repo.revoke_mcp_token_by_id(&info.id).await.unwrap());
+    }
+
+    /// A legacy `issue_mcp_token` (no explicit scope) resolves to the unrestricted
+    /// scope, preserving pre-migration behaviour (full access, writes allowed).
+    #[tokio::test]
+    async fn legacy_mcp_token_is_unrestricted() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let uid = seed_user(&pool, "dave").await;
+
+        let token = repo.issue_mcp_token(&uid, Some("legacy")).await.unwrap();
+        let ctx = repo.authenticate(&token).await.unwrap();
+        let scope = ctx.mcp_scope.expect("mcp token carries a scope");
+        assert_eq!(scope, McpScope::unrestricted());
+        // Unrestricted ⇒ even a mutating tool passes the scope gate.
+        assert!(scope.deny_reason("run_workflow", true, Some("any")).is_none());
+    }
+
+    /// Multiple MCP tokens for DIFFERENT users coexist, each with its own access.
+    #[tokio::test]
+    async fn multiple_mcp_tokens_per_user_coexist() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let alice = seed_user(&pool, "alice2").await;
+        let bob = seed_user(&pool, "bob2").await;
+
+        let ro = McpScope {
+            tools: None,
+            allow_writes: false,
+            workspace_id: None,
+        };
+        let rw = McpScope::unrestricted();
+        let (t_alice, _) = repo
+            .issue_mcp_token_with_scope(&alice, Some("alice-ro"), &ro)
+            .await
+            .unwrap();
+        let (t_bob, _) = repo
+            .issue_mcp_token_with_scope(&bob, Some("bob-rw"), &rw)
+            .await
+            .unwrap();
+
+        // Alice's token authenticates as Alice and is read-only.
+        let ca = repo.authenticate(&t_alice).await.unwrap();
+        assert_eq!(ca.effective_user.id, alice);
+        assert!(ca
+            .mcp_scope
+            .unwrap()
+            .deny_reason("run_workflow", true, None)
+            .is_some());
+        // Bob's token authenticates as Bob and permits writes.
+        let cb = repo.authenticate(&t_bob).await.unwrap();
+        assert_eq!(cb.effective_user.id, bob);
+        assert!(cb
+            .mcp_scope
+            .unwrap()
+            .deny_reason("run_workflow", true, None)
+            .is_none());
+
+        // Both are visible in the cross-user list.
+        assert_eq!(repo.list_mcp_tokens().await.unwrap().len(), 2);
     }
 
     /// `revoke_api_token` is scoped to the owner: it must not delete another

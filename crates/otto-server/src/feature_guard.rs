@@ -91,13 +91,23 @@ where
         // leaked from an external agent's `.mcp.json` cannot bypass the control
         // plane by calling feature endpoints directly. Deny-by-default.
         if ctx.mcp_only {
+            // The Streamable-HTTP transport (`POST /mcp/http`, plus its `GET`
+            // 405-probe) is the modern way an external client reaches the otto.*
+            // tools over HTTP; the legacy invoke choke point + status read stay
+            // permitted for the stdio bridge. EVERYTHING else is denied so a
+            // leaked `kind='mcp'` token can never reach a feature endpoint
+            // directly (design §14 F1).
             let allowed = (method == Method::POST && template == "/api/v1/mcp/otto-tools/invoke")
-                || (method == Method::GET && template == "/api/v1/mcp/otto-server");
+                || (method == Method::GET && template == "/api/v1/mcp/otto-server")
+                || (template == "/api/v1/mcp/http"
+                    && (method == Method::POST || method == Method::GET));
             return if allowed {
                 next.run(req).await
             } else {
-                forbidden("mcp-restricted token: only /mcp/otto-tools/invoke is permitted")
-                    .into_response()
+                forbidden(
+                    "mcp-restricted token: only /mcp/http and /mcp/otto-tools/invoke are permitted",
+                )
+                .into_response()
             };
         }
         if let Some(scope) = ctx.scope.clone() {

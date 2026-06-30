@@ -1,0 +1,20 @@
+-- Per-token permission scope for the outward "Otto as an MCP server".
+--
+-- Until now a `kind='mcp'` token was effectively one-per-user and unlocked the
+-- whole globally-enabled tool set. To let MULTIPLE tokens (and multiple users)
+-- have DIFFERENT accesses, each `kind='mcp'` row may now carry a JSON scope that
+-- the governed invoke choke point enforces on every `otto.*` tool call (over
+-- both the new HTTP transport and the legacy stdio path):
+--
+--   {
+--     "tools": ["list_workflows", "run_workflow"] | null,  -- null = all enabled
+--     "allow_writes": false,                               -- gate mutating tools
+--     "workspace_id": "ws_..." | null                      -- optional pin
+--   }
+--
+-- A NULL column means "unrestricted" (legacy behaviour) so every token minted
+-- before this migration keeps full access. The scope is immutable for the life
+-- of a token (changing access = revoke + re-mint), which is why the short-TTL
+-- auth cache can safely carry it. Only `kind='mcp'` rows ever read this column;
+-- it is ignored for every other token kind.
+ALTER TABLE auth_sessions ADD COLUMN mcp_scope TEXT;

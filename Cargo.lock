@@ -3201,6 +3201,7 @@ dependencies = [
  "otto-core",
  "otto-state",
  "rand 0.8.6",
+ "serde_json",
  "sha2",
  "sqlx",
  "tokio",

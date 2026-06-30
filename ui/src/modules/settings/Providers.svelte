@@ -50,6 +50,12 @@
   let lastRun: string | null = $state(null);
   let savingAuto = $state(false);
 
+  // Skip permission prompts (settings key `agent_skip_permissions`, default ON).
+  // On = built-in agents launch with their bypass flag (unattended); off = they
+  // use their own ask/auto permission mode.
+  let skipPermissions = $state(true);
+  let savingSkip = $state(false);
+
   // Providers offered in the default-agent picker: the live registry from
   // /meta (built-ins + custom overrides), falling back to the built-in names.
   const providers = $derived(auth.meta?.providers ?? BUILTINS.map((b) => b.name));
@@ -89,6 +95,7 @@
           ...((allSettings['cli_auto_update'] as Partial<CliAutoUpdate> | undefined) ?? {}),
         };
         lastRun = (allSettings['cli_auto_update_last_run'] as string | undefined) ?? null;
+        skipPermissions = (allSettings['agent_skip_permissions'] as boolean | undefined) ?? true;
       } catch {
         toasts.error('Could not load provider settings');
       } finally {
@@ -178,6 +185,27 @@
       toasts.error('Save failed', e instanceof Error ? e.message : String(e));
     } finally {
       savingAuto = false;
+    }
+  }
+
+  async function saveSkipPermissions(): Promise<void> {
+    savingSkip = true;
+    try {
+      allSettings = await api.put<Record<string, unknown>>('/settings', {
+        ...allSettings,
+        agent_skip_permissions: skipPermissions,
+      });
+      skipPermissions = (allSettings['agent_skip_permissions'] as boolean | undefined) ?? true;
+      await auth.refreshMeta();
+      toasts.success(
+        skipPermissions ? 'Permission prompts skipped' : 'Permission prompts enabled',
+        'Applies to new sessions; running sessions are unchanged.',
+      );
+    } catch (e) {
+      skipPermissions = !skipPermissions; // revert the optimistic toggle on failure
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      savingSkip = false;
     }
   }
 
@@ -287,6 +315,26 @@
       <p class="dim sm">
         The agent CLI used for new sessions and channel replies unless explicitly
         overridden.
+      </p>
+    </div>
+
+    <div class="section">
+      <div class="label">Permissions</div>
+      <label class="toggle-row">
+        <input
+          type="checkbox"
+          bind:checked={skipPermissions}
+          onchange={saveSkipPermissions}
+          disabled={savingSkip}
+        />
+        <span>Skip permission prompts — run agents unattended</span>
+      </label>
+      <p class="dim sm">
+        On (default): built-in agents launch with their bypass flag
+        (<code>--dangerously-skip-permissions</code>; codex
+        <code>--dangerously-bypass-approvals-and-sandbox</code>) so tool use never blocks.
+        Turn off to use each CLI's own default permission mode (ask / auto) — tool use then
+        prompts in the session terminal. Applies to new sessions; running ones are unchanged.
       </p>
     </div>
 

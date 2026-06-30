@@ -35,6 +35,24 @@ pub async fn put_all(
     if let Some(value) = body.get("providers") {
         ctx.manager.providers().reload(Some(value));
     }
+    // The skip-permissions opt-out applies immediately too: rebuild the registry
+    // against the current `providers` override with the new mode. New spawns pick
+    // it up; running sessions are untouched.
+    if let Some(value) = body.get("agent_skip_permissions") {
+        let skip = value.as_bool().unwrap_or(true);
+        let overrides = repo.get("providers").await.ok().flatten();
+        ctx.manager
+            .providers()
+            .set_skip_permissions(skip, overrides.as_ref());
+        ctx.audit(NewAuditEntry {
+            user_id: Some(user.id.clone()),
+            action: "agent_skip_permissions.toggle".into(),
+            target: Some(if skip { "on" } else { "off" }.into()),
+            detail: None,
+            ip: None,
+        })
+        .await;
+    }
 
     // Audit the change. The list of changed keys is the durable record; secret
     // values are deliberately NOT captured. The network listener is a setting,

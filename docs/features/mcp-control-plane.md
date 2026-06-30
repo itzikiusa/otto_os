@@ -41,7 +41,8 @@ the token kind, and the routes.
 | **Two halves** | (A) a **control plane** for registered MCP servers/tools; (B) **Otto-as-MCP-server** — Otto's own `otto.*` feature tools (read + write, every feature) served to external agents. |
 | **Outbound client** | `otto-mcp` connects out to each server: `stdio` (spawn a command) or `http` (Streamable-HTTP, SSRF-pinned). |
 | **Governance** | One pipeline (`McpService::invoke`): allowlist → per-tool permission → policy → risk/approval → dry-run → execute → guaranteed audit → stats. |
-| **Outward server** | `ottod mcp-server` (stdio), authenticated by a **restricted `kind='mcp'` token** that can reach only the governed choke point. |
+| **Outward server** | `ottod mcp-server` (stdio) **and** the Streamable-HTTP transport `POST /mcp/http`, authenticated by a **restricted `kind='mcp'` token** that can reach only the governed choke point. Reachable over loopback HTTP and (opt-in) the TLS `network_listener`. |
+| **Scoped tokens** | **Multiple** MCP tokens, each owned by a user and carrying an **McpScope** (tools / read-only / workspace pin) enforced at the choke point — different users get different access. `GET/POST/DELETE /mcp/tokens` (`mcp:admin`). |
 | **Gateway** | `ottod mcp-tools` surfaces governed downstream tools (namespaced `mcp__<server>__<tool>`) and proxies them through the same pipeline. |
 | **Persistence** | SQLite (migration **0077**): augmented `mcp_servers` + `mcp_tools`, `mcp_allowlist`, `mcp_policies`, `mcp_call_log`, `mcp_approvals`. |
 | **RBAC** | `Feature::Mcp` (`mcp`): reads = **View**, mutations/invoke = **Edit**, posture (policy writes/import, outward config, approvals) = **Admin**; stdio registration = **Admin** in-handler. |
@@ -150,6 +151,64 @@ external agent's `.mcp.json`:
 `ottod mcp-server` reads `OTTO_API_TOKEN` (the restricted token) and optionally
 `OTTO_MCP_BASE` (defaults to `http://127.0.0.1:<port>`). It is **off by default**
 (`mcp_otto_server_enabled = false`) — nothing is exposed until an admin enables it.
+
+### 3.2.1 Reach it over HTTP, not only locally — the Streamable-HTTP transport
+
+The stdio bridge above requires `ottod` on the **same machine**. For an external
+client to reach Otto's tools **over HTTP**, the daemon also serves the MCP
+**Streamable-HTTP transport** at:
+
+```
+POST {base}/api/v1/mcp/http       Authorization: Bearer <mcp-token>
+```
+
+It speaks JSON-RPC 2.0 (`initialize` / `tools/list` / `tools/call` / `ping`), one
+request/response per HTTP round trip. A client points straight at the URL — no local
+subprocess. Example (Claude Code):
+
+```
+claude mcp add --transport http otto http://127.0.0.1:7700/api/v1/mcp/http \
+  --header "Authorization: Bearer <mcp-token>"
+```
+
+- On the **loopback** listener it works for same-machine HTTP clients.
+- Over the opt-in **`network_listener`** (off by default; binds `0.0.0.0` with a
+  self-signed TLS cert) it works for **remote** clients at
+  `https://<host>:<port>/api/v1/mcp/http` — *MCP over HTTP, not only locally*.
+
+The **Otto Server** tab surfaces the loopback URL and an **Allow network access**
+toggle (it writes the `network_listener` setting; a daemon restart applies it). A
+`kind='mcp'` token is route-confined by the feature guard to `/mcp/http` (+ the legacy
+`/mcp/otto-tools/invoke` and `GET /mcp/otto-server`), so even leaked it can never reach
+a feature endpoint directly. `GET /mcp/http` returns `405` (no standalone SSE stream).
+
+### 3.2.2 Multiple tokens, different users, different access
+
+Instead of one token per user, an admin can mint **many scoped MCP tokens** — the
+mechanism for *different users have different accesses*. Each token is owned by an Otto
+user (identity + that user's base RBAC) **and** carries an **McpScope**:
+
+| Field | Meaning |
+|-------|---------|
+| `tools` | bare tool names this token may call; omit/`null` = every globally-enabled tool |
+| `allow_writes` | `false` (default) ⇒ every mutating tool is denied — a read-only token |
+| `workspace_id` | optional pin; a call to another workspace is denied |
+
+The scope is enforced at the **single governed choke point** (`governed_invoke`), so it
+applies identically to the HTTP transport and the legacy stdio path: `tools/list` only
+shows tools the scope permits (a read-only token never even sees a mutating tool), and
+`tools/call` denies an out-of-scope/mutating/other-workspace call with `token scope: …`
+*before* the global-enable and approval gates. The scope can never *widen* access — it
+is always intersected with the server's enabled set and the owner's RBAC.
+
+Manage tokens in the **Otto Server → Access tokens** panel, or over the API
+(`mcp:admin`):
+
+```
+GET    /api/v1/mcp/tokens            # list all (no secrets), with owner + scope
+POST   /api/v1/mcp/tokens            # {user_id?, label?, scope?} → {token, info} (once)
+DELETE /api/v1/mcp/tokens/{id}       # revoke (evicts the auth cache immediately)
+```
 
 ### 3.3 The outward tool catalog — every Otto feature
 

@@ -616,6 +616,7 @@ mod tests {
             effective_user: u,
             scope,
             mcp_only: false,
+            mcp_scope: None,
         }
     }
 

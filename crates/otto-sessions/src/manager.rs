@@ -1984,8 +1984,14 @@ impl SessionManager {
                     code = wait_exit_code(&mut exit_rx) => {
                         let _ = code;
                         // Evict the dead handle so its emulator + ring buffer
-                        // are dropped (no accumulation across many sessions).
-                        live.remove(&id);
+                        // are dropped (no accumulation across many sessions) —
+                        // but ONLY if `live` still maps THIS handle. A respawn
+                        // (restart/ensure_live) kills this PTY and inserts a
+                        // fresh handle under the same id; without the identity
+                        // check, this superseded task's exit would evict the new
+                        // handle, orphaning its process (alive but untracked, so
+                        // suspend/archive never kill it). See `evict_if_same`.
+                        evict_if_same(&live, &id, &handle);
                         // If this exit was caused by a deliberate suspend (PTY
                         // killed to free RAM), the session stays resumable: mark
                         // it Reconnectable, not Exited. `suspend()` also writes
@@ -2007,6 +2013,21 @@ impl SessionManager {
             }
         });
     }
+}
+
+/// Remove `id`'s entry from `live` **only if it still maps `handle`** (pointer
+/// identity). Returns true iff it removed.
+///
+/// This is the fix for the orphaned-process leak. The per-session status task
+/// calls it when its child exits. Removing unconditionally was the bug: a
+/// respawn (`restart` / `ensure_live`) kills the old PTY and inserts a NEW
+/// handle under the same id; the OLD handle's status task, woken by that kill,
+/// could run AFTER the new insert and evict the fresh handle — leaving the new
+/// process alive but no longer in `live`, so `suspend` / `archive` (which only
+/// kill what is in `live`) never terminated it. The identity check makes a
+/// superseded handle's exit a no-op against a replacement entry.
+fn evict_if_same(live: &DashMap<Id, Arc<PtyHandle>>, id: &Id, handle: &Arc<PtyHandle>) -> bool {
+    live.remove_if(id, |_, h| Arc::ptr_eq(h, handle)).is_some()
 }
 
 /// Decide whether a session should be sandboxed and with what network posture,
@@ -2218,6 +2239,43 @@ mod tests {
             .await
             .unwrap();
         s.id
+    }
+
+    /// Root-cause regression for the orphaned-process leak: a superseded handle's
+    /// status-task exit must NOT evict a freshly-respawned handle from `live`.
+    /// With the old unconditional `live.remove(id)` the replacement was evicted
+    /// (untracked → never killed by suspend/archive → orphan). `evict_if_same`
+    /// makes the stale exit a no-op against the replacement, while the
+    /// replacement's own exit still evicts it.
+    #[tokio::test]
+    async fn evict_if_same_ignores_superseded_handle() {
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 30".into()],
+            cwd: None,
+            env: vec![],
+        };
+        let live: DashMap<Id, Arc<PtyHandle>> = DashMap::new();
+        let id: Id = "S1".into();
+        let h1 = Arc::new(PtyHandle::spawn(&spec).expect("spawn h1")); // old, superseded
+        let h2 = Arc::new(PtyHandle::spawn(&spec).expect("spawn h2")); // the respawn
+
+        // After a restart, `live` maps the NEW handle.
+        live.insert(id.clone(), Arc::clone(&h2));
+
+        // The OLD handle's status task fires on its exit → must be a no-op here.
+        assert!(
+            !evict_if_same(&live, &id, &h1),
+            "a superseded handle must not remove the replacement entry"
+        );
+        assert!(live.contains_key(&id), "replacement must stay tracked");
+        assert!(Arc::ptr_eq(live.get(&id).unwrap().value(), &h2));
+
+        // The replacement's OWN exit does evict it.
+        assert!(evict_if_same(&live, &id, &h2));
+        assert!(!live.contains_key(&id));
+
+        // Drop kills both children (RAII); no orphan left behind.
     }
 
     #[tokio::test]

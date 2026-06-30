@@ -36,7 +36,12 @@ bridges so an agent can work a ticket from a chat thread.
 - **Agent sessions** — run `claude`, `codex`, `agy` (and a plain shell) in real
   PTY-backed terminals you can watch, split, and type into. Sessions survive
   restarts (resumable), idle-suspend to save memory, and auto-trust their
-  workspace folder so they never stall on a permission prompt.
+  workspace folder so they never stall on a permission prompt. By default agents
+  launch in a **skip-permissions** mode (`--dangerously-skip-permissions`, or
+  codex's `--dangerously-bypass-approvals-and-sandbox`) so tool use never blocks;
+  a single **Settings → Providers → Permissions** checkbox opts out and falls back
+  to each CLI's own ask / auto permission mode (tool use then prompts in the
+  session terminal). Applies to new sessions.
 - **Git & Pull Requests** — browse repos, stage/commit/discard, view diffs,
   resolve merge conflicts, and **create PRs** with an **agent-drafted title +
   description** (it reads your branch diff), pushing the branch automatically.
@@ -158,10 +163,19 @@ bridges so an agent can work a ticket from a chat thread.
   results are row-capped, PII-masked, and audited. On by default; attached to Claude
   via `.mcp.json` and to Codex via per-spawn `-c` overrides. **Outbound:** every MCP
   tool your agents call passes a governance pipeline (allowlist → policy →
-  single-use approval → dry-run → fail-closed audit → stats). **Outward:**
-  `ottod mcp-server` exposes a set of `otto.*` tools (codebase search, context
-  packets, goal loops, work items, read-only DB, PR drafts, proof packs, human
-  approval) to external MCP clients behind a restricted, single-purpose token.
+  single-use approval → dry-run → fail-closed audit → stats). **Outward:** Otto
+  exposes its own `otto.*` tools — across every feature (codebase search, context
+  packets, workflows, git/PRs, issues, brokers, swarm, vault, read-only DB, proof
+  packs, scheduled tasks, …) — to external MCP clients **over HTTP, not only
+  locally**: a **Streamable-HTTP** endpoint (`POST /api/v1/mcp/http`) a client
+  connects to with a bearer token, no local subprocess (the `ottod mcp-server`
+  stdio bridge still works too). You can mint **multiple scoped tokens** — each
+  owned by an Otto **user** and carrying its own permission set (which tools,
+  **read-only vs writes**, an optional workspace pin), enforced at the one
+  governed choke point — so **different users get different access**. Served on
+  loopback always, and reachable from another machine over the opt-in **TLS
+  network listener** (or fronted by a tunnel). Manage tokens and the HTTP/network
+  settings in **MCP → Otto Server**.
 - **Workflows** — a visual workflow engine that chains steps (agent prompts, HTTP
   requests, DB queries, broker peeks, channel notifications, human approvals,
   swarm tasks, …) into runnable graphs. Manual, webhook, and event triggers fire
@@ -304,7 +318,8 @@ touch-readable; see `docs/superpowers/specs/` for the design notes.
   Telegram, Jira, connection passwords) are stored in the **macOS Keychain** via
   `otto-keychain`; the daemon DB only stores opaque key references.
 - The daemon listens on **loopback only** unless you explicitly enable a network
-  listener in settings.
+  listener in settings (it then also binds `0.0.0.0` over **TLS**, self-signed) —
+  which is also how the MCP HTTP transport becomes reachable from another machine.
 
 ## Project layout
 
