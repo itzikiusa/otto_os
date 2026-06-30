@@ -7,10 +7,20 @@
   // by category, with per-group enable/disable) + a copy-pasteable `.mcp.json`
   // install snippet for the external agent.
   import Icon from '../../lib/components/Icon.svelte';
-  import { mcpCpApi } from '../../lib/api/mcp';
+  import { mcpCpApi, mcpTokensApi } from '../../lib/api/mcp';
+  import { api, baseUrl } from '../../lib/api/client';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { McpOttoServerStatus, McpOttoToolInfo } from '../../lib/api/types';
+  import type {
+    McpOttoServerStatus,
+    McpOttoToolInfo,
+    McpScope,
+    McpTokenInfo,
+    User,
+  } from '../../lib/api/types';
 
   // A small fallback catalog shown only if the daemon's admin route isn't
   // reachable. The live, full catalog (every feature category) comes from the
@@ -145,6 +155,168 @@
       2,
     ),
   );
+
+  // ---------------------------------------------------------------------------
+  // HTTP transport + network exposure (R1: MCP over HTTP, not only locally)
+  // ---------------------------------------------------------------------------
+  const HTTP_PATH = '/api/v1/mcp/http';
+  /** The transport URL reachable from THIS client (loopback when local). */
+  const httpUrl = $derived(`${baseUrl()}${HTTP_PATH}`);
+
+  let allSettings = $state<Record<string, unknown>>({});
+  let netEnabled = $state(false);
+  let netPort = $state(7700);
+  let netBusy = $state(false);
+
+  async function loadNetwork(): Promise<void> {
+    try {
+      allSettings = await api.get<Record<string, unknown>>('/settings');
+      const nl = allSettings['network_listener'] as { enabled?: boolean; port?: number } | undefined;
+      netEnabled = nl?.enabled ?? false;
+      netPort = nl?.port ?? 7700;
+    } catch {
+      /* non-admin or unreachable — the HTTP panel still shows the loopback URL */
+    }
+  }
+
+  async function toggleNetwork(): Promise<void> {
+    netBusy = true;
+    try {
+      const next = !netEnabled;
+      allSettings = await api.put<Record<string, unknown>>('/settings', {
+        ...allSettings,
+        network_listener: { enabled: next, port: netPort },
+      });
+      netEnabled = next;
+      toasts.success(
+        next ? 'Network access enabled' : 'Network access disabled',
+        'Restart the daemon to apply the listener change.',
+      );
+    } catch (e) {
+      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      netBusy = false;
+    }
+  }
+
+  /** A ready-to-paste `claude mcp add` command for the HTTP transport. */
+  function clientCommand(token: string): string {
+    return `claude mcp add --transport http otto ${httpUrl} --header "Authorization: Bearer ${token}"`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Multiple scoped tokens (R2/R3: many tokens, different users, different access)
+  // ---------------------------------------------------------------------------
+  const isMcpAdmin = $derived(auth.can('mcp', 'admin'));
+
+  let tokens = $state<McpTokenInfo[]>([]);
+  let users = $state<User[]>([]);
+  let tokensLoaded = $state(false);
+
+  // Create-token form.
+  let showCreate = $state(false);
+  let fOwner = $state(''); // user id; '' = the caller (self)
+  let fLabel = $state('');
+  let fAllowWrites = $state(false);
+  let fRestrictTools = $state(false);
+  let fTools = $state<Set<string>>(new Set());
+  let fWorkspace = $state(''); // '' = no pin
+  let creating = $state(false);
+  /** A freshly created token's secret + metadata, shown ONCE. */
+  let createdToken = $state<{ secret: string; info: McpTokenInfo } | null>(null);
+
+  async function loadTokens(): Promise<void> {
+    if (!isMcpAdmin) return;
+    try {
+      const r = await mcpTokensApi.list();
+      tokens = r.tokens;
+    } catch {
+      /* surfaced only as an empty list — the create panel still works */
+    } finally {
+      tokensLoaded = true;
+    }
+  }
+
+  async function loadUsers(): Promise<void> {
+    if (!isMcpAdmin) return;
+    try {
+      users = await api.get<User[]>('/users');
+    } catch {
+      users = []; // not users:admin — owner defaults to self, which is fine
+    }
+  }
+
+  function bare(name: string): string {
+    return name.replace(/^otto\./, '');
+  }
+
+  function toggleFormTool(name: string): void {
+    const b = bare(name);
+    const next = new Set(fTools);
+    if (next.has(b)) next.delete(b);
+    else next.add(b);
+    fTools = next;
+  }
+
+  async function createToken(): Promise<void> {
+    creating = true;
+    try {
+      const scope: McpScope = {
+        tools: fRestrictTools ? [...fTools] : null,
+        allow_writes: fAllowWrites,
+        workspace_id: fWorkspace || null,
+      };
+      const resp = await mcpTokensApi.create({
+        user_id: fOwner || undefined,
+        label: fLabel.trim() || undefined,
+        scope,
+      });
+      createdToken = { secret: resp.token, info: resp.info };
+      toasts.success('MCP token created', 'Copy it now — it is shown only once.');
+      // Reset the form.
+      fLabel = '';
+      fTools = new Set();
+      fRestrictTools = false;
+      fAllowWrites = false;
+      fWorkspace = '';
+      fOwner = '';
+      showCreate = false;
+      await loadTokens();
+    } catch (e) {
+      toasts.error('Create failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      creating = false;
+    }
+  }
+
+  async function revokeToken(t: McpTokenInfo): Promise<void> {
+    const ok = await confirmer.ask(
+      `Revoke MCP token ${t.label ? `“${t.label}” ` : ''}(${t.token_prefix}…) for ${t.username}? Any client using it stops working immediately.`,
+      { title: 'Revoke token', confirmLabel: 'Revoke', danger: true },
+    );
+    if (!ok) return;
+    try {
+      await mcpTokensApi.revoke(t.id);
+      toasts.success('Token revoked');
+      await loadTokens();
+    } catch (e) {
+      toasts.error('Revoke failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function scopeSummary(s: McpScope): string {
+    const toolPart =
+      s.tools == null ? 'all tools' : `${s.tools.length} tool${s.tools.length === 1 ? '' : 's'}`;
+    const writePart = s.allow_writes ? 'read + write' : 'read-only';
+    const wsPart = s.workspace_id ? ` • 1 workspace` : '';
+    return `${toolPart} • ${writePart}${wsPart}`;
+  }
+
+  $effect(() => {
+    void loadTokens();
+    void loadUsers();
+    void loadNetwork();
+  });
 </script>
 
 <div class="otto">
@@ -245,6 +417,146 @@
       <button class="btn xs copy" onclick={() => void copy(snippet, '.mcp.json')}><Icon name="file" size={12} /> Copy</button>
       <pre>{snippet}</pre>
     </div>
+
+    <!-- HTTP transport access (R1: MCP over HTTP, not only locally) -->
+    <h4 class="sec">HTTP access</h4>
+    <p class="muted small">
+      External MCP clients can connect over HTTP with a bearer token — no local subprocess. Reachable on
+      the loopback URL below at all times; enable network access to reach it over TLS from other machines.
+    </p>
+    <div class="urlrow">
+      <code class="url" data-testid="mcp-http-url">{httpUrl}</code>
+      <button class="btn xs" onclick={() => void copy(httpUrl, 'URL')}>Copy URL</button>
+    </div>
+    <label class="netrow">
+      <input
+        type="checkbox"
+        checked={netEnabled}
+        disabled={netBusy || !isMcpAdmin}
+        onchange={() => void toggleNetwork()}
+      />
+      <div class="t-meta">
+        <span class="t-name">Allow network access (TLS) on port {netPort}</span>
+        <span class="t-desc">
+          Binds the daemon on <code>0.0.0.0:{netPort}</code> with a self-signed certificate so remote clients
+          can reach <code>https://&lt;this-host&gt;:{netPort}{HTTP_PATH}</code>. Off by default; restart the daemon to apply.
+        </span>
+      </div>
+    </label>
+
+    <!-- Scoped tokens (R2/R3: multiple tokens, different users, different access) -->
+    {#if isMcpAdmin}
+      <div class="tools-head">
+        <h4 class="sec">Access tokens</h4>
+        <button class="btn xs" onclick={() => (showCreate = !showCreate)}>
+          {showCreate ? 'Cancel' : 'New token'}
+        </button>
+      </div>
+      <p class="muted small">
+        Each token authenticates as a user and carries its own scope (tools, read-only vs writes, an optional
+        workspace pin) — so different users get different access over the HTTP transport.
+      </p>
+
+      {#if createdToken}
+        <div class="token-once" data-testid="mcp-created-token">
+          <div class="to-head">
+            <Icon name="key" size={13} />
+            <strong>New token for {createdToken.info.username} — shown once. Copy it now.</strong>
+            <span class="grow"></span>
+            <button class="btn xs" onclick={() => void copy(createdToken!.secret, 'Token')}>Copy token</button>
+            <button class="btn xs" onclick={() => void copy(clientCommand(createdToken!.secret), 'Command')}>Copy command</button>
+            <button class="btn xs" onclick={() => (createdToken = null)}>Dismiss</button>
+          </div>
+          <code class="token">{createdToken.secret}</code>
+          <code class="token cmd">{clientCommand(createdToken.secret)}</code>
+        </div>
+      {/if}
+
+      {#if showCreate}
+        <div class="create">
+          <div class="frow">
+            <label class="fld">
+              <span class="lbl">Owner</span>
+              <select class="inp" bind:value={fOwner}>
+                <option value="">Me ({auth.me?.username ?? 'self'})</option>
+                {#each users as u (u.id)}
+                  <option value={u.id}>{u.username}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="fld">
+              <span class="lbl">Label</span>
+              <input class="inp" placeholder="e.g. ci-readonly" bind:value={fLabel} />
+            </label>
+            <label class="fld">
+              <span class="lbl">Workspace pin (optional)</span>
+              <select class="inp" bind:value={fWorkspace}>
+                <option value="">Any workspace</option>
+                {#each ws.workspaces as w (w.id)}
+                  <option value={w.id}>{w.name}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
+          <label class="chk">
+            <input type="checkbox" bind:checked={fAllowWrites} />
+            Allow mutating (write) tools — otherwise the token is read-only
+          </label>
+          <label class="chk">
+            <input type="checkbox" bind:checked={fRestrictTools} />
+            Restrict to specific tools — otherwise every enabled tool
+          </label>
+          {#if fRestrictTools}
+            <div class="tool-pick">
+              {#each groups as g (g.cat)}
+                <div class="pick-grp">
+                  <span class="grp-name">{g.cat}</span>
+                  {#each g.tools as t (t.name)}
+                    <label class="ptool">
+                      <input
+                        type="checkbox"
+                        checked={fTools.has(bare(t.name))}
+                        onchange={() => toggleFormTool(t.name)}
+                      />
+                      <span class="mono">{bare(t.name)}</span>{#if t.mutating}<span class="mut">mutating</span>{/if}
+                    </label>
+                  {/each}
+                </div>
+              {/each}
+            </div>
+          {/if}
+          <div class="cactions">
+            <button
+              class="btn primary"
+              disabled={creating}
+              onclick={() => void createToken()}
+              data-testid="mcp-create-token"
+            >
+              {creating ? 'Creating…' : 'Create token'}
+            </button>
+          </div>
+        </div>
+      {/if}
+
+      <div class="tok-list" data-testid="mcp-tokens">
+        {#if !tokens.length}
+          <p class="muted small pad">{tokensLoaded ? 'No MCP tokens yet.' : 'Loading…'}</p>
+        {:else}
+          {#each tokens as t (t.id)}
+            <div class="tok-row">
+              <div class="tok-main">
+                <span class="tok-label">{t.label || '(no label)'}</span>
+                <span class="tok-prefix mono">{t.token_prefix}…</span>
+              </div>
+              <span class="tok-user">{t.username}</span>
+              <span class="tok-scope muted">{scopeSummary(t.scope)}</span>
+              <span class="tok-seen muted">{rel(t.last_seen_at)}</span>
+              <button class="btn xs danger" onclick={() => void revokeToken(t)}>Revoke</button>
+            </div>
+          {/each}
+        {/if}
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -467,6 +779,146 @@
     padding: 16px;
   }
 
+  /* HTTP access */
+  .urlrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .url {
+    flex: 1 1 auto;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 6px);
+    padding: 8px 10px;
+    color: var(--text);
+    word-break: break-all;
+  }
+  .netrow {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m, 8px);
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+  .netrow input {
+    margin-top: 2px;
+  }
+
+  /* Tokens */
+  .create {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m, 8px);
+    background: var(--surface);
+    padding: 12px;
+  }
+  .frow {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .fld {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1 1 160px;
+  }
+  .lbl {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .inp {
+    font-size: 12px;
+    padding: 5px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 6px);
+    background: var(--bg);
+    color: var(--text);
+  }
+  .chk {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .tool-pick {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 220px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 6px);
+    padding: 10px;
+  }
+  .pick-grp {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .ptool {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .cactions {
+    display: flex;
+    justify-content: flex-end;
+  }
+  .token.cmd {
+    font-size: 11px;
+  }
+  .tok-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m, 8px);
+    overflow: hidden;
+  }
+  .tok-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 12px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+  .tok-row:last-child {
+    border-bottom: none;
+  }
+  .tok-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+  .tok-label {
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .tok-prefix {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .tok-user,
+  .tok-scope,
+  .tok-seen {
+    font-size: 11.5px;
+    flex: none;
+  }
+  .btn.danger {
+    color: var(--danger, #c0392b);
+  }
+
   @media (max-width: 640px) {
     .hero {
       flex-direction: column;
@@ -476,6 +928,10 @@
     }
     .hero-actions .btn {
       flex: 1;
+    }
+    .tok-scope,
+    .tok-seen {
+      display: none;
     }
   }
 </style>

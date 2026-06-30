@@ -242,6 +242,22 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/mcp/otto-server",
             get(crate::mcp_outward::otto_server_status).patch(crate::mcp_outward::otto_server_config),
         )
+        // Streamable-HTTP MCP transport: external clients reach the otto.* tools
+        // over HTTP here (no local stdio subprocess). Confined for kind='mcp'
+        // tokens by the feature guard; per-token scope enforced in the handler.
+        .route(
+            "/mcp/http",
+            post(crate::mcp_http::mcp_http_post).get(crate::mcp_http::mcp_http_get),
+        )
+        // Multiple scoped MCP tokens (the per-user / per-token access layer).
+        .route(
+            "/mcp/tokens",
+            get(crate::mcp_outward::list_mcp_tokens).post(crate::mcp_outward::create_mcp_token),
+        )
+        .route(
+            "/mcp/tokens/{id}",
+            delete(crate::mcp_outward::revoke_mcp_token),
+        )
         .route("/mcp/gateway/tools", get(crate::mcp_outward::gateway_tools))
         .route("/mcp/gateway/invoke", post(crate::mcp_outward::gateway_invoke))
         .route(

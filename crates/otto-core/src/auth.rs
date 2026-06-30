@@ -7,6 +7,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use serde::{Deserialize, Serialize};
+
 use crate::domain::{GitAccount, IssueAccount, Session, User, WorkspaceRole};
 use crate::{Error, Id, Result};
 
@@ -56,6 +58,76 @@ pub struct SessionScope {
     pub otp_pending: bool,
 }
 
+/// The per-token permission scope of a `kind='mcp'` token (the outward "Otto as
+/// an MCP server"). It is the additional narrowing that makes **multiple MCP
+/// tokens with different accesses** possible: every token is owned by a user
+/// (identity + that user's base RBAC) AND carries one of these, applied at the
+/// single governed choke point so it constrains BOTH the HTTP transport and the
+/// legacy stdio path identically.
+///
+/// Stored as JSON in `auth_sessions.mcp_scope` (nullable). A NULL column ⇒
+/// [`McpScope::unrestricted`] ⇒ the legacy single-token behaviour (every
+/// globally-enabled tool, writes allowed) — so pre-existing tokens are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpScope {
+    /// The bare tool names (e.g. `"list_workflows"`, no `otto.` prefix) this
+    /// token may call. `None` ⇒ all globally-enabled tools. `Some(list)` ⇒ only
+    /// those in the list (an empty list reaches nothing). Always intersected with
+    /// the server's global enabled set — a scope never *widens* access.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    /// Whether this token may call **mutating** tools. When `false` (default) every
+    /// mutating/DANGEROUS tool is denied by the scope even if it is in `tools` —
+    /// the natural "read-only token" axis.
+    #[serde(default)]
+    pub allow_writes: bool,
+    /// Optional workspace pin. When set, a tool call whose `workspace_id` argument
+    /// differs is denied. Best-effort: only enforced for tools that take a
+    /// `workspace_id` (tools keyed on a sub-id still defer to the owner's ws role).
+    #[serde(default)]
+    pub workspace_id: Option<Id>,
+}
+
+impl McpScope {
+    /// The legacy/unrestricted scope: every globally-enabled tool, writes allowed,
+    /// no workspace pin. A NULL `mcp_scope` column deserializes to this.
+    pub fn unrestricted() -> Self {
+        Self {
+            tools: None,
+            allow_writes: true,
+            workspace_id: None,
+        }
+    }
+
+    /// Returns `Some(reason)` if this scope **denies** calling `bare_tool` (a bare
+    /// name like `"run_workflow"`), else `None` (the scope permits it — the global
+    /// enable/approval gates still apply downstream). `mutating` is the tool's
+    /// catalog classification; `ws` is the call's `workspace_id` argument if any.
+    ///
+    /// This is the single source of truth for per-token MCP authorization, kept in
+    /// otto-core so it is dependency-free and unit-testable in isolation.
+    pub fn deny_reason(&self, bare_tool: &str, mutating: bool, ws: Option<&str>) -> Option<String> {
+        if let Some(list) = &self.tools {
+            if !list.iter().any(|t| t == bare_tool) {
+                return Some(format!(
+                    "tool '{bare_tool}' is not in this token's allowed set"
+                ));
+            }
+        }
+        if mutating && !self.allow_writes {
+            return Some(format!(
+                "this token is read-only; '{bare_tool}' is a mutating tool"
+            ));
+        }
+        if let (Some(pin), Some(req)) = (self.workspace_id.as_deref(), ws) {
+            if pin != req {
+                return Some(format!("this token is scoped to workspace '{pin}'"));
+            }
+        }
+        None
+    }
+}
+
 /// The resolved identity of an authenticated request: the **real** token owner
 /// (used for audit) and the **effective** user (used for every authorization
 /// decision). For a normal token these are the same user; they diverge only
@@ -87,6 +159,14 @@ pub struct AuthContext {
     /// control plane stays in the path even if the token leaks from a
     /// `.mcp.json` (design §14 F1). `false` for every other token kind.
     pub mcp_only: bool,
+    /// The per-token permission scope, present only for a `kind='mcp'` token
+    /// (`None` for every other kind). A `kind='mcp'` token with a NULL
+    /// `mcp_scope` column resolves to [`McpScope::unrestricted`] here, so legacy
+    /// single-token behaviour is preserved. The governed invoke choke point reads
+    /// this to constrain which `otto.*` tools the token may call (and whether it
+    /// may call mutating ones) — the mechanism behind multiple MCP tokens with
+    /// different accesses.
+    pub mcp_scope: Option<McpScope>,
 }
 
 impl AuthContext {
@@ -352,6 +432,7 @@ mod tests {
             effective_user: u,
             scope: None,
             mcp_only: false,
+            mcp_scope: None,
         };
         assert_eq!(ctx.real_user.id, ctx.effective_user.id);
         assert_eq!(ctx.real_user.username, ctx.effective_user.username);
@@ -376,12 +457,90 @@ mod tests {
                 otp_pending: false,
             }),
             mcp_only: false,
+            mcp_scope: None,
         };
         assert!(ctx.is_scoped());
         let scope = ctx.scope.expect("scoped token must carry a SessionScope");
         assert_eq!(scope.session_id, Id::from("S1"));
         assert_eq!(scope.role, WorkspaceRole::Viewer);
         assert!(!scope.otp_pending, "a plain share is not OTP-pending");
+    }
+
+    // ---- McpScope -----------------------------------------------------------
+
+    #[test]
+    fn unrestricted_scope_permits_everything() {
+        let s = McpScope::unrestricted();
+        assert!(s.deny_reason("run_workflow", true, Some("ws1")).is_none());
+        assert!(s.deny_reason("list_workflows", false, None).is_none());
+    }
+
+    #[test]
+    fn read_only_scope_denies_mutating_tools() {
+        let s = McpScope {
+            tools: None,
+            allow_writes: false,
+            workspace_id: None,
+        };
+        // A read tool is fine.
+        assert!(s.deny_reason("list_workflows", false, None).is_none());
+        // A mutating tool is denied even though the tool list is unrestricted.
+        let reason = s
+            .deny_reason("run_workflow", true, None)
+            .expect("mutating tool must be denied for a read-only token");
+        assert!(reason.contains("read-only"), "got {reason}");
+    }
+
+    #[test]
+    fn tool_allowlist_denies_out_of_scope_tools() {
+        let s = McpScope {
+            tools: Some(vec!["list_workflows".into(), "get_workflow".into()]),
+            allow_writes: true,
+            workspace_id: None,
+        };
+        assert!(s.deny_reason("list_workflows", false, None).is_none());
+        // Not in the list → denied even though writes are allowed.
+        let reason = s
+            .deny_reason("list_repos", false, None)
+            .expect("out-of-scope tool must be denied");
+        assert!(reason.contains("allowed set"), "got {reason}");
+    }
+
+    #[test]
+    fn workspace_pin_denies_other_workspaces() {
+        let s = McpScope {
+            tools: None,
+            allow_writes: true,
+            workspace_id: Some("ws-allowed".into()),
+        };
+        // Matching workspace → allowed.
+        assert!(s
+            .deny_reason("list_sessions", false, Some("ws-allowed"))
+            .is_none());
+        // Different workspace → denied.
+        let reason = s
+            .deny_reason("list_sessions", false, Some("ws-other"))
+            .expect("a different workspace must be denied");
+        assert!(reason.contains("ws-allowed"), "got {reason}");
+        // A call with no workspace arg is not blocked by the pin (best-effort).
+        assert!(s.deny_reason("list_bundled_skills", false, None).is_none());
+    }
+
+    #[test]
+    fn mcp_scope_json_round_trips_and_defaults() {
+        let s = McpScope {
+            tools: Some(vec!["list_workflows".into()]),
+            allow_writes: true,
+            workspace_id: Some("ws1".into()),
+        };
+        let j = serde_json::to_string(&s).unwrap();
+        let back: McpScope = serde_json::from_str(&j).unwrap();
+        assert_eq!(s, back);
+        // Absent fields default (forward-compatible with a minimal stored blob).
+        let minimal: McpScope = serde_json::from_str("{}").unwrap();
+        assert_eq!(minimal.tools, None);
+        assert!(!minimal.allow_writes);
+        assert_eq!(minimal.workspace_id, None);
     }
 
     #[test]

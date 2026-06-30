@@ -13,6 +13,8 @@ import type {
   CreateMcpControlServerReq,
   CreateMcpPolicyReq,
   CreateMcpServerReq,
+  CreateMcpTokenReq,
+  CreateMcpTokenResp,
   DecideMcpApprovalReq,
   EvaluateMcpReq,
   Id,
@@ -26,6 +28,7 @@ import type {
   McpInvokeReq,
   McpInvokeResp,
   McpOttoServerStatus,
+  McpTokenInfo,
   McpPolicy,
   McpPolicyExport,
   McpServer,
@@ -126,4 +129,14 @@ export const mcpCpApi = {
   cpOttoServer: () => api.get<McpOttoServerStatus>(`/mcp/otto-server`),
   cpUpdateOttoServer: (body: UpdateMcpOttoServerReq) =>
     api.patch<McpOttoServerStatus>(`/mcp/otto-server`, body),
+};
+
+/**
+ * Multiple scoped MCP tokens (the per-user / per-token access layer). Admin-only
+ * (mcp:admin). The raw secret is returned exactly once on create.
+ */
+export const mcpTokensApi = {
+  list: () => api.get<{ tokens: McpTokenInfo[] }>(`/mcp/tokens`),
+  create: (body: CreateMcpTokenReq) => api.post<CreateMcpTokenResp>(`/mcp/tokens`, body),
+  revoke: (id: Id) => api.del<void>(`/mcp/tokens/${id}`),
 };

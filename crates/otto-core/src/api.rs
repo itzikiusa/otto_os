@@ -118,6 +118,50 @@ pub struct CreateApiTokenResp {
     pub info: ApiTokenInfo,
 }
 
+/// Metadata for one outward **MCP** token (`kind='mcp'`) — an access token an
+/// external MCP client uses to reach Otto's `otto.*` tools over the HTTP
+/// transport (or the legacy stdio bridge). NEVER carries the secret (only its
+/// prefix); the raw token is returned exactly once at mint time. Unlike
+/// [`ApiTokenInfo`] it also surfaces the owning user and the per-token
+/// [`McpScope`] so an admin can see, at a glance, who holds which access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpTokenInfo {
+    pub id: Id,
+    /// The user this token authenticates as (identity + base RBAC).
+    pub user_id: Id,
+    /// The owning user's username, for display in the management UI.
+    pub username: String,
+    pub label: Option<String>,
+    /// First 12 chars of the raw token, for identification in a list.
+    pub token_prefix: String,
+    /// The per-token permission scope (tools / read-only / workspace pin).
+    pub scope: crate::auth::McpScope,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// `POST /api/v1/mcp/tokens` — mint a scoped MCP token. `user_id` is optional:
+/// an admin may mint a token for another user; when omitted it defaults to the
+/// caller. `scope` defaults to unrestricted (every globally-enabled tool).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateMcpTokenReq {
+    /// Owning user; defaults to the caller when omitted.
+    pub user_id: Option<Id>,
+    /// Human-friendly name, e.g. "ci-readonly" or "alice-laptop".
+    pub label: Option<String>,
+    /// The per-token permission scope. Omitted ⇒ unrestricted.
+    pub scope: Option<crate::auth::McpScope>,
+}
+
+/// Response for `POST /api/v1/mcp/tokens`: the raw secret is returned exactly
+/// once (it is only ever stored hashed) alongside the new token's metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateMcpTokenResp {
+    pub token: String,
+    pub info: McpTokenInfo,
+}
+
 /// Metadata for one scoped **share-link** token (mobile remote-access).
 ///
 /// A share token is a capability bound to ONE session, default read-only, with a

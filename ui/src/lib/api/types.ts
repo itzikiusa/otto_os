@@ -496,6 +496,48 @@ export interface UpdateMcpOttoServerReq {
   rotate_token?: boolean;
 }
 
+/**
+ * The per-token permission set of an outward MCP token. Each token (and each
+ * user) may carry a different one — the mechanism behind "different users have
+ * different accesses" over the MCP HTTP transport.
+ * - `tools`: bare tool names this token may call; omit/`null` = all globally-enabled.
+ * - `allow_writes`: when false (default) every mutating tool is denied.
+ * - `workspace_id`: optional pin; a call to another workspace is denied.
+ */
+export interface McpScope {
+  tools?: string[] | null;
+  allow_writes: boolean;
+  workspace_id?: string | null;
+}
+
+/** Metadata for one outward MCP token. NEVER carries the secret (only its prefix). */
+export interface McpTokenInfo {
+  id: Id;
+  user_id: Id;
+  username: string;
+  label?: string | null;
+  token_prefix: string;
+  scope: McpScope;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+}
+
+/** `POST /mcp/tokens` — mint a scoped MCP token (admin). */
+export interface CreateMcpTokenReq {
+  /** Owning user; defaults to the caller when omitted. */
+  user_id?: Id;
+  label?: string;
+  /** Per-token scope; omitted ⇒ unrestricted (every globally-enabled tool). */
+  scope?: McpScope;
+}
+
+/** `POST /mcp/tokens` response: the raw secret is returned exactly once. */
+export interface CreateMcpTokenResp {
+  token: string;
+  info: McpTokenInfo;
+}
+
 export type GitProviderKind = 'github' | 'bitbucket' | 'gitlab';
 
 export interface GitAccount {

@@ -2064,6 +2064,28 @@ enforce the entity's workspace role.
 | CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated}` |
 | CP30 | POST /api/v1/workspaces/{wid}/mcp/context-packet | mcp:edit + ws viewer | `{query?, story_id?, max_excerpts?}` | context packet |
 | CP31 | GET /api/v1/workspaces/{wid}/mcp/proof-pack | mcp:view + ws viewer | `?repo_id=&branch=&goal_loop_id=` | evidence bundle |
+| CP32 | POST /api/v1/mcp/http | the scoped mcp token (or mcp:edit) | JSON-RPC 2.0 message/batch (`initialize`/`tools/list`/`tools/call`/`ping`) | JSON-RPC result; notifications → `202` |
+| CP33 | GET /api/v1/mcp/http | the scoped mcp token (or mcp:view) | — | `405` (no standalone SSE stream — POST requests instead) |
+| CP34 | GET /api/v1/mcp/tokens | mcp:admin | — | `{tokens: McpTokenInfo[]}` (all users, no secrets) |
+| CP35 | POST /api/v1/mcp/tokens | mcp:admin | `{user_id?, label?, scope?:{tools?, allow_writes?, workspace_id?}}` | `{token, info}` (raw token shown once) |
+| CP36 | DELETE /api/v1/mcp/tokens/{id} | mcp:admin | — | `204` (404 if not found) |
+
+**MCP HTTP transport (CP32/CP33).** The outward "Otto as an MCP server" is reachable
+over the **Streamable HTTP** transport at `POST /api/v1/mcp/http` — external MCP clients
+connect directly with `Authorization: Bearer <mcp-token>` (no local stdio subprocess).
+It is served on the loopback listener always, and over the opt-in TLS `network_listener`
+(off by default) for remote clients — i.e. **MCP over HTTP, not only locally**. Each
+`kind='mcp'` token is route-confined to `/mcp/http` (+ the legacy invoke/status routes)
+by the feature guard, and its per-token **McpScope** decides which tools `tools/list`
+shows and `tools/call` may run. Every `tools/call` funnels through the same governed
+choke point as CP26 (per-token scope → global enable → dangerous→approval → audit).
+
+**McpScope** — the per-token permission set: `{ tools?: string[]  // bare names; omit =
+all globally-enabled, allow_writes?: bool  // default false: deny mutating tools,
+workspace_id?: string  // optional pin }`. **McpTokenInfo** — `{ id, user_id, username,
+label?, token_prefix, scope, created_at, last_seen_at, expires_at }` (never the secret).
+Multiple tokens (and multiple users) may each hold a different scope — that is the
+mechanism for "different users have different accesses".
 
 ---
 
