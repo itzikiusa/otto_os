@@ -297,8 +297,8 @@ class VaultStore {
     if (!wsId) return;
     this.embedderBusy = true;
     try {
-      const r = await api.post<{ embedded: number }>(`/workspaces/${wsId}/memory/reindex`, {});
-      toasts.info(`Re-embedded ${r.embedded} ${r.embedded === 1 ? 'memory' : 'memories'}`);
+      await api.post<{ embedded: number }>(`/workspaces/${wsId}/memory/reindex`, {});
+      toasts.info('Re-embedding started', 'Running in the background; search quality improves as it completes.');
     } catch (e) {
       toasts.error('Reindex failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -436,11 +436,34 @@ class VaultStore {
     try {
       const body: IndexRepoReq = { root: root.trim() };
       if (name && name.trim()) body.name = name.trim();
-      const r = await api.post<IndexResult>(`/workspaces/${wsId}/vault/repos/index`, body);
-      this.lastIndex = r;
-      toasts.success('Indexed', `${r.files} files · ${r.symbols} symbols · ${r.edges} edges`);
+      // Indexing runs in the BACKGROUND server-side (embedding can be slow with a
+      // neural model). Returns immediately; we poll the repo status to completion.
+      const started = await api.post<IndexResult>(`/workspaces/${wsId}/vault/repos/index`, body);
+      toasts.info('Indexing started', 'Building the code graph + embeddings in the background…');
       await this.loadRepos();
-      return r;
+      const id = started.repo_id;
+      for (let i = 0; i < 1800; i++) {
+        await new Promise((r) => setTimeout(r, 4000));
+        await this.loadRepos();
+        const repo = this.repos.find((r) => r.id === id);
+        if (!repo) break;
+        if (repo.status === 'ready') {
+          this.lastIndex = {
+            repo_id: id,
+            files: repo.files,
+            symbols: repo.symbols,
+            edges: repo.edges,
+            chunks: repo.chunks,
+          };
+          toasts.success('Indexed', `${repo.files} files · ${repo.symbols} symbols · ${repo.edges} edges`);
+          return this.lastIndex;
+        }
+        if (repo.status === 'error') {
+          toasts.error('Index failed', repo.message ?? 'see logs');
+          return null;
+        }
+      }
+      return started;
     } catch (e) {
       toasts.error('Index failed', e instanceof Error ? e.message : String(e));
       return null;
