@@ -163,23 +163,52 @@
   /** The transport URL reachable from THIS client (loopback when local). */
   const httpUrl = $derived(`${baseUrl()}${HTTP_PATH}`);
 
+  /** The daemon's loopback port, parsed from the API base (defaults to 7700). */
+  const loopbackPort = $derived.by(() => {
+    try {
+      return Number(new URL(baseUrl()).port) || 7700;
+    } catch {
+      return 7700;
+    }
+  });
+
   let allSettings = $state<Record<string, unknown>>({});
   let netEnabled = $state(false);
-  let netPort = $state(7700);
+  // Default to a port DISTINCT from the loopback one: the network listener binds
+  // 0.0.0.0:<port>, which collides with 127.0.0.1:<loopback> if they match (the
+  // bind fails, address-in-use). Pre-seed loopback+1 so the toggle works out of
+  // the box; the user can change it.
+  let netPort = $state(7701);
+  let netPortTouched = $state(false);
   let netBusy = $state(false);
+
+  /** True when the chosen network port would collide with the loopback listener. */
+  const portConflict = $derived(netPort === loopbackPort);
 
   async function loadNetwork(): Promise<void> {
     try {
       allSettings = await api.get<Record<string, unknown>>('/settings');
       const nl = allSettings['network_listener'] as { enabled?: boolean; port?: number } | undefined;
       netEnabled = nl?.enabled ?? false;
-      netPort = nl?.port ?? 7700;
+      if (nl?.port != null) {
+        netPort = nl.port;
+        netPortTouched = true;
+      } else if (!netPortTouched) {
+        netPort = loopbackPort + 1;
+      }
     } catch {
       /* non-admin or unreachable — the HTTP panel still shows the loopback URL */
     }
   }
 
   async function toggleNetwork(): Promise<void> {
+    if (!netEnabled && portConflict) {
+      toasts.error(
+        'Pick a different port',
+        `The network port must differ from the daemon's loopback port (${loopbackPort}).`,
+      );
+      return;
+    }
     netBusy = true;
     try {
       const next = !netEnabled;
@@ -432,15 +461,32 @@
       <input
         type="checkbox"
         checked={netEnabled}
-        disabled={netBusy || !isMcpAdmin}
+        disabled={netBusy || !isMcpAdmin || (!netEnabled && portConflict)}
         onchange={() => void toggleNetwork()}
       />
       <div class="t-meta">
-        <span class="t-name">Allow network access (TLS) on port {netPort}</span>
+        <span class="t-name">
+          Allow network access (TLS) on port
+          <input
+            class="port"
+            type="number"
+            min="1"
+            max="65535"
+            bind:value={netPort}
+            oninput={() => (netPortTouched = true)}
+            disabled={netEnabled || !isMcpAdmin}
+            aria-label="Network port"
+          />
+        </span>
         <span class="t-desc">
           Binds the daemon on <code>0.0.0.0:{netPort}</code> with a self-signed certificate so remote clients
           can reach <code>https://&lt;this-host&gt;:{netPort}{HTTP_PATH}</code>. Off by default; restart the daemon to apply.
         </span>
+        {#if portConflict}
+          <span class="t-warn">
+            Choose a port other than the daemon's loopback port ({loopbackPort}) — they would collide.
+          </span>
+        {/if}
       </div>
     </label>
 
@@ -805,8 +851,22 @@
     padding: 10px 12px;
     cursor: pointer;
   }
-  .netrow input {
+  .netrow > input {
     margin-top: 2px;
+  }
+  .port {
+    width: 72px;
+    font-size: 12px;
+    padding: 2px 6px;
+    margin-inline-start: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 6px);
+    background: var(--bg);
+    color: var(--text);
+  }
+  .t-warn {
+    font-size: 11.5px;
+    color: #e0a000;
   }
 
   /* Tokens */
