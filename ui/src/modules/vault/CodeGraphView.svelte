@@ -64,8 +64,26 @@
   let groupApplied = $state('');
 
   // ── data ────────────────────────────────────────────────────────────────
-  const nodes = $derived(vault.fullGraph?.nodes ?? []);
-  const edges = $derived(vault.fullGraph?.edges ?? []);
+  // DEFENSIVE DEDUPE — every `{#each}` over these is keyed, and Svelte THROWS
+  // (each_key_duplicate) the instant two items share a key, which kills the whole
+  // graph render and never recovers on revisit. Real dependency graphs routinely
+  // contain parallel edges (the same caller→callee with the same rel appearing
+  // multiple times — e.g. a function that calls the same target or hits the same
+  // DB table more than once) and, occasionally, a repeated node id. We collapse
+  // both here so a keyed each can never collide regardless of what the API returns.
+  const EDGE_SEP = ''; // separator so id concatenation can't alias
+  const edgeKey = (e: FullGraphEdge) => e.src + EDGE_SEP + e.dst + EDGE_SEP + e.rel;
+  const nodes = $derived.by(() => {
+    const seen = new Set<string>();
+    return (vault.fullGraph?.nodes ?? []).filter((n) => (seen.has(n.id) ? false : (seen.add(n.id), true)));
+  });
+  const edges = $derived.by(() => {
+    const seen = new Set<string>();
+    return (vault.fullGraph?.edges ?? []).filter((e) => {
+      const k = edgeKey(e);
+      return seen.has(k) ? false : (seen.add(k), true);
+    });
+  });
 
   /** Distinct kinds present (for the by-kind toggles), with their group. */
   const kinds = $derived.by(() => {
@@ -619,7 +637,7 @@
       <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
         <!-- edges -->
         <g class="edges">
-          {#each filteredEdges as e (e.src + e.dst + e.rel)}
+          {#each filteredEdges as e (edgeKey(e))}
             {@const g = edgeGeom(e)}
             {@const st = edgeStyle(e.rel)}
             {#if g}

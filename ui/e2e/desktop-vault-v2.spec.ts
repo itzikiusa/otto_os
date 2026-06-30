@@ -105,6 +105,39 @@ func Helper${i}(ctx context.Context, id int) error { _ = SharedHub(ctx, id); ret
 
 let bigRepoDir = '';
 
+// A fixture whose functions issue several DIFFERENT SQL statements against the
+// SAME underscored table → multiple `db_call` edges that share (src,dst,rel) but
+// differ only in `detail`. The DB edge unique key includes `detail`, so every row
+// persists and `fullgraph` returns PARALLEL edges. The graph's keyed {#each} must
+// dedupe / uniquely-key them; otherwise Svelte throws `each_key_duplicate` during
+// flush and the whole graph component dies — blank, and re-throws on every revisit
+// ("once I move out I cannot return"). This is the exact shape that bricked the
+// real go_admission graph; the synthetic big fixture never produced it (one db_call
+// per table), which is why earlier "fixed" claims were false.
+function writeCollisionFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'otto-vault-dup-'));
+  mkdirSync(join(dir, 'store'), { recursive: true });
+  writeFileSync(
+    join(dir, 'store', 'player.go'),
+    `package store
+import "context"
+func LoadPlayer(ctx context.Context, id int) error {
+    _, _ = conn.GetContext(ctx, "SELECT name FROM tbl_dup_target WHERE id = ?")
+    _, _ = conn.ExecContext(ctx, "UPDATE tbl_dup_target SET seen = 1 WHERE id = ?")
+    _, _ = conn.ExecContext(ctx, "DELETE FROM tbl_dup_target WHERE id = ?")
+    return nil
+}
+func SavePlayer(ctx context.Context, id int) error {
+    _, _ = conn.ExecContext(ctx, "INSERT INTO tbl_dup_target (id) VALUES (?)")
+    _, _ = conn.GetContext(ctx, "SELECT seen FROM tbl_dup_target WHERE id = ?")
+    return nil
+}
+`,
+  );
+  return dir;
+}
+let collisionRepoDir = '';
+
 async function waitRepoReady(id: string, timeoutMs = 60_000): Promise<any> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -121,6 +154,7 @@ test.beforeAll(async () => {
   wsId = await seedWorkspace(ctx, base);
   repoDir = writeFixture();
   bigRepoDir = writeBigFixture();
+  collisionRepoDir = writeCollisionFixture();
 });
 
 test('indexes a repo and builds the symbol index + dependency graph', async () => {
@@ -283,6 +317,53 @@ test('large graph: revisiting the Graph tab does NOT freeze the app', async ({ p
   await page.getByTestId('vault-tab-brain').click();
   await expect(page.getByRole('heading', { name: 'Repo Brain' })).toBeVisible({ timeout: 4000 });
   expect(Date.now() - t0).toBeLessThan(4000);
+});
+
+test('graph: parallel edges (same src/dst/rel) render without each_key_duplicate', async ({ page }) => {
+  // Index the collision fixture and confirm the scanned graph really contains
+  // parallel edges — otherwise this test would pass for the wrong reason.
+  const started = await postJson(`/api/v1/workspaces/${wsId}/vault/repos/index`, {
+    root: collisionRepoDir,
+    name: 'collision_fixture',
+  });
+  const repoId = started.repo_id;
+  const repo = await waitRepoReady(repoId);
+  expect(repo.status).toBe('ready');
+
+  const fg = await getJson(`/api/v1/workspaces/${wsId}/vault/fullgraph?repo_id=${repoId}`);
+  const counts = new Map<string, number>();
+  for (const e of fg.edges) {
+    const k = `${e.src}${e.dst}${e.rel}`;
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  const maxDup = Math.max(0, ...counts.values());
+  console.log(`[diag] collision fixture: max parallel edges sharing (src,dst,rel) = ${maxDup}`);
+  expect(maxDup, 'fixture must produce parallel edges (same src,dst,rel) to reproduce the bug').toBeGreaterThan(1);
+
+  // Now drive the UI exactly like the user: open this repo's graph, then leave
+  // and return. Before the fix, the duplicate keys throw each_key_duplicate on
+  // every render → blank graph + "cannot return".
+  const errs: string[] = [];
+  page.on('pageerror', (e) => errs.push(e.message));
+  await page.goto('/#/vault');
+  await page.getByTestId('vault-tab-repos').click();
+  const card = page.locator('.repo-card').filter({ hasText: 'collision_fixture' });
+  await expect(card).toBeVisible({ timeout: 10_000 });
+  await card.getByRole('button', { name: /View graph/i }).click();
+
+  const graphNodes = page.locator('.vp-body g.nodes > g');
+  await expect.poll(() => graphNodes.count(), { timeout: 10_000 }).toBeGreaterThan(0);
+
+  for (let k = 0; k < 2; k++) {
+    await page.getByTestId('vault-tab-symbols').click();
+    await expect(page.getByPlaceholder(/Search symbols/i)).toBeVisible({ timeout: 4000 });
+    await page.getByTestId('vault-tab-graph').click();
+    await expect.poll(() => graphNodes.count(), { timeout: 8000 }).toBeGreaterThan(0);
+  }
+
+  const dupErrs = errs.filter((m) => /each_key_duplicate/i.test(m));
+  expect(dupErrs, `each_key_duplicate must NOT fire: ${errs.join('; ')}`).toEqual([]);
+  expect(errs, `no render errors at all: ${errs.join('; ')}`).toEqual([]);
 });
 
 test('Brain: Assemble returns a context block (and stays responsive)', async ({ page }) => {

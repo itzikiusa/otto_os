@@ -36,6 +36,30 @@ const FTS_NO: u8 = 2;
 /// model (e.g. qwen3-embedding:8b) makes incremental progress per call and no
 /// single call runs unbounded.
 const REINDEX_BATCH: usize = 16;
+/// Generic words to ignore when matching a focus phrase against file paths /
+/// symbol names — they match everything and would defeat the ranking. Shared by
+/// the repo-brain knowledge re-rank and the symbol selection.
+const STOP_TERMS: &[&str] = &[
+    "what", "the", "does", "require", "requires", "need", "needs", "for", "how", "and", "with",
+    "fields", "field", "data", "info", "this", "that", "have", "has", "are", "was", "from", "into",
+    "when", "where", "which", "should", "would",
+];
+
+/// Rank tier for a "Relevant knowledge" hit by its file `path`:
+/// `0` = non-test file whose path matches a focus term (the *defining* file),
+/// `1` = any other non-test file, `2` = a test file. A stable sort by this tier
+/// floats the definition over verbose test chunks regardless of the embedder's
+/// raw similarity (a general embedder ranks wordy tests above terse definitions).
+fn knowledge_tier(path: &str, focus_terms: &[String]) -> u8 {
+    let p = path.to_lowercase();
+    if crate::test_map::is_test_file(&p) {
+        2
+    } else if !focus_terms.is_empty() && focus_terms.iter().any(|t| p.contains(t.as_str())) {
+        0
+    } else {
+        1
+    }
+}
 
 pub struct MemoryService {
     repo: MemoriesRepo,
@@ -1104,19 +1128,41 @@ impl MemoryService {
             });
         }
 
-        // 1) Relevant knowledge + docs (hybrid recall).
-        let hits = self
+        // 1) Relevant knowledge + docs (hybrid recall). Pull a WIDER candidate set
+        // and RE-RANK so the brain surfaces the *defining* file over verbose test
+        // chunks: demote test files, and float files whose PATH matches the focus
+        // terms. A general-purpose embedder otherwise ranks wordy test files above
+        // terse struct/definition files (measured on real repos), which is what made
+        // "Relevant knowledge" look unrelated. Model-independent: helps every embedder.
+        let mut hits = self
             .search(
                 ws,
                 MemoryQuery {
                     text: if focus.is_empty() { None } else { Some(focus.to_string()) },
-                    k: 6,
+                    k: 24,
                     mode: SearchMode::Hybrid,
                     ..Default::default()
                 },
             )
             .await
             .unwrap_or_default();
+        {
+            let focus_terms: Vec<String> = focus
+                .split(|c: char| !c.is_alphanumeric())
+                .map(|s| s.to_lowercase())
+                .filter(|s| s.len() >= 3 && !STOP_TERMS.contains(&s.as_str()))
+                .collect();
+            let chunk_path = |m: &Memory| -> String {
+                m.source_ref.clone().unwrap_or_else(|| {
+                    m.title
+                        .rsplit_once(':')
+                        .map(|(p, _)| p.to_string())
+                        .unwrap_or_else(|| m.title.clone())
+                })
+            };
+            // Stable sort preserves the search (similarity) order within each tier.
+            hits.sort_by_key(|h| knowledge_tier(&chunk_path(&h.memory), &focus_terms));
+        }
         if !hits.is_empty() {
             let mut body = String::new();
             for h in hits.iter().take(6) {
@@ -1144,8 +1190,7 @@ impl MemoryService {
         // instead of the domain symbol (e.g. `LoginData`).
         let mut candidates: Vec<otto_state::CodeSymbol> = Vec::new();
         let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-        // Drop ultra-generic terms that match everything.
-        const STOP_TERMS: &[&str] = &["what", "the", "does", "require", "requires", "need", "needs", "for", "how", "and", "with", "fields", "field", "data", "info"];
+        // Drop ultra-generic terms that match everything (module-level STOP_TERMS).
         let mut query_terms: Vec<String> = focus
             .split(|c: char| !c.is_alphanumeric())
             .filter(|t| t.len() >= 3)
@@ -1329,4 +1374,49 @@ fn est_tokens(s: &str) -> usize {
 /// instructions when the brief is composed into a prompt.
 fn fence_inline(s: &str) -> String {
     s.replace('`', "ʼ").replace('\n', " ")
+}
+
+#[cfg(test)]
+mod brain_rank_tests {
+    use super::knowledge_tier;
+
+    fn terms(s: &[&str]) -> Vec<String> {
+        s.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn definition_file_outranks_test_file() {
+        let focus = terms(&["registration", "step", "two"]);
+        // The struct/definition file (path matches focus) is the best tier.
+        assert_eq!(
+            knowledge_tier("registration_step_two/common/reg_step_two_data.go", &focus),
+            0
+        );
+        // A test file is demoted even though its path ALSO matches the focus.
+        assert_eq!(
+            knowledge_tier("registration_step_two/tests/component/reg_step_two_component_test.go", &focus),
+            2
+        );
+        // A non-test file with no path overlap sits in the middle.
+        assert_eq!(knowledge_tier("wallet/balance/ledger.go", &focus), 1);
+    }
+
+    #[test]
+    fn stable_sort_floats_definition_above_higher_scored_test() {
+        let focus = terms(&["registration", "step", "two"]);
+        // (path, search_score) — the TEST scored higher (as a general embedder does),
+        // but the re-rank must still place the definition first.
+        let mut hits: Vec<(&str, f32)> = vec![
+            ("registration_step_two/tests/component/reg_step_two_component_test.go", 0.67),
+            ("registration_step_two/common/reg_step_two_data.go", 0.62),
+            ("registration_step_two/filter_strategies/validation_priority.go", 0.60),
+        ];
+        hits.sort_by_key(|(p, _)| knowledge_tier(p, &focus));
+        assert!(
+            hits[0].0.ends_with("reg_step_two_data.go") || hits[0].0.ends_with("validation_priority.go"),
+            "a non-test definition file must rank first, got {}",
+            hits[0].0
+        );
+        assert!(hits.last().unwrap().0.contains("_test.go"), "test file must sink to last");
+    }
 }
