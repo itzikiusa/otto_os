@@ -483,6 +483,26 @@ test.describe('workflows page (desktop)', () => {
     await expect(page.getByText('E2E Branching').first()).toBeVisible({ timeout: 30_000 });
   });
 
+  test('rename a workflow from the sidebar; the new name sticks server-side', async ({ page }) => {
+    // A dedicated workflow so renaming it can't disturb the other UI tests. This
+    // is the "same template → many differently-named workflows" need: each must
+    // carry its own name so triggers (Slack/Telegram) can target it.
+    const wfId = await createWorkflow('E2E Rename Me', [node('trigger', 'manual_trigger')], []);
+    await page.goto('/#/workflows');
+    const row = page.getByTestId(`wf-row-${wfId}`);
+    await expect(row).toBeVisible({ timeout: 30_000 });
+    await row.getByTestId('wf-rename-btn').click();
+    const input = row.getByTestId('wf-rename-input');
+    await input.fill('E2E Renamed Flow');
+    await input.press('Enter');
+    // The row (same id) now shows the new name; the old name is gone from the list.
+    await expect(row.getByText('E2E Renamed Flow')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('E2E Rename Me')).toHaveCount(0);
+    // And it persisted on the server (so a trigger can match the new name).
+    const wf = await (await ctx.get(`${base}${V1}/workflows/${wfId}`)).json();
+    expect(wf.name).toBe('E2E Renamed Flow');
+  });
+
   test('templates live in a dropdown (room freed); no always-open "Game templates"', async ({
     page,
   }) => {

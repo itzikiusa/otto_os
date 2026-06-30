@@ -221,6 +221,38 @@
     }
   }
 
+  // ── rename (sidebar + header) ─────────────────────────────────────────────
+  // The same template can seed many workflows; each needs its OWN name so it can
+  // be triggered independently from Slack/Telegram (triggers match by name).
+  let renamingId = $state<string | null>(null);
+  let renameValue = $state('');
+
+  function startRename(wf: Workflow): void {
+    renamingId = wf.id;
+    renameValue = wf.name;
+  }
+  function cancelRename(): void {
+    renamingId = null;
+    renameValue = '';
+  }
+  async function commitRename(wf: Workflow): Promise<void> {
+    const name = renameValue.trim();
+    if (!name || name === wf.name) {
+      cancelRename();
+      return;
+    }
+    try {
+      const updated = await api.patch<Workflow>(`/workflows/${wf.id}`, { name });
+      workflows = workflows.map((w) => (w.id === wf.id ? { ...w, name: updated.name } : w));
+      if (current?.id === wf.id) current = { ...current, name: updated.name };
+      toasts.success(`Renamed to “${updated.name}”`);
+    } catch (e) {
+      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      cancelRename();
+    }
+  }
+
   function addNode(t: NodeTypeSpec): void {
     paletteOpen = false;
     const id = `${t.kind}-${Math.random().toString(36).slice(2, 7)}`;
@@ -758,12 +790,31 @@
     <div class="list">
       <div class="list-h">Workflows</div>
       {#each workflows as wf (wf.id)}
-        <div class="row" class:active={current?.id === wf.id}>
-          <button class="row-main" onclick={() => open(wf)}>
-            <Icon name="split" size={13} />
-            <span class="row-name">{wf.name}</span>
-          </button>
-          <button class="row-del" title="Delete" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
+        <div class="row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
+          {#if renamingId === wf.id}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="row-rename"
+              data-testid="wf-rename-input"
+              bind:value={renameValue}
+              autofocus
+              aria-label="Workflow name"
+              onkeydown={(e) => {
+                if (e.key === 'Enter') commitRename(wf);
+                else if (e.key === 'Escape') cancelRename();
+              }}
+              onblur={() => commitRename(wf)}
+            />
+          {:else}
+            <button class="row-main" onclick={() => open(wf)}>
+              <Icon name="split" size={13} />
+              <span class="row-name">{wf.name}</span>
+            </button>
+            <button class="row-edit" title="Rename" data-testid="wf-rename-btn" onclick={() => startRename(wf)}>
+              <Icon name="edit" size={12} />
+            </button>
+            <button class="row-del" title="Delete" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
+          {/if}
         </div>
       {/each}
       {#if workflows.length === 0}
@@ -775,7 +826,25 @@
   <main class="main">
     {#if current}
       <header class="bar">
-        <span class="wf-title">{current.name}</span>
+        {#if renamingId === current.id}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            class="wf-title-edit"
+            bind:value={renameValue}
+            autofocus
+            aria-label="Workflow name"
+            onkeydown={(e) => {
+              if (e.key === 'Enter') commitRename(current!);
+              else if (e.key === 'Escape') cancelRename();
+            }}
+            onblur={() => commitRename(current!)}
+          />
+        {:else}
+          <span class="wf-title">{current.name}</span>
+          <button class="title-edit" title="Rename workflow" onclick={() => current && startRename(current)}>
+            <Icon name="edit" size={13} />
+          </button>
+        {/if}
         {#if dirty}<span class="badge">unsaved</span>{/if}
         <span class="grow"></span>
 
@@ -1867,7 +1936,8 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .row-del {
+  .row-del,
+  .row-edit {
     background: none;
     border: none;
     color: var(--text-dim);
@@ -1875,11 +1945,27 @@
     padding: 6px;
     opacity: 0;
   }
-  .row:hover .row-del {
+  .row:hover .row-del,
+  .row:hover .row-edit {
     opacity: 1;
   }
   .row-del:hover {
     color: var(--status-exited);
+  }
+  .row-edit:hover {
+    color: var(--accent);
+  }
+  .row-rename {
+    flex: 1;
+    min-width: 0;
+    margin: 4px 6px;
+    padding: 5px 7px;
+    font-size: 12.5px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-s);
+    outline: none;
   }
   .empty {
     font-size: 12px;
@@ -1965,6 +2051,29 @@
   .wf-title {
     font-size: 13px;
     font-weight: 600;
+  }
+  .title-edit {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 4px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .title-edit:hover {
+    color: var(--accent);
+  }
+  .wf-title-edit {
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 8px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-s);
+    outline: none;
+    min-width: 220px;
   }
   .badge {
     font-size: 10px;
