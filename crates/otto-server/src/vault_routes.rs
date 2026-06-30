@@ -78,8 +78,38 @@ fn surreal_from(b: &VaultBackend, pass: Option<String>) -> SurrealClient {
     SurrealClient::new(&b.url, ns, db, user, pass)
 }
 
-/// Register one backend on the live memory service (or clear it when disabled).
-/// Returns a (status, message) health summary.
+/// Pure connectivity probe for a backend (no enabled gate, no registration).
+/// Used by the Test button so a user can verify a URL before enabling it.
+async fn probe(secrets: &Arc<dyn SecretStore>, b: &VaultBackend) -> (String, Option<String>) {
+    let secret = secrets.get(&secret_key(&b.workspace_id, &b.kind)).ok().flatten();
+    match b.kind.as_str() {
+        "qdrant" => match qdrant_from(b, secret).health().await {
+            Ok(()) => ("ok".into(), None),
+            Err(e) => ("error".into(), Some(e.to_string())),
+        },
+        "surreal" => match surreal_from(b, secret).health().await {
+            Ok(()) => ("ok".into(), None),
+            Err(e) => ("error".into(), Some(e.to_string())),
+        },
+        "ollama" => {
+            let url = if b.url.is_empty() { "http://127.0.0.1:11434".to_string() } else { b.url.clone() };
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+            match client.get(format!("{}/api/tags", url.trim_end_matches('/'))).send().await {
+                Ok(r) if r.status().is_success() => ("ok".into(), None),
+                Ok(r) => ("error".into(), Some(format!("ollama {}", r.status()))),
+                Err(e) => ("error".into(), Some(e.to_string())),
+            }
+        }
+        _ => ("error".into(), Some("unknown kind".into())),
+    }
+}
+
+/// Register one backend on the live memory service (or clear it when disabled),
+/// returning a (status, message) summary. When enabled, it probes connectivity
+/// and only wires the backend in if reachable.
 async fn register(
     memory: &MemoryService,
     secrets: &Arc<dyn SecretStore>,
@@ -116,20 +146,7 @@ async fn register(
                 Err(e) => ("error".into(), Some(e.to_string())),
             }
         }
-        "ollama" => {
-            // Ollama is the embed layer (global), configured via /memory/embedder;
-            // here we only health-check that the server answers.
-            let url = if b.url.is_empty() { "http://127.0.0.1:11434".to_string() } else { b.url.clone() };
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_default();
-            match client.get(format!("{}/api/tags", url.trim_end_matches('/'))).send().await {
-                Ok(r) if r.status().is_success() => ("ok".into(), None),
-                Ok(r) => ("error".into(), Some(format!("ollama {}", r.status()))),
-                Err(e) => ("error".into(), Some(e.to_string())),
-            }
-        }
+        "ollama" => probe(secrets, b).await,
         _ => ("error".into(), Some("unknown kind".into())),
     }
 }
@@ -195,7 +212,9 @@ async fn health(
     let Some(b) = repo.get(&ws, &kind).await.map_err(ApiError)? else {
         return Err(ApiError(Error::NotFound("backend".into())));
     };
-    let (status, message) = register(&ctx.memory, &ctx.secrets, &b).await;
+    // A pure connectivity probe (regardless of `enabled`) — Test verifies the URL
+    // is reachable before you commit to enabling it.
+    let (status, message) = probe(&ctx.secrets, &b).await;
     repo.set_status(&ws, &kind, &status, message.as_deref()).await.map_err(ApiError)?;
     Ok(Json(HealthResp { status, message }))
 }

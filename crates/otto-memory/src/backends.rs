@@ -357,7 +357,7 @@ pub mod installer {
                     (
                         "docker",
                         vec![format!(
-                            "docker run -d --name otto-qdrant -p 6333:6333 -v '{data_dir}/qdrant':/qdrant/storage qdrant/qdrant:v1.12.4"
+                            "docker start otto-qdrant 2>/dev/null || docker run -d --name otto-qdrant -p 6333:6333 -v '{data_dir}/qdrant':/qdrant/storage qdrant/qdrant:v1.12.4"
                         )],
                         true,
                     )
@@ -383,7 +383,9 @@ pub mod installer {
                         "brew",
                         vec![
                             "brew install surrealdb/tap/surreal".into(),
-                            format!("surreal start --user root --pass root 'file://{data_dir}/surreal' &"),
+                            // surreal v2+ dropped file://; use surrealkv. Guard so a
+                            // re-run doesn't fight an already-listening instance.
+                            format!("curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1 || (surreal start --user root --pass root 'surrealkv://{data_dir}/surreal' >/dev/null 2>&1 &)"),
                         ],
                         true,
                     )
@@ -391,7 +393,7 @@ pub mod installer {
                     (
                         "docker",
                         vec![format!(
-                            "docker run -d --name otto-surreal -p 8000:8000 -v '{data_dir}/surreal':/data surrealdb/surrealdb:v2.1 start --user root --pass root file:/data/db"
+                            "docker start otto-surreal 2>/dev/null || docker run -d --name otto-surreal -p 8000:8000 -v '{data_dir}/surreal':/data surrealdb/surrealdb:v2.1 start --user root --pass root surrealkv:///data/db"
                         )],
                         true,
                     )
@@ -471,7 +473,36 @@ pub mod installer {
                 }
             }
         }
+        // Steps ran clean — the real test is whether the service answers. Poll
+        // its health URL (a backgrounded server needs a moment to come up), so
+        // the reported result reflects reality rather than just sh's exit code.
+        if !plan.health_url.is_empty() {
+            log.push_str(&format!("\n› waiting for {} …\n", plan.health_url));
+            if poll_health(&plan.health_url).await {
+                log.push_str("[healthy ✓]\n");
+            } else {
+                log.push_str("[started, but did not become healthy within 25s — check the service]\n");
+                return InstallResult { ok: false, log };
+            }
+        }
         InstallResult { ok: true, log }
+    }
+
+    /// Poll a health URL for up to ~25s; true on the first 2xx.
+    async fn poll_health(url: &str) -> bool {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap_or_default();
+        for _ in 0..12 {
+            if let Ok(r) = http.get(url).send().await {
+                if r.status().is_success() {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        false
     }
 }
 
@@ -511,10 +542,12 @@ mod tests {
         for kind in ["qdrant", "surreal"] {
             let p = installer::plan(kind, dd).await.unwrap();
             for step in &p.steps {
-                if step.contains("Application Support") {
+                // Every occurrence of the space-bearing path must sit inside a
+                // single-quoted region (a `'` both before and after it).
+                if let Some(pos) = step.find("Application Support") {
                     assert!(
-                        step.contains(&format!("'{dd}/")) || step.contains(&format!("'file://{dd}/")),
-                        "host path must be single-quoted in step: {step}"
+                        step[..pos].contains('\'') && step[pos..].contains('\''),
+                        "path with a space must be single-quoted in step: {step}"
                     );
                 }
             }
