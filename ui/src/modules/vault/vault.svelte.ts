@@ -93,7 +93,19 @@ export interface EmbedderStatus {
 export interface SetEmbedderReq {
   provider: EmbedderProvider;
   api_key?: string;
+  ollama_model?: string;
+  ollama_dim?: number;
+  ollama_url?: string;
 }
+
+/** Ollama embedding model options (model → dimension). All are small enough for
+ * a 5–10 GB machine; nomic is the fast default, mxbai/bge are higher quality. */
+export const OLLAMA_EMBED_MODELS: { model: string; dim: number; note: string }[] = [
+  { model: 'nomic-embed-text', dim: 768, note: 'fast · ~0.5 GB · great default' },
+  { model: 'mxbai-embed-large', dim: 1024, note: 'higher quality · ~1.2 GB' },
+  { model: 'bge-m3', dim: 1024, note: 'multilingual + long context · ~2.5 GB' },
+  { model: 'all-minilm', dim: 384, note: 'tiny · ~0.1 GB' },
+];
 
 // ---------------------------------------------------------------------------
 // Vault v2 — top-level tabs
@@ -250,12 +262,21 @@ class VaultStore {
     }
   }
 
-  /** Switch the embedder provider (optionally storing an API key), then refresh. */
-  async setEmbedder(provider: EmbedderProvider, apiKey?: string): Promise<void> {
+  /** Switch the embedder provider (optionally storing an API key or Ollama
+   * model/dim/url), then refresh. */
+  async setEmbedder(
+    provider: EmbedderProvider,
+    opts?: { apiKey?: string; ollamaModel?: string; ollamaDim?: number; ollamaUrl?: string },
+  ): Promise<void> {
     this.embedderBusy = true;
     try {
       const body: SetEmbedderReq = { provider };
-      if (apiKey && apiKey.trim()) body.api_key = apiKey.trim();
+      if (opts?.apiKey && opts.apiKey.trim()) body.api_key = opts.apiKey.trim();
+      if (provider === 'ollama') {
+        if (opts?.ollamaModel) body.ollama_model = opts.ollamaModel;
+        if (opts?.ollamaDim) body.ollama_dim = opts.ollamaDim;
+        if (opts?.ollamaUrl && opts.ollamaUrl.trim()) body.ollama_url = opts.ollamaUrl.trim();
+      }
       this.embedder = await api.put<EmbedderStatus>('/memory/embedder', body);
       toasts.info(`Embedder set to ${this.embedder.model ?? provider}`);
     } catch (e) {
