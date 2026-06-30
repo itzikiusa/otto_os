@@ -572,8 +572,17 @@ impl MemoryService {
         }
         hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         hits.truncate(limit);
+        // Bump access counts in the BACKGROUND — it's non-critical and a write,
+        // so it must never make a search wait on the SQLite write lock (e.g.
+        // while a re-embed is running).
         let ids: Vec<String> = hits.iter().map(|h| h.memory.id.clone()).collect();
-        let _ = self.repo.bump_access(ws, &ids).await;
+        if !ids.is_empty() {
+            let repo = self.repo.clone();
+            let ws_owned = ws.to_string();
+            tokio::spawn(async move {
+                let _ = repo.bump_access(&ws_owned, &ids).await;
+            });
+        }
         Ok(hits)
     }
 
@@ -1165,6 +1174,12 @@ impl MemoryService {
             }
         }
 
+        // De-duplicate reasons (aggregated from many hits → repeats), preserving
+        // order — avoids redundant chips and duplicate keys in the UI.
+        {
+            let mut seen = std::collections::HashSet::new();
+            reasons.retain(|r| seen.insert((r.kind.clone(), r.detail.clone())));
+        }
         let markdown = render_brain(focus, &sections);
         Ok(RepoBrain {
             focus: focus.to_string(),

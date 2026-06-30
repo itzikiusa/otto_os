@@ -407,7 +407,7 @@
             {#if hit}
               <div class="reasons">
                 {#if hit.reasons && hit.reasons.length}
-                  {#each hit.reasons as r (r.kind + r.detail)}
+                  {#each hit.reasons as r, i (i)}
                     <span
                       class="reason"
                       style:--c={reasonColor(r.kind)}
@@ -417,7 +417,7 @@
                     </span>
                   {/each}
                 {:else}
-                  {#each hit.why as w (w)}
+                  {#each hit.why as w, i (i)}
                     <span class="reason" style:--c="#74c0fc" title={w}>{w}</span>
                   {/each}
                   <span class="reason score-only" style:--c="#7ee787">score {hit.score.toFixed(2)}</span>

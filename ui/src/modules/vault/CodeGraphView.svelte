@@ -283,15 +283,34 @@
     if (!raf) raf = requestAnimationFrame(loop);
   }
 
-  // rebuild the sim whenever the visible graph changes
+  // Compute the layout SYNCHRONOUSLY (bounded) and render exactly ONCE. This is
+  // the key fix for the "graph freezes on revisit": the old continuous rAF loop
+  // re-rendered hundreds of SVG nodes every frame, pegging the main thread. The
+  // rAF loop now runs ONLY during an active drag/pan (short, user-driven).
+  function settle() {
+    if (destroyed) return;
+    sim.reheat();
+    let i = 0;
+    while (sim.step() && i++ < 600) {
+      // advance physics on plain objects; no DOM work in the loop
+    }
+    // Render ONCE, but bump `frame` on the NEXT frame — NOT synchronously inside
+    // the calling $effect (that retriggers the effect → effect_update_depth_exceeded).
+    if (!raf) raf = requestAnimationFrame(() => {
+      raf = 0;
+      if (!destroyed) frame++;
+    });
+  }
+
+  // rebuild + lay out the sim whenever the visible graph changes
   $effect(() => {
     const fn = filteredNodes;
     const fe = filteredEdges.map((e) => ({ source: e.src, target: e.dst }));
     sim.setGraph(fn, fe);
-    kick();
+    settle();
   });
 
-  // push force params into the sim
+  // push force params into the sim (re-layout once)
   $effect(() => {
     sim.params = {
       centerStrength,
@@ -299,7 +318,7 @@
       linkDistance,
       linkStrength: DEFAULT_PARAMS.linkStrength,
     };
-    kick();
+    settle();
   });
 
   // ── coordinate conversion ─────────────────────────────────────────────────
@@ -394,8 +413,7 @@
 
   function resetView() {
     view = { x: 0, y: 0, k: 1 };
-    sim.reheat();
-    kick();
+    settle();
   }
 
   // ── hover ─────────────────────────────────────────────────────────────────
@@ -438,9 +456,20 @@
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
   let ro: ResizeObserver | undefined;
+  // Load the graph + repos once the workspace is available. (A one-shot onMount
+  // raced workspace selection — if ws.currentId wasn't set yet the graph loaded
+  // nothing and never retried.) The loads run in a microtask so they don't mutate
+  // store state synchronously inside the effect (which Svelte forbids and which
+  // broke the component's reactivity).
+  $effect(() => {
+    const id = ws.currentId;
+    if (!id) return;
+    queueMicrotask(() => {
+      if (!vault.repos.length) void vault.loadRepos();
+      if (!vault.fullGraph && !vault.fullGraphLoading) void vault.loadFullGraph();
+    });
+  });
   onMount(() => {
-    if (!vault.repos.length) void vault.loadRepos();
-    if (!vault.fullGraph) void vault.loadFullGraph();
     const measure = () => {
       const r = svgEl?.getBoundingClientRect();
       if (r && r.width > 0) sim.resize(r.width, r.height);
@@ -450,7 +479,7 @@
       ro = new ResizeObserver(measure);
       ro.observe(svgEl);
     }
-    kick();
+    // Layout is driven by the setGraph $effect (synchronous settle); no loop here.
   });
   onDestroy(() => {
     destroyed = true;
@@ -673,7 +702,7 @@
         {/if}
         {#if hoverHit?.reasons?.length}
           <div class="tip-reasons">
-            {#each hoverHit.reasons as rr (rr.kind + rr.detail)}
+            {#each hoverHit.reasons as rr, i (i)}
               <span class="tip-reason"><b>{rr.kind}</b> {rr.detail || rr.score.toFixed(2)}</span>
             {/each}
           </div>

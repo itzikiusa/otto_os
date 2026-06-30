@@ -73,10 +73,49 @@ func TestLogin(t *testing.T) {}
   return dir;
 }
 
+// A larger fixture (40 files × 2 funcs, cross-calls + http/db) so the Graph has
+// enough nodes/edges to surface a render/responsiveness regression.
+function writeBigFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'otto-vault-big-'));
+  mkdirSync(join(dir, 'svc'), { recursive: true });
+  for (let i = 0; i < 40; i++) {
+    writeFileSync(
+      join(dir, 'svc', `mod${i}.go`),
+      `package svc
+import "context"
+func Handler${i}(ctx context.Context, id int) error {
+    _ = Helper${(i + 1) % 40}(ctx, id)
+    url, _ := serviceLocator.GetBrandService(ctx, id, "SVC_${i % 5}")
+    _ = url
+    row, _ := conn.GetContext(ctx, "SELECT v FROM tbl_data_${i % 7} WHERE id = ?")
+    _ = row
+    return nil
+}
+func Helper${i}(ctx context.Context, id int) error { return nil }
+`,
+    );
+  }
+  return dir;
+}
+
+let bigRepoDir = '';
+
+async function waitRepoReady(id: string, timeoutMs = 60_000): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const repos = await getJson(`/api/v1/workspaces/${wsId}/vault/repos`);
+    const r = repos.find((x: any) => x.id === id);
+    if (r && (r.status === 'ready' || r.status === 'error')) return r;
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+  throw new Error(`repo ${id} not ready in ${timeoutMs}ms`);
+}
+
 test.beforeAll(async () => {
   ({ ctx, base } = await apiCtx());
   wsId = await seedWorkspace(ctx, base);
   repoDir = writeFixture();
+  bigRepoDir = writeBigFixture();
 });
 
 test('indexes a repo and builds the symbol index + dependency graph', async () => {
@@ -191,4 +230,64 @@ test('UI: every Vault tab renders; Repos + Symbols + Graph reflect the index', a
   // Graph tab → the force graph renders nodes (svg or canvas).
   await page.getByTestId('vault-tab-graph').click();
   await expect(page.locator('.vp-body svg, .vp-body canvas').first()).toBeVisible({ timeout: 10_000 });
+});
+
+test('large graph: revisiting the Graph tab does NOT freeze the app', async ({ page }) => {
+  // Index the bigger fixture (more nodes/edges) and wait for it to finish.
+  const started = await postJson(`/api/v1/workspaces/${wsId}/vault/repos/index`, {
+    root: bigRepoDir,
+    name: 'big_fixture',
+  });
+  const repo = await waitRepoReady(started.repo_id);
+  expect(repo.status).toBe('ready');
+  expect(repo.symbols).toBeGreaterThan(40);
+
+  // Any Svelte reactive-loop / render crash surfaces as a pageerror → fail.
+  const pageErrors: string[] = [];
+  page.on('pageerror', (e) => pageErrors.push(e.message));
+
+  // Sanity: the fullgraph endpoint returns nodes for this ws.
+  const fg = await getJson(`/api/v1/workspaces/${wsId}/vault/fullgraph`);
+  expect(fg.nodes.length).toBeGreaterThan(0);
+
+  await page.goto('/#/vault');
+  await page.getByTestId('vault-tab-graph').click();
+  await expect(page.locator('.vp-body svg').first()).toBeVisible({ timeout: 10_000 });
+  // The graph must actually render the nodes (not an empty/never-laid-out view).
+  const graphNodes = page.locator('.vp-body g.nodes > g');
+  await expect.poll(() => graphNodes.count(), { timeout: 10_000 }).toBeGreaterThan(10);
+
+  // Leave and return repeatedly — the old continuous per-frame SVG render froze
+  // the main thread on revisit. After each return the graph must re-render AND
+  // the app must stay responsive (a frozen main thread makes the next nav hang).
+  for (let k = 0; k < 3; k++) {
+    await page.getByTestId('vault-tab-symbols').click();
+    await expect(page.getByPlaceholder(/Search symbols/i)).toBeVisible({ timeout: 4000 });
+    await page.getByTestId('vault-tab-graph').click();
+    await expect.poll(() => graphNodes.count(), { timeout: 8000 }).toBeGreaterThan(10);
+  }
+  expect(pageErrors, `no reactive-loop/render errors: ${pageErrors.join('; ')}`).toEqual([]);
+
+  // Responsiveness probe: after all the graph churn, switching tabs must be near
+  // instant. If the main thread were pegged, this would time out.
+  const t0 = Date.now();
+  await page.getByTestId('vault-tab-brain').click();
+  await expect(page.getByRole('heading', { name: 'Repo Brain' })).toBeVisible({ timeout: 4000 });
+  expect(Date.now() - t0).toBeLessThan(4000);
+});
+
+test('Brain: Assemble returns a context block (and stays responsive)', async ({ page }) => {
+  // A render crash (e.g. duplicate {#each} keys from repeated reasons) would
+  // prevent the output from showing — fail on any page error.
+  const errs: string[] = [];
+  page.on('pageerror', (e) => errs.push(e.message));
+  await page.goto('/#/vault');
+  await page.getByTestId('vault-tab-brain').click();
+  await page.getByPlaceholder(/Focus/i).fill('how the handler flow works');
+  await page.getByRole('button', { name: /Assemble/i }).click();
+  await expect(page.locator('.brain-out')).toBeVisible({ timeout: 30_000 });
+  expect(errs, `no render errors: ${errs.join('; ')}`).toEqual([]);
+  // And the tab bar is still clickable afterwards (no freeze).
+  await page.getByTestId('vault-tab-repos').click();
+  await expect(page.getByText('Index a repository')).toBeVisible({ timeout: 4000 });
 });
