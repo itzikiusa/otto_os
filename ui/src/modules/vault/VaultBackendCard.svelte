@@ -68,7 +68,15 @@
   async function test() {
     testing = true;
     try {
-      await vault.testBackend(kind);
+      // Persist the current form first: the health endpoint 404s on a backend
+      // that was never saved, and we want to test the latest URL/secret.
+      const req: VaultBackendReq = { enabled, url: url.trim(), role };
+      if (secret.trim()) req.secret = secret.trim();
+      const ok = await vault.saveBackend(kind, req);
+      if (ok) {
+        secret = '';
+        await vault.testBackend(kind);
+      }
     } finally {
       testing = false;
     }
