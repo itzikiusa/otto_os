@@ -2,7 +2,8 @@
 
 use chrono::Utc;
 use otto_core::workflows::{
-    NodeRunState, RunStatus, Workflow, WorkflowGraph, WorkflowRun, WorkflowVersion,
+    ActiveWorkflowRun, NodeRunState, NodeStatus, RunStatus, Workflow, WorkflowGraph, WorkflowRun,
+    WorkflowVersion,
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::{Row, SqlitePool};
@@ -65,6 +66,29 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
         finished_at: finished.as_deref().map(ts).transpose()?,
         workflow_version: r.try_get("workflow_version").ok().flatten(),
         proof_pack_id: r.try_get("proof_pack_id").ok().flatten(),
+    })
+}
+
+fn row_to_active_run(r: &sqlx::sqlite::SqliteRow) -> Result<ActiveWorkflowRun> {
+    let nodes: Vec<NodeRunState> =
+        serde_json::from_str(&r.get::<String, _>("nodes_json")).unwrap_or_default();
+    let nodes_total = nodes.len() as u32;
+    let nodes_done = nodes
+        .iter()
+        .filter(|n| matches!(n.status, NodeStatus::Success | NodeStatus::Skipped))
+        .count() as u32;
+    let waiting: i64 = r.try_get("waiting_approval").unwrap_or(0);
+    Ok(ActiveWorkflowRun {
+        run_id: r.get("run_id"),
+        workflow_id: r.get("workflow_id"),
+        workspace_id: r.get("workspace_id"),
+        workflow_name: r.get("workflow_name"),
+        status: RunStatus::parse(&r.get::<String, _>("status"))
+            .ok_or_else(|| Error::Internal("bad run status".into()))?,
+        started_at: ts(&r.get::<String, _>("started_at"))?,
+        nodes_total,
+        nodes_done,
+        waiting_approval: waiting != 0,
     })
 }
 
@@ -236,6 +260,25 @@ impl WorkflowsRepo {
         .await
         .map_err(dberr("runs"))?;
         rows.iter().map(row_to_run).collect()
+    }
+
+    /// In-flight runs (pending|running) across a workspace, newest first, joined
+    /// with their workflow name and with per-run step progress pre-computed.
+    /// Backs the "Running" sidebar list (`GET /workspaces/{wid}/workflow-runs/active`).
+    pub async fn list_active_runs(&self, workspace_id: &Id) -> Result<Vec<ActiveWorkflowRun>> {
+        let rows = sqlx::query(
+            "SELECT r.id AS run_id, r.workflow_id, r.workspace_id, r.status,
+                    r.started_at, r.nodes_json, r.waiting_approval, w.name AS workflow_name
+             FROM workflow_runs r
+             JOIN workflows w ON w.id = r.workflow_id
+             WHERE r.workspace_id = ? AND r.status IN ('pending','running')
+             ORDER BY r.started_at DESC",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("active runs"))?;
+        rows.iter().map(row_to_active_run).collect()
     }
 
     // --- node output cache ------------------------------------------------

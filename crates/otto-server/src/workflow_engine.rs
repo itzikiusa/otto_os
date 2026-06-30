@@ -404,6 +404,11 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
         // environment variable substitution and auth apply.  Wired.
         n("api_run", "API Run", "Network",
           "Execute an API-client request with env-var substitution.", 1, 1, "#46c0a0", "send"),
+        // self_improve: runs the self-improvement engine in OFFER-ONLY mode
+        // (Autonomy::Propose → every edit is queued for approval, never applied)
+        // and posts the offered improvements to the trigger's chat thread.
+        n("self_improve", "Self-Improve (offer)", "AI",
+          "Reflect on recent sessions and OFFER skill/memory improvements (never auto-applied — queued for approval). Posts the offered list to the chat thread.", 1, 1, "#d97cff", "zap"),
     ]
 }
 
@@ -445,6 +450,12 @@ fn output_schema_for(kind: &str) -> Option<Value> {
         "product_plan" => obj(&[("story_id", "string"), ("plan_md", "string")]),
         "product_publish" => obj(&[("story_id", "string"), ("url", "string"), ("dry_run", "boolean")]),
         "git_pr" => obj(&[("title", "string"), ("description", "string"), ("opened", "boolean")]),
+        "self_improve" => obj(&[
+            ("run_id", "string"),
+            ("summary", "string"),
+            ("offered", "number"),
+            ("edits", "array"),
+        ]),
         "canvas" => obj(&[("scene_id", "string"), ("summary", "string")]),
         "swarm_task" => obj(&[("task_id", "string"), ("title", "string")]),
         _ => None,
@@ -578,6 +589,29 @@ pub async fn run_workflow(
         .filter(|s| !s.trim().is_empty())
         .map(expand_tilde)
         .unwrap_or_else(|| ws.root_path.clone());
+    // Resilience (design §B): many steps (review_run, git_pr, …) need a repo_id.
+    // If the run wasn't given one but DOES carry a working_directory, resolve the
+    // registered repo for that path ONCE here and seed it into the run input — so
+    // every downstream step inherits it. This is what makes a workflow that only
+    // sets `Working Directory:` work, instead of failing with "missing repo_id".
+    let input = {
+        let mut inp = input;
+        let has_repo = inp
+            .get("repo_id")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !has_repo {
+            if let Some(rid) =
+                resolve_repo_id_for_path(&ctx, &workflow.workspace_id, &run_cwd).await
+            {
+                if let Value::Object(m) = &mut inp {
+                    m.insert("repo_id".into(), Value::String(rid));
+                }
+            }
+        }
+        inp
+    };
     // Nodes that errored (or were poisoned by an errored upstream) — these
     // propagate failure. `branch_skipped` nodes were pruned by an edge condition
     // (or are downstream of a pruned node) and do NOT fail the run.
@@ -2060,12 +2094,19 @@ async fn execute_node(
 
         // --- Review Run (wired: local-review engine + 0–100 score + goals) ---
         "review_run" => {
-            let repo_id = p
-                .get("repo_id")
-                .and_then(Value::as_str)
-                .or_else(|| input.get("repo_id").and_then(Value::as_str))
-                .ok_or_else(|| otto_core::Error::Invalid("review_run: missing repo_id".into()))?
-                .to_string();
+            // Resilient repo resolution (design §B): explicit repo_id wins, else
+            // derive it from the step's worktree_path / the run's working_directory
+            // / run_cwd against the workspace's registered repos. Never a bare
+            // "missing repo_id" for a workflow that was given a working directory.
+            let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
+                .await
+                .ok_or_else(|| {
+                    otto_core::Error::Invalid(
+                        "review_run: no repo_id; pass repo_id or a working_directory/worktree_path \
+                         under a registered repo"
+                            .into(),
+                    )
+                })?;
             let threshold = p.get("threshold").and_then(Value::as_u64).unwrap_or(80) as i64;
             let await_done = p.get("await").and_then(Value::as_bool).unwrap_or(true);
             let timeout_s = p.get("timeout_s").and_then(Value::as_u64).unwrap_or(900).min(1800);
@@ -2093,7 +2134,8 @@ async fn execute_node(
             let worktree = p
                 .get("worktree_path")
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .or_else(|| input.get("working_directory").and_then(Value::as_str))
+                .map(expand_tilde)
                 .unwrap_or_else(|| repo.path.clone());
             let base = p
                 .get("base")
@@ -2107,17 +2149,43 @@ async fn execute_node(
                 .and_then(Value::as_u64)
                 .map(|n| format!("Review #{n}"))
                 .unwrap_or_else(|| "Review".to_string());
-            let cfg_override = if providers.is_empty() && lenses.is_empty() {
+            // Rich reviewer config (PR-review parity, design §F): `reviewers` =
+            // per-lens provider sets + optional per-reviewer instructions, with an
+            // optional `summarizer`. Falls back to the flat providers/lenses form,
+            // then to the stored/default PR-review config.
+            let reviewers = p.get("reviewers").and_then(Value::as_array).cloned().unwrap_or_default();
+            let cfg_override = if !reviewers.is_empty() {
+                let default_provider = crate::modules::default_review_provider(ctx).await;
+                Some(crate::modules::workflow_review_config_from_json(
+                    &default_provider,
+                    &reviewers,
+                    p.get("summarizer"),
+                ))
+            } else if providers.is_empty() && lenses.is_empty() {
                 None
             } else {
                 let default_provider = crate::modules::default_review_provider(ctx).await;
                 Some(crate::modules::workflow_review_config(&default_provider, &providers, &lenses))
             };
             if progress.enabled() {
-                let lens_txt = if lenses.is_empty() {
+                let lens_list: Vec<String> = if reviewers.is_empty() {
+                    lenses.clone()
+                } else {
+                    reviewers
+                        .iter()
+                        .filter_map(|r| {
+                            r.get("lens")
+                                .or_else(|| r.get("skill"))
+                                .or_else(|| r.get("name"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect()
+                };
+                let lens_txt = if lens_list.is_empty() {
                     String::new()
                 } else {
-                    format!(" · lenses: {}", lenses.join(", "))
+                    format!(" · lenses: {}", lens_list.join(", "))
                 };
                 let prov_txt = if providers.is_empty() {
                     String::new()
@@ -2170,7 +2238,22 @@ async fn execute_node(
             let (total, open, blocker) = crate::modules::review_findings_counts(ctx, &review_id).await;
             let blocking = blocker as i64;
             let advisory = (open.saturating_sub(blocker)) as i64;
-            let review_score = (100 - 20 * blocking - 5 * advisory).clamp(0, 100);
+            // Configurable scoring guideline (design §G): per-severity deductions
+            // (percent off 100) over the OPEN findings — `scoring: { bug, warn, info }`.
+            // Defaults (20/5/5) preserve the historical blocking/advisory formula.
+            let (bugs, warns, infos) =
+                crate::modules::review_open_counts_by_severity(ctx, &review_id).await;
+            let weight = |key: &str, default: i64| -> i64 {
+                p.get("scoring")
+                    .and_then(|s| s.get(key))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(default)
+            };
+            let review_score = (100
+                - bugs as i64 * weight("bug", 20)
+                - warns as i64 * weight("warn", 5)
+                - infos as i64 * weight("info", 5))
+            .clamp(0, 100);
             // Optional goals — assessed by an agent and blended into the score.
             let goals: Vec<String> = p
                 .get("goals")
@@ -2232,6 +2315,7 @@ async fn execute_node(
             let out = json!({
                 "review_id": review_id, "status": status,
                 "total": total, "open": open, "blocking": blocking, "advisory": advisory,
+                "severity": { "bug": bugs, "warn": warns, "info": infos },
                 "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
                 "score": score, "threshold": threshold, "passed": passed,
                 "findings": finding_briefs, "providers": providers, "lenses": lenses,
@@ -2409,12 +2493,16 @@ async fn execute_node(
 
         // --- Git PR (draft; opening is done from the Git tab) ----------------
         "git_pr" => {
-            let repo_id = p
-                .get("repo_id")
-                .and_then(Value::as_str)
-                .or_else(|| input.get("repo_id").and_then(Value::as_str))
-                .ok_or_else(|| otto_core::Error::Invalid("git_pr: missing repo_id".into()))?
-                .to_string();
+            // Same resilient repo resolution as review_run (design §B).
+            let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
+                .await
+                .ok_or_else(|| {
+                    otto_core::Error::Invalid(
+                        "git_pr: no repo_id; pass repo_id or a working_directory/worktree_path \
+                         under a registered repo"
+                            .into(),
+                    )
+                })?;
             let repo = ctx
                 .git_store
                 .get_repo(&repo_id)
@@ -2423,7 +2511,8 @@ async fn execute_node(
             let worktree = p
                 .get("worktree_path")
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .or_else(|| input.get("working_directory").and_then(Value::as_str))
+                .map(expand_tilde)
                 .unwrap_or_else(|| repo.path.clone());
             let base = p
                 .get("base")
@@ -2476,6 +2565,75 @@ async fn execute_node(
                 )),
                 Err(e) => Err(otto_core::Error::Upstream(format!("git_pr: open failed: {e}"))),
             }
+        }
+
+        // --- Self-improvement (offer-only) ----------------------------------
+        // Reflect on the workspace's recent sessions and OFFER skill/memory
+        // improvements. Runs the self-improvement engine with Autonomy::Propose
+        // so every proposed edit is QUEUED for approval — never auto-applied —
+        // then posts the offered list to the trigger's chat thread (design §I).
+        "self_improve" => {
+            use otto_core::domain::{Autonomy, ImprovementTrigger};
+            let eng = &ctx.improve_engine;
+            let run = eng
+                .improvements
+                .create_run(&ws.id, ImprovementTrigger::Manual)
+                .await
+                .map_err(|e| otto_core::Error::Internal(format!("self_improve: create run: {e}")))?;
+            eng.execute_run_with_autonomy(&run.id, &ws.id, ImprovementTrigger::Manual, Autonomy::Propose)
+                .await
+                .map_err(|e| otto_core::Error::Upstream(format!("self_improve: {e}")))?;
+            let final_run = eng.improvements.get_run(&run.id).await.ok();
+            let edits = eng.improvements.list_edits_by_run(&run.id).await.unwrap_or_default();
+            let summary = final_run.as_ref().map(|r| r.summary.clone()).unwrap_or_default();
+            let offered: Vec<Value> = edits
+                .iter()
+                .map(|e| {
+                    json!({
+                        "id": e.id,
+                        "target": e.target.as_str(),
+                        "target_ref": e.target_ref,
+                        "kind": e.kind.as_str(),
+                        "risk": e.risk.as_str(),
+                        "rationale": e.rationale,
+                    })
+                })
+                .collect();
+            let mut logs = vec![format!(
+                "self_improve: offered {} improvement(s) — none applied (run {})",
+                offered.len(),
+                run.id
+            )];
+            for e in &edits {
+                logs.push(format!("  offer: [{}] {} — {}", e.risk.as_str(), e.target_ref, truncate(&e.rationale, 160)));
+            }
+            if progress.enabled() {
+                let mut msg = format!(
+                    "💡 *Self-improvement* — {} improvement(s) *offered* (queued for approval; none auto-applied).",
+                    offered.len()
+                );
+                for e in edits.iter().take(8) {
+                    msg.push_str(&format!(
+                        "\n • [{}] `{}` — {}",
+                        e.risk.as_str(),
+                        e.target_ref,
+                        truncate(&e.rationale, 140)
+                    ));
+                }
+                if !summary.trim().is_empty() {
+                    msg.push_str(&format!("\n_Summary:_ {}", truncate(&summary, 280)));
+                }
+                progress.post(msg);
+            }
+            Ok((
+                json!({
+                    "run_id": run.id,
+                    "summary": summary,
+                    "offered": offered.len(),
+                    "edits": offered,
+                }),
+                logs,
+            ))
         }
 
         other => Err(otto_core::Error::Invalid(format!("unknown node kind '{other}'"))),
@@ -2659,6 +2817,121 @@ fn expand_tilde(p: &str) -> String {
         }
     }
     p.to_string()
+}
+
+/// Resolve the repo_id a repo-needing step (`review_run`, `git_pr`) should use:
+/// an explicit `repo_id` (step params → run input) wins; otherwise derive it from
+/// the step's `worktree_path`, the run's `working_directory`, or `run_cwd`.
+/// See design §B — this is what makes such steps resilient instead of failing
+/// with a bare "missing repo_id".
+async fn resolve_step_repo_id(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    p: &Value,
+    input: &Value,
+    run_cwd: &str,
+) -> Option<String> {
+    let explicit = p
+        .get("repo_id")
+        .and_then(Value::as_str)
+        .or_else(|| input.get("repo_id").and_then(Value::as_str))
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
+    if explicit.is_some() {
+        return explicit;
+    }
+    let hint = p
+        .get("worktree_path")
+        .and_then(Value::as_str)
+        .or_else(|| input.get("working_directory").and_then(Value::as_str))
+        .map(str::to_string)
+        .unwrap_or_else(|| run_cwd.to_string());
+    resolve_repo_id_for_path(ctx, &ws.id, &hint).await
+}
+
+/// Best-effort: find the registered repo whose checkout contains `path`, so a
+/// workflow given only a working directory still drives review/PR steps.
+///
+/// Order: (1) `path` canonically matches a registered repo (exact, or nested
+/// under it — deepest wins); (2) `path` is a `git worktree` checkout whose origin
+/// repo is registered; (3) the workspace has exactly one repo. `None` when
+/// nothing plausible matches.
+async fn resolve_repo_id_for_path(
+    ctx: &ServerCtx,
+    workspace_id: &Id,
+    path: &str,
+) -> Option<String> {
+    let repos = ctx.git_store.list_repos(workspace_id).await.ok()?;
+    if repos.is_empty() {
+        return None;
+    }
+    let pairs: Vec<(String, String)> =
+        repos.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
+    let expanded = expand_tilde(path);
+    if let Some(id) = match_repo_path(&expanded, &pairs) {
+        return Some(id);
+    }
+    if let Some(main) = git_main_worktree(&expanded).await {
+        if let Some(id) = match_repo_path(&main, &pairs) {
+            return Some(id);
+        }
+    }
+    if repos.len() == 1 {
+        return Some(repos[0].id.clone());
+    }
+    None
+}
+
+/// Pure path matcher (canonicalized, component-wise) used by
+/// [`resolve_repo_id_for_path`]; split out so it is unit-testable without a ctx.
+/// `target` matches a repo when it equals the repo path or is nested under it;
+/// the deepest (most specific) registered repo wins. Component-wise so a sibling
+/// like `…/foo_wt` does NOT match a repo at `…/foo`.
+fn match_repo_path(target: &str, repos: &[(String, String)]) -> Option<String> {
+    let canon =
+        |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
+    let t = canon(target);
+    let mut best: Option<(usize, String)> = None;
+    for (id, rp) in repos {
+        let r = canon(rp);
+        if t == r || t.starts_with(&r) {
+            let depth = r.components().count();
+            if best.as_ref().map(|(d, _)| depth > *d).unwrap_or(true) {
+                best = Some((depth, id.clone()));
+            }
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// For a `git worktree` checkout at `path`, the main worktree directory (the
+/// origin repo): `git -C <path> rev-parse --path-format=absolute
+/// --git-common-dir` yields the shared `…/.git`, whose parent is the origin repo.
+/// `None` when `path` isn't a git repo / git is unavailable. Runs on a blocking
+/// thread so it never stalls the async runtime.
+async fn git_main_worktree(path: &str) -> Option<String> {
+    let path = path.to_string();
+    tokio::task::spawn_blocking(move || {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if common.is_empty() {
+            return None;
+        }
+        std::path::Path::new(&common)
+            .parent()
+            .map(|x| x.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The directory an agent node runs in: a per-node `cwd`/`working_directory`
@@ -3043,5 +3316,95 @@ mod tests {
         // A manual UI run (no chat) → no target → disabled progress.
         assert!(resolve_chat_target(&wf, &json!({ "repo_id": "r" })).is_none());
         assert!(resolve_chat_target(&wf, &json!({ "channel": "webhook", "chat": "x" })).is_none());
+    }
+
+    // --- repo_id resolution (design §B) ------------------------------------
+
+    #[test]
+    fn match_repo_path_exact_subdir_and_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let sub = repo.join("pkg/inner");
+        let sibling = root.path().join("repo_wt"); // shares the "repo" name prefix
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let pairs = vec![("R".to_string(), repo.to_string_lossy().into_owned())];
+
+        // Exact path → match.
+        assert_eq!(
+            match_repo_path(repo.to_string_lossy().as_ref(), &pairs).as_deref(),
+            Some("R")
+        );
+        // A nested subdir → match (working dir inside the repo).
+        assert_eq!(
+            match_repo_path(sub.to_string_lossy().as_ref(), &pairs).as_deref(),
+            Some("R")
+        );
+        // A sibling whose name shares a prefix must NOT match (component-wise).
+        assert_eq!(match_repo_path(sibling.to_string_lossy().as_ref(), &pairs), None);
+        // An unrelated ancestor must not match.
+        assert_eq!(match_repo_path(root.path().to_string_lossy().as_ref(), &pairs), None);
+    }
+
+    #[test]
+    fn match_repo_path_deepest_repo_wins() {
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("outer");
+        let inner = outer.join("inner");
+        let target = inner.join("x");
+        std::fs::create_dir_all(&target).unwrap();
+        let pairs = vec![
+            ("OUTER".to_string(), outer.to_string_lossy().into_owned()),
+            ("INNER".to_string(), inner.to_string_lossy().into_owned()),
+        ];
+        assert_eq!(
+            match_repo_path(target.to_string_lossy().as_ref(), &pairs).as_deref(),
+            Some("INNER")
+        );
+    }
+
+    #[tokio::test]
+    async fn git_main_worktree_maps_linked_worktree_to_origin() {
+        // Skip cleanly when git isn't available in the environment.
+        let has_git = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_git {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("origin");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "hi").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "c"]);
+        let wt = root.path().join("linked_wt");
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["worktree", "add", "-q"])
+            .arg(&wt)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+        let main = git_main_worktree(wt.to_string_lossy().as_ref())
+            .await
+            .expect("worktree resolves to origin");
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(canon(std::path::Path::new(&main)), canon(&repo));
     }
 }

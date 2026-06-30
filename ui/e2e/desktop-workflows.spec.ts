@@ -1,5 +1,5 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
 
 // Workflow orchestrator E2E. Drives the API against the isolated OTTO_E2E daemon
 // (agent turns return a deterministic canned reply + a session id, so agent nodes
@@ -69,6 +69,20 @@ async function runToCompletion(wfId: string): Promise<any> {
 
 function nodeState(run: any, id: string): any {
   return (run.nodes ?? []).find((n: any) => n.node_id === id);
+}
+
+/** Poll an already-started run (by id) to a terminal status. */
+async function waitRun(runId: string): Promise<any> {
+  const deadline = Date.now() + 60_000;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const g = await ctx.get(`${base}${V1}/workflow-runs/${runId}`);
+    expect(g.ok(), await g.text()).toBeTruthy();
+    const run = await g.json();
+    if (run.status !== 'running' && run.status !== 'pending') return run;
+    if (Date.now() > deadline) throw new Error(`run ${runId} did not finish: ${run.status}`);
+    await new Promise((res) => setTimeout(res, 300));
+  }
 }
 
 // Run on the desktop-browser project only (the API assertions don't need a
@@ -275,11 +289,26 @@ test('code templates auto-open the PR on review pass (no human approval)', async
     // The edge into the PR step is GATED on the review having passed.
     const prEdge = t.graph.edges.find((e: any) => e.target === pr.id);
     expect(prEdge?.condition, `${id} PR edge is conditional`).toBeTruthy();
-    // The fix→review loop carries reviewer lenses (multi-agent review).
+    // The loop is REVIEW-first then fix (design §E): review precedes fix, and
+    // the until references the review step by name.
     const loop = t.graph.nodes.find((n: any) => n.kind === 'loop');
+    const stepKinds = loop.params.steps.map((s: any) => s.kind);
+    expect(stepKinds[0], `${id} reviews before fixing`).toBe('review_run');
+    expect(stepKinds).toContain('agent_prompt');
+    expect(loop.params.until, `${id} until references the review step`).toContain('steps.review');
+    // Per-lens multi-agent reviewers + a summarizer + a scoring guideline (design §F/§G).
     const review = loop.params.steps.find((s: any) => s.kind === 'review_run');
-    expect(Array.isArray(review.params.lenses), `${id} review has lenses`).toBeTruthy();
-    expect(review.params.lenses.length).toBeGreaterThan(0);
+    expect(Array.isArray(review.params.reviewers), `${id} review has reviewers`).toBeTruthy();
+    expect(review.params.reviewers.length).toBeGreaterThan(0);
+    // At least one reviewer fans out to multiple providers (e.g. claude+codex).
+    expect(
+      review.params.reviewers.some((r: any) => Array.isArray(r.providers) && r.providers.length >= 2),
+      `${id} has a multi-provider reviewer`,
+    ).toBeTruthy();
+    expect(review.params.summarizer?.provider, `${id} review has a summarizer`).toBeTruthy();
+    expect(review.params.scoring, `${id} review has a scoring guideline`).toBeTruthy();
+    // The template offers improvements as a separate, terminal block (design §I).
+    expect(kinds, `${id} offers improvements`).toContain('self_improve');
   }
 });
 
@@ -328,6 +357,80 @@ test('per-step skills + multi-provider/lens review params round-trip', async () 
   expect(prEdge.condition).toBe('output.passed == true');
 });
 
+test('review/PR repo_id derives from the working_directory (no "missing repo_id")', async () => {
+  // A workflow given ONLY a working_directory (no repo_id) must still resolve a
+  // repo for review/PR steps. The engine seeds repo_id into the run input from
+  // the working_directory; the manual_trigger node emits that input as output.
+  const { repoId, dir } = await seedGitRepo(ctx, base, ws);
+  const wfId = await createWorkflow(
+    'E2E Repo Derive',
+    [
+      {
+        id: 'trigger',
+        kind: 'manual_trigger',
+        name: 'Start',
+        x: 0,
+        y: 0,
+        params: { working_directory: dir },
+      },
+      node('echo', 'log'),
+    ],
+    [edge('trigger', 'echo')],
+  );
+  const run = await runToCompletion(wfId);
+  expect(run.status).toBe('success');
+  expect(nodeState(run, 'trigger').output.repo_id, 'repo_id derived from working_directory').toBe(
+    repoId,
+  );
+});
+
+test('active-runs endpoint lists an in-flight run, then drops it on completion', async () => {
+  const wfId = await createWorkflow(
+    'E2E Active',
+    [node('trigger', 'manual_trigger'), node('wait', 'delay', { ms: 3000 }), node('done', 'log')],
+    [edge('trigger', 'wait'), edge('wait', 'done')],
+  );
+  const r = await ctx.post(`${base}${V1}/workflows/${wfId}/run`, { data: {} });
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const runId = (await r.json()).id as string;
+
+  // While running it appears in the workspace-wide active list, with progress.
+  // Poll until the engine has populated the node states (nodes_total = 3) — there
+  // is a brief `pending` window right after create where nodes_json is still `[]`.
+  let mine: any = null;
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const a = await ctx.get(`${base}${V1}/workspaces/${ws}/workflow-runs/active`);
+    expect(a.ok(), await a.text()).toBeTruthy();
+    const found = (await a.json()).find((x: any) => x.run_id === runId);
+    if (found && found.nodes_total === 3) {
+      mine = found;
+      break;
+    }
+    await new Promise((res) => setTimeout(res, 150));
+  }
+  expect(mine, 'run appeared in the active list with its steps populated').toBeTruthy();
+  expect(mine.workflow_name).toBe('E2E Active');
+  expect(['pending', 'running']).toContain(mine.status);
+  expect(mine.nodes_done).toBeLessThanOrEqual(mine.nodes_total);
+
+  // Once terminal it leaves the active list.
+  await waitRun(runId);
+  const a2 = await ctx.get(`${base}${V1}/workspaces/${ws}/workflow-runs/active`);
+  const active2 = await a2.json();
+  expect(active2.find((x: any) => x.run_id === runId), 'finished run is no longer active').toBeFalsy();
+});
+
+// NOTE on hiding workflow sessions from the Agents list (design §A): this can't
+// be faithfully exercised in the offline E2E harness. Workflow agent turns
+// short-circuit (`run_session_turn` returns a synthetic id, no row), and a real
+// agent session can't be created either — the daemon points CLAUDE_BIN at a
+// nonexistent path, so `manager.create` deletes the row when the PTY fails to
+// spawn. The behavior is a one-line client filter (`meta.source !== 'workflow'`)
+// added alongside the 8 existing identical source-filters in
+// `ui/src/lib/stores/workspace.svelte.ts`, and the engine already stamps
+// `meta.source = "workflow"` (workflow_engine.rs → run_session_turn → create).
+
 // --- Desktop UI smoke -------------------------------------------------------
 
 test.describe('workflows page (desktop)', () => {
@@ -342,5 +445,44 @@ test.describe('workflows page (desktop)', () => {
   test('renders the workflows page and lists a seeded workflow', async ({ page }) => {
     await page.goto('/#/workflows');
     await expect(page.getByText('E2E Branching').first()).toBeVisible({ timeout: 30_000 });
+  });
+
+  test('templates live in a dropdown (room freed); no always-open "Game templates"', async ({
+    page,
+  }) => {
+    await page.goto('/#/workflows');
+    await expect(page.getByText('E2E Branching').first()).toBeVisible({ timeout: 30_000 });
+    // The old always-open template list is gone (room freed for Workflows/Running).
+    await expect(page.getByText('Game templates')).toHaveCount(0);
+    // Templates are reachable via a collapsed dropdown.
+    const btn = page.getByRole('button', { name: /Templates/ });
+    await expect(btn).toBeVisible();
+    await btn.click();
+    await expect(page.getByText('Write tests for a story').first()).toBeVisible();
+  });
+
+  test('Running list shows an in-flight run; the detail auto-updates to success', async ({
+    page,
+  }) => {
+    const wfId = await createWorkflow(
+      'E2E Live',
+      [node('trigger', 'manual_trigger'), node('wait', 'delay', { ms: 6000 }), node('done', 'log')],
+      [edge('trigger', 'wait'), edge('wait', 'done')],
+    );
+    const r = await ctx.post(`${base}${V1}/workflows/${wfId}/run`, { data: {} });
+    expect(r.ok(), await r.text()).toBeTruthy();
+
+    await page.goto('/#/workflows');
+    // The Running section lists the in-flight run.
+    const running = page.getByTestId('running-workflows');
+    await expect(running).toBeVisible({ timeout: 15_000 });
+    await expect(running.getByText('E2E Live')).toBeVisible();
+
+    // Open it from the Running list, then watch the status flip to success IN
+    // PLACE — no re-navigation — once the delay elapses (live auto-update).
+    await running.getByText('E2E Live').click();
+    const label = page.locator('.timeline .tl-label');
+    await expect(label).toBeVisible({ timeout: 10_000 });
+    await expect(label).toContainText('success', { timeout: 25_000 });
   });
 });

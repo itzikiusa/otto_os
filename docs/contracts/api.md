@@ -1199,6 +1199,7 @@ workspace from the workflow/run row.
 | DELETE /workflows/{id} | ws editor | — | 204 |
 | POST /workflows/{id}/run | ws editor | RunWorkflowReq? | WorkflowRun |
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
+| GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
 | POST /workflow-runs/{id}/cancel | ws editor | — | cancel a run |
 | GET /workflows/{id}/versions | ws viewer | — | `WorkflowVersion[]` — graph snapshot history, newest first |
@@ -1220,6 +1221,13 @@ completion — each node output becomes a `log` artifact, each `human_approval` 
 cache hit) and `sessions` (openable Otto session ids the node spawned — agent /
 product / canvas / loop-inner turns — reported live as they are created;
 `review_run` additionally surfaces a `review_id` in its output).
+
+**Running list.** `GET /workspaces/{wid}/workflow-runs/active` returns
+`ActiveWorkflowRun = {run_id, workflow_id, workspace_id, workflow_name, status,
+started_at, nodes_total, nodes_done, waiting_approval}` for every in-flight run
+(`pending`/`running`) in the workspace — a lightweight join (run × workflow name)
+with step progress precomputed, so the "Running" sidebar list + the Workflows nav
+count refresh on each `workflow_run_updated` WS event without per-run fetches.
 
 **Node kinds (catalog).** `GET /workflows/node-types` returns each kind's
 `NodeTypeSpec`, now including `output_schema` (declared output shape; drives UI

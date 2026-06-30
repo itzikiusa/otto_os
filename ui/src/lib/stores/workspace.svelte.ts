@@ -1,8 +1,10 @@
 // Workspaces + sessions + tab/split state for the shell and Agent Mode.
 
 import { api } from '../api/client';
+import { listActiveWorkflowRuns } from '../api/workflows';
 import { router } from '../router.svelte';
 import type {
+  ActiveWorkflowRun,
   AttachedIssue,
   CreateSessionReq,
   Id,
@@ -32,6 +34,11 @@ class WorkspaceStore {
    *  Terminal applies each injection exactly once (e.g. DB rows → running agent). */
   injections: Record<Id, { text: string; n: number }> = $state({});
   sessionsLoading = $state(false);
+
+  /** In-flight workflow runs (pending|running) in the current workspace, for the
+   *  "Running" sidebar list + the Workflows nav count chip. Refreshed on each
+   *  `workflow_run_updated` WS event and on workspace switch. */
+  activeWorkflowRuns: ActiveWorkflowRun[] = $state([]);
 
   /** view mode for Agent Mode: tabbed (one at a time), tiled (grid), or the
    *  Mission Control work-queue surface. */
@@ -135,7 +142,11 @@ class WorkspaceStore {
         s.meta.source !== 'swarm' &&
         s.meta.source !== 'canvas_assist' &&
         s.meta.source !== 'mockup_assist' &&
-        s.meta.source !== 'db_assist',
+        s.meta.source !== 'db_assist' &&
+        // Workflow steps run embedded under their run, not in the flat Agents
+        // list (a busy workspace can have hundreds). Still openable from the
+        // run's step detail via `openSession`, which reads `this.sessions`.
+        s.meta.source !== 'workflow',
     ),
   );
 
@@ -157,7 +168,8 @@ class WorkspaceStore {
         s.meta.source !== 'swarm' &&
         s.meta.source !== 'canvas_assist' &&
         s.meta.source !== 'mockup_assist' &&
-        s.meta.source !== 'db_assist',
+        s.meta.source !== 'db_assist' &&
+        s.meta.source !== 'workflow',
     ).length,
   );
 
@@ -175,7 +187,8 @@ class WorkspaceStore {
         s.meta.source !== 'swarm' &&
         s.meta.source !== 'canvas_assist' &&
         s.meta.source !== 'mockup_assist' &&
-        s.meta.source !== 'db_assist',
+        s.meta.source !== 'db_assist' &&
+        s.meta.source !== 'workflow',
     ).length,
   );
 
@@ -183,6 +196,24 @@ class WorkspaceStore {
   markNeedsYou(id: Id): void {
     if (this.needsYou[id]) return;
     this.needsYou = { ...this.needsYou, [id]: true };
+  }
+
+  /** Reload the in-flight workflow runs for the current workspace. Cheap query;
+   *  called on workspace switch and on every `workflow_run_updated` WS event so
+   *  the "Running" sidebar list + nav count stay live without per-page polling. */
+  async refreshActiveWorkflowRuns(): Promise<void> {
+    const wsId = this.currentId;
+    if (!wsId) {
+      this.activeWorkflowRuns = [];
+      return;
+    }
+    try {
+      const runs = await listActiveWorkflowRuns(wsId);
+      // Guard against an out-of-order response after a workspace switch.
+      if (this.currentId === wsId) this.activeWorkflowRuns = runs;
+    } catch {
+      /* transient; the next event re-fetches */
+    }
   }
 
   /** Clear a session's "needs you" flag — the user has attended to it. */
@@ -206,6 +237,7 @@ class WorkspaceStore {
     this.currentId = id;
     localStorage.setItem(LS_CURRENT, id);
     await this.refreshSessions();
+    void this.refreshActiveWorkflowRuns();
     // restore tabs for this workspace
     const raw = localStorage.getItem(LS_TABS + id);
     const ids: Id[] = raw ? JSON.parse(raw) : [];

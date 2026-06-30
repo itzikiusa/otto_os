@@ -306,9 +306,12 @@ class EventsClient {
           improvementBus.apply(parsed.kind, parsed.id);
         } else if (parsed.type === 'workflow_run_updated') {
           // Workflow execution progress: node-start / node-finish / run complete.
-          // The Workflows page subscribes to workflowRunBus and re-fetches only
-          // the run whose id matches, replacing the 700ms interval poll.
+          // The Workflows page subscribes to workflowRunBus and re-fetches the
+          // run whose id matches (run detail auto-updates while viewed).
           workflowRunBus.apply(parsed.workspace_id, parsed.run_id, parsed.status, parsed.node_id);
+          // Keep the "Running" sidebar list + nav count live (runs entering/
+          // leaving the active set, step-progress, approval pauses).
+          void ws.refreshActiveWorkflowRuns();
         } else if (parsed.type === 'skill_eval_updated') {
           // Skill-Eval terminal notification (done/error/cancelled).
           skillEvalBus.apply(parsed.workspace_id, parsed.run_id, parsed.status);

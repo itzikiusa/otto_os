@@ -4,7 +4,13 @@
 // crates/otto-server/src/routes/workflows.rs.)
 
 import { api } from './client';
-import type { Workflow, WorkflowVersion } from './types';
+import type { ActiveWorkflowRun, Workflow, WorkflowVersion } from './types';
+
+/** In-flight workflow runs (pending|running) across a workspace, newest first.
+ *  Backs the "Running" sidebar list. */
+export function listActiveWorkflowRuns(workspaceId: string): Promise<ActiveWorkflowRun[]> {
+  return api.get<ActiveWorkflowRun[]>(`/workspaces/${workspaceId}/workflow-runs/active`);
+}
 
 /** Version history for a workflow (newest first). */
 export function listWorkflowVersions(id: string): Promise<WorkflowVersion[]> {

@@ -595,6 +595,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         || p.starts_with("/workflow-runs/")
         || p.starts_with("/workflow-triggers/")
         || p.starts_with("/workspaces/{wid}/workflows")
+        || p.starts_with("/workspaces/{wid}/workflow-runs")
     {
         return Require(Workflows, if get { View } else { Edit });
     }

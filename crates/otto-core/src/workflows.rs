@@ -221,6 +221,27 @@ pub struct WorkflowRun {
     pub proof_pack_id: Option<String>,
 }
 
+/// Lightweight summary of an in-flight workflow run for the "Running" sidebar
+/// list. Joins the run with its workflow name and pre-computes step progress so
+/// the UI needs no extra fetch per run. Returned by
+/// `GET /workspaces/{wid}/workflow-runs/active` (status pending|running only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveWorkflowRun {
+    pub run_id: Id,
+    pub workflow_id: Id,
+    pub workspace_id: Id,
+    pub workflow_name: String,
+    pub status: RunStatus,
+    pub started_at: DateTime<Utc>,
+    /// Total nodes in the run, and how many have reached a terminal state
+    /// (success or skipped) — drives the "3/5 steps" progress chip.
+    pub nodes_total: u32,
+    pub nodes_done: u32,
+    /// The run is paused on a human-approval node (surfaced as a ⏸ in the list).
+    #[serde(default)]
+    pub waiting_approval: bool,
+}
+
 /// Catalog entry describing a node kind for the editor palette. Returned by
 /// `GET /workflows/node-types` so the UI and executor stay in sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]

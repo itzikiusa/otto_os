@@ -27,6 +27,7 @@ use otto_pty::CommandSpec;
 use otto_sessions::SessionManager;
 use otto_state::{GitStore, IntegrationsRepo, IssuesRepo, WorkspacesRepo};
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
@@ -2339,6 +2340,15 @@ fn title_case_lens(s: &str) -> String {
 /// scores the findings). `providers` empty → the resolved global default;
 /// `lenses` empty → the two default lenses (correctness + security) retargeted to
 /// `providers`.
+/// The lens prompt shared by every workflow-review reviewer: it pins the JSON
+/// output contract; the per-lens `skill` text is prepended at run time.
+pub(crate) const WORKFLOW_REVIEW_LENS_PROMPT: &str =
+    "You are reviewing a pull request diff. Output ONLY a JSON array \
+     (no prose, no markdown fence) of objects \
+     {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\"body\":string}. \
+     Review through your lens — the skill prepended above defines what to look for. Open and \
+     read the real files around you to verify each finding before reporting it.";
+
 pub(crate) fn workflow_review_config(
     default_provider: &str,
     providers: &[String],
@@ -2356,11 +2366,6 @@ pub(crate) fn workflow_review_config(
             a.providers = provs.clone();
         }
     } else {
-        let review_prompt = "You are reviewing a pull request diff. Output ONLY a JSON array \
-             (no prose, no markdown fence) of objects \
-             {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\"body\":string}. \
-             Review through your lens — the skill prepended above defines what to look for. Open and \
-             read the real files around you to verify each finding before reporting it.";
         base.agents = lenses
             .iter()
             .map(|lens| ReviewAgentCfg {
@@ -2368,12 +2373,122 @@ pub(crate) fn workflow_review_config(
                 provider: provs[0].clone(),
                 providers: provs.clone(),
                 model: String::new(),
-                prompt: review_prompt.to_string(),
+                prompt: WORKFLOW_REVIEW_LENS_PROMPT.to_string(),
                 skill: lens.clone(),
             })
             .collect();
     }
     base
+}
+
+/// Rich workflow-review config (PR-review parity): each reviewer carries its OWN
+/// provider set + optional custom instructions, plus a configurable summarizer —
+/// the same model the PR-review pipeline uses. Built from the `review_run` node's
+/// `reviewers`/`summarizer` JSON params. Reviewers with no providers fall back to
+/// `default_provider`; an empty `reviewers` returns the default config.
+pub(crate) fn workflow_review_config_from_json(
+    default_provider: &str,
+    reviewers: &[Value],
+    summarizer: Option<&Value>,
+) -> ReviewConfig {
+    let mut base = default_review_config(default_provider);
+    let str_list = |v: &Value, k: &str| -> Vec<String> {
+        v.get(k)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let agents: Vec<ReviewAgentCfg> = reviewers
+        .iter()
+        .filter_map(|r| {
+            let lens = r
+                .get("lens")
+                .or_else(|| r.get("skill"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut provs = str_list(r, "providers");
+            if provs.is_empty() {
+                provs = vec![default_provider.to_string()];
+            }
+            let instr = r.get("instructions").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let name = r
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    if lens.is_empty() {
+                        "Reviewer".to_string()
+                    } else {
+                        title_case_lens(&lens)
+                    }
+                });
+            let model = r.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+            let prompt = if instr.is_empty() {
+                WORKFLOW_REVIEW_LENS_PROMPT.to_string()
+            } else {
+                format!("{WORKFLOW_REVIEW_LENS_PROMPT}\n\n--- Reviewer-specific instructions ---\n{instr}")
+            };
+            // A reviewer with neither a lens nor a name nor providers is noise.
+            if lens.is_empty() && instr.is_empty() {
+                return None;
+            }
+            Some(ReviewAgentCfg {
+                name,
+                provider: provs[0].clone(),
+                providers: provs,
+                model,
+                prompt,
+                skill: lens,
+            })
+        })
+        .collect();
+    if !agents.is_empty() {
+        base.agents = agents;
+    }
+    if let Some(s) = summarizer {
+        if let Some(p) = s.get("provider").and_then(Value::as_str).filter(|x| !x.is_empty()) {
+            base.summarizer.provider = p.to_string();
+            base.summarizer.providers = vec![];
+        }
+        if let Some(m) = s.get("model").and_then(Value::as_str) {
+            base.summarizer.model = m.to_string();
+        }
+        if let Some(instr) = s
+            .get("instructions")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+        {
+            base.summarizer.prompt =
+                format!("{}\n\n--- Additional summarizer guidance ---\n{instr}", base.summarizer.prompt);
+        }
+    }
+    base
+}
+
+/// Open-finding counts for a review bucketed by the reviewer severity vocabulary
+/// (`bug`/`warn`/`info`). Backs the workflow `review_run` configurable scoring.
+pub(crate) async fn review_open_counts_by_severity(ctx: &ServerCtx, review_id: &Id) -> (u64, u64, u64) {
+    let all = ctx.findings_store.list_for_review(review_id).await.unwrap_or_default();
+    let is_open = |f: &otto_state::ReviewFindingRow| {
+        matches!(
+            f.state,
+            otto_state::FindingState::Open | otto_state::FindingState::Regressed
+        )
+    };
+    let mut bug = 0u64;
+    let mut warn = 0u64;
+    let mut info = 0u64;
+    for f in all.iter().filter(|f| is_open(f)) {
+        match f.severity.as_str() {
+            "bug" => bug += 1,
+            "warn" => warn += 1,
+            _ => info += 1,
+        }
+    }
+    (bug, warn, info)
 }
 
 /// Build/update the review's proof pack with a `review` artifact whose status is

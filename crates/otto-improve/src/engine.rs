@@ -84,7 +84,31 @@ impl ImprovementEngine {
         &self,
         run_id: &Id,
         ws_id: &Id,
+        trigger: ImprovementTrigger,
+    ) -> Result<()> {
+        self.execute_run_inner(run_id, ws_id, trigger, None).await
+    }
+
+    /// Like [`Self::execute_run`] but forces a specific [`Autonomy`] for THIS run,
+    /// ignoring the workspace's configured autonomy. The workflow `self_improve`
+    /// node uses `Autonomy::Propose` so improvements are only *offered* (queued
+    /// for approval), never auto-applied.
+    pub async fn execute_run_with_autonomy(
+        &self,
+        run_id: &Id,
+        ws_id: &Id,
+        trigger: ImprovementTrigger,
+        autonomy: otto_core::domain::Autonomy,
+    ) -> Result<()> {
+        self.execute_run_inner(run_id, ws_id, trigger, Some(autonomy)).await
+    }
+
+    async fn execute_run_inner(
+        &self,
+        run_id: &Id,
+        ws_id: &Id,
         _trigger: ImprovementTrigger,
+        autonomy_override: Option<otto_core::domain::Autonomy>,
     ) -> Result<()> {
         let _ = self.events.send(Event::ImprovementRunStarted {
             workspace_id: ws_id.clone(),
@@ -178,7 +202,14 @@ impl ImprovementEngine {
         };
 
         let (applied, pending) = self
-            .process_edits(ws_id, &ws.root_path, run_id, &proposal, &cfg.skill_allowlist, cfg.autonomy)
+            .process_edits(
+                ws_id,
+                &ws.root_path,
+                run_id,
+                &proposal,
+                &cfg.skill_allowlist,
+                autonomy_override.unwrap_or(cfg.autonomy),
+            )
             .await;
 
         advance_schedule(&mut cfg);

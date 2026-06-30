@@ -7,9 +7,9 @@ use axum::http::StatusCode;
 use axum::Json;
 use otto_core::domain::WorkspaceRole;
 use otto_core::workflows::{
-    CreateWorkflowReq, FromTemplateReq, NodeTypeSpec, RestoreVersionReq, RunStatus, RunWorkflowReq,
-    UpdateWorkflowReq, Workflow, WorkflowEdge, WorkflowGraph, WorkflowNode, WorkflowRun,
-    WorkflowTemplate, WorkflowVersion,
+    ActiveWorkflowRun, CreateWorkflowReq, FromTemplateReq, NodeTypeSpec, RestoreVersionReq,
+    RunStatus, RunWorkflowReq, UpdateWorkflowReq, Workflow, WorkflowEdge, WorkflowGraph,
+    WorkflowNode, WorkflowRun, WorkflowTemplate, WorkflowVersion,
 };
 use otto_core::{Error, Id};
 use otto_state::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger, WorkflowsRepo};
@@ -427,6 +427,18 @@ pub async fn get_run(
     Ok(Json(run))
 }
 
+/// `GET /workspaces/{wid}/workflow-runs/active` — in-flight runs (pending|running)
+/// across the workspace, for the "Running" sidebar list. Refreshed by the UI on
+/// each `workflow_run_updated` WS event.
+pub async fn list_active_runs(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<ActiveWorkflowRun>>> {
+    crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    Ok(Json(repo(&ctx).list_active_runs(&wid).await.map_err(ApiError)?))
+}
+
 // ---------------------------------------------------------------------------
 // Example templates (game pipelines: agent design + engine scaffold)
 // ---------------------------------------------------------------------------
@@ -583,31 +595,45 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
             ) }),
         )
     };
-    // Loop body: fix → multi-agent review (scored by the summarizer, goals-aware)
-    // until the score clears the threshold. `lenses` configures the reviewer
-    // agents (one per lens skill); leave providers default. The fix step can take
-    // its own implementation skill too.
-    let fix_review_loop = |max: u64, threshold: u64, lenses: serde_json::Value| {
+    // Loop body — REVIEW first, then FIX (design §E): the work already exists
+    // from the upstream implement step, so each iteration reviews it, then fixes
+    // the findings, repeating until the review passes. The reviewers mirror PR
+    // review (design §F): per-lens provider sets + a summarizer. Scoring is a
+    // generic, configurable severity→deduction guideline (design §G). `reviewers`
+    // is a JSON array of { lens, providers[] (, instructions?) }.
+    let fix_review_loop = |max: u64, threshold: u64, reviewers: serde_json::Value| {
         node(
             "iterate",
             "loop",
-            "Fix → review until passing",
+            "Review → fix until passing",
             900.0,
             json!({
                 "max_iterations": max,
-                "until": "last.passed == true",
+                // Pass iff the review step (by name) cleared the threshold.
+                "until": "steps.review.passed == true",
                 "steps": [
-                    { "kind": "agent_prompt", "name": "fix", "params": {
-                        "prompt": "Address the review findings in the input (if any) and make all \
-                                   tests pass while satisfying the goals. If there are no findings \
-                                   yet, do the initial implementation."
+                    { "kind": "review_run", "name": "review", "params": {
+                        "threshold": threshold,
+                        "reviewers": reviewers,
+                        "summarizer": { "provider": "claude" },
+                        // Generic scoring guideline — percent deducted per OPEN
+                        // finding by severity (bug=critical, warn=high, info=low).
+                        "scoring": { "bug": 10, "warn": 5, "info": 1 }
                     }},
-                    { "kind": "review_run", "name": "review",
-                      "params": { "threshold": threshold, "lenses": lenses } }
+                    { "kind": "agent_prompt", "name": "fix", "params": {
+                        "prompt": "You are given the latest code review in the input (its findings, \
+                                   score, and `passed`). If `passed` is true or there are no \
+                                   findings, make NO changes. Otherwise address EVERY finding and \
+                                   make all tests pass while satisfying the goals."
+                    }}
                 ]
             }),
         )
     };
+    // A separate, terminal "offer improvements" block (design §I): after the
+    // work + review loop, reflect on the session and OFFER skill/memory
+    // improvements — queued for approval, never auto-applied.
+    let offer_improvements = |x: f64| node("improve", "self_improve", "Offer improvements", x, Value::Null);
 
     vec![
         // 1) Writing tests for a story.
@@ -628,15 +654,25 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                         "prompt": "Using the brief, implement comprehensive tests (happy path, \
                                    meaningful validations, realistic errors). Run the suite and make them pass."
                     })),
-                    fix_review_loop(3, 80, json!(["correctness-review", "test-review"])),
+                    fix_review_loop(
+                        3,
+                        80,
+                        json!([
+                            { "lens": "correctness-review", "providers": ["claude", "codex"] },
+                            { "lens": "test-review", "providers": ["claude"] }
+                        ]),
+                    ),
                     node("pr", "git_pr", "Open PR (on pass)", 1300.0, json!({ "open": true })),
+                    offer_improvements(1300.0),
                 ],
                 edges: vec![
                     edge("trigger", "prepare"),
                     edge("prepare", "implement"),
                     edge("implement", "iterate"),
-                    // Open the PR only when the fix→review loop passed.
+                    // Open the PR only when the review→fix loop passed.
                     edge_if("iterate", "pr", "output.satisfied == true"),
+                    // Offer improvements after the loop, pass or fail.
+                    edge("iterate", "improve"),
                 ],
             },
         },
@@ -658,16 +694,27 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                         "prompt": "Using the analysis + brief, implement the feature and its tests. \
                                    Run the suite and make it pass."
                     })),
-                    fix_review_loop(4, 80, json!(["correctness-review", "security-review"])),
+                    fix_review_loop(
+                        4,
+                        80,
+                        json!([
+                            { "lens": "correctness-review", "providers": ["claude", "codex"] },
+                            { "lens": "security-review", "providers": ["codex"] },
+                            { "lens": "test-review", "providers": ["claude"] }
+                        ]),
+                    ),
                     node("pr", "git_pr", "Open PR (on pass)", 1600.0, json!({ "open": true })),
+                    offer_improvements(1600.0),
                 ],
                 edges: vec![
                     edge("trigger", "analyze"),
                     edge("analyze", "prepare"),
                     edge("prepare", "implement"),
                     edge("implement", "iterate"),
-                    // Open the PR only when the fix→review loop passed.
+                    // Open the PR only when the review→fix loop passed.
                     edge_if("iterate", "pr", "output.satisfied == true"),
+                    // Offer improvements after the loop, pass or fail.
+                    edge("iterate", "improve"),
                 ],
             },
         },

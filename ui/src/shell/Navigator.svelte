@@ -402,6 +402,9 @@
   >
     <Icon name={m.icon} size={14} />
     <span class="grow">{m.label}</span>
+    {#if m.id === 'workflows' && ws.activeWorkflowRuns.length > 0}
+      <span class="count-chip working" title="running workflows">{ws.activeWorkflowRuns.length}</span>
+    {/if}
   </button>
 {/snippet}
 

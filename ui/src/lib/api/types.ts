@@ -3741,6 +3741,22 @@ export interface WorkflowRun {
   proof_pack_id?: string | null;
 }
 
+/** Lightweight summary of an in-flight run for the "Running" sidebar list.
+ *  Returned by `GET /workspaces/{wid}/workflow-runs/active`. */
+export interface ActiveWorkflowRun {
+  run_id: Id;
+  workflow_id: Id;
+  workspace_id: Id;
+  workflow_name: string;
+  status: WorkflowRunStatus;
+  started_at: string;
+  /** Total nodes and how many have finished (success|skipped) — "3/5 steps". */
+  nodes_total: number;
+  nodes_done: number;
+  /** Paused on a human-approval node. */
+  waiting_approval?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Workflow triggers (schedule / webhook / event)
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 <script lang="ts">
   // Workflows: build automations by *describing* them (agent mode) or by hand
-  // on the canvas. Left = generate + list; center = node-graph editor + run.
+  // on the canvas. Left = generate + list + running; center = node-graph editor + run.
+  import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunSteps from './RunSteps.svelte';
@@ -40,6 +41,7 @@
   let runInputOpen = $state(false);
   let runInputText = $state('');
   let paletteOpen = $state(false);
+  let templatesOpen = $state(false);
   let triggersOpen = $state(false);
   let triggers = $state<WorkflowTrigger[]>([]);
   let approving = $state(false);
@@ -51,8 +53,74 @@
   const selectedRun = $derived(selectedId ? (runStates[selectedId] ?? null) : null);
 
   $effect(() => {
-    if (ws.currentId) void load();
+    if (ws.currentId) {
+      void load();
+      // Populate the "Running" sidebar list on entry (also kept live by the
+      // store's WS-event refresh).
+      void ws.refreshActiveWorkflowRuns();
+    }
   });
+
+  // Requirement D — keep a *viewed* run live, not only one started via execRun.
+  // (1) Snappy: refetch the shown run when a workflow_run_updated event names it.
+  $effect(() => {
+    const _tick = workflowRunBus.tick; // dependency: re-run on each WS event
+    void _tick;
+    untrack(() => {
+      const r = run;
+      if (!r || running) return; // execRun already drives the run it started
+      if (workflowRunBus.runId !== r.id) return;
+      void api
+        .get<WorkflowRun>(`/workflow-runs/${r.id}`)
+        .then((nr) => {
+          if (untrack(() => run)?.id === nr.id) run = nr;
+        })
+        .catch(() => {});
+    });
+  });
+  // (2) Guaranteed: a slow safety poll while a viewed run is non-terminal, so it
+  //     still converges if a WS event is missed (single-slot bus, or no WS).
+  $effect(() => {
+    const r = run;
+    if (!r || running) return;
+    if (r.status !== 'pending' && r.status !== 'running') return;
+    const iv = setInterval(() => {
+      void api
+        .get<WorkflowRun>(`/workflow-runs/${r.id}`)
+        .then((nr) => {
+          if (untrack(() => run)?.id === r.id) run = nr;
+        })
+        .catch(() => {});
+    }, 2500);
+    return () => clearInterval(iv);
+  });
+
+  /** Open a run from the "Running" sidebar list: ensure its workflow is open,
+   *  then show the run (which the auto-update effects keep live). */
+  async function openRunById(workflowId: string, runId: string): Promise<void> {
+    try {
+      if (current?.id !== workflowId) {
+        let wf = workflows.find((w) => w.id === workflowId);
+        if (!wf) wf = await api.get<Workflow>(`/workflows/${workflowId}`);
+        open(wf); // resets run=null + reloads the workflow's run history
+      }
+      run = await api.get<WorkflowRun>(`/workflow-runs/${runId}`);
+      runsOpen = false;
+    } catch (e) {
+      toasts.error('Could not open run', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Compact "5m ago" for run rows. */
+  function ago(iso: string): string {
+    const ms = Date.now() - new Date(iso).getTime();
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    return `${Math.floor(m / 60)}h ago`;
+  }
 
   async function load(): Promise<void> {
     try {
@@ -489,6 +557,62 @@
     onParam(field, items.length ? items : undefined);
   }
 
+  // --- review_run rich config: per-lens reviewers + summarizer + scoring -----
+  // Mirrors the PR-review config (each lens gets its own provider set + optional
+  // custom instructions), plus a generic per-severity scoring guideline.
+  interface ReviewerRow {
+    lens?: string;
+    providers?: string[];
+    instructions?: string;
+  }
+  const REVIEW_PROVIDERS = ['claude', 'codex', 'agy'];
+
+  function reviewers(): ReviewerRow[] {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    return Array.isArray(p?.reviewers) ? (p?.reviewers as ReviewerRow[]) : [];
+  }
+  function setReviewers(rows: ReviewerRow[]): void {
+    onParam('reviewers', rows.length ? rows : undefined);
+  }
+  function addReviewer(): void {
+    setReviewers([...reviewers(), { lens: '', providers: ['claude'] }]);
+  }
+  function removeReviewer(i: number): void {
+    setReviewers(reviewers().filter((_, idx) => idx !== i));
+  }
+  function updateReviewer(i: number, patch: Partial<ReviewerRow>): void {
+    setReviewers(reviewers().map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }
+  function toggleReviewerProvider(i: number, prov: string): void {
+    const cur = reviewers()[i]?.providers ?? [];
+    const next = cur.includes(prov) ? cur.filter((x) => x !== prov) : [...cur, prov];
+    updateReviewer(i, { providers: next.length ? next : ['claude'] });
+  }
+  function summarizerField(field: 'provider' | 'instructions'): string {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    const s = p?.summarizer as Record<string, unknown> | undefined;
+    const v = s?.[field];
+    return typeof v === 'string' ? v : '';
+  }
+  function updateSummarizer(field: string, value: string): void {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    const next = { ...((p?.summarizer as Record<string, unknown>) ?? {}) };
+    if (value === '') delete next[field];
+    else next[field] = value;
+    onParam('summarizer', Object.keys(next).length ? next : undefined);
+  }
+  function scoringField(sev: 'bug' | 'warn' | 'info', def: number): number {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    const s = p?.scoring as Record<string, unknown> | undefined;
+    const v = s?.[sev];
+    return typeof v === 'number' ? v : def;
+  }
+  function updateScoring(sev: string, value: number): void {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    const next = { ...((p?.scoring as Record<string, unknown>) ?? {}), [sev]: value };
+    onParam('scoring', next);
+  }
+
   // --- Per-node retry policy (writes node.retry, not params) ----------------
   function retryNum(field: 'max_attempts' | 'backoff_ms', def: number): number {
     const r = selectedNode?.retry;
@@ -568,18 +692,64 @@
       <button class="btn ghost full" onclick={createBlank}>
         <Icon name="plus" size={13} /> Start blank
       </button>
+      {#if templates.length > 0}
+        <!-- Templates collapsed into a dropdown (was an always-open list) so the
+             sidebar room goes to the Workflows + Running lists. -->
+        <div class="tpl-menu">
+          <button
+            class="btn ghost full tpl-toggle"
+            aria-expanded={templatesOpen}
+            onclick={() => (templatesOpen = !templatesOpen)}
+          >
+            <Icon name="grid" size={13} /> Templates
+            <span class="grow"></span>
+            <Icon name={templatesOpen ? 'arrowUp' : 'arrowDown'} size={12} />
+          </button>
+          {#if templatesOpen}
+            <div class="tpl-pop">
+              {#each templates as t (t.id)}
+                <button
+                  class="tpl"
+                  onclick={() => {
+                    void fromTemplate(t);
+                    templatesOpen = false;
+                  }}
+                  title={t.description}
+                >
+                  <span class="tpl-ic"><Icon name={t.icon} size={14} /></span>
+                  <span class="tpl-body">
+                    <span class="tpl-name">{t.name}</span>
+                    <span class="tpl-sub">agent design + engine</span>
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
 
-    {#if templates.length > 0}
-      <div class="templates">
-        <div class="list-h">Game templates</div>
-        {#each templates as t (t.id)}
-          <button class="tpl" onclick={() => fromTemplate(t)} title={t.description}>
-            <span class="tpl-ic"><Icon name={t.icon} size={14} /></span>
-            <span class="tpl-body">
-              <span class="tpl-name">{t.name}</span>
-              <span class="tpl-sub">agent design + engine</span>
-            </span>
+    {#if ws.activeWorkflowRuns.length > 0}
+      <div class="running" data-testid="running-workflows">
+        <div class="list-h">
+          Running
+          <span class="run-count">{ws.activeWorkflowRuns.length}</span>
+        </div>
+        {#each ws.activeWorkflowRuns as r (r.run_id)}
+          <button
+            class="run-row"
+            class:active={run?.id === r.run_id}
+            onclick={() => openRunById(r.workflow_id, r.run_id)}
+            title={`${r.workflow_name} — ${r.status}`}
+          >
+            <span class="dot {r.status}"></span>
+            <span class="run-name">{r.workflow_name}</span>
+            {#if r.waiting_approval}
+              <span class="run-badge" title="waiting for approval">⏸</span>
+            {/if}
+            <span class="grow"></span>
+            <span class="run-prog">{r.nodes_done}/{r.nodes_total}</span>
+            <span class="run-when">{ago(r.started_at)}</span>
           </button>
         {/each}
       </div>
@@ -1181,22 +1351,87 @@
                 value={paramNum('threshold', 80)}
                 oninput={(e) => onParam('threshold', Number(e.currentTarget.value))}
               />
-              <label for="np-providers">Reviewer providers (comma-separated, e.g. claude, codex)</label>
+              <div class="rv-h">
+                <span class="np-label">Reviewers — one per lens, each its own agents (like PR review)</span>
+                <button class="btn small ghost" type="button" onclick={addReviewer}>
+                  <Icon name="plus" size={11} /> Add
+                </button>
+              </div>
+              {#if reviewers().length === 0}
+                <p class="insp-note">
+                  No reviewers — leave empty to use the default PR-review config, or add one
+                  (e.g. <code>correctness-review</code> on claude + codex).
+                </p>
+              {/if}
+              {#each reviewers() as r, i (i)}
+                <div class="rv-row">
+                  <div class="rv-top">
+                    <input
+                      class="rv-lens"
+                      type="text"
+                      placeholder="lens / skill (e.g. correctness-review)"
+                      value={r.lens ?? ''}
+                      oninput={(e) => updateReviewer(i, { lens: e.currentTarget.value })}
+                    />
+                    <button class="rv-del" type="button" title="Remove reviewer" onclick={() => removeReviewer(i)}>
+                      <Icon name="trash" size={11} />
+                    </button>
+                  </div>
+                  <div class="rv-provs">
+                    {#each REVIEW_PROVIDERS as prov (prov)}
+                      <label class="rv-chip" class:on={(r.providers ?? []).includes(prov)}>
+                        <input
+                          type="checkbox"
+                          checked={(r.providers ?? []).includes(prov)}
+                          onchange={() => toggleReviewerProvider(i, prov)}
+                        />
+                        {prov}
+                      </label>
+                    {/each}
+                  </div>
+                  <textarea
+                    class="rv-instr"
+                    rows="2"
+                    placeholder="custom instructions for this reviewer (optional)"
+                    value={r.instructions ?? ''}
+                    oninput={(e) => updateReviewer(i, { instructions: e.currentTarget.value })}
+                  ></textarea>
+                </div>
+              {/each}
+
+              <label for="np-sum-prov">Summarizer (consolidates + scores)</label>
               <input
-                id="np-providers"
+                id="np-sum-prov"
                 type="text"
-                placeholder="claude, codex"
-                value={paramList('providers')}
-                oninput={(e) => onParamList('providers', e.currentTarget.value)}
+                placeholder="provider (e.g. claude)"
+                value={summarizerField('provider')}
+                oninput={(e) => updateSummarizer('provider', e.currentTarget.value)}
               />
-              <label for="np-lenses">Review lenses / skills (comma-separated, e.g. correctness-review, security-review)</label>
-              <input
-                id="np-lenses"
-                type="text"
-                placeholder="correctness-review, security-review"
-                value={paramList('lenses')}
-                oninput={(e) => onParamList('lenses', e.currentTarget.value)}
-              />
+              <textarea
+                rows="2"
+                placeholder="summarizer instructions (optional)"
+                value={summarizerField('instructions')}
+                oninput={(e) => updateSummarizer('instructions', e.currentTarget.value)}
+              ></textarea>
+
+              <span class="np-label">Scoring guideline — % deducted per open finding</span>
+              <div class="rv-score">
+                <label class="rv-sc">
+                  Critical
+                  <input type="number" min="0" max="100" value={scoringField('bug', 20)}
+                    oninput={(e) => updateScoring('bug', Number(e.currentTarget.value))} />
+                </label>
+                <label class="rv-sc">
+                  High
+                  <input type="number" min="0" max="100" value={scoringField('warn', 5)}
+                    oninput={(e) => updateScoring('warn', Number(e.currentTarget.value))} />
+                </label>
+                <label class="rv-sc">
+                  Low
+                  <input type="number" min="0" max="100" value={scoringField('info', 5)}
+                    oninput={(e) => updateScoring('info', Number(e.currentTarget.value))} />
+                </label>
+              </div>
               <label for="np-goals">Goals (one per line, optional)</label>
               <textarea
                 id="np-goals"
@@ -1365,6 +1600,13 @@
                   onchange={(e) => onParam('open', e.currentTarget.checked)}
                 /> Open PR automatically on pass (gate the incoming edge on the review passing)
               </label>
+            {:else if selectedNode.kind === 'self_improve'}
+              <p class="insp-note">
+                Reflects on the workspace's recent agent sessions and <strong>offers</strong>
+                skill/memory improvements. They are <strong>queued for approval</strong> in
+                Self-Improvement — never auto-applied — and the offered list is posted to the
+                trigger's chat thread. No parameters.
+              </p>
             {:else if selectedNode.kind !== 'manual_trigger' && selectedNode.kind !== 'log' && selectedNode.kind !== 'verifier'}
               <!-- Fallback raw-JSON editor for unrecognised or future node kinds -->
               <label for="np-raw">Params (JSON)</label>
@@ -1501,9 +1743,20 @@
     width: 100%;
     justify-content: center;
   }
-  .templates {
-    padding: 8px;
-    border-bottom: 1px solid var(--border);
+  .tpl-menu {
+    position: relative;
+  }
+  .tpl-toggle {
+    justify-content: flex-start;
+  }
+  .tpl-pop {
+    margin-top: 6px;
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    padding: 4px;
   }
   .tpl {
     display: flex;
@@ -1603,6 +1856,67 @@
     font-size: 12px;
     color: var(--text-dim);
     padding: 8px 6px;
+  }
+  /* "Running" sidebar list — in-flight runs across the workspace, live. */
+  .running {
+    flex-shrink: 0;
+    max-height: 38%;
+    overflow-y: auto;
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .running .list-h {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .run-count {
+    display: inline-grid;
+    place-items: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    font-size: 10px;
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    color: var(--text);
+  }
+  .run-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 6px 8px;
+    background: none;
+    border: none;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    text-align: start;
+    color: var(--text);
+  }
+  .run-row:hover,
+  .run-row.active {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .run-name {
+    font-size: 12.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 120px;
+  }
+  .run-badge {
+    font-size: 11px;
+  }
+  .run-prog {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .run-when {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-inline-start: 6px;
   }
   .main {
     flex: 1;
@@ -1748,6 +2062,12 @@
     font-size: 11px;
   }
   .inspector label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .np-label {
+    display: block;
     font-size: 11px;
     font-weight: 600;
     color: var(--text-dim);
@@ -2033,6 +2353,85 @@
   }
   .np-chk input {
     width: auto;
+  }
+  /* review_run reviewer editor (per-lens agents + summarizer + scoring) */
+  .rv-h {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .rv-row {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 6px;
+    margin-bottom: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .rv-top {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .rv-lens {
+    flex: 1;
+  }
+  .rv-del {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 2px;
+  }
+  .rv-del:hover {
+    color: var(--status-exited);
+  }
+  .rv-provs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .rv-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    padding: 2px 7px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+    color: var(--text-dim);
+  }
+  .rv-chip.on {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  .rv-chip input {
+    width: auto;
+    margin: 0;
+  }
+  .rv-instr {
+    width: 100%;
+    font-size: 11.5px;
+  }
+  .rv-score {
+    display: flex;
+    gap: 8px;
+  }
+  .rv-sc {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 11px;
+    color: var(--text-dim);
+    flex: 1;
+  }
+  .rv-sc input {
+    width: 100%;
   }
   /* Per-node retry sub-form */
   .retry-form {
