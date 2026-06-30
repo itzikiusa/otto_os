@@ -101,9 +101,11 @@ async fn embedder_hot_swap_status_and_reindex() {
     assert_eq!(dim, 64);
 
     // Reindex embeds the pre-existing memory under the active model.
-    assert_eq!(svc.reindex(&ws).await.unwrap(), 1);
-    // Idempotent: a second reindex skips rows already at this model.
-    assert_eq!(svc.reindex(&ws).await.unwrap(), 0);
+    assert_eq!(svc.reindex(&ws, false).await.unwrap(), 1);
+    // Idempotent: a second (non-forced) reindex skips rows already at this model.
+    assert_eq!(svc.reindex(&ws, false).await.unwrap(), 0);
+    // Force re-embeds even rows already at this model (convention-change path).
+    assert_eq!(svc.reindex(&ws, true).await.unwrap(), 1);
 
     // Semantic search now flows through the swapped-in embedder.
     let hits = svc

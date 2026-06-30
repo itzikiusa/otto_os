@@ -23,7 +23,20 @@ const MAX_EMBED_BODY: u64 = 32 * 1024 * 1024;
 pub trait Embedder: Send + Sync {
     fn model_id(&self) -> &str;
     fn dim(&self) -> usize;
+    /// Embed DOCUMENTS (stored content). Some models (nomic) need an asymmetric
+    /// document prefix — impls apply it here.
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    /// Embed a QUERY. Asymmetric models (nomic: `search_query:` vs
+    /// `search_document:`) embed queries differently from documents — overriding
+    /// this is what makes retrieval actually work. Default = treat as a document.
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        Ok(self
+            .embed(std::slice::from_ref(&text.to_string()))
+            .await?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
+    }
 }
 
 /// Validate a remote embedder base URL against the outbound SSRF guard
@@ -287,13 +300,62 @@ pub struct OllamaEmbedder {
     model: String,
     model_id: String,
     dim: usize,
+    /// Asymmetric task prefixes. nomic REQUIRES `search_document:` /
+    /// `search_query:` — without them retrieval similarity collapses (~0.4) and
+    /// ranking is poor. Empty for models that don't use prefixes.
+    doc_prefix: String,
+    query_prefix: String,
     http: reqwest::Client,
+}
+
+/// Per-model-family asymmetric task prefixes, returned as `(doc_prefix,
+/// query_prefix)`. Instruction-tuned retrieval models each have their OWN
+/// convention — applying the wrong one (or none) collapses retrieval quality:
+///
+/// - **nomic** (`nomic-embed-text`, `-v2-moe`): `search_document:` / `search_query:`
+///   on BOTH sides — asymmetric, both prefixed.
+/// - **qwen3-embedding**: documents are embedded RAW; only the QUERY is wrapped in
+///   Qwen's instruct format `Instruct: {task}\nQuery: {q}`. Using nomic's prefix
+///   here would actively hurt it.
+/// - **mxbai-embed-large** / **bge-*-en**: query-only retrieval instruction.
+/// - **bge-m3**, **all-minilm**, and anything unknown: NO prefix (symmetric) —
+///   the conservative default, never worse than the model's own baseline.
+///
+/// Matching is on the bare model name (lowercased, `ollama:`/tag stripped) so
+/// `qwen3-embedding:8b`, `qwen3-embedding`, etc. all resolve the same.
+pub(crate) fn embed_prefixes_for(model: &str) -> (String, String) {
+    let m = model
+        .to_lowercase()
+        .trim_start_matches("ollama:")
+        .to_string();
+    if m.contains("nomic") {
+        // Asymmetric: both sides prefixed.
+        ("search_document: ".to_string(), "search_query: ".to_string())
+    } else if m.contains("qwen") {
+        // Qwen3-Embedding: raw docs, instruct-wrapped queries.
+        (
+            String::new(),
+            "Instruct: Given a search query, retrieve relevant code and documentation that answers the query\nQuery: "
+                .to_string(),
+        )
+    } else if m.contains("mxbai") || (m.contains("bge") && !m.contains("m3")) {
+        // Query-only retrieval instruction; documents raw.
+        (
+            String::new(),
+            "Represent this sentence for searching relevant passages: ".to_string(),
+        )
+    } else {
+        // bge-m3, all-minilm, snowflake/arctic, and unknown models: symmetric.
+        (String::new(), String::new())
+    }
 }
 
 impl OllamaEmbedder {
     /// Default local Ollama on `127.0.0.1:11434` with `nomic-embed-text` (768).
     pub fn new(model: Option<String>, dim: Option<usize>, base_url: Option<String>) -> Self {
         let model = model.unwrap_or_else(|| "nomic-embed-text".to_string());
+        // Each model family has its OWN prefix convention — see embed_prefixes_for.
+        let (doc_prefix, query_prefix) = embed_prefixes_for(&model);
         Self {
             base_url: base_url
                 .unwrap_or_else(|| "http://127.0.0.1:11434".to_string())
@@ -302,29 +364,23 @@ impl OllamaEmbedder {
             model_id: format!("ollama:{model}"),
             dim: dim.unwrap_or(768),
             model,
+            doc_prefix,
+            query_prefix,
             http: reqwest::Client::builder()
                 .timeout(OLLAMA_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
         }
     }
-}
 
-#[async_trait]
-impl Embedder for OllamaEmbedder {
-    fn model_id(&self) -> &str {
-        &self.model_id
-    }
-    fn dim(&self) -> usize {
-        self.dim
-    }
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    /// Raw embed call against Ollama for already-prefixed inputs.
+    async fn embed_raw(&self, input: &[String]) -> Result<Vec<Vec<f32>>> {
         let resp = self
             .http
             .post(format!("{}/api/embed", self.base_url))
             .json(&OllamaEmbedReq {
                 model: &self.model,
-                input: texts,
+                input,
             })
             .send()
             .await
@@ -346,6 +402,29 @@ impl Embedder for OllamaEmbedder {
             .await
             .map_err(|e| Error::Upstream(format!("ollama decode: {e}")))?;
         Ok(body.embeddings)
+    }
+}
+
+#[async_trait]
+impl Embedder for OllamaEmbedder {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        // Documents get the document prefix (for asymmetric models like nomic).
+        let prefixed: Vec<String> = if self.doc_prefix.is_empty() {
+            texts.to_vec()
+        } else {
+            texts.iter().map(|t| format!("{}{t}", self.doc_prefix)).collect()
+        };
+        self.embed_raw(&prefixed).await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        let q = format!("{}{text}", self.query_prefix);
+        Ok(self.embed_raw(std::slice::from_ref(&q)).await?.into_iter().next().unwrap_or_default())
     }
 }
 
@@ -395,5 +474,46 @@ impl Embedder for StubEmbedder {
                 v
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::embed_prefixes_for;
+
+    #[test]
+    fn nomic_is_asymmetric_both_sides() {
+        for m in ["nomic-embed-text", "nomic-embed-text-v2-moe", "ollama:nomic-embed-text"] {
+            let (doc, query) = embed_prefixes_for(m);
+            assert_eq!(doc, "search_document: ", "doc prefix for {m}");
+            assert_eq!(query, "search_query: ", "query prefix for {m}");
+        }
+    }
+
+    #[test]
+    fn qwen_docs_raw_query_instruct() {
+        for m in ["qwen3-embedding:0.6b", "qwen3-embedding:8b", "qwen3-embedding"] {
+            let (doc, query) = embed_prefixes_for(m);
+            assert!(doc.is_empty(), "qwen docs must be raw for {m}");
+            assert!(query.starts_with("Instruct:"), "qwen query must be instruct-wrapped for {m}");
+            assert!(query.ends_with("Query: "), "qwen query must end with the Query: tag for {m}");
+        }
+    }
+
+    #[test]
+    fn mxbai_and_bge_en_are_query_only() {
+        for m in ["mxbai-embed-large", "bge-large-en-v1.5"] {
+            let (doc, query) = embed_prefixes_for(m);
+            assert!(doc.is_empty(), "docs raw for {m}");
+            assert!(query.contains("Represent this sentence"), "retrieval instruction for {m}");
+        }
+    }
+
+    #[test]
+    fn bge_m3_and_minilm_and_unknown_are_symmetric() {
+        for m in ["bge-m3", "all-minilm", "snowflake-arctic-embed", "some-future-model"] {
+            let (doc, query) = embed_prefixes_for(m);
+            assert!(doc.is_empty() && query.is_empty(), "{m} should be symmetric (no prefix)");
+        }
     }
 }

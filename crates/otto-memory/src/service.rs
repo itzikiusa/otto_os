@@ -159,11 +159,19 @@ impl MemoryService {
             .and_then(|g| g.as_ref().map(|e| (e.model_id().to_string(), e.dim())))
     }
 
-    /// Re-embed a workspace's memories under the active embedder, skipping rows
-    /// already embedded at the current model (idempotent). Batched to amortize
-    /// remote round-trips. Returns the number of memories (re)embedded. No-op
+    /// Re-embed a workspace's memories under the active embedder. With
+    /// `force=false` it skips rows already embedded at the current model
+    /// (idempotent — cheap incremental top-up). With `force=true` it re-embeds
+    /// EVERY memory regardless, overwriting existing vectors.
+    ///
+    /// Force is required when the embedding *convention* changes for the SAME
+    /// model id — e.g. a model gains an asymmetric document prefix (nomic's
+    /// `search_document:`). The stored vectors are keyed only by
+    /// `(memory_id, model_id)`, so without force the skip-set would consider them
+    /// up-to-date and the new convention would never be applied. Batched to
+    /// amortize round-trips. Returns the number of memories (re)embedded. No-op
     /// (returns 0) when keyword-only or when forwarding to a remote backend.
-    pub async fn reindex(&self, ws: &str) -> Result<usize> {
+    pub async fn reindex(&self, ws: &str, force: bool) -> Result<usize> {
         if self.remote.is_some() {
             return Ok(0);
         }
@@ -171,14 +179,18 @@ impl MemoryService {
             return Ok(0);
         };
         let model = e.model_id().to_string();
-        // Memories already embedded at the active model — skip them.
-        let already: std::collections::HashSet<String> = self
-            .repo
-            .all_vectors(ws, &model)
-            .await?
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
+        // Memories already embedded at the active model — skip them, UNLESS a
+        // forced re-embed was requested (convention change / explicit Re-index).
+        let already: std::collections::HashSet<String> = if force {
+            std::collections::HashSet::new()
+        } else {
+            self.repo
+                .all_vectors(ws, &model)
+                .await?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        };
         let filter = ListFilter {
             collection: None,
             kind: None,
@@ -487,8 +499,10 @@ impl MemoryService {
                 .map(|q| q as Arc<dyn VectorIndex>)
                 .or_else(|| self.current_index());
             if let (Some(e), Some(idx)) = (self.current_embedder(), backend_index) {
-                if let Ok(qv) = e.embed(std::slice::from_ref(&text)).await {
-                    if let Some(v0) = qv.into_iter().next() {
+                // embed_query applies the asymmetric QUERY prefix (nomic) so it
+                // matches the documents embedded with the document prefix.
+                if let Ok(v0) = e.embed_query(&text).await {
+                    if !v0.is_empty() {
                         sem = idx.knn(ws, &v0, limit * 4).await.unwrap_or_default();
                     }
                 }
@@ -738,6 +752,16 @@ impl MemoryService {
             .map(|s| s.to_string())
             .or_else(|| root.file_name().map(|f| f.to_string_lossy().to_string()))
             .unwrap_or_else(|| root_str.clone());
+        // Was this repo indexed before? A RE-index must FORCE re-embedding at the
+        // tail (chunks are content-deduped, so unchanged ones are never rewritten
+        // and would otherwise keep vectors from the prior model/convention). A
+        // FRESH index needs no force — every chunk is new and embedded on write,
+        // so forcing would only double the work.
+        let is_reindex = self
+            .code
+            .get_repo_by_root(ws, &root_str)
+            .await?
+            .is_some();
         let repo_id = self.code.upsert_repo(ws, &root_str, &display_name).await?;
         self.code
             .set_repo_state(&repo_id, "indexing", None, None, None)
@@ -827,10 +851,11 @@ impl MemoryService {
                 .unwrap_or(0);
         }
         // Ensure EVERY chunk (including de-duplicated ones from a previous index
-        // under a different embedder) is embedded under the CURRENTLY-ACTIVE model
-        // — so "Re-index" uses the embedder you've selected, not the original one.
-        // Idempotent: rows already at the active model are skipped.
-        let _ = self.reindex(ws).await;
+        // under a different embedder OR a changed convention) is embedded under the
+        // CURRENTLY-ACTIVE model — so "Re-index" uses the embedder you've selected,
+        // not the original one. On a re-index we FORCE (deduped chunks keep stale
+        // vectors otherwise); on a fresh index the skip-set is empty anyway.
+        let _ = self.reindex(ws, is_reindex).await;
 
         // Mirror the graph to SurrealDB if configured (rich remote traversal).
         if let Some(sr) = self.ws_backends(ws).surreal {
@@ -1112,10 +1137,15 @@ impl MemoryService {
             }
         }
 
-        // 2) Relevant symbols — match any focus term (split the phrase), best
-        // (shortest-name) first, deduped by name+file.
-        let mut syms: Vec<otto_state::CodeSymbol> = Vec::new();
+        // 2) Relevant symbols — match focus terms, then RANK by relevance:
+        // skip test files, prefer type/struct defs (answers "what fields…"), and
+        // symbols whose name matches a distinctive query term. This stops the brain
+        // anchoring on a generic word like "fields" (→ unrelated `Fields` methods)
+        // instead of the domain symbol (e.g. `LoginData`).
+        let mut candidates: Vec<otto_state::CodeSymbol> = Vec::new();
         let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        // Drop ultra-generic terms that match everything.
+        const STOP_TERMS: &[&str] = &["what", "the", "does", "require", "requires", "need", "needs", "for", "how", "and", "with", "fields", "field", "data", "info"];
         let mut query_terms: Vec<String> = focus
             .split(|c: char| !c.is_alphanumeric())
             .filter(|t| t.len() >= 3)
@@ -1124,16 +1154,40 @@ impl MemoryService {
         if !focus.trim().is_empty() {
             query_terms.push(focus.to_string());
         }
+        let terms_lc: Vec<String> = query_terms.iter().map(|t| t.to_lowercase()).filter(|t| t.len() >= 3).collect();
         for term in &query_terms {
-            for s in self.search_symbols(ws, term, None, 8).await.unwrap_or_default() {
+            for s in self.search_symbols(ws, term, None, 12).await.unwrap_or_default() {
+                if crate::test_map::is_test_file(&s.file) {
+                    continue; // tests are not the answer
+                }
                 if seen.insert((s.name.clone(), s.file.clone())) {
-                    syms.push(s);
+                    candidates.push(s);
                 }
             }
-            if syms.len() >= 8 {
-                break;
-            }
         }
+        let score = |s: &otto_state::CodeSymbol| -> i32 {
+            let n = s.name.to_lowercase();
+            let mut sc = 0i32;
+            if matches!(s.kind.as_str(), "struct" | "type" | "interface" | "class") {
+                sc += 3;
+            }
+            for t in &terms_lc {
+                if STOP_TERMS.contains(&t.as_str()) {
+                    continue;
+                }
+                if n == *t {
+                    sc += 5;
+                } else if n.starts_with(t) || n.ends_with(t) {
+                    sc += 3;
+                } else if n.contains(t) {
+                    sc += 1;
+                }
+            }
+            sc - (s.name.len() as i32) / 10
+        };
+        candidates.sort_by(|a, b| score(b).cmp(&score(a)).then(a.name.len().cmp(&b.name.len())));
+        candidates.truncate(8);
+        let syms = candidates;
         if !syms.is_empty() {
             let mut body = String::new();
             for s in &syms {

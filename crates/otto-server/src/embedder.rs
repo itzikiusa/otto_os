@@ -266,7 +266,11 @@ async fn put_embedder(
 }
 
 /// `POST /workspaces/{ws}/memory/reindex` — re-embed the workspace's memories
-/// under the active embedder (idempotent, batched).
+/// under the active embedder. This is the explicit user "Re-index" action, so it
+/// FORCES a full re-embed: every memory is regenerated even if a vector already
+/// exists at the current model id. That's what makes it work after an embedding
+/// *convention* change (e.g. nomic gaining its `search_document:` prefix), where
+/// the model id is unchanged but the stored vectors are stale.
 async fn reindex_memory(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
@@ -279,8 +283,8 @@ async fn reindex_memory(
     let mem = ctx.memory.clone();
     let ws2 = ws.to_string();
     tokio::spawn(async move {
-        match mem.reindex(&ws2).await {
-            Ok(n) => tracing::info!("memory: reindexed {n} memories for {ws2}"),
+        match mem.reindex(&ws2, true).await {
+            Ok(n) => tracing::info!("memory: force-reindexed {n} memories for {ws2}"),
             Err(e) => tracing::warn!("memory: reindex failed for {ws2}: {e}"),
         }
     });
