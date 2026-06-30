@@ -444,6 +444,7 @@ fn output_schema_for(kind: &str) -> Option<Value> {
             ("worktree", "string"),
             ("blocking", "number"),
             ("advisory", "number"),
+            ("checks_requested", "array"),
             ("score", "number"),
             ("threshold", "number"),
             ("passed", "boolean"),
@@ -2230,7 +2231,12 @@ async fn execute_node(
             // optional `summarizer`. Falls back to the flat providers/lenses form,
             // then to the stored/default PR-review config.
             let reviewers = p.get("reviewers").and_then(Value::as_array).cloned().unwrap_or_default();
-            let cfg_override = if !reviewers.is_empty() {
+            // User-defined reviewer CHECKS — commands (e.g. `go test -tags=component
+            // ./...`) the reviewer agent RUNS and reports failures on, in addition
+            // to goals. A safety net for what the implementer's skill may have
+            // skipped. From the node's `checks` or the run input's `checks`.
+            let check_specs = parse_checks(p.get("checks").or_else(|| input.get("checks")));
+            let mut cfg_override = if !reviewers.is_empty() {
                 let default_provider = crate::modules::default_review_provider(ctx).await;
                 Some(crate::modules::workflow_review_config_from_json(
                     &default_provider,
@@ -2243,6 +2249,16 @@ async fn execute_node(
                 let default_provider = crate::modules::default_review_provider(ctx).await;
                 Some(crate::modules::workflow_review_config(&default_provider, &providers, &lenses))
             };
+            // Append a dedicated "Required checks" reviewer that RUNS the commands
+            // and reports any failure as a blocking (bug) finding — so it drops the
+            // score and the loop keeps fixing until the checks pass. Delegated to
+            // the agent (it has the repo + the implementer's context), not run by us.
+            if !check_specs.is_empty() {
+                let default_provider = crate::modules::default_review_provider(ctx).await;
+                let cfg = cfg_override
+                    .get_or_insert_with(|| crate::modules::workflow_review_config(&default_provider, &[], &[]));
+                cfg.agents.push(checks_review_agent(&default_provider, &check_specs));
+            }
             if progress.enabled() {
                 let lens_list: Vec<String> = if reviewers.is_empty() {
                     lenses.clone()
@@ -2268,8 +2284,13 @@ async fn execute_node(
                 } else {
                     format!(" · providers: {}", providers.join(", "))
                 };
+                let chk_txt = if check_specs.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {} check(s) delegated to the reviewer", check_specs.len())
+                };
                 progress.post(format!(
-                    "🔍 *{iter_label}* started (pass ≥ {threshold}){lens_txt}{prov_txt}"
+                    "🔍 *{iter_label}* started (pass ≥ {threshold}){lens_txt}{prov_txt}{chk_txt}"
                 ));
             }
             let review_id =
@@ -2397,11 +2418,15 @@ async fn execute_node(
                 "total": total, "open": open, "blocking": blocking, "advisory": advisory,
                 "severity": { "bug": bugs, "warn": warns, "info": infos },
                 "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
+                // The checks delegated to the reviewer agent (it runs them and
+                // reports failures as findings — see the cfg injection above).
+                "checks_requested": check_specs.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
                 "score": score, "threshold": threshold, "passed": passed,
                 "findings": finding_briefs, "providers": providers, "lenses": lenses,
             });
             // `require_pass`: fail the step (so downstream gates error-skip) when the
-            // score didn't clear the bar. The verdict is already streamed above.
+            // score didn't clear the bar. A failed check surfaces as a blocking
+            // finding from the checks reviewer, which drops the score below it.
             if require_pass && !passed {
                 return Err(otto_core::Error::Upstream(format!(
                     "review_run: score {score} below required threshold {threshold} (require_pass)"
@@ -3060,6 +3085,72 @@ fn collect_pr_targets(p: &Value, input: &Value) -> Vec<Value> {
     out
 }
 
+/// Parse a `checks` value into (name, command) pairs. Accepts an array of plain
+/// command strings, or of objects `{name?, cmd}`. Drives the reviewer's
+/// user-defined verification commands (e.g. `go test -tags=component ./...`).
+fn parse_checks(v: Option<&Value>) -> Vec<(String, String)> {
+    let Some(arr) = v.and_then(Value::as_array) else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    for (i, item) in arr.iter().enumerate() {
+        match item {
+            Value::String(s) if !s.trim().is_empty() => {
+                out.push((format!("check {}", i + 1), s.trim().to_string()));
+            }
+            Value::Object(_) => {
+                if let Some(cmd) = item
+                    .get("cmd")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(cmd)
+                        .to_string();
+                    out.push((name, cmd.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Build a dedicated "Required checks" review agent: it RUNS each user-defined
+/// command in the reviewed worktree and reports any that fail (non-zero exit) as
+/// a blocking (`bug`) finding. Delegated to the review agent (which has the repo
+/// and the implementer's context) rather than executed by the engine — so it
+/// fans out through the same multi-agent review pipeline and its failures drop
+/// the score, keeping a fix→review loop iterating until the checks pass.
+fn checks_review_agent(default_provider: &str, checks: &[(String, String)]) -> otto_core::domain::ReviewAgentCfg {
+    let list = checks
+        .iter()
+        .map(|(n, c)| if n == c { format!("- {c}") } else { format!("- {n}: {c}") })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "You are a CI gate for this change. RUN EACH command below in the repository root \
+         (your current working directory) and capture its exit status and output. For any \
+         command that FAILS (non-zero exit), output one finding object \
+         {{\"path\":\".\",\"line\":0,\"severity\":\"bug\",\"body\":\"check failed: <command>\\n<the last ~40 lines of its output>\"}}. \
+         Do NOT output anything for a command that passes. Output ONLY a JSON array (no prose, \
+         no markdown fence); output [] when every command passes.\n\nCommands:\n{list}"
+    );
+    otto_core::domain::ReviewAgentCfg {
+        name: "Required checks".to_string(),
+        provider: default_provider.to_string(),
+        providers: vec![default_provider.to_string()],
+        model: String::new(),
+        prompt,
+        skill: String::new(),
+    }
+}
+
 /// Best-effort: find the registered repo whose checkout contains `path`, so a
 /// workflow given only a working directory still drives review/PR steps.
 ///
@@ -3665,5 +3756,39 @@ mod tests {
         // reference → caller resolves a single implicit target instead.
         let input = json!({ "working_directory": "/w/x", "goals": ["g"] });
         assert!(collect_pr_targets(&json!({}), &input).is_empty());
+    }
+
+    // --- reviewer checks (commands delegated to the review agent) ---------------
+
+    #[test]
+    fn parse_checks_strings_and_objects() {
+        let v = json!([
+            "go test -tags=component ./...",
+            { "name": "integration", "cmd": "go test -tags=integration ./..." },
+            { "cmd": "" },     // dropped (empty)
+            { "name": "x" },   // dropped (no cmd)
+            "   ",             // dropped (blank)
+        ]);
+        let got = parse_checks(Some(&v));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].1, "go test -tags=component ./...");
+        assert_eq!(got[1], ("integration".to_string(), "go test -tags=integration ./...".to_string()));
+        assert!(parse_checks(None).is_empty());
+        assert!(parse_checks(Some(&json!("not an array"))).is_empty());
+    }
+
+    #[test]
+    fn checks_review_agent_runs_and_flags_failures_as_bugs() {
+        let checks = vec![
+            ("component".to_string(), "go test -tags=component ./...".to_string()),
+            ("integration".to_string(), "go test -tags=integration ./...".to_string()),
+        ];
+        let a = checks_review_agent("claude", &checks);
+        assert_eq!(a.providers, vec!["claude"]);
+        // Each command is named in the prompt, and failures are reported as bugs.
+        assert!(a.prompt.contains("go test -tags=component ./..."));
+        assert!(a.prompt.contains("go test -tags=integration ./..."));
+        assert!(a.prompt.contains("\"severity\":\"bug\""));
+        assert!(a.prompt.to_lowercase().contains("run each command"));
     }
 }

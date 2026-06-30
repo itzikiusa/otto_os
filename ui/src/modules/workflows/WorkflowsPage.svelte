@@ -1444,6 +1444,18 @@
                 value={paramLines('goals')}
                 oninput={(e) => onParamLines('goals', e.currentTarget.value)}
               ></textarea>
+              <label for="np-checks">Checks — commands the reviewer runs (one per line, optional)</label>
+              <textarea
+                id="np-checks"
+                rows="3"
+                placeholder={'go test -tags=component ./...\ngo test -tags=integration ./...'}
+                value={paramLines('checks')}
+                oninput={(e) => onParamLines('checks', e.currentTarget.value)}
+              ></textarea>
+              <p class="insp-note">
+                The reviewer agent runs these in the repo and reports any failure as a blocking
+                finding — a safety net for a check the implementer may have skipped.
+              </p>
               <label class="np-chk">
                 <input
                   type="checkbox"
