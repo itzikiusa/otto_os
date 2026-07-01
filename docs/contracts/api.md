@@ -549,8 +549,8 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/test | ws editor | — | connectivity probe result |
 | GET /connections/{id}/db/capabilities | ws viewer | — | engine capability flags |
 | GET /connections/{id}/db/schema | ws viewer | — | top-level schema tree (roots) |
-| POST /connections/{id}/db/schema/children | ws viewer | `{node}` | child schema nodes (lazy expand) |
-| POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.) |
+| POST /connections/{id}/db/schema/children | ws viewer | `{node}` | child schema nodes (lazy expand). MySQL databases expose `Tables`/`Views` folders always, plus `Procedures`/`Functions` folders (with a count) when routines exist; routine leaves carry `kind:"procedure"`/`"function"` |
+| POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.). For a procedure/function: `columns` are its parameters and `ddl` is the `SHOW CREATE` body |
 | POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
 | POST /connections/{id}/db/cancel | ws editor | `{query_id}` | 204 — cancel an in-flight query engine-side |

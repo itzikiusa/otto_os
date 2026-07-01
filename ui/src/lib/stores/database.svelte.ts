@@ -1266,7 +1266,17 @@ class DatabaseStore {
     const detail = await this.fetchObject(node.id);
     const ddl = detail?.ddl?.trim();
     if (!ddl) {
-      toasts.error('No create statement', `Could not derive the DDL for ${node.label}.`);
+      // For a routine we DID fetch (detail present) but got no body, MySQL blanked
+      // the "Create …" column — that's a privilege limitation, not a bug. Say so.
+      const isRoutine = detail?.kind === 'procedure' || detail?.kind === 'function';
+      if (isRoutine) {
+        toasts.error(
+          'Definition not available',
+          `MySQL returned no body for ${node.label} — the connected account likely lacks privilege to view routine definitions (needs SHOW_ROUTINE, or SELECT on the routine).`,
+        );
+      } else {
+        toasts.error('No create statement', `Could not derive the DDL for ${node.label}.`);
+      }
       return;
     }
     try {

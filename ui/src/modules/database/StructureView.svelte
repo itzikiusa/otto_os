@@ -10,8 +10,29 @@
   import type { DbForeignKey, SchemaNode } from '../../lib/api/types';
 
   const detail = $derived(database.objectDetail);
+  // A stored procedure / function — its "columns" are parameters and its main
+  // content is the DDL (the SHOW CREATE body).
+  const isRoutine = $derived(detail?.kind === 'procedure' || detail?.kind === 'function');
+  const titleIcon = $derived(
+    detail?.kind === 'procedure'
+      ? 'procedure'
+      : detail?.kind === 'function'
+        ? 'function'
+        : detail?.kind === 'view'
+          ? 'eye'
+          : 'grid',
+  );
   let ddlOpen = $state(false);
   let designerOpen = $state(false);
+
+  // Auto-expand the DDL for objects whose DDL is the primary content — stored
+  // procedures/functions (and any object that has a DDL but no columns) — so the
+  // routine body shows immediately instead of hidden behind the toggle. Re-runs
+  // per object (tracks `detail`); the user can still collapse it afterwards.
+  $effect(() => {
+    const d = detail;
+    ddlOpen = !!d?.ddl && (d.kind === 'procedure' || d.kind === 'function' || d.columns.length === 0);
+  });
 
   function prettyExtra(extra: unknown): string {
     try {
@@ -149,7 +170,7 @@
   {:else}
     <div class="st-head">
       <div class="st-title">
-        <Icon name="grid" size={15} />
+        <Icon name={titleIcon} size={15} />
         <h2 class="mono">{detail.name}</h2>
         <span class="kind-chip">{detail.kind}</span>
         {#if detail.row_count != null}
@@ -168,7 +189,7 @@
 
     {#if detail.columns.length > 0}
       <div class="block">
-        <div class="block-title">Columns <span class="count">{detail.columns.length}</span></div>
+        <div class="block-title">{isRoutine ? 'Parameters' : 'Columns'} <span class="count">{detail.columns.length}</span></div>
         <div class="tbl-wrap">
           <table class="tbl mono">
             <thead>
@@ -311,6 +332,17 @@
         {#if ddlOpen}
           <pre class="ddl mono">{detail.ddl}</pre>
         {/if}
+      </div>
+    {:else if isRoutine}
+      <!-- MySQL blanks the "Create …" column when the account can't view the
+           routine body — surface that as a privilege hint, not a blank panel. -->
+      <div class="block">
+        <div class="block-title">Definition</div>
+        <div class="ddl-missing">
+          The routine body isn't available — the connected account likely lacks
+          privilege to view routine definitions (needs <code>SHOW_ROUTINE</code>, or
+          <code>SELECT</code> on the routine).
+        </div>
       </div>
     {/if}
   {/if}
@@ -642,6 +674,21 @@
   .extra {
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  .ddl-missing {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 10px 12px;
+  }
+  .ddl-missing code {
+    font-size: 11px;
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    padding: 0 4px;
+    border-radius: 3px;
   }
   .dim {
     color: var(--text-dim);

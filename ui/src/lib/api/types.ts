@@ -3891,6 +3891,8 @@ export type DbNodeKind =
   | 'schema'
   | 'table'
   | 'view'
+  | 'procedure'
+  | 'function'
   | 'column'
   | 'index'
   | 'collection'

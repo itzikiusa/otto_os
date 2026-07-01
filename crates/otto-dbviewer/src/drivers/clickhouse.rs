@@ -213,6 +213,7 @@ impl ClickhouseDriver {
             return Some(SchemaSnapshot {
                 databases,
                 objects: Vec::new(),
+                ..Default::default()
             });
         }
 
@@ -291,7 +292,11 @@ impl ClickhouseDriver {
             });
         }
 
-        Some(SchemaSnapshot { databases, objects })
+        Some(SchemaSnapshot {
+            databases,
+            objects,
+            ..Default::default()
+        })
     }
 
     /// Get (or lazily build + cache) the `reqwest::Client` for `cfg`, keyed by

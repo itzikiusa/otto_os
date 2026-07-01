@@ -436,6 +436,15 @@ impl DbViewerService {
                 NodeKind::Folder => {
                     let child = NodePath::parse(&node.id);
                     for inner in driver.schema_children(&cfg, &child, None).await? {
+                        // Only table-like objects belong on the ERD — skip routine
+                        // folders (Procedures/Functions), whose children are
+                        // stored procedures/functions, not diagrammable tables.
+                        if !matches!(
+                            inner.kind,
+                            NodeKind::Table | NodeKind::View | NodeKind::Collection
+                        ) {
+                            continue;
+                        }
                         total_seen += 1;
                         if object_nodes.len() < max_tables {
                             object_nodes.push(inner);

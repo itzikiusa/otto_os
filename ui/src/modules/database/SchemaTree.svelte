@@ -15,7 +15,14 @@
   let schemaFilter = $state('');
 
   // Node kinds that, when clicked, open the Structure view (vs. just expanding).
-  const OBJECT_KINDS = new Set<DbNodeKind>(['table', 'view', 'collection', 'key']);
+  const OBJECT_KINDS = new Set<DbNodeKind>([
+    'table',
+    'view',
+    'procedure',
+    'function',
+    'collection',
+    'key',
+  ]);
 
   function iconFor(kind: DbNodeKind): string {
     switch (kind) {
@@ -26,6 +33,10 @@
         return 'grid';
       case 'view':
         return 'eye';
+      case 'procedure':
+        return 'procedure';
+      case 'function':
+        return 'function';
       case 'column':
       case 'field':
         return 'dot';
@@ -104,6 +115,10 @@
     const isObject = OBJECT_KINDS.has(node.kind);
     const isSqlTable =
       database.capabilities?.sql === true && (node.kind === 'table' || node.kind === 'view');
+    // Stored procedure / function — SQL routines that carry a SHOW CREATE DDL.
+    const isSqlRoutine =
+      database.capabilities?.sql === true &&
+      (node.kind === 'procedure' || node.kind === 'function');
     const isMongoCollection = node.kind === 'collection';
 
     const items = [];
@@ -189,9 +204,10 @@
 
     items.push({ separator: true });
     items.push({ label: 'Copy name', icon: 'file', action: () => void copyName(node) });
-    // CREATE statement (DDL) — SQL tables/views only (MySQL + ClickHouse via SHOW
-    // CREATE); Mongo/Redis have no DDL.
-    if (isSqlTable) {
+    // CREATE statement (DDL) — SQL tables/views AND stored procedures/functions
+    // (MySQL + ClickHouse via SHOW CREATE TABLE/VIEW/PROCEDURE/FUNCTION);
+    // Mongo/Redis have no DDL.
+    if (isSqlTable || isSqlRoutine) {
       items.push({
         label: 'Copy create statement',
         icon: 'file',
@@ -426,6 +442,11 @@
   .node-icon.view,
   .node-icon.collection {
     color: var(--accent);
+  }
+  /* Routines get a muted-accent tone so they read as distinct from data objects. */
+  .node-icon.procedure,
+  .node-icon.function {
+    color: color-mix(in srgb, var(--accent) 45%, var(--text));
   }
   .node-icon.database,
   .node-icon.schema {

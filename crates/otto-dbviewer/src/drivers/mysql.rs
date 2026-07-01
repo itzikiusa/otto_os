@@ -144,23 +144,68 @@ impl Driver for MysqlDriver {
             return self.objects_in_folder(cfg, &db, folder, filter).await;
         }
 
-        // db:<n> -> the two folders (Tables, Views); no per-folder filter at this level.
-        let tables = SchemaNode::new(
-            parent.child("folder", "tables").to_id(),
-            "Tables",
-            NodeKind::Folder,
-        )
-        .expandable();
-        let views = SchemaNode::new(
-            parent.child("folder", "views").to_id(),
-            "Views",
-            NodeKind::Folder,
-        )
-        .expandable();
-        Ok(vec![tables, views])
+        // db:<n> -> the object folders; no per-folder filter at this level.
+        // Tables & Views are always shown (matching Workbench). Procedures &
+        // Functions are shown only when the database actually has routines of that
+        // kind — with their count as dimmed detail — so the many databases without
+        // routines stay uncluttered.
+        let mut folders = vec![
+            SchemaNode::new(parent.child("folder", "tables").to_id(), "Tables", NodeKind::Folder)
+                .expandable(),
+            SchemaNode::new(parent.child("folder", "views").to_id(), "Views", NodeKind::Folder)
+                .expandable(),
+        ];
+        // Best-effort routine counts; on error (e.g. no privilege on
+        // information_schema.routines) we simply omit the routine folders rather
+        // than failing the whole database expand.
+        if let Ok(pool) = self.pool(cfg).await {
+            let counts: Vec<(String, i64)> = sqlx::query_as(
+                "SELECT CAST(routine_type AS CHAR), COUNT(*) \
+                 FROM information_schema.routines WHERE routine_schema = ? \
+                 GROUP BY routine_type",
+            )
+            .bind(&db)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+            let count_of = |t: &str| {
+                counts
+                    .iter()
+                    .find(|(rt, _)| rt.eq_ignore_ascii_case(t))
+                    .map(|(_, n)| *n)
+            };
+            if let Some(n) = count_of("PROCEDURE").filter(|&n| n > 0) {
+                folders.push(
+                    SchemaNode::new(
+                        parent.child("folder", "procedures").to_id(),
+                        "Procedures",
+                        NodeKind::Folder,
+                    )
+                    .with_detail(n.to_string())
+                    .expandable(),
+                );
+            }
+            if let Some(n) = count_of("FUNCTION").filter(|&n| n > 0) {
+                folders.push(
+                    SchemaNode::new(
+                        parent.child("folder", "functions").to_id(),
+                        "Functions",
+                        NodeKind::Folder,
+                    )
+                    .with_detail(n.to_string())
+                    .expandable(),
+                );
+            }
+        }
+        Ok(folders)
     }
 
     async fn object_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail> {
+        // Stored procedure / function: no columns/indexes/FKs — just parameters
+        // (rendered as the object's "columns") and the CREATE DDL.
+        if path.get("procedure").is_some() || path.get("function").is_some() {
+            return self.routine_detail(cfg, path).await;
+        }
         let db = path
             .get("db")
             .ok_or_else(|| types::invalid("object_detail: path has no database segment"))?
@@ -518,6 +563,11 @@ impl MysqlDriver {
         folder: &str,
         filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
+        // Routine folders live in information_schema.routines (not .tables) and
+        // their leaves have no children — clicking one opens its DDL in Structure.
+        if folder == "procedures" || folder == "functions" {
+            return self.routines_in_folder(cfg, db, folder, filter).await;
+        }
         let (table_type, kind, seg) = match folder {
             "tables" => ("BASE TABLE", NodeKind::Table, "table"),
             "views" => ("VIEW", NodeKind::View, "view"),
@@ -560,6 +610,51 @@ impl MysqlDriver {
             .map(|(name,)| {
                 SchemaNode::new(db_path.child(seg, &name).to_id(), name, kind).expandable()
             })
+            .collect())
+    }
+
+    /// List stored procedures / functions in a database (the `Procedures` /
+    /// `Functions` tree folders), with an optional case-insensitive substring
+    /// filter. Leaves are NOT expandable — a routine has no child nodes; clicking
+    /// one opens its parameters + DDL in the Structure view.
+    async fn routines_in_folder(
+        &self,
+        cfg: &ResolvedConfig,
+        db: &str,
+        folder: &str,
+        filter: Option<&str>,
+    ) -> Result<Vec<SchemaNode>> {
+        let (routine_type, kind, seg) = match folder {
+            "procedures" => ("PROCEDURE", NodeKind::Procedure, "procedure"),
+            "functions" => ("FUNCTION", NodeKind::Function, "function"),
+            other => return Err(types::invalid(format!("unknown routine folder: {other}"))),
+        };
+        let pool = self.pool(cfg).await?;
+        // CAST text → CHAR (MySQL 8 returns information_schema text as VARBINARY).
+        let (sql, name_filter): (&str, Option<String>) = match filter {
+            Some(f) if !f.is_empty() => (
+                "SELECT CAST(routine_name AS CHAR) FROM information_schema.routines \
+                 WHERE routine_schema = ? AND routine_type = ? \
+                 AND LOWER(CAST(routine_name AS CHAR)) LIKE LOWER(?) \
+                 ORDER BY routine_name",
+                Some(format!("%{f}%")),
+            ),
+            _ => (
+                "SELECT CAST(routine_name AS CHAR) FROM information_schema.routines \
+                 WHERE routine_schema = ? AND routine_type = ? ORDER BY routine_name",
+                None,
+            ),
+        };
+        let rows: Vec<(String,)> = if let Some(pat) = name_filter {
+            sqlx::query_as(sql).bind(db).bind(routine_type).bind(pat).fetch_all(&pool).await
+        } else {
+            sqlx::query_as(sql).bind(db).bind(routine_type).fetch_all(&pool).await
+        }
+        .map_err(types::upstream)?;
+        let db_path = NodePath::parse(&format!("db:{db}"));
+        Ok(rows
+            .into_iter()
+            .map(|(name,)| SchemaNode::new(db_path.child(seg, &name).to_id(), name, kind))
             .collect())
     }
 
@@ -674,6 +769,99 @@ impl MysqlDriver {
         let ddl: String = row.try_get(1).map_err(types::upstream)?;
         Ok(ddl)
     }
+
+    /// Structure of a stored procedure / function: its parameters (mapped into the
+    /// [`ColumnDef`] shape the Structure view already renders — labelled
+    /// "Parameters" in the UI) plus the full `SHOW CREATE` DDL.
+    async fn routine_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail> {
+        let db = path
+            .get("db")
+            .ok_or_else(|| types::invalid("routine_detail: path has no database segment"))?
+            .to_string();
+        let (name, is_function, kind) = if let Some(n) = path.get("function") {
+            (n.to_string(), true, NodeKind::Function)
+        } else {
+            let n = path
+                .get("procedure")
+                .ok_or_else(|| types::invalid("routine_detail: path has no routine segment"))?;
+            (n.to_string(), false, NodeKind::Procedure)
+        };
+        let pool = self.pool(cfg).await?;
+
+        // Parameters, in declaration order. For a FUNCTION, ordinal_position 0 is
+        // the RETURN type (no name / mode). CAST(... AS SIGNED/CHAR) so sqlx
+        // decodes ordinal as i64 and the text columns as String (MySQL 8 returns
+        // information_schema text as VARBINARY).
+        let param_rows: Vec<RoutineParamRow> = sqlx::query_as(
+            "SELECT CAST(ordinal_position AS SIGNED) AS ordinal_position, \
+                    CAST(parameter_mode AS CHAR) AS parameter_mode, \
+                    CAST(parameter_name AS CHAR) AS parameter_name, \
+                    CAST(dtd_identifier AS CHAR) AS dtd_identifier \
+             FROM information_schema.parameters \
+             WHERE specific_schema = ? AND specific_name = ? \
+             ORDER BY ordinal_position",
+        )
+        .bind(&db)
+        .bind(&name)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        let mut columns = Vec::with_capacity(param_rows.len());
+        for p in param_rows {
+            let is_return = p.ordinal_position == 0; // function return value
+            columns.push(ColumnDef {
+                name: if is_return {
+                    "(return)".to_string()
+                } else {
+                    p.parameter_name.unwrap_or_default()
+                },
+                data_type: p.dtd_identifier.unwrap_or_default(),
+                nullable: true,
+                default: None,
+                key: None,
+                extra: if is_return {
+                    Some("RETURNS".to_string())
+                } else {
+                    p.parameter_mode.filter(|s| !s.is_empty())
+                },
+                comment: None,
+            });
+        }
+
+        // `.ok().flatten()`: a hard error (routine dropped concurrently, or SHOW
+        // CREATE itself denied) OR a NULL "Create …" column (definer privilege
+        // missing) both collapse to `None` → the UI shows a privilege hint.
+        let ddl = self
+            .show_create_routine(&pool, &db, &name, is_function)
+            .await
+            .ok()
+            .flatten();
+
+        let mut detail = ObjectDetail::new(name, kind);
+        detail.columns = columns;
+        detail.ddl = ddl;
+        Ok(detail)
+    }
+
+    /// `SHOW CREATE PROCEDURE|FUNCTION` DDL. Unlike `SHOW CREATE TABLE`, the DDL
+    /// here is the **3rd** column ("Create Procedure"/"Create Function"), read by
+    /// index for robustness. Returns `Ok(None)` when that column is NULL — MySQL
+    /// blanks it (rather than erroring) when the account lacks the privilege to
+    /// view the routine's definition (`SHOW_ROUTINE` / SELECT on the routine).
+    async fn show_create_routine(
+        &self,
+        pool: &sqlx::MySqlPool,
+        db: &str,
+        name: &str,
+        is_function: bool,
+    ) -> Result<Option<String>> {
+        let kw = if is_function { "FUNCTION" } else { "PROCEDURE" };
+        let sql = format!("SHOW CREATE {kw} `{}`.`{}`", esc_ident(db), esc_ident(name));
+        let row = sqlx::query(&sql).fetch_one(pool).await.map_err(types::upstream)?;
+        let ddl: Option<String> = row.try_get(2).map_err(types::upstream)?;
+        Ok(ddl)
+    }
 }
 
 // --- Connection -------------------------------------------------------------
@@ -706,7 +894,7 @@ impl MysqlDriver {
         cfg: &ResolvedConfig,
         db: &str,
     ) -> Option<crate::complete::SchemaSnapshot> {
-        use crate::complete::{FieldSnap, ObjKind, ObjectSnap, Rank, SchemaSnapshot};
+        use crate::complete::{FieldSnap, ObjKind, ObjectSnap, Rank, RoutineSnap, SchemaSnapshot};
 
         let pool = self.pool(cfg).await.ok()?;
         let databases: Vec<String> = sqlx::query_as::<_, (String,)>(
@@ -723,6 +911,7 @@ impl MysqlDriver {
             return Some(SchemaSnapshot {
                 databases,
                 objects: Vec::new(),
+                routines: Vec::new(),
             });
         }
 
@@ -744,6 +933,23 @@ impl MysqlDriver {
         .fetch_all(&pool)
         .await
         .unwrap_or_default();
+
+        // Stored procedures / functions — for routine-name completion after
+        // `SHOW CREATE PROCEDURE`/`FUNCTION`, `CALL`, `DROP PROCEDURE`/`FUNCTION`.
+        let routines: Vec<RoutineSnap> = sqlx::query_as::<_, (String, String)>(
+            "SELECT CAST(routine_name AS CHAR), CAST(routine_type AS CHAR) \
+             FROM information_schema.routines WHERE routine_schema = ? ORDER BY routine_name",
+        )
+        .bind(db)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, rtype)| RoutineSnap {
+            name,
+            is_function: rtype.eq_ignore_ascii_case("FUNCTION"),
+        })
+        .collect();
 
         // (table, column) → strongest index rank, from information_schema.statistics
         // (which lists every index member column, so composite-index members all rank).
@@ -816,7 +1022,11 @@ impl MysqlDriver {
             }
         }
 
-        Some(SchemaSnapshot { databases, objects })
+        Some(SchemaSnapshot {
+            databases,
+            objects,
+            routines,
+        })
     }
 
     /// Get (or lazily build + cache) the pool for `cfg`. The cache is keyed by
@@ -1148,6 +1358,14 @@ struct ColumnRow {
     column_key: Option<String>,
     extra: Option<String>,
     column_comment: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct RoutineParamRow {
+    ordinal_position: i64,
+    parameter_mode: Option<String>,
+    parameter_name: Option<String>,
+    dtd_identifier: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

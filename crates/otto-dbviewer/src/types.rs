@@ -188,6 +188,12 @@ pub enum NodeKind {
     Schema,
     Table,
     View,
+    /// A stored procedure (SQL routine; no result columns — carries its DDL and
+    /// its parameter list, surfaced as the object's "columns").
+    Procedure,
+    /// A stored function (SQL routine returning a value — carries its DDL and
+    /// parameters, including the return type).
+    Function,
     Column,
     Index,
     Collection,

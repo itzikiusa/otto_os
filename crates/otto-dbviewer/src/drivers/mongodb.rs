@@ -822,7 +822,7 @@ impl MongoDriver {
         self.completions.put_snapshot(
             &cache_key,
             db,
-            crate::complete::SchemaSnapshot { databases, objects },
+            crate::complete::SchemaSnapshot { databases, objects, ..Default::default() },
         );
         names
     }

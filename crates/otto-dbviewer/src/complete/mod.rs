@@ -98,12 +98,22 @@ pub struct ObjectSnap {
     pub fields_ready: bool,
 }
 
+/// A stored procedure / function (SQL) — powers routine-name completion after
+/// `SHOW CREATE PROCEDURE`/`FUNCTION`, `CALL`, and `DROP PROCEDURE`/`FUNCTION`.
+#[derive(Debug, Clone)]
+pub struct RoutineSnap {
+    pub name: String,
+    pub is_function: bool,
+}
+
 /// The cheap, cached shape of a database: its sibling databases + the list of
-/// tables/collections (with SQL columns already attached).
+/// tables/collections (with SQL columns already attached) + its routines.
 #[derive(Debug, Clone, Default)]
 pub struct SchemaSnapshot {
     pub databases: Vec<String>,
     pub objects: Vec<ObjectSnap>,
+    /// Stored procedures/functions in the scoped database (SQL only).
+    pub routines: Vec<RoutineSnap>,
 }
 
 impl SchemaSnapshot {
@@ -282,6 +292,7 @@ mod tests {
                 fields: vec![FieldSnap::new("id", Some("int".into()), Rank::Pk)],
                 fields_ready: true,
             }],
+            ..Default::default()
         }
     }
 

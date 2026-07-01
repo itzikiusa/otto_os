@@ -21,6 +21,10 @@ pub enum SqlExpect {
     Table,
     /// A column name. `qualifier` is the `alias.`/`table.` before the cursor.
     Column { qualifier: Option<String> },
+    /// A stored procedure / function name (after `SHOW CREATE PROCEDURE`/`FUNCTION`,
+    /// `CALL`, `DROP PROCEDURE`/`FUNCTION`). `functions` selects functions vs
+    /// procedures so the suggestions match the keyword.
+    Routine { functions: bool },
     /// Unknown — offer keywords + functions + tables (never worse than before).
     Any,
 }
@@ -64,6 +68,9 @@ pub fn analyze(prefix: &str, suffix: &str) -> SqlCtx {
         // `db.` in a table slot → still a table (we suggest tables in the active
         // db; cross-db qualification just narrows what the user types).
         (Base::Table, _) => SqlExpect::Table,
+        // `db.` before a routine name (`SHOW CREATE PROCEDURE db.`) narrows the
+        // typed text; we still suggest routines regardless of the qualifier.
+        (Base::Routine { functions }, _) => SqlExpect::Routine { functions },
         (Base::Column, q) => SqlExpect::Column { qualifier: q },
         (Base::Any, Some(q)) => SqlExpect::Column { qualifier: Some(q) },
         (Base::Any, None) => SqlExpect::Any,
@@ -93,6 +100,10 @@ pub fn assemble(
             push_functions(&mut items, functions);
             push_keywords(&mut items, keywords);
         }
+        SqlExpect::Routine { functions: want_functions } => {
+            push_routines(&mut items, snap, *want_functions);
+            push_keywords(&mut items, keywords);
+        }
         SqlExpect::Any => {
             push_keywords(&mut items, keywords);
             push_functions(&mut items, functions);
@@ -110,6 +121,25 @@ fn push_tables(items: &mut Vec<CompletionItem>, snap: &SchemaSnapshot) {
             _ => CompletionKind::Table,
         };
         items.push(CompletionItem::new(o.name.clone(), kind).scored(score::TABLE));
+    }
+}
+
+/// Push stored procedure / function names matching the requested kind (functions
+/// vs procedures), each carrying its kind as the completion detail so the popup
+/// distinguishes them.
+fn push_routines(items: &mut Vec<CompletionItem>, snap: &SchemaSnapshot, functions: bool) {
+    for r in &snap.routines {
+        if r.is_function != functions {
+            continue;
+        }
+        items.push(
+            CompletionItem::detailed(
+                r.name.clone(),
+                CompletionKind::Function,
+                if functions { "function" } else { "procedure" },
+            )
+            .scored(score::TABLE),
+        );
     }
 }
 
@@ -220,6 +250,8 @@ fn resolve_alias<'a>(ctx: &'a SqlCtx, q: &str) -> Option<&'a str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Base {
     Table,
+    /// A routine-name slot; `functions` picks functions vs procedures.
+    Routine { functions: bool },
     Column,
     Any,
 }
@@ -241,6 +273,12 @@ fn clause_expectation(toks: &[Tok]) -> Base {
             Tok::Punct('(') if last_kw == "INTO" && current == Base::Table => {
                 current = Base::Column;
             }
+            // `CALL proc(…)` / `CREATE PROCEDURE p(…)` — once past the routine
+            // name's opening paren we're in its argument/parameter list, not a
+            // routine-name slot anymore.
+            Tok::Punct('(') if matches!(current, Base::Routine { .. }) => {
+                current = Base::Any;
+            }
             _ => {}
         }
     }
@@ -251,6 +289,12 @@ fn clause_expectation(toks: &[Tok]) -> Base {
 fn clause_of(up: &str) -> Option<Base> {
     Some(match up {
         "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE" | "DESCRIBE" | "DESC" => Base::Table,
+        // Routine-name slots: `CALL`/`SHOW CREATE PROCEDURE`/`DROP PROCEDURE` want
+        // procedures; `SHOW CREATE FUNCTION`/`DROP FUNCTION` want functions. (These
+        // sit after `SHOW CREATE`/`DROP`, which aren't themselves clause keywords,
+        // so PROCEDURE/FUNCTION is the last recognised keyword before the cursor.)
+        "CALL" | "PROCEDURE" => Base::Routine { functions: false },
+        "FUNCTION" => Base::Routine { functions: true },
         "SELECT" | "WHERE" | "ON" | "AND" | "OR" | "HAVING" | "SET" | "BY" | "USING"
         | "RETURNING" => Base::Column,
         // Keywords that END a useful column/table slot. `GROUP`/`ORDER` are
@@ -559,7 +603,7 @@ fn top_level_semis(s: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::complete::{FieldSnap, ObjectSnap, Rank};
+    use crate::complete::{FieldSnap, ObjectSnap, Rank, RoutineSnap};
 
     fn snap() -> SchemaSnapshot {
         SchemaSnapshot {
@@ -586,11 +630,57 @@ mod tests {
                     fields_ready: true,
                 },
             ],
+            routines: vec![
+                RoutineSnap { name: "update_max_transaction_id".into(), is_function: false },
+                RoutineSnap { name: "calc_bonus".into(), is_function: true },
+            ],
         }
     }
 
     fn analyze_p(prefix: &str) -> SqlCtx {
         analyze(prefix, "")
+    }
+
+    #[test]
+    fn show_create_procedure_expects_procedures() {
+        let c = analyze_p("SHOW CREATE PROCEDURE ");
+        assert_eq!(c.expect, SqlExpect::Routine { functions: false });
+        let items = assemble(&c, &snap(), &["SHOW"], &[]);
+        // Procedures are offered; tables and functions are NOT in this slot.
+        assert!(items.iter().any(|i| i.label == "update_max_transaction_id"));
+        assert!(!items.iter().any(|i| i.label == "orders"));
+        assert!(!items.iter().any(|i| i.label == "calc_bonus"));
+    }
+
+    #[test]
+    fn show_create_function_expects_functions() {
+        let c = analyze_p("show create function ");
+        assert_eq!(c.expect, SqlExpect::Routine { functions: true });
+        let items = assemble(&c, &snap(), &[], &[]);
+        assert!(items.iter().any(|i| i.label == "calc_bonus"));
+        assert!(!items.iter().any(|i| i.label == "update_max_transaction_id"));
+    }
+
+    #[test]
+    fn call_expects_procedures() {
+        assert_eq!(
+            analyze_p("CALL ").expect,
+            SqlExpect::Routine { functions: false }
+        );
+    }
+
+    #[test]
+    fn drop_function_expects_functions() {
+        assert_eq!(
+            analyze_p("DROP FUNCTION ").expect,
+            SqlExpect::Routine { functions: true }
+        );
+    }
+
+    #[test]
+    fn routine_arg_paren_is_not_a_routine_slot() {
+        // Past the opening paren we're in the argument list, not a routine name.
+        assert_eq!(analyze_p("CALL do_thing(").expect, SqlExpect::Any);
     }
 
     #[test]

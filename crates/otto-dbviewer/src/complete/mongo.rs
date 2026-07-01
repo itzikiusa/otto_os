@@ -266,8 +266,9 @@ pub fn assemble_sql(
             push_keywords(&mut items, keywords);
         }
         // Unknown slot → keywords + functions + collections (mirrors the SQL
-        // analyzer's own `Any` fallback so it's never worse than before).
-        SqlExpect::Any => {
+        // analyzer's own `Any` fallback so it's never worse than before). Mongo
+        // has no SQL routines, so a `Routine` slot degrades to the same fallback.
+        SqlExpect::Any | SqlExpect::Routine { .. } => {
             push_keywords(&mut items, keywords);
             push_functions(&mut items, functions);
             push_collections(&mut items, collections);
