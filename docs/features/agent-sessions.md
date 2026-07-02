@@ -59,6 +59,7 @@ Svelte UI ──HTTP+WS──▶ ottod (127.0.0.1:7700) ──spawns──▶ cl
 | Tiled / grid view (live-tile budget) | `ui/src/modules/agents/TiledView.svelte` |
 | Terminal component (xterm + WS) | `ui/src/lib/components/Terminal.svelte` |
 | Activity trail + task tracker panel | `ui/src/modules/panels/ActivityPanel.svelte` |
+| Right-panel Canvas tab (referenced diagrams) | `ui/src/modules/panels/CanvasPanel.svelte`; routes `crates/otto-server/src/canvas_refs.rs` |
 | Per-device isolation toggle | `ui/src/modules/settings/Appearance.svelte`, `ui/src/lib/stores/ui.svelte.ts` |
 
 ---
@@ -429,6 +430,18 @@ session…"* input. The session pane shows a compact `done/total` task chip and 
 *"now: <in-progress task>"* hint. A session waiting on you (input or permission)
 shows a **"Needs you"** amber badge.
 
+### The right panel's other tabs
+
+Activity is one tab of the desktop right panel (Git / Files / Notes / Activity /
+**Canvas** / Info / Browser / API — a drawer on tablet/phone), shown only for
+`agent`-kind sessions. **Canvas** (`CanvasPanel.svelte`) lists the Canvas scenes
+*referenced* by the focused session — attach an existing scene or create a new
+one, expand a row for an inline SVG preview, jump to the full editor ("Open in
+Canvas"), or detach it. Live updates arrive over `canvas_refs_changed` when a
+scene is attached/detached from anywhere (this panel, the Canvas module, or an
+MCP write tool). See **[Canvas §7a](./canvas.md#7a-session-references)** for the
+full behavior and the `GET/POST/DELETE /sessions/{id}/canvas-refs` endpoints.
+
 ---
 
 ## 7. Driving a session programmatically
@@ -663,6 +676,8 @@ devices' sessions stay hidden here (they still run on the daemon)."* This is a
   sessions (with `meta.source="review"`).
 - **`./connections.md`** — connection (SSH/DB) terminals that share this PTY and
   terminal-WS machinery.
+- **`./canvas.md`** — the file-backed diagram tool; §7a covers the right panel's
+  Canvas tab (session-referenced scenes) documented above.
 - **`./daemon-http-api.md`** — tokens, base URL, and the WS auth handshake for
   driving Otto over HTTP.
 - **`./rtl-and-responsive.md`** — RTL/bidi and touch/mobile terminal behavior.

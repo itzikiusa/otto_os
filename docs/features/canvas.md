@@ -2,22 +2,31 @@
 
 A file-backed visual canvas built into Otto: describe a diagram in plain English
 and an **agent draws it for you** by editing a per-scene source file, while the
-board re-renders live as the file changes. Each scene is one of two modes —
-an **Excalidraw board** (fully editable shapes; the agent writes `canvas.json`)
-or a **Mermaid diagram** (auto-rendered flowchart / sequence / class / state /
-ER; the agent writes `canvas.mermaid`). The conversation with the agent is the
-agent's **own live shell**, embedded right in the page (the same `<Terminal>` the
-Agents view uses), so refining a diagram is just chatting; you never have to hand-
-compute coordinates or learn Mermaid syntax (though you can edit either by hand).
+board re-renders live as the file changes. Each scene is one of three modes —
+an **Excalidraw board** (fully editable shapes; the agent writes `canvas.json`),
+a **Mermaid diagram** (auto-rendered flowchart / sequence / class / state /
+ER; the agent writes `canvas.mermaid`), or a **D2 diagram** (modern declarative
+architecture / sequence / SQL-table diagrams, rendered client-side from a
+lazy-loaded WASM bundle; the agent writes `canvas.d2`). The conversation with the
+agent is the agent's **own live shell**, embedded right in the page (the same
+`<Terminal>` the Agents view uses), so refining a diagram is just chatting; you
+never have to hand-compute coordinates or learn Mermaid/D2 syntax (though you can
+edit any of the three by hand). A scene can also be **referenced from an agent
+session** — attached to that session's right-panel **Canvas** tab so the agent
+(and you) can see it without leaving the conversation (§7a).
 
 > **Where this lives in the code.** CRUD crate: `crates/otto-canvas/` (`http.rs`,
 > `types.rs`, `lib.rs`). Agent-assist (needs the orchestrator): `crates/otto-server/src/canvas_assist.rs`.
 > Persistence: `crates/otto-state/src/canvas.rs` (`CanvasRepo`), migrations
-> `0072_canvas_scenes.sql` / `0074_session_links.sql` / `0075_canvas_scene_meta.sql`.
+> `0072_canvas_scenes.sql` / `0074_session_links.sql` / `0075_canvas_scene_meta.sql` /
+> `0093_canvas_scene_refs.sql` (session references, §7a). Session-ref routes (need
+> `SessionManager`, so they live outside `otto-canvas`): `crates/otto-server/src/canvas_refs.rs`.
 > RBAC: `Feature::Canvas` (`crates/otto-core/src/domain.rs`), gated in
-> `crates/otto-server/src/policy.rs`. UI: `ui/src/modules/canvas/` + store
-> `ui/src/lib/stores/canvas.svelte.ts`. The REST contract is in
-> `docs/contracts/api.md` (#102–#108).
+> `crates/otto-server/src/policy.rs`. UI: `ui/src/modules/canvas/` (incl. the D2
+> board `D2Canvas.svelte` + WASM bridge `d2.ts`) + store
+> `ui/src/lib/stores/canvas.svelte.ts`; the session-panel UI is
+> `ui/src/modules/panels/CanvasPanel.svelte`. The REST contract is in
+> `docs/contracts/api.md` (#102–#108, #145–#147).
 
 ---
 
@@ -26,13 +35,15 @@ compute coordinates or learn Mermaid syntax (though you can edit either by hand)
 | | |
 |---|---|
 | **What it is** | A per-scene, file-backed canvas an agent draws on by editing a source file; the board renders that file live. |
-| **Two modes** | **Excalidraw** (editable shapes, source = `canvas.json`) · **Mermaid** (auto-rendered diagrams, source = `canvas.mermaid`). Chosen at creation. |
+| **Three modes** | **Excalidraw** (editable shapes, source = `canvas.json`) · **Mermaid** (auto-rendered diagrams, source = `canvas.mermaid`) · **D2** (modern declarative diagrams, source = `canvas.d2`, rendered client-side). Chosen at creation; no in-place conversion between them. |
 | **Diagram types (Mermaid)** | flowchart (`TD`/`LR`), `sequenceDiagram`, `classDiagram` (UML), `erDiagram`, `stateDiagram-v2` — Mermaid's own renderer, fully offline (bundled, lazy-loaded). |
+| **Diagram types (D2)** | Architecture/box diagrams, sequence diagrams, and `sql_table` shapes — [`@terrastruct/d2`](https://d2lang.com)'s own compiler+renderer, run **entirely in the browser** via a lazy-loaded WASM bundle (no server round-trip to render). |
 | **How you drive it** | The **Assistant** panel — the agent's embedded live shell + a composer. You describe a change; the agent edits the file in place and the board re-renders. |
-| **Edit by hand too** | Excalidraw shapes are directly editable; Mermaid has a **Code** panel to edit the `.mermaid` source — both autosave to the same file the agent edits. |
+| **Edit by hand too** | Excalidraw shapes are directly editable; Mermaid and D2 each have a **Code** panel to edit their source — all three autosave to the same file the agent edits. |
+| **D2-only extras** | A **Sketch** toggle (hand-drawn render style, persisted on the doc as `sketch`) and **PNG / SVG / copy-source** export buttons in the zoombar (Mermaid has the same three). |
 | **Storage** | One row per scene in SQLite (`canvas_scenes.doc_json`); the source file lives under the daemon's data dir (`<data>/canvas/<scene_id>/`). |
-| **Scope** | Scenes are created in a workspace; the Canvas page lists **all of your scenes across every workspace** (Canvas is a workspace-independent tool). Optionally linked to a product story. |
-| **Where it lives** | The **Canvas** top-level nav module. RBAC feature key `canvas` (View to read, Edit to mutate / Ask AI). |
+| **Scope** | Scenes are created in a workspace; the Canvas page lists **all of your scenes across every workspace** (Canvas is a workspace-independent tool). Optionally linked to a product story, or referenced by an agent session (§7a). |
+| **Where it lives** | The **Canvas** top-level nav module, and (as a reference) any agent session's right-panel **Canvas** tab. RBAC feature key `canvas` (View to read, Edit to mutate / Ask AI). |
 | **Daemon** | `ottod` on `127.0.0.1:7700`; routes under `/api/v1`. |
 
 ### Where each piece lives
@@ -46,18 +57,19 @@ compute coordinates or learn Mermaid syntax (though you can edit either by hand)
 | Server wiring (router mount + assist routes) | `crates/otto-server/src/modules.rs` |
 | RBAC policy | `crates/otto-server/src/policy.rs` (`/canvas/` + `/workspaces/{ws}/canvas/` ⇒ `Require(Canvas, …)`) |
 | Live events | `crates/otto-core/src/event.rs` (`CanvasUpdated`, `CanvasSessionStarted`) |
-| UI page + components | `ui/src/modules/canvas/{CanvasPage,SceneList,ExcalidrawCanvas,MermaidCanvas,ConversationPanel}.svelte` |
-| Mermaid render bridge | `ui/src/modules/canvas/mermaid.ts` · Excalidraw element builder: `excalidraw-build.ts` |
-| Store + live-event bus | `ui/src/lib/stores/canvas.svelte.ts` · `ui/src/lib/events.svelte.ts` (`canvasDocBus`) |
-| API client types | `ui/src/modules/canvas/types.ts` (`CanvasScene`, `CanvasDoc`, `AssistResult`, …) |
+| UI page + components | `ui/src/modules/canvas/{CanvasPage,SceneList,ExcalidrawCanvas,MermaidCanvas,D2Canvas,ConversationPanel}.svelte` |
+| Mermaid render bridge | `ui/src/modules/canvas/mermaid.ts` · D2 render bridge (WASM): `d2.ts` · Excalidraw element builder: `excalidraw-build.ts` · shared SVG export helpers: `export.ts` |
+| Session-reference routes + UI | `crates/otto-server/src/canvas_refs.rs` · `ui/src/modules/panels/CanvasPanel.svelte` (§7a) |
+| Store + live-event bus | `ui/src/lib/stores/canvas.svelte.ts` · `ui/src/lib/events.svelte.ts` (`canvasDocBus`, `canvasRefsBus`) |
+| API client types | `ui/src/modules/canvas/types.ts` (`CanvasScene`, `CanvasDoc`, `CanvasFormat`, `AssistResult`, …) |
 | Agent skill | `crates/otto-skills/assets/skills/development/otto-canvas/` |
-| API contract | `docs/contracts/api.md` #102–#108 |
+| API contract | `docs/contracts/api.md` #102–#108, #145–#147 |
 
 > **Note on legacy code.** The tree still carries an earlier *node-graph* design
 > (`CanvasFlow.svelte`, `Toolbar.svelte`, `PresentMode.svelte`, `ToolRail.svelte`,
 > `nodes/*`, `scene.ts`, `templates.ts`, and the rich `Scene` schema in
 > `types.ts`). Those components are **not mounted** by the current `CanvasPage`
-> — the shipping canvas is the file-backed Excalidraw/Mermaid pair documented
+> — the shipping canvas is the file-backed Excalidraw/Mermaid/D2 trio documented
 > here. A few helpers from that era (`parseScene`, `emptyScene`) are still used as
 > fallbacks by the store. See **Capabilities & limitations** for what this means
 > for "Present mode" and JSON export.
@@ -73,8 +85,9 @@ share (the Rust side never parses its meaning — see `canvas_assist.rs::build_d
 {
   "type": "otto-canvas",
   "version": 1,
-  "format": "mermaid",          // "mermaid" (default) | "excalidraw"
-  "source": "flowchart TD\n …"  // the Mermaid text, or the Excalidraw scene JSON
+  "format": "mermaid",          // "mermaid" (default) | "excalidraw" | "d2"
+  "source": "flowchart TD\n …", // the Mermaid/D2 text, or the Excalidraw scene JSON
+  "sketch": false                // D2 only: hand-drawn render style (§5)
 }
 ```
 
@@ -82,6 +95,10 @@ share (the Rust side never parses its meaning — see `canvas_assist.rs::build_d
   - `mermaid` → `canvas.mermaid` (the default; the agent edits *text*, so layout
     is automatic and clean).
   - `excalidraw` → `canvas.json` (a full Excalidraw scene).
+  - `d2` → `canvas.d2` (D2 text, compiled and rendered to SVG **in the browser**
+    by a lazy-loaded WASM bundle — no server round-trip).
+- **`sketch`** (D2 only) toggles the D2 renderer's hand-drawn style; it rides
+  along in the same doc and is ignored by the other two formats.
 - **`source`** is the literal file content. When an "Ask AI" turn runs, the server
   materializes `source` into `<data_dir>/canvas/<scene_id>/<file>`, lets the agent
   edit that file in its working directory, reads it back, and commits it as the new
@@ -90,7 +107,8 @@ share (the Rust side never parses its meaning — see `canvas_assist.rs::build_d
   regenerating it.
 
 A brand-new scene starts from a base (`flowchart TD\n` for Mermaid, an empty
-`{type:"excalidraw",…,"elements":[]}` for Excalidraw). If a scene is created via
+`{type:"excalidraw",…,"elements":[]}` for Excalidraw, `direction: right\n` for
+D2). If a scene is created via
 the raw API with no `doc`, `otto-canvas` stores a minimal legacy scene
 (`empty_doc`); the UI always sends a proper file-backed `doc` on create.
 
@@ -102,10 +120,12 @@ Open **Canvas** in the sidebar. The left rail (`SceneList.svelte`) lists your
 scenes; the right side is the board (or a "Start a new canvas" hero when nothing
 is open).
 
-**Create.** The hero and the **New scene** menu both offer the two modes:
+**Create.** The hero and the **New scene** menu both offer all three modes:
 
 - **Excalidraw board** — *"Editable shapes — draw & arrange by hand too."*
 - **Mermaid diagram** — *"Auto-rendered flowchart / sequence / class — rich & clean."*
+- **D2 diagram** — *"Modern declarative diagrams — architecture, sequence & SQL
+  tables."*
 
 Creating posts to `POST /workspaces/{ws}/canvas/scenes` in the **current**
 workspace with a blank doc of the chosen format, then opens it. New scenes are
@@ -169,7 +189,7 @@ turn:
    response is an `AssistResult` so the UI can render immediately even before the
    event arrives.
 
-`AssistResult` = `{ excalidraw?, mermaid?, format, nodes[], edges[], note }`.
+`AssistResult` = `{ excalidraw?, mermaid?, d2?, format, nodes[], edges[], note }`.
 `note` is the agent's one-line description (or an error explanation when nothing
 was drawn).
 
@@ -187,6 +207,11 @@ the deterministic E2E stub) and tailors the instructions to the format:
   internals; arrows reference node ids and are routed by the app). The UI
   (`excalidraw-build.ts`) expands that simplified form into a real Excalidraw scene
   — binding labels and routing arrows — so the agent never hand-computes geometry.
+- **D2** — "edit the D2 file `canvas.d2`"; the prompt teaches the key D2 shapes
+  (`shape: diamond`/`sql_table`, `style.fill`, `direction`, connections with
+  labels) so the agent writes valid D2 without guessing syntax. The file must
+  always hold one complete, valid D2 diagram, same "edit in place" contract as
+  Mermaid.
 
 The request body also accepts a `mode` hint (`auto` | `sequence` | `flow` | `uml`
 | `nodes`); the Mermaid board sends `flow`.
@@ -229,11 +254,35 @@ and lets you pan/zoom it. You edit it two ways, both writing `canvas.mermaid`:
 - **Code** — a toggleable side panel with a CodeMirror editor over the raw Mermaid
   source; edits debounce-save (~500 ms) and re-render live.
 
-Controls: **drag** to pan, **scroll** to zoom, a zoom bar with **fit-to-screen**
-and a **Download SVG** button. If the source is actually Excalidraw JSON (a
+Controls: **drag** to pan, **scroll** to zoom, a zoom bar with **fit-to-screen**,
+**Download SVG**, **Download PNG**, and **Copy source** buttons (`export.ts`,
+shared with the D2 board below). If the source is actually Excalidraw JSON (a
 mislabelled scene), the board shows a clear "this holds Excalidraw content" message
 instead of a raw parse error. A render error keeps the last good SVG on screen and
 shows the parser message in a banner.
+
+### D2 board (`D2Canvas.svelte`)
+
+Modeled 1:1 on the Mermaid board (same pan/zoom surface, zoombar, Code pane, live
+`canvasDocBus` effect, save-guard against scene switches) — the two real
+differences are the renderer and a Sketch toggle:
+
+- **Client-side WASM render.** `d2.ts` dynamically imports `@terrastruct/d2` (a
+  ~7.8 MB WASM bundle) on first use and keeps one shared instance after — it's
+  never in the main JS chunk, and the daemon never renders a D2 diagram itself.
+  `compile()` then `render()` turn the `.d2` source into an SVG string entirely
+  in the browser; a compile error surfaces as a friendly inline message (the raw
+  error is a JSON array of `{range, errmsg}` — flattened for display) and the
+  last good render stays on screen.
+- **Sketch toggle.** A pill next to **Code** flips a hand-drawn render style
+  (D2's own "sketch" theme). The choice is persisted on the doc (`sketch: true`)
+  via the same `PUT /canvas/scenes/{id}` autosave path as source edits, so it
+  survives a reload and rides along with Ask-AI edits.
+- **Code** — same pattern as Mermaid: a CodeMirror panel over the raw `.d2`
+  source; edits debounce-save (~500 ms) and re-render live (dark/light theme
+  changes also trigger a re-render, since D2 themes differ by mode).
+- **Exports** — the same zoombar as Mermaid: **Download SVG**, **Download PNG**,
+  **Copy source**.
 
 ---
 
@@ -325,15 +374,17 @@ that lists the Canvas scenes linked to a story.
 
 ## 9. Capabilities & limitations
 
-- **Two modes only**, chosen at creation: Excalidraw (`canvas.json`) and Mermaid
-  (`canvas.mermaid`). There's no in-place conversion between them — a Mermaid scene
-  stays Mermaid; create a new Excalidraw scene to draw editable shapes.
+- **Three modes only**, chosen at creation: Excalidraw (`canvas.json`), Mermaid
+  (`canvas.mermaid`), and D2 (`canvas.d2`). There's no in-place conversion between
+  them — a Mermaid scene stays Mermaid; create a new scene in the mode you need.
 - **Agent-first.** The intended flow is: describe → the agent edits the file → the
-  board re-renders. Hand-editing is supported (Excalidraw shapes; the Mermaid
-  **Code** panel) but there is no separate native shape palette for Mermaid scenes.
-- **Mermaid is fully offline** (the `mermaid` package is bundled and lazy-loaded,
-  no CDN). **Excalidraw loads its asset/font bundle from the unpkg CDN** on first
-  mount.
+  board re-renders. Hand-editing is supported (Excalidraw shapes; the Mermaid/D2
+  **Code** panels) but there is no separate native shape palette for Mermaid/D2
+  scenes.
+- **Mermaid and D2 are fully offline** (`mermaid` and `@terrastruct/d2` are both
+  bundled and lazy-loaded, no CDN — D2's ~7.8 MB WASM chunk downloads once on
+  first use of a D2 scene, then stays cached for the session). **Excalidraw loads
+  its asset/font bundle from the unpkg CDN** on first mount.
 - **No Present mode in the current canvas.** Present mode (PowerPoint-style slide
   stepping) and the top **Toolbar** (Undo/Redo, **Export JSON**, Present) belong to
   the older node-graph design and are **not wired** into the shipping file-backed
@@ -381,12 +432,17 @@ that lists the Canvas scenes linked to a story.
 
 ## 11. Troubleshooting
 
-- **The Mermaid board shows "Diagram error: …".** The `source` isn't valid Mermaid;
-  the banner is the parser's own message and the last good render stays on screen.
-  Fix it in the **Code** panel, or ask the agent to correct it.
-- **"This canvas holds Excalidraw content."** A scene labelled `mermaid` actually
-  contains an Excalidraw scene JSON. Create a new **Excalidraw** canvas to edit
-  those shapes.
+- **The Mermaid/D2 board shows "Diagram error: …".** The `source` isn't valid for
+  that format; the banner is the parser's own message (D2's is flattened from a
+  JSON `{range, errmsg}` array into one line) and the last good render stays on
+  screen. Fix it in the **Code** panel, or ask the agent to correct it.
+- **"This canvas holds Excalidraw content."** A scene labelled `mermaid` or `d2`
+  actually contains an Excalidraw scene JSON. Create a new **Excalidraw** canvas
+  to edit those shapes.
+- **A D2 scene's first render is slow, or never appears.** The D2 WASM bundle
+  (~7.8 MB) lazy-loads on first use of any D2 scene in the tab; a slow/offline
+  network delays that one-time download. It's cached after — subsequent D2 scenes
+  in the same tab render immediately.
 - **Ask AI replies but nothing is drawn.** The agent produced no parseable
   diagram/file edit; the `note` is shown as a toast ("Nothing to draw"). Try a more
   specific prompt or a mode hint, and watch the embedded shell for what the agent
