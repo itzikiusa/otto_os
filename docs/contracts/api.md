@@ -102,7 +102,9 @@ Usage & metrics (embedded ClickHouse, all root-only; types in `crates/otto-usage
   used_fraction, warning(≥80%), exceeded(≥100%)}`. The daemon exposes a consultable
   `routes::usage::check_budget(ctx, workspace_id, provider)` that is a no-op while `enforce` is off.
 - POST /ingest/usage → 204 — per-session token-usage ingest, gated by the per-session
-  ingest token (`X-Otto-Session` + `X-Otto-Token`), not a bearer token.
+  ingest token (`X-Otto-Session` + `X-Otto-Token`), not a bearer token. Rows recorded here
+  get `origin: "ingest"` when the session's work ref supplies none, so they are never
+  mistaken for transcript-tailer rows (the tailer's dedup rebuild purges only dim-less rows).
 
 Notes:
 - `Connection` carries `environment` (`dev`|`staging`|`prod`, default `dev`) and `read_only`

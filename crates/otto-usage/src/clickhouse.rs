@@ -251,13 +251,18 @@ impl ClickHouse {
     }
 
     /// Bulk insert into `table` from newline-delimited JSON (one object per line).
-    /// A blank payload is a no-op.
+    /// A blank payload is a no-op. `date_time_input_format=best_effort` lets
+    /// rows carry RFC3339 timestamps (e.g. `UsageEvent.ts`) in `DateTime64`
+    /// columns; rows that omit them still get the column DEFAULTs.
     pub async fn insert_ndjson(&self, table: &str, ndjson: &str) -> Result<()> {
         if ndjson.trim().is_empty() {
             return Ok(());
         }
         let q = urlencode(&format!("INSERT INTO {table} FORMAT JSONEachRow"));
-        let url = format!("{}/?query={q}", self.base_url);
+        let url = format!(
+            "{}/?query={q}&date_time_input_format=best_effort",
+            self.base_url
+        );
         let resp = self
             .http
             .post(&url)

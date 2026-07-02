@@ -40,8 +40,8 @@ pub use engine::UsageEngine;
 pub use metrics::{Metric, MetricsSampler};
 pub use pricing::{estimate_cost, is_priced, PRICED_AS_OF};
 pub use tailer::{
-    parse_claude_line, parse_codex_line, parse_codex_session_meta, CodexMeta, CursorStore,
-    ParsedUsage,
+    parse_claude_line, parse_codex_line, parse_codex_session_meta, ClaudeLine, CodexMeta,
+    CursorStore, ParsedUsage, SeenKeys,
 };
 pub use types::{
     AttributionDimension, AttributionRow, DailyUsage, FeatureUsage, ForecastReq, ForecastResp,

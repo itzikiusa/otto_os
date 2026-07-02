@@ -16,16 +16,28 @@
 //!   * **agy** — unsupported (token usage is encrypted on disk); logged once.
 //!
 //! Correctness invariants:
-//!   * **No double-counting.** A per-file byte-offset cursor is persisted to
-//!     `<data_dir>/usage_tailer.json` (atomic write). ClickHouse has no
-//!     idempotency column, so the cursor is the *only* guard — including across
-//!     restarts. Only complete lines (up to the last `\n`) are consumed; a
-//!     trailing partial line is left for the next scan.
-//!   * **No misdated backfill.** ClickHouse stamps `ts = now()` on insert, so
-//!     replaying historical turns would misdate them. At startup every existing
-//!     transcript is seeded with `cursor = file size`, skipping pre-existing
-//!     history. Files that appear *later* (new real-time sessions) start at 0
-//!     and are captured in full.
+//!   * **No double-counting.** Two guards. (1) A per-file byte-offset cursor is
+//!     persisted to `<data_dir>/usage_tailer.json` (atomic write), so no *line*
+//!     is read twice — including across restarts. Only complete lines (up to
+//!     the last `\n`) are consumed; a trailing partial line is left for the
+//!     next scan. (2) A persisted seen-set of claude response keys
+//!     (`message.id:requestId`, `<data_dir>/usage_tailer_seen.json`), because
+//!     one API *response* spans several transcript lines (one per content
+//!     block, all repeating the same usage) and resumed sessions replay old
+//!     lines into new files — so a response can arrive on many lines while
+//!     billing happens once.
+//!   * **True-time stamping.** Claude events carry the transcript line's own
+//!     `timestamp` (`UsageEvent.ts`), so history ingested late (the one-time
+//!     rebuild below, or catch-up after daemon downtime) is dated when the API
+//!     call actually happened, not when it was ingested. Codex lines carry no
+//!     usable per-turn timestamp and keep the insert-time default; their
+//!     pre-existing history is still seeded away at startup.
+//!   * **One-time dedup rebuild.** The pre-dedup tailer counted every line, so
+//!     stores it fed are inflated (~2.4× on real data). On first start after
+//!     upgrade (marker `<data_dir>/usage_tailer_dedup_rebuild.done` absent) the
+//!     tailer purges its own claude rows and re-derives them from the full
+//!     transcripts — deduped, true-time-stamped. Delete-first + marker-last
+//!     makes a crashed rebuild retry cleanly on the next start.
 //!   * **Crash-resilient.** A bad file/line logs and is skipped; the loop never
 //!     panics.
 
@@ -38,12 +50,17 @@ use std::time::Duration;
 use otto_state::{SessionsRepo, SqlitePool};
 use otto_usage::{
     estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta, CursorStore,
-    UsageEngine, UsageEvent, EXTERNAL_WORKSPACE,
+    SeenKeys, UsageEngine, UsageEvent, EXTERNAL_WORKSPACE,
 };
 use tokio::task::JoinHandle;
 
 /// How often to scan for new transcript bytes.
 const SCAN_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Cap on the persisted claude response-key seen-set. Real transcripts produce
+/// ~1.5k responses/day, so 100k keys ≈ two months of history — far beyond how
+/// far back a resume replays — while keeping the JSON file a few MB.
+const SEEN_KEYS_CAP: usize = 100_000;
 
 /// Default model label for Codex turns when the rollout file carries no model.
 /// `estimate_cost` prices this at the gpt tier (substring match on "codex").
@@ -75,7 +92,14 @@ pub struct UsageTailer {
     pool: SqlitePool,
     /// Home directory — the root of `~/.claude` and `~/.codex`.
     home: PathBuf,
+    /// Daemon data dir — holds the cursor/seen files and the rebuild marker.
+    data_dir: PathBuf,
     cursors: CursorStore,
+    /// Response-level dedup for claude lines (see module docs).
+    seen: SeenKeys,
+    /// Set when [`Self::scan_once`] recorded a new claude key, so the seen file
+    /// is only rewritten when it actually changed.
+    seen_dirty: bool,
 }
 
 /// One Otto session, projected for attribution.
@@ -99,13 +123,16 @@ impl UsageTailer {
     /// Build the tailer. `data_dir` holds the persisted cursor file; `home` is
     /// the root for the `~/.claude` and `~/.codex` transcript trees.
     pub fn new(usage: Arc<UsageEngine>, pool: SqlitePool, data_dir: PathBuf, home: PathBuf) -> Self {
-        let cursor_path = data_dir.join("usage_tailer.json");
-        let cursors = CursorStore::load(cursor_path);
+        let cursors = CursorStore::load(data_dir.join("usage_tailer.json"));
+        let seen = SeenKeys::load(data_dir.join("usage_tailer_seen.json"), SEEN_KEYS_CAP);
         Self {
             usage,
             pool,
             home,
+            data_dir,
             cursors,
+            seen,
+            seen_dirty: false,
         }
     }
 
@@ -114,8 +141,12 @@ impl UsageTailer {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_task = Arc::clone(&cancel);
         let task = tokio::spawn(async move {
-            // Skip pre-existing history so old turns aren't replayed with a
-            // now() timestamp (ClickHouse can't backdate them).
+            // One-time (marker-gated): purge the pre-dedup tailer's inflated
+            // claude rows and re-derive them from the full transcripts.
+            self.rebuild_claude_history().await;
+            // Skip remaining pre-existing history (codex, and any claude file
+            // the rebuild couldn't touch) so old turns aren't replayed with a
+            // now() timestamp.
             self.seed_existing_files().await;
             loop {
                 if cancel_task.load(Ordering::Relaxed) {
@@ -139,6 +170,190 @@ impl UsageTailer {
             cancel,
             _task: task,
         }
+    }
+
+    /// One-time (marker-gated) correction pass over the claude transcripts.
+    ///
+    /// The pre-dedup tailer counted every assistant line, so a response whose
+    /// content spans several lines — or is replayed into a resumed session's
+    /// file — was recorded several times over (~2.4× inflation measured on real
+    /// data). This pass re-derives claude usage from scratch:
+    ///
+    ///   1. parse every claude transcript from byte 0, deduped by response key,
+    ///      each event stamped with its line's own timestamp (also *backfills*
+    ///      history the old tailer skipped at seed time);
+    ///   2. purge the old tailer rows — synchronously, bounded by the oldest
+    ///      rebuilt date so rows whose transcripts were since deleted survive;
+    ///   3. insert the rebuilt events, advance cursors to the parsed offsets,
+    ///      fold the keys into the live seen-set, persist, write the marker.
+    ///
+    /// Ordering makes a crashed or failed rebuild safe to retry: the purge runs
+    /// before the insert and its predicate also matches rebuilt rows (same
+    /// dim-less claude completion shape), so a partial insert is swept up by
+    /// the next attempt; the marker is only written after full success. On any
+    /// error the in-memory cursors/seen stay untouched — the live loop keeps
+    /// tailing appends from the old offsets (deduped) until the next daemon
+    /// start retries.
+    async fn rebuild_claude_history(&mut self) {
+        let marker = self.data_dir.join("usage_tailer_dedup_rebuild.done");
+        if marker.exists() {
+            return;
+        }
+        // The engine boots ClickHouse concurrently with us; give it a moment.
+        // Not ready (or usage disabled) → skip without the marker so the next
+        // start retries.
+        if !self.usage.wait_ready(Duration::from_secs(90)).await {
+            tracing::warn!("usage tailer: dedup rebuild skipped — usage engine not ready");
+            return;
+        }
+
+        let attr = self.build_attribution().await;
+        // Oldest-first so that, if the seen-set cap ever evicts, it evicts the
+        // keys least likely to be replayed again.
+        let mut files = self.claude_files();
+        files.sort_by_key(|f| {
+            std::fs::metadata(f)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
+
+        let mut events: Vec<UsageEvent> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        let mut key_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut offsets: Vec<(PathBuf, u64)> = Vec::new();
+        let mut min_date: Option<String> = None;
+
+        for file in files {
+            let Some(size) = file_size(&file).await else {
+                continue; // vanished mid-scan
+            };
+            if size == 0 {
+                offsets.push((file, 0));
+                continue;
+            }
+            let bytes = match read_range(&file, 0, size).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::debug!("usage tailer: rebuild skipped {}: {e}", file.display());
+                    continue;
+                }
+            };
+            let Some(last_nl) = bytes.iter().rposition(|&b| b == b'\n') else {
+                offsets.push((file, 0));
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes[..=last_nl]);
+            let stem = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let sref = attr.by_provider_session.get(&stem);
+
+            for line in text.lines() {
+                let Some(parsed) = parse_claude_line(line) else {
+                    continue;
+                };
+                if let Some(key) = &parsed.dedup_key {
+                    if !key_set.insert(key.clone()) {
+                        continue; // another line of an already-counted response
+                    }
+                    keys.push(key.clone());
+                }
+                if let Some(date) = parsed.timestamp.as_deref().and_then(|t| t.get(..10)) {
+                    if min_date.as_deref().map(|m| date < m).unwrap_or(true) {
+                        min_date = Some(date.to_string());
+                    }
+                }
+                let (workspace_id, session_id) = match sref {
+                    Some(s) => (s.workspace_id.clone(), s.otto_session_id.clone()),
+                    None => (EXTERNAL_WORKSPACE.to_string(), stem.clone()),
+                };
+                let usage = parsed.usage;
+                let cost = estimate_cost(
+                    &usage.model,
+                    usage.input,
+                    usage.output,
+                    usage.cache_read,
+                    usage.cache_write,
+                );
+                events.push(UsageEvent {
+                    ts: parsed.timestamp,
+                    workspace_id,
+                    session_id,
+                    provider: "claude".to_string(),
+                    model: usage.model,
+                    kind: "completion".to_string(),
+                    input_tokens: usage.input,
+                    output_tokens: usage.output,
+                    cache_read_tokens: usage.cache_read,
+                    cache_write_tokens: usage.cache_write,
+                    cost_usd: cost,
+                    duration_ms: 0,
+                    ..Default::default()
+                });
+            }
+            offsets.push((file, last_nl as u64 + 1));
+        }
+
+        if events.is_empty() {
+            // Fresh install / no transcripts: nothing to correct, and no date
+            // to bound a purge by — just mark done.
+            if let Err(e) = std::fs::write(&marker, b"no-events\n") {
+                tracing::warn!("usage tailer: failed to write rebuild marker: {e}");
+            }
+            tracing::info!("usage tailer: dedup rebuild — no claude transcript usage found");
+            return;
+        }
+        let Some(min_date) = min_date else {
+            // Events exist but none carried a timestamp (never seen in real
+            // transcripts): an unbounded purge is riskier than keeping the old
+            // rows, and inserting without purging would double-count. Skip.
+            tracing::warn!(
+                "usage tailer: dedup rebuild skipped — no line timestamps to bound the purge"
+            );
+            if let Err(e) = std::fs::write(&marker, b"skipped-no-timestamps\n") {
+                tracing::warn!("usage tailer: failed to write rebuild marker: {e}");
+            }
+            return;
+        };
+
+        tracing::info!(
+            "usage tailer: dedup rebuild — purging claude tailer rows since {min_date}, \
+             re-ingesting {} deduped events from {} files",
+            events.len(),
+            offsets.len()
+        );
+        if let Err(e) = self.usage.purge_claude_tailer_rows(&min_date).await {
+            tracing::warn!("usage tailer: dedup rebuild aborted (purge failed): {e}");
+            return;
+        }
+        for chunk in events.chunks(5_000) {
+            if let Err(e) = self.usage.insert_events(chunk).await {
+                tracing::warn!(
+                    "usage tailer: dedup rebuild insert failed (will retry next start): {e}"
+                );
+                return;
+            }
+        }
+        for (f, off) in &offsets {
+            self.cursors.set(f, *off);
+        }
+        for k in &keys {
+            self.seen.insert(k);
+        }
+        if let Err(e) = self.cursors.save() {
+            tracing::warn!("usage tailer: failed to persist cursors after rebuild: {e}");
+        }
+        if let Err(e) = self.seen.save() {
+            tracing::warn!("usage tailer: failed to persist seen keys after rebuild: {e}");
+        }
+        if let Err(e) = std::fs::write(&marker, format!("rebuilt {} events\n", events.len())) {
+            tracing::warn!("usage tailer: failed to write rebuild marker: {e}");
+        }
+        tracing::info!(
+            "usage tailer: dedup rebuild complete — {} events re-ingested",
+            events.len()
+        );
     }
 
     /// Seed the cursor for every transcript file that isn't already tracked,
@@ -183,6 +398,12 @@ impl UsageTailer {
 
         if let Err(e) = self.cursors.save() {
             tracing::warn!("usage tailer: failed to persist cursors: {e}");
+        }
+        if self.seen_dirty {
+            match self.seen.save() {
+                Ok(()) => self.seen_dirty = false,
+                Err(e) => tracing::warn!("usage tailer: failed to persist seen keys: {e}"),
+            }
         }
         Ok(())
     }
@@ -246,27 +467,37 @@ impl UsageTailer {
             let Some(parsed) = parse_claude_line(line) else {
                 continue;
             };
+            // One API response = many lines (content blocks, resume replays),
+            // billed once — count only the first sighting of its key.
+            if let Some(key) = &parsed.dedup_key {
+                if !self.seen.insert(key) {
+                    continue;
+                }
+                self.seen_dirty = true;
+            }
             let (workspace_id, session_id) = match sref {
                 Some(s) => (s.workspace_id.clone(), s.otto_session_id.clone()),
                 None => (EXTERNAL_WORKSPACE.to_string(), stem.clone()),
             };
+            let usage = parsed.usage;
             let cost = estimate_cost(
-                &parsed.model,
-                parsed.input,
-                parsed.output,
-                parsed.cache_read,
-                parsed.cache_write,
+                &usage.model,
+                usage.input,
+                usage.output,
+                usage.cache_read,
+                usage.cache_write,
             );
             self.usage.record(UsageEvent {
+                ts: parsed.timestamp,
                 workspace_id,
                 session_id,
                 provider: "claude".to_string(),
-                model: parsed.model,
+                model: usage.model,
                 kind: "completion".to_string(),
-                input_tokens: parsed.input,
-                output_tokens: parsed.output,
-                cache_read_tokens: parsed.cache_read,
-                cache_write_tokens: parsed.cache_write,
+                input_tokens: usage.input,
+                output_tokens: usage.output,
+                cache_read_tokens: usage.cache_read,
+                cache_write_tokens: usage.cache_write,
                 cost_usd: cost,
                 duration_ms: 0,
                 ..Default::default()

@@ -62,12 +62,23 @@ fn event_with_dims(
     }
 }
 
+
+/// Tests that boot a *real* ClickHouse server are serialized: several servers
+/// starting at once (install checks, dir adoption, port hunting) slow each
+/// other past the `wait_ready` windows and flake.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().await
+}
+
 #[tokio::test]
 async fn usage_engine_end_to_end() {
     if ClickHouse::locate(None).is_none() {
         eprintln!("SKIP: no `clickhouse` binary found on this machine");
         return;
     }
+    let _serial = serial().await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let data_dir = tmp.path().to_path_buf();
@@ -250,6 +261,7 @@ async fn attribution_groups_by_dimension() {
         eprintln!("SKIP: no `clickhouse` binary found on this machine");
         return;
     }
+    let _serial = serial().await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let engine = UsageEngine::start(
@@ -317,6 +329,7 @@ async fn forecast_no_history_returns_zero() {
         eprintln!("SKIP: no `clickhouse` binary found on this machine");
         return;
     }
+    let _serial = serial().await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let engine = UsageEngine::start(
@@ -377,4 +390,73 @@ async fn forecast_with_est_tokens_prices_directly() {
         "basis must mention token count: {}",
         resp.basis
     );
+}
+
+/// Explicit `ts` on an event must date it at that time (not "now"), and the
+/// dedup-rebuild purge must remove exactly the tailer-shaped rows (claude +
+/// completion + no work dims) on/after the given date — nothing else.
+#[tokio::test]
+async fn explicit_ts_inserts_and_tailer_purge() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+    let _serial = serial().await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let engine = UsageEngine::start(
+        UsageConfig {
+            enabled: true,
+            retention_days: 180,
+            metrics_interval_secs: 60,
+            clickhouse_path: None,
+        },
+        tmp.path().to_path_buf(),
+    )
+    .await;
+    engine.wait_ready(Duration::from_secs(30)).await;
+    assert!(engine.available());
+
+    let day = |back: i64| (chrono::Utc::now() - chrono::Duration::days(back)).date_naive();
+    let ts = |back: i64| Some(format!("{}T10:00:00.000Z", day(back)));
+
+    // Tailer-shaped (claude + completion + dim-less): purged.
+    let mut tailer_old = event("claude", "s1", "claude-opus-4", "completion", 100, 10, 0.01);
+    tailer_old.ts = ts(5);
+    let tailer_now = event("claude", "s1", "claude-opus-4", "completion", 200, 20, 0.02);
+    // Same shape but dim-carrying (e.g. `/ingest/usage` stamps origin): kept.
+    let mut ingest = event("claude", "s2", "claude-opus-4", "completion", 400, 40, 0.04);
+    ingest.ts = ts(5);
+    ingest.origin = "ingest".to_string();
+    // Other provider / other kind: kept.
+    let mut codex = event("codex", "s3", "gpt-5-codex", "completion", 800, 80, 0.08);
+    codex.ts = ts(5);
+    let prompt = event("claude", "s1", "claude-opus-4", "prompt", 1600, 160, 0.16);
+
+    engine
+        .insert_events(&[tailer_old, tailer_now, ingest, codex, prompt])
+        .await
+        .expect("insert events");
+
+    // The explicit-ts rows must land on their historical date.
+    let daily = engine.daily_usage(30, false).await.expect("daily");
+    let hist = daily
+        .iter()
+        .find(|d| d.day == day(5).to_string())
+        .expect("a bucket on the backdated day");
+    assert_eq!(hist.total_tokens, 110 + 440 + 880, "backdated rows on that day");
+
+    // Purge from 10 days back: both tailer-shaped rows go, everything else stays.
+    engine
+        .purge_claude_tailer_rows(&day(10).to_string())
+        .await
+        .expect("purge");
+    let summary = engine.summary(30, false).await.expect("summary");
+    assert_eq!(summary.total_events, 3, "ingest + codex + prompt survive");
+    assert_eq!(summary.total_tokens, 440 + 880 + 1760);
+
+    // A malformed date must error out, not reach SQL.
+    assert!(engine.purge_claude_tailer_rows("junk';--").await.is_err());
+
+    engine.shutdown().await;
 }

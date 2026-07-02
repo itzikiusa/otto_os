@@ -216,6 +216,39 @@ impl UsageEngine {
         ch.insert_ndjson("usage_events", &ndjson(events)).await
     }
 
+    /// Delete the transcript-tailer's claude `completion` rows on or after
+    /// `min_event_date` (`YYYY-MM-DD`), synchronously (`mutations_sync = 2`).
+    ///
+    /// Used by the daemon's one-time dedup rebuild: the pre-dedup tailer
+    /// over-counted multi-line responses, so its rows are purged and re-derived
+    /// from the transcripts. Tailer rows are exactly the claude completions
+    /// with *no* work-graph dims (every other writer of token rows sets at
+    /// least one); dim-carrying rows and other providers are untouched. Errors
+    /// on a malformed date rather than interpolating it into SQL.
+    pub async fn purge_claude_tailer_rows(&self, min_event_date: &str) -> Result<()> {
+        let valid = min_event_date.len() == 10
+            && min_event_date
+                .chars()
+                .zip("0000-00-00".chars())
+                .all(|(c, m)| if m == '-' { c == '-' } else { c.is_ascii_digit() });
+        if !valid {
+            return Err(otto_core::Error::Internal(format!(
+                "purge: bad min_event_date {min_event_date:?}"
+            )));
+        }
+        let Some(ch) = self.ch() else { return Ok(()) };
+        ch.exec(&format!(
+            "ALTER TABLE usage_events DELETE WHERE provider = 'claude' \
+             AND kind = 'completion' \
+             AND repo_id = '' AND branch = '' AND pr_number = '' AND story_id = '' \
+             AND swarm_task_id = '' AND workflow_id = '' AND channel = '' \
+             AND review_id = '' AND origin = '' \
+             AND event_date >= '{min_event_date}' \
+             SETTINGS mutations_sync = 2"
+        ))
+        .await
+    }
+
     /// Persist one metrics sample. No-op when disabled.
     pub async fn store_metric(&self, m: &Metric) -> Result<()> {
         let Some(ch) = self.ch() else { return Ok(()) };

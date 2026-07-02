@@ -124,26 +124,48 @@ A turn that maps to nothing is recorded under the special workspace id
 session id. External usage gives a complete machine-wide picture but is excluded by
 default in the dashboard (the **Otto / All** toggle — see §6).
 
-### 3.4 No double-counting, no misdated backfill
+### 3.4 No double-counting, true-time stamping
 
-ClickHouse stamps `ts = now()` on insert and has **no idempotency column**, so the
-tailer is the only guard against re-counting:
+ClickHouse has **no idempotency column**, so the tailer guards against
+re-counting itself — at two levels:
 
-- **Byte-offset cursor.** A persistent `absolute-path → byte offset` map lives at
+- **Byte-offset cursor** (no *line* read twice). A persistent
+  `absolute-path → byte offset` map lives at
   `~/Library/Application Support/Otto/usage_tailer.json` (`CursorStore`, written
   atomically via tmp-file + rename). Only complete lines up to the last `\n` are
   consumed; a partial trailing line is left for the next scan. A file truncation /
   rotation (cursor > size) resets the cursor to 0.
-- **History seeding.** At startup every *existing* transcript is seeded with
-  `cursor = file size`, so pre-existing history is **skipped** (replaying it would
-  misdate every turn to "now"). Files that appear *later* — new real-time sessions —
-  start at offset 0 and are captured in full.
+- **Response-key dedup** (no *API response* counted twice). Claude Code writes
+  one line **per content block**, so a single billed response (one
+  `message.id` + `requestId`) appears on several lines, each repeating the same
+  `usage` object — and resumed sessions replay old lines into the new session's
+  file. Counting every line inflates real usage ~2.4×. The tailer counts a
+  response key **once**; already-seen keys are skipped. The seen-set is
+  persisted (`usage_tailer_seen.json`, same atomic write) and FIFO-capped at
+  100k keys (~two months of real history).
+- **True-time stamping.** Claude events carry the transcript line's own
+  `timestamp` into the `ts` column (`date_time_input_format=best_effort` on
+  insert), so late ingestion — catch-up after downtime, or the rebuild below —
+  is dated when the API call actually happened. Codex lines have no usable
+  per-turn timestamp; their pre-existing history is seeded away at startup
+  (`cursor = file size`) exactly as before.
 - **Cadence.** The loop scans every **20 s** (`SCAN_INTERVAL`). A bad file or line
   is logged and skipped; the loop never panics.
 
-> Consequence: usage only starts accruing for sessions that run **after** the
-> daemon (with the engine enabled) is up. Historical transcripts that pre-date
-> first launch are intentionally not back-filled.
+#### One-time dedup rebuild (upgrade path)
+
+Stores fed by the pre-dedup tailer are inflated. On the first start where
+`~/Library/Application Support/Otto/usage_tailer_dedup_rebuild.done` is absent,
+the tailer re-derives Claude usage from scratch: it parses every claude
+transcript from byte 0 (deduped, true-time-stamped — this also *back-fills*
+history the old tailer skipped at seed time), **purges** its own old rows
+(exactly the `provider='claude' AND kind='completion'` rows with *no*
+work-graph dims, bounded by the oldest rebuilt date), inserts the rebuilt
+events, advances cursors/seen, and writes the marker. Purge-before-insert plus
+marker-last makes a crashed rebuild retry cleanly on the next start. Rows whose
+transcripts were deleted since (Claude Code prunes old sessions) predate the
+bound and survive untouched. `/ingest/usage` rows are safe from the purge: that
+endpoint stamps `origin: "ingest"` when the session carries no work ref.
 
 ---
 
