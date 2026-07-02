@@ -122,6 +122,7 @@ pub async fn assist_mockup(
         "claude",
         meta,
         &prompt,
+        crate::agent_session::STUCK_IDLE,
         on_ready,
     )
     .await;

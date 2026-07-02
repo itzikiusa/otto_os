@@ -693,9 +693,21 @@ pub async fn run_workflow(
     // the run input BEFORE run_cwd/run_base derive below — so declaring repos
     // is all a run needs for every git-aware step to know source+destination.
     let input = {
+        // The run's Base branch (from the input) is the fallback for a declared
+        // repo that doesn't name its own `source` — so setting Base actually pins
+        // the declaration's base, instead of it always falling back to the repo's
+        // detected default branch. (R14)
+        let run_base_hint = input
+            .get("base")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let declared =
             crate::workflow_context::parse_repo_entries(input.get("repos").unwrap_or(&Value::Null));
-        let entries = resolve_repo_entries(&ctx, &workflow.workspace_id, declared).await;
+        let entries =
+            resolve_repo_entries(&ctx, &workflow.workspace_id, declared, run_base_hint.as_deref())
+                .await;
         files.set_repos(entries.clone());
         seed_input_from_entries(input, &entries)
     };
@@ -994,6 +1006,10 @@ pub async fn run_workflow(
         let mut backoff = policy.backoff_ms;
         let mut retry_logs: Vec<String> = vec![];
         let (sess_tx, mut sess_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        // Live per-node log lines (R9): the loop node streams iteration/sub-step
+        // progress here so the run detail updates AS IT RUNS. Per-node channel, so
+        // lines never leak into the next node.
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         // Snapshot when the (latest) attempt began: a step file the agent wrote
         // during a FAILED earlier attempt must not be mistaken for the winning
         // attempt's handoff (persist_step compares mtimes against this).
@@ -1003,7 +1019,7 @@ pub async fn run_workflow(
             attempt += 1;
             attempt_started = std::time::SystemTime::now();
             let fut =
-                execute_node(&ctx, &ws, &user, node, node_input.clone(), &env, &scope, &sess_tx, &progress);
+                execute_node(&ctx, &ws, &user, node, node_input.clone(), &env, &scope, &sess_tx, &log_tx, &progress);
             tokio::pin!(fut);
             let attempt_res = loop {
                 tokio::select! {
@@ -1017,6 +1033,16 @@ pub async fn run_workflow(
                                 .unwrap_or(0);
                             emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
                         }
+                    }
+                    Some(line) = log_rx.recv() => {
+                        // Live progress line (R9) — append to the node's logs and push
+                        // it to the run detail immediately.
+                        states[idx].logs.push(line);
+                        let rev = repo
+                            .update_run(&run_id, RunStatus::Running, &states, None, false)
+                            .await
+                            .unwrap_or(0);
+                        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
                     }
                     r = &mut fut => break r,
                 }
@@ -1048,6 +1074,11 @@ pub async fn run_workflow(
             if !states[idx].sessions.contains(&sid) {
                 states[idx].sessions.push(sid);
             }
+        }
+        // Drain any trailing live-log lines (superseded by the node's final logs on
+        // the success path; kept as context on the error/skip paths).
+        while let Ok(line) = log_rx.try_recv() {
+            states[idx].logs.push(line);
         }
         match result {
             Ok((out, mut logs)) => {
@@ -1566,6 +1597,10 @@ async fn execute_node(
     env: &RunEnv,
     scope: &StepScope,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    // Live per-node log lines: streamed to the run detail AS THE NODE RUNS (the
+    // loop node uses this so the user sees iteration/sub-step progress instead of a
+    // frozen "loop started"). Harvested next to `session_tx` in `run_workflow`.
+    log_tx: &tokio::sync::mpsc::UnboundedSender<String>,
     progress: &ProgressSink,
 ) -> Result<(Value, Vec<String>)> {
     // Local aliases keep the node arms' existing call sites unchanged.
@@ -2349,6 +2384,8 @@ async fn execute_node(
                 if progress.enabled() {
                     progress.post(format!("🔁 *Iteration {i}/{max_iter}*"));
                 }
+                // R9: live progress into the run detail (independent of Slack).
+                let _ = log_tx.send(format!("🔁 iteration {i}/{max_iter}"));
                 // `thread` carries across iterations (so a fix step sees the prior
                 // review's findings) and updates after each step within an iteration.
                 let mut thread = last.clone();
@@ -2374,6 +2411,7 @@ async fn execute_node(
                     if progress.enabled() && is_reportable(&skind) {
                         progress.post(format!("› ▶ {sname} started"));
                     }
+                    let _ = log_tx.send(format!("▶ {sname} — iteration {i}…"));
                     let sub = WorkflowNode {
                         id: format!("{}#{i}.{k}", node.id),
                         kind: skind.clone(),
@@ -2398,7 +2436,7 @@ async fn execute_node(
                     );
                     let sub_attempt_started = std::time::SystemTime::now();
                     match Box::pin(execute_node(
-                        ctx, ws, user, &sub, step_input, env, &sub_scope, session_tx, progress,
+                        ctx, ws, user, &sub, step_input, env, &sub_scope, session_tx, log_tx, progress,
                     ))
                     .await
                     {
@@ -2416,7 +2454,9 @@ async fn execute_node(
                                 Some(sub_attempt_started),
                             );
                             for l in slogs.drain(..).chain(flogs) {
-                                logs.push(format!("  [{i}/{sname}] {l}"));
+                                let line = format!("  [{i}/{sname}] {l}");
+                                let _ = log_tx.send(line.clone());
+                                logs.push(line);
                             }
                             step_outputs.insert(sname.clone(), out.clone());
                             // Capture any repo reference this step published —
@@ -2436,6 +2476,11 @@ async fn execute_node(
                             }
                             last = out.clone();
                             thread = out;
+                            // R9: live "done" milestone into the run detail.
+                            let _ = log_tx.send(match brief_summary(&last) {
+                                Some(s) => format!("✅ {sname} done — {}", truncate(&s, 160)),
+                                None => format!("✅ {sname} done"),
+                            });
                             if progress.enabled() && is_reportable(&skind) {
                                 match brief_summary(&last) {
                                     Some(s) => progress.post(format!("› ✅ {sname} done\n{s}")),
@@ -2448,7 +2493,9 @@ async fn execute_node(
                             }
                         }
                         Err(e) => {
-                            logs.push(format!("  [{i}/{sname}] ✗ {e}"));
+                            let fline = format!("  [{i}/{sname}] ✗ {e}");
+                            let _ = log_tx.send(fline.clone());
+                            logs.push(fline);
                             // A failed iteration leaves its trace file BEFORE the
                             // loop bails — the fix step / a human reads what broke
                             // (the production incident left no trail at all).
@@ -2481,7 +2528,9 @@ async fn execute_node(
                 history.push(ictx.clone());
                 if !until.is_empty() && otto_core::expr::eval_bool(&until, &ictx) {
                     satisfied = true;
-                    logs.push(format!("loop: `{until}` satisfied at iteration {i}"));
+                    let line = format!("loop: `{until}` satisfied at iteration {i}");
+                    let _ = log_tx.send(line.clone());
+                    logs.push(line);
                     break;
                 }
             }
@@ -3322,7 +3371,16 @@ async fn execute_node(
                     }
                     Err(e) => {
                         notes.push(format!("{}: open failed: {e}", repo.name));
-                        prs.push(json!({ "repo_id": repo_id, "repo": repo.name, "opened": false, "error": e.to_string() }));
+                        // R15: keep the agent-drafted title/description on the failure
+                        // entry too — so the user sees what the pull-request skill
+                        // prepared (and the node output isn't flagged "missing
+                        // title/description"). Otto still owns opening the PR.
+                        prs.push(json!({
+                            "repo_id": repo_id, "repo": repo.name, "opened": false,
+                            "error": e.to_string(),
+                            "title": draft.title, "description": draft.description,
+                            "source_branch": draft.source_branch, "target_branch": draft.target_branch,
+                        }));
                     }
                 }
             }
@@ -3331,6 +3389,23 @@ async fn execute_node(
                     "git_pr: no PR could be drafted/opened ({})",
                     notes.join("; ")
                 )));
+            }
+            // R13: the step was asked to OPEN a PR (open:true) but none opened —
+            // surface the reason (e.g. "repo has no git account") as a real failure
+            // instead of a misleading "success" with opened:false. A dry run
+            // (open:false) legitimately opens nothing, so it's exempt.
+            if open && opened_n == 0 {
+                let errs: Vec<String> = prs
+                    .iter()
+                    .filter_map(|pr| pr.get("error").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect();
+                if !errs.is_empty() {
+                    return Err(otto_core::Error::Upstream(format!(
+                        "git_pr: asked to open a PR but none opened — {}",
+                        errs.join("; ")
+                    )));
+                }
             }
             // Back-compat: mirror the primary (first) PR's fields at the top level,
             // alongside the full `prs[]` and an `opened` flag/count.
@@ -3510,6 +3585,20 @@ fn eval_outgoing(
 
 /// The effective retry policy for a node: an explicit `node.retry`, else a
 /// `params.retry` object, else the default (no retry). Clamped to sane bounds.
+/// Execution rules appended to EVERY agent-backed workflow step prompt: the step's
+/// single agent must do all the work itself — no sub-agents / background tasks —
+/// and must not yield its turn until the work is done. A plain directive, applied
+/// uniformly to every provider (claude/codex/agy). See design R2/R3.
+const WF_STEP_RULES: &str = "\n\n[workflow step — execution rules]\n\
+    You are running as a single automated workflow step. Do ALL of the work yourself in THIS turn.\n\
+    - Do NOT spawn, launch, or delegate to sub-agents, background agents, parallel workers, or the Task tool. No run_in_background, no fan-out — you are the only agent for this step.\n\
+    - Do NOT end your turn until the task is fully complete. Never stop early to \"wait for\" something you started; finish everything yourself, then write your handoff summary.\n";
+
+/// A workflow `agent_prompt` step that produces no output for this long is treated
+/// as stuck and retried. Separate from — and never longer than — the 10h max
+/// session lifespan backstop. See design R5.
+const WF_STEP_STUCK: Duration = Duration::from_secs(3 * 60);
+
 fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
     if let Some(p) = &node.retry {
         return p.clamped();
@@ -3518,6 +3607,14 @@ fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
         if let Ok(p) = serde_json::from_value::<otto_core::workflows::RetryPolicy>(rp.clone()) {
             return p.clamped();
         }
+    }
+    // Default: agent steps get a small retry budget (2 retries = 3 attempts) so a
+    // transient stuck/no-op spawn — e.g. a startup screen that swallowed the prompt,
+    // surfaced as the 3-min no-progress error — is re-attempted with a FRESH session,
+    // then errors ("call it a day"). Every other kind keeps the no-retry default.
+    if node.kind == "agent_prompt" {
+        return otto_core::workflows::RetryPolicy { max_attempts: 2, backoff_ms: 2000, factor: 2.0 }
+            .clamped();
     }
     otto_core::workflows::RetryPolicy::default()
 }
@@ -3566,6 +3663,16 @@ async fn run_node_agent(
     };
     let meta = json!({ "source": "workflow", "node_id": node.id, "node_kind": node.kind, "cwd": cwd });
     let tx = session_tx.clone();
+    // R2/R3: every agent-backed step runs as a single agent that does all the work
+    // itself — no sub-agents / background tasks — and doesn't yield its turn early.
+    let guarded = format!("{prompt}{WF_STEP_RULES}");
+    // R5: an `agent_prompt` step gets an early 3-min no-progress trip (retryable via
+    // resolve_retry); heavier agent kinds (review/product/canvas) keep the 10h backstop.
+    let stuck_after = if node.kind == "agent_prompt" {
+        WF_STEP_STUCK
+    } else {
+        crate::agent_session::STUCK_IDLE
+    };
     crate::agent_session::run_session_turn(
         ctx,
         ws,
@@ -3575,7 +3682,8 @@ async fn run_node_agent(
         cwd,
         provider,
         meta,
-        prompt,
+        &guarded,
+        stuck_after,
         move |id| {
             let _ = tx.send(id.to_string());
         },
@@ -3827,6 +3935,9 @@ async fn resolve_repo_entries(
     ctx: &ServerCtx,
     workspace_id: &Id,
     mut entries: Vec<crate::workflow_context::RepoEntry>,
+    // The run's Base branch: the base fallback for a declaration lacking `source`,
+    // ahead of the repo's detected default. (R14)
+    run_base: Option<&str>,
 ) -> Vec<crate::workflow_context::RepoEntry> {
     for e in entries.iter_mut() {
         // Identify the repo: id → name → path (a linked-worktree path maps to
@@ -3894,6 +4005,11 @@ async fn resolve_repo_entries(
         }
         if e.base.is_none() {
             e.base = e.source.clone();
+        }
+        if e.base.is_none() {
+            // The run's Base branch pins a declaration that didn't name a source,
+            // before we fall back to the repo's detected default. (R14)
+            e.base = run_base.map(str::to_string);
         }
         if e.base.is_none() {
             if let Some(wt) = &e.worktree {
@@ -4253,7 +4369,11 @@ mod tests {
     #[test]
     fn retry_policy_resolution_and_clamps() {
         let mut n = node("a", "agent_prompt");
-        assert_eq!(resolve_retry(&n).max_attempts, 0, "default no retry");
+        // R5: agent steps default to a small retry budget (2 retries = 3 attempts)
+        // so a stuck no-op spawn is re-attempted with a fresh session.
+        assert_eq!(resolve_retry(&n).max_attempts, 2, "agent_prompt default 2 retries");
+        // Non-agent kinds keep the no-retry default.
+        assert_eq!(resolve_retry(&node("b", "log")).max_attempts, 0, "non-agent no retry");
         n.params = json!({ "retry": { "max_attempts": 99, "backoff_ms": 999999 } });
         let p = resolve_retry(&n);
         assert_eq!(p.max_attempts, 5, "clamped to 5");
