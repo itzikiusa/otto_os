@@ -127,10 +127,16 @@ loopback-only. Only install plugins you trust.
 
 ## Worked examples (`examples/plugins/`)
 
-- **`team-performance`** (Node, zero-dependency): Jira stories-only by assignee vs.
-  git delivery (done = last merge to `develop` via `merge-base --is-ancestor`),
-  estimation-improvement target (default 10%), met/missed + concurrency. Runs with
-  just `node`.
-- **`dora-metrics`** (Rust sidecar): DORA metrics from git tags (`*deployed*`) +
-  branch-merge classification, with agent bottleneck analysis. `exec` is
+- **`team-performance`** (Node, zero-dependency): scans every issue of a Jira
+  project (paginated + incremental, async scan job), splits each task's
+  changelog time into design vs implementation business days (configurable
+  status→phase map), correlates git delivery with a one-pass repo index,
+  baselines "how long it should have taken" per (type, points) bucket,
+  predicts timelines for open tasks and tracks per-dev goals across scans.
+  Ships unit + sidecar-E2E tests (`node --test test/`). Runs with just `node`.
+- **`dora-metrics`** (Rust sidecar): the four DORA keys from git signals
+  (deploy = `*deploy*` tag, configurable; hotfix/release/feature merges) with
+  Elite/High/Medium/Low tiers, weekly trend charts, deltas, a deterministic
+  suggestions engine, and AI bottleneck analysis. Ships engine unit tests +
+  a fixture-repo integration test (`cargo test`). `exec` is
   `cargo run --release` — it compiles on first enable.
