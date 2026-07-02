@@ -2,10 +2,10 @@
 # High, non-standard host ports so this never clashes with the user's own
 # local MySQL/Redis (groove on 3310, redis on 6379) or anything else.
 #
-#   MySQL 8        -> 127.0.0.1:13306   (user: otto / pass: ottopw,  root: rootpw)
-#   Redis 7        -> 127.0.0.1:16379   (auth: ottoredis)
-#   MongoDB 7      -> 127.0.0.1:17017   (user: otto / pass: ottopw,  replica set rs0)
-#   ClickHouse 24  -> 127.0.0.1:18123 (http) / 19000 (native)  (user: otto / pass: ottopw)
+#   MySQL 9.7        -> 127.0.0.1:13306   (user: otto / pass: ottopw,  root: rootpw)
+#   Redis 8.8        -> 127.0.0.1:16379   (auth: ottoredis)
+#   MongoDB 8.2      -> 127.0.0.1:17017   (user: otto / pass: ottopw,  replica set rs0)
+#   ClickHouse 26.4  -> 127.0.0.1:18123 (http) / 19000 (native)  (user: otto / pass: ottopw)
 #
 # Bring up:   docker compose -f dev/dbviewer/docker-compose.yml up -d
 # Tear down:  docker compose -f dev/dbviewer/docker-compose.yml down -v
