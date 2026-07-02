@@ -633,6 +633,25 @@ pub async fn run_workflow(
             Value::Object(seeded)
         }
     };
+    // Per-run context files (design 2026-07-02): `<data_dir>/workflow-context/
+    // <run_id>/` holds the instruction brief, the live `repos.json` registry
+    // and per-step handoff files. Best-effort — a failed dir create disables
+    // the handle and the run proceeds on legacy inline context.
+    let files = std::sync::Arc::new(crate::workflow_context::RunContextFiles::create(
+        &ctx.data_dir,
+        &run_id,
+    ));
+    // Declared repos/branches/worktrees (`repos: [{repo, type, name, source}]`)
+    // normalized against registered repos + live git state, then seeded into
+    // the run input BEFORE run_cwd/run_base derive below — so declaring repos
+    // is all a run needs for every git-aware step to know source+destination.
+    let input = {
+        let declared =
+            crate::workflow_context::parse_repo_entries(input.get("repos").unwrap_or(&Value::Null));
+        let entries = resolve_repo_entries(&ctx, &workflow.workspace_id, declared).await;
+        files.set_repos(entries.clone());
+        seed_input_from_entries(input, &entries)
+    };
     // Run-level working directory: the `working_directory` from the run input
     // (e.g. a Slack `Working Directory:` field), else the workspace root. Agent
     // nodes run here — so a workflow owned by workspace A can operate on repo X.
@@ -645,13 +664,16 @@ pub async fn run_workflow(
     // Run-level base branch: the ambient PR/review base for the whole run, so a
     // `review_run`/`git_pr` is aware of the run's base even after intervening
     // agent nodes (which return `{reply}`) drop it from the data flow. Per-node
-    // `base` params still win; this is the fallback the steps share.
-    let run_base = input
+    // `base` params still win. `None` ⇒ each git step resolves its repo's
+    // DETECTED default branch at the point of use — never a fabricated "main"
+    // (the historical literal here made `git diff main` exit 128 on repos
+    // whose default is master/develop).
+    let run_base: Option<String> = input
         .get("base")
         .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("main")
-        .to_string();
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     // Resilience (design §B): many steps (review_run, git_pr, …) need a repo_id.
     // If the run wasn't given one but DOES carry a working_directory, resolve the
     // registered repo for that path ONCE here and seed it into the run input — so
@@ -675,6 +697,43 @@ pub async fn run_workflow(
         }
         inp
     };
+    // The run's mission brief (`wf-<run_id>-instruction.md`): mission, repos
+    // table, planned steps (IN-SCOPE only, so numbering matches what actually
+    // executes on a start-from-here run) and the step-file protocol.
+    {
+        let planned: Vec<(String, String)> = order
+            .iter()
+            .filter(|nid| run_set.as_ref().map(|s| s.contains(*nid)).unwrap_or(true))
+            .filter_map(|nid| workflow.graph.nodes.iter().find(|n| &n.id == nid))
+            .map(|n| {
+                (
+                    if n.name.is_empty() { n.kind.clone() } else { n.name.clone() },
+                    n.kind.clone(),
+                )
+            })
+            .collect();
+        files.write_instruction(&crate::workflow_context::render_instruction(
+            &workflow.name,
+            &workflow.description,
+            &run_id,
+            &input,
+            &files.repos(),
+            &planned,
+        ));
+    }
+    // The per-node execution environment (run identity + ambient cwd/base +
+    // context files). The registry on `files` is the run's source of truth
+    // for repos/branches — input threading loses keys hop by hop.
+    let env = RunEnv {
+        run_id: run_id.clone(),
+        run_cwd: run_cwd.clone(),
+        run_base,
+        files: files.clone(),
+    };
+    // 1-based number of the NEXT executed step — drives step-file naming.
+    // Skipped nodes don't consume a number; cached nodes do (their files are
+    // written from the cached output so the trail stays complete).
+    let mut step_counter: usize = 0;
     // Nodes that errored (or were poisoned by an errored upstream) — these
     // propagate failure. `branch_skipped` nodes were pruned by an edge condition
     // (or are downstream of a pruned node) and do NOT fail the run.
@@ -819,6 +878,27 @@ pub async fn run_workflow(
             // A cached agent/product/canvas node still carries its session id in
             // the cached output — surface it so the run can open it.
             harvest_session_ids(&cached_out, &mut states[idx].sessions);
+            // A cached node still consumes a step number and leaves its step
+            // files (from the cached output) — the context-file trail stays
+            // complete for downstream agents. Published refs merge too.
+            step_counter += 1;
+            let base_name = crate::workflow_context::step_base_name(
+                step_counter,
+                node_display_name(node),
+                None,
+                None,
+            );
+            let mut flogs = files.persist_step(
+                &base_name,
+                &node.kind,
+                node_display_name(node),
+                &cached_out,
+                &[],
+                None,
+                None,
+            );
+            states[idx].logs.append(&mut flogs);
+            merge_published_refs(&files, &cached_out);
             // Prune outgoing edges whose condition fails on the cached output.
             let (pruned, mut plogs) =
                 eval_outgoing(&workflow.graph, node, &cached_out, &node_input, &input);
@@ -849,6 +929,15 @@ pub async fn run_workflow(
         }
 
         let started = Instant::now();
+        // This node executes — it owns the next step-file number.
+        step_counter += 1;
+        let scope = StepScope { step_no: step_counter, iter: None, inner_idx: None };
+        let step_file_base = crate::workflow_context::step_base_name(
+            step_counter,
+            node_display_name(node),
+            None,
+            None,
+        );
         // Run the node, honoring its retry policy (default: a single attempt).
         // A node that spawns an openable agent session reports its id over
         // `sess_tx` the moment it's created; we record it on the node state and
@@ -858,10 +947,15 @@ pub async fn run_workflow(
         let mut backoff = policy.backoff_ms;
         let mut retry_logs: Vec<String> = vec![];
         let (sess_tx, mut sess_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        // Snapshot when the (latest) attempt began: a step file the agent wrote
+        // during a FAILED earlier attempt must not be mistaken for the winning
+        // attempt's handoff (persist_step compares mtimes against this).
+        let mut attempt_started = std::time::SystemTime::now();
         let result = loop {
             attempt += 1;
+            attempt_started = std::time::SystemTime::now();
             let fut =
-                execute_node(&ctx, &ws, &user, node, node_input.clone(), &run_id, &run_cwd, &run_base, &sess_tx, &progress);
+                execute_node(&ctx, &ws, &user, node, node_input.clone(), &env, &scope, &sess_tx, &progress);
             tokio::pin!(fut);
             let attempt_res = loop {
                 tokio::select! {
@@ -917,6 +1011,20 @@ pub async fn run_workflow(
                 for w in validate_node_output(&node.kind, &out) {
                     logs.push(format!("⚠ {w}"));
                 }
+                // Step handoff files: raw output + the curated summary (kept
+                // if the agent wrote its own during THIS attempt), then merge
+                // any published repo/branch/worktree refs into repos.json.
+                let mut flogs = files.persist_step(
+                    &step_file_base,
+                    &node.kind,
+                    node_display_name(node),
+                    &out,
+                    &logs,
+                    None,
+                    Some(attempt_started),
+                );
+                logs.append(&mut flogs);
+                merge_published_refs(&files, &out);
                 // Prune outgoing edges whose condition fails on this output.
                 let (pruned, mut plogs) =
                     eval_outgoing(&workflow.graph, node, &out, &node_input, &input);
@@ -948,6 +1056,18 @@ pub async fn run_workflow(
                 let mut elogs = vec![start_line];
                 elogs.append(&mut retry_logs);
                 elogs.push(format!("✗ {e}"));
+                // A failed step leaves a trace file too — the error is part of
+                // the handoff trail (a fix step or a human reads what broke).
+                let mut flogs = files.persist_step(
+                    &step_file_base,
+                    &node.kind,
+                    node_display_name(node),
+                    &Value::Null,
+                    &elogs,
+                    Some(&e.to_string()),
+                    Some(attempt_started),
+                );
+                elogs.append(&mut flogs);
                 states[idx].logs = elogs;
                 states[idx].attempts = Some(attempt);
                 states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
@@ -1350,9 +1470,33 @@ fn assemble_input(
     }
 }
 
+/// Run-level execution environment shared by every node of one run: identity,
+/// ambient cwd, the ambient PR/review base (`None` ⇒ resolve the repo's
+/// default branch at the point of use — never a fabricated `"main"`), and the
+/// per-run context files (instruction, `repos.json` registry, step files).
+/// The registry on `files` — not node-input threading, which loses keys hop
+/// by hop — is the source of truth for which repos/branches the run operates
+/// on.
+pub(crate) struct RunEnv {
+    pub run_id: Id,
+    pub run_cwd: String,
+    pub run_base: Option<String>,
+    pub files: std::sync::Arc<crate::workflow_context::RunContextFiles>,
+}
+
+/// Where a node execution sits in the run's step-file numbering: the 1-based
+/// executed-step number, plus the loop iteration / inner-step index for
+/// `step{N}-{name}-iter{X}.md` naming inside `loop` nodes.
+#[derive(Clone, Copy)]
+pub(crate) struct StepScope {
+    pub step_no: usize,
+    pub iter: Option<u64>,
+    pub inner_idx: Option<usize>,
+}
+
 /// Execute one node by kind. Returns `(output, logs)`.
 ///
-/// `run_id` is passed so stateful nodes (e.g. `human_approval`) can write
+/// `env.run_id` is used by stateful nodes (e.g. `human_approval`) to write
 /// back to their own run row to record a pause / resume decision.
 #[allow(clippy::too_many_arguments)]
 async fn execute_node(
@@ -1361,12 +1505,14 @@ async fn execute_node(
     user: &User,
     node: &WorkflowNode,
     input: Value,
-    run_id: &Id,
-    run_cwd: &str,
-    run_base: &str,
+    env: &RunEnv,
+    scope: &StepScope,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
     progress: &ProgressSink,
 ) -> Result<(Value, Vec<String>)> {
+    // Local aliases keep the node arms' existing call sites unchanged.
+    let run_id: &Id = &env.run_id;
+    let run_cwd: &str = env.run_cwd.as_str();
     let p = &node.params;
     match node.kind.as_str() {
         "manual_trigger" => Ok((input, vec![])),
@@ -1412,12 +1558,37 @@ async fn execute_node(
             // Run as a real, openable session (reusing the shared session runner)
             // so the run view can watch/inspect it — not the headless PTY.
             let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+            // File-based handoff (design 2026-07-02): point the agent at the
+            // run's context dir (instruction, repos.json, prior step files)
+            // and name the step file IT must write. The inline [input data]
+            // excerpt stays as a glance — the files are the complete channel.
+            let preamble = env
+                .files
+                .dir_str()
+                .map(|d| {
+                    let own_md = format!(
+                        "{}.md",
+                        crate::workflow_context::step_base_name(
+                            scope.step_no,
+                            node_display_name(node),
+                            scope.iter,
+                            scope.inner_idx,
+                        )
+                    );
+                    crate::workflow_context::agent_preamble(
+                        &d,
+                        &env.files.instruction_name(),
+                        &env.files.list_step_mds(),
+                        &own_md,
+                    )
+                })
+                .unwrap_or_default();
             // Inject any per-step skills (`skill`/`skills`) ahead of the prompt so
             // the step runs a specific method "via prompt".
             let full = prepend_skills(
                 ctx,
                 p,
-                &format!("{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)),
+                &format!("{preamble}{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)),
             );
             let acwd = node_cwd(node, &input, run_cwd);
             let (reply, sid) =
@@ -1430,7 +1601,10 @@ async fn execute_node(
             out.insert("reply".into(), json!(reply));
             out.insert("session_id".into(), json!(sid));
             out.insert("working_directory".into(), json!(acwd));
-            for k in ["repo_id", "base"] {
+            // `repos`/`worktree` forward too so data-flow inspection still
+            // shows them — though the run-level registry (RunEnv.files), not
+            // input threading, is what downstream git steps rely on.
+            for k in ["repo_id", "base", "repos", "worktree"] {
                 if let Some(v) = input.get(k) {
                     if !v.is_null() {
                         out.insert(k.into(), v.clone());
@@ -2084,6 +2258,19 @@ async fn execute_node(
             // Run-level keys (repo_id, base, goals, …) flow to every step as a
             // base; the threaded prev-step output overlays them.
             let loop_base = input.as_object().cloned().unwrap_or_default();
+            // Two inner steps with the same (slugged) name would collide on
+            // step-file names within an iteration — disambiguate those (and
+            // only those) with the inner index.
+            let inner_slugs: Vec<String> = steps
+                .iter()
+                .enumerate()
+                .map(|(k, s)| {
+                    crate::workflow_context::slug(
+                        s.get("name").and_then(Value::as_str).unwrap_or(&format!("step{k}")),
+                    )
+                })
+                .collect();
+            let slug_dup = |k: usize| inner_slugs.iter().filter(|s| **s == inner_slugs[k]).count() > 1;
             let mut logs = vec![];
             let mut history = vec![];
             let mut satisfied = false;
@@ -2138,17 +2325,45 @@ async fn execute_node(
                         params: step.get("params").cloned().unwrap_or(Value::Null),
                         retry: step.get("retry").and_then(|r| serde_json::from_value(r.clone()).ok()),
                     };
+                    // Inner steps share the loop's step number and add
+                    // `-iter{X}` (the user's convention): step3-review-iter2.md.
+                    let sub_scope = StepScope {
+                        step_no: scope.step_no,
+                        iter: Some(i),
+                        inner_idx: if slug_dup(k) { Some(k) } else { None },
+                    };
+                    let sub_file_base = crate::workflow_context::step_base_name(
+                        sub_scope.step_no,
+                        &sname,
+                        sub_scope.iter,
+                        sub_scope.inner_idx,
+                    );
+                    let sub_attempt_started = std::time::SystemTime::now();
                     match Box::pin(execute_node(
-                        ctx, ws, user, &sub, step_input, run_id, run_cwd, run_base, session_tx, progress,
+                        ctx, ws, user, &sub, step_input, env, &sub_scope, session_tx, progress,
                     ))
                     .await
                     {
                         Ok((out, mut slogs)) => {
-                            for l in slogs.drain(..) {
+                            // Iteration handoff files — the loop recursion never
+                            // passes the main run loop, so this is the second
+                            // persistence hook site.
+                            let flogs = env.files.persist_step(
+                                &sub_file_base,
+                                &skind,
+                                &sname,
+                                &out,
+                                &slogs,
+                                None,
+                                Some(sub_attempt_started),
+                            );
+                            for l in slogs.drain(..).chain(flogs) {
                                 logs.push(format!("  [{i}/{sname}] {l}"));
                             }
                             step_outputs.insert(sname.clone(), out.clone());
-                            // Capture any repo reference this step published.
+                            // Capture any repo reference this step published —
+                            // for the loop's own output AND the run registry.
+                            merge_published_refs(&env.files, &out);
                             if let Some(rid) = out.get("repo_id").and_then(Value::as_str) {
                                 if !rid.trim().is_empty() {
                                     refs_by_repo.insert(
@@ -2172,6 +2387,18 @@ async fn execute_node(
                         }
                         Err(e) => {
                             logs.push(format!("  [{i}/{sname}] ✗ {e}"));
+                            // A failed iteration leaves its trace file BEFORE the
+                            // loop bails — the fix step / a human reads what broke
+                            // (the production incident left no trail at all).
+                            let _ = env.files.persist_step(
+                                &sub_file_base,
+                                &skind,
+                                &sname,
+                                &Value::Null,
+                                &[format!("✗ {e}")],
+                                Some(&e.to_string()),
+                                Some(sub_attempt_started),
+                            );
                             if progress.enabled() && is_reportable(&skind) {
                                 progress.post(format!("› ❌ {sname} failed — {}", truncate(&e.to_string(), 200)));
                             }
@@ -2272,13 +2499,18 @@ async fn execute_node(
                 .filter(|s| !s.trim().is_empty())
                 .map(expand_tilde)
                 .unwrap_or_else(|| run_cwd.to_string());
-            let base = p
+            // The DESIRED base: node params → input → the run's ambient base.
+            // `None` ⇒ run_review_for_branch resolves the repo's default
+            // branch; a named branch that doesn't exist falls back the same
+            // way instead of exiting 128.
+            let want_base = p
                 .get("base")
                 .and_then(Value::as_str)
                 .or_else(|| input.get("base").and_then(Value::as_str))
-                .filter(|s| !s.trim().is_empty())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
                 .map(str::to_string)
-                .unwrap_or_else(|| run_base.to_string());
+                .or_else(|| env.run_base.clone());
             // Iteration label so a fix→review loop streams "Review #1, #2, …".
             let iter_label = input
                 .get("_iteration")
@@ -2353,7 +2585,7 @@ async fn execute_node(
                 ));
             }
             let (review_id, resolved_base) = crate::modules::run_review_for_branch(
-                ctx, &repo_id, &worktree, Some(base.as_str()), cfg_override,
+                ctx, &repo_id, &worktree, want_base.as_deref(), cfg_override,
             )
             .await?;
             // Publish the RESOLVED branch from here on — the loop harvest, the
@@ -2535,8 +2767,31 @@ async fn execute_node(
                 None => truncate(&input.to_string(), 6000),
             };
             let extra = p.get("instruction").and_then(Value::as_str).unwrap_or("");
+            // Same file-based handoff as agent_prompt: context dir + the step
+            // file this node must write (engine fallback covers omission).
+            let preamble = env
+                .files
+                .dir_str()
+                .map(|d| {
+                    let own_md = format!(
+                        "{}.md",
+                        crate::workflow_context::step_base_name(
+                            scope.step_no,
+                            node_display_name(node),
+                            scope.iter,
+                            scope.inner_idx,
+                        )
+                    );
+                    crate::workflow_context::agent_preamble(
+                        &d,
+                        &env.files.instruction_name(),
+                        &env.files.list_step_mds(),
+                        &own_md,
+                    )
+                })
+                .unwrap_or_default();
             let prompt = format!(
-                "{skill}\n\n# Task\n{instruction}\n{extra}\n\n# Story context\n{}",
+                "{preamble}{skill}\n\n# Task\n{instruction}\n{extra}\n\n# Story context\n{}",
                 truncate(&context, 8000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
@@ -2681,20 +2936,33 @@ async fn execute_node(
                 .filter(|s| !s.trim().is_empty())
                 .map(expand_tilde)
                 .unwrap_or_else(|| run_cwd.to_string());
-            let run_input_base = input
+            let run_input_base: Option<String> = input
                 .get("base")
                 .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
                 .map(str::to_string)
-                .unwrap_or_else(|| run_base.to_string());
+                .or_else(|| env.run_base.clone());
 
             // Resolve (repo_id, worktree, base) per target, deduped by repo_id.
             // Targets come from the implementer/reviewer reference (input) or
-            // explicit `params.repos`. With `detect_changed: true`, ALSO consider
-            // every registered repo — the per-repo draft below keeps only the ones
-            // that actually changed, so the run opens a PR for exactly what the
-            // implementer touched, across repositories.
+            // explicit `params.repos`; when neither names one, the run-level
+            // repos registry (the declared branches/worktrees) supplies them.
+            // With `detect_changed: true`, ALSO consider every registered repo
+            // — the per-repo draft below keeps only the ones that actually
+            // changed, so the run opens a PR for exactly what the implementer
+            // touched, across repositories. A `None` base ⇒ draft_pr_core
+            // resolves that repo's default branch.
             let mut targets = collect_pr_targets(p, &input);
+            if targets.is_empty() {
+                targets = env
+                    .files
+                    .repos()
+                    .iter()
+                    .filter(|e| e.error.is_none() && e.repo_id.is_some())
+                    .map(crate::workflow_context::entry_to_target)
+                    .collect();
+            }
             if p.get("detect_changed").and_then(Value::as_bool).unwrap_or(false) {
                 if let Ok(repos) = ctx.git_store.list_repos(&ws.id).await {
                     for r in repos {
@@ -2702,7 +2970,7 @@ async fn execute_node(
                     }
                 }
             }
-            let mut resolved: Vec<(String, String, String)> = Vec::new();
+            let mut resolved: Vec<(String, String, Option<String>)> = Vec::new();
             let mut seen: std::collections::HashSet<String> = Default::default();
             let mut notes: Vec<String> = Vec::new();
             if targets.is_empty() {
@@ -2717,9 +2985,10 @@ async fn execute_node(
                 let base = p
                     .get("base")
                     .and_then(Value::as_str)
-                    .filter(|s| !s.trim().is_empty())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
                     .map(str::to_string)
-                    .unwrap_or_else(|| run_input_base.clone());
+                    .or_else(|| run_input_base.clone());
                 seen.insert(repo_id.clone());
                 resolved.push((repo_id, run_worktree.clone(), base));
             } else {
@@ -2734,9 +3003,10 @@ async fn execute_node(
                     let base = t
                         .get("base")
                         .and_then(Value::as_str)
-                        .filter(|s| !s.trim().is_empty())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
                         .map(str::to_string)
-                        .unwrap_or_else(|| run_input_base.clone());
+                        .or_else(|| run_input_base.clone());
                     let rid = match t.get("repo_id").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
                         Some(r) => Some(r.to_string()),
                         None => resolve_repo_id_for_path(ctx, &ws.id, &worktree).await,
@@ -2768,7 +3038,7 @@ async fn execute_node(
                     }
                 };
                 let wt = if worktree.trim().is_empty() { repo.path.clone() } else { worktree.clone() };
-                let draft = match crate::modules::draft_pr_core(ctx, &wt, Some(base.as_str())).await {
+                let draft = match crate::modules::draft_pr_core(ctx, &wt, base.as_deref()).await {
                     Ok(d) => d,
                     Err(e) => {
                         notes.push(format!("{}: nothing to PR ({e})", repo.name));
@@ -3214,6 +3484,175 @@ fn checks_review_agent(default_provider: &str, checks: &[(String, String)]) -> o
         prompt,
         skill: String::new(),
     }
+}
+
+/// The node's human name (falls back to its kind) — drives step-file names.
+fn node_display_name(node: &WorkflowNode) -> &str {
+    if node.name.trim().is_empty() {
+        &node.kind
+    } else {
+        &node.name
+    }
+}
+
+/// Merge a node output's published repo reference (`repo_id` + optional
+/// `base`/`worktree`) into the run's repos registry (`repos.json`) — the
+/// "each step adds to the repos file" contract. Only the explicit `worktree`
+/// key counts (a bare `working_directory` is too ambient to be authoritative).
+fn merge_published_refs(files: &crate::workflow_context::RunContextFiles, out: &Value) {
+    let Some(rid) = out
+        .get("repo_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return;
+    };
+    files.merge_published(
+        rid,
+        out.get("base").and_then(Value::as_str),
+        out.get("worktree").and_then(Value::as_str),
+    );
+}
+
+/// Seed the run input from the first VALID declared repo entry — explicit
+/// input keys always win — and expose the normalized entries as
+/// `repos: [{repo_id, worktree, base}]`, the shape `collect_pr_targets` and
+/// the loop's ref harvest already consume. Pure; unit-tested below.
+fn seed_input_from_entries(
+    input: Value,
+    entries: &[crate::workflow_context::RepoEntry],
+) -> Value {
+    let valid: Vec<&crate::workflow_context::RepoEntry> =
+        entries.iter().filter(|e| e.error.is_none()).collect();
+    if valid.is_empty() {
+        return input;
+    }
+    let mut m = match input {
+        Value::Object(m) => m,
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut m = serde_json::Map::new();
+            m.insert("input".into(), other);
+            m
+        }
+    };
+    let missing = |m: &serde_json::Map<String, Value>, k: &str| {
+        m.get(k)
+            .and_then(Value::as_str)
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+    };
+    if missing(&m, "working_directory") {
+        if let Some(w) = valid.iter().find_map(|e| e.worktree.clone()) {
+            m.insert("working_directory".into(), Value::String(w));
+        }
+    }
+    if missing(&m, "base") {
+        if let Some(b) = valid.iter().find_map(|e| e.base.clone()) {
+            m.insert("base".into(), Value::String(b));
+        }
+    }
+    if missing(&m, "repo_id") {
+        if let Some(r) = valid.iter().find_map(|e| e.repo_id.clone()) {
+            m.insert("repo_id".into(), Value::String(r));
+        }
+    }
+    // Replace the raw declarations with the normalized targets; the original
+    // user shape stays visible in repos.json.
+    m.insert(
+        "repos".into(),
+        Value::Array(valid.iter().map(|e| crate::workflow_context::entry_to_target(e)).collect()),
+    );
+    Value::Object(m)
+}
+
+/// Resolve declared repo entries against registered repos + live git state:
+/// fill `repo_id`/`worktree`/`base`, or set a per-entry `error` (kept visible
+/// in `repos.json`; the run proceeds with the valid entries). A `branch`
+/// entry resolves to the checkout that HAS that branch checked out — falling
+/// back to the repo's registered path only when that path is actually on the
+/// branch, because silently reviewing/PRing whatever else is checked out
+/// would target the wrong branch. A missing `source` resolves to the
+/// checkout's DETECTED default branch, never a fabricated "main".
+async fn resolve_repo_entries(
+    ctx: &ServerCtx,
+    workspace_id: &Id,
+    mut entries: Vec<crate::workflow_context::RepoEntry>,
+) -> Vec<crate::workflow_context::RepoEntry> {
+    for e in entries.iter_mut() {
+        // Identify the repo: id → name → path (a linked-worktree path maps to
+        // its origin repo through resolve_repo_id_for_path).
+        let mut rid: Option<String> = None;
+        let mut root: Option<String> = None;
+        if let Ok(r) = ctx.git_store.get_repo(&e.repo).await {
+            rid = Some(r.id.clone());
+            root = Some(r.path);
+        } else if let Ok(repos) = ctx.git_store.list_repos(workspace_id).await {
+            if let Some(r) = repos.into_iter().find(|r| r.name == e.repo) {
+                rid = Some(r.id);
+                root = Some(r.path);
+            }
+        }
+        if rid.is_none() {
+            let hint = if e.kind == "worktree" {
+                expand_tilde(&e.name)
+            } else {
+                expand_tilde(&e.repo)
+            };
+            if let Some(id) = resolve_repo_id_for_path(ctx, workspace_id, &hint).await {
+                if let Ok(r) = ctx.git_store.get_repo(&id).await {
+                    root = Some(r.path);
+                }
+                rid = Some(id);
+            }
+        }
+        let Some(rid_v) = rid else {
+            e.error = Some(format!("no registered repo matches '{}'", e.repo));
+            continue;
+        };
+        e.repo_id = Some(rid_v);
+        let root = root.unwrap_or_else(|| expand_tilde(&e.repo));
+        match e.kind.as_str() {
+            "worktree" => {
+                let wt = expand_tilde(&e.name);
+                if !std::path::Path::new(&wt).is_dir() {
+                    e.error = Some(format!("worktree path does not exist: {wt}"));
+                    continue;
+                }
+                e.worktree = Some(wt);
+            }
+            "branch" => {
+                let git = otto_git::LocalGit::new(&root);
+                match git.worktree_for_branch(&e.name).await {
+                    Some(wt) => e.worktree = Some(wt),
+                    None => match git.current_branch().await {
+                        Ok(cur) if cur == e.name => e.worktree = Some(root.clone()),
+                        _ => {
+                            e.error = Some(format!(
+                                "branch '{}' is not checked out anywhere in {}",
+                                e.name, e.repo
+                            ));
+                            continue;
+                        }
+                    },
+                }
+            }
+            other => {
+                e.error =
+                    Some(format!("unknown repos entry type '{other}' (want branch|worktree)"));
+                continue;
+            }
+        }
+        if e.base.is_none() {
+            e.base = e.source.clone();
+        }
+        if e.base.is_none() {
+            if let Some(wt) = &e.worktree {
+                e.base = otto_git::LocalGit::new(wt).default_branch().await;
+            }
+        }
+    }
+    entries
 }
 
 /// Best-effort: find the registered repo whose checkout contains `path`, so a
@@ -3822,6 +4261,67 @@ mod tests {
         // reference → caller resolves a single implicit target instead.
         let input = json!({ "working_directory": "/w/x", "goals": ["g"] });
         assert!(collect_pr_targets(&json!({}), &input).is_empty());
+    }
+
+    // --- repos declarations → run-input seeding ----------------------------------
+
+    fn entry(
+        repo_id: &str,
+        worktree: Option<&str>,
+        base: Option<&str>,
+        error: Option<&str>,
+    ) -> crate::workflow_context::RepoEntry {
+        crate::workflow_context::RepoEntry {
+            repo: repo_id.to_string(),
+            repo_id: Some(repo_id.to_string()),
+            kind: "branch".into(),
+            name: "feat/x".into(),
+            source: base.map(str::to_string),
+            worktree: worktree.map(str::to_string),
+            base: base.map(str::to_string),
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn seed_input_fills_blanks_from_first_valid_entry() {
+        let entries = vec![
+            entry("BAD", None, None, Some("no repo")), // errored — skipped
+            entry("R1", Some("/w/r1"), Some("develop"), None),
+            entry("R2", Some("/w/r2"), Some("master"), None),
+        ];
+        let out = seed_input_from_entries(json!({ "msg": "do it" }), &entries);
+        assert_eq!(out.get("working_directory").and_then(Value::as_str), Some("/w/r1"));
+        assert_eq!(out.get("base").and_then(Value::as_str), Some("develop"));
+        assert_eq!(out.get("repo_id").and_then(Value::as_str), Some("R1"));
+        // Normalized targets exclude the errored entry and feed straight into
+        // collect_pr_targets (git_pr's fan-out shape). The seeded top-level
+        // repo_id ALSO matches as a single reference — dedup by repo_id is the
+        // caller's job (git_pr's `seen` set), so assert the SET here.
+        let targets = collect_pr_targets(&json!({}), &out);
+        let ids: std::collections::BTreeSet<&str> =
+            targets.iter().filter_map(|t| t.get("repo_id").and_then(Value::as_str)).collect();
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec!["R1", "R2"]);
+    }
+
+    #[test]
+    fn seed_input_explicit_keys_win() {
+        let entries = vec![entry("R1", Some("/w/r1"), Some("develop"), None)];
+        let out = seed_input_from_entries(
+            json!({ "working_directory": "/explicit", "base": "release", "repo_id": "X" }),
+            &entries,
+        );
+        assert_eq!(out.get("working_directory").and_then(Value::as_str), Some("/explicit"));
+        assert_eq!(out.get("base").and_then(Value::as_str), Some("release"));
+        assert_eq!(out.get("repo_id").and_then(Value::as_str), Some("X"));
+    }
+
+    #[test]
+    fn seed_input_no_valid_entries_is_identity() {
+        let entries = vec![entry("BAD", None, None, Some("no repo"))];
+        let input = json!({ "msg": "hi" });
+        assert_eq!(seed_input_from_entries(input.clone(), &entries), input);
+        assert_eq!(seed_input_from_entries(Value::Null, &[]), Value::Null);
     }
 
     // --- reviewer checks (commands delegated to the review agent) ---------------
