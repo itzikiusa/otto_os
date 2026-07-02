@@ -106,10 +106,10 @@ bridges so an agent can work a ticket from a chat thread.
   stories, workflows, PRs, external triggers). A projector builds it from the
   daemon's event bus, so every workstream shows up as a node with a live status —
   click one to jump straight to the work behind it.
-- **Connections** — open SSH / MySQL / Redis / MongoDB / ClickHouse sessions
-  side-by-side with agents.
-- **Database Explorer** — a TablePlus-class browser for MySQL, Redis, MongoDB,
-  and ClickHouse over plaintext, TLS/SSL, or SSH tunnels: a lazy schema tree,
+- **Connections** — open SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse
+  sessions side-by-side with agents.
+- **Database Explorer** — a TablePlus-class browser for MySQL, PostgreSQL, Redis,
+  MongoDB, and ClickHouse over plaintext, TLS/SSL, or SSH tunnels: a lazy schema tree,
   per-engine autocomplete, multiple query tabs, a virtualized results grid
   (client-side filter/sort + approval-gated inline editing), a Navicat-style
   visual JOIN builder, Superset-style dashboards/widgets for ClickHouse, and

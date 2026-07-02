@@ -315,6 +315,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_kind_round_trips() {
+        // Proves migration 0094 widened the connections.kind CHECK: a 'postgres'
+        // row inserts and reads back (the CHECK would reject it pre-migration).
+        let pool = mem_pool().await;
+        let user = seed_user(&pool).await;
+        let repo = ConnectionsRepo::new(pool.clone());
+
+        let created = repo
+            .create(NewConnection {
+                workspace_id: None,
+                name: "pg".into(),
+                kind: ConnectionKind::Postgres,
+                params: serde_json::json!({"host": "127.0.0.1", "port": 15432, "db": "shopdb"}),
+                secret_ref: None,
+                first_command: None,
+                section_id: None,
+                environment: Environment::Dev,
+                read_only: false,
+                created_by: user.clone(),
+            })
+            .await
+            .expect("create postgres connection");
+        assert_eq!(created.kind, ConnectionKind::Postgres);
+
+        let fetched = repo.get(&created.id).await.expect("re-fetch");
+        assert_eq!(fetched.kind, ConnectionKind::Postgres);
+    }
+
+    #[tokio::test]
     async fn environment_and_read_only_round_trip() {
         let pool = mem_pool().await;
         let user = seed_user(&pool).await;

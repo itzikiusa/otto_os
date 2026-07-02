@@ -208,6 +208,14 @@ function segments(sql: string, mode: SplitMode = 'sql'): { from: number; to: num
 const stripTrailingSemi = (s: string) => s.replace(/;\s*$/, '').trim();
 
 /**
+ * Non-empty statement count — drives the editor's "Run all" affordance (the
+ * plain Run intentionally narrows to selection / statement-at-cursor).
+ */
+export function countStatements(sql: string, mode: SplitMode = 'sql'): number {
+  return segments(sql, mode).filter((s) => stripTrailingSemi(sql.slice(s.from, s.to))).length;
+}
+
+/**
  * The statement containing `cursor` (trimmed, no trailing `;`). With a single
  * statement, returns the whole thing. When the cursor sits in trailing
  * whitespace after the last delimiter, returns the nearest preceding statement.

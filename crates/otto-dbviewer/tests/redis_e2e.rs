@@ -1,23 +1,34 @@
 //! End-to-end tests for the Redis driver against a live server.
 //!
 //! Each test is `#[ignore]` by default and additionally guarded by
-//! `OTTO_DBV_E2E`. Expects a Redis seeded by the harness on 127.0.0.1:16379
-//! (requirepass `ottoredis`):
+//! `OTTO_DBV_E2E`. Expects the dev-stack Redis on 127.0.0.1:16379 (requirepass
+//! `ottoredis`), which `dev/dbviewer/docker-compose.yml` seeds once (after the
+//! server is healthy) from `dev/dbviewer/seed/redis/seed.txt`:
 //!
 //! ```sh
-//! docker run -d --name otto-dbv-redis -p 16379:6379 redis:8 \
-//!   redis-server --requirepass ottoredis
-//! redis-cli -p 16379 -a ottoredis <<'SEED'
-//!   SET app:name "Otto Shop"
-//!   SET app:version 1.0.0
-//!   SET session:abc123 active
-//!   HSET customer:1 email ada@example.com name "Ada Lovelace" country GB
-//!   RPUSH queue:emails welcome receipt newsletter
-//!   SADD countries GB US DE FR
-//!   ZADD leaderboard 100 ada 90 alan 80 grace
-//!   SET counter:visits 42
-//! SEED
+//! docker compose -f dev/dbviewer/docker-compose.yml up -d
 //! ```
+//!
+//! The seed loads a small, mixed-type keyspace on db0 (verbatim from `seed.txt`):
+//!
+//! ```text
+//! SET   app:name "Otto Shop"
+//! SET   app:version "1.4.2"
+//! SET   session:abc123 "{...json...}"
+//! SET   session:def456 "{...json...}"
+//! SETEX cache:product:1 3600 "Mechanical Keyboard"
+//! HSET  customer:1 email ada@example.com name "Ada Lovelace" country GB
+//! HSET  customer:2 email alan@example.com name "Alan Turing"  country GB
+//! RPUSH queue:emails "welcome:1" "welcome:2" "receipt:4"
+//! SADD  countries GB US FI DE
+//! ZADD  leaderboard 4200 ada 3900 grace 5100 linus
+//! INCR  counter:visits            # x3 -> counter:visits == 3
+//! ```
+//!
+//! `redis_prefix_filter_and_cap` needs a prefix-heavy keyspace that `seed.txt`
+//! deliberately does NOT carry, so it SELF-SEEDS its own `user:*` keys and 2000
+//! `bigns:*` keys at the start and removes them again before returning — keeping
+//! the whole suite runnable against the stock docker stack.
 //!
 //! Run: `OTTO_DBV_E2E=1 cargo test -p otto-dbviewer --test redis_e2e -- --ignored --nocapture`
 
@@ -47,6 +58,39 @@ fn query(stmt: &str) -> QueryRequest {
         max_rows: None,
         ..Default::default()
     }
+}
+
+/// Number of `bigns:*` keys `redis_prefix_filter_and_cap` seeds — several times
+/// the driver's per-listing cap (`KEY_LIST_CAP` = 500), so the broad-filter path
+/// is forced to truncate.
+const BIGNS_SEED_COUNT: usize = 2000;
+/// The `user:*` keys the same test seeds for its narrow-filter assertions.
+const USER_SEED_KEYS: &[&str] = &["user:alice", "user:bob", "user:carol", "user:dave"];
+
+/// Seed `redis_prefix_filter_and_cap`'s fixture keys through the driver's own
+/// command path (a single `MSET` on db0). Idempotent — a re-run just overwrites,
+/// so a previous crash that skipped teardown does not perturb the counts.
+async fn seed_prefix_keys(d: &RedisDriver, cfg: &ResolvedConfig) {
+    let mut stmt = String::from("MSET");
+    for i in 0..BIGNS_SEED_COUNT {
+        stmt.push_str(&format!(" bigns:{i} 1"));
+    }
+    for k in USER_SEED_KEYS {
+        stmt.push_str(&format!(" {k} 1"));
+    }
+    d.run(cfg, &query(&stmt)).await.expect("seed MSET failed");
+}
+
+/// Best-effort removal of everything `seed_prefix_keys` created (one `UNLINK`).
+async fn cleanup_prefix_keys(d: &RedisDriver, cfg: &ResolvedConfig) {
+    let mut stmt = String::from("UNLINK");
+    for i in 0..BIGNS_SEED_COUNT {
+        stmt.push_str(&format!(" bigns:{i}"));
+    }
+    for k in USER_SEED_KEYS {
+        stmt.push_str(&format!(" {k}"));
+    }
+    let _ = d.run(cfg, &query(&stmt)).await;
 }
 
 /// `test()` PINGs and reports the server version.
@@ -175,11 +219,29 @@ async fn redis_prefix_filter_and_cap() {
     let cfg = cfg();
     let ks = NodePath::parse("kdb:0");
 
-    // Narrow filter → flat list of only user:* keys, typed, no truncation hint.
+    // Prefix filtering + capping needs a prefix-heavy keyspace the shared seed
+    // omits. Seed the fixture here so the test is self-contained against the
+    // stock docker stack, and tear it down before returning.
+    seed_prefix_keys(&d, &cfg).await;
+
+    // Gather every listing up front, THEN clean up, THEN assert. A panic inside an
+    // assertion would otherwise skip the teardown and leak the 2000 `bigns:*` keys.
     let users = d
         .schema_children(&cfg, &ks, Some("user:"))
         .await
         .expect("filter user:");
+    let big = d
+        .schema_children(&cfg, &ks, Some("bigns:"))
+        .await
+        .expect("filter bigns:");
+    let overview = d
+        .schema_children(&cfg, &ks, None)
+        .await
+        .expect("overview");
+
+    cleanup_prefix_keys(&d, &cfg).await;
+
+    // Narrow filter → flat list of only user:* keys, typed, no truncation hint.
     assert!(!users.is_empty(), "user: filter should match seeded keys");
     assert!(
         users.iter().all(|n| n.kind == NodeKind::Key),
@@ -197,10 +259,6 @@ async fn redis_prefix_filter_and_cap() {
 
     // Broad filter (2000 keys) → capped at the per-listing cap (500) with a
     // trailing truncation hint (a passive Folder node marked with ⋯).
-    let big = d
-        .schema_children(&cfg, &ks, Some("bigns:"))
-        .await
-        .expect("filter bigns:");
     let keys = big.iter().filter(|n| n.kind == NodeKind::Key).count();
     let hint = big.iter().find(|n| n.kind == NodeKind::Folder);
     assert_eq!(keys, 500, "should fill the 500-key cap for 2000 matches");
@@ -216,10 +274,6 @@ async fn redis_prefix_filter_and_cap() {
     println!("filter bigns: -> {keys} keys + hint {:?}", hint.label);
 
     // Overview (no filter) still groups by namespace prefix.
-    let overview = d
-        .schema_children(&cfg, &ks, None)
-        .await
-        .expect("overview");
     assert!(
         overview
             .iter()

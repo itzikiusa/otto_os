@@ -73,10 +73,10 @@ fn engine_mapping() {
     );
     assert_eq!(kind_for_engine("mongo").unwrap(), ConnectionKind::Mongodb);
     assert_eq!(kind_for_engine("redis").unwrap(), ConnectionKind::Redis);
+    // Postgres is now a first-class engine (jdbc:postgresql / postgis map to it).
+    assert_eq!(kind_for_engine("postgresql").unwrap(), ConnectionKind::Postgres);
+    assert_eq!(kind_for_engine("postgis").unwrap(), ConnectionKind::Postgres);
     // Unsupported engines carry an explanatory note.
-    assert!(kind_for_engine("postgresql")
-        .unwrap_err()
-        .contains("PostgreSQL"));
     assert!(kind_for_engine("oracle").unwrap_err().contains("Oracle"));
     assert!(kind_for_engine("mssql").unwrap_err().contains("SQL Server"));
     assert!(kind_for_engine("sqlite").unwrap_err().contains("SQLite"));
@@ -279,12 +279,11 @@ fn dbeaver_clickhouse_with_ssl() {
 }
 
 #[test]
-fn dbeaver_postgres_unsupported() {
+fn dbeaver_postgres_supported() {
     let (conns, _) = parse_dbeaver(DBEAVER_JSON);
     let pg = conns.iter().find(|c| c.name == "Reporting PG").unwrap();
-    assert_eq!(pg.kind, None);
-    assert!(!pg.supported);
-    assert!(pg.note.as_ref().unwrap().contains("PostgreSQL"));
+    assert_eq!(pg.kind, Some(ConnectionKind::Postgres));
+    assert!(pg.supported);
 }
 
 #[test]
@@ -386,13 +385,12 @@ fn datagrip_mongo_builds_conn_string() {
 }
 
 #[test]
-fn datagrip_postgres_unsupported() {
+fn datagrip_postgres_supported() {
     let local = parse_datagrip_local(DG_LOCAL_XML);
     let (conns, _) = parse_datagrip(DG_XML, &local);
     let pg = conns.iter().find(|c| c.name == "Postgres").unwrap();
-    assert!(!pg.supported);
-    assert_eq!(pg.kind, None);
-    assert!(pg.note.as_ref().unwrap().contains("PostgreSQL"));
+    assert!(pg.supported);
+    assert_eq!(pg.kind, Some(ConnectionKind::Postgres));
 }
 
 // --- NoSQLBooster -----------------------------------------------------------

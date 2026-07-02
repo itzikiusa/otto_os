@@ -3005,6 +3005,7 @@ dependencies = [
  "serde_json",
  "sqlparser",
  "sqlx",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tracing",

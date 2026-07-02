@@ -34,9 +34,9 @@ use crate::registry::Registry;
 use otto_core::redact;
 use otto_ssh::SshTunnel;
 use crate::types::{
-    statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse, Engine,
-    GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest,
-    QueryResult, ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
+    statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse,
+    DbQueryPlan, Engine, GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail,
+    QueryHandle, QueryRequest, QueryResult, ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
 };
 
 /// Stable marker prefixed to the write-gate rejection message so the UI can
@@ -55,6 +55,22 @@ pub const MCP_READ_ONLY_PREFIX: &str = "mcp_read_only: ";
 /// rows reach the agent transcript). Keeps a runaway `SELECT *` from flooding an
 /// agent's context.
 pub const MCP_MAX_ROWS: usize = 200;
+
+/// Recursively PII-mask a result's cells in place (via `otto_core::redact`) and
+/// flag it `masked`, including every later result set in a multi-statement
+/// batch's `more_results` — so an unmasked cell never leaks just because it was
+/// produced by the 2nd+ statement.
+fn mask_result(res: &mut QueryResult) {
+    for row in &mut res.rows {
+        for cell in row.iter_mut() {
+            *cell = redact::redact_json(cell).value;
+        }
+    }
+    res.masked = true;
+    for more in &mut res.more_results {
+        mask_result(more);
+    }
+}
 
 /// The MCP read-only policy gate: decide whether `statement` may run over the
 /// read-only MCP query path for `engine`. Pure (no I/O) so it is unit-tested
@@ -584,14 +600,12 @@ impl DbViewerService {
         // Apply server-side PII masking when the request opts in. Raw cell values
         // are passed through `otto_core::redact::redact_json` before leaving the
         // server — unmasked data never reaches the client when the flag is set.
+        // Multi-statement batches carry later result sets in `more_results`, so
+        // mask those too (never leak an unmasked cell just because it was the 2nd
+        // statement).
         let result = result.map(|mut res| {
             if req.mask == Some(true) {
-                for row in &mut res.rows {
-                    for cell in row.iter_mut() {
-                        *cell = redact::redact_json(cell).value;
-                    }
-                }
-                res.masked = true;
+                mask_result(&mut res);
             }
             res
         });
@@ -658,6 +672,7 @@ impl DbViewerService {
             params: None,
             query_id: None,
             mask: Some(true),
+            offset: None,
         };
         self.run(conn_id, user_id, &safe).await
     }
@@ -688,12 +703,7 @@ impl DbViewerService {
     ) -> Result<(crate::export::ExportCounts, u64)> {
         // Reuse the write-gate: an export is a read; a write/DDL on a guarded
         // (production / read-only) connection is refused (no confirm path here).
-        let guard_req = QueryRequest {
-            statement: statement.to_string(),
-            node: node.map(str::to_string),
-            ..QueryRequest::default()
-        };
-        self.guard_write(conn_id, &guard_req).await?;
+        self.guard_export(conn_id, statement, node).await?;
 
         let r = self.resolve(conn_id).await?;
         let started = Instant::now();
@@ -729,11 +739,88 @@ impl DbViewerService {
         result.map(|counts| (counts, elapsed))
     }
 
-    /// Import a local file into an existing SQL table. Parses the file, builds
-    /// batched `INSERT`s, and runs each batch **through the guarded `run` path**
-    /// — so a Prod/read-only connection refuses the import unless `confirm_write`
-    /// is set (no new guard here), and history records each batch. v1 supports
-    /// SQL engines (MySQL/ClickHouse); Mongo/Redis return a clear error.
+    /// Streaming variant of [`Self::export_to_path`] that writes through an
+    /// arbitrary `w` instead of a local file — the HTTP `/db/export` handler
+    /// passes a channel-backed writer so bytes stream straight to the browser
+    /// without the daemon ever buffering the full result (the fix for the old
+    /// `/db/export` truncation, spec §2.1). Same write-guard, resolve, and
+    /// history semantics as `export_to_path`; returns `{rows, bytes}` + duration.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn export_to_writer(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        statement: &str,
+        node: Option<&str>,
+        format: crate::export::ExportFormat,
+        max_rows: Option<usize>,
+        w: Box<dyn std::io::Write + Send>,
+    ) -> Result<(crate::export::ExportCounts, u64)> {
+        self.guard_export(conn_id, statement, node).await?;
+
+        let r = self.resolve(conn_id).await?;
+        let started = Instant::now();
+        let result = r
+            .driver
+            .export_to_writer(&r.config, statement, node, format, max_rows, w)
+            .await;
+        let elapsed = started.elapsed().as_millis() as u64;
+
+        // Record in history (best-effort), mirroring `export_to_path`.
+        match &result {
+            Ok(counts) => {
+                let _ = self
+                    .repo
+                    .add_history(
+                        conn_id,
+                        user_id,
+                        statement,
+                        true,
+                        elapsed as i64,
+                        counts.rows as i64,
+                        None,
+                    )
+                    .await;
+            }
+            Err(e) => {
+                let _ = self
+                    .repo
+                    .add_history(conn_id, user_id, statement, false, elapsed as i64, 0, Some(&e.to_string()))
+                    .await;
+            }
+        }
+        result.map(|counts| (counts, elapsed))
+    }
+
+    /// Pre-flight the export write-guard *without* running the export — lets the
+    /// streaming `/db/export` handler reject a guarded write with a clean HTTP
+    /// error before it has committed to a 200 streaming response. (An export is a
+    /// read; a write/DDL on a guarded connection is refused, `confirm_write`
+    /// implicitly false — there is no export confirmation path.)
+    pub async fn guard_export(
+        &self,
+        conn_id: &Id,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<()> {
+        let guard_req = QueryRequest {
+            statement: statement.to_string(),
+            node: node.map(str::to_string),
+            ..QueryRequest::default()
+        };
+        self.guard_write(conn_id, &guard_req).await
+    }
+
+    /// Import a local file into an existing table/collection. Parses the file,
+    /// then imports per engine — respecting the write guard + `confirm_write` on
+    /// every engine:
+    /// - **SQL (MySQL/ClickHouse):** builds batched `INSERT`s and runs each batch
+    ///   through the guarded `run` path (so guard/history/masking all apply).
+    /// - **MongoDB:** guards once (an `insertMany` is a write), coerces CSV/TSV
+    ///   string cells to inferred types (Mongo is schemaless), then `insertMany`s
+    ///   in batches via the driver.
+    ///
+    /// Redis has no bulk-load surface (documented out).
     #[allow(clippy::too_many_arguments)]
     pub async fn import_from_path(
         &self,
@@ -746,38 +833,115 @@ impl DbViewerService {
         confirm_write: bool,
     ) -> Result<ImportCounts> {
         let conn = self.connections.get(conn_id).await?;
-        match Engine::from_kind(conn.kind) {
-            Some(Engine::Mysql) | Some(Engine::Clickhouse) => {}
-            Some(other) => {
-                return Err(Error::Invalid(format!(
-                    "file import is not supported for {} yet (SQL engines only in v1)",
-                    other.as_str()
-                )))
-            }
-            None => return Err(Error::Invalid("connection is not a browsable database".into())),
+        let engine = Engine::from_kind(conn.kind)
+            .ok_or_else(|| Error::Invalid("connection is not a browsable database".into()))?;
+        if matches!(engine, Engine::Redis) {
+            return Err(Error::Invalid(
+                "file import is not supported for redis".into(),
+            ));
         }
 
         let bytes = tokio::fs::read(local_path)
             .await
             .map_err(|e| Error::Invalid(format!("read import file: {e}")))?;
         let parsed = crate::import::parse_rows(format, &bytes)?;
-        let statements =
-            crate::import::build_insert_statements(table, &parsed.columns, &parsed.rows, batch_size);
 
-        let mut counts = ImportCounts::default();
-        for stmt in statements {
-            let req = QueryRequest {
-                statement: stmt,
-                confirm_write,
-                ..QueryRequest::default()
-            };
-            // Routes through guard_write + history. A guarded connection without
-            // confirm_write fails here with the standard write_blocked: 409.
-            let res = self.run(conn_id, user_id, &req).await?;
-            counts.rows += res.rows_affected.unwrap_or(0);
-            counts.batches += 1;
+        match engine {
+            // SQL engines import as batched INSERTs through the guarded `run`
+            // path; identifier quoting is engine-aware (Postgres double-quotes,
+            // MySQL/ClickHouse backtick).
+            Engine::Mysql | Engine::Clickhouse | Engine::Postgres => {
+                let quote = if matches!(engine, Engine::Postgres) {
+                    crate::import::SqlQuote::DoubleQuote
+                } else {
+                    crate::import::SqlQuote::Backtick
+                };
+                let statements = crate::import::build_insert_statements(
+                    table,
+                    &parsed.columns,
+                    &parsed.rows,
+                    batch_size,
+                    quote,
+                );
+                let mut counts = ImportCounts::default();
+                for stmt in statements {
+                    let req = QueryRequest {
+                        statement: stmt,
+                        confirm_write,
+                        ..QueryRequest::default()
+                    };
+                    // Routes through guard_write + history. A guarded connection
+                    // without confirm_write fails here with write_blocked: 409.
+                    let res = self.run(conn_id, user_id, &req).await?;
+                    counts.rows += res.rows_affected.unwrap_or(0);
+                    counts.batches += 1;
+                }
+                Ok(counts)
+            }
+            Engine::Mongodb => {
+                // An insertMany is a write — guard once (a `db.<c>.insertMany`
+                // shape classifies as a write) with the caller's confirmation.
+                let guard_req = QueryRequest {
+                    statement: format!("db.{table}.insertMany([])"),
+                    confirm_write,
+                    ..QueryRequest::default()
+                };
+                self.guard_write(conn_id, &guard_req).await?;
+                // Mongo is schemaless: coerce CSV/TSV string cells to inferred
+                // types (numbers/bools/null). NDJSON/JSON already carry types.
+                let rows: Vec<Vec<serde_json::Value>> = if matches!(
+                    format,
+                    crate::import::ImportFormat::Csv | crate::import::ImportFormat::Tsv
+                ) {
+                    parsed
+                        .rows
+                        .iter()
+                        .map(|r| r.iter().map(crate::import::coerce_scalar).collect())
+                        .collect()
+                } else {
+                    parsed.rows.clone()
+                };
+                let r = self.resolve(conn_id).await?;
+                let (inserted, batches) = r
+                    .driver
+                    .import_rows(&r.config, table, &parsed.columns, &rows, batch_size, None)
+                    .await?;
+                // Best-effort history entry (one row for the whole import).
+                let _ = self
+                    .repo
+                    .add_history(
+                        conn_id,
+                        user_id,
+                        &format!("import {inserted} document(s) → {table}"),
+                        true,
+                        0,
+                        inserted as i64,
+                        None,
+                    )
+                    .await;
+                Ok(ImportCounts {
+                    rows: inserted,
+                    batches,
+                })
+            }
+            Engine::Redis => unreachable!("redis rejected above"),
         }
-        Ok(counts)
+    }
+
+    /// Produce a structured [`DbQueryPlan`] for `statement`, dispatching to the
+    /// engine's native EXPLAIN via the driver. The statement is EXPLAIN-wrapped
+    /// (never executed raw), so this is read-only by construction — no write
+    /// guard needed. The connection's SSH tunnel is established by `resolve`,
+    /// exactly like [`Self::run`]. Redis has no plan surface (the driver default
+    /// returns an `Invalid` error → 400).
+    pub async fn query_plan(
+        &self,
+        conn_id: &Id,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<DbQueryPlan> {
+        let r = self.resolve(conn_id).await?;
+        r.driver.query_plan(&r.config, statement, node).await
     }
 
     /// Validate a candidate **read** query by asking the engine for its plan,
@@ -800,7 +964,7 @@ impl DbViewerService {
         let engine = Engine::from_kind(conn.kind)
             .ok_or_else(|| "connection is not a browsable database".to_string())?;
         let req = match engine {
-            Engine::Mysql | Engine::Clickhouse => QueryRequest {
+            Engine::Mysql | Engine::Clickhouse | Engine::Postgres => QueryRequest {
                 statement: format!("EXPLAIN {sql}"),
                 node: node.map(str::to_string),
                 ..QueryRequest::default()
@@ -931,6 +1095,14 @@ impl DbViewerService {
     }
     pub async fn get_saved(&self, id: &Id) -> Result<SavedQuery> {
         self.repo.get_saved(id).await
+    }
+    pub async fn update_saved(
+        &self,
+        id: &Id,
+        name: Option<&str>,
+        statement: Option<&str>,
+    ) -> Result<SavedQuery> {
+        self.repo.update_saved(id, name, statement).await
     }
     pub async fn delete_saved(&self, id: &Id) -> Result<()> {
         self.repo.delete_saved(id).await

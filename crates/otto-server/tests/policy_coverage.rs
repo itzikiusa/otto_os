@@ -155,8 +155,15 @@ fn every_protected_route_has_a_policy_entry() {
     );
 
     // Methods we probe for each path.  Covering GET + POST catches most read/
-    // write splits; PUT and DELETE catch the remaining method-specific rules.
-    let probe_methods = [Method::GET, Method::POST, Method::PUT, Method::DELETE];
+    // write splits; PUT, PATCH and DELETE catch the remaining method-specific
+    // rules (PATCH e.g. saved-query rename / dashboard update).
+    let probe_methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+    ];
 
     // For each `(method, template)` pair, assert the policy is not `Deny`.
     // Collect all failures so the developer sees the full list in one run.

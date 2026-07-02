@@ -27,7 +27,7 @@ use crate::driver::Driver;
 use crate::types::{
     self, Capabilities, Column, CompletionContext, CompletionItem, CompletionKind,
     CompletionResponse, Engine, NodeKind, NodePath, ObjectDetail, QueryRequest, QueryResult,
-    QueryStats, ResolvedConfig, SchemaNode, TestResult,
+    ResolvedConfig, SchemaNode, TestResult,
 };
 
 /// Cap on keys sampled during a keyspace SCAN used to derive namespace groups,
@@ -67,6 +67,10 @@ impl Driver for RedisDriver {
             joins: false,
             transactions: false,
             multi_statement: true,
+            // No server-side per-command cancel; Stop is client-side only.
+            cancel: false,
+            // Redis has no query-plan surface — the Explain button is hidden.
+            explain: false,
             default_port: 6379,
             schema_levels: vec!["Database".into(), "Namespace".into(), "Key".into()],
             query_language: "redis".into(),
@@ -700,11 +704,7 @@ fn single_value(value: JsonValue) -> QueryResult {
     QueryResult {
         columns: vec![Column::new("value")],
         rows: vec![vec![value]],
-        rows_affected: None,
-        stats: QueryStats::default(),
-        message: None,
-        truncated: false,
-        masked: false,
+        ..QueryResult::empty()
     }
 }
 
@@ -716,11 +716,7 @@ fn array_to_result(items: Vec<RedisValue>) -> QueryResult {
     QueryResult {
         columns: vec![Column::new("value")],
         rows,
-        rows_affected: None,
-        stats: QueryStats::default(),
-        message: None,
-        truncated: false,
-        masked: false,
+        ..QueryResult::empty()
     }
 }
 
@@ -732,11 +728,7 @@ fn map_to_result(pairs: Vec<(RedisValue, RedisValue)>) -> QueryResult {
     QueryResult {
         columns: vec![Column::new("key"), Column::new("value")],
         rows,
-        rows_affected: None,
-        stats: QueryStats::default(),
-        message: None,
-        truncated: false,
-        masked: false,
+        ..QueryResult::empty()
     }
 }
 
@@ -943,6 +935,16 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capabilities_are_honest() {
+        let c = RedisDriver::default().capabilities();
+        assert_eq!(c.engine, Engine::Redis);
+        assert!(!c.sql && !c.joins && !c.transactions);
+        // No server-side cancel and no query-plan surface.
+        assert!(!c.cancel);
+        assert!(!c.explain);
+    }
 
     #[test]
     fn split_args_handles_quotes_and_spaces() {

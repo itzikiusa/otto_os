@@ -23,12 +23,12 @@ use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::drivers::{mongo_parse, mongo_sql};
-use crate::export::{open_sink, ExportCounts, ExportFormat};
+use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, Column, CompletionContext, CompletionResponse, Engine, IndexDef, NodePath,
-    NodeKind, ObjectDetail, QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode,
-    TestResult,
+    self, Capabilities, Column, CompletionContext, CompletionResponse, DbQueryPlan, Engine,
+    IndexDef, NodePath, NodeKind, ObjectDetail, QueryRequest, QueryResult, QueryStats,
+    ResolvedConfig, SchemaNode, TestResult,
 };
 
 /// How many documents to sample when inferring fields/types.
@@ -62,8 +62,17 @@ impl Driver for MongoDriver {
             engine: Engine::Mongodb,
             sql: false,
             joins: false,
-            transactions: true,
-            multi_statement: false,
+            // No session pinning across pooled ops — multi-document transactions
+            // aren't wired, so we don't advertise them (was over-promised `true`).
+            transactions: false,
+            // `run_many` executes a `;`-separated script sequentially (already
+            // supported — the flag now tells the truth).
+            multi_statement: true,
+            // No per-query server cancel is wired (killOp isn't exposed) — Stop is
+            // client-side only.
+            cancel: false,
+            // `.explain()` / the explain flag returns a query plan.
+            explain: true,
             default_port: 27017,
             schema_levels: vec!["Database".into(), "Collection".into(), "Field".into()],
             query_language: "mongo".into(),
@@ -318,6 +327,65 @@ impl Driver for MongoDriver {
         self.completions.invalidate(&cfg.cache_key());
     }
 
+    /// Structured query plan via the server `explain` command (queryPlanner
+    /// verbosity) for a find/aggregate. Never runs the query itself.
+    async fn query_plan(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<DbQueryPlan> {
+        let translated = if mongo_sql::looks_like_sql(statement) {
+            Some(mongo_sql::translate(statement)?)
+        } else {
+            None
+        };
+        let parsed = parse_command(translated.as_deref().unwrap_or(statement))?;
+        if !matches!(parsed.op, MongoOp::Find | MongoOp::Aggregate) {
+            return Err(types::invalid("query plan supports find / aggregate only"));
+        }
+        let db_name = resolve_db(cfg, node)?;
+        let client = self.connect(cfg).await?;
+        let db = client.database(&db_name);
+        let raw = mongo_explain_value(&db, &parsed).await?;
+        let root = crate::plan::from_mongo_queryplanner(&raw);
+        Ok(DbQueryPlan {
+            engine: "mongodb".into(),
+            root,
+            raw,
+        })
+    }
+
+    /// Import parsed rows into a collection as batched `insertMany`. Values are
+    /// mapped to BSON (numbers/bools/null preserved; the service coerces CSV
+    /// string cells first). `batch_size` is clamped 1..=5000.
+    async fn import_rows(
+        &self,
+        cfg: &ResolvedConfig,
+        target: &str,
+        columns: &[String],
+        rows: &[Vec<Value>],
+        batch_size: usize,
+        node: Option<&str>,
+    ) -> Result<(u64, u64)> {
+        let db_name = resolve_db(cfg, node)?;
+        let client = self.connect(cfg).await?;
+        let coll: Collection<Document> = client.database(&db_name).collection(target);
+        let batch = batch_size.clamp(1, 5000);
+        let mut inserted = 0u64;
+        let mut batches = 0u64;
+        for chunk in rows.chunks(batch) {
+            let docs: Vec<Document> = chunk.iter().map(|row| row_to_doc(columns, row)).collect();
+            if docs.is_empty() {
+                continue;
+            }
+            let res = coll.insert_many(&docs).await.map_err(types::upstream)?;
+            inserted += res.inserted_ids.len() as u64;
+            batches += 1;
+        }
+        Ok((inserted, batches))
+    }
+
     /// Streaming export: iterate the `Cursor` (a `Stream`) document-by-document
     /// and write each straight to the file — the cursor is NEVER collected into a
     /// `Vec`, so daemon memory stays bounded for an arbitrarily large result.
@@ -327,14 +395,14 @@ impl Driver for MongoDriver {
     /// (Mongo is schemaless and we can't pre-scan the whole result without
     /// buffering it); later documents are projected onto those columns and any
     /// extra fields are dropped. JSON / NDJSON carry each document's full shape.
-    async fn export_to_path(
+    async fn export_to_writer(
         &self,
         cfg: &ResolvedConfig,
         statement: &str,
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        dest: &std::path::Path,
+        w: Box<dyn std::io::Write + Send>,
     ) -> Result<ExportCounts> {
         let parsed = parse_command(statement.trim())?;
         if !matches!(parsed.op, MongoOp::Find | MongoOp::Aggregate) {
@@ -383,8 +451,7 @@ impl Driver for MongoDriver {
             _ => unreachable!("guarded above"),
         };
 
-        let mut sink = open_sink(dest, format)
-            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+        let mut sink = ExportSink::new(w, format);
 
         let mut columns: Vec<String> = Vec::new();
         let mut header_written = false;
@@ -442,37 +509,39 @@ fn first_doc_columns(doc: &Document) -> Vec<String> {
 // --- statement execution -----------------------------------------------------
 
 impl MongoDriver {
-    /// Run every statement from a multi-statement paste in order. Returns the
-    /// last statement's result, with a per-statement summary in `message`
-    /// (e.g. "[1] deleted 1   ·   [2] inserted 1").
+    /// Run every statement from a multi-statement paste in order and fold the
+    /// results into the shared batch shape: the **FIRST** statement's result is
+    /// the top-level one, the rest go into `more_results` (each labelled with its
+    /// statement preview). This aligns Mongo with the SQL drivers and the UI's
+    /// result-set switcher — previously it returned the *last* result only, which
+    /// hid all earlier results (intentional behavior change, noted in api.md). On
+    /// the first failing statement execution stops with an `errored` entry and the
+    /// completed results are returned (§2.2).
     async fn run_many(
         &self,
         cfg: &ResolvedConfig,
         req: &QueryRequest,
         statements: Vec<String>,
     ) -> Result<QueryResult> {
-        let total = statements.len();
-        let mut summaries: Vec<String> = Vec::with_capacity(total);
-        let mut last: Option<QueryResult> = None;
-        for (i, stmt) in statements.into_iter().enumerate() {
+        let mut results: Vec<QueryResult> = Vec::with_capacity(statements.len());
+        for stmt in statements {
+            let preview = types::statement_preview(&stmt);
             let single = QueryRequest {
                 statement: stmt,
                 ..req.clone()
             };
-            let r = self
-                .run_one(cfg, &single)
-                .await
-                .map_err(|e| types::invalid(format!("statement {}/{}: {e}", i + 1, total)))?;
-            let note = r
-                .message
-                .clone()
-                .unwrap_or_else(|| format!("{} row(s)", r.stats.row_count));
-            summaries.push(format!("[{}] {note}", i + 1));
-            last = Some(r);
+            match self.run_one(cfg, &single).await {
+                Ok(mut r) => {
+                    r.statement = Some(preview);
+                    results.push(r);
+                }
+                Err(e) => {
+                    results.push(types::errored_batch_entry(preview, e.to_string()));
+                    break;
+                }
+            }
         }
-        let mut result = last.unwrap_or_else(|| QueryResult::message("no statements"));
-        result.message = Some(summaries.join("   ·   "));
-        Ok(result)
+        Ok(types::fold_batch_results(results))
     }
 
     /// Run one already-split statement: optional SQL→Mongo translation, command
@@ -553,6 +622,15 @@ impl MongoDriver {
                 }
                 let limit = parsed.limit.unwrap_or(max_rows as i64).min(max_rows as i64);
                 action = action.limit(limit + 1);
+                // Server-side pagination: the pager's `offset` maps to Mongo `skip`
+                // (SQL engines map it to `OFFSET`). Applied only when there's no
+                // explicit user `.limit(n)` — same rule as the SQL auto-limiter, so
+                // the pager and the server never disagree.
+                if let Some(off) = req.offset.filter(|&o| o > 0) {
+                    if parsed.limit.is_none() {
+                        action = action.skip(off);
+                    }
+                }
                 if let Some(ms) = max_time_ms {
                     // maxTimeMS on the cursor tells the server to abort the query
                     // when the time budget is exceeded.
@@ -561,7 +639,11 @@ impl MongoDriver {
                 let cursor = action.await.map_err(types::upstream)?;
                 // Cap collection at the effective limit (not just max_rows) so an
                 // explicit `.limit(n)` is honored; the extra fetched row flags truncation.
-                collect_docs(cursor, limit as usize, started).await
+                let mut r = collect_docs(cursor, limit as usize, started).await?;
+                // Flag the auto-limit ⇒ the UI shows its pager — but only when WE
+                // capped it (no explicit user `.limit(n)`), mirroring the SQL path.
+                r.auto_limited = parsed.limit.is_none().then_some(max_rows as u64);
+                Ok(r)
             }
             MongoOp::Aggregate => {
                 let pipeline = parsed.pipeline.unwrap_or_default();
@@ -1866,7 +1948,22 @@ async fn explain_plan(
     parsed: &Parsed,
     started: Instant,
 ) -> Result<QueryResult> {
-    let inner = match parsed.op {
+    let plan = mongo_explain_value(db, parsed).await?;
+    let mut result = QueryResult::empty();
+    result.columns = vec![Column::typed("queryPlan", "json")];
+    result.rows = vec![vec![plan]];
+    result.stats = QueryStats {
+        duration_ms: started.elapsed().as_millis() as u64,
+        row_count: 1,
+        bytes_read: None,
+    };
+    result.message = Some("Query plan (explain · queryPlanner)".into());
+    Ok(result)
+}
+
+/// The `explain` inner command doc for a find/aggregate.
+fn explain_inner(parsed: &Parsed) -> Result<Document> {
+    match parsed.op {
         MongoOp::Find => {
             let mut d = doc! { "find": &parsed.collection };
             if let Some(f) = &parsed.filter {
@@ -1881,7 +1978,7 @@ async fn explain_plan(
             if let Some(l) = parsed.limit {
                 d.insert("limit", l);
             }
-            d
+            Ok(d)
         }
         MongoOp::Aggregate => {
             let stages: Vec<Bson> = parsed
@@ -1891,24 +1988,51 @@ async fn explain_plan(
                 .into_iter()
                 .map(Bson::Document)
                 .collect();
-            doc! { "aggregate": &parsed.collection, "pipeline": Bson::Array(stages), "cursor": {} }
+            Ok(doc! { "aggregate": &parsed.collection, "pipeline": Bson::Array(stages), "cursor": {} })
         }
-        _ => return Err(types::invalid("explain supports find and aggregate")),
-    };
+        _ => Err(types::invalid("explain supports find and aggregate")),
+    }
+}
+
+/// Run the server `explain` command (queryPlanner verbosity) and return the plan
+/// document as JSON — shared by the interactive explain and the query-plan endpoint.
+async fn mongo_explain_value(db: &mongodb::Database, parsed: &Parsed) -> Result<Value> {
+    let inner = explain_inner(parsed)?;
     let plan = db
         .run_command(doc! { "explain": inner, "verbosity": "queryPlanner" })
         .await
         .map_err(types::upstream)?;
-    let mut result = QueryResult::empty();
-    result.columns = vec![Column::typed("queryPlan", "json")];
-    result.rows = vec![vec![bson_to_json(&Bson::Document(plan))]];
-    result.stats = QueryStats {
-        duration_ms: started.elapsed().as_millis() as u64,
-        row_count: 1,
-        bytes_read: None,
-    };
-    result.message = Some("Query plan (explain · queryPlanner)".into());
-    Ok(result)
+    Ok(bson_to_json(&Bson::Document(plan)))
+}
+
+/// The database a Mongo op runs against: the connection's configured database,
+/// else the active-db `node` (a plain name or a `db:<name>` path).
+fn resolve_db(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String> {
+    cfg.database
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            node.map(str::trim).filter(|s| !s.is_empty()).map(|n| {
+                NodePath::parse(n)
+                    .get("db")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| n.to_string())
+            })
+        })
+        .ok_or_else(|| types::invalid("no database selected for this connection"))
+}
+
+/// Build a BSON document from a parsed import row: each column → its coerced
+/// value mapped to BSON (numbers/bools/null preserved). A missing/short cell
+/// becomes null.
+fn row_to_doc(columns: &[String], row: &[Value]) -> Document {
+    let mut doc = Document::new();
+    for (i, col) in columns.iter().enumerate() {
+        let v = row.get(i).cloned().unwrap_or(Value::Null);
+        let bson = json_to_bson(&v).unwrap_or(Bson::Null);
+        doc.insert(col.clone(), bson);
+    }
+    doc
 }
 
 /// Build a `QueryResult` for a write op (no rows, just affected count + note).
@@ -1968,15 +2092,13 @@ async fn collect_docs(
     Ok(QueryResult {
         columns: columns.into_iter().map(Column::new).collect(),
         rows,
-        rows_affected: None,
         stats: QueryStats {
             duration_ms: started.elapsed().as_millis() as u64,
             row_count,
             bytes_read: None,
         },
-        message: None,
         truncated,
-        masked: false,
+        ..QueryResult::empty()
     })
 }
 

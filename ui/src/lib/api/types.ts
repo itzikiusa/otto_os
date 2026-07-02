@@ -69,7 +69,14 @@ export interface Session {
   meta: Record<string, unknown>;
 }
 
-export type ConnectionKind = 'ssh' | 'mysql' | 'redis' | 'mongodb' | 'clickhouse' | 'custom';
+export type ConnectionKind =
+  | 'ssh'
+  | 'mysql'
+  | 'postgres'
+  | 'redis'
+  | 'mongodb'
+  | 'clickhouse'
+  | 'custom';
 
 /** Deployment environment. `prod` is write-guarded in the DB Explorer. */
 export type Environment = 'dev' | 'staging' | 'prod';
@@ -3909,7 +3916,7 @@ export interface GenerateWorkflowReq {
 // ---------------------------------------------------------------------------
 
 /** Database engines the explorer can talk to (subset of ConnectionKind). */
-export type DbEngine = 'mysql' | 'redis' | 'mongodb' | 'clickhouse';
+export type DbEngine = 'mysql' | 'postgres' | 'redis' | 'mongodb' | 'clickhouse';
 
 /** Schema-tree node taxonomy across SQL / Redis / Mongo. */
 export type DbNodeKind =
@@ -3919,6 +3926,7 @@ export type DbNodeKind =
   | 'view'
   | 'procedure'
   | 'function'
+  | 'trigger'
   | 'column'
   | 'index'
   | 'collection'
@@ -4026,7 +4034,12 @@ export interface QueryStats {
   bytes_read?: number | null;
 }
 
-/** Result of running a statement: tabular rows + stats. */
+/** Result of running a statement: tabular rows + stats.
+ *
+ *  For a **multi-statement batch** the top-level fields describe the FIRST
+ *  statement; each later statement is one entry in `more_results` (in order),
+ *  and every batch entry carries a `statement` preview label. A single-statement
+ *  run omits all of these (back-compat: byte-identical to before). */
 export interface QueryResult {
   columns: DbColumn[];
   rows: unknown[][];
@@ -4036,6 +4049,50 @@ export interface QueryResult {
   truncated: boolean;
   /** True when the server ran cell values through `otto_core::redact` (QueryRequest.mask=true). */
   masked?: boolean;
+  /** Later result sets from a multi-statement batch, in execution order (the
+   *  top-level fields are the first statement's result). Absent/empty for a
+   *  single statement. */
+  more_results?: QueryResult[];
+  /** A ≤80-char single-line preview of the statement that produced THIS result —
+   *  set only for the entries of a multi-statement batch (labels the switcher). */
+  statement?: string | null;
+  /** True when this batch entry is the statement that FAILED: execution stopped
+   *  here and `message` holds the engine error. A single-statement failure is an
+   *  HTTP error instead, never this flag. */
+  errored?: boolean;
+  /** The `LIMIT` the server auto-injected for an unconstrained single SELECT
+   *  (Mongo: an unconstrained `find`). Present ⇔ the result was auto-paginated,
+   *  so the UI shows its pager exactly then; absent for explicit user
+   *  LIMIT/OFFSET, non-paginatable statements, and batches. */
+  auto_limited?: number | null;
+}
+
+/** One node in a normalized query plan (`POST …/db/query-plan`). `warnings`
+ *  flags costly access patterns the UI badges in red (full scans, filesort,
+ *  temporary tables). */
+export interface DbPlanNode {
+  /** The operation (`Seq Scan`, `table`, `IXSCAN`, `ReadFromMergeTree`, …). */
+  op: string;
+  /** The object it touches (table / collection / index), when known. */
+  object?: string | null;
+  /** A short human detail line (access type, filter, condition), when known. */
+  detail?: string | null;
+  /** Estimated rows for this node, when the engine reports one. */
+  est_rows?: number | null;
+  /** Costly-pattern flags (e.g. "full table scan", "Using filesort"). */
+  warnings?: string[];
+  /** Child plan nodes. */
+  children?: DbPlanNode[];
+}
+
+/** A normalized query plan distilled from an engine's native EXPLAIN
+ *  (`POST /connections/{id}/db/query-plan`). `raw` is the engine's untouched
+ *  EXPLAIN JSON (for a "raw" toggle). Consumed by the plan-tree UI (Task 10). */
+export interface DbQueryPlan {
+  /** `mysql` | `postgres` | `clickhouse` | `mongodb`. */
+  engine: string;
+  root: DbPlanNode;
+  raw: unknown;
 }
 
 /**
@@ -4100,10 +4157,11 @@ export type ImportFormat = 'csv' | 'tsv' | 'ndjson' | 'json';
 
 /**
  * `POST /connections/{id}/db/import` — import a local file (on the daemon host)
- * into an existing SQL table. Each batch runs through the same guarded write
- * path as a query, so a Prod/read-only connection refuses the import unless
- * `confirm_write` is set (the typed-confirmation flow re-sends it). v1 is
- * SQL-only (MySQL/ClickHouse); Mongo/Redis are explicit follow-ups.
+ * into an existing table/collection. Guarded like a query, so a Prod/read-only
+ * connection refuses the import unless `confirm_write` is set (the typed-
+ * confirmation flow re-sends it). MySQL/ClickHouse import as batched `INSERT`s;
+ * **MongoDB** imports as `insertMany` batches (`table` = the collection; CSV/TSV
+ * string cells are coerced to numbers/bools/null). Redis has no bulk-load surface.
  */
 export interface ImportReq {
   /** Source file on the daemon host (a leading `~` expands to the daemon home). */
@@ -4230,8 +4288,16 @@ export interface DbCapabilities {
   engine: DbEngine;
   sql: boolean;
   joins: boolean;
+  /** Session-pinned transactions (BEGIN…COMMIT across calls). False for the
+   *  pooled engines — each run acquires an independent connection. */
   transactions: boolean;
   multi_statement: boolean;
+  /** Server-side cancel of an in-flight query (MySQL/ClickHouse). When false
+   *  (MongoDB/Redis) the Stop button is client-side only. */
+  cancel?: boolean;
+  /** The engine can produce a query plan (drives the Explain button; false for
+   *  Redis, which has no plan surface). */
+  explain?: boolean;
   default_port: number;
   schema_levels: string[];
   query_language: 'sql' | 'redis' | 'mongo';

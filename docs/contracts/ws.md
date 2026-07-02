@@ -91,7 +91,8 @@ reach only the session's owner (`created_by`), a workspace `admin`, or root —
 and only after the `viewer`+ membership gate on the event's `workspace_id`;
 other **workspace-scoped events** (improvement, swarm) reach every member with
 `viewer`+ on the event's `workspace_id` (root receives all); **broadcast
-events** (`Notice`) reach every authenticated client. There are 41 variants.
+events** (`Notice`) reach every authenticated client. There are 41 variants
+(the sections below cover them; each `## …`/`### …` heading is one feature family).
 
 Session lifecycle (session-family — owner/admin/root, viewer-gated):
 
@@ -566,6 +567,42 @@ blind timer.
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Run with Otto page re-fetches the run + its timeline on a matching tick.
 - TypeScript type: `{ type: 'otto_run_updated'; workspace_id: Id; run_id: Id; status: string }`.
+
+---
+
+### `db_assist_session_started` / `db_assist_updated`
+
+Workspace-scoped. Emitted by `crates/otto-server/src/db_assist.rs` as the DB
+Explorer's file-backed "assistant" agent (see api.md → *DB Assistant*) runs a
+turn. `db_assist_session_started` fires the moment the agent's session becomes
+live (turn start) so the Database page attaches its embedded terminal
+immediately, not only after the turn; `db_assist_updated` fires on every
+`ANSWER.sql` change while the turn runs (per poll, mid-turn) and once more with
+the committed answer.
+
+```json
+{ "type": "db_assist_session_started", "workspace_id": "<Id>", "connection_id": "<Id>",
+  "assist_id": "<Id>", "session_id": "<Id>" }
+{ "type": "db_assist_updated", "workspace_id": "<Id>", "connection_id": "<Id>",
+  "assist_id": "<Id>", "sql": "<current proposed query>", "note": "<one-line status>" }
+```
+
+- `db_assist_session_started` — the assist's agent session (hidden from the
+  Agents list via `meta.source = "db_assist"`) just started its turn; `session_id`
+  is the live, attachable session for the matching `assist_id`.
+- `db_assist_updated` — the agent's working answer changed. `sql` is the current
+  proposed query (its `ANSWER.sql`, else a fenced `sql` block in the reply); `note`
+  is a one-line status (its `NOTE.txt`, else the reply's first line). Emitted
+  per-poll mid-turn and once with the final committed answer.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- UI routing: the Database page's DB Assistant panel attaches the session on
+  `db_assist_session_started` and renders each `db_assist_updated` (`sql` in a
+  read-only block with Insert/Run) as the agent works.
+- TypeScript types: in the `OttoEvent` union in `ui/src/lib/api/types.ts` as
+  `{ type: 'db_assist_session_started'; workspace_id: Id; connection_id: Id; assist_id: Id; session_id: Id }`
+  and `{ type: 'db_assist_updated'; workspace_id: Id; connection_id: Id; assist_id: Id; sql: string; note: string }`.
+
+---
 
 ### `canvas_updated` / `canvas_session_started`
 

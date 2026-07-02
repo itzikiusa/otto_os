@@ -31,6 +31,7 @@
   const kindIcons: Record<ConnectionKind, string> = {
     ssh: 'key',
     mysql: 'db',
+    postgres: 'db',
     redis: 'zap',
     mongodb: 'db',
     clickhouse: 'db',

@@ -19,6 +19,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
+  import ErrorPanel from './ErrorPanel.svelte';
 
   // ── Send-to-agent dialog (B2a: replaces raw injectInput for DB results) ──────
   let sendToAgentOpen = $state(false);
@@ -33,8 +34,62 @@
     statement?: string;
     /** Connection id the result came from — required for inline editing. */
     connectionId?: string | null;
+    /** True while the active tab's query is in flight — drives the running overlay. */
+    running?: boolean;
+    /** Active tab's current row offset (footer pager). */
+    offset?: number;
   }
-  let { result, error = null, mini = false, statement, connectionId }: Props = $props();
+  let {
+    result: resultProp,
+    error = null,
+    mini = false,
+    statement,
+    connectionId,
+    running = false,
+    offset = 0,
+  }: Props = $props();
+
+  // ── Multi-result switcher (multi-statement batches) ──────────────────────────
+  // The server returns the first statement's result at top level and the rest in
+  // `more_results` (each with a statement preview + errored flag). The switcher
+  // picks which set is shown; everything below reads `result` (the SHOWN set), so
+  // Grid/Vertical/JSON, export, editing and the footer all follow the selection.
+  let resultIdx = $state(0);
+  const resultSets = $derived<QueryResult[]>(
+    resultProp ? [resultProp, ...(resultProp.more_results ?? [])] : [],
+  );
+  const result = $derived<QueryResult | null>(resultSets[resultIdx] ?? resultProp);
+  // A brand-new upstream result resets the selection to the first set.
+  $effect(() => {
+    void resultProp;
+    resultIdx = 0;
+  });
+
+  // ── Running overlay elapsed counter ──────────────────────────────────────────
+  // Ticks while the active tab's query is in flight so the overlay shows elapsed
+  // seconds; stops + resets when the query settles or the component unmounts.
+  let elapsed = $state(0);
+  $effect(() => {
+    if (!running) return;
+    elapsed = 0;
+    const start = Date.now();
+    const iv = setInterval(() => {
+      elapsed = Math.floor((Date.now() - start) / 1000);
+    }, 250);
+    return () => clearInterval(iv);
+  });
+
+  // ── Footer pager (single auto-limited result only) ───────────────────────────
+  // `auto_limited` (the server's applied LIMIT) lives on the top-level result and
+  // is present only for a single paginatable SELECT / Mongo find — never batches.
+  const pageSize = $derived(resultSets.length === 1 ? (resultProp?.auto_limited ?? 0) : 0);
+  const showPager = $derived(!mini && pageSize > 0 && !!result);
+  const pageRowCount = $derived(result?.rows.length ?? 0);
+  const pageFrom = $derived(pageRowCount === 0 ? 0 : offset + 1);
+  const pageTo = $derived(offset + pageRowCount);
+  // A full page implies there may be more; a short page is the last one.
+  const hasNextPage = $derived(pageSize > 0 && pageRowCount >= pageSize);
+  const hasOrderBy = $derived(/\border\s+by\b/i.test(statement ?? ''));
 
   // Mini widget grids are previews — cap their rendering. The main grid renders
   // ALL fetched rows via windowed virtualization (only the visible slice is in
@@ -44,16 +99,26 @@
   // The rows we render/filter/sort over. Re-seeded whenever the upstream result
   // changes (edits run against the DB and refresh via re-query, not in place).
   let liveRows = $state<unknown[][]>([]);
+  // Column-name signature of the last rendered result (non-reactive — used only
+  // to decide whether the view state should reset).
+  let prevColKey: string | null = null;
   $effect(() => {
-    // Track the result identity; reset local state on any new result.
+    const cols = result?.columns ?? [];
+    const colKey = cols.map((c) => c.name).join('');
+    // Rows always re-seed (edits re-query, not patch in place).
     liveRows = result ? (mini ? result.rows.slice(0, MINI_MAX) : result.rows) : [];
-    search = '';
-    colWidths = {};
-    sortCol = null;
-    sortDir = null;
-    // Jump back to the top on a fresh result.
-    scrollTop = 0;
-    if (scrollEl) scrollEl.scrollTop = 0;
+    // Preserve sort / search / column widths / scroll when the new result has the
+    // SAME columns (a re-run of the same query), so the grid doesn't jump; reset
+    // them only when the shape actually changes.
+    if (colKey !== prevColKey) {
+      search = '';
+      colWidths = {};
+      sortCol = null;
+      sortDir = null;
+      scrollTop = 0;
+      if (scrollEl) scrollEl.scrollTop = 0;
+      prevColKey = colKey;
+    }
   });
 
   // Engine behind this result (drives dialect for inline edits).
@@ -439,12 +504,10 @@
       if (ci < 0) return null;
       const v = liveRows[rowIdx][ci];
       if (v === null || v === undefined) return null; // no row referenced
-      conds.push(`\`${refCol}\` = ${valueLiteral(v)}`);
+      conds.push(`${qid(refCol)} = ${valueLiteral(v)}`);
     }
     if (conds.length === 0) return null;
-    const ref = fk.ref_schema
-      ? `\`${fk.ref_schema}\`.\`${fk.ref_table}\``
-      : `\`${fk.ref_table}\``;
+    const ref = fk.ref_schema ? `${qid(fk.ref_schema)}.${qid(fk.ref_table)}` : qid(fk.ref_table);
     return `SELECT * FROM ${ref} WHERE ${conds.join(' AND ')} LIMIT 1`;
   }
 
@@ -479,7 +542,10 @@
     // cell, into the editor + clipboard (never run). SQL engines + Mongo `find`
     // only; both items are hidden when the active statement can't be safely
     // filtered (e.g. non-SELECT, multi-statement, a Mongo aggregate).
-    const fe = engine === 'mysql' || engine === 'clickhouse' || engine === 'mongodb' ? engine : null;
+    const fe =
+      engine === 'mysql' || engine === 'clickhouse' || engine === 'mongodb' || engine === 'postgres'
+        ? engine
+        : null;
     if (fe) {
       const base = statement ?? '';
       const setQ = buildFilteredQuery(fe, base, col, v, 'set');
@@ -776,12 +842,20 @@
   }
 
   /** `\`pk1\` = v1 AND \`pk2\` = v2` targeting one row by its primary key. */
+  /** Quote a SQL identifier for the active engine — double-quotes for Postgres
+   *  (backticks are invalid there), backticks for MySQL/ClickHouse. */
+  function qid(name: string): string {
+    return engine === 'postgres'
+      ? '"' + name.replace(/"/g, '""') + '"'
+      : '`' + name.replace(/`/g, '``') + '`';
+  }
+
   function whereByPk(rowIdx: number): string {
     if (!result) return '';
     return editPkCols
       .map((pk) => {
         const ci = result!.columns.findIndex((c) => c.name === pk);
-        return `\`${pk}\` = ${valueLiteral(liveRows[rowIdx][ci])}`;
+        return `${qid(pk)} = ${valueLiteral(liveRows[rowIdx][ci])}`;
       })
       .join(' AND ');
   }
@@ -806,13 +880,14 @@
   function valueLiteral(v: unknown): string {
     if (v === null || v === undefined) return 'NULL';
     if (typeof v === 'number' || typeof v === 'bigint') return String(v);
-    if (typeof v === 'boolean') return v ? '1' : '0';
+    if (typeof v === 'boolean') return engine === 'postgres' ? (v ? 'TRUE' : 'FALSE') : v ? '1' : '0';
     if (isComplex(v)) return `'${compactJson(v).replace(/'/g, "''")}'`;
     return `'${String(v).replace(/'/g, "''")}'`;
   }
-  /** `\`db\`.\`table\`` (db optional). */
+  /** Qualified `db.table` (db optional), quoted for the active engine. */
   function tableRef(): string {
-    return editDb ? `\`${editDb}\`.\`${editTable}\`` : `\`${editTable}\``;
+    const t = qid(editTable ?? '');
+    return editDb ? `${qid(editDb)}.${t}` : t;
   }
 
   /** Build the UPDATE for the in-progress cell edit and open the review modal.
@@ -839,7 +914,7 @@
       return;
     }
     const asNumber = typeof prev === 'number';
-    const setExpr = `\`${colName}\` = ${sqlLiteral(value, asNumber)}`;
+    const setExpr = `${qid(colName)} = ${sqlLiteral(value, asNumber)}`;
     const where = whereByPk(rowIdx);
     const sql =
       engine === 'clickhouse'
@@ -870,7 +945,7 @@
     const vals: string[] = [];
     result.columns.forEach((c, i) => {
       if (omitPk && editPkCols.includes(c.name)) return; // single PK → regenerate
-      cols.push(`\`${c.name}\``);
+      cols.push(qid(c.name));
       vals.push(valueLiteral(liveRows[rowIdx][i]));
     });
     const sql = `INSERT INTO ${tableRef()} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
@@ -1017,7 +1092,7 @@
       const pk = editPkCols[0];
       const ci = result.columns.findIndex((c) => c.name === pk);
       const list = indices.map((i) => valueLiteral(liveRows[i][ci])).join(', ');
-      where = `\`${pk}\` IN (${list})`;
+      where = `${qid(pk)} IN (${list})`;
     } else {
       // Composite key: OR a per-row AND of every key column.
       where = indices.map((i) => `(${whereByPk(i)})`).join(' OR ');
@@ -1058,7 +1133,7 @@
     if (!editable || !editTable) return;
     const idxs = selectedIndices();
     if (idxs.length === 0) return;
-    const cols = result!.columns.map((c) => `\`${c.name}\``).join(', ');
+    const cols = result!.columns.map((c) => qid(c.name)).join(', ');
     const lines = idxs.map((i) => {
       const vals = result!.columns.map((_, ci) => valueLiteral(liveRows[i][ci])).join(', ');
       return `INSERT INTO ${tableRef()} (${cols}) VALUES (${vals});`;
@@ -1081,7 +1156,7 @@
       const pk = editPkCols[0];
       const ci = result!.columns.findIndex((c) => c.name === pk);
       const list = idxs.map((i) => valueLiteral(liveRows[i][ci])).join(', ');
-      where = `\`${pk}\` IN (${list})`;
+      where = `${qid(pk)} IN (${list})`;
     } else {
       where = idxs.map((i) => `(${whereByPk(i)})`).join(' OR ');
     }
@@ -1344,6 +1419,17 @@
     database.openAssist('investigate', lines.join('\n\n'));
   }
 
+  // "Ask AI to fix" (from the error panel): open the DB Assistant in investigate
+  // mode seeded with the failed statement + the engine error, so the agent can
+  // diagnose and propose a corrected query. Same path as examineWithAi.
+  function askAiToFix(): void {
+    const parts: string[] = [];
+    if (statement) parts.push(`Statement:\n${statement}`);
+    if (error) parts.push(`Error:\n${error}`);
+    parts.push('Explain what is wrong and propose a corrected query.');
+    database.openAssist('investigate', parts.join('\n\n'));
+  }
+
   // Autofocus + select the inline editor input on open. Svelte actions can't be
   // async, so defer the focus/select to a microtask after mount.
   function focusEditor(node: HTMLInputElement): void {
@@ -1354,26 +1440,73 @@
   }
 </script>
 
-{#if error}
-  <div class="grid-error mono">
-    <Icon name="x" size={14} />
-    <span>{error}</span>
+{#snippet runningCard()}
+  <!-- Inline running card for the no-result branches (a fresh tab's first query
+       has no stale grid to dim — same selectors as the absolute overlay). -->
+  <div class="rg-overlay rg-inline" role="status" aria-live="polite">
+    <div class="rg-overlay-card">
+      <span class="rg-spin"><Icon name="refresh" size={16} /></span>
+      <span class="rg-overlay-text">Running… {elapsed}s</span>
+      <button class="rg-cancel" onclick={() => database.abortQuery()} title="Cancel the running query">
+        <Icon name="x" size={11} />Cancel
+      </button>
+    </div>
   </div>
-{:else if !result}
+{/snippet}
+
+{#if !mini && resultSets.length > 1}
+  <!-- Multi-statement batch: a segmented switcher over the result sets. Errored
+       statements (execution stopped there) get a red dot; the tooltip previews
+       the statement that produced each set. Sits above the active view. -->
+  <div class="rg-switch" role="tablist" aria-label="Result sets">
+    {#each resultSets as rs, i (i)}
+      <button
+        class="rg-seg"
+        class:on={resultIdx === i}
+        class:err={rs.errored}
+        role="tab"
+        aria-selected={resultIdx === i}
+        title={rs.statement ?? `Result ${i + 1}`}
+        onclick={() => (resultIdx = i)}
+      >
+        {#if rs.errored}<span class="rg-seg-dot" aria-hidden="true"></span>{/if}
+        Result {i + 1}
+      </button>
+    {/each}
+  </div>
+{/if}
+{#if error}
+  {#if mini}
+    <div class="grid-error mono">
+      <Icon name="x" size={14} />
+      <span>{error}</span>
+    </div>
+  {:else}
+    <ErrorPanel {error} {engine} statement={statement ?? ''} onAskAi={askAiToFix} />
+  {/if}
+{:else if !resultProp}
   {#if !mini}
+    {#if running}
+      <div class="grid-empty">{@render runningCard()}</div>
+    {:else}
+      <div class="grid-empty">
+        <Icon name="grid" size={mini ? 16 : 22} />
+        <span>Run a query to see results.</span>
+      </div>
+    {/if}
+  {/if}
+{:else if !result || result.columns.length === 0}
+  {#if running && !mini}
+    <div class="grid-empty">{@render runningCard()}</div>
+  {:else}
     <div class="grid-empty">
-      <Icon name="grid" size={mini ? 16 : 22} />
-      <span>Run a query to see results.</span>
+      <Icon name="check" size={mini ? 16 : 22} />
+      <span>
+        {result?.message ??
+          (result?.rows_affected != null ? `${result.rows_affected} row(s) affected` : 'Statement OK')}
+      </span>
     </div>
   {/if}
-{:else if result.columns.length === 0}
-  <div class="grid-empty">
-    <Icon name="check" size={mini ? 16 : 22} />
-    <span>
-      {result.message ??
-        (result.rows_affected != null ? `${result.rows_affected} row(s) affected` : 'Statement OK')}
-    </span>
-  </div>
 {:else}
   <div class="grid-wrap" class:mini>
     {#if result.message && !mini}
@@ -1439,11 +1572,11 @@
             title="Export ALL rows — streams the full (uncapped) result to a file on the daemon host, in a selectable format, with live progress"
           ><Icon name="arrowDown" size={11} />Export all rows…</button>
         {/if}
-        {#if connectionId && database.capabilities?.sql}
+        {#if connectionId && (database.capabilities?.sql || database.capabilities?.engine === 'mongodb')}
           <button
             class="tb-btn"
             onclick={() => database.openImportDialog()}
-            title="Import a local file (CSV/TSV/NDJSON/JSON) into a table — batched INSERTs through the same write guard"
+            title="Import a local file (CSV/TSV/NDJSON/JSON) into a table or collection — batched writes through the same write guard"
           ><Icon name="arrowDown" size={11} />Import file…</button>
         {/if}
       </div>
@@ -1717,6 +1850,15 @@
             >capped at {result.stats.row_count.toLocaleString()}</span
           >
         {/if}
+        {#if showPager}
+          <span class="dot">·</span>
+          <span class="pager">
+            <button class="pg-btn" disabled={offset <= 0} onclick={() => database.runPage(-1)} title="Previous page" aria-label="Previous page">‹ Prev</button>
+            <span class="pg-range mono">rows {pageFrom.toLocaleString()}–{pageTo.toLocaleString()}</span>
+            <button class="pg-btn" disabled={!hasNextPage} onclick={() => database.runPage(1)} title="Next page" aria-label="Next page">Next ›</button>
+            {#if !hasOrderBy}<span class="pg-unordered" title="Without an ORDER BY, row order can shift between pages">unordered</span>{/if}
+          </span>
+        {/if}
         {#if !editable && statement}
           <span class="grow"></span>
           <span class="edit-note" title={editReason ?? undefined}
@@ -1726,6 +1868,19 @@
           <span class="grow"></span>
           <span class="msg">{result.message}</span>
         {/if}
+      </div>
+    {/if}
+    {#if running && !mini}
+      <!-- Running overlay: dims the stale grid while the active tab's query is in
+           flight, with an elapsed counter + inline Cancel (client + engine stop). -->
+      <div class="rg-overlay" role="status" aria-live="polite">
+        <div class="rg-overlay-card">
+          <span class="rg-spin"><Icon name="refresh" size={16} /></span>
+          <span class="rg-overlay-text">Running… {elapsed}s</span>
+          <button class="rg-cancel" onclick={() => database.abortQuery()} title="Cancel the running query">
+            <Icon name="x" size={11} />Cancel
+          </button>
+        </div>
       </div>
     {/if}
   </div>
@@ -1895,7 +2050,147 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    min-width: 0;
     height: 100%;
+    /* Anchors the running overlay. */
+    position: relative;
+  }
+  /* ── Multi-result switcher ── */
+  .rg-switch {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-wrap: wrap;
+    padding: 2px 2px 8px;
+    flex-shrink: 0;
+  }
+  .rg-seg {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: 11.5px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .rg-seg:hover {
+    color: var(--text);
+  }
+  .rg-seg.on {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  .rg-seg.err {
+    border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
+  }
+  .rg-seg-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-exited);
+    flex-shrink: 0;
+  }
+  /* ── Running overlay ── */
+  .rg-overlay {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--bg) 55%, transparent);
+    backdrop-filter: blur(1px);
+    z-index: 5;
+  }
+  /* Inline variant for the no-result branches — same card, no dimmer. */
+  .rg-overlay.rg-inline {
+    position: static;
+    inset: auto;
+    background: none;
+    backdrop-filter: none;
+  }
+  .rg-overlay-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .rg-spin {
+    display: grid;
+    place-items: center;
+    color: var(--accent);
+    animation: rg-spin 0.9s linear infinite;
+  }
+  @keyframes rg-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .rg-overlay-text {
+    font-variant-numeric: tabular-nums;
+  }
+  .rg-cancel {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid color-mix(in srgb, var(--status-exited) 55%, transparent);
+    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
+    color: var(--status-exited);
+    border-radius: var(--radius-s);
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 3px 9px;
+    cursor: pointer;
+  }
+  .rg-cancel:hover {
+    background: color-mix(in srgb, var(--status-exited) 24%, transparent);
+  }
+  /* ── Footer pager ── */
+  .pager {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .pg-btn {
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    border-radius: var(--radius-s);
+    font-size: 11px;
+    padding: 1px 8px;
+    cursor: pointer;
+  }
+  .pg-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .pg-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .pg-range {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .pg-unordered {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--status-warn);
+    background: var(--status-warn-soft);
+    border-radius: 999px;
+    padding: 1px 6px;
   }
   .grid-empty,
   .grid-error {

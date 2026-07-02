@@ -177,7 +177,7 @@
     </div>
 
     <label class="imp-row">
-      <span class="imp-label">Table</span>
+      <span class="imp-label">{database.capabilities?.engine === 'mongodb' ? 'Collection' : 'Table'}</span>
       <input
         class="imp-input mono"
         bind:value={table}

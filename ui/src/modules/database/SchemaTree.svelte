@@ -194,6 +194,13 @@
         icon: 'send',
         action: () => void database.sendFindToEditor(node),
       });
+      // Import a local file into this collection (insertMany batches through the
+      // same guarded write path), prefilling its name — parity with SQL tables.
+      items.push({
+        label: 'Import into…',
+        icon: 'arrowDown',
+        action: () => database.openImportDialog(node),
+      });
       items.push({ separator: true });
     }
 
@@ -293,7 +300,7 @@
     class:selected
     class:active-db={(node.kind === 'database' && node.label === database.activeDb) ||
       (node.kind === 'keyspace' && node.id === database.activeDb)}
-    style="padding-left: {depth * 13 + 4}px"
+    style="padding-inline-start: {depth * 13 + 4}px"
     oncontextmenu={(e) => showMenu(e, node)}
   >
     {#if node.has_children}
@@ -326,7 +333,7 @@
       {#each children as child (child.id)}
         {@render treeNode(child, depth + 1)}
       {:else}
-        <div class="node-empty" style="padding-left: {(depth + 1) * 13 + 18}px">empty</div>
+        <div class="node-empty" style="padding-inline-start: {(depth + 1) * 13 + 18}px">empty</div>
       {/each}
     {/if}
   {/if}

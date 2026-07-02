@@ -286,6 +286,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
             || p.ends_with("/db/schema/children")
             || p.ends_with("/db/object")
             || p.ends_with("/db/schema-graph")
+            || p.ends_with("/db/query-plan") // EXPLAIN-wrapped, never executes the raw statement
             || p.ends_with("/db/test"); // connectivity probe — non-mutating
         return Require(Database, if read { View } else { Edit });
     }
@@ -915,6 +916,25 @@ mod tests {
             pol(Method::POST, "/api/v1/connections/{id}/db/query"),
             Require(Database, Edit),
             "running SQL is Edit"
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/connections/{id}/db/query-plan"),
+            Require(Database, View),
+            "query-plan is EXPLAIN-wrapped (read-only) → View"
+        );
+        // Saved-query mutations (create/update/delete) are Edit; the list is View.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/db/saved-queries"),
+            Require(Database, View)
+        );
+        assert_eq!(
+            pol(Method::PATCH, "/api/v1/db/saved-queries/{qid}"),
+            Require(Database, Edit),
+            "renaming / updating a saved query is Edit"
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/db/saved-queries/{qid}"),
+            Require(Database, Edit)
         );
     }
 

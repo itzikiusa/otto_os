@@ -387,14 +387,17 @@ async fn test_connection<S: ConnectionsCtx>(
     if owner_private_enabled(&ctx).await {
         require_conn_owner_or_root(&user, &conn)?;
     }
-    // DB-kind connections can reuse the warm SSH tunnel cache via the driver
-    // path. SSH and Custom kinds have no driver backing and use the CLI path.
+    // DB-kind connections test via the sqlx/native driver (which also reuses the
+    // warm SSH tunnel cache) — NOT the interactive CLI, which may be absent on the
+    // host (e.g. `psql` isn't installed here). SSH and Custom kinds have no driver
+    // backing and use the CLI path.
     let is_db_kind = matches!(
         conn.kind,
         ConnectionKind::Mysql
             | ConnectionKind::Redis
             | ConnectionKind::Mongodb
             | ConnectionKind::Clickhouse
+            | ConnectionKind::Postgres
     );
     let mut resp = if is_db_kind {
         if let Some(tester) = ctx.db_tester() {

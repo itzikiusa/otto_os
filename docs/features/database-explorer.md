@@ -1,11 +1,13 @@
 # Database Explorer
 
 A TablePlus/Navicat-class database browser built into Otto. It connects to
-**MySQL, Redis, MongoDB, and ClickHouse** — over plaintext, TLS/SSL, or an SSH
-tunnel — and gives you a lazy schema tree, per-engine autocomplete, multiple
-query tabs, a virtualized results grid with approval-gated inline editing, a
-visual JOIN builder, a read-only relationship diagram (ERD), Superset-style
-ClickHouse dashboards/widgets, and an "examine this with an agent" hand-off.
+**MySQL, PostgreSQL, Redis, MongoDB, and ClickHouse** — over plaintext, TLS/SSL,
+or an SSH tunnel — and gives you a lazy schema tree, per-engine autocomplete,
+multiple query tabs (with true multi-statement batches, auto-pagination, and a
+structured query-plan panel), a virtualized results grid with approval-gated
+inline editing, a visual JOIN builder, a read-only relationship diagram (ERD),
+Superset-style ClickHouse dashboards/widgets, and an "examine this with an
+agent" hand-off.
 Every connection runs locally through the `ottod` daemon; **database credentials
 are stored in the macOS Keychain, never in the app's database or in the repo.**
 
@@ -21,8 +23,13 @@ are stored in the macOS Keychain, never in the app's database or in the repo.**
 
 The Database Explorer is its own top-level page in Otto. Its left sidebar is a
 **connection picker** (grouped into draggable sections) plus a **schema tree**
-and a **Schema / Saved / History** switch. The main area is a tab strip —
+and a **Schema / Saved / History** switch — **Saved** queries can be renamed,
+updated in place ("Save as new" forks), and searched; **History** has a search
+box and a **Load more** pager. The main area is a tab strip —
 **Query · Builder · Structure · Diagram · Dashboards** — over the active view.
+The workbench **restores itself on reload** (open connection tabs, the selected
+connection, and each connection's active view come back), and a connection tab
+shows a green **health dot** with server version + connect latency once ready.
 You can also dock a connection's full explorer *beside an agent* in the Agents
 split ("Open beside agents (split)" from a connection's right-click menu), so an
 agent and a live DB sit side by side.
@@ -38,9 +45,12 @@ query history, and persists saved queries / dashboards / widgets in SQLite.
 |---|---|
 | Engine orchestration (resolve profile + tunnel, dispatch, history) | `crates/otto-dbviewer/src/service.rs` |
 | Engine-agnostic driver contract | `crates/otto-dbviewer/src/driver.rs` |
-| Per-engine drivers | `crates/otto-dbviewer/src/drivers/{mysql,redis,mongodb,clickhouse}.rs` |
+| Per-engine drivers | `crates/otto-dbviewer/src/drivers/{mysql,postgres,redis,mongodb,clickhouse}.rs` |
 | Mongo query parsing + SQL→Mongo translation | `crates/otto-dbviewer/src/drivers/{mongo_parse,mongo_sql}.rs` |
-| Streaming local-file export sink + formats | `crates/otto-dbviewer/src/export.rs` |
+| String-aware statement splitter (multi-statement + write-guard) | `crates/otto-dbviewer/src/split.rs` |
+| Query-plan normalizer (per-engine EXPLAIN → `DbQueryPlan`) | `crates/otto-dbviewer/src/plan.rs` |
+| File import (batched INSERT / Mongo `insertMany`) | `crates/otto-dbviewer/src/import.rs` |
+| Streaming export writer + formats | `crates/otto-dbviewer/src/export.rs` |
 | REST routes | `crates/otto-dbviewer/src/http.rs` (+ `crates/otto-server/src/modules.rs` for examine-with-agent) |
 | Profile parsing (host/port/TLS/SSH/`secure`) | `crates/otto-dbviewer/src/config.rs` |
 | SSH tunnel (`-L` local forward / `-D` SOCKS5) | `crates/otto-ssh/src/lib.rs` |
@@ -53,28 +63,42 @@ query history, and persists saved queries / dashboards / widgets in SQLite.
 Values are the literal `Capabilities` each driver reports (drives which UI
 affordances appear) plus the introspection each driver actually performs.
 
-| Capability | MySQL | Redis | MongoDB | ClickHouse |
-|---|:--:|:--:|:--:|:--:|
-| `sql` (SQL editor + completion) | yes | no | no | yes |
-| `joins` (Builder + ERD edges enabled) | yes | no | no | yes |
-| `transactions` | yes | no | yes | no |
-| `multi_statement` | yes | yes | no | yes |
-| `default_port` | 3306 | 6379 | 27017 | 8123 |
-| `query_language` (editor mode) | `sql` | `redis` | `mongo` | `sql` |
-| Schema-tree levels (`schema_levels`) | Database → Table → Column | Database → Namespace → Key | Database → Collection → Field | Database → Table → Column |
-| Builder tab (visual JOIN) | yes | — | — | yes |
-| Diagram tab (ERD) | yes (FK edges) | — (no Diagram) | yes (cards, no edges) | yes (FK edges) |
-| Visual JOIN / FK relationships | yes | no | no | yes |
-| Inline editing (approval-gated) | yes (single-table SELECT w/ PK) | no | yes (single-collection find by `_id`) | yes (`ALTER … UPDATE`) |
-| Streaming export to file | yes (sqlx cursor) | no (buffered fallback) | yes (cursor) | yes (HTTP `FORMAT` splice) |
-| Engine-native query cancel | yes (`KILL QUERY`) | no-op | no-op | yes (`KILL QUERY`, HTTP transport) |
-| Automatic read `LIMIT` | yes (1000) | n/a (`SCAN` caps) | n/a (`.limit()`/cap) | yes (1000) |
+| Capability | MySQL | PostgreSQL | Redis | MongoDB | ClickHouse |
+|---|:--:|:--:|:--:|:--:|:--:|
+| `sql` (SQL editor + completion) | yes | yes | no | no | yes |
+| `joins` (Builder + ERD edges enabled) | yes | yes | no | no | yes |
+| `transactions` | no | no | no | no | no |
+| `multi_statement` | yes | yes | yes | yes | yes |
+| `cancel` (server-side per-query cancel) | yes | yes | no | no | yes |
+| `explain` (query-plan panel) | yes | yes | no | yes | yes |
+| `default_port` | 3306 | 5432 | 6379 | 27017 | 8123 |
+| `query_language` (editor mode) | `sql` | `sql` | `redis` | `mongo` | `sql` |
+| Schema-tree levels (`schema_levels`) | Database → Table → Column | Schema → Table → Column | Database → Namespace → Key | Database → Collection → Field | Database → Table → Column |
+| Builder tab (visual JOIN) | yes | yes | — | — | yes |
+| Diagram tab (ERD) | yes (FK edges) | yes (FK edges) | — (no Diagram) | yes (cards, no edges) | yes (FK edges) |
+| Visual JOIN / FK relationships | yes | yes | no | no | yes |
+| Inline editing (approval-gated) | yes (single-table SELECT w/ PK) | yes (single-table SELECT w/ PK) | no | yes (single-collection find by `_id`) | yes (`ALTER … UPDATE`) |
+| Streaming export to file | yes (sqlx cursor) | yes (sqlx cursor) | no (buffered, 100k cap) | yes (cursor) | yes (HTTP `FORMAT` splice) |
+| File import | yes (batched `INSERT`) | yes (batched `INSERT`) | no | yes (`insertMany`) | yes (batched `INSERT`) |
+| Query-plan source | `EXPLAIN FORMAT=JSON` | `EXPLAIN (FORMAT JSON)` | — (no plan) | `explain` (queryPlanner) | `EXPLAIN json=1` (+plain fallback) |
+| Triggers browse | yes (`SHOW CREATE TRIGGER`) | — | — | — | — |
+| Engine-native query cancel | yes (`KILL QUERY`) | yes (`pg_cancel_backend`) | no-op | no-op | yes (`KILL QUERY`, HTTP transport) |
+| Automatic read `LIMIT` | yes (1000) | yes (1000) | n/a (`SCAN` caps) | n/a (`.limit()`/cap) | yes (1000) |
+
+> **Honesty notes.** `transactions` is `false` for **every** engine: the explorer
+> acquires each query from a connection pool, so there is no pinned session to hold
+> a `BEGIN…COMMIT` open (the flag was `true` for MySQL/Mongo before with nothing
+> behind it). `multi_statement` is `true` for all five (Mongo already ran
+> `;`-separated scripts). `cancel` labels whether **Stop** hits the engine or is a
+> client-side drop; `explain` gates the **Explain** query-plan button (hidden for
+> Redis).
 
 > **Why the matrix matters for the UI.** The **Builder** and **Diagram** tabs are
 > gated on `joins`; Redis (no `db:`-rooted tree, no relationships) gets neither a
 > Diagram tab nor FK edges; Mongo gets a Diagram with collection cards but **no
 > edges** and a "no relationships" hint. The editor language mode and autocomplete
-> are driven by `query_language`.
+> are driven by `query_language`; the **Explain** button by `explain`; the **Stop**
+> tooltip by `cancel`.
 
 ---
 
@@ -83,7 +107,7 @@ affordances appear) plus the introspection each driver actually performs.
 DB connections are created and managed **from inside the Database Explorer**
 (they're intentionally hidden from the general Connections page). In the left
 sidebar's **Connections** section, use **New connection** (plus icon) — pick one
-of `mysql`, `redis`, `mongodb`, `clickhouse`. Group profiles with **New
+of `mysql`, `postgres`, `redis`, `mongodb`, `clickhouse`. Group profiles with **New
 section** (folder icon); sections nest into a tree and connections drag between
 them. The connection's section path (e.g. `PLATFORM / STG`) is shown on its tab
 so the target environment is unmistakable.
@@ -115,8 +139,14 @@ probe (`SELECT 1` / `PING`) and reports latency and the server version.
 ```
 
 - **`host` / `port` / `user` / `db`** — the endpoint. Port defaults per engine
-  (3306 / 6379 / 27017 / 8123) when omitted. (`db` may also be spelled
-  `database`.)
+  (3306 / 5432 / 6379 / 27017 / 8123) when omitted. (`db` may also be spelled
+  `database`.) A **PostgreSQL** connection targets one database and is browsed
+  **by schema**: its tree top level is that database's schemas (`public` first,
+  `pg_catalog`/`information_schema` hidden) and the active-database selector maps
+  to `SET search_path`. TLS maps `TlsMode` → `PgSslMode`; the tunnel is a plain
+  `-L` local forward (single endpoint, like MySQL); a session time zone applies
+  via `SET TIME ZONE` on connect. Importing a `jdbc:postgresql://` URL
+  (DataGrip/DBeaver) maps to this engine.
 - **MongoDB `conn_string`** — a full URI *wins* over host/port. `{secret}` in the
   URI is substituted with the Keychain password at resolve time; a `+srv` URI is
   fully supported (see SSH below).
@@ -194,9 +224,18 @@ fetched up front (`GET …/db/schema`); each node's children are fetched on expa
 (`POST …/db/schema/children`). A **Filter schema…** box narrows the listing. The
 tree shape is per engine:
 
-- **MySQL** — Databases → a **Tables** folder and a **Views** folder → individual
-  tables/views → columns (column listing is filterable by name). System schemas
-  (`mysql`, `information_schema`, `performance_schema`, `sys`) sort last.
+- **MySQL** — Databases → a **Tables** folder and a **Views** folder (always),
+  plus **Procedures** / **Functions** / **Triggers** folders when the database has
+  any (each with a count) → individual objects → columns (column listing is
+  filterable by name). A routine leaf's detail shows its parameters + `SHOW
+  CREATE` body; a **trigger** leaf's detail is `SHOW CREATE TRIGGER` plus
+  `{timing, event, table}`. System schemas (`mysql`, `information_schema`,
+  `performance_schema`, `sys`) sort last.
+- **PostgreSQL** — the connection's **schemas** (`public` first;
+  `pg_catalog`/`information_schema` hidden) → **Tables** / **Views** /
+  **Materialized Views** / **Functions** folders → objects → columns. Object
+  detail synthesizes DDL from the catalog (`pg_get_viewdef` / `pg_get_functiondef`
+  / a composed `CREATE TABLE`) with PK / FK / index markers.
 - **ClickHouse** — Databases → tables/views (each tagged with its engine; views
   detected) → columns. System schemas (`system`, `INFORMATION_SCHEMA`) sort last.
 - **MongoDB** — Databases → collections → **sampled** top-level fields (inferred
@@ -300,11 +339,27 @@ snippet → "Query N").
 
 ### Running a query
 
-Press **Run** (the toolbar button) or **⌘↵ / Ctrl+Enter**. The toolbar also has:
+Press **Run** (the toolbar button) or **⌘↵ / Ctrl+Enter** — this runs the
+**selection** if there is one, else the **statement under the cursor**. To run
+the whole buffer as one **multi-statement batch**, use **Run all** (appears when
+the buffer holds >1 statement) or **⇧⌘↵**: the backend splits the script with a
+string/comment-aware splitter and returns **one result set per statement** — the
+grid shows a segmented **Result 1…N** switcher (tooltip = the statement; a red
+dot marks an errored entry). Execution stops at the first failure and the
+completed results are still returned. While a query is in flight the grid dims
+under a **running overlay** (elapsed seconds + Cancel); **Esc** cancels. When a
+bare SELECT was auto-limited, the footer grows a **pager**
+(`‹ Prev · rows a–b · Next ›`) that re-runs server-side with `OFFSET`/`skip`
+(with an "unordered" hint when the statement has no `ORDER BY`; an explicit
+user `LIMIT` disables it). The **⌨** toolbar popover lists every shortcut
+(⌘↵, ⇧⌘↵, ⌘S save, ⇧⌘F format, Esc cancel, ⌥⌘→/← switch query tabs, ⌥⌘T new
+tab, ⌥⌘W close tab). The toolbar also has:
 
 - **Save** — name and store the statement as a workspace **saved query** (visible
   in the sidebar's **Saved** switch; see §11).
-- **Explain** — runs the *real* query plan (`EXPLAIN` / Mongo `explain`).
+- **Explain** — opens the **query-plan panel** (§4c): a normalized EXPLAIN tree
+  with red badges on costly access patterns. Hidden for Redis (no plan surface);
+  falls back to the raw-`EXPLAIN`-into-the-grid path if a plan can't be normalized.
 - **Format** — beautify the statement. Engine-aware: SQL engines use sql-formatter,
   **Mongo** uses a structural JS/JSON re-indenter (`db.coll.op({…})` / pipelines —
   the SQL formatter can't parse it), Redis (one-line commands) is a no-op.
@@ -702,34 +757,47 @@ execution/cancel/export = `ws editor` (global connections: root):
 | `POST …/db/explain-with-agent` | spawn an agent to explain a schema/result |
 | `POST …/db/export` | uncapped result as a CSV/JSON browser download |
 | `POST …/db/export-to-path` | stream an uncapped result to a local file (selectable format) |
+| `POST …/db/query-plan` | normalized EXPLAIN tree (`DbQueryPlan`; MySQL/PG/CH/Mongo; Redis 400) |
+| `POST …/db/import` | file → table/collection (SQL batched `INSERT`s / Mongo `insertMany`) |
 
 **Saved queries / dashboards / widgets** — workspace-scoped lists under
 `/workspaces/{wid}/db/*`, item routes keyed by row id (reads `ws viewer`,
 mutations `ws editor`; by-id reads/mutations also require owner / ws-Admin /
 root): `…/db/saved-queries`, `…/db/dashboards`, `…/db/widgets`,
-`DELETE /db/saved-queries/{qid}`, `GET|PATCH|DELETE /db/dashboards/{id}`,
-`PATCH|DELETE /db/widgets/{id}`, and `POST /db/widgets/{id}/run`.
+`PATCH|DELETE /db/saved-queries/{qid}` (PATCH = rename / update-in-place),
+`GET|PATCH|DELETE /db/dashboards/{id}`, `PATCH|DELETE /db/widgets/{id}`, and
+`POST /db/widgets/{id}/run`.
 
 `RunQueryReq` notes: `query_id` (client-generated, enables cancel); `timeout_ms`
 (MySQL `MAX_EXECUTION_TIME` hint; others = context deadline); `mask` (server-side
 redaction); `confirm_write` (typed-confirmation acknowledgement for a guarded
-connection). `ExportToPathReq` = `{statement, node?, format?, local_path,
-max_rows?}` → `ExportToPathResp` = `{local_path, rows, bytes, duration_ms}`.
+connection); `offset` (server-side paging for auto-limited statements). A batch
+response puts the first statement's result at the top level with the rest in
+`more_results[]` (each with a `statement` preview and an `errored` flag);
+`auto_limited` carries the applied cap so the UI can page. `ExportToPathReq` =
+`{statement, node?, format?, local_path, max_rows?}` → `ExportToPathResp` =
+`{local_path, rows, bytes, duration_ms}`.
 
 ---
 
 ## 12. Capabilities & limitations
 
-- **Engines**: MySQL, Redis, MongoDB, ClickHouse. `ssh`/`custom` connection kinds
-  are **not** browsable data sources (an SSH connection is a terminal, not a DB).
+- **Engines**: MySQL, PostgreSQL, Redis, MongoDB, ClickHouse. `ssh`/`custom`
+  connection kinds are **not** browsable data sources (an SSH connection is a
+  terminal, not a DB).
 - **Builder & Diagram** require `joins` (SQL engines). Redis has no Diagram; Mongo's
   Diagram shows cards but no edges.
 - **Inline editing** needs an unambiguously addressable row (single-table SELECT
   with PK / single-collection find with `_id`); Redis is read-only in the grid.
-- **Cancellation** is engine-native only for MySQL and ClickHouse (HTTP
-  transport). Redis/Mongo cancel is a client-side drop.
-- **Streaming export** is native for MySQL/Mongo/ClickHouse-HTTP; Redis,
-  ClickHouse-native, and the ClickHouse JSON-*array* format buffer in RAM.
+- **Cancellation** is engine-native for MySQL, PostgreSQL (`pg_cancel_backend`),
+  and ClickHouse (HTTP transport). Redis/Mongo cancel is a client-side drop (the
+  `cancel` capability flag labels this in the UI).
+- **Transactions**: the `transactions` capability is `false` for every engine —
+  queries run on pooled connections, so there is no pinned session to hold a
+  `BEGIN…COMMIT` open across runs.
+- **Streaming export** is native for MySQL/PostgreSQL/Mongo/ClickHouse-HTTP;
+  Redis, ClickHouse-native, and the ClickHouse JSON-*array* format buffer in RAM
+  with a **100,000-row hard cap** (a clear error beyond, never an OOM).
 - **ClickHouse native transport** caveats: per-query database scoping and per-query
   cancellation are **not** wired on the native (9000/9440) transport — use the HTTP
   transport (8123/8443) for those.
@@ -740,11 +808,13 @@ max_rows?}` → `ExportToPathResp` = `{local_path, rows, bytes, duration_ms}`.
   are not translated.
 - **`approx_row_count`** (MySQL `information_schema.table_rows`) is an InnoDB
   estimate (can be wildly off) and is opt-in because it costs an extra query.
-- **File import** (§10b) targets **SQL engines only** in v1 (MySQL/ClickHouse);
-  Mongo `insertMany` and Redis import are follow-ups. The file is buffered before
-  parsing (fine for typical imports; the INSERT batching already bounds per-
-  statement size) — a streaming line-by-line parser for very large files is a
-  follow-up.
+- **File import** (§10b) covers the SQL engines (MySQL/ClickHouse/PostgreSQL —
+  batched `INSERT`s with engine-aware identifier quoting) **and MongoDB**
+  (`insertMany` batches; CSV/TSV cells are type-coerced). Redis import is not
+  supported. The result is a single terminal NDJSON line `{done, rows, batches}`
+  (only `export-to-path` streams progress ticks). The file is buffered before
+  parsing (fine for typical imports; the batching already bounds per-statement
+  size) — a streaming line-by-line parser for very large files is a follow-up.
 - **Ask in English (NL→SQL)** (§9) is **read-only by contract** and
   **unavailable for Redis** (no `EXPLAIN`/plan surface); it requires a drafter
   wired on the server (otherwise the panel says so).

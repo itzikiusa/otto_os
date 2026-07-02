@@ -288,28 +288,27 @@ fn row_object(columns: &[String], row: &[Value]) -> serde_json::Map<String, Valu
         .collect()
 }
 
-/// Open a buffered, byte-counting [`ExportSink`] on the file at `dest` (creating
-/// it / truncating an existing one). The 64 KiB `BufWriter` is what keeps the
-/// streaming exporters' per-row writes from hitting the disk one row at a time.
-pub fn open_sink(
-    dest: &std::path::Path,
-    format: ExportFormat,
-) -> std::io::Result<ExportSink<std::io::BufWriter<std::fs::File>>> {
+/// Open the destination file wrapped in the 64 KiB `BufWriter` that keeps the
+/// streaming exporters' per-row writes from hitting the disk one row at a time,
+/// boxed as the [`crate::driver::Driver::export_to_writer`] sink type. This lets
+/// `export_to_path` be a thin file-opening wrapper over the one streaming writer
+/// path (the HTTP `/db/export` handler passes a channel-backed writer instead).
+pub fn open_file_sink(dest: &std::path::Path) -> std::io::Result<Box<dyn Write + Send>> {
     let file = std::fs::File::create(dest)?;
-    let writer = std::io::BufWriter::with_capacity(64 * 1024, file);
-    Ok(ExportSink::new(writer, format))
+    Ok(Box::new(std::io::BufWriter::with_capacity(64 * 1024, file)))
 }
 
-/// Last-resort fallback writer for the trait-default `export_to_path`: take an
-/// already-materialised [`QueryResult`] and write it out through the sink. This
-/// is NOT streaming — the whole result is in memory by the time we're here — and
-/// only used by engines without a native row stream (or as a safety net).
-pub fn write_buffered_result(
-    dest: &std::path::Path,
+/// Last-resort fallback writer for the trait-default `export_to_writer`: take an
+/// already-materialised [`crate::types::QueryResult`] and write it through a sink
+/// over `w`. This is NOT streaming — the whole result is in memory by the time
+/// we're here — and only used by engines without a native row stream (Redis),
+/// bounded by the caller's row cap.
+pub fn write_buffered_result_to(
+    w: Box<dyn Write + Send>,
     format: ExportFormat,
     result: &crate::types::QueryResult,
 ) -> std::io::Result<ExportCounts> {
-    let mut sink = open_sink(dest, format)?;
+    let mut sink = ExportSink::new(w, format);
     sink.write_header(&result.columns)?;
     for row in &result.rows {
         sink.write_row(row)?;

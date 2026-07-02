@@ -173,26 +173,18 @@ async function noHorizontalOverflow(page: Page): Promise<void> {
   // orientation (phone + tablet + desktop) for ClickHouse.
   expect(docScrollW, 'document horizontal scroll width vs viewport').toBeLessThanOrEqual(vw + 2);
 
-  // INFORMATIONAL: a stricter probe — nothing OUTSIDE a horizontal scroll
-  // container should extend past the viewport. On a PHONE this holds. On a
-  // TABLET (641–~900px) the QueryEditor's `.qe-toolbar` overflows: its
-  // `flex-wrap: wrap` lives only in the phone `@media (max-width: 640px)` block,
-  // so at tablet width the dense controls (Limit / Timeout / Mask) get pushed
-  // off the narrow main pane (overflow:visible, nowrap) and are cut off past the
-  // right edge. The document still doesn't scroll (asserted above), but those
-  // controls are unreachable. This is a SHARED-COMPONENT bug
-  // (ui/src/modules/database/QueryEditor.svelte) this sweep may not edit, so it's
-  // logged + escalated rather than failed — the ClickHouse behavior itself is
-  // correct. On phone the strict check is enforced as a real assertion.
-  const phone = await isPhoneLayout(page);
-  if (phone) {
-    expect(widest, 'phone: widest non-scrolling element vs viewport').toBeLessThanOrEqual(vw + 2);
-  } else if (widest > vw + 2) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[escalation] tablet toolbar overflow: widest non-scrolling element ${widest}px > viewport ${vw}px; offenders: ${offenders.join(', ')}`,
-    );
-  }
+  // STRICT CHECK: nothing OUTSIDE a horizontal scroll container may extend past
+  // the viewport, in EVERY layout (phone + tablet + desktop). The tablet layout
+  // (a persistent Navigator + the side-by-side connection sidebar squeezing the
+  // main pane) used to overflow here; the shared DB toolbars now wrap ≤1024px,
+  // min-width:0 runs down the flex chain, and the sidebar is capped at 45vw, so
+  // this now holds. Hard-asserted for ClickHouse — the same no-overflow invariant
+  // the Mongo sweep enforces.
+  expect(
+    widest,
+    `no element outside a horizontal scroller should exceed the viewport — ` +
+      `widest=${widest}px vs vw=${vw}px; offenders: ${offenders.join(', ') || 'none'}`,
+  ).toBeLessThanOrEqual(vw + 2);
 }
 
 test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => {

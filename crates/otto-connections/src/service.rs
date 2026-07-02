@@ -489,7 +489,10 @@ fn probe_spec(kind: ConnectionKind, mut spec: CommandSpec) -> (CommandSpec, Opti
             spec.args = args;
             (spec, None)
         }
-        ConnectionKind::Mysql | ConnectionKind::Clickhouse => (spec, Some(b"SELECT 1;\n")),
+        ConnectionKind::Mysql | ConnectionKind::Clickhouse | ConnectionKind::Postgres => {
+            // psql / mysql / clickhouse-client all read the probe from stdin and exit.
+            (spec, Some(b"SELECT 1;\n"))
+        }
         ConnectionKind::Redis => (spec, Some(b"PING\n")),
         ConnectionKind::Mongodb => {
             spec.args.push("--quiet".into());

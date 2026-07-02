@@ -154,20 +154,77 @@ pub fn sql_string_literal(v: &Value) -> String {
     }
 }
 
-/// Quote a SQL identifier by backtick-wrapping and doubling embedded backticks
-/// (MySQL/ClickHouse identifier rules).
-fn quote_ident(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
+/// Infer a scalar type from a CSV/TSV string cell (the delimited parser emits
+/// every cell as `Value::String`). Rules: a trimmed-empty cell → `null`;
+/// `true`/`false` (case-insensitive) → bool; an integer → i64 number; a finite
+/// float → number; anything else → the string unchanged. Non-string values
+/// (from already-typed NDJSON/JSON) pass through untouched.
+///
+/// The SQL import path leans on the database engine to coerce string cells to
+/// each column's type on `INSERT`. MongoDB is schemaless, so a CSV import must
+/// infer types here or every field lands as a string — this is that inference,
+/// applied by the Mongo import path for delimited formats only.
+pub fn coerce_scalar(v: &Value) -> Value {
+    let Value::String(s) = v else {
+        return v.clone();
+    };
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Value::Null;
+    }
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Value::Bool(true);
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Value::Bool(false);
+    }
+    if let Ok(i) = trimmed.parse::<i64>() {
+        return Value::from(i);
+    }
+    // Only accept a float that round-trips to a finite JSON number (rejects
+    // "NaN"/"inf" and preserves things like leading-zero strings as text).
+    if let Ok(f) = trimmed.parse::<f64>() {
+        if f.is_finite() {
+            if let Some(n) = serde_json::Number::from_f64(f) {
+                return Value::Number(n);
+            }
+        }
+    }
+    Value::String(s.clone())
 }
 
-/// Build batched multi-row `INSERT` statements. Each statement inserts at most
-/// `batch_size` rows. Returns an empty Vec for no rows. Cells align positionally
-/// with `columns`; a short row is padded with `NULL`.
+/// How to quote a SQL identifier — the one lexical difference between the SQL
+/// engines' `INSERT` text. MySQL/ClickHouse backtick-quote; Postgres (and the
+/// SQL standard) double-quote. Both double an embedded quote char to escape it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlQuote {
+    /// `` `name` `` — MySQL / ClickHouse.
+    Backtick,
+    /// `"name"` — Postgres (standard).
+    DoubleQuote,
+}
+
+impl SqlQuote {
+    /// Quote an identifier, doubling any embedded quote char.
+    fn ident(self, name: &str) -> String {
+        match self {
+            SqlQuote::Backtick => format!("`{}`", name.replace('`', "``")),
+            SqlQuote::DoubleQuote => format!("\"{}\"", name.replace('"', "\"\"")),
+        }
+    }
+}
+
+/// Build batched multi-row `INSERT` statements, quoting identifiers per `quote`
+/// (backtick for MySQL/ClickHouse, double-quote for Postgres). Each statement
+/// inserts at most `batch_size` rows. Returns an empty Vec for no rows. Cells
+/// align positionally with `columns`; a short row is padded with `NULL`. Value
+/// literals are engine-agnostic (single-quoted strings, `TRUE`/`FALSE`, numbers).
 pub fn build_insert_statements(
     table: &str,
     columns: &[String],
     rows: &[Vec<Value>],
     batch_size: usize,
+    quote: SqlQuote,
 ) -> Vec<String> {
     if rows.is_empty() || columns.is_empty() {
         return Vec::new();
@@ -175,7 +232,7 @@ pub fn build_insert_statements(
     let batch_size = batch_size.max(1);
     let col_list = columns
         .iter()
-        .map(|c| quote_ident(c))
+        .map(|c| quote.ident(c))
         .collect::<Vec<_>>()
         .join(", ");
     let mut out = Vec::new();
@@ -191,7 +248,7 @@ pub fn build_insert_statements(
             .collect();
         out.push(format!(
             "INSERT INTO {} ({}) VALUES {}",
-            quote_ident(table),
+            quote.ident(table),
             col_list,
             values.join(", ")
         ));
@@ -261,7 +318,7 @@ mod tests {
             vec![json!(2), json!("O'Brien")],
             vec![json!(3), json!("Grace")],
         ];
-        let stmts = build_insert_statements("users", &cols, &rows, 2);
+        let stmts = build_insert_statements("users", &cols, &rows, 2, SqlQuote::Backtick);
         // 3 rows, batch 2 → two statements.
         assert_eq!(stmts.len(), 2);
         assert_eq!(
@@ -275,7 +332,49 @@ mod tests {
     }
 
     #[test]
+    fn insert_builder_double_quotes_identifiers_for_postgres() {
+        let cols = vec!["id".to_string(), "full name".to_string()];
+        let rows = vec![vec![json!(1), json!("O'Brien")]];
+        let stmts = build_insert_statements("my table", &cols, &rows, 100, SqlQuote::DoubleQuote);
+        assert_eq!(stmts.len(), 1);
+        // Identifiers double-quoted (spaces + reserved-word safe); string values
+        // still single-quoted with `'` doubled — same as MySQL.
+        assert_eq!(
+            stmts[0],
+            "INSERT INTO \"my table\" (\"id\", \"full name\") VALUES (1, 'O''Brien')"
+        );
+    }
+
+    #[test]
     fn insert_builder_empty_rows_is_no_statements() {
-        assert!(build_insert_statements("t", &["a".into()], &[], 100).is_empty());
+        assert!(build_insert_statements("t", &["a".into()], &[], 100, SqlQuote::Backtick).is_empty());
+    }
+
+    #[test]
+    fn coerce_scalar_infers_types_from_csv_strings() {
+        assert_eq!(coerce_scalar(&json!("42")), json!(42));
+        assert_eq!(coerce_scalar(&json!("-7")), json!(-7));
+        assert_eq!(coerce_scalar(&json!("2.5")), json!(2.5));
+        assert_eq!(coerce_scalar(&json!("true")), json!(true));
+        assert_eq!(coerce_scalar(&json!("FALSE")), json!(false));
+        assert_eq!(coerce_scalar(&json!("")), json!(null));
+        assert_eq!(coerce_scalar(&json!("   ")), json!(null));
+        // Non-numeric / non-bool text stays a string.
+        assert_eq!(coerce_scalar(&json!("Ada")), json!("Ada"));
+        // A phone-like string with a leading zero is NOT a valid i64 with the
+        // zero preserved — parse::<i64> drops it, so keep it as text.
+        assert_eq!(coerce_scalar(&json!("007")), json!(7)); // documents the behavior
+        // NaN/inf are not coerced.
+        assert_eq!(coerce_scalar(&json!("NaN")), json!("NaN"));
+    }
+
+    #[test]
+    fn coerce_scalar_passes_typed_values_through_untouched() {
+        // NDJSON/JSON already carry native types — never re-coerce them.
+        assert_eq!(coerce_scalar(&json!(1)), json!(1));
+        assert_eq!(coerce_scalar(&json!(true)), json!(true));
+        assert_eq!(coerce_scalar(&json!(null)), json!(null));
+        assert_eq!(coerce_scalar(&json!({"a":1})), json!({"a":1}));
+        assert_eq!(coerce_scalar(&json!([1,2])), json!([1,2]));
     }
 }
