@@ -2352,8 +2352,14 @@ async fn execute_node(
                     "🔍 *{iter_label}* started (pass ≥ {threshold}){lens_txt}{prov_txt}{chk_txt}"
                 ));
             }
-            let review_id =
-                crate::modules::run_review_for_branch(ctx, &repo_id, &worktree, &base, cfg_override).await?;
+            let (review_id, resolved_base) = crate::modules::run_review_for_branch(
+                ctx, &repo_id, &worktree, Some(base.as_str()), cfg_override,
+            )
+            .await?;
+            // Publish the RESOLVED branch from here on — the loop harvest, the
+            // repos registry and a downstream git_pr must target what was
+            // actually reviewed, not the pre-resolution wish.
+            let base = resolved_base.branch.clone();
             let mut logs = vec![format!("review_run: started review {review_id} ({worktree} vs {base})")];
             let mut status = "running".to_string();
             if await_done {
@@ -2762,7 +2768,7 @@ async fn execute_node(
                     }
                 };
                 let wt = if worktree.trim().is_empty() { repo.path.clone() } else { worktree.clone() };
-                let draft = match crate::modules::draft_pr_core(ctx, &wt, base).await {
+                let draft = match crate::modules::draft_pr_core(ctx, &wt, Some(base.as_str())).await {
                     Ok(d) => d,
                     Err(e) => {
                         notes.push(format!("{}: nothing to PR ({e})", repo.name));

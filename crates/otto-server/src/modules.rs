@@ -3134,7 +3134,9 @@ async fn draft_pr(
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
-    let resp = draft_pr_core(&ctx, &repo.path, &body.base)
+    // Empty base ⇒ detect the repo's default branch instead of erroring.
+    let want = Some(body.base.as_str()).filter(|s| !s.trim().is_empty());
+    let resp = draft_pr_core(&ctx, &repo.path, want)
         .await
         .map_err(crate::error::ApiError)?;
     Ok(Json(resp))
@@ -3144,15 +3146,19 @@ async fn draft_pr(
 /// Run with Otto engine: diff the checkout at `repo_path` against `base`, draft a
 /// title + description with the `pull-request` skill, and return them. The caller
 /// owns auth/HTTP concerns. `repo_path` may be a worktree (Run with Otto passes
-/// the run's `otto-run/<id>` worktree).
+/// the run's `otto-run/<id>` worktree). `base: None` (or a ref that doesn't
+/// exist here) falls back to the repo's detected default branch — never a
+/// fabricated `main`, so a master-/develop-based repo can't exit 128.
 pub(crate) async fn draft_pr_core(
     ctx: &ServerCtx,
     repo_path: &str,
-    base: &str,
+    base: Option<&str>,
 ) -> Result<otto_core::api::DraftPrResp> {
     let git = otto_git::LocalGit::new(repo_path);
     let source = git.current_branch().await?;
-    let diff = git.diff_text_against(base).await?;
+    let resolved = git.resolve_base(base).await?;
+    let base = resolved.branch.as_str();
+    let diff = git.diff_text_against(&resolved.diff_ref).await?;
     if diff.trim().is_empty() {
         return Err(Error::Invalid(format!(
             "no changes between '{source}' and '{base}'"
@@ -3229,21 +3235,26 @@ pub(crate) async fn draft_pr_core(
 }
 
 /// Launch an AI review on a specific branch/worktree (Run with Otto's `reviewing`
-/// stage). Diffs `worktree_path` against `base_commit`, creates a local-review row
-/// keyed to `repo_id`, and drives `run_review` in the background. Returns the
-/// `review_id`; the caller polls `reviews_store.get_review` for `Done`/`Error` and
-/// reads counts via [`review_findings_counts`].
+/// stage and the workflow `review_run` node). Resolves `base` (an explicit
+/// ref/SHA, or `None` ⇒ the repo's detected default branch — never a
+/// fabricated `main`), diffs `worktree_path` against it, creates a
+/// local-review row keyed to `repo_id`, and drives `run_review` in the
+/// background. Returns the `review_id` plus the base actually used, so
+/// callers publish the RESOLVED branch (a downstream PR must target what was
+/// really reviewed); the caller polls `reviews_store.get_review` for
+/// `Done`/`Error` and reads counts via [`review_findings_counts`].
 pub(crate) async fn run_review_for_branch(
     ctx: &ServerCtx,
     repo_id: &Id,
     worktree_path: &str,
-    base_commit: &str,
+    base: Option<&str>,
     cfg_override: Option<ReviewConfig>,
-) -> Result<Id> {
+) -> Result<(Id, otto_git::ResolvedBase)> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
     let git = otto_git::LocalGit::new(worktree_path);
-    let diff_text = git.diff_text_against(base_commit).await?;
+    let resolved = git.resolve_base(base).await?;
+    let diff_text = git.diff_text_against(&resolved.diff_ref).await?;
     let review = ctx
         .reviews_store
         .create_review(repo_id, LOCAL_REVIEW_PR_NUMBER)
@@ -3272,14 +3283,15 @@ pub(crate) async fn run_review_for_branch(
         let rid = review_id.clone();
         let wt = worktree_path.to_string();
         let repo_id_bg = repo_id.clone();
-        // The worktree already holds the branch's real code; name it for the
-        // reviewers (dest left empty — base is a bare commit here).
+        // The worktree already holds the branch's real code; name both sides
+        // for the reviewers. A SHA base shows as itself — still meaningful.
+        let dest = resolved.branch.clone();
         let branches = git
             .current_branch()
             .await
             .ok()
             .filter(|c| !c.is_empty())
-            .map(|source| ReviewBranches { source, dest: String::new() });
+            .map(|source| ReviewBranches { source, dest });
         tokio::spawn(async move {
             run_review(
                 ctx_bg, rid, wt, diff_text, None, None, workspace, repo_id_bg, 0, branches,
@@ -3288,7 +3300,7 @@ pub(crate) async fn run_review_for_branch(
             .await;
         });
     }
-    Ok(review_id)
+    Ok((review_id, resolved))
 }
 
 /// Tolerantly extract a commit message from an agent reply. The agent is asked
@@ -3908,7 +3920,13 @@ async fn start_local_review(
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
     let git = otto_git::LocalGit::new(&repo.path);
-    let diff_text = match git.diff_text_against(&body.base).await {
+    // Resolve the user-picked base first: a ref that doesn't exist locally
+    // (or an empty one) falls back to `origin/<base>` / the default branch,
+    // and a truly unresolvable base reports the candidates tried instead of a
+    // raw "git exited 128".
+    let want = Some(body.base.as_str()).filter(|s| !s.trim().is_empty());
+    let resolved = git.resolve_base(want).await.map_err(crate::error::ApiError)?;
+    let diff_text = match git.diff_text_against(&resolved.diff_ref).await {
         Ok(d) => d,
         Err(e) => {
             return Err(crate::error::ApiError(Error::Invalid(format!(
