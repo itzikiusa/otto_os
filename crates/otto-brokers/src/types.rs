@@ -219,39 +219,6 @@ pub struct TestClusterResp {
 }
 
 // ---------------------------------------------------------------------------
-// Cluster sections (sidebar grouping)
-// ---------------------------------------------------------------------------
-
-/// A user-defined section (folder) that groups cluster profiles in the sidebar.
-/// Nests into a tree via `parent_id` (None = top-level).
-#[derive(Debug, Clone, Serialize)]
-pub struct BrokerClusterSection {
-    pub id: Id,
-    pub workspace_id: Id,
-    pub parent_id: Option<Id>,
-    pub name: String,
-    pub position: i64,
-    pub created_by: Id,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Create (`parent_id` nests; absent = top-level) or rename (rename ignores
-/// `parent_id`) a section.
-#[derive(Debug, Clone, Deserialize)]
-pub struct UpsertSectionReq {
-    pub name: String,
-    #[serde(default)]
-    pub parent_id: Option<Id>,
-}
-
-/// Reparent a section (None = top-level).
-#[derive(Debug, Clone, Deserialize)]
-pub struct MoveSectionReq {
-    #[serde(default)]
-    pub parent_id: Option<Id>,
-}
-
-// ---------------------------------------------------------------------------
 // Cluster overview
 // ---------------------------------------------------------------------------
 

@@ -1883,13 +1883,8 @@ responses. The Schema Registry + metrics endpoints ride the same SOCKS tunnel. O
 | GET /brokers/clusters/{id}/groups/{group} | ws viewer | — | `GroupDetail` (members + per-partition lag) |
 | POST /brokers/clusters/{id}/groups/{group}/reset | ws editor | `GroupResetReq` | `GroupDetail` (updated detail after reset; 403 if guarded + `confirm≠true`) |
 | GET /brokers/clusters/{id}/schema-registry/subjects | ws viewer | — | `SchemaSubject[]` (400 if no registry configured) |
-| GET /workspaces/{wid}/brokers/cluster-sections | ws viewer | — | `BrokerClusterSection[]` (sidebar grouping tree) |
-| POST /workspaces/{wid}/brokers/cluster-sections | ws editor | `UpsertSectionReq` (`{name, parent_id?}`) | `BrokerClusterSection` (201) |
-| PATCH /brokers/cluster-sections/{id} | ws editor | `UpsertSectionReq` (rename) | `BrokerClusterSection` |
-| DELETE /brokers/cluster-sections/{id} | ws editor | — | 204 (descendant sections cascade; clusters fall back to ungrouped) |
-| POST /brokers/cluster-sections/{id}/move | ws editor | `MoveSectionReq` (`{parent_id?}`, null=top-level) | `BrokerClusterSection` |
 
-Clusters carry an optional `section_id` (sidebar folder; `null`=ungrouped, global clusters always ungrouped); on `UpsertClusterReq` it follows the same PATCH rule as `ssh` (absent=keep, `null`=ungroup, id=set).
+Clusters carry an optional `section_id` (sidebar folder; `null`=ungrouped, global clusters always ungrouped); on `UpsertClusterReq` it follows the same PATCH rule as `ssh` (absent=keep, `null`=ungroup, id=set). Since the unified Connections hub, `section_id` points into the SHARED `connection_sections` tree (`/workspaces/{id}/connection-sections`) — the old `/brokers/cluster-sections*` endpoints are gone (migration 0095 merged those rows in, ids preserved).
 
 Notes:
 - `ConsumeReq.start` is a tagged union: `{type:beginning}`, `{type:latest}` (last
