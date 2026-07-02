@@ -280,9 +280,10 @@ pub fn suggestions(inp: &SuggestInput) -> Vec<Suggestion> {
 
     // 9. Day-of-week clustering (needs ≥4 deploys).
     if inp.deploy_ts.len() >= 4 {
+        // Epoch day 0 = Thursday 1970-01-01 → +3 makes index 0 = Monday.
         let mut byday = [0usize; 7];
         for &ts in &inp.deploy_ts {
-            byday[((ts / 86_400 + 4).rem_euclid(7)) as usize] += 1;
+            byday[((ts.div_euclid(86_400) + 3).rem_euclid(7)) as usize] += 1;
         }
         let (day, max) = byday
             .iter()
@@ -292,13 +293,13 @@ pub fn suggestions(inp: &SuggestInput) -> Vec<Suggestion> {
             .unwrap();
         if max * 2 > inp.deploy_ts.len() {
             const DAYS: [&str; 7] = [
+                "Monday",
+                "Tuesday",
+                "Wednesday",
                 "Thursday",
                 "Friday",
                 "Saturday",
                 "Sunday",
-                "Monday",
-                "Tuesday",
-                "Wednesday",
             ];
             push(
                 "info",
@@ -509,14 +510,16 @@ mod tests {
 
     #[test]
     fn weekday_clustering_rule() {
-        // 4 deploys, 3 on the same weekday (Mondays: 345600 + k*604800).
+        // 4 deploys: 3 Mondays (345600 = Mon 1970-01-05, + k*604800) and one
+        // Tuesday (432000 = 1970-01-06). Majority day must be named Monday —
+        // pins the epoch-day-0-is-Thursday label mapping.
         let inp = SuggestInput {
-            deploy_ts: vec![345_600, 950_400, 1_555_200, 431_999],
+            deploy_ts: vec![345_600, 950_400, 1_555_200, 432_000],
             ..base()
         };
         let s = suggestions(&inp);
         assert!(
-            titles(&s).iter().any(|t| t.contains("day")),
+            s.iter().any(|x| x.title.contains("Monday")),
             "{:?}",
             titles(&s)
         );

@@ -443,6 +443,7 @@
 
       // ---- boot -----------------------------------------------------------
       window.addEventListener('message', async (ev) => {
+        if (ev.source !== window.parent) return; // only the hosting shell may init us
         const msg = ev.data;
         if (!msg || msg.type !== 'otto:init') return;
         API = msg.apiBase; TOKEN = msg.token || '';

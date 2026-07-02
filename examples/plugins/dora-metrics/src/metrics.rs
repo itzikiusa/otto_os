@@ -224,6 +224,11 @@ struct WindowStats {
 
 /// All window math over the closed interval `[from, to]`. `span_days` is the
 /// nominal window length used for the deploys/week rate.
+///
+/// Pairing (merge→deploy lead time, hotfix→failed deploy, recovery, batch
+/// size) is computed **per repo** — a merge in repo A must never pair with a
+/// deploy in repo B — then the samples are aggregated: rates over the totals,
+/// percentiles over the concatenated per-repo samples.
 fn window_stats(
     commits: &[Commit],
     from: i64,
@@ -231,14 +236,16 @@ fn window_stats(
     span_days: i64,
     cfg: &Config,
 ) -> WindowStats {
-    let mut deploys: Vec<Deploy> = vec![];
-    let mut merges: Vec<MergeRec> = vec![];
+    // Group in-window signals per repo (BTreeMap: deterministic iteration).
+    let mut by_repo: std::collections::BTreeMap<&str, (Vec<Deploy>, Vec<MergeRec>)> =
+        std::collections::BTreeMap::new();
     for c in commits {
         if c.ts < from || c.ts > to {
             continue;
         }
+        let slot = by_repo.entry(c.repo.as_str()).or_default();
         if let Some(tag) = deploy_tag(&c.refs, &cfg.deploy_tag_pattern) {
-            deploys.push(Deploy {
+            slot.0.push(Deploy {
                 ts: c.ts,
                 tag,
                 repo: c.repo.clone(),
@@ -247,7 +254,7 @@ fn window_stats(
         }
         if c.parents >= 2 {
             if let Some(kind) = classify(&c.subject, cfg) {
-                merges.push(MergeRec {
+                slot.1.push(MergeRec {
                     ts: c.ts,
                     kind,
                     subject: c.subject.clone(),
@@ -256,52 +263,63 @@ fn window_stats(
             }
         }
     }
-    deploys.sort_by_key(|d| d.ts);
-    merges.sort_by_key(|m| m.ts);
 
-    // Lead time: each merge pairs with the first subsequent deploy; merges
-    // with none are censored (counted, excluded from the median).
+    let mut deploys: Vec<Deploy> = vec![];
+    let mut merges: Vec<MergeRec> = vec![];
     let mut leads: Vec<(i64, f64)> = vec![];
     let mut unshipped = 0u32;
-    for m in &merges {
-        match deploys.iter().find(|d| d.ts >= m.ts) {
-            Some(d) => leads.push((d.ts, (d.ts - m.ts) as f64 / 3600.0)),
-            None => unshipped += 1,
-        }
-    }
-
-    // Failure + recovery: a deploy is failed iff a hotfix merge lands before
-    // the next deploy (or window end); recovery = time to that next deploy.
     let mut recoveries: Vec<(i64, f64)> = vec![];
     let mut unrecovered = 0u32;
-    for i in 0..deploys.len() {
-        let wend = deploys.get(i + 1).map(|d| d.ts).unwrap_or(to);
-        let failed = merges
-            .iter()
-            .any(|m| m.kind == "hotfix" && m.ts > deploys[i].ts && m.ts <= wend);
-        deploys[i].failed = failed;
-        if failed {
-            match deploys.get(i + 1) {
-                Some(next) => {
-                    recoveries.push((deploys[i].ts, (next.ts - deploys[i].ts) as f64 / 3600.0))
-                }
-                None => unrecovered += 1,
+    let mut batches: Vec<f64> = vec![];
+
+    for (_, (mut rdeploys, mut rmerges)) in by_repo {
+        rdeploys.sort_by_key(|d| d.ts);
+        rmerges.sort_by_key(|m| m.ts);
+
+        // Lead time: each merge pairs with the first subsequent deploy in the
+        // SAME repo; merges with none are censored (counted, excluded).
+        for m in &rmerges {
+            match rdeploys.iter().find(|d| d.ts >= m.ts) {
+                Some(d) => leads.push((d.ts, (d.ts - m.ts) as f64 / 3600.0)),
+                None => unshipped += 1,
             }
         }
-    }
 
-    // Batch size: merges landing between consecutive deploys.
-    let mut batches: Vec<f64> = vec![];
-    let mut prev = from - 1;
-    for d in &deploys {
-        batches.push(
-            merges
+        // Failure + recovery: a deploy is failed iff a hotfix merge (same
+        // repo) lands before the next deploy (or window end); recovery = time
+        // to that next deploy.
+        for i in 0..rdeploys.len() {
+            let wend = rdeploys.get(i + 1).map(|d| d.ts).unwrap_or(to);
+            let failed = rmerges
                 .iter()
-                .filter(|m| m.ts > prev && m.ts <= d.ts)
-                .count() as f64,
-        );
-        prev = d.ts;
+                .any(|m| m.kind == "hotfix" && m.ts > rdeploys[i].ts && m.ts <= wend);
+            rdeploys[i].failed = failed;
+            if failed {
+                match rdeploys.get(i + 1) {
+                    Some(next) => recoveries
+                        .push((rdeploys[i].ts, (next.ts - rdeploys[i].ts) as f64 / 3600.0)),
+                    None => unrecovered += 1,
+                }
+            }
+        }
+
+        // Batch size: merges landing between consecutive deploys (same repo).
+        let mut prev = from - 1;
+        for d in &rdeploys {
+            batches.push(
+                rmerges
+                    .iter()
+                    .filter(|m| m.ts > prev && m.ts <= d.ts)
+                    .count() as f64,
+            );
+            prev = d.ts;
+        }
+
+        deploys.append(&mut rdeploys);
+        merges.append(&mut rmerges);
     }
+    deploys.sort_by_key(|d| d.ts);
+    merges.sort_by_key(|m| m.ts);
     batches.sort_by(|a, b| a.total_cmp(b));
 
     let mut lead_hours: Vec<f64> = leads.iter().map(|l| l.1).collect();
@@ -725,6 +743,32 @@ mod tests {
             .map(|d| d["repo"].as_str().unwrap())
             .collect();
         assert!(repos.contains(&"repo-a") && repos.contains(&"repo-b"));
+    }
+
+    /// `repo=all` must never cross-pair signals from different repos: a merge
+    /// in repo-a pairs with no repo-b deploy, and repo-a's hotfix does not
+    /// mark repo-b's deploy failed.
+    #[test]
+    fn compute_all_repos_isolated_pairing() {
+        let commits = vec![
+            mk(NOW - 10 * D, "Merge branch 'feature/a'", 2, &[], "repo-a"),
+            mk(NOW - 5 * D, "vb", 1, &["tag: b-deployed"], "repo-b"),
+            mk(NOW - 4 * D, "Merge branch 'hotfix/a'", 2, &[], "repo-a"),
+        ];
+        let m = compute(&commits, 14, "All repos", NOW, &cfg());
+        // No repo-a deploy → both repo-a merges are censored, no lead sample.
+        assert!(m["lead_median_h"].is_null(), "cross-repo lead pairing: {m}");
+        assert_eq!(m["unshipped_merges"], 2);
+        // repo-a's hotfix must not fail repo-b's deploy.
+        approx(f(&m, "cfr"), 0.0);
+        let deps = m["deployments"].as_array().unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0]["failed"], false);
+        assert_eq!(m["unrecovered"], 0);
+        // Aggregates still count everything.
+        approx(f(&m, "df_per_week"), 0.5);
+        assert_eq!(m["counts"]["feature"], 1);
+        assert_eq!(m["counts"]["hotfix"], 1);
     }
 
     #[test]
