@@ -1,8 +1,8 @@
 //! Agent-assisted canvas drawing — FILE-BACKED.
 //!
 //! Each scene has a persistent source file the agent EDITS across the
-//! conversation (a `canvas.mermaid` by default, or `canvas.excalidraw.json`),
-//! kept in an Otto-owned per-scene directory. An "Ask AI" turn:
+//! conversation (a `canvas.mermaid` by default, or `canvas.excalidraw.json`,
+//! or `canvas.d2`), kept in an Otto-owned per-scene directory. An "Ask AI" turn:
 //!   1. materializes the scene's current source into that file,
 //!   2. runs ONE resumed agent turn whose prompt says "edit the file in place"
 //!      (so follow-ups REFINE the same diagram instead of regenerating it),
@@ -17,10 +17,10 @@
 //! instead of hand-computing coordinates for dozens of nodes. The UI renders the
 //! source into real, editable Excalidraw elements.
 //!
-//! The reply is a FALLBACK source: if the agent printed a ```mermaid /```json
-//! block instead of editing the file (or in the offline E2E stub, where no agent
-//! runs), we take the source from the reply and write it into the file so the
-//! next resumed turn sees it.
+//! The reply is a FALLBACK source: if the agent printed a ```d2 /```mermaid /
+//! ```json block instead of editing the file (or in the offline E2E stub, where
+//! no agent runs), we take the source from the reply and write it into the file
+//! so the next resumed turn sees it.
 //!
 //! Routes (registered in modules.rs, gated by `Feature::Canvas`):
 //!   POST /api/v1/canvas/scenes/{id}/assist   (ws editor) → AssistResult
@@ -67,8 +67,11 @@ pub struct AssistResult {
     pub excalidraw: Option<Value>,
     /// A mermaid diagram source (the default format — clean auto-layout).
     pub mermaid: Option<String>,
-    /// The scene's source format: `mermaid` | `excalidraw`. Lets the UI pick the
-    /// render path without sniffing.
+    /// A D2 diagram source (when the scene's format is `d2`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub d2: Option<String>,
+    /// The scene's source format: `mermaid` | `excalidraw` | `d2`. Lets the UI
+    /// pick the render path without sniffing.
     pub format: String,
     /// Freeform nodes, when the agent produced tier-2 JSON instead of mermaid.
     pub nodes: Vec<Value>,
@@ -231,7 +234,7 @@ pub async fn assist_preview(
 fn doc_format(doc: &Value) -> String {
     doc.get("format")
         .and_then(|f| f.as_str())
-        .filter(|f| *f == "mermaid" || *f == "excalidraw")
+        .filter(|f| *f == "mermaid" || *f == "excalidraw" || *f == "d2")
         .unwrap_or("mermaid")
         .to_string()
 }
@@ -252,6 +255,7 @@ fn base_source(format: &str) -> String {
             "{\n  \"type\": \"excalidraw\",\n  \"version\": 2,\n  \"source\": \"otto\",\n  \"elements\": []\n}\n"
                 .to_string()
         }
+        "d2" => "direction: right\n".to_string(),
         _ => "flowchart TD\n".to_string(),
     }
 }
@@ -260,6 +264,7 @@ fn base_source(format: &str) -> String {
 fn file_name(format: &str) -> &'static str {
     match format {
         "excalidraw" => "canvas.json",
+        "d2" => "canvas.d2",
         _ => "canvas.mermaid",
     }
 }
@@ -290,6 +295,7 @@ async fn resolve_source(
     }
     let from_reply = match format {
         "excalidraw" => parsed.excalidraw.as_ref().map(|v| v.to_string()),
+        "d2" => parsed.d2.clone(),
         _ => parsed.mermaid.clone(),
     };
     match from_reply {
@@ -310,6 +316,7 @@ fn result_for(format: &str, source: &str, note: String) -> AssistResult {
     };
     match format {
         "excalidraw" => r.excalidraw = serde_json::from_str(source).ok(),
+        "d2" => r.d2 = Some(source.to_string()),
         _ => r.mermaid = Some(source.to_string()),
     }
     r
@@ -389,6 +396,35 @@ fn build_assist_prompt(user_prompt: &str, format: &str, file: &str, current: &st
              Request: {user_prompt}\n"
         );
     }
+    if format == "d2" {
+        return format!(
+            "OTTO_TASK: canvas_assist\n\
+             You are drawing a diagram by EDITING the D2 file `{file}` in your working directory. \
+             Read it, make the requested change IN PLACE, and save it. Keep refining this SAME file \
+             across the conversation. The file must always hold ONE COMPLETE, valid D2 diagram (no \
+             ``` fences inside the file).\n\n\
+             D2 SYNTAX — the key shapes you'll need:\n\
+             - Containers (nesting): `server: {{ api; db }}` — a shape becomes a container the \
+             moment it has children; reference nested shapes with dotted paths (`server.api`).\n\
+             - Edges + labels: `a -> b: label`; chained edges: `a -> b -> c`.\n\
+             - Layout direction: `direction: right` (pipelines/architecture) or `direction: down` \
+             (default, hierarchies).\n\
+             - Shapes: `shape: sql_table` (schemas — with typed rows: `users: {{ shape: sql_table; \
+             id: int; email: string }}`), `shape: sequence_diagram` (message flows), `shape: cylinder` \
+             (data stores), `shape: queue` (message queues), `shape: person` (actors), plus \
+             `circle`/`diamond`/`hexagon`/`cloud`/`page`/`step` for everything else.\n\
+             - Classes (reusable styles): `classes: {{ critical: {{ style: {{ fill: \"#fee2e2\"; \
+             stroke: \"#dc2626\" }} }} }}` then apply with `db.class: critical`.\n\
+             - Inline styling: `style.fill`, `style.stroke`, `style.font-color` on any shape.\n\
+             - Icons (optional): `icon: https://icons.terrastruct.com/...` alongside a shape.\n\
+             - Layout hints: `near: top-right` pins a shape; `grid-rows`/`grid-columns` on a \
+             container lay its children in a grid.\n\n\
+             Be accurate but keep labels short. Valid D2 only.\n\n\
+             The file currently contains:\n{current}\n\n\
+             Reply with ONE short sentence describing what you changed.\n\n\
+             Request: {user_prompt}\n"
+        );
+    }
     format!(
         "OTTO_TASK: canvas_assist\n\
          You are drawing a diagram by EDITING the MERMAID file `{file}` in your working directory. \
@@ -417,10 +453,17 @@ fn build_assist_prompt(user_prompt: &str, format: &str, file: &str, current: &st
     )
 }
 
-/// Parse an assist reply: a ```mermaid fence wins; otherwise an Excalidraw
-/// `{elements}` (or `{nodes,edges}`) JSON object; otherwise the raw text becomes
-/// the note. Used as the reply FALLBACK source. Never panics.
+/// Parse an assist reply: a ```d2 fence wins, then ```mermaid; otherwise an
+/// Excalidraw `{elements}` (or `{nodes,edges}`) JSON object; otherwise the raw
+/// text becomes the note. Used as the reply FALLBACK source. Never panics.
 fn parse_assist(raw: &str) -> AssistResult {
+    if let Some(src) = extract_fenced(raw, "d2") {
+        return AssistResult {
+            d2: Some(src),
+            note: prose_before_fence(raw),
+            ..Default::default()
+        };
+    }
     if let Some(src) = extract_fenced(raw, "mermaid") {
         return AssistResult {
             mermaid: Some(src),
@@ -524,10 +567,22 @@ mod tests {
     fn base_and_format_defaults() {
         assert_eq!(doc_format(&Value::Null), "mermaid");
         assert_eq!(doc_format(&serde_json::json!({"format":"excalidraw"})), "excalidraw");
+        assert_eq!(doc_format(&serde_json::json!({"format":"d2"})), "d2");
         // unknown format → default
         assert_eq!(doc_format(&serde_json::json!({"format":"weird"})), "mermaid");
         assert!(base_source("mermaid").contains("flowchart"));
         assert!(base_source("excalidraw").contains("elements"));
+        assert!(base_source("d2").contains("direction"));
+    }
+
+    #[test]
+    fn d2_prompt_points_at_d2_file() {
+        let p = build_assist_prompt("payments arch", "d2", "canvas.d2", "direction: right\n");
+        assert!(p.contains("OTTO_TASK: canvas_assist"));
+        assert!(p.contains("canvas.d2"));
+        assert!(p.contains("D2 file"));
+        assert!(p.contains("sql_table")); // prompt teaches key D2 shapes
+        assert!(p.contains("payments arch"));
     }
 
     #[test]
