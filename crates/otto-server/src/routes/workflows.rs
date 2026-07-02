@@ -430,6 +430,18 @@ pub async fn list_runs(
     Ok(Json(repo(&ctx).list_runs(&id).await.map_err(ApiError)?))
 }
 
+/// Fill the derived `context_dir` field: the run's context directory
+/// (`<data_dir>/workflow-context/<run_id>/`) when it exists on disk. Kept out
+/// of the DB — run_id derives it — and out of list endpoints (one stat per
+/// run there is wasted work; the run VIEW is where the file browser lives).
+fn with_context_dir(ctx: &ServerCtx, mut run: WorkflowRun) -> WorkflowRun {
+    let dir = ctx.data_dir.join("workflow-context").join(&run.id);
+    if dir.is_dir() {
+        run.context_dir = Some(dir.to_string_lossy().into_owned());
+    }
+    run
+}
+
 /// `GET /workflow-runs/{id}`
 pub async fn get_run(
     Path(id): Path<Id>,
@@ -438,7 +450,7 @@ pub async fn get_run(
 ) -> ApiResult<Json<WorkflowRun>> {
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(run))
+    Ok(Json(with_context_dir(&ctx, run)))
 }
 
 /// `GET /workspaces/{wid}/workflow-runs/active` — in-flight runs (pending|running)

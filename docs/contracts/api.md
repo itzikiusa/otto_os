@@ -1339,6 +1339,45 @@ live per-step progress** back into the trigger thread (origin `channel`/`chat`/
 final `summary.md`; manual/webhook-only runs do not stream. See the Workflows
 feature doc for full per-kind params/output.
 
+**Run input: repos declarations.** The run input accepts a `repos` array naming
+every repo/branch/worktree the run operates on — **source and destination** —
+which all git-aware steps (`review_run`, `git_pr`) consume:
+
+```json
+{ "repos": [
+  { "repo": "otto_os", "type": "branch",   "name": "feat/x", "source": "develop" },
+  { "repo": "koala",   "type": "worktree", "name": "~/wt/koala-fix" }
+] }
+```
+
+`repo` = a registered repo's id, name, or path. `type: "branch"` → `name` is the
+working branch (resolved to the checkout that has it checked out; error if
+nowhere) and `source` is the branch the work diffs/PRs against. `type:
+"worktree"` → `name` is the worktree path. A missing `source` resolves to the
+repo's **detected default branch** (`origin/HEAD` → `main`/`master`/`develop`/
+`trunk` probes) — the engine never fabricates `main`, and an unresolvable base
+fails with the candidate list instead of `git` exit 128. At run start the
+entries are normalized and seeded into the input (`working_directory`, `base`,
+`repo_id` from the first valid entry — explicit keys win — plus normalized
+`repos[]`); with **multiple** valid entries and no explicit target, `review_run`
+reviews every entry (aggregate: `score` = min, `passed` = all; per-repo detail
+under `reviews[]`) and `git_pr` drafts/opens one PR per entry.
+
+**Run context files.** Every run owns `<data_dir>/workflow-context/<run_id>/`:
+`wf-<run_id>-instruction.md` (mission brief written at run start),
+`repos.json` (live registry of the declarations above — updated whenever a
+step publishes a repo reference), and per-step handoff files
+`step{N}-{name}.md` + `step{N}-{name}.output.json` (raw output, 5 MiB cap;
+loop iterations add `-iter{X}`). Agent-backed steps are pointed at the
+directory in their prompt and asked to write their own step summary; the
+engine writes a full-fidelity fallback (agent replies untruncated) when they
+don't. `GET /workflow-runs/{id}` carries the derived `context_dir` (absolute
+path; present when the directory exists — absent on list endpoints); the run
+view renders a browsable file tree over it via the existing sandboxed
+`/fs/browse` + `/fs/read`. Context files are unredacted local artifacts in
+the same trust domain as `nodes_json`; any future remote serving (share
+links) must redact on delivery.
+
 ## API client ("Postman") — collections, requests, environments, automations
 
 A full in-app HTTP/gRPC client. All routes are workspace-scoped (`/workspaces/{wid}/...`);

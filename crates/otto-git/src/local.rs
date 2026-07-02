@@ -59,6 +59,14 @@ impl DiffTarget {
     }
 }
 
+/// A verified diff/PR base: `diff_ref` is a rev that exists in this checkout
+/// (possibly `origin/x`); `branch` is the logical branch name a PR targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBase {
+    pub diff_ref: String,
+    pub branch: String,
+}
+
 /// A handle on one local repository; every method spawns `git -C <path> …`.
 pub struct LocalGit {
     repo_path: PathBuf,
@@ -225,6 +233,105 @@ impl LocalGit {
             Ok((ok, _, _, _)) => ok,
             Err(_) => false,
         }
+    }
+
+    /// True when `r` resolves to a commit in this checkout. `--end-of-options`
+    /// stops an option-looking "ref" (e.g. `--output=…` arriving from untrusted
+    /// run input) from being parsed as a flag — here and, because callers only
+    /// diff refs this verified, downstream in `git diff` too.
+    async fn verify_commit_ref(&self, r: &str) -> bool {
+        let spec = format!("{r}^{{commit}}");
+        match self
+            .run_raw(
+                &["rev-parse", "--verify", "--quiet", "--end-of-options", &spec],
+                &[],
+            )
+            .await
+        {
+            Ok((ok, _, _, _)) => ok,
+            Err(_) => false,
+        }
+    }
+
+    /// The repository's default branch: `origin/HEAD` when set, else the first
+    /// of `main`/`master`/`develop`/`trunk` that exists locally, else a remote
+    /// `origin/main`/`origin/master`. `None` on a repo with no branches at all.
+    /// Mirrors the fallback chain the bundled skill scripts already use.
+    pub async fn default_branch(&self) -> Option<String> {
+        if let Ok(out) = self.run(&["symbolic-ref", "refs/remotes/origin/HEAD"]).await {
+            if let Some(b) = out.trim().strip_prefix("refs/remotes/origin/") {
+                if !b.is_empty() {
+                    return Some(b.to_string());
+                }
+            }
+        }
+        for cand in ["main", "master", "develop", "trunk"] {
+            if self.branch_exists(cand).await {
+                return Some(cand.to_string());
+            }
+        }
+        for cand in ["origin/main", "origin/master"] {
+            if self.verify_commit_ref(cand).await {
+                return Some(cand.trim_start_matches("origin/").to_string());
+            }
+        }
+        None
+    }
+
+    /// Resolve the base to diff/PR against: the wanted ref (as given, then
+    /// `origin/<want>`), else the detected default branch (local, then remote).
+    /// `diff_ref` is the verified rev to feed `git diff`; `branch` is the
+    /// logical branch name a PR targets (no `origin/` prefix). Errors name
+    /// every candidate tried — an actionable message instead of `git diff`
+    /// exiting 128 on an unknown ref (the "fatal: ambiguous argument 'main'"
+    /// failure this replaces).
+    pub async fn resolve_base(&self, want: Option<&str>) -> Result<ResolvedBase> {
+        let mut cands: Vec<(String, String)> = Vec::new(); // (diff_ref, branch)
+        if let Some(w) = want.map(str::trim).filter(|s| !s.is_empty()) {
+            let logical = w.trim_start_matches("origin/").to_string();
+            cands.push((w.to_string(), logical.clone()));
+            if !w.starts_with("origin/") {
+                cands.push((format!("origin/{w}"), logical));
+            }
+        }
+        if let Some(d) = self.default_branch().await {
+            cands.push((d.clone(), d.clone()));
+            cands.push((format!("origin/{d}"), d));
+        }
+        let mut tried: Vec<String> = Vec::new();
+        for (diff_ref, branch) in cands {
+            if tried.contains(&diff_ref) {
+                continue;
+            }
+            if self.verify_commit_ref(&diff_ref).await {
+                return Ok(ResolvedBase { diff_ref, branch });
+            }
+            tried.push(diff_ref);
+        }
+        Err(Error::Invalid(format!(
+            "no base branch resolved (tried: {})",
+            if tried.is_empty() {
+                "nothing — repository has no branches".to_string()
+            } else {
+                tried.join(", ")
+            }
+        )))
+    }
+
+    /// Absolute path of the worktree that has `branch` checked out, if any —
+    /// parsed from `git worktree list --porcelain` (the main checkout counts).
+    pub async fn worktree_for_branch(&self, branch: &str) -> Option<String> {
+        let out = self.run(&["worktree", "list", "--porcelain"]).await.ok()?;
+        let want = format!("branch refs/heads/{branch}");
+        let mut current: Option<&str> = None;
+        for line in out.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                current = Some(p.trim());
+            } else if line.trim() == want {
+                return current.map(str::to_string);
+            }
+        }
+        None
     }
 
     /// Add a worktree at `path` checking out an EXISTING `branch` without
@@ -2052,5 +2159,91 @@ mod tests {
                 .any(|b| b.name == "origin/tmp"),
             "stale origin/tmp pruned after no-op remote delete"
         );
+    }
+
+    /// Minimal repo whose initial (and only) branch is `branch` — the
+    /// master-only/develop-only shape that used to make `git diff main` exit 128.
+    fn fixture_on_branch(branch: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        sh_git(&dir, &["init", "-b", branch]);
+        sh_git(&dir, &["config", "user.email", "otto@test.local"]);
+        sh_git(&dir, &["config", "user.name", "Otto Test"]);
+        sh_git(&dir, &["config", "commit.gpgsign", "false"]);
+        write(&dir, "a.txt", "hello\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        (tmp, dir)
+    }
+
+    #[tokio::test]
+    async fn default_branch_probes_master_when_no_main() {
+        let (_tmp, dir) = fixture_on_branch("master");
+        let git = LocalGit::new(&dir);
+        assert_eq!(git.default_branch().await.as_deref(), Some("master"));
+    }
+
+    #[tokio::test]
+    async fn resolve_base_explicit_hit_fallback_and_none() {
+        let (_tmp, dir) = fixture_on_branch("master");
+        let git = LocalGit::new(&dir);
+        // Explicit existing ref wins as-is.
+        let r = git.resolve_base(Some("master")).await.unwrap();
+        assert_eq!((r.diff_ref.as_str(), r.branch.as_str()), ("master", "master"));
+        // A missing explicit ref falls back to the detected default — the exact
+        // production failure ("main" on a master-only repo) becomes a success.
+        let r = git.resolve_base(Some("main")).await.unwrap();
+        assert_eq!(r.branch, "master");
+        // want=None resolves the default directly.
+        let r = git.resolve_base(None).await.unwrap();
+        assert_eq!(r.branch, "master");
+        // A SHA verifies too (run-engine passes base commits).
+        let sha = git.rev_parse("HEAD").await.unwrap();
+        let r = git.resolve_base(Some(&sha)).await.unwrap();
+        assert_eq!(r.diff_ref, sha);
+    }
+
+    #[tokio::test]
+    async fn resolve_base_error_lists_candidates() {
+        // A repo with no commits has no branches at all — nothing can resolve.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        sh_git(&dir, &["init", "-b", "main"]);
+        let git = LocalGit::new(&dir);
+        let err = git.resolve_base(Some("develop")).await.unwrap_err().to_string();
+        assert!(err.contains("develop"), "error names what was tried: {err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_base_rejects_option_injection() {
+        let (_tmp, dir) = fixture_on_branch("master");
+        let git = LocalGit::new(&dir);
+        // An option-looking "ref" from untrusted input must not be treated as a
+        // git flag; it fails verification and detection falls back to master.
+        let r = git.resolve_base(Some("--output=/tmp/pwn")).await.unwrap();
+        assert_eq!(r.branch, "master");
+        assert!(!std::path::Path::new("/tmp/pwn").exists());
+    }
+
+    #[tokio::test]
+    async fn worktree_for_branch_finds_checkout() {
+        let (tmp, dir) = fixture_on_branch("master");
+        let git = LocalGit::new(&dir);
+        let wt = tmp.path().join("wt-feature");
+        sh_git(&dir, &["worktree", "add", "-b", "feature/x", wt.to_str().unwrap()]);
+        let found = git.worktree_for_branch("feature/x").await.unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&found).unwrap(),
+            std::fs::canonicalize(&wt).unwrap()
+        );
+        // The main checkout itself is a worktree entry too.
+        let main_wt = git.worktree_for_branch("master").await.unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&main_wt).unwrap(),
+            std::fs::canonicalize(&dir).unwrap()
+        );
+        assert!(git.worktree_for_branch("nope").await.is_none());
     }
 }

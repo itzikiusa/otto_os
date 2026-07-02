@@ -3817,6 +3817,10 @@ export interface WorkflowRun {
   workflow_version?: number | null;
   /** Proof pack assembled for this run, if any. */
   proof_pack_id?: string | null;
+  /** Absolute path of the run's context directory (instruction brief,
+   *  repos.json, per-step handoff files). Present on `GET /workflow-runs/{id}`
+   *  when the directory exists on disk; absent on list endpoints. */
+  context_dir?: string | null;
 }
 
 /** Lightweight summary of an in-flight run for the "Running" sidebar list.

@@ -288,6 +288,14 @@ and `lenses` are empty it falls back to the stored/default PR-review config.
 `require_pass:true` makes the step **ERROR** when the score is below `threshold`, so
 any downstream step is error-skipped.
 
+The review's comparison base resolves in order: node `base` param → input
+`base` → the run's ambient base → the repo's **detected default branch** — and
+a named ref that doesn't exist locally falls back through `origin/<base>` to
+the default instead of failing. The node publishes the **resolved** branch in
+its output `base` (what a downstream `git_pr` targets). With multiple `repos[]`
+declared on the run and no explicit target, one review runs per entry and the
+output aggregates (`score` = min, `passed` = all, per-repo `reviews[]`).
+
 Workflows gate "move forward" on the review through **edge conditions**, not a human
 approval: put `output.satisfied == true` (the loop's pass flag) — or rely on
 `require_pass` — on the edge from the fix→review loop into the PR step. The `git_pr`
@@ -534,6 +542,68 @@ daemon (see §5).
 
 A run executes in a background task (`run_workflow`) and persists progress to the
 `workflow_runs` row after **every** node transition.
+
+### Run repos & branches (`repos[]` input)
+
+Declare which repos/branches/worktrees the run operates on — **source and
+destination, multiple entries supported** — right in the run input:
+
+```json
+{ "repos": [
+  { "repo": "otto_os", "type": "branch",   "name": "feat/x", "source": "develop" },
+  { "repo": "koala",   "type": "worktree", "name": "~/wt/koala-fix" }
+] }
+```
+
+- `repo` — a registered repo's **id, name, or path**.
+- `type: "branch"` — `name` is the working branch; the engine finds the
+  checkout that has it checked out (`git worktree list`), and errors the entry
+  if it's checked out nowhere (never silently reviews the wrong branch).
+  `source` is the branch the work diffs against and PRs into.
+- `type: "worktree"` — `name` is the worktree path; `source` optional.
+- Missing `source` ⇒ the repo's **detected default branch** (`origin/HEAD`,
+  then `main`/`master`/`develop`/`trunk` probes). The engine never fabricates
+  `main`; an unresolvable base fails with the exact candidates tried instead
+  of a raw `git exited 128`.
+
+At run start the entries are normalized, written to the run's `repos.json`,
+and seeded into the input (first valid entry fills `working_directory`/`base`/
+`repo_id` unless explicitly set). Every git-aware step reads the registry:
+`review_run` with several declared entries reviews **all** of them (worst
+score gates; per-repo detail under `reviews[]`), and `git_pr` drafts/opens one
+PR per entry. Steps that publish a repo reference (a review's resolved base, a
+loop's worktree) **merge it back into `repos.json`** as the run progresses.
+
+### Run context files (file-based step handoff)
+
+Every run owns `<data_dir>/workflow-context/<run_id>/` — browsable in the run
+view under **Context files** (same tree + viewer as the agent Files panel,
+scoped to this run):
+
+```
+wf-<run_id>-instruction.md      # mission brief: goals, repos table, planned steps
+repos.json                      # live registry of repos/branches (see above)
+step1-gather-info.md            # per-step handoff summary
+step1-gather-info.output.json   # the step's raw output (5 MiB cap)
+step3-review-iter2.md           # loop inner steps, per iteration
+```
+
+Steps hand context to each other **through files, not truncated prompt
+text**: each agent-backed step is pointed at the directory (read the
+instruction brief, `repos.json`, and the prior `step*.md` you need) and asked
+to write its own `step{N}-{name}.md` summary before finishing. If it doesn't,
+the engine writes a full-fidelity fallback — an agent's reply lands
+**untruncated**, `review_run` files carry the score breakdown + findings, and
+failed steps (including failed loop iterations) leave their error in the
+trail. A retried step only trusts a summary written during the winning
+attempt. The inline `[input data]` excerpt in prompts remains as a quick
+glance; the files are the complete channel.
+
+Chat-triggered runs attach each meaningful step's `.md` handoff file to its
+per-step progress message (success *and* failure, loop iterations included) —
+the thread carries the brief, the attachment the full detail. Attachments are
+redacted like `summary.md` and capped at 1 MiB (the full file always remains
+in the run's context directory).
 
 ### Statuses
 ```ts

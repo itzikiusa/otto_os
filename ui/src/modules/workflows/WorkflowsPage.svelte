@@ -5,6 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunSteps from './RunSteps.svelte';
+  import FileTree from '../panels/FileTree.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -114,6 +115,9 @@
     cur.approval_node_id = nr.approval_node_id ?? null;
     cur.workflow_version = nr.workflow_version ?? null;
     cur.proof_pack_id = nr.proof_pack_id ?? null;
+    // Keep the last known dir when a payload omits it (list rows / WS-driven
+    // snapshots don't carry it) so the Context-files browser doesn't vanish.
+    cur.context_dir = nr.context_dir ?? cur.context_dir ?? null;
     for (const n of nr.nodes ?? []) {
       const ex = cur.nodes.find((x) => x.node_id === n.node_id);
       if (ex) mergeNode(ex, n);
@@ -460,8 +464,12 @@
     // root if omitted; set it to operate on a different repo.
     obj.working_directory = '~/path/to/repo';
     if (k.has('review_run') || k.has('git_pr')) {
-      obj.repo_id = '<repo id — copy it from the Git tab>';
-      obj.base = 'main';
+      // Declare the repos/branches the run operates on — source AND
+      // destination; several entries (branches, worktrees, repos) supported.
+      // Omitted `source` ⇒ the repo's detected default branch.
+      obj.repos = [
+        { repo: '<repo id, name, or path>', type: 'branch', name: '<work branch>', source: '<target branch — optional>' },
+      ];
     }
     if (k.has('product_analyze') || k.has('product_rewrite') || k.has('product_plan') || k.has('product_publish')) {
       obj.story_id = '<product story id>';
@@ -988,7 +996,7 @@
             <div class="palette runs-pop">
               {#if runs.length === 0}<div class="runs-empty">No runs yet</div>{/if}
               {#each runs as r (r.id)}
-                <button class="run-item" class:active={run?.id === r.id} onclick={() => { run = r; runsOpen = false; }}>
+                <button class="run-item" class:active={run?.id === r.id} onclick={() => { run = r; runsOpen = false; void refetchRun(r.id); }}>
                   <span class="dot {r.status}"></span>
                   <span class="run-status">{r.status}</span>
                   <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
@@ -1141,6 +1149,19 @@
               {/each}
             </div>
             <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} /></div>
+            {#if run.context_dir}
+              <!-- THIS run's context files (instruction brief, repos.json,
+                   per-step handoffs) — same browsable tree + viewer the agent
+                   Files panel uses, rooted at the run's own directory. -->
+              <details class="ctx-files">
+                <summary>
+                  <Icon name="folder" size={13} />
+                  <span>Context files</span>
+                  <code class="dim">{run.context_dir}</code>
+                </summary>
+                <div class="ctx-files-tree"><FileTree root={run.context_dir} /></div>
+              </details>
+            {/if}
           {/if}
 
           {#if selectedNode}
@@ -2384,6 +2405,36 @@
   }
   .run-detail {
     margin: 8px 0;
+  }
+  .ctx-files {
+    margin: 8px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-subtle, transparent);
+  }
+  .ctx-files > summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    min-width: 0;
+  }
+  .ctx-files > summary code {
+    font-size: 10.5px;
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: ltr;
+  }
+  .ctx-files-tree {
+    border-top: 1px solid var(--border);
+    max-height: 420px;
+    overflow: auto;
   }
   .tl-label {
     display: inline-flex;

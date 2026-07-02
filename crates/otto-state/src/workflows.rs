@@ -74,6 +74,9 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
         approved_at: approved_at.as_deref().map(ts).transpose()?,
         workflow_version: r.try_get("workflow_version").ok().flatten(),
         proof_pack_id: r.try_get("proof_pack_id").ok().flatten(),
+        // Derived at the API layer (routes/workflows.rs) from data_dir +
+        // run id when the directory exists — never persisted.
+        context_dir: None,
     })
 }
 

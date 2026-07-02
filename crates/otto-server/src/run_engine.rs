@@ -155,10 +155,15 @@ async fn stage_resolve(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
     )
     .await?;
     let git = otto_git::LocalGit::new(&repo.path);
-    let base_branch = git
-        .current_branch()
-        .await
-        .unwrap_or_else(|_| "main".to_string());
+    // The branch the run starts from = the eventual PR destination. Detached
+    // HEAD (rev-parse prints literal "HEAD") or an error falls back to the
+    // DETECTED default branch — never a fabricated "main", which would later
+    // beat the real default in resolve_base on repos that do have a stale
+    // local main.
+    let base_branch = match git.current_branch().await {
+        Ok(b) if !b.trim().is_empty() && b != "HEAD" => Some(b),
+        _ => git.default_branch().await,
+    };
     // Persist the repo first so the GitHub adapter can resolve a provider.
     ctx.runs
         .set_fields(
@@ -166,7 +171,7 @@ async fn stage_resolve(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
             &RunPatch {
                 repo_id: Some(repo.id.clone()),
                 repo_path: Some(repo.path.clone()),
-                base_branch: Some(base_branch),
+                base_branch,
                 ..Default::default()
             },
         )
@@ -397,7 +402,8 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         .worktree_path
         .clone()
         .ok_or_else(|| Error::Internal("run has no worktree".into()))?;
-    let base = run.base_commit.clone().unwrap_or_default();
+    // The captured launch-HEAD SHA when present; None ⇒ detected default.
+    let base = run.base_commit.clone().filter(|s| !s.trim().is_empty());
 
     // Deterministic E2E: skip spawning real review agents (they need a live CLI),
     // record a completed review with no findings. The stage stays visible.
@@ -421,7 +427,8 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         return Ok(());
     }
 
-    let review_id = crate::modules::run_review_for_branch(ctx, &repo_id, &wt, &base, None).await?;
+    let (review_id, _base) =
+        crate::modules::run_review_for_branch(ctx, &repo_id, &wt, base.as_deref(), None).await?;
     ctx.runs
         .set_fields(
             &run.id,
@@ -450,12 +457,10 @@ async fn stage_draft_pr(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         .worktree_path
         .clone()
         .ok_or_else(|| Error::Internal("run has no worktree".into()))?;
-    let base = run
-        .base_branch
-        .clone()
-        .unwrap_or_else(|| "main".to_string());
+    // None ⇒ draft_pr_core resolves the repo's detected default branch.
+    let base = run.base_branch.clone().filter(|s| !s.trim().is_empty());
 
-    match crate::modules::draft_pr_core(ctx, &wt, &base).await {
+    match crate::modules::draft_pr_core(ctx, &wt, base.as_deref()).await {
         Ok(draft) => {
             let json = serde_json::to_string(&draft).unwrap_or_default();
             ctx.runs

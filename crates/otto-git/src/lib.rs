@@ -9,6 +9,6 @@ pub mod providers;
 pub mod types;
 
 pub use http::{router, GitCtx};
-pub use local::{clone_repo, DiffTarget, LocalGit};
+pub use local::{clone_repo, DiffTarget, LocalGit, ResolvedBase};
 pub use providers::{detect, make_provider, GitProvider, RemoteRef};
 pub use types::CiStatus;

@@ -105,6 +105,18 @@ fn emit_run_updated(
 // Live progress streaming (Slack/Telegram thread the run was triggered from)
 // ---------------------------------------------------------------------------
 
+/// One queued progress delivery: a text line, or a step's handoff file
+/// attached beneath the step's "done" line (the user reads the summary in the
+/// thread and opens the file for the full detail).
+enum ProgressItem {
+    Text(String),
+    File { name: String, text: String },
+}
+
+/// Cap on an attached step file — a runaway reply shouldn't turn into a
+/// multi-megabyte chat upload; the full file stays in the run's context dir.
+const PROGRESS_FILE_CAP: usize = 1024 * 1024;
+
 /// A best-effort sink for human-facing progress lines streamed back to the chat
 /// thread that triggered the run. Cloneable + cheap; a *disabled* sink (manual UI
 /// run, or webhook-only trigger) silently drops everything. Messages are sent
@@ -112,7 +124,7 @@ fn emit_run_updated(
 /// engine never blocks on Slack/Telegram latency.
 #[derive(Clone)]
 struct ProgressSink {
-    tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressItem>>,
 }
 
 impl ProgressSink {
@@ -122,8 +134,24 @@ impl ProgressSink {
     /// Queue a progress line (no-op when disabled).
     fn post(&self, msg: impl Into<String>) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(msg.into());
+            let _ = tx.send(ProgressItem::Text(msg.into()));
         }
+    }
+    /// Queue a step's `.md` handoff file as a chat attachment (no-op when
+    /// disabled or the file doesn't exist — attachments never fail a step).
+    fn post_step_file(&self, files: &crate::workflow_context::RunContextFiles, base_name: &str) {
+        let Some(tx) = &self.tx else { return };
+        let Some(path) = files.step_md_path(base_name) else { return };
+        let Ok(mut text) = std::fs::read_to_string(&path) else { return };
+        if text.len() > PROGRESS_FILE_CAP {
+            let mut end = PROGRESS_FILE_CAP;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str("\n… [truncated for chat — the full file is in the run's context directory]");
+        }
+        let _ = tx.send(ProgressItem::File { name: format!("{base_name}.md"), text });
     }
     fn enabled(&self) -> bool {
         self.tx.is_some()
@@ -178,7 +206,7 @@ fn resolve_chat_target(workflow: &Workflow, input: &Value) -> Option<ChatTarget>
 /// into nodes) and the task handle (awaited at run end to flush before the final
 /// summary is delivered). Drop the sink to close the channel and end the pump.
 fn spawn_progress_pump(ctx: ServerCtx, target: ChatTarget) -> (ProgressSink, tokio::task::JoinHandle<()>) {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressItem>();
     let handle = tokio::spawn(async move {
         let integ = match otto_state::IntegrationsRepo::new(ctx.pool.clone())
             .get(&target.ws, target.channel)
@@ -192,16 +220,35 @@ fn spawn_progress_pump(ctx: ServerCtx, target: ChatTarget) -> (ProgressSink, tok
                 return;
             }
         };
-        while let Some(msg) = rx.recv().await {
-            let msg = otto_core::redact::redact_text(&msg).value;
-            let _ = otto_channels::improve_notify::send_to(
-                &ctx.secrets,
-                &integ,
-                &target.chat,
-                target.thread.as_deref(),
-                &msg,
-            )
-            .await;
+        // One adapter for file uploads, built once (send_to builds its own).
+        let adapter = otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ);
+        while let Some(item) = rx.recv().await {
+            match item {
+                ProgressItem::Text(msg) => {
+                    let msg = otto_core::redact::redact_text(&msg).value;
+                    let _ = otto_channels::improve_notify::send_to(
+                        &ctx.secrets,
+                        &integ,
+                        &target.chat,
+                        target.thread.as_deref(),
+                        &msg,
+                    )
+                    .await;
+                }
+                ProgressItem::File { name, text } => {
+                    // Same discipline as summary.md: redact before it leaves
+                    // the machine; best-effort.
+                    let text = otto_core::redact::redact_text(&text).value;
+                    if let Some(adapter) = adapter.as_ref() {
+                        if let Err(e) = adapter
+                            .upload(&target.chat, target.thread.as_deref(), &name, text.as_bytes())
+                            .await
+                        {
+                            tracing::debug!("workflow progress: {name} upload failed: {e}");
+                        }
+                    }
+                }
+            }
         }
     });
     (ProgressSink { tx: Some(tx) }, handle)
@@ -633,6 +680,25 @@ pub async fn run_workflow(
             Value::Object(seeded)
         }
     };
+    // Per-run context files (design 2026-07-02): `<data_dir>/workflow-context/
+    // <run_id>/` holds the instruction brief, the live `repos.json` registry
+    // and per-step handoff files. Best-effort — a failed dir create disables
+    // the handle and the run proceeds on legacy inline context.
+    let files = std::sync::Arc::new(crate::workflow_context::RunContextFiles::create(
+        &ctx.data_dir,
+        &run_id,
+    ));
+    // Declared repos/branches/worktrees (`repos: [{repo, type, name, source}]`)
+    // normalized against registered repos + live git state, then seeded into
+    // the run input BEFORE run_cwd/run_base derive below — so declaring repos
+    // is all a run needs for every git-aware step to know source+destination.
+    let input = {
+        let declared =
+            crate::workflow_context::parse_repo_entries(input.get("repos").unwrap_or(&Value::Null));
+        let entries = resolve_repo_entries(&ctx, &workflow.workspace_id, declared).await;
+        files.set_repos(entries.clone());
+        seed_input_from_entries(input, &entries)
+    };
     // Run-level working directory: the `working_directory` from the run input
     // (e.g. a Slack `Working Directory:` field), else the workspace root. Agent
     // nodes run here — so a workflow owned by workspace A can operate on repo X.
@@ -645,13 +711,16 @@ pub async fn run_workflow(
     // Run-level base branch: the ambient PR/review base for the whole run, so a
     // `review_run`/`git_pr` is aware of the run's base even after intervening
     // agent nodes (which return `{reply}`) drop it from the data flow. Per-node
-    // `base` params still win; this is the fallback the steps share.
-    let run_base = input
+    // `base` params still win. `None` ⇒ each git step resolves its repo's
+    // DETECTED default branch at the point of use — never a fabricated "main"
+    // (the historical literal here made `git diff main` exit 128 on repos
+    // whose default is master/develop).
+    let run_base: Option<String> = input
         .get("base")
         .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("main")
-        .to_string();
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     // Resilience (design §B): many steps (review_run, git_pr, …) need a repo_id.
     // If the run wasn't given one but DOES carry a working_directory, resolve the
     // registered repo for that path ONCE here and seed it into the run input — so
@@ -675,6 +744,43 @@ pub async fn run_workflow(
         }
         inp
     };
+    // The run's mission brief (`wf-<run_id>-instruction.md`): mission, repos
+    // table, planned steps (IN-SCOPE only, so numbering matches what actually
+    // executes on a start-from-here run) and the step-file protocol.
+    {
+        let planned: Vec<(String, String)> = order
+            .iter()
+            .filter(|nid| run_set.as_ref().map(|s| s.contains(*nid)).unwrap_or(true))
+            .filter_map(|nid| workflow.graph.nodes.iter().find(|n| &n.id == nid))
+            .map(|n| {
+                (
+                    if n.name.is_empty() { n.kind.clone() } else { n.name.clone() },
+                    n.kind.clone(),
+                )
+            })
+            .collect();
+        files.write_instruction(&crate::workflow_context::render_instruction(
+            &workflow.name,
+            &workflow.description,
+            &run_id,
+            &input,
+            &files.repos(),
+            &planned,
+        ));
+    }
+    // The per-node execution environment (run identity + ambient cwd/base +
+    // context files). The registry on `files` is the run's source of truth
+    // for repos/branches — input threading loses keys hop by hop.
+    let env = RunEnv {
+        run_id: run_id.clone(),
+        run_cwd: run_cwd.clone(),
+        run_base,
+        files: files.clone(),
+    };
+    // 1-based number of the NEXT executed step — drives step-file naming.
+    // Skipped nodes don't consume a number; cached nodes do (their files are
+    // written from the cached output so the trail stays complete).
+    let mut step_counter: usize = 0;
     // Nodes that errored (or were poisoned by an errored upstream) — these
     // propagate failure. `branch_skipped` nodes were pruned by an edge condition
     // (or are downstream of a pruned node) and do NOT fail the run.
@@ -819,6 +925,27 @@ pub async fn run_workflow(
             // A cached agent/product/canvas node still carries its session id in
             // the cached output — surface it so the run can open it.
             harvest_session_ids(&cached_out, &mut states[idx].sessions);
+            // A cached node still consumes a step number and leaves its step
+            // files (from the cached output) — the context-file trail stays
+            // complete for downstream agents. Published refs merge too.
+            step_counter += 1;
+            let base_name = crate::workflow_context::step_base_name(
+                step_counter,
+                node_display_name(node),
+                None,
+                None,
+            );
+            let mut flogs = files.persist_step(
+                &base_name,
+                &node.kind,
+                node_display_name(node),
+                &cached_out,
+                &[],
+                None,
+                None,
+            );
+            states[idx].logs.append(&mut flogs);
+            merge_published_refs(&files, &cached_out);
             // Prune outgoing edges whose condition fails on the cached output.
             let (pruned, mut plogs) =
                 eval_outgoing(&workflow.graph, node, &cached_out, &node_input, &input);
@@ -849,6 +976,15 @@ pub async fn run_workflow(
         }
 
         let started = Instant::now();
+        // This node executes — it owns the next step-file number.
+        step_counter += 1;
+        let scope = StepScope { step_no: step_counter, iter: None, inner_idx: None };
+        let step_file_base = crate::workflow_context::step_base_name(
+            step_counter,
+            node_display_name(node),
+            None,
+            None,
+        );
         // Run the node, honoring its retry policy (default: a single attempt).
         // A node that spawns an openable agent session reports its id over
         // `sess_tx` the moment it's created; we record it on the node state and
@@ -858,10 +994,16 @@ pub async fn run_workflow(
         let mut backoff = policy.backoff_ms;
         let mut retry_logs: Vec<String> = vec![];
         let (sess_tx, mut sess_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        // Snapshot when the (latest) attempt began: a step file the agent wrote
+        // during a FAILED earlier attempt must not be mistaken for the winning
+        // attempt's handoff (persist_step compares mtimes against this).
+        // Assigned at the top of every attempt; the loop runs at least once.
+        let mut attempt_started;
         let result = loop {
             attempt += 1;
+            attempt_started = std::time::SystemTime::now();
             let fut =
-                execute_node(&ctx, &ws, &user, node, node_input.clone(), &run_id, &run_cwd, &run_base, &sess_tx, &progress);
+                execute_node(&ctx, &ws, &user, node, node_input.clone(), &env, &scope, &sess_tx, &progress);
             tokio::pin!(fut);
             let attempt_res = loop {
                 tokio::select! {
@@ -917,6 +1059,20 @@ pub async fn run_workflow(
                 for w in validate_node_output(&node.kind, &out) {
                     logs.push(format!("⚠ {w}"));
                 }
+                // Step handoff files: raw output + the curated summary (kept
+                // if the agent wrote its own during THIS attempt), then merge
+                // any published repo/branch/worktree refs into repos.json.
+                let mut flogs = files.persist_step(
+                    &step_file_base,
+                    &node.kind,
+                    node_display_name(node),
+                    &out,
+                    &logs,
+                    None,
+                    Some(attempt_started),
+                );
+                logs.append(&mut flogs);
+                merge_published_refs(&files, &out);
                 // Prune outgoing edges whose condition fails on this output.
                 let (pruned, mut plogs) =
                     eval_outgoing(&workflow.graph, node, &out, &node_input, &input);
@@ -936,6 +1092,12 @@ pub async fn run_workflow(
                         None => progress.post(format!("✅ *{}* done ({dur})", node_label(node))),
                     }
                 }
+                // Attach the step's handoff file beneath its progress line —
+                // the thread carries the brief, the file the full detail.
+                // review_run streams its own block but its file rides too.
+                if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
+                    progress.post_step_file(&files, &step_file_base);
+                }
                 // Persist to the node cache for future re-runs.
                 let _ = repo
                     .set_cached_output(&workflow.id, &node_id, &params_hash, &input_hash, &out)
@@ -948,11 +1110,27 @@ pub async fn run_workflow(
                 let mut elogs = vec![start_line];
                 elogs.append(&mut retry_logs);
                 elogs.push(format!("✗ {e}"));
+                // A failed step leaves a trace file too — the error is part of
+                // the handoff trail (a fix step or a human reads what broke).
+                let mut flogs = files.persist_step(
+                    &step_file_base,
+                    &node.kind,
+                    node_display_name(node),
+                    &Value::Null,
+                    &elogs,
+                    Some(&e.to_string()),
+                    Some(attempt_started),
+                );
+                elogs.append(&mut flogs);
                 states[idx].logs = elogs;
                 states[idx].attempts = Some(attempt);
                 states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
                 if progress.enabled() && is_reportable(&node.kind) {
                     progress.post(format!("❌ *{}* failed — {}", node_label(node), truncate(&e.to_string(), 200)));
+                }
+                // The failure trace file rides along too (what broke, logs).
+                if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
+                    progress.post_step_file(&files, &step_file_base);
                 }
                 errored.insert(node_id.clone());
             }
@@ -1350,9 +1528,33 @@ fn assemble_input(
     }
 }
 
+/// Run-level execution environment shared by every node of one run: identity,
+/// ambient cwd, the ambient PR/review base (`None` ⇒ resolve the repo's
+/// default branch at the point of use — never a fabricated `"main"`), and the
+/// per-run context files (instruction, `repos.json` registry, step files).
+/// The registry on `files` — not node-input threading, which loses keys hop
+/// by hop — is the source of truth for which repos/branches the run operates
+/// on.
+pub(crate) struct RunEnv {
+    pub run_id: Id,
+    pub run_cwd: String,
+    pub run_base: Option<String>,
+    pub files: std::sync::Arc<crate::workflow_context::RunContextFiles>,
+}
+
+/// Where a node execution sits in the run's step-file numbering: the 1-based
+/// executed-step number, plus the loop iteration / inner-step index for
+/// `step{N}-{name}-iter{X}.md` naming inside `loop` nodes.
+#[derive(Clone, Copy)]
+pub(crate) struct StepScope {
+    pub step_no: usize,
+    pub iter: Option<u64>,
+    pub inner_idx: Option<usize>,
+}
+
 /// Execute one node by kind. Returns `(output, logs)`.
 ///
-/// `run_id` is passed so stateful nodes (e.g. `human_approval`) can write
+/// `env.run_id` is used by stateful nodes (e.g. `human_approval`) to write
 /// back to their own run row to record a pause / resume decision.
 #[allow(clippy::too_many_arguments)]
 async fn execute_node(
@@ -1361,12 +1563,14 @@ async fn execute_node(
     user: &User,
     node: &WorkflowNode,
     input: Value,
-    run_id: &Id,
-    run_cwd: &str,
-    run_base: &str,
+    env: &RunEnv,
+    scope: &StepScope,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
     progress: &ProgressSink,
 ) -> Result<(Value, Vec<String>)> {
+    // Local aliases keep the node arms' existing call sites unchanged.
+    let run_id: &Id = &env.run_id;
+    let run_cwd: &str = env.run_cwd.as_str();
     let p = &node.params;
     match node.kind.as_str() {
         "manual_trigger" => Ok((input, vec![])),
@@ -1412,12 +1616,37 @@ async fn execute_node(
             // Run as a real, openable session (reusing the shared session runner)
             // so the run view can watch/inspect it — not the headless PTY.
             let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+            // File-based handoff (design 2026-07-02): point the agent at the
+            // run's context dir (instruction, repos.json, prior step files)
+            // and name the step file IT must write. The inline [input data]
+            // excerpt stays as a glance — the files are the complete channel.
+            let preamble = env
+                .files
+                .dir_str()
+                .map(|d| {
+                    let own_md = format!(
+                        "{}.md",
+                        crate::workflow_context::step_base_name(
+                            scope.step_no,
+                            node_display_name(node),
+                            scope.iter,
+                            scope.inner_idx,
+                        )
+                    );
+                    crate::workflow_context::agent_preamble(
+                        &d,
+                        &env.files.instruction_name(),
+                        &env.files.list_step_mds(),
+                        &own_md,
+                    )
+                })
+                .unwrap_or_default();
             // Inject any per-step skills (`skill`/`skills`) ahead of the prompt so
             // the step runs a specific method "via prompt".
             let full = prepend_skills(
                 ctx,
                 p,
-                &format!("{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)),
+                &format!("{preamble}{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)),
             );
             let acwd = node_cwd(node, &input, run_cwd);
             let (reply, sid) =
@@ -1430,7 +1659,10 @@ async fn execute_node(
             out.insert("reply".into(), json!(reply));
             out.insert("session_id".into(), json!(sid));
             out.insert("working_directory".into(), json!(acwd));
-            for k in ["repo_id", "base"] {
+            // `repos`/`worktree` forward too so data-flow inspection still
+            // shows them — though the run-level registry (RunEnv.files), not
+            // input threading, is what downstream git steps rely on.
+            for k in ["repo_id", "base", "repos", "worktree"] {
                 if let Some(v) = input.get(k) {
                     if !v.is_null() {
                         out.insert(k.into(), v.clone());
@@ -2084,6 +2316,19 @@ async fn execute_node(
             // Run-level keys (repo_id, base, goals, …) flow to every step as a
             // base; the threaded prev-step output overlays them.
             let loop_base = input.as_object().cloned().unwrap_or_default();
+            // Two inner steps with the same (slugged) name would collide on
+            // step-file names within an iteration — disambiguate those (and
+            // only those) with the inner index.
+            let inner_slugs: Vec<String> = steps
+                .iter()
+                .enumerate()
+                .map(|(k, s)| {
+                    crate::workflow_context::slug(
+                        s.get("name").and_then(Value::as_str).unwrap_or(&format!("step{k}")),
+                    )
+                })
+                .collect();
+            let slug_dup = |k: usize| inner_slugs.iter().filter(|s| **s == inner_slugs[k]).count() > 1;
             let mut logs = vec![];
             let mut history = vec![];
             let mut satisfied = false;
@@ -2138,17 +2383,45 @@ async fn execute_node(
                         params: step.get("params").cloned().unwrap_or(Value::Null),
                         retry: step.get("retry").and_then(|r| serde_json::from_value(r.clone()).ok()),
                     };
+                    // Inner steps share the loop's step number and add
+                    // `-iter{X}` (the user's convention): step3-review-iter2.md.
+                    let sub_scope = StepScope {
+                        step_no: scope.step_no,
+                        iter: Some(i),
+                        inner_idx: if slug_dup(k) { Some(k) } else { None },
+                    };
+                    let sub_file_base = crate::workflow_context::step_base_name(
+                        sub_scope.step_no,
+                        &sname,
+                        sub_scope.iter,
+                        sub_scope.inner_idx,
+                    );
+                    let sub_attempt_started = std::time::SystemTime::now();
                     match Box::pin(execute_node(
-                        ctx, ws, user, &sub, step_input, run_id, run_cwd, run_base, session_tx, progress,
+                        ctx, ws, user, &sub, step_input, env, &sub_scope, session_tx, progress,
                     ))
                     .await
                     {
                         Ok((out, mut slogs)) => {
-                            for l in slogs.drain(..) {
+                            // Iteration handoff files — the loop recursion never
+                            // passes the main run loop, so this is the second
+                            // persistence hook site.
+                            let flogs = env.files.persist_step(
+                                &sub_file_base,
+                                &skind,
+                                &sname,
+                                &out,
+                                &slogs,
+                                None,
+                                Some(sub_attempt_started),
+                            );
+                            for l in slogs.drain(..).chain(flogs) {
                                 logs.push(format!("  [{i}/{sname}] {l}"));
                             }
                             step_outputs.insert(sname.clone(), out.clone());
-                            // Capture any repo reference this step published.
+                            // Capture any repo reference this step published —
+                            // for the loop's own output AND the run registry.
+                            merge_published_refs(&env.files, &out);
                             if let Some(rid) = out.get("repo_id").and_then(Value::as_str) {
                                 if !rid.trim().is_empty() {
                                     refs_by_repo.insert(
@@ -2169,11 +2442,31 @@ async fn execute_node(
                                     None => progress.post(format!("› ✅ {sname} done")),
                                 }
                             }
+                            // Attach the iteration's handoff file too.
+                            if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
+                                progress.post_step_file(&env.files, &sub_file_base);
+                            }
                         }
                         Err(e) => {
                             logs.push(format!("  [{i}/{sname}] ✗ {e}"));
+                            // A failed iteration leaves its trace file BEFORE the
+                            // loop bails — the fix step / a human reads what broke
+                            // (the production incident left no trail at all).
+                            let _ = env.files.persist_step(
+                                &sub_file_base,
+                                &skind,
+                                &sname,
+                                &Value::Null,
+                                &[format!("✗ {e}")],
+                                Some(&e.to_string()),
+                                Some(sub_attempt_started),
+                            );
                             if progress.enabled() && is_reportable(&skind) {
                                 progress.post(format!("› ❌ {sname} failed — {}", truncate(&e.to_string(), 200)));
+                            }
+                            // The failed iteration's trace file rides along.
+                            if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
+                                progress.post_step_file(&env.files, &sub_file_base);
                             }
                             if !continue_on_error {
                                 return Err(otto_core::Error::Upstream(format!(
@@ -2220,19 +2513,6 @@ async fn execute_node(
 
         // --- Review Run (wired: local-review engine + 0–100 score + goals) ---
         "review_run" => {
-            // Resilient repo resolution (design §B): explicit repo_id wins, else
-            // derive it from the step's worktree_path / the run's working_directory
-            // / run_cwd against the workspace's registered repos. Never a bare
-            // "missing repo_id" for a workflow that was given a working directory.
-            let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
-                .await
-                .ok_or_else(|| {
-                    otto_core::Error::Invalid(
-                        "review_run: no repo_id; pass repo_id or a working_directory/worktree_path \
-                         under a registered repo"
-                            .into(),
-                    )
-                })?;
             let threshold = p.get("threshold").and_then(Value::as_u64).unwrap_or(80) as i64;
             let await_done = p.get("await").and_then(Value::as_bool).unwrap_or(true);
             let timeout_s = p.get("timeout_s").and_then(Value::as_u64).unwrap_or(900).min(1800);
@@ -2252,33 +2532,117 @@ async fn execute_node(
             // When set, the step itself FAILS if the score is below threshold — so a
             // downstream "create PR" step is error-skipped unless the review passed.
             let require_pass = p.get("require_pass").and_then(Value::as_bool).unwrap_or(false);
-            // Validate the resolved repo exists (clear error if not); the review
-            // engine looks the repo up again by id internally.
-            let _ = ctx
-                .git_store
-                .get_repo(&repo_id)
-                .await
-                .map_err(|e| otto_core::Error::NotFound(format!("review_run: repo: {e}")))?;
-            // The directory the implementer worked in (the run's working_directory)
-            // IS what we review — fall back to it (run_cwd), not the bare repo
-            // checkout, so the reviewer sees the same place the agent changed. A
-            // prior step's published `worktree` (e.g. another review) wins first.
-            let worktree = p
-                .get("worktree_path")
-                .and_then(Value::as_str)
-                .or_else(|| input.get("worktree").and_then(Value::as_str))
-                .or_else(|| input.get("worktree_path").and_then(Value::as_str))
-                .or_else(|| input.get("working_directory").and_then(Value::as_str))
-                .filter(|s| !s.trim().is_empty())
-                .map(expand_tilde)
-                .unwrap_or_else(|| run_cwd.to_string());
-            let base = p
-                .get("base")
-                .and_then(Value::as_str)
-                .or_else(|| input.get("base").and_then(Value::as_str))
-                .filter(|s| !s.trim().is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| run_base.to_string());
+            // Which repo(s)/worktree(s)/base(s) to review — (repo_id, worktree,
+            // want_base, label), in priority order:
+            //
+            // 1. NODE params name a target → the classic single-repo path.
+            // 2. The input carries a published `repos[]` array (a multi-repo
+            //    review/loop handing its full set forward) → one target each,
+            //    so a chained review re-reviews EVERY repo, not just the
+            //    first-mirrored one.
+            // 3. The input carries a published single `worktree` reference →
+            //    single target (an upstream step handing off the exact place
+            //    it worked).
+            // 4. The run's repos registry (the declared branches/worktrees,
+            //    source+destination) → one target per valid entry.
+            // 5. One implicit target from the run context (design §B
+            //    resilience: working_directory/run_cwd → registered repo).
+            //
+            // A bare `input.repo_id`/`working_directory` never counts as a
+            // target by itself — run-start seeding puts those into the input
+            // of every declared run, and counting them would permanently mask
+            // the multi-entry paths.
+            let params_explicit = p.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
+                || p.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some();
+            let input_repo_targets: Vec<(String, String, Option<String>, String)> = input
+                .get("repos")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| {
+                            let rid = t.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())?;
+                            let wt = t.get("worktree").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())?;
+                            let base = t.get("base").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                            Some((rid.to_string(), expand_tilde(wt), base, String::new()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let input_worktree_ref = input.get("worktree").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
+                || input.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some();
+            let mut targets: Vec<(String, String, Option<String>, String)> = Vec::new();
+            if !params_explicit && !input_repo_targets.is_empty() {
+                targets = input_repo_targets;
+            } else if !params_explicit && !input_worktree_ref {
+                // Declarations: EVERY entry failed to resolve → fail with the
+                // reasons. Falling through to the run-cwd path would review
+                // whatever happens to be checked out — and an empty diff there
+                // reads as a false-green "score 100" on a run whose declared
+                // target never resolved.
+                let declared = env.files.repos();
+                if let Some(msg) = crate::workflow_context::all_declared_errored(&declared) {
+                    return Err(otto_core::Error::Invalid(format!(
+                        "review_run: no declared repos[] entry resolved — {msg}"
+                    )));
+                }
+                for e in declared
+                    .iter()
+                    .filter(|e| e.error.is_none() && e.repo_id.is_some() && e.worktree.is_some())
+                {
+                    targets.push((
+                        e.repo_id.clone().unwrap_or_default(),
+                        e.worktree.clone().unwrap_or_default(),
+                        // Declared source, else per-repo default-branch
+                        // detection inside run_review_for_branch.
+                        e.base.clone(),
+                        e.repo.clone(),
+                    ));
+                }
+            }
+            if targets.is_empty() {
+                // Resilient repo resolution (design §B): explicit repo_id wins,
+                // else derive it from the step's worktree_path / the run's
+                // working_directory / run_cwd against the workspace's registered
+                // repos. Never a bare "missing repo_id" for a workflow that was
+                // given a working directory.
+                let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
+                    .await
+                    .ok_or_else(|| {
+                        otto_core::Error::Invalid(
+                            "review_run: no repo_id; pass repo_id or a working_directory/worktree_path \
+                             under a registered repo, or declare repos on the run"
+                                .into(),
+                        )
+                    })?;
+                // The directory the implementer worked in (the run's
+                // working_directory) IS what we review — fall back to it
+                // (run_cwd), not the bare repo checkout, so the reviewer sees the
+                // same place the agent changed. A prior step's published
+                // `worktree` (e.g. another review) wins first.
+                let worktree = p
+                    .get("worktree_path")
+                    .and_then(Value::as_str)
+                    .or_else(|| input.get("worktree").and_then(Value::as_str))
+                    .or_else(|| input.get("worktree_path").and_then(Value::as_str))
+                    .or_else(|| input.get("working_directory").and_then(Value::as_str))
+                    .filter(|s| !s.trim().is_empty())
+                    .map(expand_tilde)
+                    .unwrap_or_else(|| run_cwd.to_string());
+                // The DESIRED base: node params → input → the run's ambient base.
+                // `None` ⇒ run_review_for_branch resolves the repo's default
+                // branch; a named branch that doesn't exist falls back the same
+                // way instead of exiting 128.
+                let want_base = p
+                    .get("base")
+                    .and_then(Value::as_str)
+                    .or_else(|| input.get("base").and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| env.run_base.clone());
+                targets.push((repo_id, worktree, want_base, String::new()));
+            }
+            let multi = targets.len() > 1;
             // Iteration label so a fix→review loop streams "Review #1, #2, …".
             let iter_label = input
                 .get("_iteration")
@@ -2318,171 +2682,280 @@ async fn execute_node(
                     .get_or_insert_with(|| crate::modules::workflow_review_config(&default_provider, &[], &[]));
                 cfg.agents.push(checks_review_agent(&default_provider, &check_specs));
             }
-            if progress.enabled() {
-                let lens_list: Vec<String> = if reviewers.is_empty() {
-                    lenses.clone()
-                } else {
-                    reviewers
-                        .iter()
-                        .filter_map(|r| {
-                            r.get("lens")
-                                .or_else(|| r.get("skill"))
-                                .or_else(|| r.get("name"))
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                        })
-                        .collect()
-                };
-                let lens_txt = if lens_list.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · lenses: {}", lens_list.join(", "))
-                };
-                let prov_txt = if providers.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · providers: {}", providers.join(", "))
-                };
-                let chk_txt = if check_specs.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {} check(s) delegated to the reviewer", check_specs.len())
-                };
-                progress.post(format!(
-                    "🔍 *{iter_label}* started (pass ≥ {threshold}){lens_txt}{prov_txt}{chk_txt}"
-                ));
-            }
-            let review_id =
-                crate::modules::run_review_for_branch(ctx, &repo_id, &worktree, &base, cfg_override).await?;
-            let mut logs = vec![format!("review_run: started review {review_id} ({worktree} vs {base})")];
-            let mut status = "running".to_string();
-            if await_done {
-                let deadline = Instant::now() + Duration::from_secs(timeout_s);
-                loop {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    if let Ok(r) = ctx.reviews_store.get_review(&review_id).await {
-                        use otto_core::domain::ReviewStatus as RS;
-                        match r.status {
-                            RS::Done => {
-                                status = "done".into();
-                                break;
-                            }
-                            RS::Error => {
-                                status = "error".into();
-                                break;
-                            }
-                            RS::Cancelled => {
-                                status = "cancelled".into();
-                                break;
-                            }
-                            RS::Running => {}
-                        }
-                    }
-                    if let Ok(rr) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
-                        if rr.status == RunStatus::Canceled {
-                            status = "cancelled".into();
-                            break;
-                        }
-                    }
-                    if Instant::now() >= deadline {
-                        status = "timeout".into();
-                        logs.push("review_run: timed out waiting for review".into());
-                        break;
-                    }
-                }
-            }
-            let (total, open, blocker) = crate::modules::review_findings_counts(ctx, &review_id).await;
-            let blocking = blocker as i64;
-            let advisory = (open.saturating_sub(blocker)) as i64;
-            // Configurable scoring guideline (design §G): per-severity deductions
-            // (percent off 100) over the OPEN findings — `scoring: { bug, warn, info }`.
-            // Defaults (20/5/5) preserve the historical blocking/advisory formula.
-            let (bugs, warns, infos) =
-                crate::modules::review_open_counts_by_severity(ctx, &review_id).await;
+            // Progress-post label fragments (shared by every target).
+            let lens_list: Vec<String> = if reviewers.is_empty() {
+                lenses.clone()
+            } else {
+                reviewers
+                    .iter()
+                    .filter_map(|r| {
+                        r.get("lens")
+                            .or_else(|| r.get("skill"))
+                            .or_else(|| r.get("name"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect()
+            };
+            let lens_txt = if lens_list.is_empty() {
+                String::new()
+            } else {
+                format!(" · lenses: {}", lens_list.join(", "))
+            };
+            let prov_txt = if providers.is_empty() {
+                String::new()
+            } else {
+                format!(" · providers: {}", providers.join(", "))
+            };
+            let chk_txt = if check_specs.is_empty() {
+                String::new()
+            } else {
+                format!(" · {} check(s) delegated to the reviewer", check_specs.len())
+            };
+            // Per-severity deductions (percent off 100) over the OPEN findings
+            // — `scoring: { bug, warn, info }`. Defaults (20/5/5) preserve the
+            // historical blocking/advisory formula.
             let weight = |key: &str, default: i64| -> i64 {
                 p.get("scoring")
                     .and_then(|s| s.get(key))
                     .and_then(Value::as_i64)
                     .unwrap_or(default)
             };
-            let review_score = (100
-                - bugs as i64 * weight("bug", 20)
-                - warns as i64 * weight("warn", 5)
-                - infos as i64 * weight("info", 5))
-            .clamp(0, 100);
-            // Optional goals — assessed by an agent and blended into the score.
+            // Optional goals — assessed by an agent per target and blended in.
             let goals: Vec<String> = p
                 .get("goals")
                 .and_then(Value::as_array)
                 .or_else(|| input.get("goals").and_then(Value::as_array))
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
-            let (goals_score, goals_detail) = if goals.is_empty() {
-                (None, json!([]))
-            } else {
-                let gprompt = format!(
-                    "Assess whether each goal below is met for the repository at `{worktree}` \
-                     (review the code/tests). Reply with ONLY JSON of the form \
-                     {{\"goals\":[{{\"goal\":\"...\",\"met\":true,\"score\":0,\"note\":\"...\"}}],\"score\":0}} \
-                     where each score and the overall score are 0–100.\n\nGoals:\n- {}",
-                    goals.join("\n- ")
-                );
-                match run_node_agent(ctx, ws, user, node, "claude", &gprompt, &worktree, session_tx).await {
-                    Ok((reply, _sid)) => match extract_json(&reply) {
-                        Some(v) => {
-                            let gs = v.get("score").and_then(Value::as_i64).unwrap_or(review_score).clamp(0, 100);
-                            (Some(gs), v.get("goals").cloned().unwrap_or(json!([])))
-                        }
-                        None => (Some(review_score), json!([{ "note": "goals eval reply not parseable" }])),
-                    },
+
+            // Review every target; a per-target failure in the multi-repo case
+            // is logged and skipped (one bad repo never sinks the others), the
+            // single-target case keeps its hard error.
+            let mut logs: Vec<String> = Vec::new();
+            let mut outs: Vec<serde_json::Map<String, Value>> = Vec::new();
+            for (t_idx, (repo_id, worktree, want_base, label)) in targets.iter().enumerate() {
+                // Validate the repo exists (clear error if not); the review
+                // engine looks the repo up again by id internally. Its name
+                // labels the per-repo progress lines when the target didn't
+                // carry one (input-published references).
+                let label = match ctx.git_store.get_repo(repo_id).await {
+                    Ok(r) if label.is_empty() => r.name,
+                    Ok(_) => label.clone(),
                     Err(e) => {
-                        logs.push(format!("review_run: goals eval failed: {e}"));
-                        (Some(review_score), json!([{ "note": "goals eval failed" }]))
+                        let msg = format!("review_run [{label}]: repo: {e}");
+                        if multi {
+                            logs.push(msg);
+                            continue;
+                        }
+                        return Err(otto_core::Error::NotFound(msg));
                     }
-                }
-            };
-            let score = match goals_score {
-                Some(gs) => (review_score + gs) / 2,
-                None => review_score,
-            };
-            let passed = score >= threshold && status == "done";
-            logs.push(format!(
-                "review_run: score {score} (review {review_score}{}) — {}",
-                goals_score.map(|g| format!(", goals {g}")).unwrap_or_default(),
-                if passed { "passed" } else { "below threshold" }
-            ));
-            // Stream the verdict + top findings to the chat thread.
-            let finding_briefs = crate::modules::review_finding_briefs(ctx, &review_id, 10).await;
-            if progress.enabled() {
-                let verdict = if passed { "✅ passed" } else { "⚠️ below threshold" };
-                let mut msg = format!(
-                    "🔍 *{iter_label}* done — score *{score}/100* (pass ≥ {threshold}) — {verdict}"
-                );
-                if finding_briefs.is_empty() {
-                    msg.push_str("\nFindings: none 🎉");
+                };
+                let tag = if multi {
+                    format!(" [{} {}/{}]", label, t_idx + 1, targets.len())
                 } else {
-                    msg.push_str(&format!("\nFindings ({open} open):"));
-                    for b in &finding_briefs {
-                        msg.push_str(&format!("\n • {b}"));
+                    String::new()
+                };
+                if progress.enabled() {
+                    progress.post(format!(
+                        "🔍 *{iter_label}{tag}* started (pass ≥ {threshold}){lens_txt}{prov_txt}{chk_txt}"
+                    ));
+                }
+                let (review_id, resolved_base) = match crate::modules::run_review_for_branch(
+                    ctx,
+                    repo_id,
+                    worktree,
+                    want_base.as_deref(),
+                    cfg_override.clone(),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let msg = format!("review_run{tag}: {e}");
+                        if multi {
+                            logs.push(msg);
+                            if progress.enabled() {
+                                progress.post(format!("🔍 *{iter_label}{tag}* skipped — {}", truncate(&e.to_string(), 200)));
+                            }
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                };
+                // Publish the RESOLVED branch from here on — the loop harvest,
+                // the repos registry and a downstream git_pr must target what
+                // was actually reviewed, not the pre-resolution wish.
+                let base = resolved_base.branch.clone();
+                logs.push(format!(
+                    "review_run{tag}: started review {review_id} ({worktree} vs {base})"
+                ));
+                let mut status = "running".to_string();
+                if await_done {
+                    let deadline = Instant::now() + Duration::from_secs(timeout_s);
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        if let Ok(r) = ctx.reviews_store.get_review(&review_id).await {
+                            use otto_core::domain::ReviewStatus as RS;
+                            match r.status {
+                                RS::Done => {
+                                    status = "done".into();
+                                    break;
+                                }
+                                RS::Error => {
+                                    status = "error".into();
+                                    break;
+                                }
+                                RS::Cancelled => {
+                                    status = "cancelled".into();
+                                    break;
+                                }
+                                RS::Running => {}
+                            }
+                        }
+                        if let Ok(rr) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
+                            if rr.status == RunStatus::Canceled {
+                                status = "cancelled".into();
+                                break;
+                            }
+                        }
+                        if Instant::now() >= deadline {
+                            status = "timeout".into();
+                            logs.push(format!("review_run{tag}: timed out waiting for review"));
+                            break;
+                        }
                     }
                 }
-                progress.post(msg);
+                let (total, open, blocker) =
+                    crate::modules::review_findings_counts(ctx, &review_id).await;
+                let blocking = blocker as i64;
+                let advisory = (open.saturating_sub(blocker)) as i64;
+                let (bugs, warns, infos) =
+                    crate::modules::review_open_counts_by_severity(ctx, &review_id).await;
+                let review_score = (100
+                    - bugs as i64 * weight("bug", 20)
+                    - warns as i64 * weight("warn", 5)
+                    - infos as i64 * weight("info", 5))
+                .clamp(0, 100);
+                let (goals_score, goals_detail) = if goals.is_empty() {
+                    (None, json!([]))
+                } else {
+                    let gprompt = format!(
+                        "Assess whether each goal below is met for the repository at `{worktree}` \
+                         (review the code/tests). Reply with ONLY JSON of the form \
+                         {{\"goals\":[{{\"goal\":\"...\",\"met\":true,\"score\":0,\"note\":\"...\"}}],\"score\":0}} \
+                         where each score and the overall score are 0–100.\n\nGoals:\n- {}",
+                        goals.join("\n- ")
+                    );
+                    match run_node_agent(ctx, ws, user, node, "claude", &gprompt, worktree, session_tx).await {
+                        Ok((reply, _sid)) => match extract_json(&reply) {
+                            Some(v) => {
+                                let gs = v.get("score").and_then(Value::as_i64).unwrap_or(review_score).clamp(0, 100);
+                                (Some(gs), v.get("goals").cloned().unwrap_or(json!([])))
+                            }
+                            None => (Some(review_score), json!([{ "note": "goals eval reply not parseable" }])),
+                        },
+                        Err(e) => {
+                            logs.push(format!("review_run{tag}: goals eval failed: {e}"));
+                            (Some(review_score), json!([{ "note": "goals eval failed" }]))
+                        }
+                    }
+                };
+                let score = match goals_score {
+                    Some(gs) => (review_score + gs) / 2,
+                    None => review_score,
+                };
+                let passed = score >= threshold && status == "done";
+                logs.push(format!(
+                    "review_run{tag}: score {score} (review {review_score}{}) — {}",
+                    goals_score.map(|g| format!(", goals {g}")).unwrap_or_default(),
+                    if passed { "passed" } else { "below threshold" }
+                ));
+                // Stream the verdict + top findings to the chat thread.
+                let finding_briefs = crate::modules::review_finding_briefs(ctx, &review_id, 10).await;
+                if progress.enabled() {
+                    let verdict = if passed { "✅ passed" } else { "⚠️ below threshold" };
+                    let mut msg = format!(
+                        "🔍 *{iter_label}{tag}* done — score *{score}/100* (pass ≥ {threshold}) — {verdict}"
+                    );
+                    if finding_briefs.is_empty() {
+                        msg.push_str("\nFindings: none 🎉");
+                    } else {
+                        msg.push_str(&format!("\nFindings ({open} open):"));
+                        for b in &finding_briefs {
+                            msg.push_str(&format!("\n • {b}"));
+                        }
+                    }
+                    progress.post(msg);
+                }
+                let out = json!({
+                    "review_id": review_id, "status": status,
+                    // Publish the exact reference reviewed so a downstream git_pr
+                    // (or another review) opens the PR on the SAME
+                    // repo/branch/worktree — no need to re-type them on the PR
+                    // node (design: PR is aware).
+                    "repo_id": repo_id, "base": base, "worktree": worktree,
+                    "total": total, "open": open, "blocking": blocking, "advisory": advisory,
+                    "severity": { "bug": bugs, "warn": warns, "info": infos },
+                    "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
+                    // The checks delegated to the reviewer agent (it runs them and
+                    // reports failures as findings — see the cfg injection above).
+                    "checks_requested": check_specs.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
+                    "score": score, "threshold": threshold, "passed": passed,
+                    "findings": finding_briefs, "providers": providers, "lenses": lenses,
+                });
+                outs.push(out.as_object().cloned().unwrap_or_default());
             }
-            let out = json!({
-                "review_id": review_id, "status": status,
-                // Publish the exact reference reviewed so a downstream git_pr (or
-                // another review) opens the PR on the SAME repo/branch/worktree —
-                // no need to re-type them on the PR node (design: PR is aware).
-                "repo_id": repo_id, "base": base, "worktree": worktree,
-                "total": total, "open": open, "blocking": blocking, "advisory": advisory,
-                "severity": { "bug": bugs, "warn": warns, "info": infos },
-                "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
-                // The checks delegated to the reviewer agent (it runs them and
-                // reports failures as findings — see the cfg injection above).
-                "checks_requested": check_specs.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
-                "score": score, "threshold": threshold, "passed": passed,
-                "findings": finding_briefs, "providers": providers, "lenses": lenses,
-            });
+            if outs.is_empty() {
+                return Err(otto_core::Error::Upstream(format!(
+                    "review_run: no declared repo could be reviewed ({})",
+                    logs.join("; ")
+                )));
+            }
+            // Aggregate: the FIRST reviewed repo's fields stay mirrored at the
+            // top level (back-compat for single-repo consumers); the strict
+            // union gates multi-repo runs — worst score, pass only when all
+            // passed — with per-repo detail under `reviews[]`.
+            let mut out = outs[0].clone();
+            let (score, passed) = if multi {
+                let agg_score = outs
+                    .iter()
+                    .filter_map(|o| o.get("score").and_then(Value::as_i64))
+                    .min()
+                    .unwrap_or(0);
+                let agg_passed = outs
+                    .iter()
+                    .all(|o| o.get("passed").and_then(Value::as_bool).unwrap_or(false));
+                out.insert("score".into(), json!(agg_score));
+                out.insert("passed".into(), json!(agg_passed));
+                // EVERY reviewed reference, in the `repos[]` shape
+                // collect_pr_targets consumes — without this a downstream
+                // git_pr would see only the first repo mirrored at top level
+                // and never open the other entries' PRs.
+                let repo_targets: Vec<Value> = outs
+                    .iter()
+                    .map(|o| {
+                        let mut m = serde_json::Map::new();
+                        for k in ["repo_id", "worktree", "base"] {
+                            if let Some(v) = o.get(k) {
+                                m.insert(k.to_string(), v.clone());
+                            }
+                        }
+                        Value::Object(m)
+                    })
+                    .collect();
+                out.insert("repos".into(), Value::Array(repo_targets));
+                out.insert(
+                    "reviews".into(),
+                    Value::Array(outs.into_iter().map(Value::Object).collect()),
+                );
+                (agg_score, agg_passed)
+            } else {
+                (
+                    out.get("score").and_then(Value::as_i64).unwrap_or(0),
+                    out.get("passed").and_then(Value::as_bool).unwrap_or(false),
+                )
+            };
             // `require_pass`: fail the step (so downstream gates error-skip) when the
             // score didn't clear the bar. A failed check surfaces as a blocking
             // finding from the checks reviewer, which drops the score below it.
@@ -2491,7 +2964,7 @@ async fn execute_node(
                     "review_run: score {score} below required threshold {threshold} (require_pass)"
                 )));
             }
-            Ok((out, logs))
+            Ok((Value::Object(out), logs))
         }
 
         // --- Product nodes (wired: real single-agent turn over story context) -
@@ -2529,8 +3002,31 @@ async fn execute_node(
                 None => truncate(&input.to_string(), 6000),
             };
             let extra = p.get("instruction").and_then(Value::as_str).unwrap_or("");
+            // Same file-based handoff as agent_prompt: context dir + the step
+            // file this node must write (engine fallback covers omission).
+            let preamble = env
+                .files
+                .dir_str()
+                .map(|d| {
+                    let own_md = format!(
+                        "{}.md",
+                        crate::workflow_context::step_base_name(
+                            scope.step_no,
+                            node_display_name(node),
+                            scope.iter,
+                            scope.inner_idx,
+                        )
+                    );
+                    crate::workflow_context::agent_preamble(
+                        &d,
+                        &env.files.instruction_name(),
+                        &env.files.list_step_mds(),
+                        &own_md,
+                    )
+                })
+                .unwrap_or_default();
             let prompt = format!(
-                "{skill}\n\n# Task\n{instruction}\n{extra}\n\n# Story context\n{}",
+                "{preamble}{skill}\n\n# Task\n{instruction}\n{extra}\n\n# Story context\n{}",
                 truncate(&context, 8000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
@@ -2675,20 +3171,39 @@ async fn execute_node(
                 .filter(|s| !s.trim().is_empty())
                 .map(expand_tilde)
                 .unwrap_or_else(|| run_cwd.to_string());
-            let run_input_base = input
+            let run_input_base: Option<String> = input
                 .get("base")
                 .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
                 .map(str::to_string)
-                .unwrap_or_else(|| run_base.to_string());
+                .or_else(|| env.run_base.clone());
 
             // Resolve (repo_id, worktree, base) per target, deduped by repo_id.
             // Targets come from the implementer/reviewer reference (input) or
-            // explicit `params.repos`. With `detect_changed: true`, ALSO consider
-            // every registered repo — the per-repo draft below keeps only the ones
-            // that actually changed, so the run opens a PR for exactly what the
-            // implementer touched, across repositories.
+            // explicit `params.repos`; when neither names one, the run-level
+            // repos registry (the declared branches/worktrees) supplies them.
+            // With `detect_changed: true`, ALSO consider every registered repo
+            // — the per-repo draft below keeps only the ones that actually
+            // changed, so the run opens a PR for exactly what the implementer
+            // touched, across repositories. A `None` base ⇒ draft_pr_core
+            // resolves that repo's default branch.
             let mut targets = collect_pr_targets(p, &input);
+            if targets.is_empty() {
+                let declared = env.files.repos();
+                // Same guard as review_run: every declaration errored → fail
+                // with the reasons rather than silently PR-ing the run cwd.
+                if let Some(msg) = crate::workflow_context::all_declared_errored(&declared) {
+                    return Err(otto_core::Error::Invalid(format!(
+                        "git_pr: no declared repos[] entry resolved — {msg}"
+                    )));
+                }
+                targets = declared
+                    .iter()
+                    .filter(|e| e.error.is_none() && e.repo_id.is_some())
+                    .map(crate::workflow_context::entry_to_target)
+                    .collect();
+            }
             if p.get("detect_changed").and_then(Value::as_bool).unwrap_or(false) {
                 if let Ok(repos) = ctx.git_store.list_repos(&ws.id).await {
                     for r in repos {
@@ -2696,7 +3211,7 @@ async fn execute_node(
                     }
                 }
             }
-            let mut resolved: Vec<(String, String, String)> = Vec::new();
+            let mut resolved: Vec<(String, String, Option<String>)> = Vec::new();
             let mut seen: std::collections::HashSet<String> = Default::default();
             let mut notes: Vec<String> = Vec::new();
             if targets.is_empty() {
@@ -2711,9 +3226,10 @@ async fn execute_node(
                 let base = p
                     .get("base")
                     .and_then(Value::as_str)
-                    .filter(|s| !s.trim().is_empty())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
                     .map(str::to_string)
-                    .unwrap_or_else(|| run_input_base.clone());
+                    .or_else(|| run_input_base.clone());
                 seen.insert(repo_id.clone());
                 resolved.push((repo_id, run_worktree.clone(), base));
             } else {
@@ -2728,9 +3244,10 @@ async fn execute_node(
                     let base = t
                         .get("base")
                         .and_then(Value::as_str)
-                        .filter(|s| !s.trim().is_empty())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
                         .map(str::to_string)
-                        .unwrap_or_else(|| run_input_base.clone());
+                        .or_else(|| run_input_base.clone());
                     let rid = match t.get("repo_id").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
                         Some(r) => Some(r.to_string()),
                         None => resolve_repo_id_for_path(ctx, &ws.id, &worktree).await,
@@ -2762,7 +3279,7 @@ async fn execute_node(
                     }
                 };
                 let wt = if worktree.trim().is_empty() { repo.path.clone() } else { worktree.clone() };
-                let draft = match crate::modules::draft_pr_core(ctx, &wt, base).await {
+                let draft = match crate::modules::draft_pr_core(ctx, &wt, base.as_deref()).await {
                     Ok(d) => d,
                     Err(e) => {
                         notes.push(format!("{}: nothing to PR ({e})", repo.name));
@@ -3208,6 +3725,183 @@ fn checks_review_agent(default_provider: &str, checks: &[(String, String)]) -> o
         prompt,
         skill: String::new(),
     }
+}
+
+/// The node's human name (falls back to its kind) — drives step-file names.
+fn node_display_name(node: &WorkflowNode) -> &str {
+    if node.name.trim().is_empty() {
+        &node.kind
+    } else {
+        &node.name
+    }
+}
+
+/// Merge a node output's published repo reference(s) into the run's repos
+/// registry (`repos.json`) — the "each step adds to the repos file" contract:
+/// the top-level `repo_id`+`base`/`worktree`, plus every entry of a published
+/// `repos[]` array (a multi-repo review/loop). Only the explicit `worktree`
+/// key counts (a bare `working_directory` is too ambient to be authoritative).
+fn merge_published_refs(files: &crate::workflow_context::RunContextFiles, out: &Value) {
+    let merge_one = |v: &Value| {
+        if let Some(rid) = v
+            .get("repo_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            files.merge_published(
+                rid,
+                v.get("base").and_then(Value::as_str),
+                v.get("worktree").and_then(Value::as_str),
+            );
+        }
+    };
+    merge_one(out);
+    if let Some(arr) = out.get("repos").and_then(Value::as_array) {
+        for v in arr {
+            merge_one(v);
+        }
+    }
+}
+
+/// Seed the run input from the first VALID declared repo entry — explicit
+/// input keys always win — and expose the normalized entries as
+/// `repos: [{repo_id, worktree, base}]`, the shape `collect_pr_targets` and
+/// the loop's ref harvest already consume. Pure; unit-tested below.
+fn seed_input_from_entries(
+    input: Value,
+    entries: &[crate::workflow_context::RepoEntry],
+) -> Value {
+    let valid: Vec<&crate::workflow_context::RepoEntry> =
+        entries.iter().filter(|e| e.error.is_none()).collect();
+    if valid.is_empty() {
+        return input;
+    }
+    let mut m = match input {
+        Value::Object(m) => m,
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut m = serde_json::Map::new();
+            m.insert("input".into(), other);
+            m
+        }
+    };
+    let missing = |m: &serde_json::Map<String, Value>, k: &str| {
+        m.get(k)
+            .and_then(Value::as_str)
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+    };
+    if missing(&m, "working_directory") {
+        if let Some(w) = valid.iter().find_map(|e| e.worktree.clone()) {
+            m.insert("working_directory".into(), Value::String(w));
+        }
+    }
+    if missing(&m, "base") {
+        if let Some(b) = valid.iter().find_map(|e| e.base.clone()) {
+            m.insert("base".into(), Value::String(b));
+        }
+    }
+    if missing(&m, "repo_id") {
+        if let Some(r) = valid.iter().find_map(|e| e.repo_id.clone()) {
+            m.insert("repo_id".into(), Value::String(r));
+        }
+    }
+    // Replace the raw declarations with the normalized targets; the original
+    // user shape stays visible in repos.json.
+    m.insert(
+        "repos".into(),
+        Value::Array(valid.iter().map(|e| crate::workflow_context::entry_to_target(e)).collect()),
+    );
+    Value::Object(m)
+}
+
+/// Resolve declared repo entries against registered repos + live git state:
+/// fill `repo_id`/`worktree`/`base`, or set a per-entry `error` (kept visible
+/// in `repos.json`; the run proceeds with the valid entries). A `branch`
+/// entry resolves to the checkout that HAS that branch checked out — falling
+/// back to the repo's registered path only when that path is actually on the
+/// branch, because silently reviewing/PRing whatever else is checked out
+/// would target the wrong branch. A missing `source` resolves to the
+/// checkout's DETECTED default branch, never a fabricated "main".
+async fn resolve_repo_entries(
+    ctx: &ServerCtx,
+    workspace_id: &Id,
+    mut entries: Vec<crate::workflow_context::RepoEntry>,
+) -> Vec<crate::workflow_context::RepoEntry> {
+    for e in entries.iter_mut() {
+        // Identify the repo: id → name → path (a linked-worktree path maps to
+        // its origin repo through resolve_repo_id_for_path).
+        let mut rid: Option<String> = None;
+        let mut root: Option<String> = None;
+        if let Ok(r) = ctx.git_store.get_repo(&e.repo).await {
+            rid = Some(r.id.clone());
+            root = Some(r.path);
+        } else if let Ok(repos) = ctx.git_store.list_repos(workspace_id).await {
+            if let Some(r) = repos.into_iter().find(|r| r.name == e.repo) {
+                rid = Some(r.id);
+                root = Some(r.path);
+            }
+        }
+        if rid.is_none() {
+            let hint = if e.kind == "worktree" {
+                expand_tilde(&e.name)
+            } else {
+                expand_tilde(&e.repo)
+            };
+            if let Some(id) = resolve_repo_id_for_path(ctx, workspace_id, &hint).await {
+                if let Ok(r) = ctx.git_store.get_repo(&id).await {
+                    root = Some(r.path);
+                }
+                rid = Some(id);
+            }
+        }
+        let Some(rid_v) = rid else {
+            e.error = Some(format!("no registered repo matches '{}'", e.repo));
+            continue;
+        };
+        e.repo_id = Some(rid_v);
+        let root = root.unwrap_or_else(|| expand_tilde(&e.repo));
+        match e.kind.as_str() {
+            "worktree" => {
+                let wt = expand_tilde(&e.name);
+                if !std::path::Path::new(&wt).is_dir() {
+                    e.error = Some(format!("worktree path does not exist: {wt}"));
+                    continue;
+                }
+                e.worktree = Some(wt);
+            }
+            "branch" => {
+                let git = otto_git::LocalGit::new(&root);
+                match git.worktree_for_branch(&e.name).await {
+                    Some(wt) => e.worktree = Some(wt),
+                    None => match git.current_branch().await {
+                        Ok(cur) if cur == e.name => e.worktree = Some(root.clone()),
+                        _ => {
+                            e.error = Some(format!(
+                                "branch '{}' is not checked out anywhere in {}",
+                                e.name, e.repo
+                            ));
+                            continue;
+                        }
+                    },
+                }
+            }
+            other => {
+                e.error =
+                    Some(format!("unknown repos entry type '{other}' (want branch|worktree)"));
+                continue;
+            }
+        }
+        if e.base.is_none() {
+            e.base = e.source.clone();
+        }
+        if e.base.is_none() {
+            if let Some(wt) = &e.worktree {
+                e.base = otto_git::LocalGit::new(wt).default_branch().await;
+            }
+        }
+    }
+    entries
 }
 
 /// Best-effort: find the registered repo whose checkout contains `path`, so a
@@ -3836,6 +4530,67 @@ mod tests {
         // reference → caller resolves a single implicit target instead.
         let input = json!({ "working_directory": "/w/x", "goals": ["g"] });
         assert!(collect_pr_targets(&json!({}), &input).is_empty());
+    }
+
+    // --- repos declarations → run-input seeding ----------------------------------
+
+    fn entry(
+        repo_id: &str,
+        worktree: Option<&str>,
+        base: Option<&str>,
+        error: Option<&str>,
+    ) -> crate::workflow_context::RepoEntry {
+        crate::workflow_context::RepoEntry {
+            repo: repo_id.to_string(),
+            repo_id: Some(repo_id.to_string()),
+            kind: "branch".into(),
+            name: "feat/x".into(),
+            source: base.map(str::to_string),
+            worktree: worktree.map(str::to_string),
+            base: base.map(str::to_string),
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn seed_input_fills_blanks_from_first_valid_entry() {
+        let entries = vec![
+            entry("BAD", None, None, Some("no repo")), // errored — skipped
+            entry("R1", Some("/w/r1"), Some("develop"), None),
+            entry("R2", Some("/w/r2"), Some("master"), None),
+        ];
+        let out = seed_input_from_entries(json!({ "msg": "do it" }), &entries);
+        assert_eq!(out.get("working_directory").and_then(Value::as_str), Some("/w/r1"));
+        assert_eq!(out.get("base").and_then(Value::as_str), Some("develop"));
+        assert_eq!(out.get("repo_id").and_then(Value::as_str), Some("R1"));
+        // Normalized targets exclude the errored entry and feed straight into
+        // collect_pr_targets (git_pr's fan-out shape). The seeded top-level
+        // repo_id ALSO matches as a single reference — dedup by repo_id is the
+        // caller's job (git_pr's `seen` set), so assert the SET here.
+        let targets = collect_pr_targets(&json!({}), &out);
+        let ids: std::collections::BTreeSet<&str> =
+            targets.iter().filter_map(|t| t.get("repo_id").and_then(Value::as_str)).collect();
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec!["R1", "R2"]);
+    }
+
+    #[test]
+    fn seed_input_explicit_keys_win() {
+        let entries = vec![entry("R1", Some("/w/r1"), Some("develop"), None)];
+        let out = seed_input_from_entries(
+            json!({ "working_directory": "/explicit", "base": "release", "repo_id": "X" }),
+            &entries,
+        );
+        assert_eq!(out.get("working_directory").and_then(Value::as_str), Some("/explicit"));
+        assert_eq!(out.get("base").and_then(Value::as_str), Some("release"));
+        assert_eq!(out.get("repo_id").and_then(Value::as_str), Some("X"));
+    }
+
+    #[test]
+    fn seed_input_no_valid_entries_is_identity() {
+        let entries = vec![entry("BAD", None, None, Some("no repo"))];
+        let input = json!({ "msg": "hi" });
+        assert_eq!(seed_input_from_entries(input.clone(), &entries), input);
+        assert_eq!(seed_input_from_entries(Value::Null, &[]), Value::Null);
     }
 
     // --- reviewer checks (commands delegated to the review agent) ---------------
