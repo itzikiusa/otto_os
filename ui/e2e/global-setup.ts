@@ -49,6 +49,12 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       // meaningfully, so this only makes that already-doomed path quick + and
       // deterministic; no other spec exercises agent execution.
       CLAUDE_BIN: '/nonexistent/otto-e2e-no-claude',
+      // Isolate runtime plugins: without this, a spec that installs a plugin
+      // would write into the user's REAL ~/otto-plugins.
+      OTTO_PLUGINS_HOME: join(dataDir, 'plugins-home'),
+      // Never write test secrets into the user's macOS Keychain — file-backed
+      // secrets live in the temp data dir and vanish with it.
+      OTTO_SECRETS: process.env.OTTO_SECRETS ?? 'file',
     },
     stdio: ['ignore', 'inherit', 'inherit'],
     detached: false,
