@@ -56,6 +56,22 @@ pub const MCP_READ_ONLY_PREFIX: &str = "mcp_read_only: ";
 /// agent's context.
 pub const MCP_MAX_ROWS: usize = 200;
 
+/// Recursively PII-mask a result's cells in place (via `otto_core::redact`) and
+/// flag it `masked`, including every later result set in a multi-statement
+/// batch's `more_results` — so an unmasked cell never leaks just because it was
+/// produced by the 2nd+ statement.
+fn mask_result(res: &mut QueryResult) {
+    for row in &mut res.rows {
+        for cell in row.iter_mut() {
+            *cell = redact::redact_json(cell).value;
+        }
+    }
+    res.masked = true;
+    for more in &mut res.more_results {
+        mask_result(more);
+    }
+}
+
 /// The MCP read-only policy gate: decide whether `statement` may run over the
 /// read-only MCP query path for `engine`. Pure (no I/O) so it is unit-tested
 /// exhaustively without a database. Returns:
@@ -584,14 +600,12 @@ impl DbViewerService {
         // Apply server-side PII masking when the request opts in. Raw cell values
         // are passed through `otto_core::redact::redact_json` before leaving the
         // server — unmasked data never reaches the client when the flag is set.
+        // Multi-statement batches carry later result sets in `more_results`, so
+        // mask those too (never leak an unmasked cell just because it was the 2nd
+        // statement).
         let result = result.map(|mut res| {
             if req.mask == Some(true) {
-                for row in &mut res.rows {
-                    for cell in row.iter_mut() {
-                        *cell = redact::redact_json(cell).value;
-                    }
-                }
-                res.masked = true;
+                mask_result(&mut res);
             }
             res
         });
@@ -658,6 +672,7 @@ impl DbViewerService {
             params: None,
             query_id: None,
             mask: Some(true),
+            offset: None,
         };
         self.run(conn_id, user_id, &safe).await
     }

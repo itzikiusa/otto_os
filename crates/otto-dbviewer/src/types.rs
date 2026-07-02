@@ -469,6 +469,14 @@ pub struct QueryRequest {
     /// No migration needed; this is a request-level flag only.
     #[serde(default)]
     pub mask: Option<bool>,
+    /// Zero-based row offset for server-side pagination. Applied only to an
+    /// auto-limited *single* SELECT (SQL engines append `OFFSET`; Mongo `find`
+    /// maps it to `skip`). Ignored for multi-statement batches and for
+    /// statements the auto-limiter leaves alone (an explicit user `LIMIT`/`OFFSET`),
+    /// so the client's pager and the server's paging never disagree.
+    /// `#[serde(default)]` so a client that omits it still deserializes.
+    #[serde(default)]
+    pub offset: Option<u64>,
 }
 
 /// An engine-native handle the driver captured for an executing query, so the
@@ -561,6 +569,32 @@ pub struct QueryResult {
     /// (because `QueryRequest::mask` was `true`). The UI surfaces this as a badge.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub masked: bool,
+    /// Later result sets from a multi-statement batch, in execution order. The
+    /// **top-level** fields of this `QueryResult` describe the FIRST statement's
+    /// result; each entry here is one subsequent statement. Empty for the common
+    /// single-statement case, and then omitted from the wire entirely — so a
+    /// single-statement response is byte-for-byte unchanged (back-compat).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more_results: Vec<QueryResult>,
+    /// A short (≤80-char, single-line) preview of the statement that produced
+    /// THIS result. Set only for the entries of a multi-statement batch, so the
+    /// UI's result-set switcher can label each set; `None` for a single-statement
+    /// run (and thus omitted from the wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+    /// True when this batch entry is the statement that FAILED: batch execution
+    /// stops here and `message` carries the engine error text. A **single**-statement
+    /// failure is still surfaced as an HTTP error (unchanged), never this flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub errored: bool,
+    /// The effective `LIMIT` the server auto-injected because the statement was
+    /// an unconstrained *single* row-returning SELECT (Mongo: an unconstrained
+    /// `find`). Present ⇔ the result was server-paginated, so the UI shows its
+    /// pager exactly then — without re-deriving the injector's bail heuristics.
+    /// Absent when the user wrote their own `LIMIT`/`OFFSET`, the statement isn't
+    /// paginatable, or it was part of a multi-statement batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_limited: Option<u64>,
 }
 
 impl QueryResult {
@@ -573,6 +607,10 @@ impl QueryResult {
             message: None,
             truncated: false,
             masked: false,
+            more_results: Vec::new(),
+            statement: None,
+            errored: false,
+            auto_limited: None,
         }
     }
 
@@ -582,12 +620,51 @@ impl QueryResult {
         Self {
             columns: vec![Column::new("result")],
             rows: vec![vec![Value::String(text.clone())]],
-            rows_affected: None,
-            stats: QueryStats::default(),
             message: Some(text),
-            truncated: false,
-            masked: false,
+            ..Self::empty()
         }
+    }
+}
+
+/// Assemble a multi-statement batch's per-statement results into the wire shape:
+/// the first result becomes the top-level [`QueryResult`] and the remaining ones
+/// move into its [`QueryResult::more_results`] (preserving execution order). An
+/// empty input yields an empty result. Defined here so first-on-top ordering
+/// lives in exactly one place — every SQL driver's batch path and Mongo's
+/// `run_many` fold through it identically.
+pub fn fold_batch_results(mut results: Vec<QueryResult>) -> QueryResult {
+    if results.is_empty() {
+        return QueryResult::empty();
+    }
+    let mut first = results.remove(0);
+    first.more_results = results;
+    first
+}
+
+/// The terminal entry for a batch statement that failed: an empty result flagged
+/// [`QueryResult::errored`], carrying the engine error text in `message` and the
+/// statement's preview. Batch execution stops at the first such entry, so the
+/// response is a `200` with the completed results plus this one.
+pub fn errored_batch_entry(statement_preview: String, message: impl Into<String>) -> QueryResult {
+    QueryResult {
+        errored: true,
+        statement: Some(statement_preview),
+        message: Some(message.into()),
+        ..QueryResult::empty()
+    }
+}
+
+/// A trimmed, single-line, ≤80-char preview of a batch statement — the label the
+/// multi-result switcher shows per set. Collapses runs of whitespace/newlines to
+/// single spaces and appends `…` (keeping the whole string ≤80 chars) when clipped.
+pub fn statement_preview(statement: &str) -> String {
+    const MAX: usize = 80;
+    let collapsed = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > MAX {
+        let kept: String = collapsed.chars().take(MAX - 1).collect();
+        format!("{kept}…")
+    } else {
+        collapsed
     }
 }
 
@@ -695,8 +772,20 @@ pub struct Capabilities {
     pub engine: Engine,
     pub sql: bool,
     pub joins: bool,
+    /// Whether the explorer can pin a session-scoped transaction (BEGIN…COMMIT)
+    /// across calls. False for the pooled engines: each `run` independently
+    /// acquires a connection from a pool, so there is no session to hold a
+    /// transaction open on — we advertise `false` rather than pretend to support it.
     pub transactions: bool,
     pub multi_statement: bool,
+    /// Whether an in-flight query can be cancelled **server-side** (not just the
+    /// client's HTTP wait). MySQL (`KILL QUERY`) and ClickHouse (`KILL QUERY WHERE
+    /// query_id=…`, HTTP transport) can; MongoDB/Redis cannot, so the UI labels
+    /// Stop as client-side-only there.
+    pub cancel: bool,
+    /// Whether the engine can produce a query plan (drives the Explain button —
+    /// hidden for Redis, which has no plan surface).
+    pub explain: bool,
     pub default_port: u16,
     /// Human labels for the tree levels (e.g. ["Database","Table","Column"]).
     pub schema_levels: Vec<String>,
@@ -723,14 +812,34 @@ pub fn invalid(msg: impl Into<String>) -> Error {
     Error::Invalid(msg.into())
 }
 
-/// Append `LIMIT n` to a single read statement that doesn't already constrain
-/// its row count, so a huge table isn't fully scanned/streamed before we clip
-/// it. Conservative: returns the statement UNCHANGED when it already has a
-/// `LIMIT`, spans multiple statements, or uses a clause where a trailing LIMIT
-/// would be invalid/ambiguous (FORMAT/SETTINGS/INTO OUTFILE/INTO DUMPFILE/
-/// FOR UPDATE/FOR SHARE/UNION/LIMIT BY). Callers should pass this only for
-/// statements they've already classified as row-returning reads.
-pub fn inject_row_limit(statement: &str, limit: usize) -> String {
+/// Outcome of [`inject_row_limit`]: the statement to execute plus whether a
+/// `LIMIT` was actually injected. `limited` is `true` only when the statement
+/// was an unconstrained single row-returning SELECT that we capped — the driver
+/// reports it back as [`QueryResult::auto_limited`] so the UI's pager appears
+/// exactly when the server paginated, with no re-derivation of the bail rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowLimit {
+    /// The (possibly-rewritten) statement to run.
+    pub sql: String,
+    /// `true` when a `LIMIT` (and any requested `OFFSET`) was injected.
+    pub limited: bool,
+}
+
+/// Append `LIMIT n` (and, when `offset` > 0, `OFFSET m`) to a single read
+/// statement that doesn't already constrain its row count, so a huge table isn't
+/// fully scanned/streamed before we clip it. Conservative: returns the statement
+/// UNCHANGED (with `limited: false`) when it already has a `LIMIT`, spans
+/// multiple statements, or uses a clause where a trailing LIMIT would be
+/// invalid/ambiguous (FORMAT/SETTINGS/INTO OUTFILE/INTO DUMPFILE/FOR UPDATE/
+/// FOR SHARE/UNION/LIMIT BY). Callers should pass this only for statements
+/// they've already classified as row-returning reads. `offset` is honoured only
+/// alongside an injected `LIMIT` — never on a statement that bails (the pager is
+/// disabled for those anyway), so `OFFSET` can't land on an explicit user LIMIT.
+pub fn inject_row_limit(statement: &str, limit: usize, offset: Option<u64>) -> RowLimit {
+    let unchanged = || RowLimit {
+        sql: statement.to_string(),
+        limited: false,
+    };
     let trimmed = statement.trim().trim_end_matches(';').trim_end();
     let lower = trimmed.to_ascii_lowercase();
     // Only SELECT (incl. `WITH … SELECT` and a parenthesized `(SELECT …)`)
@@ -740,17 +849,18 @@ pub fn inject_row_limit(statement: &str, limit: usize) -> String {
     let head = strip_leading_comments(&lower);
     let first_word: String = head.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
     if first_word != "select" && first_word != "with" && !head.starts_with('(') {
-        return statement.to_string();
+        return unchanged();
     }
-    // Multiple statements — too risky to rewrite.
+    // Multiple statements — too risky to rewrite. (Drivers split first, so the
+    // single-statement path never hits this; kept as a defensive guard.)
     if trimmed.contains(';') {
-        return statement.to_string();
+        return unchanged();
     }
     // Already constrained: `limit <digit>` somewhere (honors offset,count and
     // `LIMIT n OFFSET m`). A column literally named `limit` won't match because
     // it isn't followed by a digit.
     if has_word_then_digit(&lower, "limit") {
-        return statement.to_string();
+        return unchanged();
     }
     // Clauses after which a trailing LIMIT is invalid or changes meaning.
     const SKIP: &[&str] = &[
@@ -759,10 +869,16 @@ pub fn inject_row_limit(statement: &str, limit: usize) -> String {
     ];
     for kw in SKIP {
         if lower.contains(kw) {
-            return statement.to_string();
+            return unchanged();
         }
     }
-    format!("{trimmed} LIMIT {limit}")
+    // `LIMIT n [OFFSET m]` — the standard form ClickHouse, MySQL and Postgres all
+    // accept. Offset 0 (the first page) is elided so a non-paged run is unchanged.
+    let sql = match offset.filter(|&m| m > 0) {
+        Some(m) => format!("{trimmed} LIMIT {limit} OFFSET {m}"),
+        None => format!("{trimmed} LIMIT {limit}"),
+    };
+    RowLimit { sql, limited: true }
 }
 
 /// Strip leading whitespace and SQL line (`--`) / block (`/* */`) comments,
@@ -1061,63 +1177,59 @@ mod tests {
 
     #[test]
     fn injects_limit_on_plain_select() {
-        assert_eq!(
-            inject_row_limit("SELECT * FROM t", 1000),
-            "SELECT * FROM t LIMIT 1000"
-        );
+        let r = inject_row_limit("SELECT * FROM t", 1000, None);
+        assert_eq!(r.sql, "SELECT * FROM t LIMIT 1000");
+        assert!(r.limited, "a plain SELECT is auto-limited");
     }
 
     #[test]
     fn strips_trailing_semicolon_before_appending() {
         assert_eq!(
-            inject_row_limit("SELECT * FROM t;", 1000),
+            inject_row_limit("SELECT * FROM t;", 1000, None).sql,
             "SELECT * FROM t LIMIT 1000"
         );
     }
 
     #[test]
     fn leaves_existing_limit_untouched() {
-        assert_eq!(
-            inject_row_limit("SELECT * FROM t LIMIT 5", 1000),
-            "SELECT * FROM t LIMIT 5"
-        );
+        let r = inject_row_limit("SELECT * FROM t LIMIT 5", 1000, None);
+        assert_eq!(r.sql, "SELECT * FROM t LIMIT 5");
+        assert!(!r.limited, "an explicit user LIMIT bails ⇒ no auto_limit / pager");
     }
 
     #[test]
     fn appends_after_order_by() {
-        assert!(inject_row_limit("select a from t order by a", 50).ends_with(" LIMIT 50"));
+        assert!(inject_row_limit("select a from t order by a", 50, None).sql.ends_with(" LIMIT 50"));
     }
 
     #[test]
     fn rate_limit_identifier_is_not_a_limit_clause() {
         assert_eq!(
-            inject_row_limit("SELECT rate_limit FROM t", 10),
+            inject_row_limit("SELECT rate_limit FROM t", 10, None).sql,
             "SELECT rate_limit FROM t LIMIT 10"
         );
     }
 
     #[test]
     fn union_is_left_untouched() {
-        assert_eq!(
-            inject_row_limit("SELECT * FROM a UNION SELECT * FROM b", 10),
-            "SELECT * FROM a UNION SELECT * FROM b"
-        );
+        let r = inject_row_limit("SELECT * FROM a UNION SELECT * FROM b", 10, None);
+        assert_eq!(r.sql, "SELECT * FROM a UNION SELECT * FROM b");
+        assert!(!r.limited);
     }
 
     #[test]
     fn format_clause_is_left_untouched() {
         assert_eq!(
-            inject_row_limit("SELECT * FROM t FORMAT JSON", 10),
+            inject_row_limit("SELECT * FROM t FORMAT JSON", 10, None).sql,
             "SELECT * FROM t FORMAT JSON"
         );
     }
 
     #[test]
     fn multi_statement_is_left_untouched() {
-        assert_eq!(
-            inject_row_limit("SELECT 1; SELECT 2", 10),
-            "SELECT 1; SELECT 2"
-        );
+        let r = inject_row_limit("SELECT 1; SELECT 2", 10, None);
+        assert_eq!(r.sql, "SELECT 1; SELECT 2");
+        assert!(!r.limited);
     }
 
     #[test]
@@ -1131,15 +1243,86 @@ mod tests {
             "EXPLAIN SELECT * FROM t",
             "EXISTS TABLE t",
         ] {
-            assert_eq!(inject_row_limit(sql, 1000), sql, "must not touch: {sql}");
+            let r = inject_row_limit(sql, 1000, None);
+            assert_eq!(r.sql, sql, "must not touch: {sql}");
+            assert!(!r.limited, "non-paginatable read must not be flagged auto-limited: {sql}");
         }
     }
 
     #[test]
     fn injects_after_leading_comment_and_for_cte_and_paren() {
-        assert!(inject_row_limit("-- pick\nSELECT * FROM t", 10).ends_with(" LIMIT 10"));
-        assert!(inject_row_limit("WITH c AS (SELECT 1) SELECT * FROM c", 10).ends_with(" LIMIT 10"));
-        assert!(inject_row_limit("(SELECT * FROM t)", 10).ends_with(" LIMIT 10"));
+        assert!(inject_row_limit("-- pick\nSELECT * FROM t", 10, None).sql.ends_with(" LIMIT 10"));
+        assert!(inject_row_limit("WITH c AS (SELECT 1) SELECT * FROM c", 10, None).sql.ends_with(" LIMIT 10"));
+        assert!(inject_row_limit("(SELECT * FROM t)", 10, None).sql.ends_with(" LIMIT 10"));
+    }
+
+    #[test]
+    fn offset_is_appended_after_the_injected_limit() {
+        let r = inject_row_limit("SELECT * FROM t", 25, Some(50));
+        assert_eq!(r.sql, "SELECT * FROM t LIMIT 25 OFFSET 50");
+        assert!(r.limited);
+    }
+
+    #[test]
+    fn offset_zero_is_elided() {
+        // Page 0 must produce the same SQL as no offset — the first page isn't a
+        // special OFFSET 0 form.
+        let r = inject_row_limit("SELECT * FROM t", 25, Some(0));
+        assert_eq!(r.sql, "SELECT * FROM t LIMIT 25");
+        assert!(r.limited);
+    }
+
+    #[test]
+    fn offset_never_lands_on_a_bailed_statement() {
+        // Parity with the pager contract: OFFSET is honoured ONLY alongside an
+        // injected LIMIT, so a user's explicit LIMIT (which bails) can never gain
+        // a server OFFSET, and a non-paginatable read stays byte-identical.
+        for sql in ["SELECT * FROM t LIMIT 5", "SHOW TABLES", "SELECT 1; SELECT 2"] {
+            let r = inject_row_limit(sql, 25, Some(100));
+            assert_eq!(r.sql, sql, "bailed statement must be unchanged even with offset: {sql}");
+            assert!(!r.limited);
+        }
+    }
+
+    // --- batch helpers ---------------------------------------------------------
+
+    #[test]
+    fn statement_preview_collapses_and_clips() {
+        assert_eq!(statement_preview("  SELECT\n  1  "), "SELECT 1");
+        let long = "SELECT ".to_string() + &"a,".repeat(100);
+        let p = statement_preview(&long);
+        assert!(p.chars().count() <= 80, "preview must be ≤80 chars, got {}", p.chars().count());
+        assert!(p.ends_with('…'), "clipped preview ends with an ellipsis");
+    }
+
+    #[test]
+    fn fold_batch_results_puts_first_on_top_rest_in_more_results() {
+        let mk = |label: &str| {
+            let mut r = QueryResult::empty();
+            r.statement = Some(label.to_string());
+            r
+        };
+        // Empty → empty.
+        let empty = fold_batch_results(vec![]);
+        assert!(empty.more_results.is_empty() && empty.statement.is_none());
+        // Single → no more_results (single-statement shape preserved).
+        let one = fold_batch_results(vec![mk("a")]);
+        assert_eq!(one.statement.as_deref(), Some("a"));
+        assert!(one.more_results.is_empty());
+        // Three → first on top, order preserved in more_results.
+        let three = fold_batch_results(vec![mk("a"), mk("b"), mk("c")]);
+        assert_eq!(three.statement.as_deref(), Some("a"));
+        let rest: Vec<_> = three.more_results.iter().map(|r| r.statement.as_deref()).collect();
+        assert_eq!(rest, vec![Some("b"), Some("c")]);
+    }
+
+    #[test]
+    fn errored_batch_entry_flags_and_carries_the_message() {
+        let e = errored_batch_entry("DROP TABLE t".into(), "boom");
+        assert!(e.errored);
+        assert_eq!(e.message.as_deref(), Some("boom"));
+        assert_eq!(e.statement.as_deref(), Some("DROP TABLE t"));
+        assert!(e.rows.is_empty() && e.columns.is_empty());
     }
 
     // --- Write-gate classification --------------------------------------------
@@ -1264,6 +1447,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn batch_write_gate_catches_a_write_anywhere_in_the_batch() {
+        // The service runs `statement_is_write` on the WHOLE batch text before
+        // dispatch (service::guard_write). Prove a write is caught wherever it
+        // sits — first, middle, last — for both SQL engines, so true
+        // multi-statement batches can never smuggle a write past a guarded conn.
+        for sql in [
+            "DELETE FROM t; SELECT 1",           // write first
+            "SELECT 1; DELETE FROM t; SELECT 2", // write in the middle
+            "SELECT 1; SELECT 2; DROP TABLE t",  // write last
+        ] {
+            assert!(statement_is_write(Engine::Mysql, sql), "mysql missed batch write: {sql}");
+            assert!(statement_is_write(Engine::Clickhouse, sql), "ch missed batch write: {sql}");
+        }
+        // An all-read batch stays a read (passes the gate unconfirmed).
+        assert!(!statement_is_write(Engine::Mysql, "SELECT 1; SHOW TABLES; SELECT 2"));
     }
 
     #[test]

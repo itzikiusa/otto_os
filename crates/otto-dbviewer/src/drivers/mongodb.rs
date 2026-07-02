@@ -62,8 +62,17 @@ impl Driver for MongoDriver {
             engine: Engine::Mongodb,
             sql: false,
             joins: false,
-            transactions: true,
-            multi_statement: false,
+            // No session pinning across pooled ops — multi-document transactions
+            // aren't wired, so we don't advertise them (was over-promised `true`).
+            transactions: false,
+            // `run_many` executes a `;`-separated script sequentially (already
+            // supported — the flag now tells the truth).
+            multi_statement: true,
+            // No per-query server cancel is wired (killOp isn't exposed) — Stop is
+            // client-side only.
+            cancel: false,
+            // `.explain()` / the explain flag returns a query plan.
+            explain: true,
             default_port: 27017,
             schema_levels: vec!["Database".into(), "Collection".into(), "Field".into()],
             query_language: "mongo".into(),
@@ -442,37 +451,39 @@ fn first_doc_columns(doc: &Document) -> Vec<String> {
 // --- statement execution -----------------------------------------------------
 
 impl MongoDriver {
-    /// Run every statement from a multi-statement paste in order. Returns the
-    /// last statement's result, with a per-statement summary in `message`
-    /// (e.g. "[1] deleted 1   ·   [2] inserted 1").
+    /// Run every statement from a multi-statement paste in order and fold the
+    /// results into the shared batch shape: the **FIRST** statement's result is
+    /// the top-level one, the rest go into `more_results` (each labelled with its
+    /// statement preview). This aligns Mongo with the SQL drivers and the UI's
+    /// result-set switcher — previously it returned the *last* result only, which
+    /// hid all earlier results (intentional behavior change, noted in api.md). On
+    /// the first failing statement execution stops with an `errored` entry and the
+    /// completed results are returned (§2.2).
     async fn run_many(
         &self,
         cfg: &ResolvedConfig,
         req: &QueryRequest,
         statements: Vec<String>,
     ) -> Result<QueryResult> {
-        let total = statements.len();
-        let mut summaries: Vec<String> = Vec::with_capacity(total);
-        let mut last: Option<QueryResult> = None;
-        for (i, stmt) in statements.into_iter().enumerate() {
+        let mut results: Vec<QueryResult> = Vec::with_capacity(statements.len());
+        for stmt in statements {
+            let preview = types::statement_preview(&stmt);
             let single = QueryRequest {
                 statement: stmt,
                 ..req.clone()
             };
-            let r = self
-                .run_one(cfg, &single)
-                .await
-                .map_err(|e| types::invalid(format!("statement {}/{}: {e}", i + 1, total)))?;
-            let note = r
-                .message
-                .clone()
-                .unwrap_or_else(|| format!("{} row(s)", r.stats.row_count));
-            summaries.push(format!("[{}] {note}", i + 1));
-            last = Some(r);
+            match self.run_one(cfg, &single).await {
+                Ok(mut r) => {
+                    r.statement = Some(preview);
+                    results.push(r);
+                }
+                Err(e) => {
+                    results.push(types::errored_batch_entry(preview, e.to_string()));
+                    break;
+                }
+            }
         }
-        let mut result = last.unwrap_or_else(|| QueryResult::message("no statements"));
-        result.message = Some(summaries.join("   ·   "));
-        Ok(result)
+        Ok(types::fold_batch_results(results))
     }
 
     /// Run one already-split statement: optional SQL→Mongo translation, command
@@ -553,6 +564,15 @@ impl MongoDriver {
                 }
                 let limit = parsed.limit.unwrap_or(max_rows as i64).min(max_rows as i64);
                 action = action.limit(limit + 1);
+                // Server-side pagination: the pager's `offset` maps to Mongo `skip`
+                // (SQL engines map it to `OFFSET`). Applied only when there's no
+                // explicit user `.limit(n)` — same rule as the SQL auto-limiter, so
+                // the pager and the server never disagree.
+                if let Some(off) = req.offset.filter(|&o| o > 0) {
+                    if parsed.limit.is_none() {
+                        action = action.skip(off);
+                    }
+                }
                 if let Some(ms) = max_time_ms {
                     // maxTimeMS on the cursor tells the server to abort the query
                     // when the time budget is exceeded.
@@ -561,7 +581,11 @@ impl MongoDriver {
                 let cursor = action.await.map_err(types::upstream)?;
                 // Cap collection at the effective limit (not just max_rows) so an
                 // explicit `.limit(n)` is honored; the extra fetched row flags truncation.
-                collect_docs(cursor, limit as usize, started).await
+                let mut r = collect_docs(cursor, limit as usize, started).await?;
+                // Flag the auto-limit ⇒ the UI shows its pager — but only when WE
+                // capped it (no explicit user `.limit(n)`), mirroring the SQL path.
+                r.auto_limited = parsed.limit.is_none().then_some(max_rows as u64);
+                Ok(r)
             }
             MongoOp::Aggregate => {
                 let pipeline = parsed.pipeline.unwrap_or_default();
@@ -1968,15 +1992,13 @@ async fn collect_docs(
     Ok(QueryResult {
         columns: columns.into_iter().map(Column::new).collect(),
         rows,
-        rows_affected: None,
         stats: QueryStats {
             duration_ms: started.elapsed().as_millis() as u64,
             row_count,
             bytes_read: None,
         },
-        message: None,
         truncated,
-        masked: false,
+        ..QueryResult::empty()
     })
 }
 

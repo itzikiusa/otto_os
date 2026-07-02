@@ -180,6 +180,55 @@ async fn mysql_run_select() {
     );
 }
 
+/// A true multi-statement batch (`SELECT 1; SELECT 2`) returns TWO results: the
+/// first on top, the second in `more_results`, each carrying its statement
+/// preview. Proves §2.2 end-to-end against the live server.
+#[tokio::test]
+#[ignore]
+async fn mysql_run_multi_statement_batch() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+
+    let d = MysqlDriver::default();
+    let res = d
+        .run(&cfg(), &query("SELECT 1 AS a; SELECT 2 AS b"))
+        .await
+        .expect("run(batch)");
+    // First statement on top.
+    assert_eq!(res.rows[0][0].as_i64(), Some(1), "first result = SELECT 1");
+    assert_eq!(res.statement.as_deref(), Some("SELECT 1 AS a"));
+    // Second statement in more_results.
+    assert_eq!(res.more_results.len(), 1, "one trailing result");
+    assert_eq!(res.more_results[0].rows[0][0].as_i64(), Some(2));
+    assert_eq!(res.more_results[0].statement.as_deref(), Some("SELECT 2 AS b"));
+    // A single statement doesn't gain the batch fields.
+    let one = d.run(&cfg(), &query("SELECT 1 AS a")).await.expect("run(single)");
+    assert!(one.more_results.is_empty() && one.statement.is_none());
+}
+
+/// A batch that fails mid-way returns the completed results plus a terminal
+/// `errored` entry (a 200 with partial results, not an error).
+#[tokio::test]
+#[ignore]
+async fn mysql_batch_partial_on_error() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+
+    let d = MysqlDriver::default();
+    let res = d
+        .run(&cfg(), &query("SELECT 1 AS a; SELECT * FROM no_such_table_xyz; SELECT 3"))
+        .await
+        .expect("batch returns Ok with a partial result, not Err");
+    // First statement succeeded (top-level); the failure is the terminal entry.
+    assert_eq!(res.rows[0][0].as_i64(), Some(1));
+    assert_eq!(res.more_results.len(), 1, "stopped at the failing statement");
+    let failed = &res.more_results[0];
+    assert!(failed.errored, "second entry flagged errored");
+    assert!(!failed.message.as_deref().unwrap_or("").is_empty(), "carries the engine error");
+}
+
 /// After `FROM`, completion offers the tables (orders, customers) ranked above
 /// keywords.
 #[tokio::test]

@@ -22,11 +22,12 @@ use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::export::{open_sink, ExportCounts, ExportFormat};
+use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
     Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest,
-    QueryResult, QueryStats, ResolvedConfig, SchemaNode, TestResult,
+    QueryResult, ResolvedConfig, SchemaNode, TestResult,
 };
 
 const DEFAULT_MAX_ROWS: usize = 1000;
@@ -59,8 +60,15 @@ impl Driver for MysqlDriver {
             engine: Engine::Mysql,
             sql: true,
             joins: true,
-            transactions: true,
+            // Pooled connections: every `run` acquires an independent session, so
+            // there's no place to hold a BEGIN…COMMIT across calls. Advertise the
+            // honest `false` rather than a transaction affordance we can't back.
+            transactions: false,
             multi_statement: true,
+            // `KILL QUERY <conn_id>` on a separate pooled connection.
+            cancel: true,
+            // `EXPLAIN` / `EXPLAIN FORMAT=JSON`.
+            explain: true,
             default_port: 3306,
             schema_levels: vec!["Database".into(), "Table".into(), "Column".into()],
             query_language: "sql".into(),
@@ -344,43 +352,59 @@ impl Driver for MysqlDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
-        let statement = req.statement.trim();
-        if statement.is_empty() {
+        let text = req.statement.trim();
+        if text.is_empty() {
             return Err(types::invalid("empty statement"));
         }
         let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
         let pool = self.pool(cfg).await?;
-        let started = Instant::now();
 
         // The active database (if the user selected one) scopes unqualified
         // table names: we `USE` it on the connection before running the query.
         let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-        let result = if is_read_statement(statement) {
-            let limited = types::inject_row_limit(statement, max_rows.saturating_add(1));
+        // Split with MySQL's lexical rules (backticks, `#` comments, backslash
+        // escapes). A true batch (>1 statement) runs every statement in order on
+        // one shared session; the single-statement fast path keeps its
+        // auto-LIMIT/OFFSET injection and MAX_EXECUTION_TIME hint (§2.2).
+        let spans = split_statements(text, SqlDialect::Mysql);
+        if spans.len() > 1 {
+            return run_batch(&pool, &spans, max_rows, active_db, token).await;
+        }
+        // 0 spans ⇒ comment-only paste: run the original text (unchanged behavior).
+        let statement = spans.first().map(|s| s.text.as_str()).unwrap_or(text);
+        let started = Instant::now();
+
+        let (result, auto_limited) = if is_read_statement(statement) {
+            let ri = types::inject_row_limit(statement, max_rows.saturating_add(1), req.offset);
             // Inject MySQL's MAX_EXECUTION_TIME(ms) optimizer hint when a per-statement
             // timeout is requested. The hint goes right after the SELECT keyword so it
             // is valid even after LIMIT injection. Non-SELECT reads (e.g. SHOW, EXPLAIN)
             // are passed through unchanged — MySQL only honours the hint on SELECTs.
-            let limited = if let Some(ms) = req.timeout_ms.filter(|&t| t > 0) {
-                if limited.trim_start().to_uppercase().starts_with("SELECT") {
+            let sql = if let Some(ms) = req.timeout_ms.filter(|&t| t > 0) {
+                if ri.sql.trim_start().to_uppercase().starts_with("SELECT") {
                     // "SELECT /*+ MAX_EXECUTION_TIME(N) */ ..."
-                    limited.replacen("SELECT", &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"), 1)
+                    ri.sql.replacen("SELECT", &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"), 1)
                 } else {
-                    limited
+                    ri.sql.clone()
                 }
             } else {
-                limited
+                ri.sql.clone()
             };
-            run_read(&pool, &limited, max_rows, active_db, token).await
+            (
+                run_read(&pool, &sql, max_rows, active_db, token).await,
+                // Report the user-visible page size (max_rows), not the +1 probe.
+                ri.limited.then_some(max_rows as u64),
+            )
         } else {
-            run_write(&pool, statement, active_db, token).await
+            (run_write(&pool, statement, active_db, token).await, None)
         };
         let duration_ms = started.elapsed().as_millis() as u64;
 
         let mut result = result?;
         result.stats.duration_ms = duration_ms;
         result.stats.row_count = result.rows.len();
+        result.auto_limited = auto_limited;
         Ok(result)
     }
 
@@ -1191,6 +1215,86 @@ async fn run_read(
                 .await
                 .map_err(types::upstream)?;
     }
+    exec_read_conn(&mut conn, statement, max_rows).await
+}
+
+async fn run_write(
+    pool: &sqlx::MySqlPool,
+    statement: &str,
+    active_db: Option<&str>,
+    token: &CancelToken,
+) -> Result<QueryResult> {
+    // Same as run_read: `USE <db>` and the statement must share one session.
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    capture_conn_id(&mut conn, token).await;
+    if let Some(db) = active_db {
+        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
+                .await
+                .map_err(types::upstream)?;
+    }
+    exec_write_conn(&mut conn, statement).await
+}
+
+/// Execute a true multi-statement batch (>1 statement) on ONE shared pooled
+/// session, in order. The optional `USE <db>` and the captured backend id apply
+/// once to the whole batch (so a concurrent cancel `KILL QUERY`s whichever
+/// statement is running). Each statement's result carries its preview label; on
+/// the first failing statement execution stops and an `errored` entry is appended
+/// — the completed results are returned, not discarded (§2.2). No auto-LIMIT/OFFSET
+/// injection for batches (the pager is single-statement only), but each read is
+/// still capped at `max_rows`.
+async fn run_batch(
+    pool: &sqlx::MySqlPool,
+    spans: &[StatementSpan],
+    max_rows: usize,
+    active_db: Option<&str>,
+    token: &CancelToken,
+) -> Result<QueryResult> {
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    capture_conn_id(&mut conn, token).await;
+    if let Some(db) = active_db {
+        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
+                .await
+                .map_err(types::upstream)?;
+    }
+    let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let stmt = span.text.as_str();
+        let started = Instant::now();
+        let outcome = if is_read_statement(stmt) {
+            exec_read_conn(&mut conn, stmt, max_rows).await
+        } else {
+            exec_write_conn(&mut conn, stmt).await
+        };
+        match outcome {
+            Ok(mut r) => {
+                r.stats.duration_ms = started.elapsed().as_millis() as u64;
+                r.stats.row_count = r.rows.len();
+                r.statement = Some(types::statement_preview(stmt));
+                results.push(r);
+            }
+            Err(e) => {
+                // Stop at the first failure; keep the completed results and flag
+                // this one. The service returns 200 with the partial batch.
+                results.push(types::errored_batch_entry(
+                    types::statement_preview(stmt),
+                    e.to_string(),
+                ));
+                break;
+            }
+        }
+    }
+    Ok(types::fold_batch_results(results))
+}
+
+/// Run a row-returning statement on an already-prepared connection (`USE` +
+/// conn-id capture done by the caller) and shape the rows into a `QueryResult`,
+/// capping at `max_rows` and flagging `truncated` when the driver fetched more.
+async fn exec_read_conn(
+    conn: &mut sqlx::MySqlConnection,
+    statement: &str,
+    max_rows: usize,
+) -> Result<QueryResult> {
     let rows = sqlx::query(statement)
         .fetch_all(&mut *conn)
         .await
@@ -1217,28 +1321,17 @@ async fn run_read(
     Ok(QueryResult {
         columns,
         rows: out_rows,
-        rows_affected: None,
-        stats: QueryStats::default(),
-        message: None,
         truncated,
-        masked: false,
+        ..QueryResult::empty()
     })
 }
 
-async fn run_write(
-    pool: &sqlx::MySqlPool,
+/// Run a write/DDL statement on an already-prepared connection and return the
+/// affected-row acknowledgement.
+async fn exec_write_conn(
+    conn: &mut sqlx::MySqlConnection,
     statement: &str,
-    active_db: Option<&str>,
-    token: &CancelToken,
 ) -> Result<QueryResult> {
-    // Same as run_read: `USE <db>` and the statement must share one session.
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
-    capture_conn_id(&mut conn, token).await;
-    if let Some(db) = active_db {
-        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
-                .await
-                .map_err(types::upstream)?;
-    }
     let res = sqlx::query(statement)
         .execute(&mut *conn)
         .await
@@ -1466,6 +1559,18 @@ const FUNCTIONS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capabilities_are_honest() {
+        let c = MysqlDriver::default().capabilities();
+        assert_eq!(c.engine, Engine::Mysql);
+        assert!(c.sql && c.joins && c.multi_statement);
+        // Pooled connections ⇒ no session-pinned transactions (was over-promised).
+        assert!(!c.transactions);
+        // Server-side cancel (KILL QUERY) + EXPLAIN both supported.
+        assert!(c.cancel);
+        assert!(c.explain);
+    }
 
     #[test]
     fn detects_read_statements() {

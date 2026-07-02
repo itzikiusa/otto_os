@@ -547,7 +547,7 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /connections/{id}/db/test | ws editor | — | connectivity probe result |
-| GET /connections/{id}/db/capabilities | ws viewer | — | engine capability flags |
+| GET /connections/{id}/db/capabilities | ws viewer | — | engine capability flags: `sql`, `joins`, `transactions`, `multi_statement`, `cancel`, `explain`, `default_port`, `schema_levels`, `query_language` (see the honesty notes below) |
 | GET /connections/{id}/db/schema | ws viewer | — | top-level schema tree (roots) |
 | POST /connections/{id}/db/schema/children | ws viewer | `{node}` | child schema nodes (lazy expand). MySQL databases expose `Tables`/`Views` folders always, plus `Procedures`/`Functions` folders (with a count) when routines exist; routine leaves carry `kind:"procedure"`/`"function"` |
 | POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.). For a procedure/function: `columns` are its parameters and `ddl` is the `SHOW CREATE` body |
@@ -625,6 +625,45 @@ connection, not just the client's HTTP wait. Cancel is gated at the same role as
 `query` (`ws editor`; global connections: root). Cancelling an unknown /
 already-finished query, a query on a different connection, or one on an engine
 without a native per-query cancel (Redis/MongoDB) is a no-op success (`204`).
+
+`RunQueryReq` also accepts `offset?` (u64, `#[serde(default)]` — back-compat).
+It paginates an **auto-limited single SELECT** (Mongo: an unconstrained `find`):
+the SQL drivers append `LIMIT n OFFSET m`, Mongo maps it to `skip`. It is applied
+**only** when the server auto-injected the LIMIT — an explicit user `LIMIT`/`OFFSET`,
+a non-paginatable statement, or a multi-statement batch never gets an `offset`,
+so the client's pager and the server's paging can't disagree.
+
+**Multi-statement batches (`SELECT 1; SELECT 2`).** For MySQL/ClickHouse/MongoDB a
+`;`-separated script now runs **each statement in order** (a string/comment/quote-
+aware splitter decides the boundaries — a `;` inside a literal or comment is not
+one). `QueryResult` gained (all back-compat, omitted when empty/default):
+`more_results: QueryResult[]` — the later statements' results, in order; the
+**top-level fields describe the FIRST statement**. `statement?` — a ≤80-char
+single-line preview label, set on each entry of a batch (not for a single
+statement). `errored?: bool` — set on the terminal entry when a statement fails:
+execution **stops there**, and the response is a `200` carrying the completed
+results plus that one errored entry (its `message` holds the engine error). A
+**single**-statement failure is still an HTTP error, unchanged. Cancel kills the
+statement currently running, surfacing as that entry's error → the same partial
+path. A single statement (the common case) is unaffected — no injection changes,
+no new fields on the wire. **MongoDB behavior change:** `run_many` previously
+returned only the *last* statement's result; it now returns the first on top with
+the rest in `more_results` (so the UI's result-set switcher sees them all).
+
+`auto_limited?: u64` on `QueryResult` — the effective `LIMIT` the server injected
+for an auto-paginated single SELECT/`find`. Present ⇔ the result was
+server-paginated (so the UI shows its pager exactly then, without re-deriving the
+injector's bail rules); absent for explicit user LIMIT/OFFSET, non-paginatable
+statements, and every batch entry.
+
+**Honest capability flags** (`GET …/db/capabilities`). `transactions` is now
+`false` for MySQL and MongoDB (was `true` with no implementation): the explorer
+acquires each `run` from a connection pool, so there is no pinned session to hold
+a `BEGIN…COMMIT` open on. `multi_statement` is now `true` for MongoDB (it already
+ran `;`-separated scripts). Two new flags: `cancel` (server-side per-query cancel
+— `true` for MySQL/ClickHouse, `false` for MongoDB/Redis; the UI labels Stop as
+client-side-only when false) and `explain` (`true` everywhere except Redis, which
+has no plan surface — the UI hides the Explain button there).
 
 ## DB Assistant — file-backed agent (`/connections/{id}/db/assist`, `/db-assist/{aid}/query`)
 

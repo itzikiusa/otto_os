@@ -4000,7 +4000,12 @@ export interface QueryStats {
   bytes_read?: number | null;
 }
 
-/** Result of running a statement: tabular rows + stats. */
+/** Result of running a statement: tabular rows + stats.
+ *
+ *  For a **multi-statement batch** the top-level fields describe the FIRST
+ *  statement; each later statement is one entry in `more_results` (in order),
+ *  and every batch entry carries a `statement` preview label. A single-statement
+ *  run omits all of these (back-compat: byte-identical to before). */
 export interface QueryResult {
   columns: DbColumn[];
   rows: unknown[][];
@@ -4010,6 +4015,22 @@ export interface QueryResult {
   truncated: boolean;
   /** True when the server ran cell values through `otto_core::redact` (QueryRequest.mask=true). */
   masked?: boolean;
+  /** Later result sets from a multi-statement batch, in execution order (the
+   *  top-level fields are the first statement's result). Absent/empty for a
+   *  single statement. */
+  more_results?: QueryResult[];
+  /** A ≤80-char single-line preview of the statement that produced THIS result —
+   *  set only for the entries of a multi-statement batch (labels the switcher). */
+  statement?: string | null;
+  /** True when this batch entry is the statement that FAILED: execution stopped
+   *  here and `message` holds the engine error. A single-statement failure is an
+   *  HTTP error instead, never this flag. */
+  errored?: boolean;
+  /** The `LIMIT` the server auto-injected for an unconstrained single SELECT
+   *  (Mongo: an unconstrained `find`). Present ⇔ the result was auto-paginated,
+   *  so the UI shows its pager exactly then; absent for explicit user
+   *  LIMIT/OFFSET, non-paginatable statements, and batches. */
+  auto_limited?: number | null;
 }
 
 /**
@@ -4204,8 +4225,16 @@ export interface DbCapabilities {
   engine: DbEngine;
   sql: boolean;
   joins: boolean;
+  /** Session-pinned transactions (BEGIN…COMMIT across calls). False for the
+   *  pooled engines — each run acquires an independent connection. */
   transactions: boolean;
   multi_statement: boolean;
+  /** Server-side cancel of an in-flight query (MySQL/ClickHouse). When false
+   *  (MongoDB/Redis) the Stop button is client-side only. */
+  cancel?: boolean;
+  /** The engine can produce a query plan (drives the Explain button; false for
+   *  Redis, which has no plan surface). */
+  explain?: boolean;
   default_port: number;
   schema_levels: string[];
   query_language: 'sql' | 'redis' | 'mongo';

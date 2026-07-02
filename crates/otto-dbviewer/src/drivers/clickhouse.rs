@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::export::{open_sink, ExportCounts, ExportFormat};
+use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
@@ -549,6 +550,127 @@ impl ClickhouseDriver {
                 Ok(text)
             }
         }
+    }
+
+    /// Run one row-returning statement and shape it into a `QueryResult`,
+    /// capping at `max_rows` (flagging `truncated`) and capping oversized cells.
+    /// Shared by the single-statement fast path and the batch loop.
+    async fn exec_ch_read(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
+        max_rows: usize,
+    ) -> Result<QueryResult> {
+        let started = Instant::now();
+        let resp = self
+            .query_rows_db_timeout(cfg, sql, active_db, query_id, timeout_secs)
+            .await?;
+        let duration_ms = started.elapsed().as_millis() as u64;
+
+        let columns: Vec<Column> = resp
+            .meta
+            .iter()
+            .map(|(name, ty)| Column::typed(name, ty))
+            .collect();
+
+        let total = resp.data.len();
+        let truncated = total > max_rows;
+        // Cap oversized cells (e.g. AggregateFunction/*State blobs) so a giant
+        // value can't break the grid.
+        let rows: Vec<Vec<Value>> = resp
+            .data
+            .into_iter()
+            .take(max_rows)
+            .map(|row| row.into_iter().map(cap_cell).collect())
+            .collect();
+        let row_count = rows.len();
+
+        Ok(QueryResult {
+            columns,
+            rows,
+            stats: QueryStats {
+                duration_ms,
+                row_count,
+                bytes_read: Some(resp.bytes_read),
+            },
+            truncated,
+            ..QueryResult::empty()
+        })
+    }
+
+    /// Run one write/DDL statement (no rowset) and return the "OK" acknowledgement.
+    async fn exec_ch_write(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<QueryResult> {
+        let started = Instant::now();
+        self.query_text_db_timeout(cfg, sql, active_db, query_id, timeout_secs)
+            .await?;
+        let mut result = QueryResult::message("OK");
+        result.rows_affected = None;
+        result.stats = QueryStats {
+            duration_ms: started.elapsed().as_millis() as u64,
+            row_count: 0,
+            bytes_read: None,
+        };
+        Ok(result)
+    }
+
+    /// Execute a true multi-statement batch (>1 statement) in order. Each
+    /// statement gets its own fresh `query_id` (recorded in `token` on the HTTP
+    /// transport) so a concurrent cancel targets the statement currently running.
+    /// The first result is the top-level one, the rest go into `more_results`,
+    /// each labelled with its statement preview; on the first failure execution
+    /// stops with an `errored` entry and the completed results are returned (§2.2).
+    /// Batches get no auto-LIMIT/OFFSET injection (the pager is single-statement
+    /// only), but each read is still capped at `max_rows`.
+    async fn run_ch_batch(
+        &self,
+        cfg: &ResolvedConfig,
+        spans: &[StatementSpan],
+        max_rows: usize,
+        active_db: Option<&str>,
+        timeout_secs: Option<u64>,
+        token: &CancelToken,
+    ) -> Result<QueryResult> {
+        // Server-side cancel via query_id only exists on the HTTP transport.
+        let http = transport_for(cfg) == Transport::Http;
+        let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
+        for span in spans {
+            let stmt = span.text.as_str();
+            let query_id = new_query_id();
+            if http {
+                token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
+            }
+            let outcome = if returns_rows(stmt) {
+                self.exec_ch_read(cfg, stmt, active_db, Some(query_id), timeout_secs, max_rows)
+                    .await
+            } else {
+                self.exec_ch_write(cfg, stmt, active_db, Some(query_id), timeout_secs)
+                    .await
+            };
+            match outcome {
+                Ok(mut r) => {
+                    r.statement = Some(types::statement_preview(stmt));
+                    results.push(r);
+                }
+                Err(e) => {
+                    results.push(types::errored_batch_entry(
+                        types::statement_preview(stmt),
+                        e.to_string(),
+                    ));
+                    break;
+                }
+            }
+        }
+        Ok(types::fold_batch_results(results))
     }
 }
 
@@ -1076,6 +1198,12 @@ impl Driver for ClickhouseDriver {
             joins: true,
             transactions: false,
             multi_statement: true,
+            // Server-side cancel via `KILL QUERY WHERE query_id=…` — only tagged on
+            // the HTTP transport, but advertised as capable; the native transport's
+            // cancel is a harmless no-op.
+            cancel: true,
+            // `EXPLAIN` / `EXPLAIN json=1`.
+            explain: true,
             default_port: 8123,
             schema_levels: vec!["Database".into(), "Table".into(), "Column".into()],
             query_language: "sql".into(),
@@ -1342,78 +1470,52 @@ impl Driver for ClickhouseDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
-        let sql = req.statement.trim();
-        if sql.is_empty() {
+        let text = req.statement.trim();
+        if text.is_empty() {
             return Err(types::invalid("clickhouse: empty statement"));
         }
         let max_rows = req.max_rows.unwrap_or(1000);
-        let started = Instant::now();
 
         // The active database (if the user selected one) scopes unqualified
         // table names — see query_rows_db for how it's applied per transport.
         let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
+        // Convert ms → seconds (round up) for ClickHouse's `max_execution_time`.
+        let timeout_secs = req.timeout_ms.filter(|&t| t > 0).map(|t| t.div_ceil(1000));
+        // Server-side cancel via query_id only exists on the HTTP transport.
+        let http = transport_for(cfg) == Transport::Http;
+
+        // A true batch (>1 statement) runs each statement in order, tagging each
+        // with its own query_id so a cancel hits the running one; the single path
+        // keeps auto-LIMIT/OFFSET injection (§2.2).
+        let spans = split_statements(text, SqlDialect::Clickhouse);
+        if spans.len() > 1 {
+            return self
+                .run_ch_batch(cfg, &spans, max_rows, active_db, timeout_secs, token)
+                .await;
+        }
+        // 0 spans ⇒ comment-only paste: run the original text (unchanged behavior).
+        let stmt = spans.first().map(|s| s.text.as_str()).unwrap_or(text);
+
         // Tag this execution with a fresh server-side query_id (HTTP transport)
         // and record it in the token, so a concurrent cancel can KILL it. The
         // native transport ignores it (cancel becomes a no-op there).
         let query_id = new_query_id();
-        if transport_for(cfg) == Transport::Http {
+        if http {
             token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
         }
 
-        // Convert ms → seconds (round up) for ClickHouse's `max_execution_time`.
-        let timeout_secs = req.timeout_ms.filter(|&t| t > 0).map(|t| t.div_ceil(1000));
-
-        if returns_rows(sql) {
-            let limited = types::inject_row_limit(sql, max_rows.saturating_add(1));
-            let resp = self
-                .query_rows_db_timeout(cfg, &limited, active_db, Some(query_id), timeout_secs)
+        if returns_rows(stmt) {
+            let ri = types::inject_row_limit(stmt, max_rows.saturating_add(1), req.offset);
+            let mut r = self
+                .exec_ch_read(cfg, &ri.sql, active_db, Some(query_id), timeout_secs, max_rows)
                 .await?;
-            let duration_ms = started.elapsed().as_millis() as u64;
-
-            let columns: Vec<Column> = resp
-                .meta
-                .iter()
-                .map(|(name, ty)| Column::typed(name, ty))
-                .collect();
-
-            let total = resp.data.len();
-            let truncated = total > max_rows;
-            // Cap oversized cells (e.g. AggregateFunction/*State blobs) so a
-            // giant value can't break the grid.
-            let rows: Vec<Vec<Value>> = resp
-                .data
-                .into_iter()
-                .take(max_rows)
-                .map(|row| row.into_iter().map(cap_cell).collect())
-                .collect();
-            let row_count = rows.len();
-
-            Ok(QueryResult {
-                columns,
-                rows,
-                rows_affected: None,
-                stats: QueryStats {
-                    duration_ms,
-                    row_count,
-                    bytes_read: Some(resp.bytes_read),
-                },
-                message: None,
-                truncated,
-                masked: false,
-            })
+            // Report the user-visible page size (max_rows), not the +1 probe.
+            r.auto_limited = ri.limited.then_some(max_rows as u64);
+            Ok(r)
         } else {
-            // Write / DDL statement: no rowset, just acknowledge.
-            self.query_text_db_timeout(cfg, sql, active_db, Some(query_id), timeout_secs).await?;
-            let duration_ms = started.elapsed().as_millis() as u64;
-            let mut result = QueryResult::message("OK");
-            result.rows_affected = None;
-            result.stats = QueryStats {
-                duration_ms,
-                row_count: 0,
-                bytes_read: None,
-            };
-            Ok(result)
+            self.exec_ch_write(cfg, stmt, active_db, Some(query_id), timeout_secs)
+                .await
         }
     }
 
@@ -1555,7 +1657,7 @@ impl ClickhouseDriver {
 /// the conservative limit injector shared with the interactive path.
 fn capped_sql(sql: &str, max_rows: Option<usize>) -> String {
     match max_rows {
-        Some(n) => types::inject_row_limit(sql, n),
+        Some(n) => types::inject_row_limit(sql, n, None).sql,
         None => sql.to_string(),
     }
 }
@@ -1709,6 +1811,16 @@ const FUNCTIONS: &[(&str, &str)] = &[
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn capabilities_are_honest() {
+        let c = ClickhouseDriver::default().capabilities();
+        assert_eq!(c.engine, Engine::Clickhouse);
+        assert!(c.sql && c.joins && c.multi_statement);
+        assert!(!c.transactions);
+        assert!(c.cancel, "KILL QUERY WHERE query_id supported (HTTP)");
+        assert!(c.explain);
+    }
 
     fn base_cfg(port: u16) -> ResolvedConfig {
         ResolvedConfig {
