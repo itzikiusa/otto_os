@@ -357,8 +357,8 @@ fn tier_json(t: Option<Tier>) -> Value {
     t.map(|x| json!(x.as_str())).unwrap_or(Value::Null)
 }
 
-/// Full `/metrics` payload (spec §A3). `suggestions` is emitted empty here and
-/// filled by the route layer via [`crate::suggest`]. Pure — `now` injected.
+/// Full `/metrics` payload (spec §A3), suggestions included. Pure — `now`
+/// injected.
 pub fn compute(commits: &[Commit], days: i64, label: &str, now: i64, cfg: &Config) -> Value {
     let days = days.max(1);
     let from = now - days * 86_400;
@@ -439,6 +439,32 @@ pub fn compute(commits: &[Commit], days: i64, label: &str, now: i64, cfg: &Confi
     recent.sort_by_key(|m| std::cmp::Reverse(m.ts));
     recent.truncate(50);
 
+    let sugg = crate::suggest::suggestions(&crate::suggest::SuggestInput {
+        deploy_tag_pattern: cfg.deploy_tag_pattern.clone(),
+        has_deploys,
+        df_per_week: cur.df_per_week,
+        lead_median_h: cur.lead_median,
+        lead_p90_h: cur.lead_p90,
+        lead_count: cur.leads.len(),
+        cfr: cur.cfr,
+        mttr_h: cur.mttr,
+        tier_df: t_df,
+        tier_lead: t_lead,
+        tier_mttr: t_mttr,
+        batch_median: cur.batch_median,
+        feat_to_rel_h: avg_gap(&rel_ts, &feat_ts),
+        rel_to_dep_h: avg_gap(&dep_ts, &rel_ts),
+        deploy_ts: dep_ts.clone(),
+        failed_tags: cur
+            .deploys
+            .iter()
+            .filter(|d| d.failed)
+            .map(|d| d.tag.clone())
+            .collect(),
+        unrecovered: cur.unrecovered,
+        unshipped_merges: cur.unshipped,
+    });
+
     json!({
         "repo_name": label,
         "window_days": days,
@@ -469,7 +495,7 @@ pub fn compute(commits: &[Commit], days: i64, label: &str, now: i64, cfg: &Confi
         "avg_release_to_deploy_hours": opt(avg_gap(&dep_ts, &rel_ts)),
         "deployments": cur.deploys.iter().map(|d| json!({"ts": d.ts, "tag": d.tag, "failed": d.failed, "repo": d.repo})).collect::<Vec<_>>(),
         "recent_merges": recent.iter().map(|m| json!({"ts": m.ts, "kind": m.kind, "subject": m.subject, "repo": m.repo})).collect::<Vec<_>>(),
-        "suggestions": [],
+        "suggestions": sugg.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
     })
 }
 
