@@ -47,8 +47,12 @@ export const nativeBrowser = {
   onNewTab: async (cb: (url: string) => void): Promise<() => void> => {
     if (!isTauri) return () => {};
     try {
-      const { listen } = await import('@tauri-apps/api/event');
-      return await listen<string>('otto://browser-new-tab', (e) => cb(e.payload));
+      // Per-window listen: the shell emits browser events to the OWNING window
+      // only (multi-window) — a global listener would receive every window's.
+      const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      return await getCurrentWebviewWindow().listen<string>('otto://browser-new-tab', (e) =>
+        cb(e.payload),
+      );
     } catch {
       return () => {};
     }
@@ -62,8 +66,9 @@ export const nativeBrowser = {
   onUrlChange: async (cb: (id: string, url: string) => void): Promise<() => void> => {
     if (!isTauri) return () => {};
     try {
-      const { listen } = await import('@tauri-apps/api/event');
-      return await listen<[string, string]>('otto://browser-url', (e) =>
+      // Per-window listen — same scoping rationale as onNewTab.
+      const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      return await getCurrentWebviewWindow().listen<[string, string]>('otto://browser-url', (e) =>
         cb(e.payload[0], e.payload[1]),
       );
     } catch {

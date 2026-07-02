@@ -31,7 +31,6 @@ use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl};
 
 /// Label prefix for every browser-tab webview (`otto-browser-<tabId>`).
 const PREFIX: &str = "otto-browser-";
-const MAIN: &str = "main";
 
 /// Emitted (payload = requested URL) when a tab asks to open a new window.
 const NEW_TAB_EVENT: &str = "otto://browser-new-tab";
@@ -50,8 +49,10 @@ fn parse_url(url: &str) -> Result<tauri::Url, String> {
 /// given panel rect. Coordinates are logical (CSS) pixels relative to the
 /// window's top-left, matching `getBoundingClientRect()` in the SPA.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // tauri command: flat invoke args (id + url + rect)
 pub fn browser_open(
     app: tauri::AppHandle,
+    window: tauri::Window,
     id: String,
     url: String,
     x: f64,
@@ -73,20 +74,25 @@ pub fn browser_open(
         }))
         .unwrap_or_else(|_| Err("browser webview panicked while navigating".into()));
     }
-    let window = app.get_window(MAIN).ok_or("main window not found")?;
+    // Anchor the tab to the window the SPA invoked us from (multi-window: each
+    // window's Browser panel owns its own child webviews), and emit its events
+    // to THAT window only — a broadcast would open the tab / move the address
+    // bar in every window's Browser panel at once.
+    let win_label = window.label().to_string();
     let app_nav = app.clone();
     let id_nav = id.clone();
+    let lbl_nav = win_label.clone();
     let app_new = app.clone();
     let builder = tauri::webview::WebviewBuilder::new(&lbl, WebviewUrl::External(parsed))
         .transparent(false)
         // Track in-page navigation for the address bar (never calls url()).
         .on_navigation(move |u: &tauri::Url| {
-            let _ = app_nav.emit(URL_EVENT, (id_nav.clone(), u.to_string()));
+            let _ = app_nav.emit_to(lbl_nav.as_str(), URL_EVENT, (id_nav.clone(), u.to_string()));
             true
         })
         // Deny OS popups; ask the SPA to open a real in-app tab instead.
         .on_new_window(move |u: tauri::Url, _features: NewWindowFeatures| {
-            let _ = app_new.emit(NEW_TAB_EVENT, u.to_string());
+            let _ = app_new.emit_to(win_label.as_str(), NEW_TAB_EVENT, u.to_string());
             NewWindowResponse::Deny
         });
     window
@@ -151,13 +157,15 @@ pub fn browser_hide(app: tauri::AppHandle, id: String) {
     }
 }
 
-/// Hide EVERY browser-tab webview — used when an SPA overlay (palette, modal,
-/// context menu) opens over the panel, or when the Browser tab isn't visible.
+/// Hide every browser-tab webview OF THE INVOKING WINDOW — used when an SPA
+/// overlay (palette, modal, context menu) opens over the panel, or when the
+/// Browser tab isn't visible. Scoped per window so window A's palette doesn't
+/// blank window B's browser.
 #[tauri::command]
-pub fn browser_hide_all(app: tauri::AppHandle) {
+pub fn browser_hide_all(app: tauri::AppHandle, window: tauri::Window) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         for (lbl, wv) in app.webviews() {
-            if lbl.starts_with(PREFIX) {
+            if lbl.starts_with(PREFIX) && wv.window().label() == window.label() {
                 let _ = wv.hide();
             }
         }
@@ -214,12 +222,13 @@ pub fn browser_devtools(app: tauri::AppHandle, id: String) {
     });
 }
 
-/// Close (destroy) every browser-tab webview — used when the panel unmounts.
+/// Close (destroy) the invoking window's browser-tab webviews — used when the
+/// panel unmounts (per-window, same scoping rationale as `browser_hide_all`).
 #[tauri::command]
-pub fn browser_close_all(app: tauri::AppHandle) {
+pub fn browser_close_all(app: tauri::AppHandle, window: tauri::Window) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         for (lbl, wv) in app.webviews() {
-            if lbl.starts_with(PREFIX) {
+            if lbl.starts_with(PREFIX) && wv.window().label() == window.label() {
                 let _ = wv.close();
             }
         }
