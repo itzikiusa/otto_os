@@ -319,9 +319,93 @@
   let editorOpen = $state(true);
   let resultsOpen = $state(true);
   const hasResult = $derived(!!tab.result || !!tab.error);
+
+  // ── Keyboard shortcuts (active only while the DB query view owns focus) ───────
+  // Registered on window but gated to fire only when focus is inside this editor
+  // (or nowhere), so they never hijack another module's inputs. The component is
+  // mounted only on the Query tab, so the listener is naturally scoped to it.
+  let rootEl = $state<HTMLElement | null>(null);
+  // Only conflict-free chords are bound: the global key map (lib/keys.ts, window
+  // capture) already claims ⌘T/⌘W/⌘F and ⌃Tab (regardless of ⌥/⇧), so binding
+  // those here would double-fire the shell's session actions. New tab / Close tab
+  // / Format stay on the toolbar; these are the shortcuts that work standalone.
+  const SHORTCUTS: { keys: string; label: string }[] = [
+    { keys: '⌘↵', label: 'Run' },
+    { keys: '⌘S', label: 'Save query' },
+    { keys: 'Esc', label: 'Cancel running query' },
+    { keys: '⌥⌘→', label: 'Next query tab' },
+    { keys: '⌥⌘←', label: 'Previous query tab' },
+  ];
+
+  function switchRelative(dir: 1 | -1): void {
+    const n = database.tabs.length;
+    if (n < 2) return;
+    const cur = database.activeTab;
+    database.switchTab(dir === 1 ? (cur + 1) % n : (cur - 1 + n) % n);
+  }
+
+  function handleShortcut(e: KeyboardEvent): void {
+    const key = e.key;
+    const cmd = e.metaKey || e.ctrlKey; // ⌘ on macOS, Ctrl elsewhere
+    // Esc — cancel a running query (or close the shortcuts popover).
+    if (key === 'Escape') {
+      if (tab.running) {
+        e.preventDefault();
+        database.abortQuery();
+      } else if (shortcutsOpen) {
+        shortcutsOpen = false;
+      }
+      return;
+    }
+    // ⌘S — save the query. (⌘F/⌘T/⌘W are claimed by the global key map, so Format
+    // / New tab / Close tab stay on the toolbar rather than double-fire here.)
+    if (cmd && !e.shiftKey && !e.altKey && (key === 's' || key === 'S')) {
+      e.preventDefault();
+      if (canEdit && tab.statement.trim()) void openSave();
+      return;
+    }
+    // ⌥⌘→ / ⌥⌘← — switch query tabs (⌃Tab is the app-global session cycler).
+    if (e.metaKey && e.altKey && key === 'ArrowRight') {
+      e.preventDefault();
+      switchRelative(1);
+      return;
+    }
+    if (e.metaKey && e.altKey && key === 'ArrowLeft') {
+      e.preventDefault();
+      switchRelative(-1);
+    }
+  }
+
+  $effect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const ae = document.activeElement;
+      // Only when the DB query view owns focus (or nothing else does) — never
+      // steal keys destined for another pane's inputs.
+      if (rootEl && ae && ae !== document.body && !rootEl.contains(ae)) return;
+      handleShortcut(e);
+      // When we handled it, stop the event so shell-level bindings (e.g. Ctrl+Tab)
+      // don't ALSO fire. Capture phase + stopPropagation makes the DB view win
+      // while it's focused.
+      if (e.defaultPrevented) e.stopPropagation();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  });
+
+  // ── Shortcuts popover (⌨) ─────────────────────────────────────────────────────
+  let shortcutsOpen = $state(false);
+  let kbdWrapEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    if (!shortcutsOpen) return;
+    const onDown = (e: PointerEvent): void => {
+      if (kbdWrapEl && !kbdWrapEl.contains(e.target as Node)) shortcutsOpen = false;
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    return () => window.removeEventListener('pointerdown', onDown, true);
+  });
 </script>
 
-<div class="query-editor">
+<div class="query-editor" bind:this={rootEl}>
   <div class="qe-tabs" role="tablist" aria-label="Query tabs">
     {#each database.tabs as t, i (t.id)}
       <div
@@ -440,6 +524,27 @@
         <Icon name="command" size={11} />Format
       </button>
     {/if}
+    <div class="qe-kbd" bind:this={kbdWrapEl}>
+      <button
+        class="btn small ghost"
+        class:on={shortcutsOpen}
+        onclick={() => (shortcutsOpen = !shortcutsOpen)}
+        title="Keyboard shortcuts"
+        aria-label="Keyboard shortcuts"
+        aria-expanded={shortcutsOpen}
+      >⌨</button>
+      {#if shortcutsOpen}
+        <div class="qe-kbd-pop" role="menu">
+          <div class="qe-kbd-title">Keyboard shortcuts</div>
+          {#each SHORTCUTS as s (s.label)}
+            <div class="qe-kbd-row">
+              <span class="qe-kbd-label">{s.label}</span>
+              <kbd class="qe-kbd-keys">{s.keys}</kbd>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
     <span class="grow"></span>
     {#if database.capabilities?.sql && database.databaseNames.length > 0}
       <label class="qe-db" title="Active database — queries run scoped to it, so you don't need a db. prefix">
@@ -634,6 +739,8 @@
       error={tab.error}
       statement={tab.statement}
       connectionId={database.selectedConnId}
+      running={tab.running}
+      offset={tab.offset}
     />
   </div>
 </div>
@@ -830,6 +937,53 @@
     color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
     background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  /* ⌨ shortcuts popover */
+  .qe-kbd {
+    position: relative;
+    display: inline-flex;
+  }
+  .qe-kbd-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    inset-inline-start: 0;
+    z-index: 30;
+    min-width: 220px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .qe-kbd-title {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    padding: 2px 4px 4px;
+  }
+  .qe-kbd-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 2px 4px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .qe-kbd-keys {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 1px 6px;
+    white-space: nowrap;
   }
   .btn.stop {
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);

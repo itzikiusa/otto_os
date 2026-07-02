@@ -326,6 +326,13 @@ export interface QueryTab {
    * fresh one. Cleared when the tab's origin no longer applies.
    */
   savedQueryId?: Id;
+  /**
+   * Zero-based row offset for the footer pager. Only meaningful when the last
+   * result was auto-limited (a single paginatable SELECT / Mongo find). Reset to
+   * 0 whenever the statement changes; advanced by `runPage`. Transient (not
+   * persisted).
+   */
+  offset: number;
 }
 
 /** Normalize a persisted vars blob — legacy `Record<string,string>` (bare value)
@@ -361,6 +368,7 @@ function blankTab(statement = ''): QueryTab {
     timeout_ms: null,
     mask: false,
     vars: {},
+    offset: 0,
   };
 }
 
@@ -770,7 +778,10 @@ class DatabaseStore {
   }
   setStatement(value: string): void {
     const t = this.tab;
-    if (t) t.statement = value;
+    if (t) {
+      t.statement = value;
+      t.offset = 0; // editing the statement resets the pager to the first page
+    }
     this.persistTabs();
   }
 
@@ -1591,7 +1602,7 @@ class DatabaseStore {
   async runQuery(
     statement?: string,
     node?: string,
-    opts?: { transient?: boolean },
+    opts?: { transient?: boolean; keepOffset?: boolean },
   ): Promise<QueryResult | null> {
     const id = this.selectedConnId;
     const t = this.tab;
@@ -1607,6 +1618,8 @@ class DatabaseStore {
     // A transient run (the selected / current statement, variable-substituted)
     // must NOT clobber the editor's full multi-statement buffer.
     if (statement !== undefined && !opts?.transient) t.statement = statement;
+    // A fresh run starts at the first page; only the pager (runPage) keeps offset.
+    if (!opts?.keepOffset) t.offset = 0;
     // Cancel any prior in-flight run for this tab before starting a new one
     // (server-side too, so a previous heavy query stops on the DB).
     this.abortQuery(t.id);
@@ -1640,6 +1653,8 @@ class DatabaseStore {
             // Per-run id so the cancel endpoint can issue engine-native
             // cancellation (KILL QUERY / etc.) for this in-flight query.
             query_id: queryId,
+            // Footer pager: server appends OFFSET (Mongo: skip) when auto-limiting.
+            ...(t.offset > 0 ? { offset: t.offset } : {}),
             // Driver-enforced timeout (engine-native, e.g. MySQL MAX_EXECUTION_TIME).
             ...(tabTimeoutMs && tabTimeoutMs > 0 ? { timeout_ms: tabTimeoutMs } : {}),
             // Server-side PII/prod masking: redacts cell values before they leave
@@ -1687,6 +1702,22 @@ class DatabaseStore {
         t.running = false;
       }
     }
+  }
+
+  /**
+   * Page the active tab's auto-limited result by `delta` pages (±1). The page
+   * size is the server's applied LIMIT (`auto_limited`); re-runs the same
+   * statement with the new row offset (server appends OFFSET / Mongo skip).
+   * No-op when the current result wasn't auto-paginated.
+   */
+  runPage(delta: number): void {
+    const t = this.tab;
+    const pageSize = t?.result?.auto_limited ?? 0;
+    if (!t || pageSize <= 0) return;
+    const next = Math.max(0, t.offset + delta * pageSize);
+    if (next === t.offset) return;
+    t.offset = next;
+    void this.runQuery(undefined, undefined, { keepOffset: true });
   }
 
   /**
