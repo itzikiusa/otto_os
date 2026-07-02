@@ -515,7 +515,19 @@ pub async fn ingest(
             .unwrap_or_default()
     };
 
+    // Origin falls back to "ingest" so rows recorded through this endpoint are
+    // never mistaken for transcript-tailer rows (which carry no dims at all —
+    // the tailer's one-time dedup rebuild purges exactly that shape).
+    let origin = {
+        let o = dim_val("origin");
+        if o.is_empty() {
+            "ingest".to_string()
+        } else {
+            o
+        }
+    };
     ctx.usage.record(UsageEvent {
+        ts: None,
         workspace_id: session.workspace_id,
         session_id: session.id,
         provider: session.provider,
@@ -541,7 +553,7 @@ pub async fn ingest(
         workflow_id: dim_val("workflow_id"),
         channel: dim_val("channel"),
         review_id: dim_val("review_id"),
-        origin: dim_val("origin"),
+        origin,
     });
     StatusCode::NO_CONTENT
 }
@@ -661,6 +673,7 @@ pub fn trail_to_usage_with_work(
     };
 
     Some(UsageEvent {
+        ts: None,
         workspace_id: workspace_id.clone(),
         session_id: session_id.clone(),
         provider: provider.to_string(),

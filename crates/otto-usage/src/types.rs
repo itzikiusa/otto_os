@@ -5,8 +5,11 @@
 use serde::{Deserialize, Serialize};
 
 /// One usage row. Field names match the `usage_events` columns exactly so the
-/// struct serializes straight to `JSONEachRow` for insertion (the `ts` /
-/// `event_date` columns are omitted and default to "now" in ClickHouse).
+/// struct serializes straight to `JSONEachRow` for insertion. `ts` is optional:
+/// when set (RFC3339 — the insert enables `date_time_input_format=best_effort`)
+/// it dates the event at its *true* time, e.g. the transcript line's own
+/// timestamp; when `None` it is omitted and ClickHouse defaults `ts` /
+/// `event_date` to "now".
 ///
 /// The nine `work_*` fields carry work-graph attribution sourced from the
 /// session's `meta_json["work"]` (a [`otto_core::workref::WorkRef`]). They are
@@ -14,6 +17,8 @@ use serde::{Deserialize, Serialize};
 /// don't write unnecessary empty columns (ClickHouse fills the `DEFAULT ''`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<String>,
     pub workspace_id: String,
     pub session_id: String,
     pub provider: String,

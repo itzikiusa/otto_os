@@ -49,12 +49,28 @@ fn u64_field(obj: &Value, key: &str) -> u64 {
     obj.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+/// A parsed Claude Code assistant line: normalized usage plus the identity
+/// needed to count each API response exactly once.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClaudeLine {
+    pub usage: ParsedUsage,
+    /// `message.id` (+ `requestId` when present). One API response is written
+    /// as *multiple* transcript lines — one per content block, each repeating
+    /// the same `message.usage` — and resumed sessions replay prior lines into
+    /// a new file. Billing happens once per response, so usage must be counted
+    /// once per key. `None` when the line carries no `message.id` (count it —
+    /// there is nothing to collide with).
+    pub dedup_key: Option<String>,
+    /// The line's own `timestamp` (RFC3339), the true time of the API call.
+    pub timestamp: Option<String>,
+}
+
 /// Parse a single Claude Code transcript line.
 ///
 /// Returns `Some` only for `type=="assistant"` lines that carry a
 /// `message.usage` object. Missing token fields default to 0; non-assistant
 /// lines, lines without usage, and parse failures all yield `None`.
-pub fn parse_claude_line(line: &str) -> Option<ParsedUsage> {
+pub fn parse_claude_line(line: &str) -> Option<ClaudeLine> {
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -73,12 +89,24 @@ pub fn parse_claude_line(line: &str) -> Option<ParsedUsage> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    Some(ParsedUsage {
-        model,
-        input: u64_field(usage, "input_tokens"),
-        output: u64_field(usage, "output_tokens"),
-        cache_read: u64_field(usage, "cache_read_input_tokens"),
-        cache_write: u64_field(usage, "cache_creation_input_tokens"),
+    let dedup_key = message.get("id").and_then(Value::as_str).map(|mid| {
+        let rid = v.get("requestId").and_then(Value::as_str).unwrap_or_default();
+        format!("{mid}:{rid}")
+    });
+    let timestamp = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(ClaudeLine {
+        usage: ParsedUsage {
+            model,
+            input: u64_field(usage, "input_tokens"),
+            output: u64_field(usage, "output_tokens"),
+            cache_read: u64_field(usage, "cache_read_input_tokens"),
+            cache_write: u64_field(usage, "cache_creation_input_tokens"),
+        },
+        dedup_key,
+        timestamp,
     })
 }
 
@@ -227,6 +255,90 @@ fn key(file: &Path) -> String {
     file.to_string_lossy().into_owned()
 }
 
+/// A bounded, persisted set of already-counted Claude dedup keys
+/// (see [`ClaudeLine::dedup_key`]).
+///
+/// The byte-offset cursor guarantees no *line* is read twice, but one API
+/// response spans several lines and resumed sessions replay old lines into new
+/// files — so a *response* can still arrive more than once. This set is the
+/// response-level guard. It is persisted next to the cursor file (same atomic
+/// tmp+rename pattern, insertion order preserved as a JSON array) so restarts
+/// don't re-count, and FIFO-capped so it can't grow without bound: at real
+/// transcript rates the cap covers months of history, far longer than any
+/// resume replays reach back.
+#[derive(Debug)]
+pub struct SeenKeys {
+    path: PathBuf,
+    cap: usize,
+    set: std::collections::HashSet<String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl SeenKeys {
+    /// Load from `path`, keeping at most `cap` keys (oldest evicted first). A
+    /// missing or unparseable file yields an empty store bound to that path.
+    pub fn load(path: impl Into<PathBuf>, cap: usize) -> Self {
+        let path = path.into();
+        let order: std::collections::VecDeque<String> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default()
+            .into();
+        let mut s = Self {
+            path,
+            cap: cap.max(1),
+            set: order.iter().cloned().collect(),
+            order,
+        };
+        s.evict();
+        s
+    }
+
+    pub fn contains(&self, key: &str) -> bool {
+        self.set.contains(key)
+    }
+
+    /// Insert `key`; returns `true` if it was new (i.e. this occurrence should
+    /// be counted) and `false` if it was already present (a duplicate).
+    pub fn insert(&mut self, key: &str) -> bool {
+        if !self.set.insert(key.to_string()) {
+            return false;
+        }
+        self.order.push_back(key.to_string());
+        self.evict();
+        true
+    }
+
+    fn evict(&mut self) {
+        while self.order.len() > self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// Atomically persist (tmp file + rename), like [`CursorStore::save`].
+    pub fn save(&self) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let keys: Vec<&String> = self.order.iter().collect();
+        let json = serde_json::to_string(&keys).map_err(std::io::Error::other)?;
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, json.as_bytes())?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,7 +353,9 @@ mod tests {
             "uuid": "41192d16-aaaa",
             "timestamp": "2026-06-15T18:20:13.595Z",
             "sessionId": "sess-1",
+            "requestId": "req_011Ccd",
             "message": {
+                "id": "msg_01Xezx",
                 "model": "claude-opus-4-8",
                 "stop_reason": "tool_use",
                 "usage": {
@@ -256,12 +370,16 @@ mod tests {
         let got = parse_claude_line(line).expect("assistant line parses");
         assert_eq!(
             got,
-            ParsedUsage {
-                model: "claude-opus-4-8".to_string(),
-                input: 14354,
-                output: 332,
-                cache_read: 15826,
-                cache_write: 9729,
+            ClaudeLine {
+                usage: ParsedUsage {
+                    model: "claude-opus-4-8".to_string(),
+                    input: 14354,
+                    output: 332,
+                    cache_read: 15826,
+                    cache_write: 9729,
+                },
+                dedup_key: Some("msg_01Xezx:req_011Ccd".to_string()),
+                timestamp: Some("2026-06-15T18:20:13.595Z".to_string()),
             }
         );
     }
@@ -272,7 +390,7 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"model":"claude-sonnet-4","usage":{"input_tokens":100}}}"#;
         let got = parse_claude_line(line).expect("parses");
         assert_eq!(
-            got,
+            got.usage,
             ParsedUsage {
                 model: "claude-sonnet-4".to_string(),
                 input: 100,
@@ -281,6 +399,34 @@ mod tests {
                 cache_write: 0,
             }
         );
+        // No message.id → nothing to dedup on; no timestamp on the line.
+        assert_eq!(got.dedup_key, None);
+        assert_eq!(got.timestamp, None);
+    }
+
+    #[test]
+    fn parse_claude_dedup_key_without_request_id_uses_message_id() {
+        // message ids are unique per API response, so the id alone still
+        // identifies the response when requestId is absent.
+        let line = r#"{"type":"assistant","message":{"id":"msg_9","usage":{"input_tokens":1}}}"#;
+        let got = parse_claude_line(line).expect("parses");
+        assert_eq!(got.dedup_key, Some("msg_9:".to_string()));
+    }
+
+    #[test]
+    fn parse_claude_multi_block_lines_share_one_dedup_key() {
+        // One API response with N content blocks = N transcript lines, all
+        // repeating the same message.id + requestId + usage. The key must be
+        // identical across them so exactly one is counted.
+        let mk = |uuid: &str| {
+            format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","requestId":"req_1","message":{{"id":"msg_1","usage":{{"input_tokens":5,"output_tokens":7}}}}}}"#
+            )
+        };
+        let a = parse_claude_line(&mk("aaaa")).unwrap();
+        let b = parse_claude_line(&mk("bbbb")).unwrap();
+        assert_eq!(a.dedup_key, b.dedup_key);
+        assert!(a.dedup_key.is_some());
     }
 
     #[test]
@@ -435,5 +581,58 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = CursorStore::load(dir.path().join("does-not-exist.json"));
         assert!(store.is_empty());
+    }
+
+    // ── SeenKeys ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn seen_keys_first_insert_counts_duplicate_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seen = SeenKeys::load(dir.path().join("seen.json"), 100);
+        assert!(seen.insert("msg_1:req_1")); // first sight → count
+        assert!(!seen.insert("msg_1:req_1")); // duplicate → skip
+        assert!(seen.insert("msg_2:req_2")); // different response → count
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn seen_keys_roundtrips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seen.json");
+        let mut seen = SeenKeys::load(&path, 100);
+        seen.insert("a");
+        seen.insert("b");
+        seen.save().unwrap();
+
+        let reloaded = SeenKeys::load(&path, 100);
+        assert!(reloaded.contains("a"));
+        assert!(reloaded.contains("b"));
+        assert!(!reloaded.contains("c"));
+        assert_eq!(reloaded.len(), 2);
+    }
+
+    #[test]
+    fn seen_keys_evicts_oldest_beyond_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seen = SeenKeys::load(dir.path().join("seen.json"), 3);
+        for k in ["k1", "k2", "k3", "k4"] {
+            assert!(seen.insert(k));
+        }
+        assert_eq!(seen.len(), 3);
+        assert!(!seen.contains("k1")); // oldest evicted
+        assert!(seen.contains("k4"));
+        // Eviction also applies on load (cap can shrink between versions).
+        seen.save().unwrap();
+        let reloaded = SeenKeys::load(dir.path().join("seen.json"), 2);
+        assert_eq!(reloaded.len(), 2);
+        assert!(!reloaded.contains("k2"));
+        assert!(reloaded.contains("k3") && reloaded.contains("k4"));
+    }
+
+    #[test]
+    fn seen_keys_missing_file_is_empty_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = SeenKeys::load(dir.path().join("does-not-exist.json"), 10);
+        assert!(seen.is_empty());
     }
 }
