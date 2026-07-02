@@ -332,8 +332,11 @@ async fn mongo_import_rows_inserts_batches() {
     let coll = "e2e_import_scratch";
     let stmt = |s: &str| QueryRequest { statement: s.into(), ..Default::default() };
 
-    // Clean slate (ignore "ns not found" on first run).
-    let _ = d.run(&cfg, &stmt(&format!("db.{coll}.drop()"))).await;
+    // Clean slate — deleteMany IS a parsed console op (drop() is not; a silently
+    // failed cleanup left duplicate _ids behind for the next run).
+    d.run(&cfg, &stmt(&format!("db.{coll}.deleteMany({{}})")))
+        .await
+        .expect("cleanup deleteMany");
 
     let columns = vec!["_id".to_string(), "name".to_string(), "qty".to_string()];
     let rows = vec![
