@@ -209,6 +209,7 @@
       const state = { account: null, project: null, overview: null, dev: null, config: null, polling: null };
 
       window.addEventListener('message', async (ev) => {
+        if (ev.source !== window.parent) return; // only the hosting shell may init us
         const m = ev.data;
         if (!m || m.type !== 'otto:init') return;
         API = m.apiBase; TOKEN = m.token || '';

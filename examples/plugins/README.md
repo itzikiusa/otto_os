@@ -30,7 +30,7 @@ tested like real software, but as **local gates**: the repo's CI workspace
 gates intentionally exclude them):
 
 ```bash
-cd examples/plugins/team-performance && node --test test/   # unit + sidecar E2E
+cd examples/plugins/team-performance && node --test         # unit + sidecar E2E
                                                             # (mock Jira + host API + scripted git repo)
 cd examples/plugins/dora-metrics && cargo test              # engine units + fixture-repo integration
 ```

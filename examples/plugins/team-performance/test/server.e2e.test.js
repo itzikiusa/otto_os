@@ -1,7 +1,7 @@
 // Sidecar E2E: spawns the REAL server.js with a mock Otto host API, a mock
 // Jira (fixtures/mock-jira.js), and a scripted temp git repo — then drives the
 // HTTP surface end-to-end: scan → overview/assignee → goals → config →
-// incremental rescan. Zero dependencies; run: node --test test/
+// incremental rescan. Zero dependencies; run (from the plugin dir): node --test
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
@@ -289,6 +289,25 @@ test('incremental rescan refetches only the touched issue', async () => {
   // Corpus survives: still 6 completed.
   const { json: o } = await api('GET', '/overview?account=acc1&project=TP');
   assert.equal(o.completed, 6);
+});
+
+test('a failed issue fetch is retried on the next scan (not lost to the watermark)', async () => {
+  // Touch TP-4 so the incremental scan includes it, but fail its first fetch.
+  mockJira.touch('TP-4', new Date().toISOString());
+  mockJira.failOnce('TP-4');
+  await api('POST', '/scan', { account: 'acc1', project: 'TP' });
+  const withError = await waitScanDone();
+  assert.equal(withError.errors, 1);
+
+  // Next scan: TP-4 no longer matches the JQL window by itself, but the
+  // persisted fetch_failed list unions it back in — and it succeeds now.
+  const before = mockJira.hits.issue.get('TP-4') || 0;
+  await api('POST', '/scan', { account: 'acc1', project: 'TP' });
+  const clean = await waitScanDone();
+  assert.equal(clean.errors, 0);
+  assert.equal((mockJira.hits.issue.get('TP-4') || 0) - before, 1, 'TP-4 refetched');
+  const { json: o } = await api('GET', '/overview?account=acc1&project=TP');
+  assert.equal(o.completed, 6, 'corpus intact');
 });
 
 test('statuses endpoint exposes the map defaults', async () => {

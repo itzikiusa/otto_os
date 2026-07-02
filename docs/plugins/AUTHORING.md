@@ -133,7 +133,7 @@ loopback-only. Only install plugins you trust.
   status→phase map), correlates git delivery with a one-pass repo index,
   baselines "how long it should have taken" per (type, points) bucket,
   predicts timelines for open tasks and tracks per-dev goals across scans.
-  Ships unit + sidecar-E2E tests (`node --test test/`). Runs with just `node`.
+  Ships unit + sidecar-E2E tests (`node --test`). Runs with just `node`.
 - **`dora-metrics`** (Rust sidecar): the four DORA keys from git signals
   (deploy = `*deploy*` tag, configurable; hotfix/release/feature merges) with
   Elite/High/Medium/Low tiers, weekly trend charts, deltas, a deterministic

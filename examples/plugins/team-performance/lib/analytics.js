@@ -155,7 +155,6 @@ function lastDoneTransition(transitions, currentStatus, currentCategory) {
     if (doneish) last = t.at;
     else if (last !== null) last = null; // reopened after done; keep only the final done run
   }
-  // A single backward pass is equivalent, but the reset above also feeds `reopened`.
   return last;
 }
 
@@ -526,7 +525,10 @@ function suggestGoals(devStats, teamMedians) {
     const own = devStats[GOAL_SOURCE[metric]] ?? devStats[metric] ?? null;
     const team = teamMedians[metric] ?? null;
     if (own === null || team === null) continue;
-    out.push({ metric, target: round2(Math.min(own, Math.max(team, own * 0.9))) });
+    const target = round2(Math.min(own, Math.max(team, own * 0.9)));
+    // A zero target is unactionable (and unsaveable — targets must be > 0).
+    if (target <= 0) continue;
+    out.push({ metric, target });
   }
   return out;
 }

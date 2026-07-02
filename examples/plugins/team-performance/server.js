@@ -193,8 +193,8 @@ async function runScan(account, project, full) {
     job.step = 'fields';
     const pointsField = corpus.points_field || detectPointsField(await client.fields());
 
-    const types = config.issue_types.map((t) => `"${t.replace(/"/g, '')}"`).join(', ');
-    let jql = `project = "${project.replace(/"/g, '')}" AND issuetype IN (${types})`;
+    const types = config.issue_types.map((t) => `"${t.replace(/["\\]/g, '')}"`).join(', ');
+    let jql = `project = "${project.replace(/["\\]/g, '')}" AND issuetype IN (${types})`;
     // Incremental: everything updated since the previous scan STARTED (minus a
     // 1-day buffer — JQL datetimes are interpreted in the Jira account's
     // timezone; the buffer absorbs the offset).
@@ -213,10 +213,18 @@ async function runScan(account, project, full) {
     });
     const capped = found.length >= config.max_issues;
 
+    // Issues whose changelog fetch failed last scan would otherwise be lost
+    // until touched again in Jira (the watermark JQL excludes them) — union
+    // them into this scan's fetch set.
+    for (const key of corpus.fetch_failed || []) {
+      if (!found.some((s) => s.key === key)) found.push({ key, fields: {} });
+    }
+
     job.step = 'changelogs';
     job.total = found.length;
     job.fetched = 0;
     const rawIssues = [];
+    const failedKeys = [];
     for (const stub of found) {
       const known = corpus.issues[stub.key];
       const updatedMs = Date.parse(stub.fields && stub.fields.updated) || null;
@@ -228,6 +236,7 @@ async function runScan(account, project, full) {
         rawIssues.push(await client.issueWithChangelog(stub.key, fields));
       } catch (e) {
         job.errors = (job.errors || 0) + 1;
+        failedKeys.push(stub.key);
         console.error(`scan: issue ${stub.key} failed:`, e.message);
       }
       job.fetched++;
@@ -265,7 +274,10 @@ async function runScan(account, project, full) {
     corpus.points_field = pointsField;
     corpus.scanned_at = Date.now();
     corpus.last_scan_start = scanStart;
-    corpus.capped = capped;
+    // A small incremental fetch must not clear the banner while the corpus is
+    // still the truncated set from an earlier capped scan.
+    corpus.capped = full ? capped : Boolean(corpus.capped) || capped;
+    corpus.fetch_failed = failedKeys;
     corpus.target_used = gitIndex.target_used;
     store.writeJsonAtomic(corpusFile, corpus);
     appendGoalSnapshots(account, project, corpus, config);

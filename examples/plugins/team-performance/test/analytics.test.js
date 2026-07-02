@@ -1,5 +1,5 @@
 // Unit tests for the pure analytics core (no I/O, no network).
-// Run: node --test test/   (zero dependencies — node:test builtins only)
+// Run (from the plugin dir): node --test   (zero dependencies — node:test builtins only)
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -391,6 +391,14 @@ test('suggestGoals: slow dev steps 10% toward team p50; fast dev keeps own media
   const gf = A.suggestGoals(fast, team);
   const fcycle = gf.find((g) => g.metric === 'median_cycle_days');
   assert.equal(fcycle.target, 2); // never suggest regression (team p50=3 would be worse)
+});
+
+test('suggestGoals: zero medians never suggest an unsaveable 0 target', () => {
+  const dev = { median_cycle_days: 3, median_impl_days: 2, median_design_days: 0, estimate_mape: 0.3, avg_wip: 2 };
+  const team = { median_cycle_days: 3, median_impl_days: 2, median_design_days: 0, estimate_mape: 0.25, avg_wip: 1.5 };
+  const gs = A.suggestGoals(dev, team);
+  assert.ok(!gs.some((g) => g.metric === 'median_design_days'), JSON.stringify(gs));
+  assert.ok(gs.every((g) => g.target > 0));
 });
 
 test('goalProgress: lower-is-better semantics', () => {

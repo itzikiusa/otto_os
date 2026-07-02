@@ -130,7 +130,7 @@ const STATUSES = [
 function startMockJira() {
   const issues = dataset();
   const hits = { search: 0, issue: new Map(), fields: 0, statuses: 0, projects: 0, count: 0 };
-  const state = { delayMs: 0 };
+  const state = { delayMs: 0, failNext: new Set() };
 
   function jqlFilter(jql) {
     // Naive `updated >= "yyyy-MM-dd HH:mm"` filter (mock interprets it as UTC).
@@ -187,6 +187,10 @@ function startMockJira() {
     if (issueMatch) {
       const key = issueMatch[1];
       hits.issue.set(key, (hits.issue.get(key) || 0) + 1);
+      if (state.failNext.has(key)) {
+        state.failNext.delete(key);
+        return send(400, { errorMessages: ['injected failure'] });
+      }
       const found = issues.find((i) => i.key === key);
       return found ? send(200, found) : send(404, { errorMessages: ['no issue'] });
     }
@@ -211,6 +215,10 @@ function startMockJira() {
         touch(key, iso) {
           const found = issues.find((i) => i.key === key);
           if (found) found.fields.updated = iso;
+        },
+        /** Fail the NEXT fetch of this issue with a non-retryable 400. */
+        failOnce(key) {
+          state.failNext.add(key);
         },
         set delayMs(v) {
           state.delayMs = v;

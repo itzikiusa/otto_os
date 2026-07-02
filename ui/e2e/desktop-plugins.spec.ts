@@ -54,6 +54,10 @@ async function pluginFrame(page: Page, slug: string): Promise<FrameLocator> {
 }
 
 test.beforeAll(async ({}, testInfo) => {
+  // Guard here as well as in beforeEach: without it this hook runs (and
+  // installs plugins / spawns fixtures) once per device project in a full
+  // suite run — 6 concurrent copies racing each other.
+  if (testInfo.project.name !== 'desktop-browser') return;
   testInfo.setTimeout(120_000);
   const a = await apiCtx();
   api = a.ctx;
@@ -100,8 +104,9 @@ test('team-performance: scan → team dashboard with bars, predictions, estimati
   test.setTimeout(90_000);
   const frame = await pluginFrame(page, 'team-performance');
 
-  // Account/project preselected from fixtures.
-  await expect(frame.locator('#account option')).toHaveCount(1);
+  // Account/project preselected from fixtures (other specs may add accounts —
+  // assert ours exists rather than pinning the count).
+  await expect(frame.locator('#account option', { hasText: 'E2E Jira' })).toHaveCount(1);
   await expect(frame.locator('#project')).toContainText('TP');
 
   await frame.locator('#scan').click();
@@ -167,6 +172,7 @@ test('team-performance: goal target persists across a full reload', async ({ pag
 
 test.describe('dora-metrics (needs cargo)', () => {
   test.beforeAll(async ({}, testInfo) => {
+    if (testInfo.project.name !== 'desktop-browser') return;
     test.skip(!hasCargo, 'cargo not on PATH — dora sidecar cannot compile');
     // Install, prebuild (compile-sized budget), then enable → health is fast.
     testInfo.setTimeout(600_000);
