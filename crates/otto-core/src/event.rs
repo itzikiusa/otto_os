@@ -337,4 +337,11 @@ pub enum Event {
         run_id: Id,
         status: String,
     },
+    /// A session's set of referenced Canvas scenes changed (attach/detach). The
+    /// session's Canvas panel re-fetches `GET /sessions/{id}/canvas-refs` on a
+    /// matching tick instead of polling.
+    CanvasRefsChanged {
+        workspace_id: Id,
+        session_id: Id,
+    },
 }

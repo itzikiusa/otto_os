@@ -9,6 +9,7 @@ pub mod api_helpers;
 pub mod auth;
 pub mod cadence;
 pub mod canvas_assist;
+pub mod canvas_refs;
 pub mod db_assist;
 pub mod mockup_assist;
 pub mod context_packet;
