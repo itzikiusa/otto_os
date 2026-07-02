@@ -6,6 +6,7 @@
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import ResultsGrid from './ResultsGrid.svelte';
+  import PlanView from './PlanView.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { database, ROW_LIMIT_ALL, type QueryTab } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -506,14 +507,17 @@
         <Icon name="check" size={11} />{savedLinked ? 'Update' : 'Save'}
       </button>
     {/if}
-    <button
-      class="btn small ghost"
-      onclick={() => void database.runExplain()}
-      disabled={!tab.statement.trim() || tab.running}
-      title="Run the real query plan (EXPLAIN / Mongo explain)"
-    >
-      <Icon name="zap" size={11} />Explain
-    </button>
+    {#if database.capabilities?.explain !== false}
+      <button
+        class="btn small ghost"
+        class:on={database.planOpen}
+        onclick={() => void database.explainPlan()}
+        disabled={!tab.statement.trim() || tab.running}
+        title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
+      >
+        <Icon name="zap" size={11} />Explain
+      </button>
+    {/if}
     <button
       class="btn small ghost"
       class:on={database.assistOpen && database.assistMode === 'ask'}
@@ -755,6 +759,11 @@
     </button>
   {/if}
   <div class="qe-results" class:qe-collapsed={viewport.isPhone && !resultsOpen}>
+    {#if database.planOpen && database.queryPlan}
+      <div class="qe-plan">
+        <PlanView plan={database.queryPlan} onclose={() => database.closePlan()} />
+      </div>
+    {/if}
     <ResultsGrid
       result={tab.result}
       error={tab.error}
@@ -1132,6 +1141,14 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  /* Query-plan panel sits above the grid, bounded so the results stay visible. */
+  .qe-plan {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 45%;
+    display: flex;
+    margin-bottom: 8px;
   }
   .grow {
     flex: 1;

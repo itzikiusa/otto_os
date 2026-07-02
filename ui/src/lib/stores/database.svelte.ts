@@ -18,6 +18,7 @@ import type {
   DbCompletionItem,
   DbDashboard,
   DbHistoryEntry,
+  DbQueryPlan,
   DbSavedQuery,
   DbSchemaGraph,
   DbTestResult,
@@ -560,6 +561,12 @@ class DatabaseStore {
   selectedDashboard: DbDashboard | null = $derived(
     this.dashboards.find((d) => d.id === this.selectedDashboardId) ?? null,
   );
+
+  // ── Query plan (Explain) ──────────────────────────────────────────────────
+  // A normalized query plan from the engine's native EXPLAIN, shown in a
+  // collapsible tree panel beside the results. Null when the panel is closed.
+  queryPlan: DbQueryPlan | null = $state(null);
+  planOpen = $state(false);
 
   // ── DB Assistant (embedded, file-backed agent panel) ─────────────────────
   // The DB Assistant runs an agent as a managed Otto session beside the query
@@ -1809,6 +1816,45 @@ class DatabaseStore {
     } finally {
       t.running = false;
     }
+  }
+
+  /**
+   * Fetch a NORMALIZED query plan (`POST …/db/query-plan`) for the active
+   * statement and open the plan panel. Falls back to the raw `EXPLAIN` → grid
+   * path (`runExplain`) if the endpoint fails or can't normalize the plan, so
+   * Explain always shows something. The statement is EXPLAIN-wrapped server-side
+   * (never executed raw), so this is read-only even on a guarded connection.
+   */
+  async explainPlan(): Promise<void> {
+    const id = this.selectedConnId;
+    const stmt = this.tab.statement.trim();
+    if (!id) {
+      toasts.error('No connection selected');
+      return;
+    }
+    if (!stmt) {
+      toasts.error('Statement is empty');
+      return;
+    }
+    try {
+      const plan = await api.post<DbQueryPlan>(`${this.connBase(id)}/query-plan`, {
+        statement: stmt,
+        node: this.activeDb || null,
+      });
+      this.queryPlan = plan;
+      this.planOpen = true;
+    } catch {
+      // Engine can't produce a normalized plan (or the endpoint failed) — fall
+      // back to the always-available raw EXPLAIN → grid path.
+      this.closePlan();
+      await this.runExplain();
+    }
+  }
+
+  /** Close the query-plan panel and drop the plan. */
+  closePlan(): void {
+    this.planOpen = false;
+    this.queryPlan = null;
   }
 
   /**
