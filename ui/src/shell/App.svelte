@@ -65,6 +65,7 @@
   import { events } from '../lib/events.svelte';
   import { installKeyMap, keyContext } from '../lib/keys';
   import { attachMenuBridge, attachCloseHandler } from '../lib/menu';
+  import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
   import { registry } from '../lib/commands.svelte';
   import { api } from '../lib/api/client';
@@ -224,6 +225,7 @@
   $effect(() => {
     void ws.load();
     events.start();
+    void gcWindowKeys();
     let unlistenMenu: (() => void) | null = null;
     let unlistenClose: (() => void) | null = null;
     void attachMenuBridge().then((fn) => (unlistenMenu = fn));
