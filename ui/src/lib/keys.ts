@@ -54,8 +54,8 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     const mod = e.metaKey || e.ctrlKey;
     const term = keyContext.terminalFocused;
 
-    // ⌃Tab cycling (ctrl specifically, also when meta absent)
-    if (e.ctrlKey && !e.metaKey && e.key === 'Tab') {
+    // ⌃Tab cycling (ctrl specifically, also when meta absent; shift = previous).
+    if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Tab') {
       e.preventDefault();
       dispatch(e.shiftKey ? 'prevTab' : 'nextTab', e);
       return;
@@ -63,13 +63,17 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
 
     // ⌃1…⌃9 → jump straight to the Nth session tab (ctrl specifically, so it
     // doesn't collide with ⌘1 = toggle rail). Handled before the meta switch.
-    if (e.ctrlKey && !e.metaKey && !e.shiftKey && e.key >= '1' && e.key <= '9') {
+    if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
       e.preventDefault();
       dispatch('jumpSession', e, Number(e.key));
       return;
     }
 
     if (!mod) return;
+    // No global chord uses ⌥ as a modifier — match exactly so an ⌥-augmented
+    // combo never triggers the plain-⌘ action (e.g. ⌥⌘T must not fire ⌘T's
+    // "new session"; the DB editor binds ⌥⌘T for a new query tab).
+    if (e.altKey) return;
 
     // ⌘⇧← / ⌘⇧→ → navigate back / forward through page history. Skip when an
     // editable element (input/textarea/contenteditable/CodeMirror) is focused,
@@ -90,21 +94,25 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
 
     switch (e.key.toLowerCase()) {
       case 'k':
+        if (e.shiftKey) return;
         e.preventDefault();
         dispatch('palette', e);
         return;
       case ',':
         // ⌘, → Settings (works even if the native menu bridge isn't attached)
+        if (e.shiftKey) return;
         e.preventDefault();
         dispatch('settings', e);
         return;
       case 'i':
         // ⌘I → straight to the plain-English "Ask Otto" box.
+        if (e.shiftKey) return;
         e.preventDefault();
         dispatch('askOtto', e);
         return;
       case 'u':
         // ⌘U → update all agent CLIs (spawns the Update CLIs session).
+        if (e.shiftKey) return;
         e.preventDefault();
         dispatch('updateCLIs', e);
         return;
@@ -117,26 +125,34 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
         }
         return;
       case '1':
+        if (e.shiftKey) return;
         e.preventDefault();
         dispatch('toggleRail', e);
         return;
       case 'j':
+        if (e.shiftKey) return;
         e.preventDefault();
         dispatch('toggleRight', e);
         return;
       case 't':
+        // ⌘T → new session. ⇧⌘T / ⌥⌘T are NOT this (the DB editor uses ⌥⌘T).
+        if (e.shiftKey) return;
         e.preventDefault();
         dispatch('newSession', e);
         return;
       case 'w':
+        if (e.shiftKey) return;
         e.preventDefault();
         dispatch('closeTab', e);
         return;
       case 'd':
+        // ⌘D vertical split, ⌘⇧D horizontal split — both intended.
         e.preventDefault();
         dispatch(e.shiftKey ? 'splitHorizontal' : 'splitVertical', e);
         return;
       case 'f':
+        // ⌘F → find. ⇧⌘F is NOT find (the DB editor uses it for Format).
+        if (e.shiftKey) return;
         e.preventDefault();
         dispatch('find', e);
         return;

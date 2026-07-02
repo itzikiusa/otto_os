@@ -325,16 +325,17 @@
   // (or nowhere), so they never hijack another module's inputs. The component is
   // mounted only on the Query tab, so the listener is naturally scoped to it.
   let rootEl = $state<HTMLElement | null>(null);
-  // Only conflict-free chords are bound: the global key map (lib/keys.ts, window
-  // capture) already claims ⌘T/⌘W/⌘F and ⌃Tab (regardless of ⌥/⇧), so binding
-  // those here would double-fire the shell's session actions. New tab / Close tab
-  // / Format stay on the toolbar; these are the shortcuts that work standalone.
+  // The global key map (lib/keys.ts) now matches modifiers exactly, so ⌥⌘/⇧⌘
+  // augmented chords don't collide with the plain-⌘ session actions (⌘T/⌘W/⌘F).
+  // ⌃Tab stays the app-global session cycler; query-tab nav uses ⌥⌘→/←.
   const SHORTCUTS: { keys: string; label: string }[] = [
     { keys: '⌘↵', label: 'Run' },
     { keys: '⌘S', label: 'Save query' },
+    { keys: '⇧⌘F', label: 'Format' },
     { keys: 'Esc', label: 'Cancel running query' },
-    { keys: '⌥⌘→', label: 'Next query tab' },
-    { keys: '⌥⌘←', label: 'Previous query tab' },
+    { keys: '⌥⌘→ / ⌥⌘←', label: 'Next / previous query tab' },
+    { keys: '⌥⌘T', label: 'New query tab' },
+    { keys: '⌥⌘W', label: 'Close query tab' },
   ];
 
   function switchRelative(dir: 1 | -1): void {
@@ -345,10 +346,11 @@
   }
 
   function handleShortcut(e: KeyboardEvent): void {
-    const key = e.key;
     const cmd = e.metaKey || e.ctrlKey; // ⌘ on macOS, Ctrl elsewhere
+    // Letter chords match on e.code (physical key) so macOS Option-key character
+    // composition (⌥T → "†") doesn't defeat them.
     // Esc — cancel a running query (or close the shortcuts popover).
-    if (key === 'Escape') {
+    if (e.key === 'Escape') {
       if (tab.running) {
         e.preventDefault();
         database.abortQuery();
@@ -357,20 +359,39 @@
       }
       return;
     }
-    // ⌘S — save the query. (⌘F/⌘T/⌘W are claimed by the global key map, so Format
-    // / New tab / Close tab stay on the toolbar rather than double-fire here.)
-    if (cmd && !e.shiftKey && !e.altKey && (key === 's' || key === 'S')) {
+    // ⌘S — save the query.
+    if (cmd && !e.shiftKey && !e.altKey && e.code === 'KeyS') {
       e.preventDefault();
       if (canEdit && tab.statement.trim()) void openSave();
       return;
     }
+    // ⇧⌘F — format (⌘F alone stays the app-global find).
+    if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyF') {
+      e.preventDefault();
+      if (database.queryLanguage !== 'redis' && tab.statement.trim() && !tab.running) {
+        database.formatStatement();
+        editorSel = { text: '', cursor: 0 };
+      }
+      return;
+    }
+    // ⌥⌘T new query tab / ⌥⌘W close query tab (⌘T/⌘W stay session actions).
+    if (e.metaKey && e.altKey && e.code === 'KeyT') {
+      e.preventDefault();
+      database.newTab();
+      return;
+    }
+    if (e.metaKey && e.altKey && e.code === 'KeyW') {
+      e.preventDefault();
+      if (database.tabs.length > 1) database.closeTab(database.activeTab);
+      return;
+    }
     // ⌥⌘→ / ⌥⌘← — switch query tabs (⌃Tab is the app-global session cycler).
-    if (e.metaKey && e.altKey && key === 'ArrowRight') {
+    if (e.metaKey && e.altKey && e.key === 'ArrowRight') {
       e.preventDefault();
       switchRelative(1);
       return;
     }
-    if (e.metaKey && e.altKey && key === 'ArrowLeft') {
+    if (e.metaKey && e.altKey && e.key === 'ArrowLeft') {
       e.preventDefault();
       switchRelative(-1);
     }
