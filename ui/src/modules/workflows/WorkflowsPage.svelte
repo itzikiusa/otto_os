@@ -3,6 +3,7 @@
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunSteps from './RunSteps.svelte';
   import FileTree from '../panels/FileTree.svelte';
@@ -710,6 +711,10 @@
     return typeof v === 'string' ? v : JSON.stringify(v, null, 2);
   }
 
+  // JSON param field zoom (R10): open a big modal editor for the cramped node-form
+  // JSON textareas (Steps / Merge JSON / Body). Edits write straight back to the param.
+  let jsonZoom = $state<{ field: string; label: string } | null>(null);
+
   function onParamJson(field: string, raw: string): void {
     if (!selectedNode) return;
     try {
@@ -867,6 +872,22 @@
     }
   }
 </script>
+
+<!-- Label + zoom button for a cramped node-form JSON field (R10). -->
+{#snippet jsonLabel(forId: string, label: string, field: string)}
+  <div class="np-jsonlabel">
+    <label for={forId}>{label}</label>
+    <button
+      type="button"
+      class="np-zoom"
+      title="Zoom — edit in a big editor"
+      aria-label="Zoom JSON editor"
+      onclick={() => (jsonZoom = { field, label })}
+    >
+      <Icon name="maximize" size={12} />
+    </button>
+  </div>
+{/snippet}
 
 <div class="wf">
   <aside class="side">
@@ -1371,7 +1392,7 @@
                 value={paramStr('url')}
                 oninput={(e) => onParam('url', e.currentTarget.value)}
               />
-              <label for="np-body">Body (JSON, optional)</label>
+              {@render jsonLabel('np-body', 'Body (JSON, optional)', 'body')}
               <textarea
                 id="np-body"
                 rows="3"
@@ -1391,7 +1412,7 @@
                 oninput={(e) => onParam('ms', Number(e.currentTarget.value))}
               />
             {:else if selectedNode.kind === 'transform'}
-              <label for="np-json">Merge JSON (object)</label>
+              {@render jsonLabel('np-json', 'Merge JSON (object)', 'json')}
               <textarea
                 id="np-json"
                 rows="4"
@@ -1554,7 +1575,7 @@
                 value={paramStr('url')}
                 oninput={(e) => onParam('url', e.currentTarget.value)}
               />
-              <label for="np-body">Body (JSON, optional)</label>
+              {@render jsonLabel('np-body', 'Body (JSON, optional)', 'body')}
               <textarea
                 id="np-body"
                 rows="3"
@@ -1590,7 +1611,7 @@
                 value={paramStr('until')}
                 oninput={(e) => onParam('until', e.currentTarget.value)}
               />
-              <label for="np-steps">Steps (JSON array)</label>
+              {@render jsonLabel('np-steps', 'Steps (JSON array)', 'steps')}
               <textarea
                 id="np-steps"
                 rows="5"
@@ -2044,6 +2065,22 @@
     {/if}
   {/if}
 </div>
+
+<!-- Big editor for a cramped node-form JSON field (R10). Edits write straight
+     back to the selected node's param via onParamJson. -->
+{#if jsonZoom}
+  {@const jz = jsonZoom}
+  <Modal title={jz.label} width={900} onclose={() => (jsonZoom = null)}>
+    <textarea
+      class="json-zoom mono"
+      data-testid="json-zoom-editor"
+      value={paramJson(jz.field)}
+      oninput={(e) => onParamJson(jz.field, e.currentTarget.value)}
+      spellcheck="false"
+      placeholder={'[ { "kind": "agent_prompt", "params": {} } ]'}
+    ></textarea>
+  </Modal>
+{/if}
 
 <style>
   .wf {
@@ -2723,6 +2760,47 @@
   .ctx-strip .strip-btn {
     width: 28px;
     height: 28px;
+  }
+
+  /* Node-form JSON field: label + zoom button; the editor lives in a modal. (R10) */
+  .np-jsonlabel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .np-zoom {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 2px 5px;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .np-zoom:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .json-zoom {
+    width: 100%;
+    min-height: 60vh;
+    resize: vertical;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+    outline: none;
+  }
+  .json-zoom:focus {
+    border-color: var(--accent);
   }
 
   /* Runs history popover */

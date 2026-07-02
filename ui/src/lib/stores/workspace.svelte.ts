@@ -684,6 +684,20 @@ class WorkspaceStore {
         ) {
           this.clearNeedsYou(ev.session_id);
         }
+        // R11: a finished workflow STEP session (PTY suspended → reconnectable, or
+        // exited) no longer needs a tab. Auto-close it to declutter — but KEEP the
+        // session (closeTab never deletes; the run detail's "Open session" reopens
+        // it) — and never yank the tab the user is actively viewing.
+        if (ev.status === 'reconnectable' || ev.status === 'exited') {
+          const s = this.sessions.find((x) => x.id === ev.session_id);
+          if (
+            s?.meta?.source === 'workflow' &&
+            ev.session_id !== this.activeSessionId &&
+            this.openTabs.includes(ev.session_id)
+          ) {
+            this.closeTab(ev.session_id);
+          }
+        }
         break;
       }
       case 'session_created': {
