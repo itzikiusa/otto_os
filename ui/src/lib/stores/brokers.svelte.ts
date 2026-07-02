@@ -2,14 +2,16 @@
 // their own per-cluster data (topics, groups, metrics) on demand.
 
 import { api } from '../api/client';
-import type { BrokerCluster, BrokerClusterSection, Id, UpsertClusterReq } from '../api/types';
+import type { BrokerCluster, ConnectionSection, Id, UpsertClusterReq } from '../api/types';
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
 
 class BrokersStore {
   clusters: BrokerCluster[] = $state([]);
-  /** User-defined sidebar sections (folders), a nestable tree via parent_id. */
-  sections: BrokerClusterSection[] = $state([]);
+  /** User-defined sidebar sections (folders), a nestable tree via parent_id.
+   *  Shared with Connections + the DB Explorer — the ONE global connection-section
+   *  tree; clusters carry `section_id` into it (see the unified Connections hub). */
+  sections: ConnectionSection[] = $state([]);
   selectedId: Id | null = $state(null);
   /** Clusters opened as tabs (Workbench-style), in tab order. */
   openIds: Id[] = $state([]);
@@ -39,9 +41,10 @@ class BrokersStore {
       this.loading = false;
     }
     // Sections are best-effort: a failure shouldn't blank the cluster list.
+    // Read the ONE global connection-section tree (shared with Connections + DB).
     try {
-      this.sections = await api.get<BrokerClusterSection[]>(
-        `/workspaces/${wsId}/brokers/cluster-sections`,
+      this.sections = await api.get<ConnectionSection[]>(
+        `/workspaces/${wsId}/connection-sections`,
       );
     } catch {
       this.sections = [];
@@ -49,25 +52,27 @@ class BrokersStore {
   }
 
   // ---- sections (sidebar grouping) ----------------------------------------
+  // The section tree is the shared connection-section tree; these mirror the
+  // request/response shapes the Connections page uses for the same endpoints.
 
   async createSection(parentId: Id | null, name: string): Promise<void> {
     if (!ws.currentId) return;
-    const sec = await api.post<BrokerClusterSection>(
-      `/workspaces/${ws.currentId}/brokers/cluster-sections`,
+    const sec = await api.post<ConnectionSection>(
+      `/workspaces/${ws.currentId}/connection-sections`,
       { name, parent_id: parentId },
     );
     this.sections = [...this.sections, sec];
   }
 
   async renameSection(id: Id, name: string): Promise<void> {
-    const updated = await api.patch<BrokerClusterSection>(`/brokers/cluster-sections/${id}`, {
+    const updated = await api.patch<ConnectionSection>(`/connection-sections/${id}`, {
       name,
     });
     this.sections = this.sections.map((s) => (s.id === id ? updated : s));
   }
 
   async deleteSection(id: Id): Promise<void> {
-    await api.del(`/brokers/cluster-sections/${id}`);
+    await api.del(`/connection-sections/${id}`);
     // Drop the section + descendants locally; ungroup their clusters.
     const removed = new Set<Id>();
     const collect = (sid: Id) => {
@@ -82,7 +87,7 @@ class BrokersStore {
   }
 
   async reparentSection(id: Id, parentId: Id | null): Promise<void> {
-    const updated = await api.post<BrokerClusterSection>(`/brokers/cluster-sections/${id}/move`, {
+    const updated = await api.post<ConnectionSection>(`/connection-sections/${id}/move`, {
       parent_id: parentId,
     });
     this.sections = this.sections.map((s) => (s.id === id ? updated : s));
