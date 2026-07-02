@@ -351,3 +351,47 @@ async fn postgres_query_plan_flags_seq_scan() {
         plan.root
     );
 }
+
+/// SQL import path for Postgres: build **double-quoted** batched INSERTs from a
+/// parsed CSV and run them, then verify the row count and drop the scratch table.
+#[tokio::test]
+#[ignore]
+async fn postgres_import_inserts_rows() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = PostgresDriver::default();
+    let cfg = cfg();
+    d.run(&cfg, &query("DROP TABLE IF EXISTS e2e_import_scratch")).await.ok();
+    d.run(&cfg, &query("CREATE TABLE e2e_import_scratch (id INT, name TEXT)"))
+        .await
+        .expect("create scratch table");
+
+    let parsed = otto_dbviewer::parse_rows(
+        otto_dbviewer::ImportFormat::Csv,
+        b"id,name\n1,Ada\n2,Grace\n3,Linus\n",
+    )
+    .expect("parse csv");
+    let stmts = otto_dbviewer::build_insert_statements(
+        "e2e_import_scratch",
+        &parsed.columns,
+        &parsed.rows,
+        2,
+        otto_dbviewer::SqlQuote::DoubleQuote,
+    );
+    assert_eq!(stmts.len(), 2, "3 rows, batch 2 → 2 INSERT statements");
+    for s in &stmts {
+        d.run(&cfg, &query(s)).await.expect("insert batch");
+    }
+
+    let res = d
+        .run(&cfg, &query("SELECT COUNT(*) AS c FROM e2e_import_scratch"))
+        .await
+        .expect("count");
+    let count = res.rows[0][0]
+        .as_i64()
+        .or_else(|| res.rows[0][0].as_str().and_then(|s| s.parse().ok()));
+    assert_eq!(count, Some(3), "3 rows imported; got {:?}", res.rows[0][0]);
+
+    d.run(&cfg, &query("DROP TABLE e2e_import_scratch")).await.ok();
+}

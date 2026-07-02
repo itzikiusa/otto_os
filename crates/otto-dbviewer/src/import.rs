@@ -193,20 +193,38 @@ pub fn coerce_scalar(v: &Value) -> Value {
     Value::String(s.clone())
 }
 
-/// Quote a SQL identifier by backtick-wrapping and doubling embedded backticks
-/// (MySQL/ClickHouse identifier rules).
-fn quote_ident(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
+/// How to quote a SQL identifier — the one lexical difference between the SQL
+/// engines' `INSERT` text. MySQL/ClickHouse backtick-quote; Postgres (and the
+/// SQL standard) double-quote. Both double an embedded quote char to escape it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlQuote {
+    /// `` `name` `` — MySQL / ClickHouse.
+    Backtick,
+    /// `"name"` — Postgres (standard).
+    DoubleQuote,
 }
 
-/// Build batched multi-row `INSERT` statements. Each statement inserts at most
-/// `batch_size` rows. Returns an empty Vec for no rows. Cells align positionally
-/// with `columns`; a short row is padded with `NULL`.
+impl SqlQuote {
+    /// Quote an identifier, doubling any embedded quote char.
+    fn ident(self, name: &str) -> String {
+        match self {
+            SqlQuote::Backtick => format!("`{}`", name.replace('`', "``")),
+            SqlQuote::DoubleQuote => format!("\"{}\"", name.replace('"', "\"\"")),
+        }
+    }
+}
+
+/// Build batched multi-row `INSERT` statements, quoting identifiers per `quote`
+/// (backtick for MySQL/ClickHouse, double-quote for Postgres). Each statement
+/// inserts at most `batch_size` rows. Returns an empty Vec for no rows. Cells
+/// align positionally with `columns`; a short row is padded with `NULL`. Value
+/// literals are engine-agnostic (single-quoted strings, `TRUE`/`FALSE`, numbers).
 pub fn build_insert_statements(
     table: &str,
     columns: &[String],
     rows: &[Vec<Value>],
     batch_size: usize,
+    quote: SqlQuote,
 ) -> Vec<String> {
     if rows.is_empty() || columns.is_empty() {
         return Vec::new();
@@ -214,7 +232,7 @@ pub fn build_insert_statements(
     let batch_size = batch_size.max(1);
     let col_list = columns
         .iter()
-        .map(|c| quote_ident(c))
+        .map(|c| quote.ident(c))
         .collect::<Vec<_>>()
         .join(", ");
     let mut out = Vec::new();
@@ -230,7 +248,7 @@ pub fn build_insert_statements(
             .collect();
         out.push(format!(
             "INSERT INTO {} ({}) VALUES {}",
-            quote_ident(table),
+            quote.ident(table),
             col_list,
             values.join(", ")
         ));
@@ -300,7 +318,7 @@ mod tests {
             vec![json!(2), json!("O'Brien")],
             vec![json!(3), json!("Grace")],
         ];
-        let stmts = build_insert_statements("users", &cols, &rows, 2);
+        let stmts = build_insert_statements("users", &cols, &rows, 2, SqlQuote::Backtick);
         // 3 rows, batch 2 → two statements.
         assert_eq!(stmts.len(), 2);
         assert_eq!(
@@ -314,8 +332,22 @@ mod tests {
     }
 
     #[test]
+    fn insert_builder_double_quotes_identifiers_for_postgres() {
+        let cols = vec!["id".to_string(), "full name".to_string()];
+        let rows = vec![vec![json!(1), json!("O'Brien")]];
+        let stmts = build_insert_statements("my table", &cols, &rows, 100, SqlQuote::DoubleQuote);
+        assert_eq!(stmts.len(), 1);
+        // Identifiers double-quoted (spaces + reserved-word safe); string values
+        // still single-quoted with `'` doubled — same as MySQL.
+        assert_eq!(
+            stmts[0],
+            "INSERT INTO \"my table\" (\"id\", \"full name\") VALUES (1, 'O''Brien')"
+        );
+    }
+
+    #[test]
     fn insert_builder_empty_rows_is_no_statements() {
-        assert!(build_insert_statements("t", &["a".into()], &[], 100).is_empty());
+        assert!(build_insert_statements("t", &["a".into()], &[], 100, SqlQuote::Backtick).is_empty());
     }
 
     #[test]

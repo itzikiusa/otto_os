@@ -847,14 +847,21 @@ impl DbViewerService {
         let parsed = crate::import::parse_rows(format, &bytes)?;
 
         match engine {
-            // The INSERT builder emits MySQL/ClickHouse (backtick) identifiers;
-            // Postgres import isn't wired on this path.
-            Engine::Mysql | Engine::Clickhouse => {
+            // SQL engines import as batched INSERTs through the guarded `run`
+            // path; identifier quoting is engine-aware (Postgres double-quotes,
+            // MySQL/ClickHouse backtick).
+            Engine::Mysql | Engine::Clickhouse | Engine::Postgres => {
+                let quote = if matches!(engine, Engine::Postgres) {
+                    crate::import::SqlQuote::DoubleQuote
+                } else {
+                    crate::import::SqlQuote::Backtick
+                };
                 let statements = crate::import::build_insert_statements(
                     table,
                     &parsed.columns,
                     &parsed.rows,
                     batch_size,
+                    quote,
                 );
                 let mut counts = ImportCounts::default();
                 for stmt in statements {
@@ -917,9 +924,6 @@ impl DbViewerService {
                     batches,
                 })
             }
-            Engine::Postgres => Err(Error::Invalid(
-                "file import is not supported for postgres yet".into(),
-            )),
             Engine::Redis => unreachable!("redis rejected above"),
         }
     }
