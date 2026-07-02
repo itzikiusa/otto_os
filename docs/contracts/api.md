@@ -1927,12 +1927,27 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 102 | GET /api/v1/workspaces/{ws}/canvas/scenes | ws viewer | — | `CanvasSceneSummary[]` (newest-updated first) |
-| 103 | POST /api/v1/workspaces/{ws}/canvas/scenes | ws editor | `{title, doc?, story_id?}` | CanvasScene (201; `doc` defaults to an empty scene) |
+| 103 | POST /api/v1/workspaces/{ws}/canvas/scenes | ws editor | `{title, doc?, story_id?, provider?, section?}` | CanvasScene (201; `doc` defaults to an empty scene) |
 | 104 | GET /api/v1/canvas/scenes/{id} | ws viewer | — | CanvasScene (full `doc_json`) |
-| 105 | PUT /api/v1/canvas/scenes/{id} | ws editor | `{title?, doc?, thumbnail?}` | CanvasScene (partial; omitted fields unchanged) |
+| 105 | PUT /api/v1/canvas/scenes/{id} | ws editor | `{title?, doc?, thumbnail?, provider?, section?, story_id?}` | CanvasScene (partial; omitted fields unchanged, COALESCE) |
 | 106 | DELETE /api/v1/canvas/scenes/{id} | ws editor | — | 204 |
-| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits + commits the scene's backing file) |
+| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview) |
 | 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
+| 145 | GET /api/v1/sessions/{sid}/canvas-refs | ws viewer | — | `CanvasSceneSummary[]` — scenes referenced by this session |
+| 146 | POST /api/v1/sessions/{sid}/canvas-refs | ws editor | `{scene_id}` | 204 (idempotent; 404 if the scene isn't in the session's workspace) |
+| 147 | DELETE /api/v1/sessions/{sid}/canvas-refs/{scene_id} | ws editor | — | 204 (detaches; the scene itself is untouched) |
+
+Session references live in `crates/otto-server/src/canvas_refs.rs` (needs
+`SessionManager` to resolve a session's workspace, so they can't live in the
+`otto-canvas` crate like the routes above). Broadcasts `canvas_refs_changed`
+(see `docs/contracts/ws.md`) on attach/detach.
+
+The first-party MCP tool server (`ottod mcp-tools`) additionally exposes two
+GOVERNED WRITE tools — `canvas_create_scene` (posts to #103, then best-effort
+#146 to reference the new scene to the calling session) and
+`canvas_update_scene` (GET #104 then PUT #105, preserving `format`/`sketch`) —
+the only two mutating tools in an otherwise read-only MCP surface; both run as
+the session owner through the same `WorkspaceRole::Editor` gate a human hits.
 
 ## Discovery Chat
 
