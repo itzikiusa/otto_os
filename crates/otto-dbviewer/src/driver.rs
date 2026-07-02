@@ -86,6 +86,39 @@ pub trait Driver: Send + Sync {
         Ok(())
     }
 
+    /// Produce a normalized [`DbQueryPlan`] for `statement` by running the engine's
+    /// native EXPLAIN (the statement is EXPLAIN-wrapped, **never executed raw** —
+    /// read-only by construction). `node` scopes the active database (same
+    /// semantics as [`QueryRequest::node`]). The default is unsupported (Redis);
+    /// SQL engines + Mongo override it.
+    async fn query_plan(
+        &self,
+        _cfg: &ResolvedConfig,
+        _statement: &str,
+        _node: Option<&str>,
+    ) -> Result<crate::types::DbQueryPlan> {
+        Err(otto_core::Error::Invalid("explain not supported".into()))
+    }
+
+    /// Bulk-import already-parsed rows into a collection/table as the engine's
+    /// native batched insert, in batches of `batch_size`. Only MongoDB implements
+    /// this — SQL engines import via the service's INSERT-statement path — so the
+    /// default is unsupported. `node` scopes the active database. Returns
+    /// `(rows_inserted, batches_run)`.
+    async fn import_rows(
+        &self,
+        _cfg: &ResolvedConfig,
+        _target: &str,
+        _columns: &[String],
+        _rows: &[Vec<serde_json::Value>],
+        _batch_size: usize,
+        _node: Option<&str>,
+    ) -> Result<(u64, u64)> {
+        Err(otto_core::Error::Invalid(
+            "file import is not supported for this engine".into(),
+        ))
+    }
+
     /// Autocomplete items for the editor, scoped to the given context.
     async fn completion(
         &self,

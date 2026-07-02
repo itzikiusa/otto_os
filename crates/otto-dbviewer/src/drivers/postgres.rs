@@ -31,8 +31,8 @@ use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
-    Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest,
-    QueryResult, ResolvedConfig, SchemaNode, TestResult,
+    DbQueryPlan, Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle,
+    QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
 };
 
 const DEFAULT_MAX_ROWS: usize = 1000;
@@ -386,6 +386,41 @@ impl Driver for PostgresDriver {
             .execute(&pool)
             .await;
         Ok(())
+    }
+
+    /// Structured query plan via `EXPLAIN (FORMAT JSON)`. Postgres returns the
+    /// plan as a single `json` cell (a one-element array). The statement is
+    /// EXPLAIN-wrapped — never executed raw (no `ANALYZE`, so no side effects).
+    async fn query_plan(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<DbQueryPlan> {
+        let stmt = statement.trim().trim_end_matches(';');
+        if stmt.is_empty() {
+            return Err(types::invalid("empty statement"));
+        }
+        let pool = self.pool(cfg).await?;
+        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        if let Some(schema) = node.map(str::trim).filter(|s| !s.is_empty()) {
+            (&mut *conn)
+                .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
+                .await
+                .map_err(types::upstream)?;
+        }
+        let row = sqlx::query(&format!("EXPLAIN (FORMAT JSON) {stmt}"))
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(types::upstream)?;
+        // The plan column decodes straight to a serde_json::Value (json type).
+        let raw: Value = row.try_get(0).map_err(types::upstream)?;
+        let root = crate::plan::from_pg_json(&raw);
+        Ok(DbQueryPlan {
+            engine: "postgres".into(),
+            root,
+            raw,
+        })
     }
 
     async fn completion(

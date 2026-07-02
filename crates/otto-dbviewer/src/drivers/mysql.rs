@@ -26,8 +26,8 @@ use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
-    Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest,
-    QueryResult, ResolvedConfig, SchemaNode, TestResult,
+    DbQueryPlan, Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle,
+    QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
 };
 
 const DEFAULT_MAX_ROWS: usize = 1000;
@@ -204,6 +204,26 @@ impl Driver for MysqlDriver {
                     .expandable(),
                 );
             }
+            // Triggers live in information_schema.triggers (a different catalog
+            // table); show the folder only when the database has any.
+            let trig_count: Option<i64> = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema = ?",
+            )
+            .bind(&db)
+            .fetch_one(&pool)
+            .await
+            .ok();
+            if let Some(n) = trig_count.filter(|&n| n > 0) {
+                folders.push(
+                    SchemaNode::new(
+                        parent.child("folder", "triggers").to_id(),
+                        "Triggers",
+                        NodeKind::Folder,
+                    )
+                    .with_detail(n.to_string())
+                    .expandable(),
+                );
+            }
         }
         Ok(folders)
     }
@@ -213,6 +233,10 @@ impl Driver for MysqlDriver {
         // (rendered as the object's "columns") and the CREATE DDL.
         if path.get("procedure").is_some() || path.get("function").is_some() {
             return self.routine_detail(cfg, path).await;
+        }
+        // Trigger: event/timing/table metadata + SHOW CREATE TRIGGER DDL.
+        if path.get("trigger").is_some() {
+            return self.trigger_detail(cfg, path).await;
         }
         let db = path
             .get("db")
@@ -428,6 +452,41 @@ impl Driver for MysqlDriver {
         Ok(())
     }
 
+    /// Structured query plan via `EXPLAIN FORMAT=JSON`. The statement is
+    /// EXPLAIN-wrapped (never executed raw), so this is read-only by construction.
+    async fn query_plan(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<DbQueryPlan> {
+        let stmt = statement.trim().trim_end_matches(';');
+        if stmt.is_empty() {
+            return Err(types::invalid("empty statement"));
+        }
+        let pool = self.pool(cfg).await?;
+        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
+            (&mut *conn)
+                .execute(sqlx::raw_sql(&use_db_sql(db)))
+                .await
+                .map_err(types::upstream)?;
+        }
+        let row = sqlx::query(&format!("EXPLAIN FORMAT=JSON {stmt}"))
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(types::upstream)?;
+        let json_str: String = row.try_get(0).map_err(types::upstream)?;
+        let raw: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| types::invalid(format!("parse EXPLAIN JSON: {e}")))?;
+        let root = crate::plan::from_mysql_json(&raw);
+        Ok(DbQueryPlan {
+            engine: "mysql".into(),
+            root,
+            raw,
+        })
+    }
+
     async fn completion(
         &self,
         cfg: &ResolvedConfig,
@@ -590,6 +649,10 @@ impl MysqlDriver {
         // their leaves have no children — clicking one opens its DDL in Structure.
         if folder == "procedures" || folder == "functions" {
             return self.routines_in_folder(cfg, db, folder, filter).await;
+        }
+        // Triggers live in information_schema.triggers; leaves open their DDL.
+        if folder == "triggers" {
+            return self.triggers_in_folder(cfg, db, filter).await;
         }
         let (table_type, kind, seg) = match folder {
             "tables" => ("BASE TABLE", NodeKind::Table, "table"),
@@ -882,6 +945,105 @@ impl MysqlDriver {
         let kw = if is_function { "FUNCTION" } else { "PROCEDURE" };
         let sql = format!("SHOW CREATE {kw} `{}`.`{}`", esc_ident(db), esc_ident(name));
         let row = sqlx::query(&sql).fetch_one(pool).await.map_err(types::upstream)?;
+        let ddl: Option<String> = row.try_get(2).map_err(types::upstream)?;
+        Ok(ddl)
+    }
+
+    /// List a database's triggers (the `Triggers` tree folder), optional
+    /// case-insensitive substring filter. Leaves aren't expandable — clicking one
+    /// opens its event/timing/table + DDL in Structure.
+    async fn triggers_in_folder(
+        &self,
+        cfg: &ResolvedConfig,
+        db: &str,
+        filter: Option<&str>,
+    ) -> Result<Vec<SchemaNode>> {
+        let pool = self.pool(cfg).await?;
+        let (sql, name_filter): (&str, Option<String>) = match filter {
+            Some(f) if !f.is_empty() => (
+                "SELECT CAST(trigger_name AS CHAR) FROM information_schema.triggers \
+                 WHERE trigger_schema = ? \
+                 AND LOWER(CAST(trigger_name AS CHAR)) LIKE LOWER(?) \
+                 ORDER BY trigger_name",
+                Some(format!("%{f}%")),
+            ),
+            _ => (
+                "SELECT CAST(trigger_name AS CHAR) FROM information_schema.triggers \
+                 WHERE trigger_schema = ? ORDER BY trigger_name",
+                None,
+            ),
+        };
+        let rows: Vec<(String,)> = if let Some(pat) = name_filter {
+            sqlx::query_as(sql).bind(db).bind(pat).fetch_all(&pool).await
+        } else {
+            sqlx::query_as(sql).bind(db).fetch_all(&pool).await
+        }
+        .map_err(types::upstream)?;
+        let db_path = NodePath::parse(&format!("db:{db}"));
+        Ok(rows
+            .into_iter()
+            .map(|(name,)| SchemaNode::new(db_path.child("trigger", &name).to_id(), name, NodeKind::Trigger))
+            .collect())
+    }
+
+    /// Trigger structure: its event/timing/table metadata (in `extra`) plus the
+    /// full `SHOW CREATE TRIGGER` DDL.
+    async fn trigger_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail> {
+        let db = path
+            .get("db")
+            .ok_or_else(|| types::invalid("trigger_detail: path has no database segment"))?
+            .to_string();
+        let name = path
+            .get("trigger")
+            .ok_or_else(|| types::invalid("trigger_detail: path has no trigger segment"))?
+            .to_string();
+        let pool = self.pool(cfg).await?;
+        let meta: Option<TriggerRow> = sqlx::query_as(
+            "SELECT CAST(event_manipulation AS CHAR) AS event_manipulation, \
+                    CAST(action_timing AS CHAR) AS action_timing, \
+                    CAST(event_object_table AS CHAR) AS event_object_table \
+             FROM information_schema.triggers \
+             WHERE trigger_schema = ? AND trigger_name = ?",
+        )
+        .bind(&db)
+        .bind(&name)
+        .fetch_optional(&pool)
+        .await
+        .map_err(types::upstream)?;
+
+        // `.ok().flatten()`: a hard error or a NULL definition (privilege missing)
+        // both collapse to `None`.
+        let ddl = self.show_create_trigger(&pool, &db, &name).await.ok().flatten();
+
+        let mut detail = ObjectDetail::new(name, NodeKind::Trigger);
+        if let Some(m) = meta {
+            detail.extra = serde_json::json!({
+                "timing": m.action_timing,
+                "event": m.event_manipulation,
+                "table": m.event_object_table,
+            });
+        }
+        detail.ddl = ddl;
+        Ok(detail)
+    }
+
+    /// `SHOW CREATE TRIGGER` DDL (the "SQL Original Statement" column, index 2).
+    /// `SHOW CREATE TRIGGER` resolves against the default database, so we `USE`
+    /// the trigger's schema on a scratch connection first. Returns `Ok(None)` when
+    /// the definition column is NULL (definer privilege missing).
+    async fn show_create_trigger(
+        &self,
+        pool: &sqlx::MySqlPool,
+        db: &str,
+        name: &str,
+    ) -> Result<Option<String>> {
+        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .await
+            .map_err(types::upstream)?;
+        let sql = format!("SHOW CREATE TRIGGER `{}`", esc_ident(name));
+        let row = sqlx::query(&sql).fetch_one(&mut *conn).await.map_err(types::upstream)?;
         let ddl: Option<String> = row.try_get(2).map_err(types::upstream)?;
         Ok(ddl)
     }
@@ -1458,6 +1620,13 @@ struct RoutineParamRow {
     parameter_mode: Option<String>,
     parameter_name: Option<String>,
     dtd_identifier: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct TriggerRow {
+    event_manipulation: Option<String>,
+    action_timing: Option<String>,
+    event_object_table: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

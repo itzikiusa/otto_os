@@ -199,6 +199,9 @@ pub enum NodeKind {
     /// A stored function (SQL routine returning a value — carries its DDL and
     /// parameters, including the return type).
     Function,
+    /// A table trigger (SQL). Detail carries its event/timing/table + the
+    /// `SHOW CREATE TRIGGER` DDL; no result columns.
+    Trigger,
     Column,
     Index,
     Collection,
@@ -797,6 +800,58 @@ pub struct Capabilities {
     pub schema_levels: Vec<String>,
     /// Hint for the editor language mode: "sql" | "redis" | "mongo".
     pub query_language: String,
+}
+
+// --- Query plan (structured EXPLAIN) ----------------------------------------
+
+/// A normalized query plan — the engine-agnostic shape the UI's plan tree renders,
+/// distilled from each engine's native EXPLAIN output. `raw` preserves the
+/// engine's own JSON so a "raw" toggle can show the untouched plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbQueryPlan {
+    /// Engine that produced the plan (`mysql`/`postgres`/`clickhouse`/`mongodb`).
+    pub engine: String,
+    /// The plan tree root.
+    pub root: PlanNode,
+    /// The engine's untouched EXPLAIN JSON (for the "raw JSON" toggle).
+    pub raw: Value,
+}
+
+/// One node in a normalized query plan. `warnings` flags costly access patterns
+/// (full scans, filesort, temporary tables) the UI badges in red.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanNode {
+    /// The operation (`Seq Scan`, `table`, `IXSCAN`, `ReadFromMergeTree`, …).
+    pub op: String,
+    /// The object it touches (table / collection / index), when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// A short human detail line (access type, filter, condition), when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Estimated rows for this node, when the engine reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub est_rows: Option<f64>,
+    /// Costly-pattern flags (e.g. "full table scan", "Using filesort").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Child plan nodes (sub-operations).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<PlanNode>,
+}
+
+impl PlanNode {
+    /// A leaf node with just an operation label.
+    pub fn op(op: impl Into<String>) -> Self {
+        Self {
+            op: op.into(),
+            object: None,
+            detail: None,
+            est_rows: None,
+            warnings: Vec::new(),
+            children: Vec::new(),
+        }
+    }
 }
 
 // --- Helpers ----------------------------------------------------------------

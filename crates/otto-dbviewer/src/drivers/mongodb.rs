@@ -26,9 +26,9 @@ use crate::drivers::{mongo_parse, mongo_sql};
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, Column, CompletionContext, CompletionResponse, Engine, IndexDef, NodePath,
-    NodeKind, ObjectDetail, QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode,
-    TestResult,
+    self, Capabilities, Column, CompletionContext, CompletionResponse, DbQueryPlan, Engine,
+    IndexDef, NodePath, NodeKind, ObjectDetail, QueryRequest, QueryResult, QueryStats,
+    ResolvedConfig, SchemaNode, TestResult,
 };
 
 /// How many documents to sample when inferring fields/types.
@@ -325,6 +325,65 @@ impl Driver for MongoDriver {
 
     async fn invalidate_completion_cache(&self, cfg: &ResolvedConfig) {
         self.completions.invalidate(&cfg.cache_key());
+    }
+
+    /// Structured query plan via the server `explain` command (queryPlanner
+    /// verbosity) for a find/aggregate. Never runs the query itself.
+    async fn query_plan(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<DbQueryPlan> {
+        let translated = if mongo_sql::looks_like_sql(statement) {
+            Some(mongo_sql::translate(statement)?)
+        } else {
+            None
+        };
+        let parsed = parse_command(translated.as_deref().unwrap_or(statement))?;
+        if !matches!(parsed.op, MongoOp::Find | MongoOp::Aggregate) {
+            return Err(types::invalid("query plan supports find / aggregate only"));
+        }
+        let db_name = resolve_db(cfg, node)?;
+        let client = self.connect(cfg).await?;
+        let db = client.database(&db_name);
+        let raw = mongo_explain_value(&db, &parsed).await?;
+        let root = crate::plan::from_mongo_queryplanner(&raw);
+        Ok(DbQueryPlan {
+            engine: "mongodb".into(),
+            root,
+            raw,
+        })
+    }
+
+    /// Import parsed rows into a collection as batched `insertMany`. Values are
+    /// mapped to BSON (numbers/bools/null preserved; the service coerces CSV
+    /// string cells first). `batch_size` is clamped 1..=5000.
+    async fn import_rows(
+        &self,
+        cfg: &ResolvedConfig,
+        target: &str,
+        columns: &[String],
+        rows: &[Vec<Value>],
+        batch_size: usize,
+        node: Option<&str>,
+    ) -> Result<(u64, u64)> {
+        let db_name = resolve_db(cfg, node)?;
+        let client = self.connect(cfg).await?;
+        let coll: Collection<Document> = client.database(&db_name).collection(target);
+        let batch = batch_size.clamp(1, 5000);
+        let mut inserted = 0u64;
+        let mut batches = 0u64;
+        for chunk in rows.chunks(batch) {
+            let docs: Vec<Document> = chunk.iter().map(|row| row_to_doc(columns, row)).collect();
+            if docs.is_empty() {
+                continue;
+            }
+            let res = coll.insert_many(&docs).await.map_err(types::upstream)?;
+            inserted += res.inserted_ids.len() as u64;
+            batches += 1;
+        }
+        Ok((inserted, batches))
     }
 
     /// Streaming export: iterate the `Cursor` (a `Stream`) document-by-document
@@ -1889,7 +1948,22 @@ async fn explain_plan(
     parsed: &Parsed,
     started: Instant,
 ) -> Result<QueryResult> {
-    let inner = match parsed.op {
+    let plan = mongo_explain_value(db, parsed).await?;
+    let mut result = QueryResult::empty();
+    result.columns = vec![Column::typed("queryPlan", "json")];
+    result.rows = vec![vec![plan]];
+    result.stats = QueryStats {
+        duration_ms: started.elapsed().as_millis() as u64,
+        row_count: 1,
+        bytes_read: None,
+    };
+    result.message = Some("Query plan (explain · queryPlanner)".into());
+    Ok(result)
+}
+
+/// The `explain` inner command doc for a find/aggregate.
+fn explain_inner(parsed: &Parsed) -> Result<Document> {
+    match parsed.op {
         MongoOp::Find => {
             let mut d = doc! { "find": &parsed.collection };
             if let Some(f) = &parsed.filter {
@@ -1904,7 +1978,7 @@ async fn explain_plan(
             if let Some(l) = parsed.limit {
                 d.insert("limit", l);
             }
-            d
+            Ok(d)
         }
         MongoOp::Aggregate => {
             let stages: Vec<Bson> = parsed
@@ -1914,24 +1988,51 @@ async fn explain_plan(
                 .into_iter()
                 .map(Bson::Document)
                 .collect();
-            doc! { "aggregate": &parsed.collection, "pipeline": Bson::Array(stages), "cursor": {} }
+            Ok(doc! { "aggregate": &parsed.collection, "pipeline": Bson::Array(stages), "cursor": {} })
         }
-        _ => return Err(types::invalid("explain supports find and aggregate")),
-    };
+        _ => Err(types::invalid("explain supports find and aggregate")),
+    }
+}
+
+/// Run the server `explain` command (queryPlanner verbosity) and return the plan
+/// document as JSON — shared by the interactive explain and the query-plan endpoint.
+async fn mongo_explain_value(db: &mongodb::Database, parsed: &Parsed) -> Result<Value> {
+    let inner = explain_inner(parsed)?;
     let plan = db
         .run_command(doc! { "explain": inner, "verbosity": "queryPlanner" })
         .await
         .map_err(types::upstream)?;
-    let mut result = QueryResult::empty();
-    result.columns = vec![Column::typed("queryPlan", "json")];
-    result.rows = vec![vec![bson_to_json(&Bson::Document(plan))]];
-    result.stats = QueryStats {
-        duration_ms: started.elapsed().as_millis() as u64,
-        row_count: 1,
-        bytes_read: None,
-    };
-    result.message = Some("Query plan (explain · queryPlanner)".into());
-    Ok(result)
+    Ok(bson_to_json(&Bson::Document(plan)))
+}
+
+/// The database a Mongo op runs against: the connection's configured database,
+/// else the active-db `node` (a plain name or a `db:<name>` path).
+fn resolve_db(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String> {
+    cfg.database
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            node.map(str::trim).filter(|s| !s.is_empty()).map(|n| {
+                NodePath::parse(n)
+                    .get("db")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| n.to_string())
+            })
+        })
+        .ok_or_else(|| types::invalid("no database selected for this connection"))
+}
+
+/// Build a BSON document from a parsed import row: each column → its coerced
+/// value mapped to BSON (numbers/bools/null preserved). A missing/short cell
+/// becomes null.
+fn row_to_doc(columns: &[String], row: &[Value]) -> Document {
+    let mut doc = Document::new();
+    for (i, col) in columns.iter().enumerate() {
+        let v = row.get(i).cloned().unwrap_or(Value::Null);
+        let bson = json_to_bson(&v).unwrap_or(Bson::Null);
+        doc.insert(col.clone(), bson);
+    }
+    doc
 }
 
 /// Build a `QueryResult` for a write op (no rows, just affected count + note).

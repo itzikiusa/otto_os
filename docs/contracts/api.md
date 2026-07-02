@@ -549,10 +549,11 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/test | ws editor | — | connectivity probe result |
 | GET /connections/{id}/db/capabilities | ws viewer | — | engine capability flags: `sql`, `joins`, `transactions`, `multi_statement`, `cancel`, `explain`, `default_port`, `schema_levels`, `query_language` (see the honesty notes below) |
 | GET /connections/{id}/db/schema | ws viewer | — | top-level schema tree (roots) |
-| POST /connections/{id}/db/schema/children | ws viewer | `{node}` | child schema nodes (lazy expand). MySQL databases expose `Tables`/`Views` folders always, plus `Procedures`/`Functions` folders (with a count) when routines exist; routine leaves carry `kind:"procedure"`/`"function"` |
-| POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.). For a procedure/function: `columns` are its parameters and `ddl` is the `SHOW CREATE` body |
+| POST /connections/{id}/db/schema/children | ws viewer | `{node}` | child schema nodes (lazy expand). MySQL databases expose `Tables`/`Views` folders always, plus `Procedures`/`Functions`/`Triggers` folders (with a count) when the database has any; routine leaves carry `kind:"procedure"`/`"function"`, trigger leaves `kind:"trigger"` |
+| POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.). For a procedure/function: `columns` are its parameters and `ddl` is the `SHOW CREATE` body. For a trigger (MySQL): `ddl` is `SHOW CREATE TRIGGER` and `extra` = `{timing, event, table}` |
 | POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
+| POST /connections/{id}/db/query-plan | ws **viewer** | `{statement, node?}` | `DbQueryPlan` — a normalized query plan from the engine's native EXPLAIN (MySQL `EXPLAIN FORMAT=JSON`, Postgres `EXPLAIN (FORMAT JSON)`, ClickHouse `EXPLAIN json=1` w/ plain-text fallback, Mongo `explain` queryPlanner). The statement is **EXPLAIN-wrapped, never executed raw** — read-only by construction, hence `viewer`. Redis → 400 (no plan surface). |
 | POST /connections/{id}/db/cancel | ws editor | `{query_id}` | 204 — cancel an in-flight query engine-side |
 | POST /connections/{id}/db/completion | ws viewer | `{prefix, suffix?, database?, node?}` | Context-aware completion items (`{items:[DbCompletionItem]}`). The daemon parses `prefix` (text before the cursor) + `suffix` (text after, to resolve a `FROM` that follows the cursor) to decide intent — tables after `FROM`/`JOIN`, columns after `WHERE`/`AND`/`alias.`, Mongo collections/methods/field-keys (incl. embedded `x.a`). Each item carries a `score` (→ CodeMirror `boost`) so **index columns/fields rank first**, then the rest of the schema. Backed by a per-connection schema snapshot **cached until refresh** (see below; ~5-min TTL safety net). |
 | POST /connections/{id}/db/completion/refresh | ws viewer | `{}` | 204 — drop the connection's cached completion snapshot so the next completion re-introspects. Wired to the UI "Refresh schema" action. No-op for engines without a snapshot cache (Redis). |
@@ -560,7 +561,7 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/explain-with-agent | ws editor | `{sql}` | AI explanation of a query (spawns an agent) |
 | POST /connections/{id}/db/export | ws editor | `{statement, format?, node?}` | **Uncapped, streamed** CSV/JSON browser download (`Content-Disposition: attachment`). Bytes are produced by the driver's streaming exporter and piped straight to the response body — no row cap and no full-result buffering (fixes the prior silent truncation at the driver default). `format`: `csv` (header + rows) or `json` (array of objects). A write/DDL on a guarded connection is rejected up front. If the driver errors mid-stream the response body terminates early (truncated download + connection reset) rather than reporting success. |
 | POST /connections/{id}/db/export-to-path | ws editor | ExportToPathReq | Stream an uncapped result to a **local file** on the daemon host, selectable format. Response is a **streamed `application/x-ndjson`** progress feed (see below). |
-| POST /connections/{id}/db/import | ws editor | ImportReq | Import a **local file** (CSV/TSV/NDJSON/JSON) into an existing SQL table as batched INSERTs **through the same guarded `run` path** (a Prod/read-only connection refuses it without `confirm_write`). Response is a **streamed `application/x-ndjson`** line: `{ done, rows, batches }` or `{ error }` (text starting `write_blocked:` ⇒ typed confirmation needed). v1: MySQL/ClickHouse only. |
+| POST /connections/{id}/db/import | ws editor | ImportReq | Import a **local file** (CSV/TSV/NDJSON/JSON) into an existing table/collection, **guarded** (a Prod/read-only connection refuses it without `confirm_write`). MySQL/ClickHouse → batched `INSERT`s via the `run` path; **MongoDB** → `insertMany` batches (`table` = collection; CSV/TSV cells coerced to numbers/bools/null; NDJSON/JSON keep their types). Response is a **streamed `application/x-ndjson`** line: `{ done, rows, batches }` or `{ error }` (text starting `write_blocked:` ⇒ typed confirmation needed). Redis is unsupported (no bulk-load). Postgres import is not wired on this path. |
 | POST /connections/{id}/db/nl-to-sql | ws editor | NlToSqlReq | Draft a **read** query from natural language, **validated with `EXPLAIN`** against the live schema before returning. Plain JSON → `NlToSqlOutcome`. Never emits a write/DDL. 400 starting "NL-to-SQL is not configured" ⇒ no drafter wired; 400 starting "could not produce a valid read query" ⇒ retry loop exhausted (message carries the last engine error). Unavailable for Redis. |
 
 `ExportToPathReq` = `{ statement, node?, format?, local_path, max_rows? }`. `format`
@@ -664,6 +665,16 @@ ran `;`-separated scripts). Two new flags: `cancel` (server-side per-query cance
 — `true` for MySQL/ClickHouse, `false` for MongoDB/Redis; the UI labels Stop as
 client-side-only when false) and `explain` (`true` everywhere except Redis, which
 has no plan surface — the UI hides the Explain button there).
+
+**`DbQueryPlan`** (`POST …/db/query-plan`) = `{ engine, root: PlanNode, raw }` where
+`PlanNode` = `{ op, object?, detail?, est_rows?, warnings[], children[] }`. `raw` is
+the engine's untouched EXPLAIN JSON (for a "raw" toggle). `warnings` flags the
+costly access patterns the UI badges red: full scans (`access_type: ALL` on MySQL,
+`Seq Scan` on Postgres, `COLLSCAN` on Mongo) and MySQL `Using filesort` / `Using
+temporary`. ClickHouse `ReadFromMergeTree` is deliberately **not** flagged (normal
+for MergeTree tables). Triggers browse: MySQL databases with triggers expose a
+`Triggers` tree folder (`information_schema.TRIGGERS`); a trigger's object detail
+carries `SHOW CREATE TRIGGER` DDL + `extra = {timing, event, table}`.
 
 **PostgreSQL engine** (`ConnectionKind`/`DbEngine` `"postgres"`, default port 5432).
 First-class parity with MySQL: schema browse, query, streaming export/import, ERD,

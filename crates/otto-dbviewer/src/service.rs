@@ -34,9 +34,9 @@ use crate::registry::Registry;
 use otto_core::redact;
 use otto_ssh::SshTunnel;
 use crate::types::{
-    statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse, Engine,
-    GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest,
-    QueryResult, ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
+    statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse,
+    DbQueryPlan, Engine, GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail,
+    QueryHandle, QueryRequest, QueryResult, ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
 };
 
 /// Stable marker prefixed to the write-gate rejection message so the UI can
@@ -811,11 +811,16 @@ impl DbViewerService {
         self.guard_write(conn_id, &guard_req).await
     }
 
-    /// Import a local file into an existing SQL table. Parses the file, builds
-    /// batched `INSERT`s, and runs each batch **through the guarded `run` path**
-    /// — so a Prod/read-only connection refuses the import unless `confirm_write`
-    /// is set (no new guard here), and history records each batch. v1 supports
-    /// SQL engines (MySQL/ClickHouse); Mongo/Redis return a clear error.
+    /// Import a local file into an existing table/collection. Parses the file,
+    /// then imports per engine — respecting the write guard + `confirm_write` on
+    /// every engine:
+    /// - **SQL (MySQL/ClickHouse):** builds batched `INSERT`s and runs each batch
+    ///   through the guarded `run` path (so guard/history/masking all apply).
+    /// - **MongoDB:** guards once (an `insertMany` is a write), coerces CSV/TSV
+    ///   string cells to inferred types (Mongo is schemaless), then `insertMany`s
+    ///   in batches via the driver.
+    ///
+    /// Redis has no bulk-load surface (documented out).
     #[allow(clippy::too_many_arguments)]
     pub async fn import_from_path(
         &self,
@@ -828,38 +833,111 @@ impl DbViewerService {
         confirm_write: bool,
     ) -> Result<ImportCounts> {
         let conn = self.connections.get(conn_id).await?;
-        match Engine::from_kind(conn.kind) {
-            Some(Engine::Mysql) | Some(Engine::Clickhouse) => {}
-            Some(other) => {
-                return Err(Error::Invalid(format!(
-                    "file import is not supported for {} yet (SQL engines only in v1)",
-                    other.as_str()
-                )))
-            }
-            None => return Err(Error::Invalid("connection is not a browsable database".into())),
+        let engine = Engine::from_kind(conn.kind)
+            .ok_or_else(|| Error::Invalid("connection is not a browsable database".into()))?;
+        if matches!(engine, Engine::Redis) {
+            return Err(Error::Invalid(
+                "file import is not supported for redis".into(),
+            ));
         }
 
         let bytes = tokio::fs::read(local_path)
             .await
             .map_err(|e| Error::Invalid(format!("read import file: {e}")))?;
         let parsed = crate::import::parse_rows(format, &bytes)?;
-        let statements =
-            crate::import::build_insert_statements(table, &parsed.columns, &parsed.rows, batch_size);
 
-        let mut counts = ImportCounts::default();
-        for stmt in statements {
-            let req = QueryRequest {
-                statement: stmt,
-                confirm_write,
-                ..QueryRequest::default()
-            };
-            // Routes through guard_write + history. A guarded connection without
-            // confirm_write fails here with the standard write_blocked: 409.
-            let res = self.run(conn_id, user_id, &req).await?;
-            counts.rows += res.rows_affected.unwrap_or(0);
-            counts.batches += 1;
+        match engine {
+            // The INSERT builder emits MySQL/ClickHouse (backtick) identifiers;
+            // Postgres import isn't wired on this path.
+            Engine::Mysql | Engine::Clickhouse => {
+                let statements = crate::import::build_insert_statements(
+                    table,
+                    &parsed.columns,
+                    &parsed.rows,
+                    batch_size,
+                );
+                let mut counts = ImportCounts::default();
+                for stmt in statements {
+                    let req = QueryRequest {
+                        statement: stmt,
+                        confirm_write,
+                        ..QueryRequest::default()
+                    };
+                    // Routes through guard_write + history. A guarded connection
+                    // without confirm_write fails here with write_blocked: 409.
+                    let res = self.run(conn_id, user_id, &req).await?;
+                    counts.rows += res.rows_affected.unwrap_or(0);
+                    counts.batches += 1;
+                }
+                Ok(counts)
+            }
+            Engine::Mongodb => {
+                // An insertMany is a write — guard once (a `db.<c>.insertMany`
+                // shape classifies as a write) with the caller's confirmation.
+                let guard_req = QueryRequest {
+                    statement: format!("db.{table}.insertMany([])"),
+                    confirm_write,
+                    ..QueryRequest::default()
+                };
+                self.guard_write(conn_id, &guard_req).await?;
+                // Mongo is schemaless: coerce CSV/TSV string cells to inferred
+                // types (numbers/bools/null). NDJSON/JSON already carry types.
+                let rows: Vec<Vec<serde_json::Value>> = if matches!(
+                    format,
+                    crate::import::ImportFormat::Csv | crate::import::ImportFormat::Tsv
+                ) {
+                    parsed
+                        .rows
+                        .iter()
+                        .map(|r| r.iter().map(crate::import::coerce_scalar).collect())
+                        .collect()
+                } else {
+                    parsed.rows.clone()
+                };
+                let r = self.resolve(conn_id).await?;
+                let (inserted, batches) = r
+                    .driver
+                    .import_rows(&r.config, table, &parsed.columns, &rows, batch_size, None)
+                    .await?;
+                // Best-effort history entry (one row for the whole import).
+                let _ = self
+                    .repo
+                    .add_history(
+                        conn_id,
+                        user_id,
+                        &format!("import {inserted} document(s) → {table}"),
+                        true,
+                        0,
+                        inserted as i64,
+                        None,
+                    )
+                    .await;
+                Ok(ImportCounts {
+                    rows: inserted,
+                    batches,
+                })
+            }
+            Engine::Postgres => Err(Error::Invalid(
+                "file import is not supported for postgres yet".into(),
+            )),
+            Engine::Redis => unreachable!("redis rejected above"),
         }
-        Ok(counts)
+    }
+
+    /// Produce a structured [`DbQueryPlan`] for `statement`, dispatching to the
+    /// engine's native EXPLAIN via the driver. The statement is EXPLAIN-wrapped
+    /// (never executed raw), so this is read-only by construction — no write
+    /// guard needed. The connection's SSH tunnel is established by `resolve`,
+    /// exactly like [`Self::run`]. Redis has no plan surface (the driver default
+    /// returns an `Invalid` error → 400).
+    pub async fn query_plan(
+        &self,
+        conn_id: &Id,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<DbQueryPlan> {
+        let r = self.resolve(conn_id).await?;
+        r.driver.query_plan(&r.config, statement, node).await
     }
 
     /// Validate a candidate **read** query by asking the engine for its plan,

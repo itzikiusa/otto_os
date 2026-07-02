@@ -189,6 +189,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/object", post(object_detail::<S>))
         .route("/connections/{id}/db/schema-graph", post(schema_graph::<S>))
         .route("/connections/{id}/db/query", post(run_query::<S>))
+        .route("/connections/{id}/db/query-plan", post(query_plan::<S>))
         .route("/connections/{id}/db/mcp-query", post(mcp_query::<S>))
         .route("/connections/{id}/db/export", post(export_query::<S>))
         .route(
@@ -374,6 +375,33 @@ async fn run_query<S: DbViewerCtx>(
         ctx.on_confirmed_write(&user, &conn, &req.statement);
     }
     Ok(Json(result).into_response())
+}
+
+/// Request body for the structured query-plan endpoint.
+#[derive(Debug, Deserialize)]
+struct QueryPlanReq {
+    statement: String,
+    /// Active database/schema to scope the plan (same as a query's `node`).
+    #[serde(default)]
+    node: Option<String>,
+}
+
+/// Return a normalized `DbQueryPlan` for a statement by running the engine's
+/// native EXPLAIN. The statement is EXPLAIN-wrapped and
+/// **never executed raw** — read-only by construction — so this is gated at
+/// `Viewer` (like schema browse), not `Editor`. Redis has no plan surface and
+/// returns `400` (the driver default).
+async fn query_plan<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<QueryPlanReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
+    let node = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let plan = ctx.db().query_plan(&id, &req.statement, node).await?;
+    Ok(Json(plan).into_response())
 }
 
 /// A read-only DB query issued by an agent over MCP. The body is intentionally a

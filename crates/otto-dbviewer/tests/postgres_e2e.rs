@@ -326,3 +326,28 @@ async fn postgres_cancel() {
         .expect("join");
     assert!(res.is_err(), "a cancelled query should return an error");
 }
+
+/// EXPLAIN (FORMAT JSON) on a full-scan SELECT yields a plan whose tree carries
+/// a sequential-scan warning.
+#[tokio::test]
+#[ignore]
+async fn postgres_query_plan_flags_seq_scan() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    fn has_seq_scan_warning(n: &otto_dbviewer::types::PlanNode) -> bool {
+        n.warnings.iter().any(|w| w.contains("sequential scan"))
+            || n.children.iter().any(has_seq_scan_warning)
+    }
+    let d = PostgresDriver::default();
+    let plan = d
+        .query_plan(&cfg(), "SELECT * FROM customers", Some("public"))
+        .await
+        .expect("query_plan");
+    assert_eq!(plan.engine, "postgres");
+    assert!(
+        has_seq_scan_warning(&plan.root),
+        "expected a Seq Scan warning; root: {:?}",
+        plan.root
+    );
+}

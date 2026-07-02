@@ -32,8 +32,8 @@ use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
-    Engine, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest, QueryResult, QueryStats,
-    ResolvedConfig, SchemaNode, TestResult,
+    DbQueryPlan, Engine, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest, QueryResult,
+    QueryStats, ResolvedConfig, SchemaNode, TestResult,
 };
 
 /// ClickHouse driver. Caches one transport handle per [`ResolvedConfig::cache_key`]:
@@ -1550,6 +1550,63 @@ impl Driver for ClickhouseDriver {
         // transient error as a cancel failure.
         let _ = self.query_text(cfg, &sql).await;
         Ok(())
+    }
+
+    /// Structured query plan via `EXPLAIN json = 1` (a single JSON cell), falling
+    /// back to plain-text `EXPLAIN` (one node per line) when JSON isn't available.
+    /// The statement is EXPLAIN-wrapped — never executed raw.
+    async fn query_plan(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<DbQueryPlan> {
+        let stmt = statement.trim().trim_end_matches(';');
+        if stmt.is_empty() {
+            return Err(types::invalid("clickhouse: empty statement"));
+        }
+        let active_db = node.map(str::trim).filter(|s| !s.is_empty());
+
+        // Preferred: EXPLAIN json = 1 → the plan JSON in the first cell.
+        if let Ok(resp) = self
+            .query_rows_db_timeout(cfg, &format!("EXPLAIN json = 1 {stmt}"), active_db, None, None)
+            .await
+        {
+            let raw: Option<serde_json::Value> = match resp.data.first().and_then(|r| r.first()) {
+                Some(serde_json::Value::String(s)) => serde_json::from_str(s).ok(),
+                Some(other) => Some(other.clone()),
+                None => None,
+            };
+            if let Some(raw) = raw {
+                let root = crate::plan::from_clickhouse_json(&raw);
+                return Ok(DbQueryPlan {
+                    engine: "clickhouse".into(),
+                    root,
+                    raw,
+                });
+            }
+        }
+
+        // Fallback: plain EXPLAIN → text lines as a single-node plan.
+        let resp = self
+            .query_rows_db_timeout(cfg, &format!("EXPLAIN {stmt}"), active_db, None, None)
+            .await?;
+        let lines: Vec<String> = resp
+            .data
+            .iter()
+            .filter_map(|r| r.first())
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect();
+        let raw = serde_json::Value::Array(lines.iter().cloned().map(serde_json::Value::String).collect());
+        let root = crate::plan::from_clickhouse_text(&lines);
+        Ok(DbQueryPlan {
+            engine: "clickhouse".into(),
+            root,
+            raw,
+        })
     }
 
     async fn completion(

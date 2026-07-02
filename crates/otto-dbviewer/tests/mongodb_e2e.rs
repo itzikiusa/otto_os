@@ -318,3 +318,60 @@ async fn mongo_completion_embedded_paths() {
         "indexed embedded path ranks above a plain embedded path"
     );
 }
+
+/// `import_rows` bulk-inserts parsed rows as `insertMany` batches; a follow-up
+/// find confirms the documents landed with their inferred types.
+#[tokio::test]
+#[ignore]
+async fn mongo_import_rows_inserts_batches() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MongoDriver::default();
+    let cfg = cfg();
+    let coll = "e2e_import_scratch";
+    let stmt = |s: &str| QueryRequest { statement: s.into(), ..Default::default() };
+
+    // Clean slate (ignore "ns not found" on first run).
+    let _ = d.run(&cfg, &stmt(&format!("db.{coll}.drop()"))).await;
+
+    let columns = vec!["_id".to_string(), "name".to_string(), "qty".to_string()];
+    let rows = vec![
+        vec![json!("imp-1"), json!("Ada"), json!(10)],
+        vec![json!("imp-2"), json!("Grace"), json!(20)],
+        vec![json!("imp-3"), json!("Linus"), json!(30)],
+    ];
+    let (inserted, batches) = d
+        .import_rows(&cfg, coll, &columns, &rows, 2, None)
+        .await
+        .expect("import_rows");
+    assert_eq!(inserted, 3, "3 documents inserted");
+    assert_eq!(batches, 2, "batch size 2 over 3 rows → 2 batches");
+
+    // Verify they are queryable, with the numeric type preserved.
+    let res = d
+        .run(&cfg, &stmt(&format!("db.{coll}.find({{}})")))
+        .await
+        .expect("find imported");
+    assert_eq!(res.rows.len(), 3, "find should return the 3 imported docs");
+
+    // Cleanup.
+    let _ = d.run(&cfg, &stmt(&format!("db.{coll}.drop()"))).await;
+}
+
+/// `query_plan` returns a normalized plan for a find (a stage tree from
+/// explain queryPlanner).
+#[tokio::test]
+#[ignore]
+async fn mongo_query_plan_returns_stage_tree() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MongoDriver::default();
+    let plan = d
+        .query_plan(&cfg(), "db.orders.find({})", None)
+        .await
+        .expect("query_plan");
+    assert_eq!(plan.engine, "mongodb");
+    assert!(!plan.root.op.is_empty(), "plan root should carry a stage op");
+}

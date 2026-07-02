@@ -362,3 +362,66 @@ async fn mysql_timezone() {
         res.rows[0][0]
     );
 }
+
+/// shopdb exposes a `Triggers` folder → `trg_orders_clamp_total`; its object
+/// detail carries the event/timing/table (in `extra`) + the SHOW CREATE DDL.
+#[tokio::test]
+#[ignore]
+async fn mysql_triggers_browse() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MysqlDriver::default();
+    let cfg = cfg();
+
+    // shopdb → folders include "Triggers".
+    let shopdb = NodePath::parse("db:shopdb");
+    let folders = d.schema_children(&cfg, &shopdb, None).await.expect("db folders");
+    assert!(
+        folders.iter().any(|n| n.label == "Triggers"),
+        "shopdb should expose a Triggers folder; got: {:?}",
+        folders.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+
+    // Triggers folder → the seeded trigger.
+    let trig_folder = NodePath::parse("db:shopdb/folder:triggers");
+    let trigs = d.schema_children(&cfg, &trig_folder, None).await.expect("triggers");
+    let trg = trigs
+        .iter()
+        .find(|n| n.label == "trg_orders_clamp_total")
+        .expect("trg_orders_clamp_total present");
+
+    // object_detail → DDL + extra.{table,event,timing}.
+    let detail = d.object_detail(&cfg, &NodePath::parse(&trg.id)).await.expect("trigger detail");
+    let ddl = detail.ddl.unwrap_or_default().to_uppercase();
+    assert!(ddl.contains("TRIGGER"), "trigger DDL should mention TRIGGER; got: {ddl}");
+    assert_eq!(detail.extra.get("table").and_then(|v| v.as_str()), Some("orders"));
+    assert_eq!(detail.extra.get("event").and_then(|v| v.as_str()), Some("INSERT"));
+}
+
+/// EXPLAIN FORMAT=JSON on a full-scan SELECT yields a plan whose table node is
+/// flagged as a full table scan.
+#[tokio::test]
+#[ignore]
+async fn mysql_query_plan_flags_full_scan() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MysqlDriver::default();
+    // No index on `status` → a filtered scan of orders.
+    let plan = d
+        .query_plan(&cfg(), "SELECT * FROM orders WHERE total_cents > 0", Some("shopdb"))
+        .await
+        .expect("query_plan");
+    assert_eq!(plan.engine, "mysql");
+    // The orders access node should be present with an object name.
+    let has_table = plan.root.children.iter().any(|c| c.object.as_deref() == Some("orders"));
+    assert!(has_table, "plan should reference the orders table; root: {:?}", plan.root);
+    // A full scan (access_type ALL) is warned.
+    let full_scan = plan
+        .root
+        .children
+        .iter()
+        .any(|c| c.warnings.iter().any(|w| w.contains("full table scan")));
+    assert!(full_scan, "expected a full-table-scan warning; root: {:?}", plan.root);
+}

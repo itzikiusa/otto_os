@@ -3900,6 +3900,7 @@ export type DbNodeKind =
   | 'view'
   | 'procedure'
   | 'function'
+  | 'trigger'
   | 'column'
   | 'index'
   | 'collection'
@@ -4040,6 +4041,34 @@ export interface QueryResult {
   auto_limited?: number | null;
 }
 
+/** One node in a normalized query plan (`POST …/db/query-plan`). `warnings`
+ *  flags costly access patterns the UI badges in red (full scans, filesort,
+ *  temporary tables). */
+export interface DbPlanNode {
+  /** The operation (`Seq Scan`, `table`, `IXSCAN`, `ReadFromMergeTree`, …). */
+  op: string;
+  /** The object it touches (table / collection / index), when known. */
+  object?: string | null;
+  /** A short human detail line (access type, filter, condition), when known. */
+  detail?: string | null;
+  /** Estimated rows for this node, when the engine reports one. */
+  est_rows?: number | null;
+  /** Costly-pattern flags (e.g. "full table scan", "Using filesort"). */
+  warnings?: string[];
+  /** Child plan nodes. */
+  children?: DbPlanNode[];
+}
+
+/** A normalized query plan distilled from an engine's native EXPLAIN
+ *  (`POST /connections/{id}/db/query-plan`). `raw` is the engine's untouched
+ *  EXPLAIN JSON (for a "raw" toggle). Consumed by the plan-tree UI (Task 10). */
+export interface DbQueryPlan {
+  /** `mysql` | `postgres` | `clickhouse` | `mongodb`. */
+  engine: string;
+  root: DbPlanNode;
+  raw: unknown;
+}
+
 /**
  * Body for the read-only MCP query endpoint
  * (`POST /api/v1/connections/{id}/db/mcp-query`) — the agent-facing query path used
@@ -4102,10 +4131,11 @@ export type ImportFormat = 'csv' | 'tsv' | 'ndjson' | 'json';
 
 /**
  * `POST /connections/{id}/db/import` — import a local file (on the daemon host)
- * into an existing SQL table. Each batch runs through the same guarded write
- * path as a query, so a Prod/read-only connection refuses the import unless
- * `confirm_write` is set (the typed-confirmation flow re-sends it). v1 is
- * SQL-only (MySQL/ClickHouse); Mongo/Redis are explicit follow-ups.
+ * into an existing table/collection. Guarded like a query, so a Prod/read-only
+ * connection refuses the import unless `confirm_write` is set (the typed-
+ * confirmation flow re-sends it). MySQL/ClickHouse import as batched `INSERT`s;
+ * **MongoDB** imports as `insertMany` batches (`table` = the collection; CSV/TSV
+ * string cells are coerced to numbers/bools/null). Redis has no bulk-load surface.
  */
 export interface ImportReq {
   /** Source file on the daemon host (a leading `~` expands to the daemon home). */

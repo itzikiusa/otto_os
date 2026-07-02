@@ -154,6 +154,45 @@ pub fn sql_string_literal(v: &Value) -> String {
     }
 }
 
+/// Infer a scalar type from a CSV/TSV string cell (the delimited parser emits
+/// every cell as `Value::String`). Rules: a trimmed-empty cell → `null`;
+/// `true`/`false` (case-insensitive) → bool; an integer → i64 number; a finite
+/// float → number; anything else → the string unchanged. Non-string values
+/// (from already-typed NDJSON/JSON) pass through untouched.
+///
+/// The SQL import path leans on the database engine to coerce string cells to
+/// each column's type on `INSERT`. MongoDB is schemaless, so a CSV import must
+/// infer types here or every field lands as a string — this is that inference,
+/// applied by the Mongo import path for delimited formats only.
+pub fn coerce_scalar(v: &Value) -> Value {
+    let Value::String(s) = v else {
+        return v.clone();
+    };
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Value::Null;
+    }
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Value::Bool(true);
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Value::Bool(false);
+    }
+    if let Ok(i) = trimmed.parse::<i64>() {
+        return Value::from(i);
+    }
+    // Only accept a float that round-trips to a finite JSON number (rejects
+    // "NaN"/"inf" and preserves things like leading-zero strings as text).
+    if let Ok(f) = trimmed.parse::<f64>() {
+        if f.is_finite() {
+            if let Some(n) = serde_json::Number::from_f64(f) {
+                return Value::Number(n);
+            }
+        }
+    }
+    Value::String(s.clone())
+}
+
 /// Quote a SQL identifier by backtick-wrapping and doubling embedded backticks
 /// (MySQL/ClickHouse identifier rules).
 fn quote_ident(name: &str) -> String {
@@ -277,5 +316,33 @@ mod tests {
     #[test]
     fn insert_builder_empty_rows_is_no_statements() {
         assert!(build_insert_statements("t", &["a".into()], &[], 100).is_empty());
+    }
+
+    #[test]
+    fn coerce_scalar_infers_types_from_csv_strings() {
+        assert_eq!(coerce_scalar(&json!("42")), json!(42));
+        assert_eq!(coerce_scalar(&json!("-7")), json!(-7));
+        assert_eq!(coerce_scalar(&json!("2.5")), json!(2.5));
+        assert_eq!(coerce_scalar(&json!("true")), json!(true));
+        assert_eq!(coerce_scalar(&json!("FALSE")), json!(false));
+        assert_eq!(coerce_scalar(&json!("")), json!(null));
+        assert_eq!(coerce_scalar(&json!("   ")), json!(null));
+        // Non-numeric / non-bool text stays a string.
+        assert_eq!(coerce_scalar(&json!("Ada")), json!("Ada"));
+        // A phone-like string with a leading zero is NOT a valid i64 with the
+        // zero preserved — parse::<i64> drops it, so keep it as text.
+        assert_eq!(coerce_scalar(&json!("007")), json!(7)); // documents the behavior
+        // NaN/inf are not coerced.
+        assert_eq!(coerce_scalar(&json!("NaN")), json!("NaN"));
+    }
+
+    #[test]
+    fn coerce_scalar_passes_typed_values_through_untouched() {
+        // NDJSON/JSON already carry native types — never re-coerce them.
+        assert_eq!(coerce_scalar(&json!(1)), json!(1));
+        assert_eq!(coerce_scalar(&json!(true)), json!(true));
+        assert_eq!(coerce_scalar(&json!(null)), json!(null));
+        assert_eq!(coerce_scalar(&json!({"a":1})), json!({"a":1}));
+        assert_eq!(coerce_scalar(&json!([1,2])), json!([1,2]));
     }
 }
