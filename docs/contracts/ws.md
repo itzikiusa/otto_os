@@ -91,7 +91,7 @@ reach only the session's owner (`created_by`), a workspace `admin`, or root —
 and only after the `viewer`+ membership gate on the event's `workspace_id`;
 other **workspace-scoped events** (improvement, swarm) reach every member with
 `viewer`+ on the event's `workspace_id` (root receives all); **broadcast
-events** (`Notice`) reach every authenticated client. There are 16 variants.
+events** (`Notice`) reach every authenticated client. There are 41 variants.
 
 Session lifecycle (session-family — owner/admin/root, viewer-gated):
 
@@ -547,3 +547,61 @@ blind timer.
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Run with Otto page re-fetches the run + its timeline on a matching tick.
 - TypeScript type: `{ type: 'otto_run_updated'; workspace_id: Id; run_id: Id; status: string }`.
+
+### `canvas_updated` / `canvas_session_started`
+
+Workspace-scoped. Emitted by `crates/otto-server/src/canvas_assist.rs` while an
+Ask-AI agent turn edits a scene's backing source file (live, per-poll) and once
+more with the committed result; `canvas_session_started` fires at the START of
+the turn so the Canvas Assistant panel can attach the agent's shell immediately
+instead of waiting for it to finish.
+
+```json
+{ "type": "canvas_updated", "workspace_id": "<Id>", "scene_id": "<Id>", "doc": {"type":"otto-canvas","format":"mermaid","source":"..."} }
+{ "type": "canvas_session_started", "workspace_id": "<Id>", "scene_id": "<Id>", "session_id": "<Id>" }
+```
+
+- `doc` — the opaque canvas document (`{type,format,source,…}`); the open editor
+  re-renders it for the matching `scene_id` without a refetch.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- UI routing: `events.svelte.ts` → `canvasDocBus.apply()` (`canvas_updated`); sets
+  `canvas.sessionId` directly for the open scene (`canvas_session_started`).
+- TypeScript types: `{ type: 'canvas_updated'; workspace_id: Id; scene_id: Id; doc: unknown }`
+  and `{ type: 'canvas_session_started'; workspace_id: Id; scene_id: Id; session_id: Id }`.
+
+### `mockup_updated` / `mockup_session_started`
+
+Workspace-scoped. Emitted by `crates/otto-server/src/mockup_assist.rs` — same
+shape and timing as the canvas pair above, but for a product story's mockup
+attachment (an HTML page or Mermaid diagram the mockup agent edits in place).
+
+```json
+{ "type": "mockup_updated", "workspace_id": "<Id>", "story_id": "<Id>", "attachment_id": "<Id>", "format": "html|mermaid", "content": "..." }
+{ "type": "mockup_session_started", "workspace_id": "<Id>", "story_id": "<Id>", "attachment_id": "<Id>", "session_id": "<Id>" }
+```
+
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- UI routing: `events.svelte.ts` → `mockupAssist.ingestLive()` (`mockup_updated`)
+  / `mockupAssist.setSession()` (`mockup_session_started`); the Product →
+  Mockups Assistant panel re-renders the live preview for the matching
+  `attachment_id`.
+- TypeScript types: `{ type: 'mockup_updated'; workspace_id: Id; story_id: Id; attachment_id: Id; format: string; content: string }`
+  and `{ type: 'mockup_session_started'; workspace_id: Id; story_id: Id; attachment_id: Id; session_id: Id }`.
+
+### `canvas_refs_changed`
+
+Workspace-scoped. Emitted by `crates/otto-server/src/canvas_refs.rs` whenever a
+Canvas scene is attached to or detached from an agent session.
+
+```json
+{ "type": "canvas_refs_changed", "workspace_id": "<Id>", "session_id": "<Id>" }
+```
+
+- Emitted after `POST /sessions/{sid}/canvas-refs` and
+  `DELETE /sessions/{sid}/canvas-refs/{scene_id}`.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`), like
+  the other canvas events — Canvas is a workspace-shared tool, not owner-gated.
+- UI routing: `events.svelte.ts` → `canvasRefsBus.apply()`; the session's Canvas
+  panel (`CanvasPanel.svelte`) re-fetches `GET /sessions/{id}/canvas-refs` when
+  the event's `session_id` matches the open session.
+- TypeScript type: `{ type: 'canvas_refs_changed'; workspace_id: Id; session_id: Id }`.
