@@ -57,13 +57,13 @@ async function createWorkflow(name: string, nodes: Node[], edges: Edge[]): Promi
 }
 
 /** Run a workflow with the given input and poll its run row to a terminal status. */
-async function runToCompletion(wfId: string, input?: unknown): Promise<any> {
+async function runToCompletion(wfId: string, input?: unknown, deadlineMs = 90_000): Promise<any> {
   const r = await ctx.post(`${base}${V1}/workflows/${wfId}/run`, {
     data: input === undefined ? {} : { input },
   });
   expect(r.ok(), await r.text()).toBeTruthy();
   const runId = (await r.json()).id as string;
-  const deadline = Date.now() + 90_000;
+  const deadline = Date.now() + deadlineMs;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const g = await ctx.get(`${base}${V1}/workflow-runs/${runId}`);
@@ -192,17 +192,26 @@ test('review_run succeeds on a master-only repo — the exit-128 regression', as
   test.setTimeout(240_000);
   const { dir } = await seedMasterOnlyRepo();
 
+  // A single reviewer lens keeps the stubbed pipeline fast (the default
+  // config fans out several agents, each burning spawn-fail retries).
+  const reviewParams = {
+    await: true,
+    timeout_s: 120,
+    providers: ['claude'],
+    lenses: ['correctness-review'],
+  };
+
   // (a) No repos, no base — the historical hardcoded "main" fallback made
   // `git diff main` exit 128 here; default-branch detection must find master.
   const wfA = await createWorkflow(
     'E2E Review Master A',
     [
       node('trigger', 'manual_trigger'),
-      node('review', 'review_run', { await: true, timeout_s: 120 }),
+      node('review', 'review_run', reviewParams),
     ],
     [edge('trigger', 'review')],
   );
-  const runA = await runToCompletion(wfA, { working_directory: dir });
+  const runA = await runToCompletion(wfA, { working_directory: dir }, 180_000);
   expect(runA.status, JSON.stringify(nodeState(runA, 'review'), null, 2)).toBe('success');
   expect(nodeState(runA, 'review').output.base).toBe('master');
 
@@ -212,13 +221,15 @@ test('review_run succeeds on a master-only repo — the exit-128 regression', as
     'E2E Review Master B',
     [
       node('trigger', 'manual_trigger'),
-      node('review', 'review_run', { await: true, timeout_s: 120 }),
+      node('review', 'review_run', reviewParams),
     ],
     [edge('trigger', 'review')],
   );
-  const runB = await runToCompletion(wfB, {
-    repos: [{ repo: dir, type: 'branch', name: 'master' }],
-  });
+  const runB = await runToCompletion(
+    wfB,
+    { repos: [{ repo: dir, type: 'branch', name: 'master' }] },
+    180_000,
+  );
   expect(runB.status, JSON.stringify(nodeState(runB, 'review'), null, 2)).toBe('success');
   expect(nodeState(runB, 'review').output.base).toBe('master');
   // The reviewed reference lands in the run's repos.json registry too.
