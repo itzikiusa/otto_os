@@ -174,11 +174,29 @@ pub enum Event {
     ImprovementUpdated { kind: String, id: Option<Id> },
     /// A workflow run advanced (a node started/finished, or the run completed).
     /// `node_id` is the node that changed, when applicable.
+    ///
+    /// The additive fields let clients apply the change IN PLACE instead of
+    /// refetching the whole run on every transition: `rev` is the run's
+    /// monotonic revision after this change (stale-snapshot guard; 0 when the
+    /// write failed), `node` is the changed node's full state (omitted when
+    /// oversized — clients fall back to a refetch), and `nodes_done`/
+    /// `nodes_total`/`waiting_approval` keep the "Running" sidebar live
+    /// without a second GET.
     WorkflowRunUpdated {
         workspace_id: Id,
         run_id: Id,
         status: String,
         node_id: Option<Id>,
+        #[serde(default)]
+        rev: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<crate::workflows::NodeRunState>,
+        #[serde(default)]
+        nodes_done: u32,
+        #[serde(default)]
+        nodes_total: u32,
+        #[serde(default)]
+        waiting_approval: bool,
     },
     /// A skill-evaluation run advanced. Lets the Skill-Eval UI switch from
     /// fixed-interval polling to event-driven refresh.
@@ -337,4 +355,61 @@ pub enum Event {
         run_id: Id,
         status: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wire shape the workflows UI merges in place: `rev` + the changed
+    /// node ride the event; `node` is omitted (not null) when absent so older
+    /// clients see the exact pre-0092 payload plus ignorable extras.
+    #[test]
+    fn workflow_run_updated_wire_shape() {
+        let ev = Event::WorkflowRunUpdated {
+            workspace_id: "ws1".into(),
+            run_id: "r1".into(),
+            status: "running".into(),
+            node_id: Some("step".into()),
+            rev: 7,
+            node: Some(crate::workflows::NodeRunState {
+                node_id: "step".into(),
+                status: crate::workflows::NodeStatus::Running,
+                output: None,
+                error: None,
+                logs: vec!["▶ log started".into()],
+                started_at: None,
+                duration_ms: None,
+                attempts: None,
+                sessions: vec![],
+            }),
+            nodes_done: 2,
+            nodes_total: 5,
+            waiting_approval: false,
+        };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["type"], "workflow_run_updated");
+        assert_eq!(v["rev"], 7);
+        assert_eq!(v["node"]["node_id"], "step");
+        assert_eq!(v["node"]["status"], "running");
+        // `started_at` is skip-if-none — a pending node stays compact.
+        assert!(v["node"].get("started_at").is_none());
+        assert_eq!(v["nodes_done"], 2);
+        assert_eq!(v["nodes_total"], 5);
+
+        // Without a node payload the key is omitted entirely.
+        let ev = Event::WorkflowRunUpdated {
+            workspace_id: "ws1".into(),
+            run_id: "r1".into(),
+            status: "success".into(),
+            node_id: None,
+            rev: 9,
+            node: None,
+            nodes_done: 5,
+            nodes_total: 5,
+            waiting_approval: false,
+        };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert!(v.get("node").is_none());
+    }
 }

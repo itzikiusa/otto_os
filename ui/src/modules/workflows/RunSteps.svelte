@@ -15,6 +15,41 @@
   }
   let { run, nodeName = (id) => id }: Props = $props();
 
+  // Expansion is USER-owned, id-keyed state: a step that errors auto-opens once
+  // (error visibility), but a manual toggle always wins afterward — live run
+  // updates must never fight what the user opened or closed. Reset per run so
+  // a freshly viewed run starts from its own defaults.
+  let expanded = $state<Record<string, boolean>>({});
+  let expandedRunId: string | null = null;
+  $effect(() => {
+    if (run.id !== expandedRunId) {
+      expandedRunId = run.id;
+      expanded = {};
+    }
+  });
+  function isOpen(ns: NodeRunState): boolean {
+    return expanded[ns.node_id] ?? ns.status === 'error';
+  }
+  function onToggle(ns: NodeRunState, open: boolean): void {
+    // A toggle event also fires for our own programmatic open (error
+    // auto-open); only a value that DIFFERS from the computed one is the user.
+    if (open !== isOpen(ns)) expanded[ns.node_id] = open;
+  }
+
+  // Live elapsed time on running steps: a 1s client-side ticker while any step
+  // runs (no network involved).
+  let now = $state(Date.now());
+  $effect(() => {
+    if (!run.nodes.some((n) => n.status === 'running')) return;
+    const iv = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(iv);
+  });
+  function elapsedMs(ns: NodeRunState): number | null {
+    if (!ns.started_at) return null;
+    const t = new Date(ns.started_at).getTime();
+    return Number.isFinite(t) ? Math.max(0, now - t) : null;
+  }
+
   function fmtMs(ms?: number | null): string {
     if (ms == null) return '';
     return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
@@ -100,13 +135,22 @@
 
 <div class="steps">
   {#each run.nodes as ns (ns.node_id)}
-    <details class="step" open={ns.status === 'error'} data-status={ns.status}>
+    <details
+      class="step"
+      open={isOpen(ns)}
+      ontoggle={(e) => onToggle(ns, e.currentTarget.open)}
+      data-status={ns.status}
+    >
       <summary>
         <span class="dot {ns.status}"></span>
         <span class="name">{nodeName(ns.node_id)}</span>
         <span class="status">{ns.status}</span>
         {#if (ns.attempts ?? 1) > 1}<span class="chip" title="step was retried">×{ns.attempts} attempts</span>{/if}
-        {#if ns.duration_ms != null}<span class="ms">{fmtMs(ns.duration_ms)}</span>{/if}
+        {#if ns.duration_ms != null}
+          <span class="ms">{fmtMs(ns.duration_ms)}</span>
+        {:else if ns.status === 'running' && elapsedMs(ns) != null}
+          <span class="ms live">{fmtMs(elapsedMs(ns))}</span>
+        {/if}
       </summary>
       <div class="body">
         {#if ns.error}
@@ -245,6 +289,9 @@
     font-size: 10.5px;
     color: var(--text-dim);
     font-family: var(--font-mono);
+  }
+  .ms.live {
+    color: var(--status-working, #28c840);
   }
   .body {
     padding: 0 12px 12px;

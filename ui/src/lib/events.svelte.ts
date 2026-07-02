@@ -2,7 +2,7 @@
 // Feeds the workspace store (session statuses) and the toast store (notices).
 
 import { wsConnect } from './api/client';
-import type { OttoEvent } from './api/types';
+import type { NodeRunState, OttoEvent } from './api/types';
 import { ws } from './stores/workspace.svelte';
 import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
@@ -47,19 +47,37 @@ export const improvementBus = new ImprovementUpdateBus();
 // ---------------------------------------------------------------------------
 
 /** Incremented each time a `workflow_run_updated` WS event arrives.
- *  WorkflowsPage subscribes and re-fetches the matching run immediately. */
+ *  WorkflowsPage subscribes and applies the change to the viewed run — in
+ *  place when the event carries the changed node + a contiguous `rev`, else
+ *  via a rev-guarded refetch of `GET /workflow-runs/{id}`. */
 export class WorkflowRunBus {
   tick: number = $state(0);
   runId: string = $state('');
   workspaceId: string = $state('');
   status: string = $state('');
   nodeId: string | null = $state(null);
+  /** Run revision after this change (0 = unknown → refetch path). */
+  rev: number = $state(0);
+  /** The changed node's full state, when the event carried it. */
+  node: NodeRunState | null = $state(null);
+  waitingApproval: boolean = $state(false);
 
-  apply(workspaceId: string, runId: string, status: string, nodeId?: string | null): void {
-    this.workspaceId = workspaceId;
-    this.runId = runId;
-    this.status = status;
-    this.nodeId = nodeId ?? null;
+  apply(ev: {
+    workspace_id: string;
+    run_id: string;
+    status: string;
+    node_id?: string | null;
+    rev?: number;
+    node?: NodeRunState | null;
+    waiting_approval?: boolean;
+  }): void {
+    this.workspaceId = ev.workspace_id;
+    this.runId = ev.run_id;
+    this.status = ev.status;
+    this.nodeId = ev.node_id ?? null;
+    this.rev = ev.rev ?? 0;
+    this.node = ev.node ?? null;
+    this.waitingApproval = ev.waiting_approval ?? false;
     this.tick += 1;
   }
 }
@@ -305,13 +323,15 @@ class EventsClient {
           // Let the Self-Improvement pane refresh without waiting for its poll.
           improvementBus.apply(parsed.kind, parsed.id);
         } else if (parsed.type === 'workflow_run_updated') {
-          // Workflow execution progress: node-start / node-finish / run complete.
-          // The Workflows page subscribes to workflowRunBus and re-fetches the
-          // run whose id matches (run detail auto-updates while viewed).
-          workflowRunBus.apply(parsed.workspace_id, parsed.run_id, parsed.status, parsed.node_id);
-          // Keep the "Running" sidebar list + nav count live (runs entering/
-          // leaving the active set, step-progress, approval pauses).
-          void ws.refreshActiveWorkflowRuns();
+          // Workflow execution progress: node-start / node-finish / approval
+          // pause/resume / run complete. The Workflows page subscribes to
+          // workflowRunBus and applies the change to the viewed run (in place
+          // when the event carries the changed node, else a rev-guarded GET).
+          workflowRunBus.apply(parsed);
+          // Keep the "Running" sidebar list + nav count live — in place from
+          // the event's progress fields; a full refetch only for runs the list
+          // doesn't know yet (or events from an older daemon).
+          ws.applyWorkflowRunEvent(parsed);
         } else if (parsed.type === 'skill_eval_updated') {
           // Skill-Eval terminal notification (done/error/cancelled).
           skillEvalBus.apply(parsed.workspace_id, parsed.run_id, parsed.status);

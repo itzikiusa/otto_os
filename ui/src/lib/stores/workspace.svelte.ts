@@ -216,6 +216,41 @@ class WorkspaceStore {
     }
   }
 
+  /** Apply a `workflow_run_updated` WS event to the "Running" sidebar list IN
+   *  PLACE: update a known run's status/progress/approval flag, drop it on a
+   *  terminal status, and fall back to a full refetch only for runs the list
+   *  doesn't know yet (or events from an older daemon without progress fields,
+   *  signalled by `nodes_total` 0/absent). */
+  applyWorkflowRunEvent(ev: {
+    workspace_id: Id;
+    run_id: Id;
+    status: string;
+    nodes_done?: number;
+    nodes_total?: number;
+    waiting_approval?: boolean;
+  }): void {
+    if (ev.workspace_id !== this.currentId) return;
+    const terminal = ev.status === 'success' || ev.status === 'error' || ev.status === 'canceled';
+    const idx = this.activeWorkflowRuns.findIndex((r) => r.run_id === ev.run_id);
+    if (terminal) {
+      if (idx >= 0) this.activeWorkflowRuns.splice(idx, 1);
+      return;
+    }
+    if (idx < 0) {
+      // A run the list doesn't know yet (started elsewhere) — one full refetch
+      // brings it in with its workflow name.
+      void this.refreshActiveWorkflowRuns();
+      return;
+    }
+    const r = this.activeWorkflowRuns[idx];
+    r.status = ev.status as ActiveWorkflowRun['status'];
+    if (ev.nodes_total && ev.nodes_total > 0) {
+      r.nodes_done = ev.nodes_done ?? r.nodes_done;
+      r.nodes_total = ev.nodes_total;
+    }
+    if (ev.waiting_approval !== undefined) r.waiting_approval = ev.waiting_approval;
+  }
+
   /** Clear a session's "needs you" flag — the user has attended to it. */
   clearNeedsYou(id: Id): void {
     if (!this.needsYou[id]) return;

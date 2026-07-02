@@ -183,6 +183,10 @@ pub struct NodeRunState {
     pub error: Option<String>,
     #[serde(default)]
     pub logs: Vec<String>,
+    /// When this node started executing (set on the pending→running
+    /// transition) — lets the UI show a live elapsed timer on a running step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     /// Wall-clock execution time of this node, once it has run.
     #[serde(default)]
     pub duration_ms: Option<u64>,
@@ -213,6 +217,27 @@ pub struct WorkflowRun {
     pub started_at: DateTime<Utc>,
     #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
+    /// Monotonic revision, bumped on every persisted progress write (node
+    /// transitions, the human-approval pause, and the approve/reject
+    /// decision). Clients use it to discard stale/out-of-order snapshots and
+    /// to apply `workflow_run_updated` events in order. 0 for legacy rows.
+    #[serde(default)]
+    pub rev: i64,
+    /// True while the run is paused at a `human_approval` node.
+    #[serde(default)]
+    pub waiting_approval: bool,
+    /// The `human_approval` node the run is paused at (while waiting).
+    #[serde(default)]
+    pub approval_node_id: Option<String>,
+    /// User id of the approver (None when rejected or still pending).
+    #[serde(default)]
+    pub approved_by: Option<String>,
+    /// Note attached to the approval/rejection decision.
+    #[serde(default)]
+    pub approval_note: Option<String>,
+    /// When the decision was recorded.
+    #[serde(default)]
+    pub approved_at: Option<DateTime<Utc>>,
     /// The workflow `version` this run executed (snapshot at run start).
     #[serde(default)]
     pub workflow_version: Option<i64>,

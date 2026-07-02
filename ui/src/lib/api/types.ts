@@ -915,15 +915,27 @@ export type OttoEvent =
    *  A8 — Skills/Improve/Channels cluster. */
   | { type: 'improvement_updated'; kind: string; id?: string | null }
   /** A workflow run advanced: a node started, finished (or was served from
-   *  cache), or the run reached a terminal status. `node_id` is present when a
-   *  specific node changed; absent when the overall run changed (start/terminal).
-   *  A11 — Workflows cluster. Supplement for a capped 700ms poll fallback. */
+   *  cache), the run paused/resumed at a human approval, or it reached a
+   *  terminal status. `node_id` is present when a specific node changed.
+   *
+   *  The additive fields let the UI apply the change IN PLACE instead of
+   *  refetching the whole run per event: `rev` is the run's monotonic revision
+   *  after this change (stale-snapshot guard; 0/absent → fall back to refetch),
+   *  `node` is the changed node's full state (omitted when oversized), and
+   *  `nodes_done`/`nodes_total`/`waiting_approval` keep the "Running" sidebar
+   *  live without a second GET (`nodes_total` 0 = unknown, keep last counts).
+   *  A11 — Workflows cluster. A 2.5s fallback poll remains for missed events. */
   | {
       type: 'workflow_run_updated';
       workspace_id: Id;
       run_id: Id;
       status: string;
       node_id?: Id | null;
+      rev?: number;
+      node?: NodeRunState | null;
+      nodes_done?: number;
+      nodes_total?: number;
+      waiting_approval?: boolean;
     }
   /** A skill-evaluation run reached a terminal state (done/error/cancelled).
    *  Lets the Skill-Eval UI replace its 2s×600 fixed poll with event-driven
@@ -3753,6 +3765,9 @@ export interface NodeRunState {
   output?: unknown;
   error?: string | null;
   logs: string[];
+  /** When the node started executing (RFC-3339) — drives the live elapsed
+   *  timer shown on a running step. */
+  started_at?: string | null;
   duration_ms?: number | null;
   /** Number of attempts made (>1 when a retry policy fired). */
   attempts?: number | null;
@@ -3770,6 +3785,9 @@ export interface WorkflowRun {
   error?: string | null;
   started_at: string;
   finished_at?: string | null;
+  /** Monotonic revision, bumped on every persisted progress write. The UI
+   *  discards snapshots/events whose rev is behind what it already shows. */
+  rev?: number;
   /** True when the run is paused waiting for a human_approval node decision. */
   waiting_approval?: boolean;
   /** The node id of the human_approval node the run is paused at. */

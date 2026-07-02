@@ -359,13 +359,19 @@ the user can watch them (and answer questions when `interactive`).
 
 Workspace-scoped. Emitted by `crates/otto-server/src/workflow_engine.rs` at
 every node transition (start, finish/cached, error-skip, branch-skip — a not-taken
-edge), again whenever a node spawns an openable session (so the run view can open
-it live), and when the overall run reaches a terminal status. Lets the Workflows
-page switch from a 700ms poll loop to event-driven refresh; a capped fallback poll
-(backing off to 3s, max 300 ticks) is kept for cases where the WS connection is
-unavailable. The **payload is unchanged** (the new per-node `sessions`/`attempts`
-and the run's `workflow_version`/`proof_pack_id` ride the `GET /workflow-runs/{id}`
-the event triggers a refetch of, not the event itself).
+edge), whenever a node spawns an openable session (so the run view can open it
+live), when a `human_approval` node pauses the run, and when the overall run
+reaches a terminal status. `routes/workflows.rs` additionally emits on the
+approve/reject decision and on cancel, so open views react without waiting for
+the engine's own polls.
+
+The payload carries enough for clients to apply the change **in place** instead
+of refetching the whole run per event: `rev` is the run's monotonic revision
+after this change, and `node` is the changed node's full `NodeRunState` —
+omitted when its serialized size exceeds 32 KiB, in which case (or on a rev
+gap / a run-level event) clients converge with one rev-guarded
+`GET /workflow-runs/{id}`. A 2.5s fallback poll remains while a viewed run is
+non-terminal so the view converges even with no WS connection.
 
 ```json
 {
@@ -373,18 +379,31 @@ the event triggers a refetch of, not the event itself).
   "workspace_id": "<Id>",
   "run_id": "<Id>",
   "status": "running|success|error|canceled",
-  "node_id": "<node_id | null>"
+  "node_id": "<node_id | null>",
+  "rev": 7,
+  "node": { "node_id": "…", "status": "…", "logs": ["…"], "…": "…" },
+  "nodes_done": 2,
+  "nodes_total": 5,
+  "waiting_approval": false
 }
 ```
 
 - `node_id` — the node whose state changed; `null` when the event reflects the
-  overall run status (run started / run terminal).
-- UI routing: `events.svelte.ts` dispatches to `workflowRunBus.apply()`.
-  `WorkflowsPage.svelte` subscribes to `workflowRunBus.tick` and re-fetches
-  `GET /workflow-runs/{id}` whenever a matching `run_id` event fires.
-- TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts`
-  as `{ type: 'workflow_run_updated'; workspace_id: Id; run_id: Id; status:
-  string; node_id?: Id | null }`.
+  overall run status (run started / paused for approval / decision / terminal).
+- `rev` — the run revision this event reflects (0 = unknown → refetch path).
+  Clients drop events/snapshots whose rev is behind what they already show, and
+  apply a node payload in place only when `rev` is exactly contiguous.
+- `nodes_done`/`nodes_total` — step progress for the "Running" sidebar, updated
+  in place without a second GET (`nodes_total` 0 = unknown, keep last counts).
+- `waiting_approval` — true on the pause event; the approve/reject decision
+  re-emits with false.
+- UI routing: `events.svelte.ts` dispatches to `workflowRunBus.apply(event)`
+  (run view) **and** `ws.applyWorkflowRunEvent(event)` (in-place "Running"
+  sidebar update; a full active-list refetch only for unknown run ids).
+- TypeScript type: the `OttoEvent` union in `ui/src/lib/api/types.ts` —
+  `{ type: 'workflow_run_updated'; workspace_id: Id; run_id: Id; status:
+  string; node_id?: Id | null; rev?: number; node?: NodeRunState | null;
+  nodes_done?: number; nodes_total?: number; waiting_approval?: boolean }`.
 
 ## Skill-eval completion (A11)
 

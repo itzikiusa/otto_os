@@ -1222,6 +1222,17 @@ cache hit) and `sessions` (openable Otto session ids the node spawned — agent 
 product / canvas / loop-inner turns — reported live as they are created;
 `review_run` additionally surfaces a `review_id` in its output).
 
+**Run fields (0092).** A `WorkflowRun` additionally carries `rev` — a monotonic
+revision bumped on **every** persisted progress write (node transitions, the
+human-approval pause, the approve/reject decision). Clients use it to discard
+stale/out-of-order snapshots and to order `workflow_run_updated` events; legacy
+rows report 0. The approval columns now ride the run too:
+`waiting_approval` (bool), `approval_node_id`, `approved_by`, `approval_note`,
+`approved_at` — previously only surfaced on `ActiveWorkflowRun`, which made the
+run-view approval banner unreachable. Each `NodeRunState` gains `started_at`
+(set on the pending→running transition; drives the live elapsed timer on a
+running step).
+
 **Running list.** `GET /workspaces/{wid}/workflow-runs/active` returns
 `ActiveWorkflowRun = {run_id, workflow_id, workspace_id, workflow_name, status,
 started_at, nodes_total, nodes_done, waiting_approval}` for every in-flight run

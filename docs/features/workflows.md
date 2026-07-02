@@ -545,29 +545,44 @@ nodes show as `success` with a "Success (cached)" log line.
 
 ### Live progress over WebSocket (`workflow_run_updated`)
 The engine emits `Event::WorkflowRunUpdated` on the shared event bus at **every
-node transition** (start, finish/cached, skip) and at **run completion**:
+node transition** (start, finish/cached, skip, session spawn), on the
+**human-approval pause** and the **approve/reject decision**, on **cancel**,
+and at **run completion**:
 
 ```json
 { "type": "workflow_run_updated",
   "workspace_id": "<Id>", "run_id": "<Id>",
   "status": "running|success|error|canceled",
-  "node_id": "<node_id | null>" }
+  "node_id": "<node_id | null>",
+  "rev": 7, "node": { "node_id": "…", "status": "…" },
+  "nodes_done": 2, "nodes_total": 5, "waiting_approval": false }
 ```
-- `node_id` is the node whose state changed; `null` when the event reflects the
-  overall run status (run started / run reached a terminal state).
+- `rev` is the run's monotonic revision (also on `WorkflowRun.rev`); `node` is
+  the changed node's full state (omitted when > 32 KiB serialized).
 - The UI (`events.svelte.ts` → `workflowRunBus.apply()` → `WorkflowsPage`)
-  re-fetches `GET /workflow-runs/{id}` whenever a matching `run_id` event fires.
-- A **capped fallback poll** (700ms, backing off to 3s, max 300 ticks ≈ 3.5 min)
-  keeps the UI live if the WS connection is unavailable.
+  **merges the change into the viewed run in place** when the event carries the
+  node + the contiguous rev — no network at all. On a rev gap, a run-level
+  event, or a missing payload it converges with **one single-flight,
+  rev-guarded** `GET /workflow-runs/{id}`. The viewed run object is **never
+  replaced wholesale**, so an expanded step, the timeline selection, and scroll
+  positions all survive every update, and stale/out-of-order responses can
+  never regress the view.
+- A **2.5s fallback poll** (while the viewed run is non-terminal, uncapped)
+  keeps the UI live if the WS connection is unavailable. The sidebar "Running"
+  list updates in place from the event's `nodes_done`/`nodes_total`/
+  `waiting_approval` (full refetch only for unknown run ids).
 
 ### Inspect
-`RunSteps.svelte` renders each step's status, duration, `attempts` (when a retry
+`RunSteps.svelte` renders each step's status, duration (a **live elapsed timer**
+while the step runs, from `NodeRunState.started_at`), `attempts` (when a retry
 policy ran), logs (including `⚠` typed-output warnings and `edge → … not taken`
 branch lines), error, and the **"work product"** (an agent `reply` string is
-rendered as text; everything else as pretty JSON, copyable). Steps that spawned
-**openable sessions** (`NodeRunState.sessions` — agent / product / canvas / loop
-turns) link to them so you can watch/inspect the agent **while the step runs**; the
-timeline strip at the top jumps between steps.
+rendered as text; everything else as pretty JSON, copyable). Step expansion is
+**user-owned**: a step that errors auto-opens once for visibility, but a manual
+open/collapse always wins afterward — live updates never fight it. Steps that
+spawned **openable sessions** (`NodeRunState.sessions` — agent / product /
+canvas / loop turns) link to them so you can watch/inspect the agent **while the
+step runs**; the timeline strip at the top jumps between steps.
 
 ### Run → Proof Pack
 On completion the run links a **Proof Pack** (`WorkflowRun.proof_pack_id`)
@@ -577,11 +592,16 @@ approver). The run also records the workflow `version` it executed
 (`WorkflowRun.workflow_version`).
 
 ### Human-approval pause
-When a run hits a `human_approval` node it pauses; the page shows a banner —
-*"Run paused — waiting for approval at &lt;node&gt;"* — with **Approve** / **Reject**
-(→ `POST /workflow-runs/{id}/approve` with `{node_id, approved}`). Approve resumes
-the run (records `approved_by`); reject errors the node ("rejected — &lt;note&gt;").
-If no decision arrives within the node timeout, the node errors ("timed out").
+When a run hits a `human_approval` node it pauses (`waiting_approval` +
+`approval_node_id` ride both the run row and a `workflow_run_updated` pause
+event, so the banner and the sidebar ⏸ badge appear immediately); the page
+shows a banner — *"Run paused — waiting for approval at &lt;node&gt;"* — with
+**Approve** / **Reject** (→ `POST /workflow-runs/{id}/approve` with
+`{node_id, approved}`). Approve resumes the run (records `approved_by`; the
+engine's resume poll runs every 2s); reject errors the node
+("rejected — &lt;note&gt;"). Both decisions re-emit the event so open views
+drop the banner at once. If no decision arrives within the node timeout, the
+node errors ("timed out").
 
 ---
 
@@ -815,7 +835,7 @@ are **append-only** — never edit or renumber an existing one.
 | `db_query` errors "missing connection_id" / connection not found | The `connection_id` must be a saved Database-Explorer connection id; create it there first (`./connections-ssh-sftp.md`). |
 | `broker_peek` / `swarm_task` errors | The referenced cluster / swarm + project must exist and be set up. |
 | `channel_notify` does nothing | No enabled Slack/Telegram integration, or the selected `channel` isn't configured (`./channels-slack-telegram.md`). |
-| Run UI stops updating but isn't finished | WS dropped → the capped fallback poll (max ~3.5 min) took over; the run still runs server-side. Re-open the run or reload. |
+| Run UI stops updating but isn't finished | WS dropped → the uncapped 2.5s fallback poll keeps the viewed run converging; the run still runs server-side. If the view is genuinely frozen, re-open the run or reload. |
 | Webhook returns 401 | Token doesn't match an **enabled** webhook trigger on that workflow id. Re-check the token / re-enable the trigger. |
 | Run "exceeded the N-minute time limit" | The global wall-clock fired; the graph (often an `agent_prompt` chain) is too long. Split it or reduce work. |
 | Approve/Reject button does nothing | The run must actually be paused at a `human_approval` node (`waiting_approval`), and you need `Workflows:Edit`. |

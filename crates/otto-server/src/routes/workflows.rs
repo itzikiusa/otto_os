@@ -6,6 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use otto_core::domain::WorkspaceRole;
+use otto_core::event::Event;
 use otto_core::workflows::{
     ActiveWorkflowRun, CreateWorkflowReq, FromTemplateReq, NodeTypeSpec, RestoreVersionReq,
     RunStatus, RunWorkflowReq, UpdateWorkflowReq, Workflow, WorkflowEdge, WorkflowGraph,
@@ -397,10 +398,23 @@ pub async fn cancel_run(
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
     if matches!(run.status, RunStatus::Pending | RunStatus::Running) {
-        repo(&ctx)
+        let rev = repo(&ctx)
             .update_run(&id, RunStatus::Canceled, &run.nodes, Some("canceled"), true)
             .await
             .map_err(ApiError)?;
+        // Announce the cancel right away (the engine re-emits once its current
+        // node reaches a boundary and it marks the remaining nodes skipped).
+        let _ = ctx.events.send(Event::WorkflowRunUpdated {
+            workspace_id: run.workspace_id.clone(),
+            run_id: id.clone(),
+            status: "canceled".into(),
+            node_id: None,
+            rev,
+            node: None,
+            nodes_done: 0,
+            nodes_total: 0,
+            waiting_approval: false,
+        });
     }
     repo(&ctx).get_run(&id).await.map(Json).map_err(ApiError)
 }
@@ -999,22 +1013,27 @@ pub async fn approve_run(
 
     let now = chrono::Utc::now().to_rfc3339();
     if req.approved {
-        // Record the approver and clear the pause flag atomically.
-        sqlx::query(
+        // Record the approver and clear the pause flag atomically. Bump `rev`
+        // and announce the decision so open run views drop the banner at once
+        // (the engine's own resume poll follows within its 2s cadence).
+        let rev: i64 = sqlx::query_scalar(
             "UPDATE workflow_runs
              SET waiting_approval = 0,
                  approved_by     = ?,
                  approval_note   = ?,
-                 approved_at     = ?
-             WHERE id = ?",
+                 approved_at     = ?,
+                 rev             = rev + 1
+             WHERE id = ?
+             RETURNING rev",
         )
         .bind(&user.id)
         .bind(req.note.as_deref().unwrap_or(""))
         .bind(&now)
         .bind(&id)
-        .execute(&ctx.pool)
+        .fetch_one(&ctx.pool)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("approve_run record: {e}"))))?;
+        emit_run_decision(&ctx, &run.workspace_id, &id, &req.node_id, rev);
 
         Ok(Json(json!({
             "approved": true,
@@ -1025,20 +1044,23 @@ pub async fn approve_run(
         // Rejection: clear `approved_by` (NULL) and clear the pause flag so the
         // engine's poll loop sees `waiting_approval = 0` AND `approved_by = NULL`
         // and errors the node.
-        sqlx::query(
+        let rev: i64 = sqlx::query_scalar(
             "UPDATE workflow_runs
              SET waiting_approval = 0,
                  approved_by     = NULL,
                  approval_note   = ?,
-                 approved_at     = ?
-             WHERE id = ?",
+                 approved_at     = ?,
+                 rev             = rev + 1
+             WHERE id = ?
+             RETURNING rev",
         )
         .bind(req.note.as_deref().unwrap_or("rejected"))
         .bind(&now)
         .bind(&id)
-        .execute(&ctx.pool)
+        .fetch_one(&ctx.pool)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("reject_run record: {e}"))))?;
+        emit_run_decision(&ctx, &run.workspace_id, &id, &req.node_id, rev);
 
         Ok(Json(json!({
             "approved": false,
@@ -1046,6 +1068,22 @@ pub async fn approve_run(
             "note": req.note,
         })))
     }
+}
+
+/// Announce an approval decision over WS: the run is no longer waiting. The
+/// node itself is still `running` until the engine's resume poll finishes it.
+fn emit_run_decision(ctx: &ServerCtx, workspace_id: &Id, run_id: &Id, node_id: &str, rev: i64) {
+    let _ = ctx.events.send(Event::WorkflowRunUpdated {
+        workspace_id: workspace_id.clone(),
+        run_id: run_id.clone(),
+        status: "running".into(),
+        node_id: Some(node_id.to_string()),
+        rev,
+        node: None,
+        nodes_done: 0,
+        nodes_total: 0,
+        waiting_approval: false,
+    });
 }
 
 #[cfg(test)]
