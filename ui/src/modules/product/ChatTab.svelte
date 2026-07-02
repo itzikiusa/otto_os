@@ -1,12 +1,15 @@
 <script lang="ts">
   // ChatTab — Discovery Chat for the current story.
   // Left: "New chat" + a list of this story's DiscoveryChats (newest first, with
-  // an archive action). Right: the active DiscoveryChat pane.
-  // Layout mirrors RefineTab (220px sidebar + chat pane); the conversation works
-  // from an EMPTY/Untitled draft to help with early discovery & research.
+  // an archive action), in a shared ListPane. Right: the active DiscoveryChat
+  // pane. Layout mirrors RefineTab (220px sidebar + chat pane); the
+  // conversation works from an EMPTY/Untitled draft to help with early
+  // discovery & research.
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import DiscoveryChat from './DiscoveryChat.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import ListPane from './ui/ListPane.svelte';
   import type { DiscoveryChat as DiscoveryChatT } from './types';
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -107,60 +110,62 @@
 
 <div class="chat-tab">
   <!-- ── Left: chat list ────────────────────────────────────────────────── -->
-  <aside class="chat-list-pane">
-    <div class="pane-head">
-      <span class="pane-title">Chats</span>
+  <ListPane title="Chats" isEmpty={!loading && !loadError && chats.length === 0}>
+    {#snippet actions()}
       <button
-        class="toolbar-btn primary"
+        class="p-btn primary"
         onclick={createChat}
         disabled={creating}
         title="Start a new discovery chat"
       >
         {creating ? 'Creating…' : '+ New chat'}
       </button>
-    </div>
-
-    {#if loading && chats.length === 0}
-      <div class="muted pad">Loading…</div>
-    {:else if loadError}
-      <div class="error-msg pad">Could not load chats: {loadError}</div>
-    {:else if chats.length === 0}
-      <div class="empty-state">
-        <p>No chats yet.</p>
-        <p>Click <strong>+ New chat</strong> to start figuring out what to build.</p>
-      </div>
-    {:else}
-      <div class="chat-list">
-        {#each chats as c (c.id)}
-          <div
-            class="chat-item"
-            class:active={activeCid === c.id}
-            class:archived={c.status === 'archived'}
-          >
-            <button class="chat-btn" onclick={() => (activeCid = c.id)}>
-              <span class="chat-title">{c.title}</span>
-              <span class="chat-meta">
-                <span class="chat-status" class:status-archived={c.status === 'archived'}>
-                  {c.status}
+    {/snippet}
+    {#snippet children()}
+      {#if loading && chats.length === 0}
+        <div class="muted pad">Loading…</div>
+      {:else if loadError}
+        <div class="error-msg pad">Could not load chats: {loadError}</div>
+      {:else}
+        <div class="chat-list">
+          {#each chats as c (c.id)}
+            <div
+              class="chat-item"
+              class:active={activeCid === c.id}
+              class:archived={c.status === 'archived'}
+            >
+              <button class="chat-btn" onclick={() => (activeCid = c.id)}>
+                <span class="chat-title">{c.title}</span>
+                <span class="chat-meta">
+                  <span class="chat-status" class:status-archived={c.status === 'archived'}>
+                    {c.status}
+                  </span>
+                  <span class="chat-date">{relDate(c.updated_at)}</span>
                 </span>
-                <span class="chat-date">{relDate(c.updated_at)}</span>
-              </span>
-            </button>
-            {#if c.status === 'active'}
-              <button
-                class="archive-btn"
-                onclick={() => archiveChat(c.id)}
-                title="Archive this chat"
-                aria-label="Archive chat"
-              >
-                Archive
               </button>
-            {/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
-  </aside>
+              {#if c.status === 'active'}
+                <button
+                  class="archive-btn"
+                  onclick={() => archiveChat(c.id)}
+                  title="Archive this chat"
+                  aria-label="Archive chat"
+                >
+                  Archive
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    {/snippet}
+    {#snippet empty()}
+      <EmptyState
+        icon="zap"
+        title="No chats yet"
+        body="Click + New chat to start figuring out what to build."
+      />
+    {/snippet}
+  </ListPane>
 
   <!-- ── Right: chat or empty state ───────────────────────────────────────── -->
   <div class="chat-pane">
@@ -182,69 +187,9 @@
     gap: 0;
   }
 
-  /* ── Left pane ─────────────────────────────────────────────────────────── */
-  .chat-list-pane {
-    width: 220px;
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-
-  .pane-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    padding: 8px 10px 6px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .pane-title {
-    font-size: 10.5px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-  }
-
-  .toolbar-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font-size: 11.5px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 110ms, border-color 110ms;
-  }
-  .toolbar-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .toolbar-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .toolbar-btn.primary:hover:not(:disabled) {
-    opacity: 0.88;
-  }
-  .toolbar-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  /* Chat list */
+  /* ── Left pane — chrome (width, border, header, scroll) is ListPane's job;
+     only the row markup below is ChatTab-specific. ───────────────────────── */
   .chat-list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 0;
@@ -354,17 +299,6 @@
     font-size: 12px;
     padding: 8px 10px;
   }
-  .empty-state {
-    padding: 24px 12px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 12px;
-    line-height: 1.6;
-  }
-  .empty-state p {
-    margin: 4px 0;
-  }
-
   /* ── Right pane ─────────────────────────────────────────────────────────── */
   .chat-pane {
     flex: 1;

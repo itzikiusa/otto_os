@@ -5,10 +5,14 @@ import { seedProductStory } from './seed-product';
 // ── E2E: Product workflow-group navigation ─────────────────────────────────────
 //
 // The 13 per-story sub-views are bucketed into 4 workflow GROUPS (Story ·
-// Discover · Deliver · Log). The top tab strip shows exactly those 4 group
-// labels; picking a group reveals a secondary sub-nav of its sub-views. This
-// spec seeds one story, opens it, and asserts (a) the top strip is exactly the
-// 4 groups and (b) the two-step Discover → Chat navigation renders the chat tab.
+// Discover · Deliver · Log). ONE header band (`.product-header-row2`) holds
+// the group strip (icon + label, segmented) inline-start and, when the active
+// group has more than one sub-view, its sub-view pills inline-end
+// (`.sub-tab-strip`) — a single-sub group (Log) shows no pills, since picking
+// the group already navigates there. This spec seeds one story, opens it, and
+// asserts (a) the band's group strip is exactly the 4 groups, (b) the
+// two-step Discover → Chat navigation renders the chat tab, and (c) a
+// single-sub group hides the sub-view pills.
 //
 // Desktop-width viewport so both tab strips render in the stable side-by-side
 // layout regardless of the device project (mirrors product-discovery.spec.ts).
@@ -48,21 +52,35 @@ async function openStoryOverview(page: Page): Promise<void> {
   await expect(page.locator('.overview')).toBeVisible({ timeout: 20_000 });
 }
 
-test('product tabs: top strip is the 4 workflow groups; Discover → Chat renders chat', async ({
+test('product tabs: consolidated header band — 4 groups; Discover → Chat renders chat', async ({
   page,
 }) => {
   test.setTimeout(60_000);
 
   await openStoryOverview(page);
 
-  // The TOP strip (row 2) shows exactly the 4 group labels, in order.
-  const groupStrip = page.locator('.product-header-row2 .tab-strip');
-  await expect(groupStrip).toBeVisible({ timeout: 15_000 });
+  // ONE header band holds both the group strip and (when applicable) the
+  // active group's sub-view pills. Both carry the `.tab-strip` class (the
+  // sub-view pills keep it too, for the mockups spec's generic selector) —
+  // `.first()` picks the group strip, which is first in DOM order.
+  const band = page.locator('.product-header-row2');
+  await expect(band).toBeVisible({ timeout: 15_000 });
+  const groupStrip = band.locator('.tab-strip').first();
   await expect(groupStrip.locator('.st')).toHaveText(['Story', 'Discover', 'Deliver', 'Log']);
+
+  // Overview opens in the "Story" group, which has 3 subs — its pills render
+  // inside the SAME band, beside the group strip.
+  await expect(band.locator('.sub-tab-strip')).toBeVisible();
 
   // Two-step navigation: pick the Discover group, then the Chat sub-tab.
   // Exact match on the group so 'Discover' doesn't grab the 'Discovery' sub.
   await page.getByRole('tab', { name: 'Discover', exact: true }).click();
   await page.getByRole('tab', { name: 'Chat' }).click();
   await expect(page.locator('.chat-tab')).toBeVisible({ timeout: 15_000 });
+
+  // A single-sub group (Log) shows the group strip with NO sub-view pills —
+  // clicking it already navigates to its one sub (History).
+  await page.getByRole('tab', { name: 'Log', exact: true }).click();
+  await expect(page.locator('.history-tab')).toBeVisible({ timeout: 15_000 });
+  await expect(band.locator('.sub-tab-strip')).toHaveCount(0);
 });

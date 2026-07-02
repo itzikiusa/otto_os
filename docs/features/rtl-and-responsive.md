@@ -213,8 +213,8 @@ byte-for-byte identical content** — only the surrounding chrome differs.
 - **Desktop (≥1025px)** — the original, unchanged 3-pane shell:
   `.sidebar` (Navigator when expanded, else the icon `Rail`) · `.center` (banners,
   notification bell, TabBar on Agents, module router) · `RightPanel`
-  (Git/Files/Notes/Activity/Info/Browser/API for the focused agent session) ·
-  a `StatusBar` row.
+  (Git/Files/Notes/Activity/Canvas/Info/Browser/API for the focused agent
+  session) · a `StatusBar` row.
 - **Tablet (641–1024px)** — single content pane with a **persistent narrow
   Navigator column** (`.msidebar`, 220px) on the left; the RightPanel moves into a
   **right drawer**. Compact top bar (`.mtopbar`), no bottom nav.

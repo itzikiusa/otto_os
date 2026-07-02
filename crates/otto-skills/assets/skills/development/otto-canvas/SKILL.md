@@ -1,14 +1,14 @@
 ---
-description: Use when drawing/generating a diagram for the Otto Canvas, creating or editing canvas scenes, or driving Discovery Chat on a Product story, from an agent session over HTTP. Covers the FILE-BACKED canvas model with TWO modes — Mermaid (edit a per-scene `canvas.mermaid`; any diagram type) and Excalidraw (edit a per-scene `canvas.json`; fully editable shapes) — top-notch pretty-Mermaid styling, the Excalidraw simplified element format, the OTTO_API_TOKEN auth model, the Canvas + Discovery-Chat endpoints, and the canvas.mjs helper.
+description: Use when drawing/generating a diagram for the Otto Canvas, creating or editing canvas scenes, or driving Discovery Chat on a Product story, from an agent session over HTTP. Covers the FILE-BACKED canvas model with THREE modes — Mermaid (edit a per-scene `canvas.mermaid`; any diagram type), Excalidraw (edit a per-scene `canvas.json`; fully editable shapes), and D2 (edit a per-scene `canvas.d2`; modern declarative diagrams — architecture, sequence, SQL tables) — top-notch pretty-Mermaid styling, the D2 shape/class syntax, the Excalidraw simplified element format, the OTTO_API_TOKEN auth model, the Canvas + Discovery-Chat endpoints, and the canvas.mjs helper.
 category: development
-version: 4
+version: 5
 ---
 
-# Otto Canvas (Mermaid + Excalidraw modes) + Discovery Chat over HTTP
+# Otto Canvas (Mermaid + Excalidraw + D2 modes) + Discovery Chat over HTTP
 
-Otto's **Canvas** is **file-backed** with TWO modes the user picks per scene; the
-agent edits the scene's file and the board re-renders (manual edits write back to
-the same file too):
+Otto's **Canvas** is **file-backed** with THREE modes the user picks per scene;
+the agent edits the scene's file and the board re-renders (manual edits write
+back to the same file too):
 
 - **Mermaid mode** — the agent edits a per-scene **`canvas.mermaid`**. The UI renders
   it with Mermaid's own renderer, so ANY diagram type works (flowchart, sequence,
@@ -16,12 +16,16 @@ the same file too):
 - **Excalidraw mode** — the agent edits a per-scene **`canvas.json`** (an Excalidraw
   scene). The UI loads it in the real Excalidraw editor, so the user can also draw /
   move / restyle shapes by hand. Best for freeform, hand-editable boards.
+- **D2 mode** — the agent edits a per-scene **`canvas.d2`**. The UI renders it with
+  D2's own layout engine (client-side WASM), with an optional hand-drawn "sketch"
+  render mode. Best for architecture diagrams, SQL schemas (`shape: sql_table`),
+  and anything that benefits from containers/nesting.
 
-The scene's `doc_json` stores `{ "type":"otto-canvas", "version":1, "format":"mermaid"|"excalidraw", "source":"…" }`
-(`source` is the file's text). The agent refines the SAME file across the conversation,
-so follow-ups *change* the diagram instead of regenerating it, and the work is never
-lost. **Discovery Chat** is a conversational product-discovery agent on a story that
-can *propose* a canvas you then apply.
+The scene's `doc_json` stores `{ "type":"otto-canvas", "version":1, "format":"mermaid"|"excalidraw"|"d2", "source":"…", "sketch"?:bool }`
+(`source` is the file's text; `sketch` only applies to D2). The agent refines the
+SAME file across the conversation, so follow-ups *change* the diagram instead of
+regenerating it, and the work is never lost. **Discovery Chat** is a conversational
+product-discovery agent on a story that can *propose* a canvas you then apply.
 
 ## Excalidraw mode — edit canvas.json
 
@@ -32,6 +36,23 @@ expands it into a real Excalidraw scene — do NOT include `seed`/`versionNonce`
 - Arrow (routed by id): `{"type":"arrow","start":{"id":"n1"},"end":{"id":"n2"},"label":{"text":"yes"}}`
 - Text: `{"type":"text","x":int,"y":int,"text":"…","fontSize":20}` · `fontFamily:3` = code.
 Lay nodes ~80px apart with no overlaps, size boxes to text, colour-code by role.
+
+## D2 mode — edit canvas.d2
+
+In D2 mode you EDIT `canvas.d2` — ONE complete, valid D2 diagram (no ``` fences
+inside the file). Key syntax (full reference: `references/d2-cheatsheet.md`):
+- Containers (nesting): `server: { api; db }` — reference nested shapes with
+  dotted paths (`server.api`).
+- Edges + labels: `a -> b: label`; chained: `a -> b -> c`.
+- Layout: `direction: right` (pipelines/architecture) or `direction: down`
+  (hierarchies, the default).
+- Shapes: `shape: sql_table` (schemas, with typed rows), `shape: sequence_diagram`
+  (message flows), `shape: cylinder` (data stores), `shape: queue`, `shape: person`,
+  plus `circle`/`diamond`/`hexagon`/`cloud` for everything else.
+- Classes (reusable styles): `classes: { critical: { style: { fill: "#fee2e2"; stroke: "#dc2626" } } }`
+  then `db.class: critical` — the D2 analog of Mermaid's `classDef`.
+- Inline styling: `style.fill` / `style.stroke` / `style.font-color` on any shape.
+- Icons (optional): `icon: https://icons.terrastruct.com/...`.
 
 Reach for this skill whenever you're asked to **draw/diagram something on the
 canvas** ("show how service A calls B", "sketch the auth flow", "diagram the
@@ -99,13 +120,17 @@ node scripts/canvas.mjs list-scenes   <wsId>
 node scripts/canvas.mjs create-scene  <wsId> "<title>" [storyId]   # empty scene
 node scripts/canvas.mjs get-scene     <sceneId>
 node scripts/canvas.mjs add-mermaid   <sceneId> "<mermaid src>"    # append a mermaid node
+node scripts/canvas.mjs add-d2        <sceneId> <file.d2>          # set the scene's D2 source from a file
 node scripts/canvas.mjs add-slide     <sceneId> "<slide title>"    # slide revealing all nodes
 node scripts/canvas.mjs assist        <sceneId> "<prompt>" [mode]  # assist on a scene
 node scripts/canvas.mjs assist        --preview  "<prompt>" [mode] # assist with no scene
 ```
 
-`add-mermaid` / `add-slide` do a read-modify-write: GET the scene, `JSON.parse`
-its `doc_json`, append a node/slide per the schema, then `PUT` the whole doc back.
+`add-mermaid` / `add-slide` do a read-modify-write on the legacy multi-node Scene
+schema: GET the scene, `JSON.parse` its `doc_json`, append a node/slide, then
+`PUT` the whole doc back. `add-d2` instead targets the file-backed single-source
+doc directly (reads the diagram from a local file — D2 sources are multi-line and
+awkward to pass inline) and replaces `doc.source` wholesale.
 
 ## Canvas doc (file-backed) + legacy Scene schema
 
@@ -165,7 +190,7 @@ When asked to visualize a flow ("service A calls B, B does 10 things"):
    node scripts/canvas.mjs assist "$SID" "service A calls B, and B does 10 things"
    ```
    `assist` on a scene now EDITS the scene's source file and **commits it**
-   (updating `doc_json`), then returns `{ mermaid?, excalidraw?, format, note }`
+   (updating `doc_json`), then returns `{ mermaid?, d2?, excalidraw?, format, note }`
    and broadcasts the live update. `assist --preview` (no scene) just returns the
    blocks without persisting. The default `format` is `mermaid`.
 
@@ -223,6 +248,8 @@ expect an MCP tool to mutate a canvas; there isn't one and won't be.
   method/path/body/response.
 - `references/mermaid-cheatsheet.md` — sequence/flowchart/class/state/ER syntax +
   the fan-out pattern.
+- `references/d2-cheatsheet.md` — D2 shapes/containers/classes/styles, `sql_table`,
+  `sequence_diagram`, `direction` — one page.
 - `examples/service-fanout.md` — "A calls B; B does 10 things" → exhaustive
   sequence diagram on a scene.
 - `examples/sequence-to-slides.md` — build a sequence, then present it step by step.
