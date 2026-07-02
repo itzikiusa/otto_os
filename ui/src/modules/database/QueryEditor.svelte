@@ -15,6 +15,7 @@
   import type { DbCompletionKind } from '../../lib/api/types';
   import {
     statementAtCursor,
+    countStatements,
     extractVars,
     substituteVars,
     renderVar,
@@ -180,12 +181,10 @@
     });
   }
 
-  function run(): void {
-    const whole = tab.statement;
-    // Run the selection if there is one, else the statement under the cursor.
-    const base = editorSel.text.trim()
-      ? editorSel.text
-      : statementAtCursor(whole, editorSel.cursor, splitMode);
+  // Substitute query-level variables into `base` and execute it (transient — the
+  // tab's text is never overwritten by the rendered SQL). Shared by Run
+  // (selection / statement-at-cursor) and Run all (the whole buffer as a batch).
+  function execBase(base: string): void {
     if (!base.trim()) {
       void database.runQuery();
       return;
@@ -212,6 +211,22 @@
     );
     const finalSql = names.length > 0 ? substituteVars(base, rendered, splitMode) : base;
     void database.runQuery(finalSql, undefined, { transient: true });
+  }
+
+  function run(): void {
+    // Run the selection if there is one, else the statement under the cursor.
+    execBase(
+      editorSel.text.trim()
+        ? editorSel.text
+        : statementAtCursor(tab.statement, editorSel.cursor, splitMode),
+    );
+  }
+
+  // Run the WHOLE buffer as one multi-statement batch (the backend splits it and
+  // returns one result set per statement — the grid shows a result switcher).
+  const stmtCount = $derived(countStatements(tab.statement, splitMode));
+  function runAll(): void {
+    execBase(tab.statement);
   }
 
   // Draggable split between the editor and the results (persisted px height).
@@ -331,6 +346,7 @@
   // ⌃Tab stays the app-global session cycler; query-tab nav uses ⌥⌘→/←.
   const SHORTCUTS: { keys: string; label: string }[] = [
     { keys: '⌘↵', label: 'Run' },
+    { keys: '⇧⌘↵', label: 'Run all statements' },
     { keys: '⌘S', label: 'Save query' },
     { keys: '⇧⌘F', label: 'Format' },
     { keys: 'Esc', label: 'Cancel running query' },
@@ -358,6 +374,12 @@
       } else if (shortcutsOpen) {
         shortcutsOpen = false;
       }
+      return;
+    }
+    // ⇧⌘↵ — run the whole buffer as a batch (⌘↵ alone = editor's run-current).
+    if (cmd && e.shiftKey && !e.altKey && e.key === 'Enter') {
+      e.preventDefault();
+      if (!tab.running && database.selectedConnId) runAll();
       return;
     }
     // ⌘S — save the query.
@@ -496,6 +518,17 @@
         Run
         <span class="kbd">⌘↵</span>
       </button>
+      {#if stmtCount > 1}
+        <button
+          class="btn small"
+          onclick={runAll}
+          disabled={!database.selectedConnId}
+          title="Run all {stmtCount} statements as one batch — one result set per statement (⇧⌘↵)"
+        >
+          <Icon name="play" size={12} />
+          Run all
+        </button>
+      {/if}
     {/if}
     {#if canEdit}
       <button

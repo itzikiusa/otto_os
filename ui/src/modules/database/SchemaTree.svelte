@@ -194,6 +194,13 @@
         icon: 'send',
         action: () => void database.sendFindToEditor(node),
       });
+      // Import a local file into this collection (insertMany batches through the
+      // same guarded write path), prefilling its name — parity with SQL tables.
+      items.push({
+        label: 'Import into…',
+        icon: 'arrowDown',
+        action: () => database.openImportDialog(node),
+      });
       items.push({ separator: true });
     }
 

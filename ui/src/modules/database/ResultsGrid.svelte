@@ -1440,6 +1440,20 @@
   }
 </script>
 
+{#snippet runningCard()}
+  <!-- Inline running card for the no-result branches (a fresh tab's first query
+       has no stale grid to dim — same selectors as the absolute overlay). -->
+  <div class="rg-overlay rg-inline" role="status" aria-live="polite">
+    <div class="rg-overlay-card">
+      <span class="rg-spin"><Icon name="refresh" size={16} /></span>
+      <span class="rg-overlay-text">Running… {elapsed}s</span>
+      <button class="rg-cancel" onclick={() => database.abortQuery()} title="Cancel the running query">
+        <Icon name="x" size={11} />Cancel
+      </button>
+    </div>
+  </div>
+{/snippet}
+
 {#if !mini && resultSets.length > 1}
   <!-- Multi-statement batch: a segmented switcher over the result sets. Errored
        statements (execution stopped there) get a red dot; the tooltip previews
@@ -1472,19 +1486,27 @@
   {/if}
 {:else if !resultProp}
   {#if !mini}
-    <div class="grid-empty">
-      <Icon name="grid" size={mini ? 16 : 22} />
-      <span>Run a query to see results.</span>
-    </div>
+    {#if running}
+      <div class="grid-empty">{@render runningCard()}</div>
+    {:else}
+      <div class="grid-empty">
+        <Icon name="grid" size={mini ? 16 : 22} />
+        <span>Run a query to see results.</span>
+      </div>
+    {/if}
   {/if}
 {:else if !result || result.columns.length === 0}
-  <div class="grid-empty">
-    <Icon name="check" size={mini ? 16 : 22} />
-    <span>
-      {result?.message ??
-        (result?.rows_affected != null ? `${result.rows_affected} row(s) affected` : 'Statement OK')}
-    </span>
-  </div>
+  {#if running && !mini}
+    <div class="grid-empty">{@render runningCard()}</div>
+  {:else}
+    <div class="grid-empty">
+      <Icon name="check" size={mini ? 16 : 22} />
+      <span>
+        {result?.message ??
+          (result?.rows_affected != null ? `${result.rows_affected} row(s) affected` : 'Statement OK')}
+      </span>
+    </div>
+  {/if}
 {:else}
   <div class="grid-wrap" class:mini>
     {#if result.message && !mini}
@@ -1550,11 +1572,11 @@
             title="Export ALL rows — streams the full (uncapped) result to a file on the daemon host, in a selectable format, with live progress"
           ><Icon name="arrowDown" size={11} />Export all rows…</button>
         {/if}
-        {#if connectionId && database.capabilities?.sql}
+        {#if connectionId && (database.capabilities?.sql || database.capabilities?.engine === 'mongodb')}
           <button
             class="tb-btn"
             onclick={() => database.openImportDialog()}
-            title="Import a local file (CSV/TSV/NDJSON/JSON) into a table — batched INSERTs through the same write guard"
+            title="Import a local file (CSV/TSV/NDJSON/JSON) into a table or collection — batched writes through the same write guard"
           ><Icon name="arrowDown" size={11} />Import file…</button>
         {/if}
       </div>
@@ -2083,6 +2105,13 @@
     background: color-mix(in srgb, var(--bg) 55%, transparent);
     backdrop-filter: blur(1px);
     z-index: 5;
+  }
+  /* Inline variant for the no-result branches — same card, no dimmer. */
+  .rg-overlay.rg-inline {
+    position: static;
+    inset: auto;
+    background: none;
+    backdrop-filter: none;
   }
   .rg-overlay-card {
     display: inline-flex;
