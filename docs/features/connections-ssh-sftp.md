@@ -1,7 +1,14 @@
 # Connections — SSH, Databases, Tunnels & the SFTP Browser
 
 A **Connection** is a saved, reusable profile for reaching a remote endpoint —
-an SSH host, a MySQL / Redis / MongoDB / ClickHouse server, or any custom CLI.
+an SSH host, a MySQL / PostgreSQL / Redis / MongoDB / ClickHouse server, or any
+custom CLI. The Connections page is the **unified hub**: it lists every
+connection kind AND Kafka broker clusters in ONE shared section tree
+(migration `0095` merged the broker folders in), with type-filter chips
+(All / SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse / Kafka /
+Custom). Opens route by type — SSH/custom → terminal, DB kinds → the Database
+Explorer workbench (an "Open terminal client" row action keeps the CLI path),
+clusters → Message Brokers.
 Opening a profile drops you into a **live terminal session** sitting side-by-side
 with your agents (same session machinery), driven by the system client binary
 (`ssh`, `mysql`, `redis-cli`, `mongosh`, `clickhouse-client`, …). The very same

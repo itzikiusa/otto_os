@@ -9,6 +9,7 @@
 
 mod browser;
 mod supervisor;
+mod windows;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
@@ -20,9 +21,37 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         // Forward native menu-bar clicks to the SPA (which owns all behavior).
         // Registered on the Builder — the reliable place in Tauri v2 for an
-        // app-wide menu set via `app.set_menu`.
+        // app-wide menu set via `app.set_menu`. Window-lifecycle items
+        // (new-window/quit) are handled natively; everything else goes to the
+        // FOCUSED window only — menu accelerators are app-wide, and a broadcast
+        // Cmd+W would close a tab in EVERY window at once.
         .on_menu_event(|app, event| {
-            let _ = app.emit("otto://menu", event.id().0.clone());
+            let id = event.id().0.as_str();
+            match id {
+                "new-window" => windows::create_new_window(app),
+                "quit" => {
+                    windows::mark_quitting();
+                    windows::snapshot_all(app);
+                    app.exit(0);
+                }
+                _ => {
+                    let focused = app
+                        .webview_windows()
+                        .into_iter()
+                        .find(|(_, w)| w.is_focused().unwrap_or(false))
+                        .map(|(l, _)| l);
+                    match focused {
+                        // menu.ts listens per-webview-window, so a targeted
+                        // emit reaches exactly one window.
+                        Some(l) => {
+                            let _ = app.emit_to(l.as_str(), "otto://menu", id.to_string());
+                        }
+                        None => {
+                            let _ = app.emit("otto://menu", id.to_string());
+                        }
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             supervisor::daemon_status,
@@ -40,6 +69,7 @@ fn main() {
             browser::browser_close,
             browser::browser_close_all,
             browser::browser_devtools,
+            windows::windows_registry,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
@@ -52,6 +82,11 @@ fn main() {
 
             build_menu(app)?;
 
+            // Reopen the window set from the last quit (frames + secondary
+            // windows); each window's SPA restores its own tabs/route from
+            // per-window (`__OTTO_WIN__`-keyed) localStorage.
+            windows::restore(app.handle());
+
             // Ensure the daemon is up in the background; the SPA polls /health
             // and surfaces state, so failures here are non-fatal.
             let handle = app.handle().clone();
@@ -62,13 +97,37 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Otto");
+        .build(tauri::generate_context!())
+        .expect("error while building Otto")
+        .run(|app, event| match event {
+            // Cmd+Q (or last-window close) → snapshot the whole window set so
+            // the next launch restores it; a lone window close just forgets
+            // that window (handled in on_close_requested).
+            tauri::RunEvent::ExitRequested { .. } => {
+                windows::mark_quitting();
+                windows::snapshot_all(app);
+            }
+            tauri::RunEvent::WindowEvent { label, event, .. } => match event {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    windows::on_close_requested(app, &label);
+                }
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    windows::schedule_snapshot(app);
+                }
+                _ => {}
+            },
+            _ => {}
+        });
 }
 
 /// Set the macOS dock badge to the number of working agents ("" clears).
+/// The dock badge is app-global, so the MAIN window is its single writer —
+/// otherwise N windows race and the last writer wins with a partial count.
 #[tauri::command]
 fn set_badge_count(window: tauri::WebviewWindow, count: u32) {
+    if window.label() != "main" {
+        return;
+    }
     let _ = window.set_badge_count(if count == 0 { None } else { Some(count as i64) });
 }
 
@@ -85,7 +144,10 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
             &MenuItem::with_id(handle, "settings", "Settings…", true, Some("Cmd+,"))?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::hide(handle, None)?,
-            &PredefinedMenuItem::quit(handle, None)?,
+            // Custom quit (not PredefinedMenuItem::quit): the handler must set
+            // the QUITTING flag + snapshot the window set BEFORE exiting, so
+            // per-window close bookkeeping doesn't "forget" open windows.
+            &MenuItem::with_id(handle, "quit", "Quit Otto", true, Some("Cmd+Q"))?,
         ],
     )?;
 
@@ -94,6 +156,14 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
         "File",
         true,
         &[
+            &MenuItem::with_id(
+                handle,
+                "new-window",
+                "New Window",
+                true,
+                Some("Cmd+Shift+N"),
+            )?,
+            &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "new-session", "New Session", true, Some("Cmd+T"))?,
             &MenuItem::with_id(
                 handle,

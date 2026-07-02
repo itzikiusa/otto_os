@@ -16,7 +16,11 @@ import type {
 } from '../api/types';
 import { toasts } from '../toast.svelte';
 import { ui, clientId } from './ui.svelte';
+import { winKey } from '../win';
 
+// Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
+// window's label so two windows never clobber each other's workspace/tabs/view.
+// The main window keeps the legacy unprefixed keys.
 const LS_CURRENT = 'otto_workspace';
 const LS_TABS = 'otto_tabs_'; // + workspace id
 
@@ -43,7 +47,7 @@ class WorkspaceStore {
   /** view mode for Agent Mode: tabbed (one at a time), tiled (grid), or the
    *  Mission Control work-queue surface. */
   viewMode: 'tabs' | 'tiled' | 'mission' = $state(
-    (localStorage.getItem('otto_view_mode') as 'tabs' | 'tiled' | 'mission') ?? 'tabs',
+    (localStorage.getItem(winKey('otto_view_mode')) as 'tabs' | 'tiled' | 'mission') ?? 'tabs',
   );
 
   /** In tiled view, a session id to show maximized (zoomed) on its own. */
@@ -261,7 +265,7 @@ class WorkspaceStore {
 
   async load(): Promise<void> {
     this.workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
-    const saved = localStorage.getItem(LS_CURRENT);
+    const saved = localStorage.getItem(winKey(LS_CURRENT));
     const found = this.workspaces.find((w) => w.id === saved);
     const target = found ?? this.workspaces[0] ?? null;
     if (target) await this.select(target.id);
@@ -270,11 +274,11 @@ class WorkspaceStore {
   async select(id: Id): Promise<void> {
     if (this.currentId === id && this.sessions.length > 0) return;
     this.currentId = id;
-    localStorage.setItem(LS_CURRENT, id);
+    localStorage.setItem(winKey(LS_CURRENT), id);
     await this.refreshSessions();
     void this.refreshActiveWorkflowRuns();
     // restore tabs for this workspace
-    const raw = localStorage.getItem(LS_TABS + id);
+    const raw = localStorage.getItem(winKey(LS_TABS + id));
     const ids: Id[] = raw ? JSON.parse(raw) : [];
     // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
     const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
@@ -344,7 +348,7 @@ class WorkspaceStore {
 
   private persistTabs(): void {
     if (this.currentId) {
-      localStorage.setItem(LS_TABS + this.currentId, JSON.stringify(this.openTabs));
+      localStorage.setItem(winKey(LS_TABS + this.currentId), JSON.stringify(this.openTabs));
     }
   }
 
@@ -589,7 +593,7 @@ class WorkspaceStore {
   setViewMode(mode: 'tabs' | 'tiled' | 'mission'): void {
     this.viewMode = mode;
     if (mode === 'tabs') this.maximizedId = null;
-    localStorage.setItem('otto_view_mode', mode);
+    localStorage.setItem(winKey('otto_view_mode'), mode);
   }
 
   /**

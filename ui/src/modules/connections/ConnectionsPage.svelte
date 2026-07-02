@@ -1,10 +1,13 @@
 <script lang="ts">
-  // Connections: a tree of user-defined sections (nestable) with connections
-  // shown as compact list rows. Drag a connection onto a section to file it;
-  // drag a section onto another to nest it. Open / Test / Edit / Delete per row.
+  // Connections hub: the ONE tree for every connection type — SSH, databases,
+  // message brokers and custom clients — filed into a shared, nestable section
+  // tree. Rows are compact list entries; drag a row onto a section to file it,
+  // a section onto another to nest it. DB rows open the Database workbench,
+  // cluster rows open Message Brokers; a type-filter narrows the tree.
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import type {
+    BrokerCluster,
     Connection,
     ConnectionKind,
     ConnectionSection,
@@ -14,22 +17,59 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { brokers } from '../../lib/stores/brokers.svelte';
+  import { database } from '../../lib/stores/database.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ConnectionForm from './ConnectionForm.svelte';
   import SftpBrowser from './SftpBrowser.svelte';
   import ConnectionImportDialog from './ConnectionImportDialog.svelte';
+  import ClusterForm from '../brokers/ClusterForm.svelte';
 
   interface TreeNode {
     sec: ConnectionSection;
     items: Connection[];
+    clusters: BrokerCluster[];
     children: TreeNode[];
   }
 
-  // DB engines are managed in the Database section; this page handles the rest.
-  const DB_CONN_KINDS = ['mysql', 'redis', 'mongodb', 'clickhouse'];
-  const NON_DB_KINDS = ['ssh', 'custom'] as const;
+  // Every connection kind the hub can create + the DB engines that open the
+  // Database workbench instead of a terminal.
+  const ALL_KINDS: ConnectionKind[] = [
+    'ssh', 'mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom',
+  ];
+  const DB_KINDS = new Set<ConnectionKind>(['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse']);
+  const isDbKind = (k: ConnectionKind): boolean => DB_KINDS.has(k);
+
+  // Toolbar type filter (single-select). Each id matches a connection kind;
+  // 'kafka' matches broker clusters. Persisted in localStorage.
+  const FILTER_KEY = 'otto_connhub_filter';
+  const FILTER_CHIPS: { id: string; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'ssh', label: 'SSH' },
+    { id: 'mysql', label: 'MySQL' },
+    { id: 'postgres', label: 'PostgreSQL' },
+    { id: 'redis', label: 'Redis' },
+    { id: 'mongodb', label: 'MongoDB' },
+    { id: 'clickhouse', label: 'ClickHouse' },
+    { id: 'kafka', label: 'Kafka' },
+    { id: 'custom', label: 'Custom' },
+  ];
+  function loadFilter(): string {
+    if (typeof localStorage === 'undefined') return 'all';
+    return localStorage.getItem(FILTER_KEY) || 'all';
+  }
+  let filterKind = $state(loadFilter());
+  function setFilter(id: string): void {
+    filterKind = id;
+    if (typeof localStorage !== 'undefined') localStorage.setItem(FILTER_KEY, id);
+  }
+  // A filter is "active" (narrowing the tree, hiding empty sections) whenever it
+  // isn't the catch-all. Search has its own flat-results view below.
+  const filtering = $derived(filterKind !== 'all');
+  const connMatchesFilter = (c: Connection): boolean => filterKind === 'all' || c.kind === filterKind;
+  const clusterMatchesFilter = (): boolean => filterKind === 'all' || filterKind === 'kafka';
 
   let conns: Connection[] = $state([]);
   let sections: ConnectionSection[] = $state([]);
@@ -37,6 +77,9 @@
   let formOpen = $state(false);
   let importOpen = $state(false);
   let editing: Connection | null = $state(null);
+  // Message-broker cluster form (New Cluster / edit a cluster row).
+  let clusterFormOpen = $state(false);
+  let editingCluster: BrokerCluster | null = $state(null);
   // The SSH connection whose SFTP file browser is open (null = none).
   let sftpFor: Connection | null = $state(null);
   let testing: Record<string, boolean> = $state({});
@@ -45,6 +88,7 @@
   let openingSplit: Record<string, boolean> = $state({});
   let collapsed: Record<string, boolean> = $state({});
   let draggedConnId: string | null = $state(null);
+  let draggedClusterId: string | null = $state(null);
   let draggedSectionId: string | null = $state(null);
   // Which connection's "open in workspace…" menu is showing (null = none).
   let openMenuFor: string | null = $state(null);
@@ -68,24 +112,36 @@
     }
   }
 
-  // Free-text search across all connections. When non-empty the page shows a
-  // flat result list (by name / host-user / kind / section) instead of the tree.
+  const secName = (id: string | null): string =>
+    id ? (sections.find((s) => s.id === id)?.name ?? '') : '';
+
+  // Free-text search across all rows. When non-empty the page shows a flat result
+  // list (by name / host-user / kind / section) instead of the tree; the type
+  // filter still applies (chips + search compose with AND).
   let search = $state('');
+  const connMatchesSearch = (c: Connection, q: string): boolean =>
+    c.name.toLowerCase().includes(q) ||
+    describe(c).toLowerCase().includes(q) ||
+    c.kind.toLowerCase().includes(q) ||
+    secName(c.section_id).toLowerCase().includes(q);
+  const clusterMatchesSearch = (cl: BrokerCluster, q: string): boolean =>
+    cl.name.toLowerCase().includes(q) ||
+    cl.bootstrap_servers.toLowerCase().includes(q) ||
+    'kafka'.includes(q) ||
+    secName(cl.section_id ?? null).toLowerCase().includes(q);
   const searchResults = $derived.by(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return [];
-    const secName = (id: string | null): string =>
-      id ? (sections.find((s) => s.id === id)?.name ?? '') : '';
-    return conns
-      .filter(
-        (c) =>
-          c.name.toLowerCase().includes(q) ||
-          describe(c).toLowerCase().includes(q) ||
-          c.kind.toLowerCase().includes(q) ||
-          secName(c.section_id).toLowerCase().includes(q),
-      )
-      .sort(sortByName);
+    if (!q) return { conns: [] as Connection[], clusters: [] as BrokerCluster[] };
+    return {
+      conns: conns
+        .filter((c) => connMatchesFilter(c) && connMatchesSearch(c, q))
+        .sort(sortByName),
+      clusters: brokers.clusters
+        .filter((cl) => clusterMatchesFilter() && clusterMatchesSearch(cl, q))
+        .sort(sortByClusterName),
+    };
   });
+  const searchCount = $derived(searchResults.conns.length + searchResults.clusters.length);
 
   const kindIcons: Record<ConnectionKind, string> = {
     ssh: 'key',
@@ -97,8 +153,11 @@
     custom: 'terminal',
   };
   const sortByName = (a: Connection, b: Connection): number => a.name.localeCompare(b.name);
+  const sortByClusterName = (a: BrokerCluster, b: BrokerCluster): number =>
+    a.name.localeCompare(b.name);
 
-  // Build the section tree from the flat list; `parentId = null` is the root.
+  // Build the section tree from the flat lists; `parentId = null` is the root.
+  // Each node carries both connections and broker clusters filed under it.
   function buildTree(parentId: string | null): TreeNode[] {
     return sections
       .filter((s) => (s.parent_id ?? null) === parentId)
@@ -106,15 +165,37 @@
       .map((sec) => ({
         sec,
         items: conns.filter((c) => c.section_id === sec.id).sort(sortByName),
+        clusters: brokers.clusters.filter((cl) => cl.section_id === sec.id).sort(sortByClusterName),
         children: buildTree(sec.id),
       }));
   }
   const tree = $derived(buildTree(null));
-  // A connection whose folder is unknown falls back to Ungrouped, so nothing
-  // ever vanishes. Connections are global, so all of them can be filed.
+
+  // Count of matching descendants (connections + clusters, recursive) under the
+  // current filter — drives the per-section count chip and whether an empty
+  // section is hidden while filtering.
+  function nodeMatchCount(node: TreeNode): number {
+    let n =
+      node.items.filter(connMatchesFilter).length +
+      (clusterMatchesFilter() ? node.clusters.length : 0);
+    for (const ch of node.children) n += nodeMatchCount(ch);
+    return n;
+  }
+
+  // A connection/cluster whose folder is unknown falls back to Ungrouped, so
+  // nothing ever vanishes. Everything here is global, so all of it can be filed.
   const knownSectionIds = $derived(new Set(sections.map((s) => s.id)));
   const ungrouped = $derived(
     conns.filter((c) => !c.section_id || !knownSectionIds.has(c.section_id)).sort(sortByName),
+  );
+  const ungroupedClusters = $derived(
+    brokers.clusters
+      .filter((cl) => !cl.section_id || !knownSectionIds.has(cl.section_id))
+      .sort(sortByClusterName),
+  );
+  const ungroupedMatchCount = $derived(
+    ungrouped.filter(connMatchesFilter).length +
+      (clusterMatchesFilter() ? ungroupedClusters.length : 0),
   );
 
   // "Recent" group: pinned connections first (alphabetical), then those with a
@@ -124,11 +205,11 @@
   const RECENT_CAP = 6;
   const recent = $derived.by(() => {
     const pinned = conns
-      .filter((c) => c.pinned)
+      .filter((c) => c.pinned && connMatchesFilter(c))
       .sort(sortByName);
     const pinnedIds = new Set(pinned.map((c) => c.id));
     const byRecent = conns
-      .filter((c) => !pinnedIds.has(c.id) && c.last_opened_at)
+      .filter((c) => !pinnedIds.has(c.id) && c.last_opened_at && connMatchesFilter(c))
       .sort((a, b) => {
         // Descending: most recently opened first.
         const ta = new Date(a.last_opened_at!).getTime();
@@ -139,14 +220,12 @@
   });
 
   // Load (or reload) the connection list for a workspace. Extracted so the import
-  // dialog can refresh the list after creating connections. DB connections
-  // (mysql/redis/mongodb/clickhouse) live in the Database section now — keep this
-  // page to SSH / custom clients only.
+  // dialog can refresh the list after creating connections. The hub shows ALL
+  // connection kinds (SSH, DB engines, custom) alongside broker clusters.
   async function loadConns(wsId: string): Promise<void> {
     loading = true;
     try {
-      const c = await api.get<Connection[]>(`/workspaces/${wsId}/connections`);
-      conns = c.filter((x) => !DB_CONN_KINDS.includes(x.kind));
+      conns = await api.get<Connection[]>(`/workspaces/${wsId}/connections`);
     } catch (e) {
       toasts.error('Could not load connections', e instanceof Error ? e.message : '');
     } finally {
@@ -158,6 +237,9 @@
     const wsId = ws.currentId;
     if (!wsId) return;
     void loadConns(wsId);
+    // Broker clusters share this tree — load them through their own store (which
+    // owns cluster CRUD + the shared section fetch); we read `brokers.clusters`.
+    void brokers.load(wsId);
     void api
       .get<ConnectionSection[]>(`/workspaces/${wsId}/connection-sections`)
       .then((s) => (sections = s))
@@ -277,13 +359,28 @@
     }
   }
 
-  // A drop onto a section: a dragged connection files into it; a dragged
+  // File a cluster into a section (or null = ungrouped) via the brokers store's
+  // move (PATCH /brokers/clusters/{id} {section_id}). `brokers.clusters` updates
+  // in place, so the tree re-renders.
+  async function moveCluster(id: string, sectionId: string | null): Promise<void> {
+    try {
+      await brokers.moveCluster(id, sectionId);
+    } catch (e) {
+      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // A drop onto a section: a dragged connection/cluster files into it; a dragged
   // section nests under it.
   function onSectionDrop(sectionId: string): void {
     if (draggedConnId) {
       const c = conns.find((x) => x.id === draggedConnId);
       draggedConnId = null;
       if (c) void moveConn(c, sectionId);
+    } else if (draggedClusterId) {
+      const id = draggedClusterId;
+      draggedClusterId = null;
+      void moveCluster(id, sectionId);
     } else if (draggedSectionId) {
       const src = draggedSectionId;
       draggedSectionId = null;
@@ -291,13 +388,17 @@
     }
   }
 
-  // A drop onto the "Ungrouped" / top-level zone: connection → no section;
-  // section → top-level.
+  // A drop onto the "Ungrouped" / top-level zone: connection/cluster → no
+  // section; section → top-level.
   function onRootDrop(): void {
     if (draggedConnId) {
       const c = conns.find((x) => x.id === draggedConnId);
       draggedConnId = null;
       if (c) void moveConn(c, null);
+    } else if (draggedClusterId) {
+      const id = draggedClusterId;
+      draggedClusterId = null;
+      void moveCluster(id, null);
     } else if (draggedSectionId) {
       const src = draggedSectionId;
       draggedSectionId = null;
@@ -397,6 +498,51 @@
     }
   }
 
+  // Open a DB-engine connection in the Database workbench (the primary action for
+  // mysql/postgres/redis/mongodb/clickhouse rows). The terminal client stays
+  // available as a secondary row action.
+  async function openDb(c: Connection): Promise<void> {
+    opening[c.id] = true;
+    try {
+      await database.openConnection(c.id);
+      router.go('database');
+    } catch (e) {
+      toasts.error('Open failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      opening[c.id] = false;
+    }
+  }
+
+  // --- Broker cluster operations --------------------------------------------
+
+  // Open a cluster in Message Brokers (select it there + navigate).
+  function openCluster(cl: BrokerCluster): void {
+    brokers.select(cl.id);
+    router.go('brokers');
+  }
+
+  function editCluster(cl: BrokerCluster): void {
+    editingCluster = cl;
+    clusterFormOpen = true;
+  }
+
+  async function removeCluster(cl: BrokerCluster): Promise<void> {
+    if (
+      !(await confirmer.ask(`Remove cluster “${cl.name}”? Topics on the broker are not touched.`, {
+        title: 'Remove cluster',
+        confirmLabel: 'Remove',
+        danger: true,
+      }))
+    )
+      return;
+    try {
+      await brokers.remove(cl.id);
+      toasts.info('Cluster removed', cl.name);
+    } catch (e) {
+      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function remove(c: Connection): Promise<void> {
     if (!(await confirmer.ask(`Delete connection “${c.name}”? Its Keychain secret is removed too.`, { title: 'Delete connection' }))) return;
     try {
@@ -431,7 +577,7 @@
   <div class="page-header">
     <div>
       <h1>Connections</h1>
-      <div class="sub">SSH, databases and custom clients — opening one creates a terminal session.</div>
+      <div class="sub">SSH, databases, message brokers and custom clients — one tree, filter by type.</div>
     </div>
     <div class="header-actions">
       <button class="btn" onclick={() => createSection(null)}>New Section</button>
@@ -441,6 +587,16 @@
         onclick={() => (importOpen = true)}
       >
         <Icon name="plug" size={12} /> Import
+      </button>
+      <button
+        class="btn"
+        title="Add a Kafka cluster to Message Brokers"
+        onclick={() => {
+          editingCluster = null;
+          clusterFormOpen = true;
+        }}
+      >
+        <Icon name="box" size={12} /> New Cluster
       </button>
       <button
         class="btn primary"
@@ -456,11 +612,11 @@
 
   {#if loading}
     <Skeleton rows={4} height={40} />
-  {:else if conns.length === 0 && sections.length === 0}
+  {:else if conns.length === 0 && brokers.clusters.length === 0 && sections.length === 0}
     <EmptyState
       icon="plug"
       title="No connections yet"
-      body="Create profiles for ssh, mysql, redis, mongodb, clickhouse or any custom CLI. Secrets go to the Keychain; opening a profile drops you into a live terminal."
+      body="Create profiles for ssh, mysql, postgres, redis, mongodb, clickhouse, Kafka clusters or any custom CLI. Secrets go to the Keychain; open a DB profile in the workbench, a cluster in Message Brokers, or anything as a live terminal."
       actionLabel="New Connection"
       onaction={() => {
         editing = null;
@@ -468,13 +624,13 @@
       }}
     />
   {:else}
-    <!-- Search across all connections (flat results when active). -->
+    <!-- Search across all rows (flat results when active). -->
     <div class="conn-search">
       <Icon name="search" size={13} />
       <input
         class="conn-search-input"
         type="text"
-        placeholder="Search connections — name, host, type, or section…"
+        placeholder="Search — name, host, type, or section…"
         aria-label="Search connections"
         bind:value={search}
       />
@@ -485,25 +641,44 @@
       {/if}
     </div>
 
+    <!-- Type filter — single-select; composes with search (AND). -->
+    <div class="filter-chips" role="group" aria-label="Filter by type">
+      {#each FILTER_CHIPS as chip (chip.id)}
+        <button
+          class="filter-chip"
+          class:on={filterKind === chip.id}
+          data-testid={`connhub-filter-${chip.id}`}
+          aria-pressed={filterKind === chip.id}
+          onclick={() => setFilter(chip.id)}
+        >
+          {chip.label}
+        </button>
+      {/each}
+    </div>
+
     {#if search.trim()}
       <div class="tree">
         <div class="section-head plain">
           <span class="caret-spacer"></span>
           <span class="section-name grow">Results</span>
-          <span class="count">{searchResults.length}</span>
+          <span class="count">{searchCount}</span>
         </div>
-        {#if searchResults.length === 0}
-          <div class="search-empty">No connections match “{search.trim()}”.</div>
+        {#if searchCount === 0}
+          <div class="search-empty">Nothing matches “{search.trim()}”.</div>
         {:else}
-          {#each searchResults as c (c.id)}
+          {#each searchResults.conns as c (c.id)}
             {@render connRow(c, 1)}
+          {/each}
+          {#each searchResults.clusters as cl (cl.id)}
+            {@render clusterRow(cl, 1)}
           {/each}
         {/if}
       </div>
     {:else}
     <div class="tree">
       <!-- Recent: pinned first, then most-recently-opened, capped at 6. Only
-           shown when there is at least one pinned or previously-opened connection. -->
+           shown when there is at least one pinned or previously-opened connection
+           matching the active filter. -->
       {#if recent.length > 0}
         <div class="section-head plain">
           <span class="caret-spacer"></span>
@@ -523,23 +698,28 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="section-head plain"
-        class:drop-target={draggedConnId || draggedSectionId}
+        class:drop-target={draggedConnId || draggedClusterId || draggedSectionId}
         ondragover={(e) => {
-          if (draggedConnId || draggedSectionId) e.preventDefault();
+          if (draggedConnId || draggedClusterId || draggedSectionId) e.preventDefault();
         }}
         ondrop={(e) => {
           e.preventDefault();
           onRootDrop();
         }}
-        title="Connections with no section (drop here to remove from a section / make a section top-level)"
+        title="Rows with no section (drop here to remove from a section / make a section top-level)"
       >
         <span class="caret-spacer"></span>
         <span class="section-name grow">Ungrouped</span>
-        {#if ungrouped.length > 0}<span class="count">{ungrouped.length}</span>{/if}
+        {#if ungroupedMatchCount > 0}<span class="count">{ungroupedMatchCount}</span>{/if}
       </div>
-      {#each ungrouped as c (c.id)}
+      {#each ungrouped.filter(connMatchesFilter) as c (c.id)}
         {@render connRow(c, 1)}
       {/each}
+      {#if clusterMatchesFilter()}
+        {#each ungroupedClusters as cl (cl.id)}
+          {@render clusterRow(cl, 1)}
+        {/each}
+      {/if}
     </div>
     {/if}
   {/if}
@@ -552,49 +732,58 @@
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
   {@const isOpen = !collapsed[node.sec.id]}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="section-head"
-    class:drop-target={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedConnId}
-    style="padding-left: {depth * 16 + 6}px"
-    draggable="true"
-    ondragstart={(e) => {
-      draggedSectionId = node.sec.id;
-      e.stopPropagation();
-    }}
-    ondragend={() => (draggedSectionId = null)}
-    ondragover={(e) => {
-      if (draggedConnId || (draggedSectionId && draggedSectionId !== node.sec.id)) e.preventDefault();
-    }}
-    ondrop={(e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      onSectionDrop(node.sec.id);
-    }}
-  >
-    <button class="caret" onclick={() => toggleCollapse(node.sec.id)} aria-label="Toggle section">
-      <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-    </button>
-    <Icon name="folder" size={13} />
-    <span class="section-name grow ellipsis">{node.sec.name}</span>
-    <span class="count">{node.items.length}</span>
-    <button class="icon-btn" title="Add sub-section" onclick={() => createSection(node.sec.id)}>
-      <Icon name="plus" size={13} />
-    </button>
-    <button class="icon-btn" title="Rename section" onclick={() => renameSection(node.sec)}>
-      <Icon name="edit" size={13} />
-    </button>
-    <button class="icon-btn" title="Delete section" onclick={() => deleteSection(node.sec)}>
-      <Icon name="trash" size={13} />
-    </button>
-  </div>
-  {#if isOpen}
-    {#each node.items as c (c.id)}
-      {@render connRow(c, depth + 1)}
-    {/each}
-    {#each node.children as child (child.sec.id)}
-      {@render sectionNode(child, depth + 1)}
-    {/each}
+  {@const matchCount = nodeMatchCount(node)}
+  <!-- While a type filter is active, sections with no matching descendant vanish. -->
+  {#if !filtering || matchCount > 0}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="section-head"
+      class:drop-target={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedConnId || draggedClusterId}
+      style="padding-left: {depth * 16 + 6}px"
+      draggable="true"
+      ondragstart={(e) => {
+        draggedSectionId = node.sec.id;
+        e.stopPropagation();
+      }}
+      ondragend={() => (draggedSectionId = null)}
+      ondragover={(e) => {
+        if (draggedConnId || draggedClusterId || (draggedSectionId && draggedSectionId !== node.sec.id)) e.preventDefault();
+      }}
+      ondrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onSectionDrop(node.sec.id);
+      }}
+    >
+      <button class="caret" onclick={() => toggleCollapse(node.sec.id)} aria-label="Toggle section">
+        <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+      </button>
+      <Icon name="folder" size={13} />
+      <span class="section-name grow ellipsis">{node.sec.name}</span>
+      <span class="count">{matchCount}</span>
+      <button class="icon-btn" title="Add sub-section" onclick={() => createSection(node.sec.id)}>
+        <Icon name="plus" size={13} />
+      </button>
+      <button class="icon-btn" title="Rename section" onclick={() => renameSection(node.sec)}>
+        <Icon name="edit" size={13} />
+      </button>
+      <button class="icon-btn" title="Delete section" onclick={() => deleteSection(node.sec)}>
+        <Icon name="trash" size={13} />
+      </button>
+    </div>
+    {#if isOpen}
+      {#each node.items.filter(connMatchesFilter) as c (c.id)}
+        {@render connRow(c, depth + 1)}
+      {/each}
+      {#if clusterMatchesFilter()}
+        {#each node.clusters as cl (cl.id)}
+          {@render clusterRow(cl, depth + 1)}
+        {/each}
+      {/if}
+      {#each node.children as child (child.sec.id)}
+        {@render sectionNode(child, depth + 1)}
+      {/each}
+    {/if}
   {/if}
 {/snippet}
 
@@ -605,6 +794,7 @@
     class="conn-row"
     class:dragging={draggedConnId === c.id}
     style="padding-left: {depth * 16 + 8}px"
+    data-testid="conn-row"
     draggable="true"
     ondragstart={(e) => {
       draggedConnId = c.id;
@@ -612,10 +802,12 @@
     }}
     ondragend={() => (draggedConnId = null)}
     ondblclick={(e) => {
-      // Double-click the row to open the session — but not when the dblclick
-      // lands on one of the action buttons.
+      // Double-click the row to open it — DB engines land in the workbench, the
+      // rest attach a terminal session. Not when the dblclick lands on a button.
       if ((e.target as HTMLElement).closest('button')) return;
-      if (!opening[c.id]) void open(c);
+      if (opening[c.id]) return;
+      if (isDbKind(c.kind)) void openDb(c);
+      else void open(c);
     }}
     title={c.first_command ? `${c.name} · ▸ ${c.first_command} — double-click to open` : `${c.name} — double-click to open`}
   >
@@ -704,36 +896,54 @@
     <!-- Actions strip. `display:contents` on desktop (no visual change); on phone
          it becomes its own wrapping row so every action stays reachable. -->
     <div class="conn-actions">
-    <!-- Open as a session attached to a workspace; the caret picks which one. -->
-    <div class="open-split">
-      <button class="btn small primary open-main" disabled={opening[c.id]} onclick={() => open(c)}>
+    {#if isDbKind(c.kind)}
+      <!-- DB engine: primary Open goes to the Database workbench; the terminal
+           client is a secondary action. -->
+      <button class="btn small primary open-main-solo" disabled={opening[c.id]} onclick={() => openDb(c)} title="Open in the Database workbench">
         <Icon name="play" size={11} />
         {opening[c.id] ? 'Opening…' : 'Open'}
       </button>
       <button
-        class="btn small primary open-caret"
-        title="Open in a specific workspace…"
-        aria-label="Open in workspace"
+        class="btn small icon-only"
+        title="Open terminal client — attach a DB CLI as a terminal session"
+        aria-label="Open terminal client"
         disabled={opening[c.id]}
-        onclick={(e) => {
-          e.stopPropagation();
-          openMenuFor = openMenuFor === c.id ? null : c.id;
-        }}
+        onclick={() => open(c)}
       >
-        <Icon name="chevronDown" size={11} />
+        <Icon name="terminal" size={12} />
       </button>
-      {#if openMenuFor === c.id}
-        <div class="open-menu">
-          <div class="open-menu-title">Attach session to…</div>
-          {#each ws.workspaces as w (w.id)}
-            <button class="open-menu-item" onclick={() => open(c, w.id)}>
-              <span class="ellipsis">{w.name}</span>
-              {#if w.id === ws.currentId}<span class="cur">current</span>{/if}
-            </button>
-          {/each}
-        </div>
-      {/if}
-    </div>
+    {:else}
+      <!-- Open as a session attached to a workspace; the caret picks which one. -->
+      <div class="open-split">
+        <button class="btn small primary open-main" disabled={opening[c.id]} onclick={() => open(c)}>
+          <Icon name="play" size={11} />
+          {opening[c.id] ? 'Opening…' : 'Open'}
+        </button>
+        <button
+          class="btn small primary open-caret"
+          title="Open in a specific workspace…"
+          aria-label="Open in workspace"
+          disabled={opening[c.id]}
+          onclick={(e) => {
+            e.stopPropagation();
+            openMenuFor = openMenuFor === c.id ? null : c.id;
+          }}
+        >
+          <Icon name="chevronDown" size={11} />
+        </button>
+        {#if openMenuFor === c.id}
+          <div class="open-menu">
+            <div class="open-menu-title">Attach session to…</div>
+            {#each ws.workspaces as w (w.id)}
+              <button class="open-menu-item" onclick={() => open(c, w.id)}>
+                <span class="ellipsis">{w.name}</span>
+                {#if w.id === ws.currentId}<span class="cur">current</span>{/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
     <button
       class="btn small icon-only"
       title="Open beside — adds this terminal as a split pane next to the current session"
@@ -780,13 +990,71 @@
   </div>
 {/snippet}
 
+{#snippet clusterRow(cl: BrokerCluster, depth: number)}
+  <!-- A message-broker cluster filed into the shared tree. Opening it jumps to
+       Message Brokers; drag it to file it like any other row. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="conn-row cluster-row"
+    class:dragging={draggedClusterId === cl.id}
+    style="padding-left: {depth * 16 + 8}px"
+    data-testid="cluster-row"
+    draggable="true"
+    ondragstart={(e) => {
+      draggedClusterId = cl.id;
+      e.stopPropagation();
+    }}
+    ondragend={() => (draggedClusterId = null)}
+    ondblclick={(e) => {
+      if ((e.target as HTMLElement).closest('button')) return;
+      openCluster(cl);
+    }}
+    title={`${cl.name} — double-click to open in Message Brokers`}
+  >
+    <div class="conn-main">
+      <span
+        class="conn-dot cluster-dot"
+        style={cl.color ? `background:color-mix(in srgb, ${cl.color} 16%, transparent);color:${cl.color}` : ''}
+      >
+        <Icon name="box" size={13} />
+      </span>
+      <span class="conn-name ellipsis">{cl.name}</span>
+      <span class="kind-badge" title="Kafka cluster">kafka</span>
+      {#if cl.environment === 'prod'}
+        <span class="env-chip prod" title="Production">PROD</span>
+      {:else if cl.read_only}
+        <span class="env-chip ro" title="Read-only">RO</span>
+      {:else if cl.environment === 'staging'}
+        <span class="env-chip stg" title="Staging">STG</span>
+      {/if}
+      <span class="conn-desc mono ellipsis">{cl.bootstrap_servers}</span>
+      <span class="grow"></span>
+    </div>
+    <div class="conn-actions">
+      <button class="btn small primary open-main-solo" onclick={() => openCluster(cl)} title="Open in Message Brokers">
+        <Icon name="play" size={11} /> Open
+      </button>
+      <button class="icon-btn" title="Edit cluster" onclick={() => editCluster(cl)}>
+        <Icon name="edit" size={13} />
+      </button>
+      <button class="icon-btn" title="Remove cluster" onclick={() => removeCluster(cl)}>
+        <Icon name="trash" size={13} />
+      </button>
+    </div>
+  </div>
+{/snippet}
+
 {#if formOpen}
   <ConnectionForm
     existing={editing}
-    kinds={[...NON_DB_KINDS]}
+    kinds={ALL_KINDS}
     onclose={() => (formOpen = false)}
     onsaved={onSaved}
   />
+{/if}
+
+{#if clusterFormOpen}
+  <ClusterForm cluster={editingCluster} onclose={() => (clusterFormOpen = false)} />
 {/if}
 
 {#if sftpFor}
@@ -849,6 +1117,49 @@
     font-size: 13px;
     color: var(--text-dim);
     font-style: italic;
+  }
+  /* Type filter chips — single-select row under the search box. */
+  .filter-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .filter-chip {
+    height: 26px;
+    padding: 0 11px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 130ms ease-out;
+  }
+  .filter-chip:hover {
+    color: var(--text);
+  }
+  .filter-chip.on {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent);
+    font-weight: 500;
+  }
+  /* Small type badge on cluster rows (mirrors the row identity line). */
+  .kind-badge {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+  }
+  .cluster-dot {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
   }
   .tree {
     display: flex;
@@ -1164,9 +1475,14 @@
     }
     .header-actions {
       width: 100%;
+      /* Four actions (New Section / Import / New Cluster / New Connection) can't
+         shrink below their label on a narrow phone — wrap them into rows (two per
+         line) instead of letting one jut past the viewport edge. */
+      flex-wrap: wrap;
     }
     .header-actions :global(.btn) {
-      flex: 1;
+      flex: 1 1 45%;
+      min-width: 0;
       min-height: 38px;
     }
 

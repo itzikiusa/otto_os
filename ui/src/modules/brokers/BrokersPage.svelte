@@ -5,7 +5,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { BrokerCluster, BrokerClusterSection, TestClusterResp } from '../../lib/api/types';
+  import type { BrokerCluster, ConnectionSection, TestClusterResp } from '../../lib/api/types';
   import ClusterForm from './ClusterForm.svelte';
   import OverviewTab from './OverviewTab.svelte';
   import TopicsTab from './TopicsTab.svelte';
@@ -107,7 +107,7 @@
 
   // ---- sidebar sections (grouping tree) ------------------------------------
   interface TreeNode {
-    sec: BrokerClusterSection;
+    sec: ConnectionSection;
     items: BrokerCluster[];
     children: TreeNode[];
   }
@@ -160,7 +160,7 @@
     }
   }
 
-  async function renameSec(sec: BrokerClusterSection): Promise<void> {
+  async function renameSec(sec: ConnectionSection): Promise<void> {
     const name = await confirmer.promptText('Rename section', {
       title: 'Rename section',
       confirmLabel: 'Rename',
@@ -174,7 +174,7 @@
     }
   }
 
-  async function delSec(sec: BrokerClusterSection): Promise<void> {
+  async function delSec(sec: ConnectionSection): Promise<void> {
     if (
       !(await confirmer.ask(
         `Delete section “${sec.name}”? Sub-sections are removed too and their clusters become ungrouped.`,

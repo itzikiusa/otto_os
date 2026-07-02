@@ -119,7 +119,6 @@ async fn build_app() -> (Router, Id) {
 
     let svc = Arc::new(BrokersService::new(
         otto_state::BrokerClustersRepo::new(pool.clone()),
-        otto_state::BrokerClusterSectionsRepo::new(pool),
         Arc::new(MemSecrets::default()),
         None,
     ));

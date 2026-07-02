@@ -46,12 +46,18 @@ export function handleMenu(id: string): void {
   }
 }
 
-/** Subscribe to native menu events (Tauri only). Returns an unlisten fn. */
+/** Subscribe to native menu events (Tauri only). Returns an unlisten fn.
+ *  Listens on THIS webview window (not globally): the shell emits menu ids to
+ *  the focused window only, so Cmd+W/Cmd+T act on one window — a global
+ *  listener would receive targeted events for every window and re-broadcast
+ *  the action (multi-window). */
 export async function attachMenuBridge(): Promise<() => void> {
   if (!('__TAURI_INTERNALS__' in window)) return () => {};
   try {
-    const { listen } = await import('@tauri-apps/api/event');
-    return await listen<string>('otto://menu', (e) => handleMenu(e.payload));
+    const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    return await getCurrentWebviewWindow().listen<string>('otto://menu', (e) =>
+      handleMenu(e.payload),
+    );
   } catch {
     return () => {};
   }

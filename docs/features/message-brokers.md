@@ -37,7 +37,7 @@ tab in a tabstrip, so you can flip between clusters without losing context.
 | Schema Registry client | `crates/otto-brokers/src/schema_registry.rs` |
 | Metrics (throughput + Prometheus scrape) | `crates/otto-brokers/src/metrics.rs` |
 | UI module | `ui/src/modules/brokers/` (`BrokersPage`, `ClusterForm`, `TopicsTab`, `TopicDetail`, `GroupsTab`, `SchemaTab`, `OverviewTab`, `ReplayPanel`, `LagAlertsPanel`, …) |
-| Persistence | SQLite migrations `0040_brokers`, `0047_broker_ssh`, `0048_broker_cluster_sections`, `0052_broker_audit`, `0055_broker_ops` |
+| Persistence | SQLite migrations `0040_brokers`, `0047_broker_ssh`, `0048_broker_cluster_sections`, `0052_broker_audit`, `0055_broker_ops`, `0095_unified_connection_sections` (cluster folders now live in the shared `connection_sections` tree — see the unified Connections hub) |
 | Secrets | macOS Keychain refs `broker-{id}` (SASL) / `broker-sr-{id}` (Schema Registry) |
 
 ### Architecture at a glance
@@ -145,7 +145,12 @@ edit never silently disarms the guard.
 ## 3. The sidebar: sections, multi-tab, drag-and-drop
 
 The sidebar groups cluster profiles into **sections** (folders) that nest into a
-tree. Clusters that aren't filed appear under **Ungrouped**.
+tree. Clusters that aren't filed appear under **Ungrouped**. Since the unified
+Connections hub, this is the SAME section tree the Connections and Database
+pages use (`/workspaces/{id}/connection-sections`; migration `0095` merged the
+old broker-only folders in, ids preserved) — so a folder created here shows up
+on the Connections page and vice versa, and clusters can be managed from either
+place.
 
 - **New section** — the folder button on the sidebar header (or right-click a
   section → *New sub-section*).
