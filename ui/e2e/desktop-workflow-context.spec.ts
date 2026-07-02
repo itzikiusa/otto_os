@@ -237,6 +237,50 @@ test('review_run succeeds on a master-only repo — the exit-128 regression', as
   expect(repos[0].base).toBe('master');
 });
 
+test('two declared repos → review aggregates both → git_pr drafts one PR per repo', async () => {
+  // Two sequential stub reviews (~30s each) + two PR-draft agent turns.
+  test.setTimeout(240_000);
+  const a = await seedMasterOnlyRepo();
+  const b = await seedGitRepo(ctx, base, ws);
+  // The second repo needs uncommitted changes too, or its review diff is
+  // empty and the PR draft skips it.
+  writeFileSync(join(b.dir, 'file_00.txt'), 'changed for e2e\n');
+
+  const wfId = await createWorkflow(
+    'E2E Multi Repo PR',
+    [
+      node('trigger', 'manual_trigger'),
+      node('review', 'review_run', {
+        await: true,
+        timeout_s: 120,
+        providers: ['claude'],
+        lenses: ['correctness-review'],
+      }),
+      node('pr', 'git_pr', { open: false }),
+    ],
+    [edge('trigger', 'review'), edge('review', 'pr')],
+  );
+  const run = await runToCompletion(
+    wfId,
+    {
+      repos: [
+        { repo: a.dir, type: 'branch', name: 'master' },
+        { repo: b.dir, type: 'worktree', name: b.dir },
+      ],
+    },
+    200_000,
+  );
+  expect(run.status, JSON.stringify(run.nodes, null, 2)).toBe('success');
+  // The aggregate review carries BOTH references…
+  const review = nodeState(run, 'review').output;
+  expect(review.reviews?.length).toBe(2);
+  expect(review.repos?.length).toBe(2);
+  // …and git_pr fans out one draft per repo (not just the first-mirrored one).
+  const pr = nodeState(run, 'pr').output;
+  expect(pr.prs?.length, JSON.stringify(pr, null, 2)).toBe(2);
+  expect(pr.opened).toBe(false);
+});
+
 test('loop iterations leave step{N}-{name}-iter{X} files', async () => {
   const wfId = await createWorkflow(
     'E2E Context Loop',

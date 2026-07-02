@@ -2483,9 +2483,19 @@ async fn execute_node(
                 || input.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
                 || input.get("worktree").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
                 || input.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some();
-            let registry: Vec<crate::workflow_context::RepoEntry> = env
-                .files
-                .repos()
+            let declared = env.files.repos();
+            // EVERY declared entry failed to resolve → fail with the reasons.
+            // Falling through to the run-cwd path here would review whatever
+            // happens to be checked out — and an empty diff there reads as a
+            // false-green "score 100" on a run whose target never resolved.
+            if !explicit {
+                if let Some(msg) = crate::workflow_context::all_declared_errored(&declared) {
+                    return Err(otto_core::Error::Invalid(format!(
+                        "review_run: no declared repos[] entry resolved — {msg}"
+                    )));
+                }
+            }
+            let registry: Vec<crate::workflow_context::RepoEntry> = declared
                 .into_iter()
                 .filter(|e| e.error.is_none() && e.repo_id.is_some() && e.worktree.is_some())
                 .collect();
@@ -2824,6 +2834,23 @@ async fn execute_node(
                     .all(|o| o.get("passed").and_then(Value::as_bool).unwrap_or(false));
                 out.insert("score".into(), json!(agg_score));
                 out.insert("passed".into(), json!(agg_passed));
+                // EVERY reviewed reference, in the `repos[]` shape
+                // collect_pr_targets consumes — without this a downstream
+                // git_pr would see only the first repo mirrored at top level
+                // and never open the other entries' PRs.
+                let repo_targets: Vec<Value> = outs
+                    .iter()
+                    .map(|o| {
+                        let mut m = serde_json::Map::new();
+                        for k in ["repo_id", "worktree", "base"] {
+                            if let Some(v) = o.get(k) {
+                                m.insert(k.to_string(), v.clone());
+                            }
+                        }
+                        Value::Object(m)
+                    })
+                    .collect();
+                out.insert("repos".into(), Value::Array(repo_targets));
                 out.insert(
                     "reviews".into(),
                     Value::Array(outs.into_iter().map(Value::Object).collect()),
@@ -3069,9 +3096,15 @@ async fn execute_node(
             // resolves that repo's default branch.
             let mut targets = collect_pr_targets(p, &input);
             if targets.is_empty() {
-                targets = env
-                    .files
-                    .repos()
+                let declared = env.files.repos();
+                // Same guard as review_run: every declaration errored → fail
+                // with the reasons rather than silently PR-ing the run cwd.
+                if let Some(msg) = crate::workflow_context::all_declared_errored(&declared) {
+                    return Err(otto_core::Error::Invalid(format!(
+                        "git_pr: no declared repos[] entry resolved — {msg}"
+                    )));
+                }
+                targets = declared
                     .iter()
                     .filter(|e| e.error.is_none() && e.repo_id.is_some())
                     .map(crate::workflow_context::entry_to_target)
@@ -3609,23 +3642,31 @@ fn node_display_name(node: &WorkflowNode) -> &str {
     }
 }
 
-/// Merge a node output's published repo reference (`repo_id` + optional
-/// `base`/`worktree`) into the run's repos registry (`repos.json`) — the
-/// "each step adds to the repos file" contract. Only the explicit `worktree`
+/// Merge a node output's published repo reference(s) into the run's repos
+/// registry (`repos.json`) — the "each step adds to the repos file" contract:
+/// the top-level `repo_id`+`base`/`worktree`, plus every entry of a published
+/// `repos[]` array (a multi-repo review/loop). Only the explicit `worktree`
 /// key counts (a bare `working_directory` is too ambient to be authoritative).
 fn merge_published_refs(files: &crate::workflow_context::RunContextFiles, out: &Value) {
-    let Some(rid) = out
-        .get("repo_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-    else {
-        return;
+    let merge_one = |v: &Value| {
+        if let Some(rid) = v
+            .get("repo_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            files.merge_published(
+                rid,
+                v.get("base").and_then(Value::as_str),
+                v.get("worktree").and_then(Value::as_str),
+            );
+        }
     };
-    files.merge_published(
-        rid,
-        out.get("base").and_then(Value::as_str),
-        out.get("worktree").and_then(Value::as_str),
-    );
+    merge_one(out);
+    if let Some(arr) = out.get("repos").and_then(Value::as_array) {
+        for v in arr {
+            merge_one(v);
+        }
+    }
 }
 
 /// Seed the run input from the first VALID declared repo entry — explicit

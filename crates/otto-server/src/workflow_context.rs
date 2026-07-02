@@ -92,6 +92,24 @@ pub(crate) fn parse_repo_entries(v: &Value) -> Vec<RepoEntry> {
     out
 }
 
+/// When repos WERE declared but not one of them resolved, git-aware steps
+/// must FAIL with the per-entry reasons — falling back to "whatever is
+/// checked out at the run cwd" would silently review/PR the wrong target
+/// (and an empty diff there reads as a false-green). `None` ⇒ no declaration
+/// at all (legacy fallback is fine) or at least one valid entry.
+pub(crate) fn all_declared_errored(declared: &[RepoEntry]) -> Option<String> {
+    if declared.is_empty() || declared.iter().any(|e| e.error.is_none()) {
+        return None;
+    }
+    Some(
+        declared
+            .iter()
+            .filter_map(|e| e.error.as_ref().map(|err| format!("{}: {err}", e.repo)))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
 /// `{repo_id, worktree, base}` — the reference shape `collect_pr_targets`
 /// and the loop's ref harvest already consume; nulls omitted.
 pub(crate) fn entry_to_target(e: &RepoEntry) -> Value {
@@ -407,7 +425,8 @@ impl RunContextFiles {
         std::fs::metadata(p).ok()?.modified().ok()
     }
 
-    /// Sorted `step*.md` file names present in the dir (what an agent can read).
+    /// `step*.md` file names present in the dir (what an agent can read),
+    /// sorted by step NUMBER (lexicographic would put step10 before step2).
     pub fn list_step_mds(&self) -> Vec<String> {
         let Some(dir) = &self.dir else { return vec![] };
         let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
@@ -416,7 +435,14 @@ impl RunContextFiles {
             .filter_map(|e| e.file_name().into_string().ok())
             .filter(|n| n.starts_with("step") && n.ends_with(".md"))
             .collect();
-        out.sort();
+        out.sort_by_key(|n| {
+            let num: u64 = n
+                .strip_prefix("step")
+                .and_then(|r| r.split('-').next())
+                .and_then(|d| d.parse().ok())
+                .unwrap_or(u64::MAX);
+            (num, n.clone())
+        });
         out
     }
 
@@ -668,6 +694,51 @@ mod tests {
         let raw = std::fs::read_to_string(td.path().join("workflow-context/r3/step1-c.output.json")).unwrap();
         assert!(raw.len() <= OUTPUT_JSON_CAP + 1024);
         assert!(raw.contains("truncated"), "cap leaves an explicit marker");
+    }
+
+    #[test]
+    fn all_declared_errored_guards_only_total_failure() {
+        let ok = RepoEntry {
+            repo: "good".into(),
+            repo_id: Some("G".into()),
+            kind: "branch".into(),
+            name: "feat".into(),
+            source: None,
+            worktree: Some("/w".into()),
+            base: None,
+            error: None,
+        };
+        let bad = RepoEntry {
+            repo: "typo".into(),
+            repo_id: None,
+            kind: "branch".into(),
+            name: "feat/typo".into(),
+            source: None,
+            worktree: None,
+            base: None,
+            error: Some("branch 'feat/typo' is not checked out anywhere in typo".into()),
+        };
+        // No declarations at all → legacy fallback allowed.
+        assert!(all_declared_errored(&[]).is_none());
+        // A valid entry among errors → proceed on the valid ones.
+        assert!(all_declared_errored(&[bad.clone(), ok]).is_none());
+        // EVERY declaration errored → the actionable message, never a silent
+        // fallback to the run cwd.
+        let msg = all_declared_errored(&[bad]).unwrap();
+        assert!(msg.contains("typo") && msg.contains("not checked out"), "{msg}");
+    }
+
+    #[test]
+    fn list_step_mds_sorts_numerically() {
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "r5");
+        for n in ["step10-late", "step2-early", "step1-first"] {
+            f.persist_step(n, "log", "x", &json!({}), &[], None, None);
+        }
+        assert_eq!(
+            f.list_step_mds(),
+            vec!["step1-first.md", "step2-early.md", "step10-late.md"]
+        );
     }
 
     #[test]
