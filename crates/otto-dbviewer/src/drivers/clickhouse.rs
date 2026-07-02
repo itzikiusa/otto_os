@@ -27,7 +27,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
-use crate::export::{open_sink, ExportCounts, ExportFormat};
+use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
@@ -678,12 +678,13 @@ impl ClickhouseDriver {
 /// inline CA for custom-CA TLS. Never called directly by the driver methods —
 /// they go through [`ClickhouseDriver::client`] for caching.
 fn build_client(cfg: &ResolvedConfig) -> Result<reqwest::Client> {
-    // Bound both connection establishment (TCP+TLS) and the overall request so a
-    // misconfigured endpoint (e.g. HTTPS against a plain-HTTP port, or the native
-    // 9000/9440 port) fails fast with a clear error instead of hanging forever.
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60));
+    // Bound connection establishment (TCP+TLS) so a misconfigured endpoint (e.g.
+    // HTTPS against a plain-HTTP port, or the native 9000/9440 port) fails fast
+    // with a clear error instead of hanging forever. The per-request wall-clock
+    // timeout is set on each `post`/`post_stream` call instead of a blanket
+    // client-wide cap: the old 60s ceiling truncated long queries the user
+    // explicitly allowed via `timeout_ms`, and killed >60s streaming exports (§2.4).
+    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
     // Tunnel case: the URL host is the real hostname (for SNI/cert), but the TCP
     // must go to the local forward — map it there. (reqwest uses the URL port
     // with the overridden IP, so the forward's local port is honoured.)
@@ -744,6 +745,15 @@ impl Conn {
             // only positive values reach here.
             req = req.query(&[("max_execution_time", secs.to_string().as_str())]);
         }
+        // Per-request client-side wall clock (replaces the old blanket 60s client
+        // timeout, §2.4): honour the user's per-statement timeout with a few
+        // seconds of grace so ClickHouse's own `max_execution_time` fires first
+        // (cleaner server error); otherwise the 60s default.
+        let per_request = self
+            .timeout_secs
+            .map(|s| Duration::from_secs(s.saturating_add(5)))
+            .unwrap_or(Duration::from_secs(60));
+        req = req.timeout(per_request);
         let resp = req.body(body).send().await.map_err(req_err)?;
         let status = resp.status();
         let text = resp.text().await.map_err(types::upstream)?;
@@ -769,6 +779,10 @@ impl Conn {
         if let Some(qid) = &self.query_id {
             req = req.query(&[("query_id", qid.as_str())]);
         }
+        // The export stream owns its own progress/cancel semantics; an effectively
+        // unlimited (24h) per-request timeout keeps the old blanket 60s client cap
+        // from truncating a long export mid-stream (§2.4).
+        req = req.timeout(Duration::from_secs(24 * 60 * 60));
         let resp = req.body(body).send().await.map_err(req_err)?;
         if !resp.status().is_success() {
             let text = resp.text().await.map_err(types::upstream)?;
@@ -1568,14 +1582,14 @@ impl Driver for ClickhouseDriver {
     /// array format has no single-pass CH FORMAT, so it falls back to the
     /// daemon-side row formatter (logged); on the native transport we stream
     /// result blocks and format rows ourselves.
-    async fn export_to_path(
+    async fn export_to_writer(
         &self,
         cfg: &ResolvedConfig,
         statement: &str,
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        dest: &std::path::Path,
+        w: Box<dyn std::io::Write + Send>,
     ) -> Result<ExportCounts> {
         let sql = statement.trim();
         if sql.is_empty() {
@@ -1590,7 +1604,7 @@ impl Driver for ClickhouseDriver {
         if transport_for(cfg) == Transport::Http {
             if let Some(ch_format) = format.clickhouse_format() {
                 return self
-                    .export_http_format(cfg, sql, active_db, ch_format, max_rows, format, dest)
+                    .export_http_format(cfg, sql, active_db, ch_format, max_rows, format, w)
                     .await;
             }
             // JSON-array format: no single CH FORMAT — fall back to the buffered
@@ -1602,7 +1616,7 @@ impl Driver for ClickhouseDriver {
             let resp = self
                 .query_rows_db(cfg, &capped_sql(sql, max_rows), active_db, None)
                 .await?;
-            return write_rawrows(dest, format, &resp, max_rows);
+            return write_rawrows(w, format, &resp, max_rows);
         }
 
         // Native transport: stream result blocks (already done by native_query,
@@ -1614,13 +1628,13 @@ impl Driver for ClickhouseDriver {
              formatting (no FORMAT streaming); large exports may use more memory than HTTP"
         );
         let resp = self.native_query(cfg, &capped_sql(sql, max_rows)).await?;
-        write_rawrows(dest, format, &resp, max_rows)
+        write_rawrows(w, format, &resp, max_rows)
     }
 }
 
 impl ClickhouseDriver {
     /// The HTTP `FORMAT`-streaming export: issue `<sql> FORMAT <ch_format>` and
-    /// splice the response body to the file chunk-by-chunk. Row count isn't known
+    /// splice the response body through `w` chunk-by-chunk. Row count isn't known
     /// from the streamed bytes, so it's reported as 0 (bytes are exact).
     #[allow(clippy::too_many_arguments)]
     async fn export_http_format(
@@ -1631,7 +1645,7 @@ impl ClickhouseDriver {
         ch_format: &str,
         max_rows: Option<usize>,
         format: ExportFormat,
-        dest: &std::path::Path,
+        w: Box<dyn std::io::Write + Send>,
     ) -> Result<ExportCounts> {
         use futures_util::StreamExt as _;
 
@@ -1639,8 +1653,7 @@ impl ClickhouseDriver {
         let body = format!("{}\nFORMAT {ch_format}", capped_sql(sql, max_rows));
         let resp = conn.post_stream(body).await?;
 
-        let mut sink = open_sink(dest, format)
-            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+        let mut sink = ExportSink::new(w, format);
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(req_err)?;
@@ -1662,10 +1675,10 @@ fn capped_sql(sql: &str, max_rows: Option<usize>) -> String {
     }
 }
 
-/// Write a materialised [`RawRows`] (the JSON-array fallback / native path) to the
-/// file through the row formatter, honouring `max_rows`.
+/// Write a materialised [`RawRows`] (the JSON-array fallback / native path)
+/// through the row formatter to `w`, honouring `max_rows`.
 fn write_rawrows(
-    dest: &std::path::Path,
+    w: Box<dyn std::io::Write + Send>,
     format: ExportFormat,
     resp: &RawRows,
     max_rows: Option<usize>,
@@ -1675,8 +1688,7 @@ fn write_rawrows(
         .iter()
         .map(|(name, ty)| Column::typed(name, ty))
         .collect();
-    let mut sink = open_sink(dest, format)
-        .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+    let mut sink = ExportSink::new(w, format);
     sink.write_header(&columns)
         .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
     let take = max_rows.unwrap_or(usize::MAX);

@@ -362,3 +362,43 @@ async fn clickhouse_native_e2e() {
         detail.extra
     );
 }
+
+/// Export truncation fix (spec §2.1 / R1): a full export (`max_rows: None`) must
+/// stream ALL rows, not silently cap at the interactive default (1000). Uses
+/// `numbers(5000)` so it's self-contained (no seed dependency) and asserts the
+/// exported file carries all 5000 data rows.
+#[tokio::test]
+#[ignore]
+async fn clickhouse_export_is_uncapped_over_1000_rows() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    use otto_dbviewer::export::ExportFormat;
+
+    let d = ClickhouseDriver::default();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("export.csv");
+
+    let counts = d
+        .export_to_path(
+            &cfg(),
+            "SELECT number FROM numbers(5000)",
+            None,
+            ExportFormat::CsvWithNames,
+            None, // uncapped — the whole point
+            &dest,
+        )
+        .await
+        .expect("export_to_path should stream the full result");
+
+    // CH's HTTP FORMAT path reports rows as 0 (bytes-only), so verify by counting
+    // the written data lines instead of trusting counts.rows.
+    let text = std::fs::read_to_string(&dest).expect("read export file");
+    let total_lines = text.lines().count();
+    let data_rows = total_lines.saturating_sub(1); // minus the header row
+    assert_eq!(
+        data_rows, 5000,
+        "expected 5000 data rows, got {data_rows} (bytes={})",
+        counts.bytes
+    );
+}

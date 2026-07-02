@@ -11,6 +11,13 @@ use crate::types::{
     ObjectDetail, QueryHandle, QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
 };
 
+/// Hard row ceiling for the buffered `export_to_writer` fallback (engines with no
+/// native row stream, e.g. Redis). A "full export" (`max_rows: None`) that would
+/// materialise more than this in RAM is REFUSED with a clear error rather than
+/// risking a daemon OOM — the streaming drivers (MySQL/ClickHouse/MongoDB) have
+/// no such cap because they never buffer the whole result.
+pub const BUFFERED_EXPORT_ROW_CAP: usize = 100_000;
+
 #[async_trait]
 pub trait Driver: Send + Sync {
     /// The engine this driver serves.
@@ -92,18 +99,66 @@ pub trait Driver: Send + Sync {
     /// e.g. Redis, keep nothing to clear).
     async fn invalidate_completion_cache(&self, _cfg: &ResolvedConfig) {}
 
-    /// Stream a (potentially huge) **uncapped** read result to a local file at
-    /// `dest`, in `format`, with **bounded daemon memory** — pull one row/chunk
-    /// at a time from the engine's native cursor/stream and write it straight to a
-    /// `BufWriter` on disk. `node` scopes the active database (same semantics as
-    /// `QueryRequest::node`); `max_rows`, when set, stops the stream early.
+    /// Stream a (potentially huge) **uncapped** read result to an arbitrary
+    /// writer `w`, in `format`, with **bounded daemon memory** — pull one
+    /// row/chunk at a time from the engine's native cursor/stream and write it
+    /// straight through `w`. `node` scopes the active database (same semantics as
+    /// `QueryRequest::node`); `max_rows`, when set, stops the stream early —
+    /// `None` means a genuinely uncapped export (the `/db/export` fix: the old
+    /// path substituted each driver's small default cap and silently truncated).
+    ///
+    /// `w` is provided by the caller: [`Driver::export_to_path`] passes a buffered
+    /// `File`; the HTTP `/db/export` handler passes a channel-backed writer so the
+    /// bytes stream straight to the browser without ever buffering the full result.
     ///
     /// Engines that can stream (MySQL/ClickHouse/MongoDB) **override** this. The
     /// trait default is a **last-resort buffering fallback**: it runs the
-    /// statement via [`Driver::run`] (which materialises the whole result in RAM)
-    /// and then writes it out. It `tracing::warn!`s so the buffering is never
-    /// silent. This default is what Redis (no row stream) uses, and a safety net
-    /// for any engine whose streaming path isn't wired yet.
+    /// statement via [`Driver::run`] (which materialises the result in RAM) and
+    /// writes it out, `tracing::warn!`ing so the buffering is never silent. To
+    /// keep that fallback from trying to hold an unbounded "full export" in RAM it
+    /// probes at [`BUFFERED_EXPORT_ROW_CAP`]` + 1` and REFUSES a larger result
+    /// with a clear error. This default is what Redis (no row stream) uses.
+    async fn export_to_writer(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+        format: ExportFormat,
+        max_rows: Option<usize>,
+        w: Box<dyn std::io::Write + Send>,
+    ) -> Result<ExportCounts> {
+        tracing::warn!(
+            engine = self.engine().as_str(),
+            "db export: driver has no streaming path — buffering the result in memory \
+             (last-resort fallback); capped at {BUFFERED_EXPORT_ROW_CAP} rows"
+        );
+        // Probe at the cap + 1 so an unbounded export (`max_rows: None`) or an
+        // over-cap request is DETECTED rather than silently OOMing the daemon.
+        let probe_max = match max_rows {
+            Some(m) if m <= BUFFERED_EXPORT_ROW_CAP => m,
+            _ => BUFFERED_EXPORT_ROW_CAP + 1,
+        };
+        let req = QueryRequest {
+            statement: statement.to_string(),
+            max_rows: Some(probe_max),
+            node: node.map(str::to_string),
+            ..QueryRequest::default()
+        };
+        let result = self.run(cfg, &req).await?;
+        if result.rows.len() > BUFFERED_EXPORT_ROW_CAP {
+            return Err(otto_core::Error::Invalid(format!(
+                "export too large for this engine's buffered fallback (over {BUFFERED_EXPORT_ROW_CAP} \
+                 rows) — it has no streaming export path; narrow the query or add an explicit LIMIT"
+            )));
+        }
+        crate::export::write_buffered_result_to(w, format, &result)
+            .map_err(|e| otto_core::Error::Internal(format!("write export file: {e}")))
+    }
+
+    /// Convenience wrapper: stream an export to a local file at `dest`. Opens the
+    /// file behind a 64 KiB `BufWriter` and delegates to [`Driver::export_to_writer`]
+    /// — the one place export bytes are produced. Drivers override `export_to_writer`,
+    /// never this. Backs `POST /db/export-to-path`.
     async fn export_to_path(
         &self,
         cfg: &ResolvedConfig,
@@ -113,20 +168,10 @@ pub trait Driver: Send + Sync {
         max_rows: Option<usize>,
         dest: &std::path::Path,
     ) -> Result<ExportCounts> {
-        tracing::warn!(
-            engine = self.engine().as_str(),
-            "db export: driver has no streaming path — buffering the full result in memory \
-             (last-resort fallback); large exports may use significant RAM"
-        );
-        let req = QueryRequest {
-            statement: statement.to_string(),
-            max_rows,
-            node: node.map(str::to_string),
-            ..QueryRequest::default()
-        };
-        let result = self.run(cfg, &req).await?;
-        crate::export::write_buffered_result(dest, format, &result)
-            .map_err(|e| otto_core::Error::Internal(format!("write export file: {e}")))
+        let w = crate::export::open_file_sink(dest)
+            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+        self.export_to_writer(cfg, statement, node, format, max_rows, w)
+            .await
     }
 }
 
@@ -290,5 +335,126 @@ mod tests {
             *d.cancelled.lock().unwrap(),
             Some(QueryHandle::MysqlConnId(99))
         ));
+    }
+
+    // --- Export: trait-default (buffered fallback) + `export_to_path` wrapper ---
+
+    /// A `Write` that appends into a shared `Vec<u8>` so a test can inspect the
+    /// bytes the boxed writer received.
+    #[derive(Clone)]
+    struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A driver with NO streaming export override, so `export_to_writer` /
+    /// `export_to_path` exercise the trait's buffered fallback (Redis-shaped).
+    /// `run` returns `rows` two-column rows, honouring the request's `max_rows`.
+    struct BufferedExportDriver {
+        rows: usize,
+    }
+
+    #[async_trait]
+    impl Driver for BufferedExportDriver {
+        fn engine(&self) -> Engine {
+            Engine::Redis
+        }
+        fn capabilities(&self) -> Capabilities {
+            unreachable!()
+        }
+        async fn test(&self, _: &ResolvedConfig) -> Result<TestResult> {
+            unreachable!()
+        }
+        async fn schema_root(&self, _: &ResolvedConfig) -> Result<Vec<SchemaNode>> {
+            unreachable!()
+        }
+        async fn schema_children(
+            &self,
+            _: &ResolvedConfig,
+            _: &NodePath,
+            _: Option<&str>,
+        ) -> Result<Vec<SchemaNode>> {
+            unreachable!()
+        }
+        async fn object_detail(&self, _: &ResolvedConfig, _: &NodePath) -> Result<ObjectDetail> {
+            unreachable!()
+        }
+        async fn run(&self, _: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
+            let n = self.rows.min(req.max_rows.unwrap_or(self.rows));
+            let rows: Vec<Vec<serde_json::Value>> = (0..n)
+                .map(|i| vec![serde_json::json!(i as i64), serde_json::json!(format!("r{i}"))])
+                .collect();
+            Ok(QueryResult {
+                columns: vec![crate::types::Column::new("id"), crate::types::Column::new("name")],
+                rows,
+                ..QueryResult::empty()
+            })
+        }
+        // NB: no `export_to_writer` override — the buffered default is under test.
+        async fn completion(
+            &self,
+            _: &ResolvedConfig,
+            _: &CompletionContext,
+        ) -> Result<CompletionResponse> {
+            unreachable!()
+        }
+    }
+
+    /// The buffered fallback refuses a result larger than the cap (a full export
+    /// — `max_rows: None` — that would materialise too much in RAM), rather than
+    /// silently OOMing. The probe runs at cap + 1, so cap + 1 rows trips it.
+    #[tokio::test]
+    async fn default_export_to_writer_refuses_over_cap() {
+        let d = BufferedExportDriver {
+            rows: BUFFERED_EXPORT_ROW_CAP + 1,
+        };
+        let sink: Box<dyn std::io::Write + Send> = Box::new(std::io::sink());
+        let err = d
+            .export_to_writer(&cfg(), "GET *", None, ExportFormat::CsvWithNames, None, sink)
+            .await
+            .expect_err("over-cap export must be refused");
+        assert!(
+            matches!(err, otto_core::Error::Invalid(_)),
+            "expected Error::Invalid, got {err:?}"
+        );
+    }
+
+    /// The buffered fallback within the cap writes the expected bytes through the
+    /// boxed writer (golden CSV-with-names).
+    #[tokio::test]
+    async fn default_export_to_writer_writes_buffered_bytes() {
+        let d = BufferedExportDriver { rows: 3 };
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w: Box<dyn std::io::Write + Send> = Box::new(SharedWriter(buf.clone()));
+        let counts = d
+            .export_to_writer(&cfg(), "GET *", None, ExportFormat::CsvWithNames, None, w)
+            .await
+            .expect("export ok");
+        assert_eq!(counts.rows, 3);
+        let got = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert_eq!(got, "id,name\n0,r0\n1,r1\n2,r2\n");
+    }
+
+    /// `export_to_path` (the provided file wrapper) writes byte-identical output
+    /// to what `export_to_writer` produced — proving the wrapper just opens a file
+    /// and delegates.
+    #[tokio::test]
+    async fn export_to_path_wrapper_writes_identical_bytes_to_file() {
+        let d = BufferedExportDriver { rows: 3 };
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("export.csv");
+        let counts = d
+            .export_to_path(&cfg(), "GET *", None, ExportFormat::CsvWithNames, None, &dest)
+            .await
+            .expect("export_to_path ok");
+        assert_eq!(counts.rows, 3);
+        let got = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(got, "id,name\n0,r0\n1,r1\n2,r2\n");
     }
 }

@@ -23,7 +23,7 @@ use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::drivers::{mongo_parse, mongo_sql};
-use crate::export::{open_sink, ExportCounts, ExportFormat};
+use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, Column, CompletionContext, CompletionResponse, Engine, IndexDef, NodePath,
@@ -336,14 +336,14 @@ impl Driver for MongoDriver {
     /// (Mongo is schemaless and we can't pre-scan the whole result without
     /// buffering it); later documents are projected onto those columns and any
     /// extra fields are dropped. JSON / NDJSON carry each document's full shape.
-    async fn export_to_path(
+    async fn export_to_writer(
         &self,
         cfg: &ResolvedConfig,
         statement: &str,
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        dest: &std::path::Path,
+        w: Box<dyn std::io::Write + Send>,
     ) -> Result<ExportCounts> {
         let parsed = parse_command(statement.trim())?;
         if !matches!(parsed.op, MongoOp::Find | MongoOp::Aggregate) {
@@ -392,8 +392,7 @@ impl Driver for MongoDriver {
             _ => unreachable!("guarded above"),
         };
 
-        let mut sink = open_sink(dest, format)
-            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+        let mut sink = ExportSink::new(w, format);
 
         let mut columns: Vec<String> = Vec::new();
         let mut header_written = false;

@@ -21,7 +21,7 @@ use sqlx::{Column as _, Executor as _, Row, TypeInfo};
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
-use crate::export::{open_sink, ExportCounts, ExportFormat};
+use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
@@ -455,18 +455,18 @@ impl Driver for MysqlDriver {
 
     /// Streaming export: use sqlx's row CURSOR (`.fetch(&mut conn)`) so the
     /// (potentially huge) result is pulled one row at a time and written straight
-    /// to the file — daemon memory stays bounded (NOT `fetch_all`). Only
+    /// through `w` — daemon memory stays bounded (NOT `fetch_all`). Only
     /// row-returning statements are exportable; a write/DDL is rejected (the
     /// service's write-gate already blocks guarded writes, but an export of a
     /// non-read makes no sense).
-    async fn export_to_path(
+    async fn export_to_writer(
         &self,
         cfg: &ResolvedConfig,
         statement: &str,
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        dest: &std::path::Path,
+        w: Box<dyn std::io::Write + Send>,
     ) -> Result<ExportCounts> {
         use futures_util::TryStreamExt as _;
 
@@ -489,8 +489,7 @@ impl Driver for MysqlDriver {
         // A real cursor over the wire: each `try_next().await` fetches the next
         // row; nothing buffers the whole result.
         let mut rows = sqlx::query(statement).fetch(&mut *conn);
-        let mut sink = open_sink(dest, format)
-            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+        let mut sink = ExportSink::new(w, format);
 
         let mut header_written = false;
         let mut n: usize = 0;

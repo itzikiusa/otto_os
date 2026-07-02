@@ -703,12 +703,7 @@ impl DbViewerService {
     ) -> Result<(crate::export::ExportCounts, u64)> {
         // Reuse the write-gate: an export is a read; a write/DDL on a guarded
         // (production / read-only) connection is refused (no confirm path here).
-        let guard_req = QueryRequest {
-            statement: statement.to_string(),
-            node: node.map(str::to_string),
-            ..QueryRequest::default()
-        };
-        self.guard_write(conn_id, &guard_req).await?;
+        self.guard_export(conn_id, statement, node).await?;
 
         let r = self.resolve(conn_id).await?;
         let started = Instant::now();
@@ -742,6 +737,78 @@ impl DbViewerService {
             }
         }
         result.map(|counts| (counts, elapsed))
+    }
+
+    /// Streaming variant of [`Self::export_to_path`] that writes through an
+    /// arbitrary `w` instead of a local file — the HTTP `/db/export` handler
+    /// passes a channel-backed writer so bytes stream straight to the browser
+    /// without the daemon ever buffering the full result (the fix for the old
+    /// `/db/export` truncation, spec §2.1). Same write-guard, resolve, and
+    /// history semantics as `export_to_path`; returns `{rows, bytes}` + duration.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn export_to_writer(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        statement: &str,
+        node: Option<&str>,
+        format: crate::export::ExportFormat,
+        max_rows: Option<usize>,
+        w: Box<dyn std::io::Write + Send>,
+    ) -> Result<(crate::export::ExportCounts, u64)> {
+        self.guard_export(conn_id, statement, node).await?;
+
+        let r = self.resolve(conn_id).await?;
+        let started = Instant::now();
+        let result = r
+            .driver
+            .export_to_writer(&r.config, statement, node, format, max_rows, w)
+            .await;
+        let elapsed = started.elapsed().as_millis() as u64;
+
+        // Record in history (best-effort), mirroring `export_to_path`.
+        match &result {
+            Ok(counts) => {
+                let _ = self
+                    .repo
+                    .add_history(
+                        conn_id,
+                        user_id,
+                        statement,
+                        true,
+                        elapsed as i64,
+                        counts.rows as i64,
+                        None,
+                    )
+                    .await;
+            }
+            Err(e) => {
+                let _ = self
+                    .repo
+                    .add_history(conn_id, user_id, statement, false, elapsed as i64, 0, Some(&e.to_string()))
+                    .await;
+            }
+        }
+        result.map(|counts| (counts, elapsed))
+    }
+
+    /// Pre-flight the export write-guard *without* running the export — lets the
+    /// streaming `/db/export` handler reject a guarded write with a clean HTTP
+    /// error before it has committed to a 200 streaming response. (An export is a
+    /// read; a write/DDL on a guarded connection is refused, `confirm_write`
+    /// implicitly false — there is no export confirmation path.)
+    pub async fn guard_export(
+        &self,
+        conn_id: &Id,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<()> {
+        let guard_req = QueryRequest {
+            statement: statement.to_string(),
+            node: node.map(str::to_string),
+            ..QueryRequest::default()
+        };
+        self.guard_write(conn_id, &guard_req).await
     }
 
     /// Import a local file into an existing SQL table. Parses the file, builds
