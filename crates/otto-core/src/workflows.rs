@@ -244,6 +244,12 @@ pub struct WorkflowRun {
     /// The Proof Pack assembled for this run on completion, if any.
     #[serde(default)]
     pub proof_pack_id: Option<String>,
+    /// Absolute path of the run's context directory
+    /// (`<data_dir>/workflow-context/<run_id>/` — instruction brief,
+    /// `repos.json`, per-step handoff files). Derived at the API layer when
+    /// the directory exists on disk — NOT persisted; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_dir: Option<String>,
 }
 
 /// Lightweight summary of an in-flight workflow run for the "Running" sidebar

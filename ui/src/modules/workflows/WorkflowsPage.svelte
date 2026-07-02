@@ -5,6 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunSteps from './RunSteps.svelte';
+  import FileTree from '../panels/FileTree.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -1141,6 +1142,19 @@
               {/each}
             </div>
             <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} /></div>
+            {#if run.context_dir}
+              <!-- THIS run's context files (instruction brief, repos.json,
+                   per-step handoffs) — same browsable tree + viewer the agent
+                   Files panel uses, rooted at the run's own directory. -->
+              <details class="ctx-files">
+                <summary>
+                  <Icon name="folder" size={13} />
+                  <span>Context files</span>
+                  <code class="dim">{run.context_dir}</code>
+                </summary>
+                <div class="ctx-files-tree"><FileTree root={run.context_dir} /></div>
+              </details>
+            {/if}
           {/if}
 
           {#if selectedNode}
@@ -2384,6 +2398,36 @@
   }
   .run-detail {
     margin: 8px 0;
+  }
+  .ctx-files {
+    margin: 8px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-subtle, transparent);
+  }
+  .ctx-files > summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    min-width: 0;
+  }
+  .ctx-files > summary code {
+    font-size: 10.5px;
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: ltr;
+  }
+  .ctx-files-tree {
+    border-top: 1px solid var(--border);
+    max-height: 420px;
+    overflow: auto;
   }
   .tl-label {
     display: inline-flex;
