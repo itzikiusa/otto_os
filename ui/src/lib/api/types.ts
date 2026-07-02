@@ -4882,17 +4882,6 @@ export interface BrokerCluster {
   created_at: string;
 }
 
-/** A user-defined section (folder) grouping clusters in the sidebar. */
-export interface BrokerClusterSection {
-  id: Id;
-  workspace_id: Id;
-  parent_id: Id | null;
-  name: string;
-  position: number;
-  created_by: Id;
-  created_at: string;
-}
-
 export interface UpsertClusterReq {
   name: string;
   bootstrap_servers: string;

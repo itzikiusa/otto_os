@@ -32,7 +32,6 @@
   import ContextMenu from '../lib/components/ContextMenu.svelte';
   import FindInPage from '../lib/components/FindInPage.svelte';
   import { findInPage } from '../lib/findinpage.svelte';
-  import ConnectionsPage from '../modules/connections/ConnectionsPage.svelte';
   import GitPage from '../modules/git/GitPage.svelte';
   import ApiPage from '../modules/api/ApiPage.svelte';
   import DatabasePage from '../modules/database/DatabasePage.svelte';
@@ -65,6 +64,7 @@
   import { events } from '../lib/events.svelte';
   import { installKeyMap, keyContext } from '../lib/keys';
   import { attachMenuBridge, attachCloseHandler } from '../lib/menu';
+  import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
   import { registry } from '../lib/commands.svelte';
   import { api } from '../lib/api/client';
@@ -224,6 +224,7 @@
   $effect(() => {
     void ws.load();
     events.start();
+    void gcWindowKeys();
     let unlistenMenu: (() => void) | null = null;
     let unlistenClose: (() => void) | null = null;
     void attachMenuBridge().then((fn) => (unlistenMenu = fn));
@@ -576,14 +577,15 @@
       <AgentsPage />
     {:else if moduleName === 'mission-control'}
       <MissionControlPage />
-    {:else if moduleName === 'connections'}
-      <ConnectionsPage />
+    {:else if moduleName === 'connections' || moduleName === 'database'}
+      <!-- The unified Connections hub IS the DB workbench page: its sidebar tree
+           holds every profile kind + Kafka clusters; `#/database` stays as an
+           alias so existing links/opens keep working. -->
+      <DatabasePage />
     {:else if moduleName === 'git'}
       <GitPage />
     {:else if moduleName === 'api'}
       <ApiPage />
-    {:else if moduleName === 'database'}
-      <DatabasePage />
     {:else if moduleName === 'brokers'}
       <BrokersPage />
     {:else if moduleName === 'mcp'}

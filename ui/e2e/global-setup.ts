@@ -1,6 +1,6 @@
 import { request, type FullConfig } from '@playwright/test';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execSync, spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,6 +25,7 @@ const META_FILE = join(STATE_DIR, 'daemon.json');
 const PASSWORD = 'otto-e2e-password';
 
 export default async function globalSetup(_config: FullConfig): Promise<void> {
+  sweepOrphanedClickhouse();
   const dataDir = mkdtempSync(join(tmpdir(), 'otto-e2e-'));
   // eslint-disable-next-line no-console
   console.log(`[e2e] launching test daemon: ${OTTOD}\n[e2e]   OTTO_DATA_DIR=${dataDir} OTTO_PORT=${PORT}`);
@@ -125,4 +126,35 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   await ctx.dispose();
   // eslint-disable-next-line no-console
   console.log(`[e2e] test daemon ready (pid ${child.pid}); root onboarded.`);
+}
+
+/** Self-heal: kill clickhouse servers leaked by INTERRUPTED past runs (teardown
+ *  never fired — Ctrl+C, crash). A leaked server's config path points into a
+ *  temp `otto-*` data dir; if that dir is GONE the server is a zombie. Live
+ *  parallel slots keep their dirs, so they are never touched. Watchdog (parent)
+ *  dies first so it can't respawn the child. */
+function sweepOrphanedClickhouse(): void {
+  try {
+    const out = execSync('ps -axo pid=,ppid=,command=', { encoding: 'utf8' });
+    for (const line of out.split('\n')) {
+      const cfg = / (--config-file=)(.*\/otto-[^/]+)\/clickhouse\/server\/config\.xml/.exec(line);
+      if (!cfg || !line.includes('clickhouse')) continue;
+      if (existsSync(cfg[2])) continue; // data dir alive → possibly a live run
+      const m = line.trim().match(/^(\d+)\s+(\d+)/);
+      if (!m) continue;
+      for (const p of [Number(m[2]), Number(m[1])]) {
+        if (p > 1) {
+          try {
+            process.kill(p, 'SIGKILL');
+          } catch {
+            /* gone */
+          }
+        }
+      }
+      // eslint-disable-next-line no-console
+      console.log(`[e2e] reaped orphaned clickhouse (data dir gone): ${cfg[2]}`);
+    }
+  } catch {
+    /* ps unavailable — skip */
+  }
 }

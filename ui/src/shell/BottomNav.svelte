@@ -14,7 +14,7 @@
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
-  import { availableModules, resolveOrder, visibleOrder } from '../lib/sidebar';
+  import { availableModules, navIdForModule, resolveOrder, visibleOrder } from '../lib/sidebar';
 
   // How many primary tabs sit on the bar before everything spills into "More".
   const PRIMARY_COUNT = 4;
@@ -46,13 +46,13 @@
   // "More" is active when the current module lives in the overflow set (or
   // Settings), so the bar reflects where you are even for spilled modules.
   const moreActive = $derived(
-    router.module === 'settings' || overflow.some((m) => m.id === router.module),
+    router.module === 'settings' || overflow.some((m) => m.id === navIdForModule(router.module)),
   );
 </script>
 
 <nav class="bottomnav" aria-label="Primary">
   {#each primary as m (m.id)}
-    <button class="bn-btn" class:active={router.module === m.id} onclick={() => go(m.id)}>
+    <button class="bn-btn" class:active={navIdForModule(router.module) === m.id} onclick={() => go(m.id)}>
       <span class="bn-icon">
         <Icon name={m.icon} size={20} />
         {#if m.id === 'agents' && ws.workingCount > 0}
@@ -80,7 +80,7 @@
     <div class="sheet-grip"></div>
     <div class="sheet-grid">
       {#each overflow as m (m.id)}
-        <button class="sheet-item" class:active={router.module === m.id} onclick={() => go(m.id)}>
+        <button class="sheet-item" class:active={navIdForModule(router.module) === m.id} onclick={() => go(m.id)}>
           <Icon name={m.icon} size={22} />
           <span>{m.label}</span>
         </button>
