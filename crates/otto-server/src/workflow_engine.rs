@@ -105,6 +105,18 @@ fn emit_run_updated(
 // Live progress streaming (Slack/Telegram thread the run was triggered from)
 // ---------------------------------------------------------------------------
 
+/// One queued progress delivery: a text line, or a step's handoff file
+/// attached beneath the step's "done" line (the user reads the summary in the
+/// thread and opens the file for the full detail).
+enum ProgressItem {
+    Text(String),
+    File { name: String, text: String },
+}
+
+/// Cap on an attached step file — a runaway reply shouldn't turn into a
+/// multi-megabyte chat upload; the full file stays in the run's context dir.
+const PROGRESS_FILE_CAP: usize = 1024 * 1024;
+
 /// A best-effort sink for human-facing progress lines streamed back to the chat
 /// thread that triggered the run. Cloneable + cheap; a *disabled* sink (manual UI
 /// run, or webhook-only trigger) silently drops everything. Messages are sent
@@ -112,7 +124,7 @@ fn emit_run_updated(
 /// engine never blocks on Slack/Telegram latency.
 #[derive(Clone)]
 struct ProgressSink {
-    tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressItem>>,
 }
 
 impl ProgressSink {
@@ -122,8 +134,24 @@ impl ProgressSink {
     /// Queue a progress line (no-op when disabled).
     fn post(&self, msg: impl Into<String>) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(msg.into());
+            let _ = tx.send(ProgressItem::Text(msg.into()));
         }
+    }
+    /// Queue a step's `.md` handoff file as a chat attachment (no-op when
+    /// disabled or the file doesn't exist — attachments never fail a step).
+    fn post_step_file(&self, files: &crate::workflow_context::RunContextFiles, base_name: &str) {
+        let Some(tx) = &self.tx else { return };
+        let Some(path) = files.step_md_path(base_name) else { return };
+        let Ok(mut text) = std::fs::read_to_string(&path) else { return };
+        if text.len() > PROGRESS_FILE_CAP {
+            let mut end = PROGRESS_FILE_CAP;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str("\n… [truncated for chat — the full file is in the run's context directory]");
+        }
+        let _ = tx.send(ProgressItem::File { name: format!("{base_name}.md"), text });
     }
     fn enabled(&self) -> bool {
         self.tx.is_some()
@@ -178,7 +206,7 @@ fn resolve_chat_target(workflow: &Workflow, input: &Value) -> Option<ChatTarget>
 /// into nodes) and the task handle (awaited at run end to flush before the final
 /// summary is delivered). Drop the sink to close the channel and end the pump.
 fn spawn_progress_pump(ctx: ServerCtx, target: ChatTarget) -> (ProgressSink, tokio::task::JoinHandle<()>) {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressItem>();
     let handle = tokio::spawn(async move {
         let integ = match otto_state::IntegrationsRepo::new(ctx.pool.clone())
             .get(&target.ws, target.channel)
@@ -192,16 +220,35 @@ fn spawn_progress_pump(ctx: ServerCtx, target: ChatTarget) -> (ProgressSink, tok
                 return;
             }
         };
-        while let Some(msg) = rx.recv().await {
-            let msg = otto_core::redact::redact_text(&msg).value;
-            let _ = otto_channels::improve_notify::send_to(
-                &ctx.secrets,
-                &integ,
-                &target.chat,
-                target.thread.as_deref(),
-                &msg,
-            )
-            .await;
+        // One adapter for file uploads, built once (send_to builds its own).
+        let adapter = otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ);
+        while let Some(item) = rx.recv().await {
+            match item {
+                ProgressItem::Text(msg) => {
+                    let msg = otto_core::redact::redact_text(&msg).value;
+                    let _ = otto_channels::improve_notify::send_to(
+                        &ctx.secrets,
+                        &integ,
+                        &target.chat,
+                        target.thread.as_deref(),
+                        &msg,
+                    )
+                    .await;
+                }
+                ProgressItem::File { name, text } => {
+                    // Same discipline as summary.md: redact before it leaves
+                    // the machine; best-effort.
+                    let text = otto_core::redact::redact_text(&text).value;
+                    if let Some(adapter) = adapter.as_ref() {
+                        if let Err(e) = adapter
+                            .upload(&target.chat, target.thread.as_deref(), &name, text.as_bytes())
+                            .await
+                        {
+                            tracing::debug!("workflow progress: {name} upload failed: {e}");
+                        }
+                    }
+                }
+            }
         }
     });
     (ProgressSink { tx: Some(tx) }, handle)
@@ -1045,6 +1092,12 @@ pub async fn run_workflow(
                         None => progress.post(format!("✅ *{}* done ({dur})", node_label(node))),
                     }
                 }
+                // Attach the step's handoff file beneath its progress line —
+                // the thread carries the brief, the file the full detail.
+                // review_run streams its own block but its file rides too.
+                if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
+                    progress.post_step_file(&files, &step_file_base);
+                }
                 // Persist to the node cache for future re-runs.
                 let _ = repo
                     .set_cached_output(&workflow.id, &node_id, &params_hash, &input_hash, &out)
@@ -1074,6 +1127,10 @@ pub async fn run_workflow(
                 states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
                 if progress.enabled() && is_reportable(&node.kind) {
                     progress.post(format!("❌ *{}* failed — {}", node_label(node), truncate(&e.to_string(), 200)));
+                }
+                // The failure trace file rides along too (what broke, logs).
+                if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
+                    progress.post_step_file(&files, &step_file_base);
                 }
                 errored.insert(node_id.clone());
             }
@@ -2385,6 +2442,10 @@ async fn execute_node(
                                     None => progress.post(format!("› ✅ {sname} done")),
                                 }
                             }
+                            // Attach the iteration's handoff file too.
+                            if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
+                                progress.post_step_file(&env.files, &sub_file_base);
+                            }
                         }
                         Err(e) => {
                             logs.push(format!("  [{i}/{sname}] ✗ {e}"));
@@ -2402,6 +2463,10 @@ async fn execute_node(
                             );
                             if progress.enabled() && is_reportable(&skind) {
                                 progress.post(format!("› ❌ {sname} failed — {}", truncate(&e.to_string(), 200)));
+                            }
+                            // The failed iteration's trace file rides along.
+                            if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
+                                progress.post_step_file(&env.files, &sub_file_base);
                             }
                             if !continue_on_error {
                                 return Err(otto_core::Error::Upstream(format!(

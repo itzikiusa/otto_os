@@ -599,6 +599,12 @@ trail. A retried step only trusts a summary written during the winning
 attempt. The inline `[input data]` excerpt in prompts remains as a quick
 glance; the files are the complete channel.
 
+Chat-triggered runs attach each meaningful step's `.md` handoff file to its
+per-step progress message (success *and* failure, loop iterations included) —
+the thread carries the brief, the attachment the full detail. Attachments are
+redacted like `summary.md` and capped at 1 MiB (the full file always remains
+in the run's context directory).
+
 ### Statuses
 ```ts
 RunStatus  = 'pending' | 'running' | 'success' | 'error' | 'canceled';
