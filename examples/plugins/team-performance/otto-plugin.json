@@ -2,8 +2,8 @@
   "slug": "team-performance",
   "name": "Team Performance",
   "icon": "gauge",
-  "version": "0.1.0",
-  "description": "Per-assignee Jira-story throughput vs. git delivery (done = last merge to develop), with an AI-era estimation-improvement tracker. Node sidecar — runs with zero npm install.",
+  "version": "0.2.0",
+  "description": "Scans every Jira issue of a project (incremental), splits per-task time into design vs implementation business days, baselines 'how long it should have taken' per (type, points) bucket, predicts timelines for open tasks, and tracks per-dev goals across scans. Node sidecar — zero npm install.",
   "exec": ["node", "server.js"],
   "ui": "ui",
   "health": "/health"

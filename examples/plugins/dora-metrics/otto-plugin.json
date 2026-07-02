@@ -2,8 +2,8 @@
   "slug": "dora-metrics",
   "name": "DORA Metrics",
   "icon": "gauge",
-  "version": "0.1.0",
-  "description": "DORA delivery metrics from git tags + branch merges (deploy = *deployed* tag; hotfix/release/feature -> develop), with agent bottleneck analysis. Rust sidecar (compiles on first enable via `cargo run`).",
+  "version": "0.2.0",
+  "description": "All four DORA keys from git signals (deploy = *deploy* tag, configurable; hotfix/release/feature merges): deployment frequency, lead time (median+p90), change-failure rate, failed-deployment recovery — with Elite/High/Medium/Low tiers, weekly trends, and a deterministic suggestions engine plus AI analysis. Rust sidecar (compiles on first enable via `cargo run`).",
   "exec": ["cargo", "run", "--release", "--quiet"],
   "ui": "ui",
   "health": "/health"
