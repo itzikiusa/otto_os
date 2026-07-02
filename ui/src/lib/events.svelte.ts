@@ -204,6 +204,24 @@ export class CanvasDocBus {
 
 export const canvasDocBus = new CanvasDocBus();
 
+// ---------------------------------------------------------------------------
+// canvas_refs_changed — a session's referenced Canvas scenes changed. The
+// session's Canvas panel subscribes and re-fetches when `sessionId` matches
+// the open session.
+// ---------------------------------------------------------------------------
+
+export class CanvasRefsBus {
+  tick: number = $state(0);
+  sessionId: string = $state('');
+
+  apply(sessionId: string): void {
+    this.sessionId = sessionId;
+    this.tick += 1;
+  }
+}
+
+export const canvasRefsBus = new CanvasRefsBus();
+
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
 class EventsClient {
@@ -362,6 +380,10 @@ class EventsClient {
           // The agent session is live (turn start) → attach its shell immediately
           // by setting the open scene's session id.
           if (parsed.scene_id === canvas.currentId) canvas.sessionId = parsed.session_id;
+        } else if (parsed.type === 'canvas_refs_changed') {
+          // A scene was attached/detached to a session — the session's Canvas
+          // panel refetches when its session id matches.
+          canvasRefsBus.apply(parsed.session_id);
         } else if (parsed.type === 'mockup_updated') {
           // Live mockup edits: the Mockups Assistant panel re-renders the preview.
           mockupAssist.ingestLive(
