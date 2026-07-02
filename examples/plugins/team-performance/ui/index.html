@@ -5,90 +5,213 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Team Performance</title>
     <style>
+      /* Chart chrome comes from Otto theme vars (otto:init); series colors are
+         the validated dataviz palette with light/dark steps picked by surface
+         luminance. Text never wears series colors. */
       :root {
-        --bg: #14161a;
-        --text: #e6e6e6;
-        --text-dim: #9aa0a6;
-        --accent: #3e63dd;
-        --border: #2a2d33;
+        --bg: #14161a; --text: #e6e6e6; --text-dim: #9aa0a6; --accent: #3e63dd; --border: #2a2d33;
+        --s1: #3987e5; --s2: #199e70; --s3: #c98500;
+        --good: #0ca30c; --warn: #fab219; --serious: #ec835a; --critical: #d03b3b;
+        --band: rgba(57, 135, 229, 0.14);
+      }
+      :root.light {
+        --s1: #2a78d6; --s2: #1baf7a; --s3: #eda100;
+        --band: rgba(42, 120, 214, 0.12);
       }
       * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font: 13px/1.5 -apple-system, system-ui, sans-serif;
-        color: var(--text);
-        background: var(--bg);
-        padding: 16px 20px;
-      }
+      body { margin: 0; font: 13px/1.5 -apple-system, system-ui, sans-serif; color: var(--text); background: var(--bg); padding: 16px 20px; }
       h1 { font-size: 18px; margin: 0 0 12px; }
+      h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 8px; }
       .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-      select, input, button {
-        padding: 6px 10px; font-size: 13px; color: var(--text);
-        background: transparent; border: 1px solid var(--border); border-radius: 6px;
-      }
+      select, input, button { padding: 6px 10px; font-size: 13px; color: var(--text); background: transparent; border: 1px solid var(--border); border-radius: 6px; }
       button { cursor: pointer; }
       button.primary { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
-      button:disabled { opacity: .5; cursor: default; }
-      .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 10px; margin: 12px 0; }
-      .tile { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
-      .tile .l { font-size: 11px; color: var(--text-dim); }
-      .tile .v { font-size: 22px; font-weight: 700; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+      .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 0 0 12px; }
+      .kpi-tile { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+      .kpi-tile .l { font-size: 11px; color: var(--text-dim); }
+      .kpi-tile .v { font-size: 22px; font-weight: 700; }
+      .kpi-tile .v small { font-size: 12px; font-weight: 500; color: var(--text-dim); }
       table { width: 100%; border-collapse: collapse; }
-      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-      th { color: var(--text-dim); font-weight: 600; }
-      .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--text-dim) 18%, transparent); }
-      .badge.ok { background: color-mix(in srgb, #30a46c 24%, transparent); color: #4cc38a; }
-      .badge.bad { background: color-mix(in srgb, #e5484d 24%, transparent); color: #f0787c; }
-      .err { color: #e5484d; padding: 8px 0; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+      th { color: var(--text-dim); font-weight: 600; font-size: 12px; }
+      td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+      tr.clickable { cursor: pointer; }
+      tr.clickable:hover td { background: color-mix(in srgb, var(--text) 4%, transparent); }
+      .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--text-dim) 18%, transparent); white-space: nowrap; }
+      .badge.fast { background: color-mix(in srgb, var(--good) 22%, transparent); }
+      .badge.on_track { background: color-mix(in srgb, var(--good) 12%, transparent); }
+      .badge.slow { background: color-mix(in srgb, var(--critical) 22%, transparent); }
+      .badge.met { background: color-mix(in srgb, var(--good) 22%, transparent); }
+      .badge.missed { background: color-mix(in srgb, var(--critical) 22%, transparent); }
+      .banner { border: 1px solid color-mix(in srgb, var(--warn) 50%, transparent); background: color-mix(in srgb, var(--warn) 12%, transparent); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
+      .err { color: var(--critical); padding: 4px 0; }
       .dim { color: var(--text-dim); }
-      a { color: var(--accent); }
-      pre { white-space: pre-wrap; }
+      a { color: var(--accent); cursor: pointer; text-decoration: none; }
+      pre { white-space: pre-wrap; margin: 0; }
+      .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-dim); margin: 4px 0 8px; }
+      .legend .key { display: inline-flex; align-items: center; gap: 5px; }
+      .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+      .evidence { display: none; }
+      .evidence.open { display: table-row; }
+      .evidence td { background: color-mix(in srgb, var(--text) 3%, transparent); }
+      .goal { display: grid; grid-template-columns: 1fr auto auto auto auto; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
+      .goal:last-child { border-bottom: 0; }
+      .goal input { width: 74px; padding: 3px 6px; }
+      .meter { width: 120px; height: 8px; border-radius: 4px; background: color-mix(in srgb, var(--text-dim) 15%, transparent); overflow: hidden; display: inline-block; vertical-align: middle; }
+      .meter > div { height: 100%; border-radius: 4px; }
+      #scan-progress { font-size: 12px; color: var(--text-dim); }
+      svg text { fill: var(--text-dim); font-size: 10px; }
+      .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+      details.method { color: var(--text-dim); font-size: 12px; margin-top: 8px; }
+      details.method summary { cursor: pointer; }
     </style>
   </head>
   <body>
     <h1>Team Performance</h1>
     <div class="row">
-      <select id="account"></select>
-      <input id="project" placeholder="Project key (e.g. PROJ)" />
-      <input id="assignee" placeholder="Assignee (accountId or name)" />
-      <button class="primary" id="run">Scorecard</button>
+      <select id="account" aria-label="Jira account"></select>
+      <select id="project" aria-label="Project"></select>
+      <button class="primary" id="scan">Scan project</button>
+      <span id="scan-progress"></span>
+      <span id="last-scan" class="dim"></span>
       <button id="coach">AI coach</button>
-    </div>
-    <div class="row">
-      <label>Improvement target
-        <input id="target" type="number" min="0" max="0.9" step="0.05" style="width:80px" />
-      </label>
-      <span class="dim">a comparable next task should take that much less time</span>
-      <button id="saveTarget">Save</button>
+      <button id="settings-toggle" title="Settings">⚙</button>
     </div>
     <div id="err" class="err"></div>
-    <div id="out"></div>
+    <div id="capped-banner" class="banner" style="display:none"></div>
+    <div id="settings-card" class="card" style="display:none"></div>
+    <div id="coach-out"></div>
+    <div id="team-view"></div>
+    <div id="dev-view" style="display:none"></div>
 
     <script>
-      let API = '';
-      let TOKEN = '';
-
-      function applyTheme(theme) {
-        if (!theme) return;
-        for (const [k, v] of Object.entries(theme)) if (v) document.documentElement.style.setProperty(k, v);
-      }
-      async function api(path, opts) {
-        const r = await fetch(API + path, {
-          ...opts,
-          headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json', ...(opts && opts.headers) },
-        });
-        if (!r.ok) throw new Error((await r.text()) || r.status);
-        return r.status === 204 ? null : r.json();
-      }
+      'use strict';
+      let API = '', TOKEN = '';
       const $ = (id) => document.getElementById(id);
+      const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
       const err = (m) => ($('err').textContent = m || '');
-      const fmtD = (d) => (d == null ? '—' : d.toFixed(1) + 'd');
+      const fmtD = (v) => (v == null ? '—' : (Math.round(v * 10) / 10) + 'd');
+      const fmtRange = (st) => (st && st.p50 != null ? `${fmtD(st.p50)} <span class="dim">[${fmtD(st.p25)}–${fmtD(st.p75)}]</span>` : '—');
+      const fmtDate = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '—');
+      const fmtPct = (v) => (v == null ? '—' : Math.round(v * 100) + '%');
+
+      // ---- theming ----------------------------------------------------------
+      function applyTheme(theme) {
+        if (theme) for (const [k, v] of Object.entries(theme)) if (v) document.documentElement.style.setProperty(k, v);
+        // Pick light/dark series steps by surface luminance (fallback: media query).
+        const bg = (theme && theme['--bg']) || getComputedStyle(document.documentElement).getPropertyValue('--bg');
+        const m = /^#([0-9a-f]{6})$/i.exec(bg.trim());
+        let light = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+        if (m) {
+          const n = parseInt(m[1], 16);
+          const lum = 0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255);
+          light = lum > 128;
+        }
+        document.documentElement.classList.toggle('light', light);
+      }
+
+      async function api(path, opts) {
+        const r = await fetch(API + path, { ...opts, headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json', ...(opts && opts.headers) } });
+        if (!r.ok) {
+          let msg = '';
+          try { msg = (await r.json()).error || ''; } catch { /* not json */ }
+          const e = new Error(msg || `HTTP ${r.status}`);
+          e.status = r.status;
+          throw e;
+        }
+        return r.json();
+      }
+
+      // ---- tiny SVG helpers (inline, per the dataviz method) -----------------
+      const S = (tag, attrs, kids) => {
+        const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+        for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+        for (const k of kids || []) el.appendChild(k);
+        return el;
+      };
+      const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+      /** Horizontal stacked bars: rows [{label, parts:[{v, varName}], end}] — 2px surface gaps, ≤18px marks, end labels. */
+      function stackedHBar(rows, maxV) {
+        const w = 560, rowH = 26, labelW = 130, endW = 60, barH = 14;
+        const plotW = w - labelW - endW;
+        const svg = S('svg', { width: '100%', viewBox: `0 0 ${w} ${rows.length * rowH}`, role: 'img' });
+        rows.forEach((r, i) => {
+          const y = i * rowH + (rowH - barH) / 2;
+          const t = S('text', { x: labelW - 8, y: i * rowH + rowH / 2 + 3, 'text-anchor': 'end' });
+          t.textContent = r.label.length > 18 ? r.label.slice(0, 17) + '…' : r.label;
+          svg.appendChild(t);
+          let x = labelW;
+          r.parts.forEach((p, pi) => {
+            const bw = maxV > 0 ? Math.max(0, (p.v / maxV) * plotW) : 0;
+            if (bw > 0.5) {
+              const isLast = pi === r.parts.length - 1;
+              svg.appendChild(S('rect', { x, y, width: Math.max(1, bw - 2), height: barH, rx: isLast ? 4 : 0, fill: cssVar(p.varName) }));
+              x += bw; // the -2 leaves the 2px surface gap
+            }
+          });
+          const end = S('text', { x: x + 6, y: i * rowH + rowH / 2 + 3 });
+          end.textContent = r.end;
+          svg.appendChild(end);
+        });
+        return svg;
+      }
+
+      /** Bullet bar: baseline band p25–p75 + p50 tick + 8px actual bar. */
+      function bulletBar(actual, band, maxV, varName) {
+        const w = 170, h = 18;
+        const svg = S('svg', { width: w, height: h, viewBox: `0 0 ${w} ${h}` });
+        const X = (v) => (maxV > 0 ? Math.min(w - 1, (v / maxV) * (w - 8)) : 0);
+        if (band && band.p25 != null && band.p75 != null) {
+          svg.appendChild(S('rect', { x: X(band.p25), y: 2, width: Math.max(1, X(band.p75) - X(band.p25)), height: h - 4, rx: 3, fill: 'var(--band)' }));
+        }
+        if (band && band.p50 != null) {
+          svg.appendChild(S('rect', { x: X(band.p50), y: 1, width: 2, height: h - 2, fill: cssVar('--text-dim') }));
+        }
+        if (actual != null) {
+          svg.appendChild(S('rect', { x: 0, y: (h - 8) / 2, width: Math.max(2, X(actual)), height: 8, rx: 4, fill: cssVar(varName) }));
+        }
+        return svg;
+      }
+
+      /** 12-point sparkline (2px line). */
+      function sparkline(values) {
+        const w = 90, h = 22, vs = values.filter((v) => v != null);
+        const svg = S('svg', { width: w, height: h, viewBox: `0 0 ${w} ${h}` });
+        if (vs.length < 2) return svg;
+        const lo = Math.min(...vs), hi = Math.max(...vs);
+        const pts = values.slice(-12).map((v, i, arr) => {
+          if (v == null) return null;
+          const x = (i / Math.max(1, arr.length - 1)) * (w - 6) + 3;
+          const y = hi === lo ? h / 2 : h - 3 - ((v - lo) / (hi - lo)) * (h - 6);
+          return `${x},${y}`;
+        }).filter(Boolean);
+        svg.appendChild(S('polyline', { points: pts.join(' '), fill: 'none', stroke: cssVar('--s1'), 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+        return svg;
+      }
+
+      function meter(ratio, over) {
+        const div = document.createElement('div');
+        div.className = 'meter';
+        const fill = document.createElement('div');
+        const pct = Math.min(1, Math.max(0, ratio ?? 0));
+        fill.style.width = pct * 100 + '%';
+        fill.style.background = over ? 'var(--critical)' : 'var(--accent)';
+        div.appendChild(fill);
+        div.title = fmtPct(ratio);
+        return div;
+      }
+
+      // ---- state + boot ------------------------------------------------------
+      const state = { account: null, project: null, overview: null, dev: null, config: null, polling: null };
 
       window.addEventListener('message', async (ev) => {
         const m = ev.data;
         if (!m || m.type !== 'otto:init') return;
-        API = m.apiBase;
-        TOKEN = m.token || '';
+        API = m.apiBase; TOKEN = m.token || '';
         applyTheme(m.theme);
         await boot();
       });
@@ -96,63 +219,337 @@
       async function boot() {
         try {
           const accts = await api('/accounts');
-          $('account').innerHTML = accts.map((a) => `<option value="${a.id}">${a.label}</option>`).join('');
-          const cfg = await api('/config');
-          $('target').value = cfg.target;
+          $('account').innerHTML = accts.map((a) => `<option value="${esc(a.id)}">${esc(a.label)}</option>`).join('');
+          if (!accts.length) { $('team-view').innerHTML = '<p class="dim">No Jira accounts configured in Otto. Add one first, then come back.</p>'; return; }
+          state.account = accts[0].id;
+          await loadProjects();
         } catch (e) { err('Load failed: ' + e.message); }
       }
 
-      $('saveTarget').onclick = async () => {
-        try { const c = await api('/config', { method: 'PUT', body: JSON.stringify({ target: parseFloat($('target').value) }) }); $('target').value = c.target; }
-        catch (e) { err(e.message); }
+      async function loadProjects() {
+        try {
+          const projects = await api(`/projects?account=${encodeURIComponent(state.account)}`);
+          $('project').innerHTML = projects.map((p) => `<option value="${esc(p.key)}">${esc(p.key)} — ${esc(p.name)}</option>`).join('');
+          if (projects.length) { state.project = projects[0].key; await refresh(); }
+          else $('team-view').innerHTML = '<p class="dim">No projects visible to this Jira account.</p>';
+        } catch (e) { err('Projects failed: ' + e.message); }
+      }
+
+      $('account').onchange = async (e) => { state.account = e.target.value; state.dev = null; await loadProjects(); };
+      $('project').onchange = async (e) => { state.project = e.target.value; state.dev = null; await refresh(); };
+
+      // ---- scan --------------------------------------------------------------
+      $('scan').onclick = async () => {
+        err('');
+        try {
+          await api('/scan', { method: 'POST', body: JSON.stringify({ account: state.account, project: state.project }) });
+          pollScan();
+        } catch (e) { err(e.status === 409 ? 'A scan is already running.' : e.message); }
       };
-      $('run').onclick = run;
-      $('coach').onclick = coach;
 
-      async function run() {
-        err('');
-        const a = $('account').value, p = $('project').value, as = $('assignee').value;
-        if (!a || !p || !as) return err('Pick an account, project and assignee.');
-        $('out').innerHTML = '<p class="dim">Loading…</p>';
-        try {
-          const c = await api(`/scorecard?account=${encodeURIComponent(a)}&project=${encodeURIComponent(p)}&assignee=${encodeURIComponent(as)}`);
-          render(c);
-        } catch (e) { $('out').innerHTML = ''; err(e.message); }
+      function pollScan() {
+        clearInterval(state.polling);
+        $('scan').disabled = true;
+        state.polling = setInterval(async () => {
+          try {
+            const s = await api(`/scan/status?account=${encodeURIComponent(state.account)}&project=${encodeURIComponent(state.project)}`);
+            if (s.state === 'running') {
+              const total = s.total != null ? `/${s.total}` : '';
+              $('scan-progress').textContent = `${s.step} ${s.fetched ?? 0}${total}${s.retries ? ` · ${s.retries} retries` : ''}`;
+            } else {
+              clearInterval(state.polling);
+              $('scan').disabled = false;
+              $('scan-progress').textContent = s.state === 'error' ? '' : 'scan complete';
+              if (s.state === 'error') err(s.error || 'scan failed');
+              setTimeout(() => ($('scan-progress').textContent = ''), 4000);
+              await refresh();
+            }
+          } catch { /* transient poll error — keep polling */ }
+        }, 800);
       }
 
-      async function coach() {
+      // ---- views -------------------------------------------------------------
+      async function refresh() {
         err('');
-        const a = $('account').value, p = $('project').value, as = $('assignee').value;
-        if (!a || !p || !as) return err('Pick an account, project and assignee.');
+        $('coach-out').innerHTML = '';
         try {
-          const r = await api('/analyze', { method: 'POST', body: JSON.stringify({ account: a, project: p, assignee: as }) });
-          $('out').insertAdjacentHTML('afterbegin', `<div class="tile"><div class="l">AI coach</div><pre>${esc(r.summary)}</pre></div>`);
-        } catch (e) { err(e.message); }
+          state.overview = await api(`/overview?account=${encodeURIComponent(state.account)}&project=${encodeURIComponent(state.project)}`);
+        } catch (e) {
+          state.overview = null;
+          if (e.status !== 404) err(e.message);
+        }
+        const o = state.overview;
+        $('last-scan').textContent = o && o.scanned_at ? `scanned ${fmtDate(o.scanned_at)}` : 'not scanned yet';
+        $('capped-banner').style.display = o && o.capped ? '' : 'none';
+        if (o && o.capped) $('capped-banner').textContent = 'Corpus capped at max_issues — baselines reflect the most recently updated issues only (raise the cap in ⚙ settings).';
+        if (state.dev) renderDev(); else renderTeam();
       }
 
-      function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+      function verdictBadge(v) {
+        if (!v) return '<span class="badge">n/a</span>';
+        const label = { fast: 'fast', on_track: 'on track', slow: 'slow' }[v];
+        return `<span class="badge ${v}">${label}</span>`;
+      }
 
-      function render(c) {
-        const rows = c.stories.map((s) => `
-          <tr>
-            <td><a href="${s.url}" target="_blank" rel="noreferrer">${s.key}</a></td>
-            <td>${esc(s.status)}</td>
-            <td>${s.estimate_days != null ? s.estimate_days + 'd' : '—'}</td>
-            <td>${fmtD(s.suggested_days)}</td>
-            <td>${fmtD(s.actual_days)}</td>
-            <td>${s.met === true ? '<span class="badge ok">met</span>' : s.met === false ? '<span class="badge bad">missed</span>' : '<span class="badge">—</span>'}</td>
-            <td class="dim">${esc(s.summary)}</td>
-          </tr>`).join('');
-        $('out').innerHTML = `
+      function renderTeam() {
+        $('dev-view').style.display = 'none';
+        $('team-view').style.display = '';
+        const o = state.overview;
+        if (!o) { $('team-view').innerHTML = '<p class="dim">No scan yet — pick the project and hit <b>Scan project</b>. The first scan builds the baseline corpus; every later scan is incremental and sharpens the estimates.</p>'; return; }
+
+        const team = o.team || {};
+        const tiles = `
           <div class="tiles">
-            <div class="tile"><div class="l">Completed</div><div class="v">${c.completed}</div></div>
-            <div class="tile"><div class="l">Met target</div><div class="v">${c.met_count}</div></div>
-            <div class="tile"><div class="l">Missed</div><div class="v">${c.missed_count}</div></div>
-            <div class="tile"><div class="l">Concurrent overlaps</div><div class="v">${c.concurrent.length}</div></div>
-          </div>
-          ${c.concurrent.length ? `<p class="dim">Multiple tasks at once: ${c.concurrent.map((x) => x.join('↔')).join(', ')}</p>` : ''}
-          <table><thead><tr><th>Key</th><th>Status</th><th>Est</th><th>Suggested</th><th>Actual</th><th>Met</th><th>Summary</th></tr></thead><tbody>${rows}</tbody></table>`;
+            <div class="kpi-tile"><div class="l">Completed tasks</div><div class="v">${o.completed}</div></div>
+            <div class="kpi-tile"><div class="l">Open tasks</div><div class="v">${o.open}</div></div>
+            <div class="kpi-tile"><div class="l">Team median cycle</div><div class="v">${fmtD(team.median_cycle_days)}</div></div>
+            <div class="kpi-tile"><div class="l">On track or faster</div><div class="v">${o.completed ? Math.round((o.on_track / o.completed) * 100) + '<small>%</small>' : '—'}</div></div>
+          </div>`;
+
+        const maxBar = Math.max(1, ...o.assignees.map((a) => (a.median_design || 0) + (a.median_impl || 0)));
+        const rows = o.assignees.map((a) => ({
+          label: a.assignee_name || a.assignee_id,
+          parts: [{ v: a.median_design || 0, varName: '--s1' }, { v: a.median_impl || 0, varName: '--s2' }],
+          end: fmtD((a.median_design || 0) + (a.median_impl || 0)),
+        }));
+        const barsCard = document.createElement('div');
+        barsCard.className = 'card';
+        barsCard.id = 'assignee-bars';
+        barsCard.innerHTML = `<h2>Median task time per developer (design + implementation)</h2>
+          <div class="legend"><span class="key"><span class="swatch" style="background:var(--s1)"></span>design</span><span class="key"><span class="swatch" style="background:var(--s2)"></span>implementation</span></div>`;
+        if (rows.length) barsCard.appendChild(stackedHBar(rows, maxBar));
+
+        const trendArrow = (t) => (t === 'improving' ? '▲' : t === 'worsening' ? '▼' : t === 'flat' ? '▶' : '—');
+        const tableRows = o.assignees.map((a) => `
+          <tr class="clickable" data-dev="${esc(a.assignee_id)}">
+            <td>${esc(a.assignee_name || a.assignee_id)}</td>
+            <td class="num">${a.completed}</td>
+            <td class="num">${a.wip}</td>
+            <td class="num">${fmtD(a.median_design)}</td>
+            <td class="num">${fmtD(a.median_impl)}</td>
+            <td class="num">${fmtD(a.median_cycle)}</td>
+            <td class="num">${a.factor != null ? '×' + a.factor.toFixed(2) : '—'}</td>
+            <td class="num">${a.mape != null ? fmtPct(a.mape) : '—'}</td>
+            <td class="num">${a.avg_wip ?? '—'}</td>
+            <td title="${esc(a.trend || '')}">${trendArrow(a.trend)}</td>
+          </tr>`).join('');
+        const table = `<div class="card"><h2>Developers <span class="dim">(click a row for tasks, goals and evidence)</span></h2>
+          <table id="assignee-table"><thead><tr><th>Developer</th><th class="num">Done</th><th class="num">WIP</th><th class="num">Design</th><th class="num">Impl</th><th class="num">Cycle</th><th class="num">vs team</th><th class="num">Est. error</th><th class="num">Avg WIP</th><th>Trend</th></tr></thead><tbody>${tableRows}</tbody></table></div>`;
+
+        const openRows = (o.open_tasks || []).map((t) => `
+          <tr>
+            <td>${esc(t.key)}</td>
+            <td>${esc(t.assignee_name || '—')}</td>
+            <td>${esc(t.type)}${t.points != null ? ` · ${t.points}pt` : ''}</td>
+            <td>${esc(t.status)}</td>
+            <td class="num">${fmtD((t.design_days || 0) + (t.impl_days || 0))}</td>
+            <td class="num">${t.prediction ? fmtRange(t.prediction.total) : '<span class="dim">need ≥3 similar done tasks</span>'}</td>
+            <td class="pct" data-pct="${t.pct_consumed ?? ''}"></td>
+            <td class="num">${fmtDate(t.projected_done_at)}</td>
+          </tr>`).join('');
+        const openCard = `<div class="card" id="open-tasks"><h2>Open tasks — predicted timelines</h2>
+          ${openRows ? `<table><thead><tr><th>Key</th><th>Assignee</th><th>Type</th><th>Status</th><th class="num">Elapsed</th><th class="num">Expected total</th><th>Consumed</th><th class="num">Projected done</th></tr></thead><tbody>${openRows}</tbody></table>` : '<p class="dim">No open tasks in the corpus.</p>'}</div>`;
+
+        const guideRows = (o.baseline || []).map((b) => `
+          <tr><td>${esc(b.type)}</td><td class="num">${b.points ?? 'unestimated'}</td><td class="num">${b.n}</td>
+          <td class="num">${fmtRange(b.design)}</td><td class="num">${fmtRange(b.impl)}</td><td class="num">${fmtRange(b.total)}</td></tr>`).join('');
+        const guide = `<div class="card" id="estimation-guide"><h2>Estimation guide — how long tasks actually take here</h2>
+          ${guideRows ? `<table><thead><tr><th>Type</th><th class="num">Points</th><th class="num">n</th><th class="num">Design p50 [p25–p75]</th><th class="num">Implementation</th><th class="num">Total</th></tr></thead><tbody>${guideRows}</tbody></table>` : '<p class="dim">Not enough completed tasks yet — the guide appears once buckets reach n≥2.</p>'}
+          <details class="method" id="methodology"><summary>Methodology</summary>
+            Times are business days (configurable workweek) spent in each status, from the issue's own changelog. Design = statuses mapped to design; implementation = statuses mapped to implementation (⚙ settings). "Should have taken" = percentiles of this team's completed tasks in the same (type, points) bucket, falling back to type-level then project-level stats below n=3. Delivery is correlated with git: a task counts as shipped when a commit or merge naming its key lands on ${esc(Object.values(o.target_used || {})[0] || 'develop')}. Predictions scale the bucket median by each developer's historical velocity factor (clamped ×0.5–×2). Completed tasks are attributed to the assignee at completion time.</details></div>`;
+
+        const flags = Object.entries(o.flags || {});
+        const flagsCard = flags.length ? `<div class="card"><h2>Hygiene flags (completed tasks)</h2><div class="row" style="margin:0">${flags.map(([k, v]) => `<span class="badge">${esc(k)} × ${v}</span>`).join(' ')}</div></div>` : '';
+
+        const view = $('team-view');
+        view.innerHTML = tiles + table + openCard + guide + flagsCard;
+        view.insertBefore(barsCard, view.children[1]);
+        view.querySelectorAll('tr.clickable').forEach((tr) => (tr.onclick = () => { state.dev = tr.dataset.dev; renderDev(); }));
+        hydrateMeters(view);
       }
+
+      function hydrateMeters(root) {
+        root.querySelectorAll('td.pct').forEach((td) => {
+          const p = td.dataset.pct === '' ? null : parseFloat(td.dataset.pct);
+          if (p == null) { td.textContent = '—'; return; }
+          td.appendChild(meter(p, p > 1));
+          td.append(' ' + fmtPct(p));
+        });
+      }
+
+      async function renderDev() {
+        $('team-view').style.display = 'none';
+        $('dev-view').style.display = '';
+        let v;
+        try {
+          v = await api(`/assignee?account=${encodeURIComponent(state.account)}&project=${encodeURIComponent(state.project)}&assignee=${encodeURIComponent(state.dev)}`);
+        } catch (e) { $('dev-view').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+        const s = v.stats;
+
+        const goalLabel = {
+          median_cycle_days: 'Median cycle (days)',
+          median_impl_days: 'Median implementation (days)',
+          median_design_days: 'Median design (days)',
+          estimate_mape: 'Estimate error',
+          avg_wip: 'Avg parallel tasks',
+        };
+        const goalRows = v.goals.map((g) => {
+          const row = document.createElement('div');
+          row.className = 'goal';
+          row.dataset.metric = g.metric;
+          row.innerHTML = `<span>${esc(goalLabel[g.metric] || g.metric)} ${g.suggested ? '<span class="dim">(suggested)</span>' : ''}</span>
+            <span class="num dim">now ${g.metric === 'estimate_mape' ? fmtPct(g.current) : g.current ?? '—'}</span>
+            <span>target <input class="goal-target" type="number" step="0.1" min="0.1" value="${g.target}"></span>
+            <span>${g.met ? '<span class="badge met">met</span>' : '<span class="badge missed">missed</span>'}</span>`;
+          row.appendChild(sparkline(g.history.map((h) => h.value)));
+          return row;
+        });
+
+        const maxTask = Math.max(1, ...v.completed.map((t) => Math.max(t.cycle_days || 0, t.baseline ? t.baseline.total.p75 : 0)));
+        const taskRows = v.completed.map((t, i) => {
+          const evid = (t.intervals || []).map((iv) => {
+            const days = Math.round(((iv.to - iv.from) / 86400000) * 10) / 10;
+            return `<tr><td>${esc(iv.status)}</td><td>${esc(iv.phase)}</td><td class="num">${fmtDate(iv.from)} → ${fmtDate(iv.to)}</td><td class="num">${days}d</td></tr>`;
+          }).join('');
+          return `
+          <tr class="task-row clickable" data-i="${i}" title="${esc(t.summary)}">
+            <td>${esc(t.key)}</td>
+            <td>${esc(t.type)}${t.points != null ? ` · ${t.points}pt` : ''}</td>
+            <td class="num">${fmtD(t.design_days)} ${verdictBadge(t.verdicts.design)}</td>
+            <td class="num">${fmtD(t.impl_days)} ${verdictBadge(t.verdicts.impl)}</td>
+            <td class="num">${fmtD(t.cycle_days)}</td>
+            <td class="num">${t.baseline ? fmtRange(t.baseline.total) : '—'}</td>
+            <td class="bullet" data-i="${i}"></td>
+            <td>${verdictBadge(t.verdicts.total)}</td>
+          </tr>
+          <tr class="evidence"><td colspan="8"><b>${esc(t.key)}</b> — status history (spans are calendar; phase totals count business days only)${t.delivered_at ? ` · merged ${fmtDate(t.delivered_at)}` : ''}${(t.flags || []).map((f) => ` · <span class="badge">${esc(f)}</span>`).join('')}
+            <table style="margin-top:6px"><thead><tr><th>Status</th><th>Phase</th><th class="num">Span</th><th class="num">Calendar</th></tr></thead><tbody>${evid}</tbody></table></td></tr>`;
+        }).join('');
+
+        const openRows = v.open.map((t) => `
+          <tr>
+            <td>${esc(t.key)}</td><td>${esc(t.status)}</td>
+            <td class="num">${fmtD((t.design_days || 0) + (t.impl_days || 0))}</td>
+            <td class="num">${t.prediction ? fmtRange(t.prediction.design) : '—'}</td>
+            <td class="num">${t.prediction ? fmtRange(t.prediction.impl) : '—'}</td>
+            <td class="num">${t.prediction ? fmtRange(t.prediction.total) : '—'}</td>
+            <td class="pct" data-pct="${t.pct_consumed ?? ''}"></td>
+            <td class="num">${fmtDate(t.projected_done_at)}</td>
+          </tr>`).join('');
+
+        $('dev-view').innerHTML = `
+          <div class="row"><a id="back">← team</a><h2 style="margin:0">${esc(s.assignee_name || s.assignee_id)}</h2></div>
+          <div class="tiles">
+            <div class="kpi-tile"><div class="l">Median cycle</div><div class="v">${fmtD(s.median_cycle)}</div></div>
+            <div class="kpi-tile"><div class="l">vs team baseline</div><div class="v">${s.factor != null ? '×' + s.factor.toFixed(2) : '—'}</div></div>
+            <div class="kpi-tile"><div class="l">Estimate error</div><div class="v">${s.mape != null ? fmtPct(s.mape) : '—'}</div></div>
+            <div class="kpi-tile"><div class="l">Avg parallel tasks</div><div class="v">${s.avg_wip ?? '—'}</div></div>
+          </div>
+          <div class="card" id="goals"><h2>Goals <span class="dim">(targets are editable; progress updates every scan)</span></h2><div id="goal-rows"></div>
+            <div class="row" style="margin:10px 0 0"><button class="primary" id="save-goals">Save goals</button><span id="goals-msg" class="dim"></span></div></div>
+          <div class="card"><h2>Completed tasks — actual vs expected <span class="dim">(click a row for the evidence)</span></h2>
+            ${v.completed.length ? `<table id="completed-table"><thead><tr><th>Key</th><th>Type</th><th class="num">Design</th><th class="num">Implementation</th><th class="num">Total</th><th class="num">Expected</th><th>vs baseline</th><th>Verdict</th></tr></thead><tbody>${taskRows}</tbody></table>` : '<p class="dim">No completed tasks for this developer yet.</p>'}
+          </div>
+          <div class="card" id="dev-open"><h2>Open tasks — predicted timeline</h2>
+            ${v.open.length ? `<table><thead><tr><th>Key</th><th>Status</th><th class="num">Elapsed</th><th class="num">Design</th><th class="num">Impl</th><th class="num">Total</th><th>Consumed</th><th class="num">Projected done</th></tr></thead><tbody>${openRows}</tbody></table>` : '<p class="dim">Nothing in flight.</p>'}
+          </div>`;
+
+        const goalWrap = $('goal-rows');
+        goalRows.forEach((r) => goalWrap.appendChild(r));
+        if (!goalRows.length) goalWrap.innerHTML = '<p class="dim">Goals appear once this developer has enough completed tasks to compute stats.</p>';
+        $('back').onclick = () => { state.dev = null; renderTeam(); };
+        $('dev-view').querySelectorAll('td.bullet').forEach((td) => {
+          const t = v.completed[parseInt(td.dataset.i, 10)];
+          td.appendChild(bulletBar(t.cycle_days, t.baseline ? t.baseline.total : null, maxTask, '--s1'));
+        });
+        $('dev-view').querySelectorAll('tr.task-row').forEach((tr) => {
+          tr.onclick = () => tr.nextElementSibling.classList.toggle('open');
+        });
+        hydrateMeters($('dev-view'));
+        $('save-goals').onclick = async () => {
+          const goals = [...goalWrap.querySelectorAll('.goal')].map((row) => ({
+            metric: row.dataset.metric,
+            target: parseFloat(row.querySelector('.goal-target').value),
+          })).filter((g) => Number.isFinite(g.target) && g.target > 0);
+          try {
+            await api('/goals', { method: 'PUT', body: JSON.stringify({ account: state.account, project: state.project, assignee: state.dev, goals }) });
+            $('goals-msg').textContent = 'saved';
+            setTimeout(() => renderDev(), 400);
+          } catch (e) { err(e.message); }
+        };
+      }
+
+      // ---- AI coach ----------------------------------------------------------
+      $('coach').onclick = async () => {
+        err('');
+        $('coach').disabled = true;
+        $('coach-out').innerHTML = '<div class="card"><h2>AI coach</h2><p class="dim">Thinking…</p></div>';
+        try {
+          const r = await api('/analyze', { method: 'POST', body: JSON.stringify({ account: state.account, project: state.project, assignee: state.dev || undefined }) });
+          $('coach-out').innerHTML = `<div class="card"><h2>AI coach${state.dev ? '' : ' — whole team'}</h2><pre>${esc(r.summary)}</pre></div>`;
+        } catch (e) { $('coach-out').innerHTML = ''; err(e.message); }
+        $('coach').disabled = false;
+      };
+
+      // ---- settings ----------------------------------------------------------
+      $('settings-toggle').onclick = async () => {
+        const card = $('settings-card');
+        if (card.style.display !== 'none') { card.style.display = 'none'; return; }
+        card.style.display = '';
+        card.innerHTML = '<p class="dim">Loading…</p>';
+        try {
+          const [config, statuses] = await Promise.all([
+            api('/config'),
+            api(`/statuses?account=${encodeURIComponent(state.account)}&project=${encodeURIComponent(state.project)}`).catch(() => []),
+          ]);
+          state.config = config;
+          const map = config.status_map[state.project] || {};
+          const stRows = statuses.map((st) => `
+            <div class="row" style="margin:2px 0">
+              <span style="min-width:160px">${esc(st.name)} <span class="dim">${esc(st.category || '')}</span></span>
+              <select class="st-map" data-status="${esc(st.name)}">
+                ${['design', 'implementation', 'waiting', 'excluded'].map((p) => `<option value="${p}" ${(map[st.name] || st.mapped) === p ? 'selected' : ''}>${p}</option>`).join('')}
+              </select>
+            </div>`).join('');
+          card.innerHTML = `<h2>Settings</h2>
+            <div class="grid-2">
+              <div>
+                <h2>Status → phase map (${esc(state.project)})</h2>
+                ${stRows || '<p class="dim">Could not load project statuses.</p>'}
+              </div>
+              <div>
+                <h2>Scan</h2>
+                <div class="row">Issue types <input id="cfg-types" value="${esc(config.issue_types.join(', '))}" style="min-width:200px"></div>
+                <div class="row">Workweek
+                  <select id="cfg-week">
+                    <option value="1,2,3,4,5" ${config.workweek.join(',') === '1,2,3,4,5' ? 'selected' : ''}>Mon–Fri</option>
+                    <option value="0,1,2,3,4" ${config.workweek.join(',') === '0,1,2,3,4' ? 'selected' : ''}>Sun–Thu</option>
+                  </select></div>
+                <div class="row">Max issues <input id="cfg-max" type="number" min="10" max="10000" value="${config.max_issues}" style="width:90px"></div>
+                <div class="row">Git depth <input id="cfg-depth" type="number" min="100" max="50000" value="${config.git_depth}" style="width:90px"></div>
+              </div>
+            </div>
+            <div class="row" style="margin-top:10px"><button class="primary" id="save-config">Save settings</button><span class="dim">status-map changes recompute instantly from the stored corpus — no rescan needed</span></div>`;
+          $('save-config').onclick = async () => {
+            const status_map = { ...state.config.status_map };
+            const projMap = {};
+            card.querySelectorAll('.st-map').forEach((sel) => { projMap[sel.dataset.status] = sel.value; });
+            if (Object.keys(projMap).length) status_map[state.project] = projMap;
+            const body = {
+              issue_types: $('cfg-types').value.split(',').map((x) => x.trim()).filter(Boolean),
+              workweek: $('cfg-week').value.split(',').map(Number),
+              max_issues: parseInt($('cfg-max').value, 10),
+              git_depth: parseInt($('cfg-depth').value, 10),
+              status_map,
+            };
+            try {
+              await api('/config', { method: 'PUT', body: JSON.stringify(body) });
+              card.style.display = 'none';
+              await refresh();
+            } catch (e) { err(e.message); }
+          };
+        } catch (e) { card.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+      };
     </script>
   </body>
 </html>
