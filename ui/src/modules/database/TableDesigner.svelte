@@ -144,20 +144,66 @@
     onclose();
   }
 
-  // Escape closes the designer.
+  // Modal a11y: Escape-to-close + a focus trap. On open we remember what had
+  // focus, move focus to the first field, and keep Tab/Shift+Tab cycling inside
+  // the dialog; on close we restore focus to the opener. `focusables()` is
+  // recomputed each keystroke so newly-added column/index/FK rows join the cycle.
+  let modalEl = $state<HTMLElement | null>(null);
   $effect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    const focusables = (): HTMLElement[] =>
+      modalEl
+        ? Array.from(
+            modalEl.querySelectorAll<HTMLElement>(
+              'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+            ),
+          ).filter((el) => el.offsetParent !== null)
+        : [];
+    // Focus the first text field (fall back to any focusable) after paint.
+    queueMicrotask(() => {
+      const items = focusables();
+      (items.find((el) => el.tagName === 'INPUT') ?? items[0])?.focus();
+    });
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onclose();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onclose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const items = focusables();
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && (active === first || !modalEl?.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      opener?.focus?.();
+    };
   });
 </script>
 
-<div class="td-backdrop">
-  <div class="td-modal">
+<!-- Backdrop: click outside the card closes (Esc is handled by the focus-trap
+     effect). role="presentation" — the accessible close paths are the button + Esc. -->
+<div class="td-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
+  <div
+    class="td-modal"
+    bind:this={modalEl}
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="td-title"
+  >
     <div class="td-head">
-      <h3 class="mono"><Icon name="grid" size={14} /> Design {table}</h3>
+      <h3 id="td-title" class="mono"><Icon name="grid" size={14} /> Design {table}</h3>
       <button class="icon-btn" aria-label="Close" onclick={onclose}><Icon name="x" size={14} /></button>
     </div>
 

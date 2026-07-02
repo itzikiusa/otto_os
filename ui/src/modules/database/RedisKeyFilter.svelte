@@ -26,7 +26,7 @@
   }
 </script>
 
-<div class="kf" style="padding-left: {(depth + 1) * 13 + 4}px">
+<div class="kf" style="padding-inline-start: {(depth + 1) * 13 + 4}px">
   <Icon name="search" size={11} />
   <input
     class="kf-input"

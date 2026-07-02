@@ -858,6 +858,9 @@
     height: 100%;
     display: flex;
     min-height: 0;
+    /* Let the page shrink inside its (flex) content pane instead of forcing its
+       intrinsic width — belt-and-suspenders with .db-main's min-width:0 below. */
+    min-width: 0;
   }
   .db-side {
     /* Default width; on tablet/desktop an inline `width:{sideW}px` (drag-resizable,
@@ -1683,14 +1686,21 @@
   }
 
   /* ───────────────── Tablet (641–1024px) ─────────────────
-     The tablet keeps the desktop side-by-side layout (280px sidebar + main),
-     but the narrowed main column can't fit the dense tab/status row on one
-     line, so the engine chip + Test button get pushed past the
-     (.content overflow:hidden) edge and become unreachable — even though the
-     page itself never scrolls sideways. Let the tab row wrap and break the
-     status onto its own line (the same treatment the phone layout uses), WITHOUT
-     collapsing the columns. */
+     The tablet keeps the desktop side-by-side layout (sidebar + main), but the
+     shell ALSO shows a persistent ~220px Navigator column here, so the main
+     column is doubly squeezed. Two guards keep content on-screen:
+       1. The dense tab/status row wraps (engine chip + Test button drop to their
+          own line) instead of being pushed past the (.content overflow:hidden)
+          edge and becoming unreachable — the same treatment the phone uses.
+       2. The connection sidebar is capped at 45vw. It's flex-shrink:0 at a
+          persisted px width (db.sideW, up to ~640px carried from a desktop
+          session); without the cap that fixed width + the Navigator could force
+          the main pane off-screen. The cap never bites the default 300px sidebar
+          at these widths, so the layout still reads as side-by-side. */
   @media (min-width: 641px) and (max-width: 1024px) {
+    .db-side {
+      max-width: 45vw;
+    }
     .main-tabs {
       flex-wrap: wrap;
       row-gap: 4px;

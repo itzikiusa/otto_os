@@ -616,6 +616,9 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    /* Shrink with the (narrow tablet) main pane rather than forcing intrinsic
+       width, so the wrapping toolbar/tab strips stay inside the viewport. */
+    min-width: 0;
   }
   .qe-tabs {
     display: flex;
