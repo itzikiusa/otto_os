@@ -68,7 +68,10 @@ struct Ctx {
     http: reqwest::Client,
     /// Base URL of the running daemon, e.g. `http://127.0.0.1:7700`.
     base: String,
-    /// Per-session read-only bearer token (the `OTTO_MCP_TOKEN` env value).
+    /// Per-session bearer token (the `OTTO_MCP_TOKEN` env value). Authorizes as
+    /// the session's owner against the governed `/api/v1` routes — read-only
+    /// for every tool except `canvas_create_scene`/`canvas_update_scene`, which
+    /// it also authorizes to write (see the module doc's "Safety properties").
     token: String,
     /// Calling agent session id (for audit + RBAC scoping). May be empty.
     session_id: Option<String>,

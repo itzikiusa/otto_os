@@ -162,6 +162,7 @@
 
   const attachCandidates = $derived(
     allScenes
+      .filter((s) => s.workspace_id === session?.workspace_id)
       .filter((s) => !refs.some((r) => r.id === s.id))
       .filter((s) => s.title.toLowerCase().includes(attachQuery.trim().toLowerCase())),
   );

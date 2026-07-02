@@ -454,4 +454,9 @@ async fn viewer_can_list_but_not_mutate() {
     )
     .await;
     assert_eq!(post_status, StatusCode::FORBIDDEN, "viewer must not be able to attach a scene");
+
+    // Viewer cannot detach (403), even for a ref that doesn't exist yet — the
+    // role check runs before the (idempotent) delete.
+    let del_status = delete_as(&app, &vince, &format!("/sessions/{sid}/canvas-refs/{scene_id}")).await;
+    assert_eq!(del_status, StatusCode::FORBIDDEN, "viewer must not be able to detach a scene");
 }
