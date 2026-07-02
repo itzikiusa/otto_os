@@ -605,6 +605,12 @@ mod tests {
         assert!(x.excalidraw.is_some());
         assert!(x.mermaid.is_none());
         assert_eq!(x.format, "excalidraw");
+
+        let d = result_for("d2", "direction: right\na -> b", "drawn".into());
+        assert_eq!(d.d2.as_deref(), Some("direction: right\na -> b"));
+        assert!(d.mermaid.is_none());
+        assert!(d.excalidraw.is_none());
+        assert_eq!(d.format, "d2");
     }
 
     #[test]
@@ -614,6 +620,16 @@ mod tests {
         assert_eq!(r.mermaid.as_deref(), Some("sequenceDiagram\n  A->>B: hi"));
         assert!(r.excalidraw.is_none());
         assert_eq!(r.note, "Here you go.");
+    }
+
+    #[test]
+    fn parse_prefers_d2_fence() {
+        let raw = "Drew it.\n\n```d2\ndirection: right\na -> b: hi\n```";
+        let r = parse_assist(raw);
+        assert_eq!(r.d2.as_deref(), Some("direction: right\na -> b: hi"));
+        assert!(r.mermaid.is_none());
+        assert!(r.excalidraw.is_none());
+        assert_eq!(r.note, "Drew it.");
     }
 
     #[test]
@@ -656,6 +672,18 @@ mod tests {
         assert!(got.contains("X-->Y"));
         let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(on_disk.contains("X-->Y"), "reply source written back to file");
+
+        // Same reply-fallback path for a D2 scene.
+        let d2_path = dir.join("canvas.d2");
+        tokio::fs::write(&d2_path, "direction: right\n").await.unwrap();
+        let parsed = AssistResult {
+            d2: Some("direction: right\na -> b: hi".into()),
+            ..Default::default()
+        };
+        let got = resolve_source(&d2_path, "direction: right\n", "d2", &parsed).await;
+        assert!(got.contains("a -> b: hi"));
+        let on_disk = tokio::fs::read_to_string(&d2_path).await.unwrap();
+        assert!(on_disk.contains("a -> b: hi"), "reply source written back to file");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

@@ -41,7 +41,10 @@
   let notD2 = $state(false);
   let generating = $state(false);
   let codeOpen = $state(false);
-  let sketch = $state(false);
+  // Seeded synchronously (not in onMount) — canvas.rawDoc is already populated
+  // by the store's open() before this component mounts, and the render $effect
+  // below must see the right value on its very first run.
+  let sketch = $state((canvas.rawDoc as CanvasDoc | null)?.sketch ?? false);
 
   // Pan/zoom transform.
   let scale = $state(1);
@@ -278,7 +281,6 @@
 
   onMount(() => {
     liveId = canvas.currentId;
-    sketch = (canvas.rawDoc as CanvasDoc | null)?.sketch ?? false;
   });
   onDestroy(() => {
     if (codeTimer) clearTimeout(codeTimer);
