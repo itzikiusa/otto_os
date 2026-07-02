@@ -28,6 +28,16 @@ function sqlEquals(column: string, value: unknown): string {
   return condToSql({ kind: 'col', column, op: 'in', values: [toFilterVal(value)] });
 }
 
+/** Postgres equals — double-quoted identifier (backticks are invalid in PG) with
+ *  a standard-SQL value literal. Single-equals is all "Query by value" needs. */
+function pgEquals(column: string, value: unknown): string {
+  const q = '"' + column.replace(/"/g, '""') + '"';
+  if (value === null || value === undefined) return `${q} IS NULL`;
+  if (typeof value === 'number' || typeof value === 'bigint') return `${q} = ${value}`;
+  if (typeof value === 'boolean') return `${q} = ${value ? 'TRUE' : 'FALSE'}`;
+  return `${q} = '${String(value).replace(/'/g, "''")}'`;
+}
+
 /** True when `body` has a top-level (depth-0, outside strings/comments) ` OR ` —
  *  used to parenthesize an existing WHERE before ANDing a new term so operator
  *  precedence is preserved. */
@@ -99,11 +109,12 @@ export function applySqlFilter(
   column: string,
   value: unknown,
   mode: FilterMode,
+  engine: 'mysql' | 'clickhouse' | 'postgres' = 'mysql',
 ): string | null {
   const core = sql.trim().replace(/;\s*$/, '');
   const parts = splitStatement(core);
   if (!parts) return null;
-  const cond = sqlEquals(column, value);
+  const cond = engine === 'postgres' ? pgEquals(column, value) : sqlEquals(column, value);
   if (!cond) return null;
   let newBody: string;
   if (mode === 'and' && parts.whereBody) {
@@ -273,7 +284,7 @@ export function applyMongoFilter(
  *  can be produced (empty base, a non-SELECT SQL statement, or a Mongo statement
  *  that isn't a `find`). The caller hides the menu items when this returns null. */
 export function buildFilteredQuery(
-  engine: 'mysql' | 'clickhouse' | 'mongodb',
+  engine: 'mysql' | 'clickhouse' | 'postgres' | 'mongodb',
   currentSql: string,
   col: string,
   v: unknown,
@@ -282,5 +293,5 @@ export function buildFilteredQuery(
   const sql = currentSql ?? '';
   if (!sql.trim()) return null;
   if (engine === 'mongodb') return applyMongoFilter(sql, col, v, mode);
-  return applySqlFilter(sql, col, v, mode);
+  return applySqlFilter(sql, col, v, mode, engine);
 }

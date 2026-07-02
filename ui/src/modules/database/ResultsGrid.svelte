@@ -504,12 +504,10 @@
       if (ci < 0) return null;
       const v = liveRows[rowIdx][ci];
       if (v === null || v === undefined) return null; // no row referenced
-      conds.push(`\`${refCol}\` = ${valueLiteral(v)}`);
+      conds.push(`${qid(refCol)} = ${valueLiteral(v)}`);
     }
     if (conds.length === 0) return null;
-    const ref = fk.ref_schema
-      ? `\`${fk.ref_schema}\`.\`${fk.ref_table}\``
-      : `\`${fk.ref_table}\``;
+    const ref = fk.ref_schema ? `${qid(fk.ref_schema)}.${qid(fk.ref_table)}` : qid(fk.ref_table);
     return `SELECT * FROM ${ref} WHERE ${conds.join(' AND ')} LIMIT 1`;
   }
 
@@ -544,7 +542,10 @@
     // cell, into the editor + clipboard (never run). SQL engines + Mongo `find`
     // only; both items are hidden when the active statement can't be safely
     // filtered (e.g. non-SELECT, multi-statement, a Mongo aggregate).
-    const fe = engine === 'mysql' || engine === 'clickhouse' || engine === 'mongodb' ? engine : null;
+    const fe =
+      engine === 'mysql' || engine === 'clickhouse' || engine === 'mongodb' || engine === 'postgres'
+        ? engine
+        : null;
     if (fe) {
       const base = statement ?? '';
       const setQ = buildFilteredQuery(fe, base, col, v, 'set');
@@ -841,12 +842,20 @@
   }
 
   /** `\`pk1\` = v1 AND \`pk2\` = v2` targeting one row by its primary key. */
+  /** Quote a SQL identifier for the active engine — double-quotes for Postgres
+   *  (backticks are invalid there), backticks for MySQL/ClickHouse. */
+  function qid(name: string): string {
+    return engine === 'postgres'
+      ? '"' + name.replace(/"/g, '""') + '"'
+      : '`' + name.replace(/`/g, '``') + '`';
+  }
+
   function whereByPk(rowIdx: number): string {
     if (!result) return '';
     return editPkCols
       .map((pk) => {
         const ci = result!.columns.findIndex((c) => c.name === pk);
-        return `\`${pk}\` = ${valueLiteral(liveRows[rowIdx][ci])}`;
+        return `${qid(pk)} = ${valueLiteral(liveRows[rowIdx][ci])}`;
       })
       .join(' AND ');
   }
@@ -871,13 +880,14 @@
   function valueLiteral(v: unknown): string {
     if (v === null || v === undefined) return 'NULL';
     if (typeof v === 'number' || typeof v === 'bigint') return String(v);
-    if (typeof v === 'boolean') return v ? '1' : '0';
+    if (typeof v === 'boolean') return engine === 'postgres' ? (v ? 'TRUE' : 'FALSE') : v ? '1' : '0';
     if (isComplex(v)) return `'${compactJson(v).replace(/'/g, "''")}'`;
     return `'${String(v).replace(/'/g, "''")}'`;
   }
-  /** `\`db\`.\`table\`` (db optional). */
+  /** Qualified `db.table` (db optional), quoted for the active engine. */
   function tableRef(): string {
-    return editDb ? `\`${editDb}\`.\`${editTable}\`` : `\`${editTable}\``;
+    const t = qid(editTable ?? '');
+    return editDb ? `${qid(editDb)}.${t}` : t;
   }
 
   /** Build the UPDATE for the in-progress cell edit and open the review modal.
@@ -904,7 +914,7 @@
       return;
     }
     const asNumber = typeof prev === 'number';
-    const setExpr = `\`${colName}\` = ${sqlLiteral(value, asNumber)}`;
+    const setExpr = `${qid(colName)} = ${sqlLiteral(value, asNumber)}`;
     const where = whereByPk(rowIdx);
     const sql =
       engine === 'clickhouse'
@@ -935,7 +945,7 @@
     const vals: string[] = [];
     result.columns.forEach((c, i) => {
       if (omitPk && editPkCols.includes(c.name)) return; // single PK → regenerate
-      cols.push(`\`${c.name}\``);
+      cols.push(qid(c.name));
       vals.push(valueLiteral(liveRows[rowIdx][i]));
     });
     const sql = `INSERT INTO ${tableRef()} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
@@ -1082,7 +1092,7 @@
       const pk = editPkCols[0];
       const ci = result.columns.findIndex((c) => c.name === pk);
       const list = indices.map((i) => valueLiteral(liveRows[i][ci])).join(', ');
-      where = `\`${pk}\` IN (${list})`;
+      where = `${qid(pk)} IN (${list})`;
     } else {
       // Composite key: OR a per-row AND of every key column.
       where = indices.map((i) => `(${whereByPk(i)})`).join(' OR ');
@@ -1123,7 +1133,7 @@
     if (!editable || !editTable) return;
     const idxs = selectedIndices();
     if (idxs.length === 0) return;
-    const cols = result!.columns.map((c) => `\`${c.name}\``).join(', ');
+    const cols = result!.columns.map((c) => qid(c.name)).join(', ');
     const lines = idxs.map((i) => {
       const vals = result!.columns.map((_, ci) => valueLiteral(liveRows[i][ci])).join(', ');
       return `INSERT INTO ${tableRef()} (${cols}) VALUES (${vals});`;
@@ -1146,7 +1156,7 @@
       const pk = editPkCols[0];
       const ci = result!.columns.findIndex((c) => c.name === pk);
       const list = idxs.map((i) => valueLiteral(liveRows[i][ci])).join(', ');
-      where = `\`${pk}\` IN (${list})`;
+      where = `${qid(pk)} IN (${list})`;
     } else {
       where = idxs.map((i) => `(${whereByPk(i)})`).join(' OR ');
     }

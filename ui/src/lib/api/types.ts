@@ -69,7 +69,14 @@ export interface Session {
   meta: Record<string, unknown>;
 }
 
-export type ConnectionKind = 'ssh' | 'mysql' | 'redis' | 'mongodb' | 'clickhouse' | 'custom';
+export type ConnectionKind =
+  | 'ssh'
+  | 'mysql'
+  | 'postgres'
+  | 'redis'
+  | 'mongodb'
+  | 'clickhouse'
+  | 'custom';
 
 /** Deployment environment. `prod` is write-guarded in the DB Explorer. */
 export type Environment = 'dev' | 'staging' | 'prod';
@@ -3883,7 +3890,7 @@ export interface GenerateWorkflowReq {
 // ---------------------------------------------------------------------------
 
 /** Database engines the explorer can talk to (subset of ConnectionKind). */
-export type DbEngine = 'mysql' | 'redis' | 'mongodb' | 'clickhouse';
+export type DbEngine = 'mysql' | 'postgres' | 'redis' | 'mongodb' | 'clickhouse';
 
 /** Schema-tree node taxonomy across SQL / Redis / Mongo. */
 export type DbNodeKind =

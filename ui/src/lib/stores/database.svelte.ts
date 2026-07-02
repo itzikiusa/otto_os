@@ -44,8 +44,8 @@ import {
 } from '../../modules/database/sql-util';
 import { bsonScalar } from '../../modules/database/bson';
 
-/** Connection kinds the explorer can browse (the four DB engines). */
-export const DB_KINDS = ['mysql', 'redis', 'mongodb', 'clickhouse'] as const;
+/** Connection kinds the explorer can browse (the DB engines). */
+export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
 export type DbKind = (typeof DB_KINDS)[number];
 
 function isDbKind(k: string): k is DbKind {
@@ -810,7 +810,9 @@ class DatabaseStore {
         this.setStatement(formatMongo(t.statement));
         return;
       }
-      const dialect: 'mysql' | 'sql' = this.selectedConn?.kind === 'mysql' ? 'mysql' : 'sql';
+      const kind = this.selectedConn?.kind;
+      const dialect: 'mysql' | 'postgresql' | 'sql' =
+        kind === 'mysql' ? 'mysql' : kind === 'postgres' ? 'postgresql' : 'sql';
       const unwrapped = stripJavaStringConcat(t.statement);
       const { masked, tokens } = maskQueryPlaceholders(unwrapped);
       const formatted = formatSql(masked, { language: dialect, keywordCase: 'upper' });

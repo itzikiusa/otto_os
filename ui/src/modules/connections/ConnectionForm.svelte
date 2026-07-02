@@ -26,15 +26,15 @@
     existing,
     onclose,
     onsaved,
-    kinds = ['ssh', 'mysql', 'redis', 'mongodb', 'clickhouse', 'custom'],
+    kinds = ['ssh', 'mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom'],
   }: Props = $props();
 
   // Which kinds support the db field
-  const hasDatabaseField = new Set<ConnectionKind>(['mysql', 'clickhouse', 'redis', 'mongodb']);
+  const hasDatabaseField = new Set<ConnectionKind>(['mysql', 'postgres', 'clickhouse', 'redis', 'mongodb']);
   // Which kinds need host/port/user (not mongodb / custom)
-  const hasHostFields = new Set<ConnectionKind>(['ssh', 'mysql', 'redis', 'clickhouse']);
+  const hasHostFields = new Set<ConnectionKind>(['ssh', 'mysql', 'postgres', 'redis', 'clickhouse']);
   // Which kinds can have a password (all except ssh by default)
-  const hasPasswordField = new Set<ConnectionKind>(['mysql', 'redis', 'mongodb', 'clickhouse', 'custom']);
+  const hasPasswordField = new Set<ConnectionKind>(['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom']);
 
   // svelte-ignore state_referenced_locally
   let name = $state(existing?.name ?? '');
@@ -77,9 +77,9 @@
   // ── TLS + SSH-tunnel (DB engines) ──────────────────────────────────────────
   // These write structured objects into params.tls / params.ssh for the four DB
   // kinds, on top of the existing flat jump/identity_file fields (left intact).
-  const tlsKinds = new Set<ConnectionKind>(['mysql', 'redis', 'mongodb', 'clickhouse']);
+  const tlsKinds = new Set<ConnectionKind>(['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse']);
   // Engines with a meaningful session time zone (renders datetimes in this zone).
-  const tzKinds = new Set<ConnectionKind>(['mysql', 'clickhouse']);
+  const tzKinds = new Set<ConnectionKind>(['mysql', 'postgres', 'clickhouse']);
   type TlsMode = 'disabled' | 'preferred' | 'required';
   // svelte-ignore state_referenced_locally
   const existingTls = (existing?.params?.tls as Record<string, unknown> | undefined) ?? undefined;
@@ -248,6 +248,9 @@
     const kindMap: Record<string, ConnectionKind> = {
       mysql: 'mysql',
       'mysql+tcp': 'mysql',
+      postgres: 'postgres',
+      postgresql: 'postgres',
+      'postgres+tcp': 'postgres',
       redis: 'redis',
       rediss: 'redis',
       mongodb: 'mongodb',
@@ -490,7 +493,7 @@
           class="input mono"
           type="number"
           bind:value={fPort}
-          placeholder={kind === 'ssh' ? '22' : kind === 'redis' ? '6379' : kind === 'clickhouse' ? '8443' : '3306'}
+          placeholder={kind === 'ssh' ? '22' : kind === 'redis' ? '6379' : kind === 'clickhouse' ? '8443' : kind === 'postgres' ? '5432' : '3306'}
         />
         {#if kind === 'clickhouse'}
           <span class="hint">Use the HTTP interface — 8123 (plain) or 8443 (TLS). The native ports 9000 / 9440 aren't supported.</span>

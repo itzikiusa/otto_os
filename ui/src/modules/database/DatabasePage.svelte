@@ -30,7 +30,7 @@
   } from '../../lib/api/types';
 
   // DB connections are created/managed here (hidden from the Connections page).
-  const DB_KINDS: ConnectionKind[] = ['mysql', 'redis', 'mongodb', 'clickhouse'];
+  const DB_KINDS: ConnectionKind[] = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'];
   let connFormOpen = $state(false);
   let editingConn = $state<Connection | null>(null);
   // Import connection profiles from other DB tools (MySQL Workbench / DBeaver /
@@ -1239,6 +1239,9 @@
   .conn-glyph.clickhouse {
     color: var(--accent);
   }
+  .conn-glyph.postgres {
+    color: #336791;
+  }
   .conn-glyph.redis {
     color: #d2691e;
   }
@@ -1500,6 +1503,9 @@
   .conn-tab-glyph.mysql,
   .conn-tab-glyph.clickhouse {
     color: var(--accent);
+  }
+  .conn-tab-glyph.postgres {
+    color: #336791;
   }
   .conn-tab-glyph.redis {
     color: #d2691e;
