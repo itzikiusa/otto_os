@@ -6,7 +6,7 @@
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
-  import { availableModules, resolveOrder, visibleOrder } from '../lib/sidebar';
+  import { availableModules, navIdForModule, resolveOrder, visibleOrder } from '../lib/sidebar';
 
   // The collapsed rail mirrors the same resolved module list as the Navigator
   // (shared registry → RBAC filter + plugins → user's saved order, minus hidden
@@ -29,11 +29,12 @@
 
   // Active when the route matches the entry id. Plugin entries use a `plugin/<slug>`
   // id while `router.module` is just `plugin`, so compare the slug for those.
+  // database/brokers views belong to the Connections hub (navIdForModule).
   function isActive(id: string): boolean {
     if (id.startsWith('plugin/')) {
       return router.module === 'plugin' && `plugin/${router.parts[1] ?? ''}` === id;
     }
-    return router.module === id;
+    return navIdForModule(router.module) === id;
   }
 </script>
 

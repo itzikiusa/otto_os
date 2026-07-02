@@ -271,6 +271,14 @@ export function engineGlyph(kind: string): string {
       return 'box';
     case 'clickhouse':
       return 'grid';
+    case 'postgres':
+      return 'layers';
+    case 'ssh':
+      return 'terminal';
+    case 'custom':
+      return 'gear';
+    case 'kafka': // broker clusters in the unified tree
+      return 'split';
     default:
       return 'db';
   }
@@ -424,8 +432,11 @@ export interface ConnStatus {
 
 class DatabaseStore {
   // ── Connections ────────────────────────────────────────────────────────────
-  /** All workspace connections, filtered to the four DB engines. */
+  /** All workspace connections, filtered to the DB engines (workbench-openable). */
   connections: Connection[] = $state([]);
+  /** Non-DB profiles (ssh/custom) — rendered in the unified sidebar tree;
+   *  opening one spawns a terminal session instead of a workbench tab. */
+  otherConnections: Connection[] = $state([]);
   selectedConnId: Id | null = $state(null);
   /** Connections currently open as top-level tabs, in display order. */
   openConnIds: Id[] = $state([]);
@@ -1033,13 +1044,16 @@ class DatabaseStore {
 
   // ── Loading ───────────────────────────────────────────────────────────────
 
-  /** Load DB-kind connections for the current workspace. */
+  /** Load connections for the current workspace. DB kinds drive the workbench
+   *  (`connections`); ssh/custom land in `otherConnections` so the unified
+   *  sidebar tree can render EVERY profile (opens route by type). */
   async loadConnections(): Promise<void> {
     const wid = ws.currentId;
     if (!wid) return;
     try {
       const all = await api.get<Connection[]>(`/workspaces/${wid}/connections`);
       const next = all.filter((c) => isDbKind(c.kind));
+      this.otherConnections = all.filter((c) => !isDbKind(c.kind));
       // Distinguish a genuine WORKSPACE SWITCH from a same-workspace refresh
       // (e.g. after adding/deleting a connection). Keying on the workspace id —
       // not the connection-id set — is what lets a restored/open set survive a

@@ -2,13 +2,16 @@
 
 A **Connection** is a saved, reusable profile for reaching a remote endpoint —
 an SSH host, a MySQL / PostgreSQL / Redis / MongoDB / ClickHouse server, or any
-custom CLI. The Connections page is the **unified hub**: it lists every
+custom CLI. **Connections is the single sidebar entry** — `#/connections`
+opens the DB-workbench page whose sidebar tree is the unified hub: every
 connection kind AND Kafka broker clusters in ONE shared section tree
-(migration `0095` merged the broker folders in), with type-filter chips
-(All / SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse / Kafka /
-Custom). Opens route by type — SSH/custom → terminal, DB kinds → the Database
-Explorer workbench (an "Open terminal client" row action keeps the CLI path),
-clusters → Message Brokers.
+(migration `0095` merged the broker folders in), per-kind glyphs + a `kind`
+tag on each row, and type-filter chips (All / SSH / MySQL / PostgreSQL /
+Redis / MongoDB / ClickHouse / Kafka / Custom). Opens route by type —
+SSH/custom → terminal session, DB kinds → the workbench (right-click keeps
+"Open terminal client" and SSH rows keep "Browse files (SFTP)"), clusters →
+the Message Brokers view (`#/brokers`, reached from here; it has no sidebar
+entry of its own, and neither does `#/database`, which stays as an alias).
 Opening a profile drops you into a **live terminal session** sitting side-by-side
 with your agents (same session machinery), driven by the system client binary
 (`ssh`, `mysql`, `redis-cli`, `mongosh`, `clickhouse-client`, …). The very same

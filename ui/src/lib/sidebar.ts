@@ -16,8 +16,11 @@ export interface SidebarModuleDef {
   /** Display label. */
   label: string;
   /** RBAC feature gate (checked at 'view'). Omitted = ungated: always visible
-   *  to any authenticated member (e.g. Vault, Message Brokers). */
+   *  to any authenticated member (e.g. Goal Loops, Canvas). */
   feature?: Feature;
+  /** Alternative gates: visible when ANY of these features is viewable (used by
+   *  Connections, which fronts both the connections and database features). */
+  featureAny?: Feature[];
   /** Agents/Connections render a nested live-session list in the Navigator and
    *  so need bespoke markup; every other module is a plain nav row. */
   special?: boolean;
@@ -40,7 +43,17 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'agents', icon: 'terminal', label: 'Agents', feature: 'agents', special: true },
   { id: 'run-with-otto', icon: 'play', label: 'Run with Otto', feature: 'run_with_otto' },
   { id: 'mission-control', icon: 'radar', label: 'Mission Control', feature: 'mission_control' },
-  { id: 'connections', icon: 'plug', label: 'Connections', feature: 'connections', special: true },
+  // The unified hub: SSH/custom terminals + databases + Kafka clusters live in
+  // ONE tree here, so there are no separate Database / Message Brokers entries —
+  // their views (`#/database`, `#/brokers`) are reached by opening a row and
+  // highlight this entry (see navIdForModule). Visible with EITHER feature.
+  {
+    id: 'connections',
+    icon: 'plug',
+    label: 'Connections',
+    featureAny: ['connections', 'database'],
+    special: true,
+  },
   { id: 'swarm', icon: 'grid', label: 'Swarm', feature: 'swarm' },
   { id: 'loops', icon: 'refresh', label: 'Goal Loops' },
   { id: 'proof', icon: 'check', label: 'Proof', feature: 'proof_pack' },
@@ -53,8 +66,6 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   // { id: 'vault', icon: 'globe', label: 'Vault' },
   { id: 'canvas', icon: 'shapes', label: 'Canvas' },
   { id: 'api', icon: 'send', label: 'API', feature: 'api_client' },
-  { id: 'database', icon: 'db', label: 'Database', feature: 'database' },
-  { id: 'brokers', icon: 'box', label: 'Message Brokers' },
   { id: 'mcp', icon: 'plug', label: 'MCP Control Plane', feature: 'mcp' },
   { id: 'workflows', icon: 'split', label: 'Workflows', feature: 'workflows' },
   { id: 'scheduled-tasks', icon: 'clock', label: 'Scheduled Tasks', feature: 'scheduled_tasks' },
@@ -73,10 +84,20 @@ export function availableModules(
   can: (feature: Feature) => boolean,
   plugins: SidebarModule[],
 ): SidebarModule[] {
-  const builtins = SIDEBAR_MODULES.filter((m) => m.feature == null || can(m.feature)).map(
-    (m): SidebarModule => ({ id: m.id, icon: m.icon, label: m.label, special: m.special }),
-  );
+  const builtins = SIDEBAR_MODULES.filter((m) =>
+    m.featureAny ? m.featureAny.some(can) : m.feature == null || can(m.feature),
+  ).map((m): SidebarModule => ({ id: m.id, icon: m.icon, label: m.label, special: m.special }));
   return [...builtins, ...plugins];
+}
+
+/**
+ * The sidebar entry a router module belongs to. The Database Explorer and
+ * Message Brokers views have no nav entries of their own — they are opened from
+ * the unified Connections hub, so their routes highlight `connections`.
+ */
+export function navIdForModule(routerModule: string): string {
+  if (routerModule === 'database' || routerModule === 'brokers') return 'connections';
+  return routerModule;
 }
 
 /**
