@@ -12,13 +12,17 @@
   import SceneList from './SceneList.svelte';
   import ExcalidrawCanvas from './ExcalidrawCanvas.svelte';
   import MermaidCanvas from './MermaidCanvas.svelte';
+  import D2Canvas from './D2Canvas.svelte';
   import ConversationPanel from './ConversationPanel.svelte';
   import type { CanvasFormat } from './types';
 
-  // Two modes the user picks at creation: Excalidraw (a fully editable board, the
-  // agent writes canvas.json) or Mermaid (rich auto-rendered diagrams of any kind
-  // — flowchart / sequence / class — the agent writes canvas.mermaid).
+  // Three modes the user picks at creation: Excalidraw (a fully editable board,
+  // the agent writes canvas.json), Mermaid (rich auto-rendered diagrams of any
+  // kind — flowchart / sequence / class — the agent writes canvas.mermaid), or
+  // D2 (modern declarative diagrams — architecture / sequence / SQL tables — the
+  // agent writes canvas.d2).
   const isExcalidraw = $derived(canvas.format === 'excalidraw');
+  const isD2 = $derived(canvas.format === 'd2');
 
   // Phone collapses the scene list once a board is open (more room).
   const readonly = $derived(viewport.isPhone);
@@ -45,14 +49,18 @@
   });
 
   function blankDoc(format: CanvasFormat): unknown {
-    return format === 'excalidraw'
-      ? {
-          type: 'otto-canvas',
-          version: 1,
-          format: 'excalidraw',
-          source: JSON.stringify({ type: 'excalidraw', version: 2, source: 'otto', elements: [] }),
-        }
-      : { type: 'otto-canvas', version: 1, format: 'mermaid', source: '' };
+    if (format === 'excalidraw') {
+      return {
+        type: 'otto-canvas',
+        version: 1,
+        format: 'excalidraw',
+        source: JSON.stringify({ type: 'excalidraw', version: 2, source: 'otto', elements: [] }),
+      };
+    }
+    if (format === 'd2') {
+      return { type: 'otto-canvas', version: 1, format: 'd2', source: '' };
+    }
+    return { type: 'otto-canvas', version: 1, format: 'mermaid', source: '' };
   }
 
   async function createBlank(format: CanvasFormat = 'excalidraw'): Promise<void> {
@@ -87,6 +95,8 @@
             <div class="editor-host">
               {#if isExcalidraw}
                 <ExcalidrawCanvas bind:this={editor} {readonly} />
+              {:else if isD2}
+                <D2Canvas bind:this={editor} {readonly} />
               {:else}
                 <MermaidCanvas bind:this={editor} {readonly} />
               {/if}
@@ -123,6 +133,11 @@
               <Icon name="branch" size={20} />
               <span class="m-title">Mermaid diagram</span>
               <span class="m-sub">Auto-rendered flowchart / sequence / class — rich &amp; clean</span>
+            </button>
+            <button class="mode" onclick={() => createBlank('d2')}>
+              <Icon name="layers" size={20} />
+              <span class="m-title">D2 diagram</span>
+              <span class="m-sub">Modern declarative diagrams — architecture, sequence &amp; SQL tables</span>
             </button>
           </div>
         </div>

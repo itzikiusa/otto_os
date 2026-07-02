@@ -1,0 +1,40 @@
+/* Shared Product-module button idiom.
+ * Plain (unscoped) CSS, imported once by ProductPage.svelte — so ChatTab,
+ * RefineTab and MockupsTab don't each duplicate the same pill-button rules
+ * (previously `.toolbar-btn` / `.head-btn` / `.act-btn`, all near-identical).
+ * Svelte's per-component style scoping only covers markup written in that
+ * component's own template, so a shared class used from a `{#snippet}` (e.g.
+ * ListPane's `actions`) has to live in a plain .css file like this one rather
+ * than a component's own <style> block.
+ */
+
+.p-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 110ms, border-color 110ms, opacity 110ms;
+}
+.p-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+}
+.p-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.p-btn.primary:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.p-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

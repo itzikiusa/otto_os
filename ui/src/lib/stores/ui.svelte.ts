@@ -4,7 +4,7 @@
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
 export type Direction = 'ltr' | 'rtl';
-export type RightTab = 'git' | 'files' | 'notes' | 'activity' | 'info' | 'browser' | 'api';
+export type RightTab = 'git' | 'files' | 'notes' | 'activity' | 'info' | 'browser' | 'api' | 'canvas';
 
 /** Terminal font choice. 'Cousine' supplies Hebrew glyphs in every stack so RTL
  *  text stays crisp; 'system' keeps SF Mono primary (no change for English). */

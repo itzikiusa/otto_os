@@ -61,37 +61,126 @@
     }
   });
 
-  // Requirement D — keep a *viewed* run live, not only one started via execRun.
-  // (1) Snappy: refetch the shown run when a workflow_run_updated event names it.
+  // ── live run sync ──────────────────────────────────────────────────────────
+  // ONE path keeps the viewed run live, whatever started it. Updates are
+  // MERGED INTO the existing `run` object (never a wholesale replacement), so
+  // everything the user is looking at — an expanded step, the timeline
+  // selection, scroll positions — survives every tick. The run's monotonic
+  // `rev` guards against stale/out-of-order snapshots ever regressing the view.
+  //
+  // Sources, all funneled through applyRunSnapshot / the WS fast-path:
+  //   1. workflow_run_updated events carrying the changed node + a contiguous
+  //      rev → merged in place, no network at all.
+  //   2. Events with a rev gap / no node payload / terminal status → ONE
+  //      single-flight, rev-guarded GET of the full run.
+  //   3. A 2.5s fallback poll while the viewed run is non-terminal (missed
+  //      events, or no WS connection).
+
+  let destroyed = false;
+  $effect(() => () => {
+    destroyed = true;
+  });
+
+  /** Cheap change signature over the fields a node update can touch. Object
+   *  fields (output/logs/sessions) are only reassigned when it changes, so
+   *  unchanged step subtrees don't re-render on every merge. */
+  function nodeSig(n: NodeRunState): string {
+    const out = n.output === undefined || n.output === null ? 0 : 1;
+    return `${n.status}|${n.error ?? ''}|${n.started_at ?? ''}|${n.duration_ms ?? -1}|${n.attempts ?? 0}|${n.logs?.length ?? 0}|${(n.logs ?? [])[Math.max(0, (n.logs?.length ?? 0) - 1)] ?? ''}|${n.sessions?.length ?? 0}|${out}`;
+  }
+
+  function mergeNode(into: NodeRunState, from: NodeRunState): void {
+    if (nodeSig(into) === nodeSig(from)) return;
+    into.status = from.status;
+    into.error = from.error ?? null;
+    into.started_at = from.started_at ?? null;
+    into.duration_ms = from.duration_ms ?? null;
+    into.attempts = from.attempts ?? null;
+    into.logs = from.logs ?? [];
+    into.sessions = from.sessions ?? [];
+    into.output = from.output;
+  }
+
+  /** Merge a full snapshot into the viewed run (id + rev guarded). */
+  function applyRunSnapshot(nr: WorkflowRun): void {
+    const cur = run;
+    if (!cur || cur.id !== nr.id) return; // the view moved on — never stomp it
+    if ((nr.rev ?? 0) < (cur.rev ?? 0)) return; // stale snapshot — ignore
+    cur.rev = nr.rev ?? cur.rev;
+    cur.status = nr.status;
+    cur.error = nr.error ?? null;
+    cur.finished_at = nr.finished_at ?? null;
+    cur.waiting_approval = nr.waiting_approval ?? false;
+    cur.approval_node_id = nr.approval_node_id ?? null;
+    cur.workflow_version = nr.workflow_version ?? null;
+    cur.proof_pack_id = nr.proof_pack_id ?? null;
+    for (const n of nr.nodes ?? []) {
+      const ex = cur.nodes.find((x) => x.node_id === n.node_id);
+      if (ex) mergeNode(ex, n);
+      else cur.nodes.push(n);
+    }
+  }
+
+  // Single-flight refetch: at most one GET in the air; a request that arrives
+  // while one is flying coalesces into one trailing fetch.
+  let runFetchInFlight = false;
+  let runRefetchQueued = false;
+  async function refetchRun(runId: string): Promise<void> {
+    if (runFetchInFlight) {
+      runRefetchQueued = true;
+      return;
+    }
+    runFetchInFlight = true;
+    try {
+      do {
+        runRefetchQueued = false;
+        const nr = await api.get<WorkflowRun>(`/workflow-runs/${runId}`);
+        applyRunSnapshot(nr);
+      } while (runRefetchQueued && untrack(() => run)?.id === runId && !destroyed);
+    } catch {
+      /* transient; the fallback poll heals */
+    } finally {
+      runFetchInFlight = false;
+    }
+  }
+
+  // (1) WS fast-path: apply the event to the viewed run without refetching
+  // when it carries the changed node and the very next rev.
   $effect(() => {
     const _tick = workflowRunBus.tick; // dependency: re-run on each WS event
     void _tick;
     untrack(() => {
-      const r = run;
-      if (!r || running) return; // execRun already drives the run it started
-      if (workflowRunBus.runId !== r.id) return;
-      void api
-        .get<WorkflowRun>(`/workflow-runs/${r.id}`)
-        .then((nr) => {
-          if (untrack(() => run)?.id === nr.id) run = nr;
-        })
-        .catch(() => {});
+      const cur = run;
+      if (!cur || workflowRunBus.runId !== cur.id) return;
+      const evRev = workflowRunBus.rev;
+      const curRev = cur.rev ?? 0;
+      if (evRev > 0 && evRev <= curRev) return; // already have this state
+      const status = workflowRunBus.status;
+      const terminal = status === 'success' || status === 'error' || status === 'canceled';
+      const evNode = workflowRunBus.node;
+      if (!terminal && evRev === curRev + 1 && evNode) {
+        cur.rev = evRev;
+        cur.status = status as WorkflowRun['status'];
+        const ex = cur.nodes.find((x) => x.node_id === evNode.node_id);
+        if (ex) mergeNode(ex, evNode);
+        else cur.nodes.push(evNode);
+        return;
+      }
+      // Rev gap (missed events), no node payload (run-level / approval /
+      // oversized node), or terminal (pick up proof pack + final states):
+      // converge via one full, guarded snapshot.
+      void refetchRun(cur.id);
     });
   });
-  // (2) Guaranteed: a slow safety poll while a viewed run is non-terminal, so it
-  //     still converges if a WS event is missed (single-slot bus, or no WS).
+
+  // (2) Guaranteed: a slow safety poll while the viewed run is non-terminal,
+  // so the view still converges with no WS connection at all.
   $effect(() => {
-    const r = run;
-    if (!r || running) return;
-    if (r.status !== 'pending' && r.status !== 'running') return;
-    const iv = setInterval(() => {
-      void api
-        .get<WorkflowRun>(`/workflow-runs/${r.id}`)
-        .then((nr) => {
-          if (untrack(() => run)?.id === r.id) run = nr;
-        })
-        .catch(() => {});
-    }, 2500);
+    const cur = run;
+    if (!cur) return;
+    if (cur.status !== 'pending' && cur.status !== 'running') return;
+    const id = cur.id;
+    const iv = setInterval(() => void refetchRun(id), 2500);
     return () => clearInterval(iv);
   });
 
@@ -298,53 +387,49 @@
     dirty = true;
   }
 
-  // Max number of poll intervals before we stop even if no terminal event
-  // arrives. With 700ms intervals this allows ~3.5 minutes of capped polling.
-  const POLL_MAX = 300;
+  /** Await a run's terminal status WITHOUT driving the view: while the run is
+   *  the one on screen, its live-merged state is authoritative (no network);
+   *  once the user switches the view elsewhere, fall back to a cheap poll.
+   *  This is what lets a user inspect another run while one is in flight —
+   *  nothing here ever writes `run`. */
+  async function waitRunTerminal(runId: string): Promise<{ status: string; error?: string | null }> {
+    for (;;) {
+      if (destroyed) return { status: 'canceled', error: null };
+      const cur = untrack(() => run);
+      let status: string;
+      let error: string | null | undefined;
+      if (cur?.id === runId) {
+        status = cur.status;
+        error = cur.error;
+      } else {
+        try {
+          const g = await api.get<WorkflowRun>(`/workflow-runs/${runId}`);
+          status = g.status;
+          error = g.error;
+        } catch {
+          status = 'running'; // transient fetch error — keep waiting
+        }
+      }
+      if (status !== 'pending' && status !== 'running') return { status, error };
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+  }
 
   async function execRun(body: Record<string, unknown>): Promise<void> {
     if (!current || running) return;
     if (dirty) await save();
     running = true;
-    run = null;
     const workflowId = current.id;
     try {
-      let r = await api.post<WorkflowRun>(`/workflows/${workflowId}/run`, body);
+      const r = await api.post<WorkflowRun>(`/workflows/${workflowId}/run`, body);
+      // Show the new run (a user-initiated view switch); from here the shared
+      // live-run sync streams its progress in.
       run = r;
-      const runId = r.id;
-      let pollCount = 0;
-      let nextPollMs = 700;
-
-      // Event-driven refresh: workflowRunBus.tick increments each time the
-      // server emits WorkflowRunUpdated for any run. We re-fetch when our
-      // run_id is the active one. A capped 700ms fallback poll keeps the UI
-      // live when the WS connection is unavailable.
-      while ((r.status === 'pending' || r.status === 'running') && pollCount < POLL_MAX) {
-        // Wait for whichever comes first: a WS event tick or the poll timer.
-        const snapshot = workflowRunBus.tick;
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, nextPollMs);
-          // Check for a new event tick in a tight loop (rAF-free; negligible CPU).
-          const iv = setInterval(() => {
-            if (workflowRunBus.tick !== snapshot && workflowRunBus.runId === runId) {
-              clearInterval(iv);
-              clearTimeout(timer);
-              resolve();
-            }
-          }, 50);
-          // Ensure the interval is always cleared when the timer fires.
-          setTimeout(() => clearInterval(iv), nextPollMs + 10);
-        });
-        r = await api.get<WorkflowRun>(`/workflow-runs/${runId}`);
-        run = r;
-        pollCount += 1;
-        // Back off the fallback poll slightly after the first few ticks to
-        // reduce load when WS events are driving the refresh. Cap at 3s.
-        nextPollMs = Math.min(nextPollMs + 100, 3000);
-      }
-      if (r.status === 'success') toasts.success('Run complete');
-      else if (r.status === 'canceled') toasts.info('Run stopped');
-      else toasts.error('Run finished with errors', r.error ?? '');
+      const done = await waitRunTerminal(r.id);
+      if (destroyed) return;
+      if (done.status === 'success') toasts.success('Run complete');
+      else if (done.status === 'canceled') toasts.info('Run stopped');
+      else toasts.error('Run finished with errors', done.error ?? '');
       void loadRuns();
     } catch (e) {
       toasts.error('Run failed', e instanceof Error ? e.message : String(e));

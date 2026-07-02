@@ -91,7 +91,7 @@ reach only the session's owner (`created_by`), a workspace `admin`, or root —
 and only after the `viewer`+ membership gate on the event's `workspace_id`;
 other **workspace-scoped events** (improvement, swarm) reach every member with
 `viewer`+ on the event's `workspace_id` (root receives all); **broadcast
-events** (`Notice`) reach every authenticated client. There are 40 variants
+events** (`Notice`) reach every authenticated client. There are 41 variants
 (the sections below cover them; each `## …`/`### …` heading is one feature family).
 
 Session lifecycle (session-family — owner/admin/root, viewer-gated):
@@ -360,13 +360,19 @@ the user can watch them (and answer questions when `interactive`).
 
 Workspace-scoped. Emitted by `crates/otto-server/src/workflow_engine.rs` at
 every node transition (start, finish/cached, error-skip, branch-skip — a not-taken
-edge), again whenever a node spawns an openable session (so the run view can open
-it live), and when the overall run reaches a terminal status. Lets the Workflows
-page switch from a 700ms poll loop to event-driven refresh; a capped fallback poll
-(backing off to 3s, max 300 ticks) is kept for cases where the WS connection is
-unavailable. The **payload is unchanged** (the new per-node `sessions`/`attempts`
-and the run's `workflow_version`/`proof_pack_id` ride the `GET /workflow-runs/{id}`
-the event triggers a refetch of, not the event itself).
+edge), whenever a node spawns an openable session (so the run view can open it
+live), when a `human_approval` node pauses the run, and when the overall run
+reaches a terminal status. `routes/workflows.rs` additionally emits on the
+approve/reject decision and on cancel, so open views react without waiting for
+the engine's own polls.
+
+The payload carries enough for clients to apply the change **in place** instead
+of refetching the whole run per event: `rev` is the run's monotonic revision
+after this change, and `node` is the changed node's full `NodeRunState` —
+omitted when its serialized size exceeds 32 KiB, in which case (or on a rev
+gap / a run-level event) clients converge with one rev-guarded
+`GET /workflow-runs/{id}`. A 2.5s fallback poll remains while a viewed run is
+non-terminal so the view converges even with no WS connection.
 
 ```json
 {
@@ -374,18 +380,31 @@ the event triggers a refetch of, not the event itself).
   "workspace_id": "<Id>",
   "run_id": "<Id>",
   "status": "running|success|error|canceled",
-  "node_id": "<node_id | null>"
+  "node_id": "<node_id | null>",
+  "rev": 7,
+  "node": { "node_id": "…", "status": "…", "logs": ["…"], "…": "…" },
+  "nodes_done": 2,
+  "nodes_total": 5,
+  "waiting_approval": false
 }
 ```
 
 - `node_id` — the node whose state changed; `null` when the event reflects the
-  overall run status (run started / run terminal).
-- UI routing: `events.svelte.ts` dispatches to `workflowRunBus.apply()`.
-  `WorkflowsPage.svelte` subscribes to `workflowRunBus.tick` and re-fetches
-  `GET /workflow-runs/{id}` whenever a matching `run_id` event fires.
-- TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts`
-  as `{ type: 'workflow_run_updated'; workspace_id: Id; run_id: Id; status:
-  string; node_id?: Id | null }`.
+  overall run status (run started / paused for approval / decision / terminal).
+- `rev` — the run revision this event reflects (0 = unknown → refetch path).
+  Clients drop events/snapshots whose rev is behind what they already show, and
+  apply a node payload in place only when `rev` is exactly contiguous.
+- `nodes_done`/`nodes_total` — step progress for the "Running" sidebar, updated
+  in place without a second GET (`nodes_total` 0 = unknown, keep last counts).
+- `waiting_approval` — true on the pause event; the approve/reject decision
+  re-emits with false.
+- UI routing: `events.svelte.ts` dispatches to `workflowRunBus.apply(event)`
+  (run view) **and** `ws.applyWorkflowRunEvent(event)` (in-place "Running"
+  sidebar update; a full active-list refetch only for unknown run ids).
+- TypeScript type: the `OttoEvent` union in `ui/src/lib/api/types.ts` —
+  `{ type: 'workflow_run_updated'; workspace_id: Id; run_id: Id; status:
+  string; node_id?: Id | null; rev?: number; node?: NodeRunState | null;
+  nodes_done?: number; nodes_total?: number; waiting_approval?: boolean }`.
 
 ## Skill-eval completion (A11)
 
@@ -582,3 +601,63 @@ the committed answer.
 - TypeScript types: in the `OttoEvent` union in `ui/src/lib/api/types.ts` as
   `{ type: 'db_assist_session_started'; workspace_id: Id; connection_id: Id; assist_id: Id; session_id: Id }`
   and `{ type: 'db_assist_updated'; workspace_id: Id; connection_id: Id; assist_id: Id; sql: string; note: string }`.
+
+---
+
+### `canvas_updated` / `canvas_session_started`
+
+Workspace-scoped. Emitted by `crates/otto-server/src/canvas_assist.rs` while an
+Ask-AI agent turn edits a scene's backing source file (live, per-poll) and once
+more with the committed result; `canvas_session_started` fires at the START of
+the turn so the Canvas Assistant panel can attach the agent's shell immediately
+instead of waiting for it to finish.
+
+```json
+{ "type": "canvas_updated", "workspace_id": "<Id>", "scene_id": "<Id>", "doc": {"type":"otto-canvas","format":"mermaid","source":"..."} }
+{ "type": "canvas_session_started", "workspace_id": "<Id>", "scene_id": "<Id>", "session_id": "<Id>" }
+```
+
+- `doc` — the opaque canvas document (`{type,format,source,…}`); the open editor
+  re-renders it for the matching `scene_id` without a refetch.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- UI routing: `events.svelte.ts` → `canvasDocBus.apply()` (`canvas_updated`); sets
+  `canvas.sessionId` directly for the open scene (`canvas_session_started`).
+- TypeScript types: `{ type: 'canvas_updated'; workspace_id: Id; scene_id: Id; doc: unknown }`
+  and `{ type: 'canvas_session_started'; workspace_id: Id; scene_id: Id; session_id: Id }`.
+
+### `mockup_updated` / `mockup_session_started`
+
+Workspace-scoped. Emitted by `crates/otto-server/src/mockup_assist.rs` — same
+shape and timing as the canvas pair above, but for a product story's mockup
+attachment (an HTML page or Mermaid diagram the mockup agent edits in place).
+
+```json
+{ "type": "mockup_updated", "workspace_id": "<Id>", "story_id": "<Id>", "attachment_id": "<Id>", "format": "html|mermaid", "content": "..." }
+{ "type": "mockup_session_started", "workspace_id": "<Id>", "story_id": "<Id>", "attachment_id": "<Id>", "session_id": "<Id>" }
+```
+
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- UI routing: `events.svelte.ts` → `mockupAssist.ingestLive()` (`mockup_updated`)
+  / `mockupAssist.setSession()` (`mockup_session_started`); the Product →
+  Mockups Assistant panel re-renders the live preview for the matching
+  `attachment_id`.
+- TypeScript types: `{ type: 'mockup_updated'; workspace_id: Id; story_id: Id; attachment_id: Id; format: string; content: string }`
+  and `{ type: 'mockup_session_started'; workspace_id: Id; story_id: Id; attachment_id: Id; session_id: Id }`.
+
+### `canvas_refs_changed`
+
+Workspace-scoped. Emitted by `crates/otto-server/src/canvas_refs.rs` whenever a
+Canvas scene is attached to or detached from an agent session.
+
+```json
+{ "type": "canvas_refs_changed", "workspace_id": "<Id>", "session_id": "<Id>" }
+```
+
+- Emitted after `POST /sessions/{sid}/canvas-refs` and
+  `DELETE /sessions/{sid}/canvas-refs/{scene_id}`.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`), like
+  the other canvas events — Canvas is a workspace-shared tool, not owner-gated.
+- UI routing: `events.svelte.ts` → `canvasRefsBus.apply()`; the session's Canvas
+  panel (`CanvasPanel.svelte`) re-fetches `GET /sessions/{id}/canvas-refs` when
+  the event's `session_id` matches the open session.
+- TypeScript type: `{ type: 'canvas_refs_changed'; workspace_id: Id; session_id: Id }`.

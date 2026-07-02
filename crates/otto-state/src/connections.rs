@@ -316,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_kind_round_trips() {
-        // Proves migration 0093 widened the connections.kind CHECK: a 'postgres'
+        // Proves migration 0094 widened the connections.kind CHECK: a 'postgres'
         // row inserts and reads back (the CHECK would reject it pre-migration).
         let pool = mem_pool().await;
         let user = seed_user(&pool).await;

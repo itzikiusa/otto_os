@@ -387,6 +387,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // Requires SelfImprovement:Edit so it obeys the same gate as a workspace run.
         return Require(SelfImprovement, Edit);
     }
+    // Session ↔ Canvas scene references (Task B): governed by the Canvas
+    // feature (like the rest of Canvas Studio), NOT Agents — tested BEFORE the
+    // generic `/sessions/` prefix below so it isn't shadowed. Matches both
+    // `/sessions/{sid}/canvas-refs` (list/add) and `/sessions/{sid}/canvas-refs/
+    // {scene_id}` (remove).
+    if p.starts_with("/sessions/") && p.contains("/canvas-refs") {
+        return Require(Canvas, if get { View } else { Edit });
+    }
     if p.starts_with("/sessions/") {
         // restart / archive / unarchive / input / handover / handover-brief /
         // attach-product — all session-control writes.

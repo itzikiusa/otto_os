@@ -47,6 +47,11 @@ pub struct CanvasSceneSummary {
     pub thumbnail: Option<String>,
     /// Folder path used to group scenes in the UI. `None` = root/ungrouped.
     pub section: Option<String>,
+    /// The scene's source format (`mermaid` | `excalidraw` | `d2`), pulled out of
+    /// `doc_json` via `json_extract` so list views can show a format chip without
+    /// fetching the full document. `None` for docs that predate/omit `format`
+    /// (treated as `mermaid` by convention on the UI side).
+    pub format: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -108,6 +113,7 @@ fn row_to_summary(r: &sqlx::sqlite::SqliteRow) -> Result<CanvasSceneSummary> {
         title: r.get("title"),
         thumbnail: r.get("thumbnail"),
         section: r.get("section"),
+        format: r.get("format"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
     })
@@ -170,7 +176,8 @@ impl CanvasRepo {
     /// List scenes for a workspace, most-recently-updated first.
     pub async fn list_for_workspace(&self, ws: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, story_id, title, thumbnail, section, created_at, updated_at
+            "SELECT id, workspace_id, story_id, title, thumbnail, section,
+                    json_extract(doc_json, '$.format') AS format, created_at, updated_at
              FROM canvas_scenes WHERE workspace_id = ? ORDER BY updated_at DESC",
         )
         .bind(ws)
@@ -183,7 +190,8 @@ impl CanvasRepo {
     /// List scenes linked to a product story, most-recently-updated first.
     pub async fn list_for_story(&self, story_id: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, story_id, title, thumbnail, section, created_at, updated_at
+            "SELECT id, workspace_id, story_id, title, thumbnail, section,
+                    json_extract(doc_json, '$.format') AS format, created_at, updated_at
              FROM canvas_scenes WHERE story_id = ? ORDER BY updated_at DESC",
         )
         .bind(story_id)
@@ -197,13 +205,74 @@ impl CanvasRepo {
     /// you see your scenes regardless of the active workspace.
     pub async fn list_for_user(&self, user_id: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, story_id, title, thumbnail, section, created_at, updated_at
+            "SELECT id, workspace_id, story_id, title, thumbnail, section,
+                    json_extract(doc_json, '$.format') AS format, created_at, updated_at
              FROM canvas_scenes WHERE created_by = ? ORDER BY updated_at DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list canvas scenes for user"))?;
+        rows.iter().map(row_to_summary).collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Session ↔ scene references (canvas_scene_refs)
+    // -----------------------------------------------------------------------
+
+    /// Reference a scene from a session (idempotent — re-adding an existing ref
+    /// is a no-op, not a conflict).
+    pub async fn add_ref(
+        &self,
+        scene_id: &Id,
+        session_id: &Id,
+        workspace_id: &Id,
+        user_id: &Id,
+    ) -> Result<()> {
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "INSERT INTO canvas_scene_refs
+             (scene_id, session_id, workspace_id, created_by, created_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (scene_id, session_id) DO NOTHING",
+        )
+        .bind(scene_id)
+        .bind(session_id)
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("add canvas scene ref"))?;
+        Ok(())
+    }
+
+    /// Remove a scene reference from a session. A missing ref is a silent no-op
+    /// (detaching something already detached is not an error).
+    pub async fn remove_ref(&self, scene_id: &Id, session_id: &Id) -> Result<()> {
+        sqlx::query("DELETE FROM canvas_scene_refs WHERE scene_id = ? AND session_id = ?")
+            .bind(scene_id)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("remove canvas scene ref"))?;
+        Ok(())
+    }
+
+    /// List the scenes referenced by a session, most-recently-updated first.
+    pub async fn list_refs_for_session(&self, session_id: &Id) -> Result<Vec<CanvasSceneSummary>> {
+        let rows = sqlx::query(
+            "SELECT s.id, s.workspace_id, s.story_id, s.title, s.thumbnail, s.section,
+                    json_extract(s.doc_json, '$.format') AS format, s.created_at, s.updated_at
+             FROM canvas_scenes s
+             JOIN canvas_scene_refs r ON r.scene_id = s.id
+             WHERE r.session_id = ?
+             ORDER BY s.updated_at DESC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list canvas refs for session"))?;
         rows.iter().map(row_to_summary).collect()
     }
 
@@ -239,6 +308,13 @@ impl CanvasRepo {
     }
 
     pub async fn delete(&self, id: &Id) -> Result<()> {
+        // Explicit child delete first (independent of the foreign_keys pragma,
+        // which isn't guaranteed on every pool — see other repos' convention).
+        sqlx::query("DELETE FROM canvas_scene_refs WHERE scene_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete canvas scene refs"))?;
         let result = sqlx::query("DELETE FROM canvas_scenes WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -372,5 +448,132 @@ mod tests {
             Err(Error::NotFound(_))
         ));
         assert!(matches!(repo.delete(&missing).await, Err(Error::NotFound(_))));
+    }
+
+    // -----------------------------------------------------------------------
+    // Session ↔ scene refs
+    // -----------------------------------------------------------------------
+
+    async fn seed_user(pool: &SqlitePool, user_id: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
+             VALUES (?, ?, 'x', ?, 0, ?)",
+        )
+        .bind(user_id)
+        .bind(user_id)
+        .bind(user_id)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+    }
+
+    async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
+             VALUES (?, 'ws', '/tmp', '{}', 0, ?)",
+        )
+        .bind(ws_id)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+    }
+
+    async fn seed_session(pool: &SqlitePool, ws_id: &str, created_by: &str) -> Id {
+        let id = new_id();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO sessions
+                (id, workspace_id, kind, provider, title, status, cwd, created_by,
+                 created_at, last_active_at, meta_json)
+             VALUES (?, ?, 'agent', 'shell', 't', 'running', '/tmp', ?, ?, ?, '{}')",
+        )
+        .bind(&id)
+        .bind(ws_id)
+        .bind(created_by)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed session");
+        id
+    }
+
+    #[tokio::test]
+    async fn add_ref_is_idempotent_lists_and_removes() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "u1").await;
+        seed_workspace(&pool, "w1").await;
+        let sid = seed_session(&pool, "w1", "u1").await;
+
+        let repo = CanvasRepo::new(pool);
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "Referenced Scene".into(),
+                doc_json: r#"{"type":"otto-canvas","version":1,"format":"d2","source":""}"#.into(),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+
+        // No refs yet.
+        assert!(repo.list_refs_for_session(&sid).await.unwrap().is_empty());
+
+        // Add twice — idempotent, not a conflict error.
+        repo.add_ref(&scene.id, &sid, &"w1".into(), &"u1".into()).await.unwrap();
+        repo.add_ref(&scene.id, &sid, &"w1".into(), &"u1".into()).await.unwrap();
+
+        let refs = repo.list_refs_for_session(&sid).await.unwrap();
+        assert_eq!(refs.len(), 1, "idempotent add must not duplicate the ref");
+        assert_eq!(refs[0].id, scene.id);
+        assert_eq!(refs[0].format.as_deref(), Some("d2"), "format is pulled from doc_json");
+
+        // Remove — list goes back to empty.
+        repo.remove_ref(&scene.id, &sid).await.unwrap();
+        assert!(repo.list_refs_for_session(&sid).await.unwrap().is_empty());
+
+        // Removing an already-removed ref is a silent no-op.
+        repo.remove_ref(&scene.id, &sid).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deleting_a_scene_cascades_its_refs() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "u1").await;
+        seed_workspace(&pool, "w1").await;
+        let sid = seed_session(&pool, "w1", "u1").await;
+
+        let repo = CanvasRepo::new(pool.clone());
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "Doomed Scene".into(),
+                doc_json: r#"{"schema":1}"#.into(),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        repo.add_ref(&scene.id, &sid, &"w1".into(), &"u1".into()).await.unwrap();
+        assert_eq!(repo.list_refs_for_session(&sid).await.unwrap().len(), 1);
+
+        repo.delete(&scene.id).await.unwrap();
+
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM canvas_scene_refs WHERE scene_id = ?")
+                .bind(&scene.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "deleting a scene must cascade its refs");
     }
 }

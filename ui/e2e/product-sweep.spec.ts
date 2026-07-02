@@ -139,8 +139,12 @@ async function openTab(page: Page, info: TestInfo, label: string): Promise<void>
   // Pick the owning workflow group first (top strip), then the sub-view.
   const group = GROUP_OF[label];
   if (group) {
+    // Target the group strip explicitly (`:not(.sub-tab-strip)`), not DOM
+    // order: the sub-view pills carry `.tab-strip` too (see ProductPage.svelte)
+    // and a sub label can substring-match a group label (e.g. "Discovery"
+    // contains "Discover"), so `.first()` alone was order-dependent.
     const groupTab = page
-      .locator('.product-header-row2 .tab-strip .st', { hasText: group })
+      .locator('.product-header-row2 .tab-strip:not(.sub-tab-strip) .st', { hasText: group })
       .first();
     await groupTab.scrollIntoViewIfNeeded();
     await groupTab.click();

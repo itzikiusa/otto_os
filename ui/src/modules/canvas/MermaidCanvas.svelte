@@ -17,6 +17,7 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMermaid } from './mermaid';
+  import { svgToPngDownload, copyText } from './export';
   import type { CanvasDoc, CanvasFormat } from './types';
   import Icon from '../../lib/components/Icon.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
@@ -186,6 +187,9 @@
     (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
   }
 
+  function fileBase(): string {
+    return (canvas.scene?.title ?? 'canvas').replace(/[^\w.-]+/g, '-');
+  }
   function downloadSvg(): void {
     const svg = content?.querySelector('svg');
     if (!svg) return;
@@ -193,9 +197,19 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${(canvas.scene?.title ?? 'canvas').replace(/[^\w.-]+/g, '-')}.svg`;
+    a.download = `${fileBase()}.svg`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function downloadPng(): void {
+    const svg = content?.querySelector('svg');
+    if (!svg) return;
+    svgToPngDownload(svg, `${fileBase()}.png`);
+  }
+  async function copySource(): Promise<void> {
+    const ok = await copyText(canvas.source ?? '');
+    if (ok) toasts.success('Copied', 'Mermaid source copied to clipboard.');
+    else toasts.error('Copy failed', 'Could not copy to the clipboard.');
   }
 
   /** Ask the agent to edit this scene's .mermaid source. */
@@ -339,6 +353,12 @@
           <span class="sep"></span>
           <button onclick={downloadSvg} title="Download SVG" aria-label="Download SVG">
             <Icon name="file" size={15} />
+          </button>
+          <button onclick={downloadPng} title="Download PNG" aria-label="Download PNG">
+            <Icon name="image" size={15} />
+          </button>
+          <button onclick={() => void copySource()} title="Copy source" aria-label="Copy source">
+            <Icon name="copy" size={15} />
           </button>
         </div>
       {/if}

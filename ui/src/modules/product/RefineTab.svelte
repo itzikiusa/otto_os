@@ -1,11 +1,17 @@
 <script lang="ts">
   // RefineTab — left: list of refinement threads with "New thread" / "New from
-  // discovery run…" controls; right: RefineChat for the selected thread.
-  // Mirrors DiscoveryTab for the list+detail layout and PlanTab for the
-  // <select> idiom.
+  // discovery run…" controls, in a shared ListPane; right: RefineChat for the
+  // selected thread. Mirrors DiscoveryTab for the list+detail layout and
+  // PlanTab for the <select> idiom.
+  //
+  // Doesn't use ListPane's `empty` snippet: the discovery-run picker must stay
+  // visible even with zero threads, so the loading/error/empty/rows branching
+  // all lives in `children` (unlike ChatTab/MockupsTab, whose empty state has
+  // nothing else to keep showing).
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import RefineChat from './RefineChat.svelte';
+  import ListPane from './ui/ListPane.svelte';
   import type { RefinementThread, DiscoveryRunSummary } from './types';
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -123,90 +129,90 @@
 
 <div class="refine-tab">
   <!-- ── Left: thread list ──────────────────────────────────────────────── -->
-  <aside class="thread-list-pane">
-    <div class="pane-head">
-      <span class="pane-title">Threads</span>
+  <ListPane title="Threads">
+    {#snippet actions()}
       <button
-        class="toolbar-btn primary"
+        class="p-btn primary"
         onclick={createThread}
         disabled={creating}
         title="Start a new refinement conversation"
       >
         {creating ? 'Creating…' : '+ New thread'}
       </button>
-    </div>
-
-    <!-- "New from discovery run…" picker (only when runs exist) -->
-    {#if discoveryRuns.length > 0}
-      <div class="run-picker-row">
-        <select
-          class="picker"
-          bind:value={selectedRunId}
-          title="Seed the thread with a discovery run's findings"
-        >
-          <option value="">New from discovery run…</option>
-          {#each discoveryRuns as dr (dr.run.id)}
-            <option value={dr.run.id}>
-              {relDate(dr.run.created_at)} — {dr.derived_status}
-            </option>
-          {/each}
-        </select>
-        <button
-          class="toolbar-btn"
-          onclick={createFromRun}
-          disabled={creating || !selectedRunId}
-          title="Create a thread seeded from the selected discovery run"
-        >
-          Create
-        </button>
-      </div>
-    {/if}
-
-    <!-- Thread list -->
-    {#if loading && threads.length === 0}
-      <div class="muted pad">Loading…</div>
-    {:else if loadError}
-      <div class="error-msg pad">Could not load threads: {loadError}</div>
-    {:else if threads.length === 0}
-      <div class="empty-state">
-        <p>No threads yet.</p>
-        <p>Click <strong>+ New thread</strong> to start chatting.</p>
-      </div>
-    {:else}
-      <div class="thread-list">
-        {#each threads as t (t.id)}
-          <div
-            class="thread-item"
-            class:active={activeTid === t.id}
-            class:archived={t.status === 'archived'}
+    {/snippet}
+    {#snippet children()}
+      <!-- "New from discovery run…" picker (only when runs exist) — stays
+           visible regardless of the thread list's own state below. -->
+      {#if discoveryRuns.length > 0}
+        <div class="run-picker-row">
+          <select
+            class="picker"
+            bind:value={selectedRunId}
+            title="Seed the thread with a discovery run's findings"
           >
-            <button
-              class="thread-btn"
-              onclick={() => (activeTid = t.id)}
+            <option value="">New from discovery run…</option>
+            {#each discoveryRuns as dr (dr.run.id)}
+              <option value={dr.run.id}>
+                {relDate(dr.run.created_at)} — {dr.derived_status}
+              </option>
+            {/each}
+          </select>
+          <button
+            class="p-btn"
+            onclick={createFromRun}
+            disabled={creating || !selectedRunId}
+            title="Create a thread seeded from the selected discovery run"
+          >
+            Create
+          </button>
+        </div>
+      {/if}
+
+      {#if loading && threads.length === 0}
+        <div class="muted pad">Loading…</div>
+      {:else if loadError}
+        <div class="error-msg pad">Could not load threads: {loadError}</div>
+      {:else if threads.length === 0}
+        <div class="empty-state">
+          <p>No threads yet.</p>
+          <p>Click <strong>+ New thread</strong> to start chatting.</p>
+        </div>
+      {:else}
+        <div class="thread-list">
+          {#each threads as t (t.id)}
+            <div
+              class="thread-item"
+              class:active={activeTid === t.id}
+              class:archived={t.status === 'archived'}
             >
-              <span class="thread-title">{t.title}</span>
-              <span class="thread-meta">
-                <span class="thread-status" class:status-archived={t.status === 'archived'}>
-                  {t.status}
-                </span>
-                <span class="thread-date">{relDate(t.updated_at)}</span>
-              </span>
-            </button>
-            {#if t.status === 'active'}
               <button
-                class="archive-btn"
-                onclick={() => archiveThread(t.id)}
-                title="Archive this thread"
-                aria-label="Archive thread"
+                class="thread-btn"
+                onclick={() => (activeTid = t.id)}
               >
-                Archive
+                <span class="thread-title">{t.title}</span>
+                <span class="thread-meta">
+                  <span class="thread-status" class:status-archived={t.status === 'archived'}>
+                    {t.status}
+                  </span>
+                  <span class="thread-date">{relDate(t.updated_at)}</span>
+                </span>
               </button>
-            {/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
-  </aside>
+              {#if t.status === 'active'}
+                <button
+                  class="archive-btn"
+                  onclick={() => archiveThread(t.id)}
+                  title="Archive this thread"
+                  aria-label="Archive thread"
+                >
+                  Archive
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    {/snippet}
+  </ListPane>
 
   <!-- ── Right: chat or empty state ────────────────────────────────────── -->
   <div class="chat-pane">
@@ -228,63 +234,8 @@
     gap: 0;
   }
 
-  /* ── Left pane ─────────────────────────────────────────────────────────── */
-  .thread-list-pane {
-    width: 220px;
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-
-  .pane-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    padding: 8px 10px 6px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .pane-title {
-    font-size: 10.5px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-  }
-
-  .toolbar-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font-size: 11.5px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 110ms, border-color 110ms;
-  }
-  .toolbar-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .toolbar-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .toolbar-btn.primary:hover:not(:disabled) {
-    opacity: 0.88;
-  }
-  .toolbar-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
+  /* ── Left pane — chrome (width, border, header, scroll) is ListPane's job;
+     only the row/picker markup below is RefineTab-specific. ───────────────── */
 
   /* Discovery run picker */
   .run-picker-row {
@@ -310,9 +261,6 @@
 
   /* Thread list */
   .thread-list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 0;

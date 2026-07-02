@@ -246,6 +246,11 @@ pub fn host_routes() -> Router<ServerCtx> {
 pub fn asset_router(ctx: ServerCtx) -> Router {
     Router::new()
         .route("/plugins/{slug}/ui", get(asset))
+        // The iframe loads `…/ui/` (trailing slash, so relative asset URLs
+        // resolve under it). `{*path}` does not match an empty tail in axum,
+        // so without this explicit route the request would fall through to
+        // the SPA fallback and the iframe would render Otto itself.
+        .route("/plugins/{slug}/ui/", get(asset))
         .route("/plugins/{slug}/ui/{*path}", get(asset))
         .with_state(ctx)
 }

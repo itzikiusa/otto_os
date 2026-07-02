@@ -103,9 +103,24 @@ fn discovery_chat_reply() -> String {
 
 fn canvas_assist_reply(prompt: &str) -> String {
     // Format-aware: the Excalidraw-mode prompt targets `canvas.json` → reply with a
-    // simplified Excalidraw scene (the app expands it). Otherwise (Mermaid mode) →
-    // a colour-coded flowchart. The handler prefers the file edit and falls back to
+    // simplified Excalidraw scene (the app expands it). The D2-mode prompt targets
+    // `canvas.d2` → reply with a D2 diagram. Otherwise (Mermaid mode) → a
+    // colour-coded flowchart. The handler prefers the file edit and falls back to
     // this reply's fenced block.
+    if prompt.contains("canvas.d2") || prompt.contains("D2 file") {
+        return "Drew the order flow in D2 with a validation decision.\n\n\
+```d2\n\
+direction: right\n\
+start: \"🚀 Start\" { style.fill: \"#dcfce7\" }\n\
+valid: \"❓ Valid?\" { shape: diamond }\n\
+process: \"⚙️ Process order\"\n\
+reject: \"❌ Reject\" { style.fill: \"#fee2e2\" }\n\
+start -> valid\n\
+valid -> process: yes\n\
+valid -> reject: no\n\
+```"
+            .to_string();
+    }
     if prompt.contains("canvas.json") || prompt.contains("EXCALIDRAW canvas") {
         return "Drew the order flow as Excalidraw shapes with a validation decision.\n\n\
 ```json\n\
@@ -170,5 +185,12 @@ mod tests {
         assert!(ex.contains("```json"));
         assert!(ex.contains("\"type\":\"excalidraw\""));
         assert!(!ex.contains("```mermaid"));
+    }
+
+    #[test]
+    fn canvas_reply_d2_mode() {
+        let d = canned_reply("OTTO_TASK: canvas_assist edit the D2 file `canvas.d2`");
+        assert!(d.contains("```d2"));
+        assert!(!d.contains("```mermaid"));
     }
 }

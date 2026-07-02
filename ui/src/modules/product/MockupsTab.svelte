@@ -9,6 +9,8 @@
   import { mockupAssist } from '../../lib/stores/mockup-assist.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import ListPane from './ui/ListPane.svelte';
   import MockupViewer from './MockupViewer.svelte';
   import MockupAssistPanel from './MockupAssistPanel.svelte';
   import type { ProductAttachment } from './types';
@@ -160,69 +162,76 @@
 
 <div class="mockups-tab">
   <!-- List of mockup attachments -->
-  <aside class="mockup-list">
-    <div class="list-head">
-      <span class="list-title">Mockups</span>
+  <ListPane
+    title="Mockups"
+    width={240}
+    isEmpty={!loading && !loadError && mockups.length === 0}
+  >
+    {#snippet actions()}
       <button class="refresh-btn" onclick={loadMockups} title="Refresh">
         <Icon name="refresh" size={12} />
       </button>
-    </div>
-    <div class="list-actions">
-      <label class="act-btn" title="Import a mockup file (HTML, image, SVG, .mmd)">
-        <Icon name="plus" size={12} />
-        {importing ? 'Importing…' : 'Import'}
-        <input
-          type="file"
-          multiple
-          accept="image/*,.svg,.html,.htm,.mmd,text/html,text/vnd.mermaid"
-          style="display:none"
-          onchange={importFiles}
-          disabled={importing}
-        />
-      </label>
-      <div class="create-wrap">
-        <button class="act-btn primary" onclick={() => (createMenu = !createMenu)} title="Generate a mockup with AI">
-          <Icon name="zap" size={12} /> Create with AI
-        </button>
-        {#if createMenu}
-          <button class="menu-backdrop" aria-label="Close menu" onclick={() => (createMenu = false)}></button>
-          <div class="create-menu">
-            <button onclick={() => createWithAi('html')}>
-              <strong>HTML screen</strong><small>A self-contained UI mockup</small>
-            </button>
-            <button onclick={() => createWithAi('mermaid')}>
-              <strong>Diagram</strong><small>A Mermaid flow / sequence / model</small>
-            </button>
-          </div>
-        {/if}
-      </div>
-    </div>
-    {#if loading}
-      <div class="list-empty">Loading…</div>
-    {:else if loadError}
-      <div class="list-empty err">{loadError}</div>
-    {:else if mockups.length === 0}
-      <div class="list-empty">
-        No mockups yet. <strong>Import</strong> a file, or <strong>Create with AI</strong> to have a
-        specialized agent build one — right here, no Agents detour.
-      </div>
-    {:else}
-      {#each mockups as m (m.id)}
-        <div class="mockup-row" class:active={selectedId === m.id}>
-          <button class="mockup-open" onclick={() => (selectedId = m.id)} title={m.filename}>
-            <span class="mockup-type">{typeLabel(m)}</span>
-            <span class="mockup-name">{m.filename}</span>
-            {#if m.source === 'agent'}<span class="agent-badge">agent</span>{/if}
+      <div class="list-actions">
+        <label class="act-btn" title="Import a mockup file (HTML, image, SVG, .mmd)">
+          <Icon name="plus" size={12} />
+          {importing ? 'Importing…' : 'Import'}
+          <input
+            type="file"
+            multiple
+            accept="image/*,.svg,.html,.htm,.mmd,text/html,text/vnd.mermaid"
+            style="display:none"
+            onchange={importFiles}
+            disabled={importing}
+          />
+        </label>
+        <div class="create-wrap">
+          <button class="act-btn primary" onclick={() => (createMenu = !createMenu)} title="Generate a mockup with AI">
+            <Icon name="zap" size={12} /> Create with AI
           </button>
-          {#if m.source === 'agent'}
-            <button class="refine-btn" onclick={() => refine(m)} title="Refine with AI" aria-label="Refine with AI">
-              <Icon name="zap" size={12} />
-            </button>
+          {#if createMenu}
+            <button class="menu-backdrop" aria-label="Close menu" onclick={() => (createMenu = false)}></button>
+            <div class="create-menu">
+              <button onclick={() => createWithAi('html')}>
+                <strong>HTML screen</strong><small>A self-contained UI mockup</small>
+              </button>
+              <button onclick={() => createWithAi('mermaid')}>
+                <strong>Diagram</strong><small>A Mermaid flow / sequence / model</small>
+              </button>
+            </div>
           {/if}
         </div>
-      {/each}
-    {/if}
-  </aside>
+      </div>
+    {/snippet}
+    {#snippet children()}
+      {#if loading}
+        <div class="list-empty">Loading…</div>
+      {:else if loadError}
+        <div class="list-empty err">{loadError}</div>
+      {:else}
+        {#each mockups as m (m.id)}
+          <div class="mockup-row" class:active={selectedId === m.id}>
+            <button class="mockup-open" onclick={() => (selectedId = m.id)} title={m.filename}>
+              <span class="mockup-type">{typeLabel(m)}</span>
+              <span class="mockup-name">{m.filename}</span>
+              {#if m.source === 'agent'}<span class="agent-badge">agent</span>{/if}
+            </button>
+            {#if m.source === 'agent'}
+              <button class="refine-btn" onclick={() => refine(m)} title="Refine with AI" aria-label="Refine with AI">
+                <Icon name="zap" size={12} />
+              </button>
+            {/if}
+          </div>
+        {/each}
+      {/if}
+    {/snippet}
+    {#snippet empty()}
+      <EmptyState
+        icon="box"
+        title="No mockups yet"
+        body="Import a file, or Create with AI to have a specialized agent build one — right here, no Agents detour."
+      />
+    {/snippet}
+  </ListPane>
 
   <!-- Stage: the in-place mockup agent (when active) else the viewer. -->
   <div class="mockup-stage">
@@ -248,32 +257,7 @@
     flex: 1;
     min-height: 0;
     display: flex;
-    gap: 12px;
-  }
-  .mockup-list {
-    width: 240px;
-    flex-shrink: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    overflow: hidden;
-  }
-  .list-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .list-title {
-    font-size: 10.5px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
+    gap: 0;
   }
   .refresh-btn {
     display: grid;
@@ -343,12 +327,13 @@
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--accent);
   }
+  /* Now embedded in ListPane's header actions area (which owns the row's own
+     padding/border) rather than a standalone bordered row. */
   .list-actions {
     display: flex;
+    align-items: center;
     gap: 6px;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
+    flex-wrap: wrap;
   }
   .act-btn {
     display: inline-flex;
@@ -478,9 +463,15 @@
     .mockups-tab {
       flex-direction: column;
     }
-    .mockup-list {
-      width: 100%;
+    /* ListPane sets its width via an inline style (the `width` prop); on a
+       phone it must give that up and cap its height instead — `:global()`
+       reaches into ListPane's root element from here, `!important` is what it
+       takes to beat the more-specific inline style. */
+    .mockups-tab :global(.list-pane) {
+      width: 100% !important;
       max-height: 220px;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
     }
   }
 </style>

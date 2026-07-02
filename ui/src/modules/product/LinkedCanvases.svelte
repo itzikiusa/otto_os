@@ -7,7 +7,7 @@
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { CanvasSceneSummary } from '../canvas/types';
+  import type { CanvasFormat, CanvasSceneSummary } from '../canvas/types';
 
   interface Props {
     storyId: string;
@@ -19,6 +19,7 @@
   let creating = $state(false);
   let picking = $state(false);
   let linkingId = $state('');
+  let newMenu = $state(false);
 
   async function load(): Promise<void> {
     loading = true;
@@ -63,20 +64,29 @@
     router.go('canvas');
   }
 
-  function excaliDoc(): unknown {
-    return {
-      type: 'otto-canvas',
-      version: 1,
-      format: 'excalidraw',
-      source: JSON.stringify({ type: 'excalidraw', version: 2, source: 'otto', elements: [] }),
-    };
+  /** A blank doc for a freshly-created scene of the given format — mirrors
+   *  CanvasPage's own `blankDoc()` (Canvas module's "New" action). */
+  function blankDoc(format: CanvasFormat): unknown {
+    if (format === 'excalidraw') {
+      return {
+        type: 'otto-canvas',
+        version: 1,
+        format: 'excalidraw',
+        source: JSON.stringify({ type: 'excalidraw', version: 2, source: 'otto', elements: [] }),
+      };
+    }
+    if (format === 'd2') {
+      return { type: 'otto-canvas', version: 1, format: 'd2', source: '' };
+    }
+    return { type: 'otto-canvas', version: 1, format: 'mermaid', source: '' };
   }
 
-  async function createLinked(): Promise<void> {
+  async function createLinked(format: CanvasFormat): Promise<void> {
+    newMenu = false;
     if (creating) return;
     creating = true;
     try {
-      const created = await canvas.create('Untitled canvas', excaliDoc(), storyId);
+      const created = await canvas.create('Untitled canvas', blankDoc(format), storyId);
       canvas.pendingOpenId = created.id;
       router.go('canvas');
       toasts.success('Canvas created', 'Linked to this story');
@@ -90,6 +100,27 @@
   function label(s: CanvasSceneSummary): string {
     return s.section ? `${s.section.replace(/\//g, ' / ')} · ${s.title}` : s.title;
   }
+
+  /** Icon + short label for a scene's source format. */
+  function formatMeta(f: CanvasFormat): { icon: string; label: string } {
+    switch (f) {
+      case 'excalidraw': return { icon: 'shapes', label: 'Excalidraw' };
+      case 'd2': return { icon: 'layers', label: 'D2' };
+      default: return { icon: 'branch', label: 'Mermaid' };
+    }
+  }
+
+  function ago(iso: string): string {
+    const t = Date.parse(iso);
+    if (!t) return '';
+    const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (s < 60) return 'just now';
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  }
 </script>
 
 <div class="linked-canvases">
@@ -99,9 +130,32 @@
       <button class="lc-btn" class:on={picking} onclick={openPicker}>
         <Icon name="plug" size={12} /> Link existing
       </button>
-      <button class="lc-btn primary" onclick={createLinked} disabled={creating}>
-        <Icon name="plus" size={12} /> {creating ? 'Creating…' : 'New'}
-      </button>
+      <div class="lc-new-wrap">
+        <button
+          class="lc-btn primary"
+          onclick={() => (newMenu = !newMenu)}
+          disabled={creating}
+        >
+          <Icon name="plus" size={12} /> {creating ? 'Creating…' : 'New'}
+        </button>
+        {#if newMenu}
+          <button class="lc-menu-backdrop" aria-label="Close menu" onclick={() => (newMenu = false)}></button>
+          <div class="lc-new-menu">
+            <button onclick={() => createLinked('excalidraw')}>
+              <Icon name="shapes" size={14} />
+              <span><strong>Excalidraw board</strong><small>Editable shapes — draw by hand</small></span>
+            </button>
+            <button onclick={() => createLinked('mermaid')}>
+              <Icon name="branch" size={14} />
+              <span><strong>Mermaid diagram</strong><small>Auto-rendered, any type</small></span>
+            </button>
+            <button onclick={() => createLinked('d2')}>
+              <Icon name="layers" size={14} />
+              <span><strong>D2 diagram</strong><small>Architecture, sequence &amp; SQL tables</small></span>
+            </button>
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 
@@ -136,6 +190,13 @@
           <button class="lc-row" onclick={() => open(s.id)} title="Open in Canvas">
             <Icon name="shapes" size={13} />
             <span class="lc-name">{label(s)}</span>
+            {#if s.format}
+              <span class="lc-format-chip" title={formatMeta(s.format).label}>
+                <Icon name={formatMeta(s.format).icon} size={10} />
+                {formatMeta(s.format).label}
+              </span>
+            {/if}
+            <span class="lc-updated">{ago(s.updated_at)}</span>
             <Icon name="chevronRight" size={13} />
           </button>
         </li>
@@ -203,6 +264,53 @@
   .lc-btn.primary:hover {
     color: #fff;
     filter: brightness(1.08);
+  }
+  .lc-new-wrap {
+    position: relative;
+  }
+  .lc-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 19;
+    border: none;
+    background: transparent;
+    cursor: default;
+  }
+  .lc-new-menu {
+    position: absolute;
+    top: 32px;
+    inset-inline-end: 0;
+    z-index: 20;
+    min-width: 210px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m, 8px);
+    box-shadow: var(--shadow, 0 8px 28px rgba(0, 0, 0, 0.25));
+    overflow: hidden;
+  }
+  .lc-new-menu button {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 11px;
+    border: none;
+    background: none;
+    color: var(--text);
+    cursor: pointer;
+    text-align: start;
+  }
+  .lc-new-menu button:hover {
+    background: var(--surface-2);
+  }
+  .lc-new-menu span {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.3;
+  }
+  .lc-new-menu small {
+    color: var(--text-dim);
+    font-size: 10.5px;
   }
   .lc-picker {
     display: flex;
@@ -272,5 +380,24 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 13px;
+  }
+  .lc-format-chip {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    color: var(--text-dim);
+  }
+  .lc-updated {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text-dim, #888);
   }
 </style>

@@ -166,8 +166,12 @@ methods/paths).
 ### `CanvasSceneSummary` (list route — no `doc_json`)
 
 ```jsonc
-{ "id", "workspace_id", "story_id": "…"|null, "title", "thumbnail": "…"|null, "created_at", "updated_at" }
+{ "id", "workspace_id", "story_id": "…"|null, "title", "thumbnail": "…"|null,
+  "section": "…"|null, "format": "mermaid"|"d2"|"excalidraw"|null, "created_at", "updated_at" }
 ```
+`format` is pulled out of `doc_json` server-side (`json_extract`) so list views
+can show a chip without fetching the full document; `null` for docs that
+predate/omit it (treat as `mermaid`).
 
 ### `CreateSceneReq`
 

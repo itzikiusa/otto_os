@@ -50,13 +50,51 @@ fn hash_value(v: &Value) -> String {
     format!("{:x}", digest)
 }
 
+/// A changed node bigger than this (serialized) is dropped from the event; the
+/// UI falls back to a rev-guarded refetch. Keeps broadcast frames bounded when a
+/// step output is huge (long agent replies, big JSON products).
+const NODE_EVENT_MAX_BYTES: usize = 32 * 1024;
+
 /// Broadcast a `WorkflowRunUpdated` event (best-effort; log on failure).
-fn emit_run_updated(ctx: &ServerCtx, workspace_id: &Id, run_id: &Id, status: &str, node_id: Option<&str>) {
+///
+/// `rev` is the run revision returned by the `update_run` that persisted this
+/// change (0 when that write failed — clients then fall back to a refetch).
+/// `node` rides the event so clients can merge the changed step in place
+/// without refetching the whole run; `states` feeds the `nodes_done` /
+/// `nodes_total` progress the "Running" sidebar shows (pass `&[]` when the
+/// caller doesn't hold the run's states — clients keep their last counts).
+#[allow(clippy::too_many_arguments)]
+fn emit_run_updated(
+    ctx: &ServerCtx,
+    workspace_id: &Id,
+    run_id: &Id,
+    status: &str,
+    node_id: Option<&str>,
+    rev: i64,
+    node: Option<&NodeRunState>,
+    states: &[NodeRunState],
+    waiting_approval: bool,
+) {
+    let node = node
+        .filter(|n| {
+            serde_json::to_string(n)
+                .map(|s| s.len() <= NODE_EVENT_MAX_BYTES)
+                .unwrap_or(false)
+        })
+        .cloned();
     let ev = Event::WorkflowRunUpdated {
         workspace_id: workspace_id.clone(),
         run_id: run_id.clone(),
         status: status.to_string(),
         node_id: node_id.map(|s| s.to_string()),
+        rev,
+        node,
+        nodes_done: states
+            .iter()
+            .filter(|n| matches!(n.status, NodeStatus::Success | NodeStatus::Skipped))
+            .count() as u32,
+        nodes_total: states.len() as u32,
+        waiting_approval,
     };
     if ctx.events.send(ev).is_err() {
         tracing::debug!(%run_id, "no WS subscribers for WorkflowRunUpdated");
@@ -531,10 +569,11 @@ pub async fn run_workflow(
     let order = match topo_order(&workflow.graph) {
         Ok(o) => o,
         Err(e) => {
-            let _ = repo
+            let rev = repo
                 .update_run(&run_id, RunStatus::Error, &[], Some(&e), true)
-                .await;
-            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None);
+                .await
+                .unwrap_or(0);
+            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None, rev, None, &[], false);
             return;
         }
     };
@@ -560,6 +599,7 @@ pub async fn run_workflow(
             output: None,
             error: None,
             logs: vec![],
+            started_at: None,
             duration_ms: None,
             attempts: None,
             sessions: vec![],
@@ -648,10 +688,11 @@ pub async fn run_workflow(
     // Record which workflow version this run executed (best-effort).
     let _ = repo.set_run_version(&run_id, workflow.version).await;
 
-    let _ = repo
+    let rev = repo
         .update_run(&run_id, RunStatus::Running, &states, None, false)
-        .await;
-    emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", None);
+        .await
+        .unwrap_or(0);
+    emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", None, rev, None, &states, false);
 
     // Live progress: if this run was triggered from a chat thread, stream brief
     // per-step updates back to it. A single pump task posts them in order; manual
@@ -710,10 +751,11 @@ pub async fn run_workflow(
         if run_set.as_ref().is_some_and(|set| !set.contains(&node_id)) {
             states[idx].status = NodeStatus::Skipped;
             states[idx].logs = vec!["outside run scope".into()];
-            let _ = repo
+            let rev = repo
                 .update_run(&run_id, RunStatus::Running, &states, None, false)
-                .await;
-            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+                .await
+                .unwrap_or(0);
+            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
             continue;
         }
 
@@ -737,20 +779,22 @@ pub async fn run_workflow(
                 states[idx].status = NodeStatus::Skipped;
                 states[idx].logs = vec!["skipped (upstream did not succeed)".into()];
                 errored.insert(node_id.clone());
-                let _ = repo
+                let rev = repo
                     .update_run(&run_id, RunStatus::Running, &states, None, false)
-                    .await;
-                emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+                    .await
+                    .unwrap_or(0);
+                emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
                 continue;
             }
             NodeDecision::BranchSkip => {
                 states[idx].status = NodeStatus::Skipped;
                 states[idx].logs = vec!["skipped (branch not taken)".into()];
                 branch_skipped.insert(node_id.clone());
-                let _ = repo
+                let rev = repo
                     .update_run(&run_id, RunStatus::Running, &states, None, false)
-                    .await;
-                emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+                    .await
+                    .unwrap_or(0);
+                emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
                 continue;
             }
             NodeDecision::Run(satisfied) => assemble_input(&satisfied, &outputs, &input),
@@ -781,22 +825,25 @@ pub async fn run_workflow(
             inactive_edges.extend(pruned);
             states[idx].logs.append(&mut plogs);
             outputs.insert(node_id.clone(), cached_out);
-            let _ = repo
+            let rev = repo
                 .update_run(&run_id, RunStatus::Running, &states, None, false)
-                .await;
-            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+                .await
+                .unwrap_or(0);
+            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
             continue;
         }
         // --------------------------------------------------------------------
 
         let start_line = format!("▶ {} started", node.kind);
         states[idx].status = NodeStatus::Running;
+        states[idx].started_at = Some(chrono::Utc::now());
         states[idx].logs = vec![start_line.clone()];
-        let _ = repo
+        let rev = repo
             .update_run(&run_id, RunStatus::Running, &states, None, false)
-            .await;
+            .await
+            .unwrap_or(0);
         // Signal node start so the UI can show live progress immediately.
-        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
         if progress.enabled() && is_reportable(&node.kind) {
             progress.post(format!("▶ *{}* started", node_label(node)));
         }
@@ -822,10 +869,11 @@ pub async fn run_workflow(
                     Some(sid) = sess_rx.recv() => {
                         if !states[idx].sessions.contains(&sid) {
                             states[idx].sessions.push(sid);
-                            let _ = repo
+                            let rev = repo
                                 .update_run(&run_id, RunStatus::Running, &states, None, false)
-                                .await;
-                            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+                                .await
+                                .unwrap_or(0);
+                            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
                         }
                     }
                     r = &mut fut => break r,
@@ -909,11 +957,12 @@ pub async fn run_workflow(
                 errored.insert(node_id.clone());
             }
         }
-        let _ = repo
+        let rev = repo
             .update_run(&run_id, RunStatus::Running, &states, None, false)
-            .await;
+            .await
+            .unwrap_or(0);
         // Signal node finish so the inspector can update without waiting for the next poll.
-        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id));
+        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
     }
 
     // Flush all streamed progress lines (close the channel, await the pump) so the
@@ -929,11 +978,12 @@ pub async fn run_workflow(
                 s.status = NodeStatus::Skipped;
             }
         }
-        let _ = repo
+        let rev = repo
             .update_run(&run_id, RunStatus::Canceled, &states, Some("canceled"), true)
-            .await;
+            .await
+            .unwrap_or(0);
         deliver_run_result(&ctx, &workflow, &states, RunStatus::Canceled, None, &input).await;
-        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "canceled", None);
+        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "canceled", None, rev, None, &states, false);
         return;
     }
 
@@ -948,11 +998,12 @@ pub async fn run_workflow(
             "run exceeded the {}-hour time limit",
             RUN_WALL_CLOCK_TIMEOUT.as_secs() / 3600
         );
-        let _ = repo
+        let rev = repo
             .update_run(&run_id, RunStatus::Error, &states, Some(&msg), true)
-            .await;
+            .await
+            .unwrap_or(0);
         deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, None, &input).await;
-        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None);
+        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None, rev, None, &states, false);
         return;
     }
 
@@ -967,9 +1018,10 @@ pub async fn run_workflow(
     } else {
         None
     };
-    let _ = repo
+    let rev = repo
         .update_run(&run_id, final_status, &states, err_msg.as_deref(), true)
-        .await;
+        .await
+        .unwrap_or(0);
     // Proof pack: package the run's node outputs, human approvals, and budget
     // gate into inspectable evidence; link the pack to the run. Best-effort.
     let pack_id = assemble_workflow_proof(&ctx, &workflow, &run_id, &states).await;
@@ -980,7 +1032,7 @@ pub async fn run_workflow(
     // thread / webhook): a brief status + the full summary.md. Best-effort.
     deliver_run_result(&ctx, &workflow, &states, final_status, pack_id.as_deref(), &input).await;
     // Final event: run complete.
-    emit_run_updated(&ctx, &workflow.workspace_id, &run_id, final_status.as_str(), None);
+    emit_run_updated(&ctx, &workflow.workspace_id, &run_id, final_status.as_str(), None, rev, None, &states, false);
 }
 
 /// Assemble the proof pack for a completed workflow run: each node's output is a
@@ -1789,23 +1841,27 @@ async fn execute_node(
                 .unwrap_or("Please review and approve to continue");
 
             // Mark the run as paused-for-approval.  The resume handler sets
-            // `waiting_approval = 0` and records the decision.
+            // `waiting_approval = 0` and records the decision. Bump `rev` so
+            // clients treat the pause as a fresh state, and announce it over
+            // WS immediately — the approval banner/badge must not wait on a poll.
             let pool = &ctx.pool;
-            sqlx::query(
+            let rev: i64 = sqlx::query_scalar(
                 "UPDATE workflow_runs
-                 SET waiting_approval = 1, approval_node_id = ?
-                 WHERE id = ?",
+                 SET waiting_approval = 1, approval_node_id = ?, rev = rev + 1
+                 WHERE id = ?
+                 RETURNING rev",
             )
             .bind(&node.id)
             .bind(run_id)
-            .execute(pool)
+            .fetch_one(pool)
             .await
             .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?;
+            emit_run_updated(ctx, &ws.id, run_id, "running", Some(&node.id), rev, None, &[], true);
 
             // Poll for the operator's decision.
             let deadline = Instant::now() + NODE_AGENT_TIMEOUT;
             loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 if Instant::now() >= deadline {
                     // Clear the pause flag before erroring so the run doesn't
                     // appear stuck after it errors out.
@@ -2585,7 +2641,7 @@ async fn execute_node(
             let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &full, &acwd, session_tx).await?;
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
             // Write under the data dir (never the user's repo working tree).
-            let ext = if mode == "excalidraw" { "json" } else { "mmd" };
+            let ext = canvas_node_ext(mode);
             let rel = format!("workflow-canvas/{run_id}/{}.{ext}", node.id);
             let path = ctx.data_dir.join(&rel);
             if let Some(parent) = path.parent() {
@@ -3358,6 +3414,18 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// File extension for a `canvas` workflow node's written diagram artifact,
+/// keyed on its `mode` param. `excalidraw` writes JSON; `d2` writes `.d2`
+/// source; everything else (the default `mermaid`, and any unrecognized mode)
+/// writes `.mmd`.
+fn canvas_node_ext(mode: &str) -> &'static str {
+    match mode {
+        "excalidraw" => "json",
+        "d2" => "d2",
+        _ => "mmd",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3401,6 +3469,14 @@ mod tests {
         assert!(is_known_kind("agent_prompt"));
         assert!(is_known_kind("game_engine"));
         assert!(!is_known_kind("nope"));
+    }
+
+    #[test]
+    fn canvas_node_ext_matches_mode() {
+        assert_eq!(canvas_node_ext("excalidraw"), "json");
+        assert_eq!(canvas_node_ext("d2"), "d2");
+        assert_eq!(canvas_node_ext("mermaid"), "mmd");
+        assert_eq!(canvas_node_ext("sequence"), "mmd", "unrecognized modes default to mermaid");
     }
 
     #[test]
@@ -3515,6 +3591,7 @@ mod tests {
             output: Some(out),
             error: None,
             logs: vec![],
+            started_at: None,
             duration_ms: Some(10),
             attempts: Some(1),
             sessions: vec![],

@@ -1,8 +1,12 @@
 <script lang="ts">
-  // Product Story Analysis page — left sidebar (stories list + import), a
-  // Stories | Learnings toggle, a per-story tab strip, and tab content.
-  // Tabs 6.3-6.6 are placeholders; only Overview (6.2) is implemented.
+  // Product Story Analysis page — left sidebar (Stories | Learnings toggle +
+  // story list + import) and a per-story workspace: ONE header band buckets the
+  // 13 sub-views into 4 workflow GROUPS (Story · Discover · Deliver · Log) —
+  // group tabs inline-start, the active group's sub-views as pills inline-end —
+  // with the selected sub-view's content below.
+  import './product.css';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import ImportDialog from './ImportDialog.svelte';
@@ -87,11 +91,15 @@
   // cascade below stays keyed on the flat `product.tab` (the sub id), so every
   // existing tab component renders unchanged — only the navigation is regrouped.
   type Sub = { id: string; label: string };
-  type Group = { id: string; label: string; subs: Sub[] };
+  // `icon` is purely cosmetic (the merged header band renders it beside the
+  // group label) — `id`/`label`/`subs` stay byte-for-byte what they were: the
+  // sub `id`s ARE the `product.tab` values that E2E + deep links depend on.
+  type Group = { id: string; label: string; icon: string; subs: Sub[] };
   const GROUPS: Group[] = [
     {
       id: 'story',
       label: 'Story',
+      icon: 'file',
       subs: [
         { id: 'overview', label: 'Overview' },
         { id: 'rewrite', label: 'Rewrite' },
@@ -101,6 +109,7 @@
     {
       id: 'discover',
       label: 'Discover',
+      icon: 'search',
       subs: [
         { id: 'chat', label: 'Chat' },
         { id: 'analysis', label: 'Analysis' },
@@ -113,6 +122,7 @@
     {
       id: 'deliver',
       label: 'Deliver',
+      icon: 'send',
       subs: [
         { id: 'plan', label: 'Plan' },
         { id: 'testcases', label: 'Test Cases' },
@@ -122,6 +132,7 @@
     {
       id: 'log',
       label: 'Log',
+      icon: 'clock',
       subs: [{ id: 'history', label: 'History' }],
     },
   ];
@@ -192,9 +203,12 @@
 
   <!-- ── Left sidebar — always rendered to avoid layout jump ───────────── -->
   <aside class="product-side">
-    <!-- Mobile-only Stories|Learnings toggle (the desktop one lives in the
-         content header, which is collapsed when the list panel is open). -->
-    <div class="m-view-toggle" role="tablist" aria-label="View (mobile)">
+    <!-- The ONE Stories|Learnings toggle, at every breakpoint — a compact
+         segmented control above the list, rather than a duplicate in the main
+         content header. (It's still absent from view while the mobile content
+         panel is open — this whole sidebar collapses then — but that's fine:
+         you pick Stories/Learnings before diving into a story's content.) -->
+    <div class="m-view-toggle" role="tablist" aria-label="View">
       <button
         class="vt"
         class:active={product.view === 'stories'}
@@ -216,7 +230,7 @@
         <span class="side-title">Stories</span>
         <div class="side-head-actions">
           <button
-            class="head-btn"
+            class="p-btn"
             onclick={createDraft}
             title="Start a blank draft (Discovery): jot ideas, refine with agents, then publish as a Story or RFC"
             disabled={draftCreating}
@@ -224,7 +238,7 @@
             <Icon name="file" size={12} /> {draftCreating ? 'Creating…' : 'New draft'}
           </button>
           <button
-            class="head-btn primary"
+            class="p-btn primary"
             onclick={() => (importOpen = true)}
             title="Import an existing Jira issue / Confluence page"
           >
@@ -357,29 +371,11 @@
 
   <!-- ── Main area ──────────────────────────────────────────────────────── -->
   <div class="product-main">
-    <!-- Header row 1: Stories | Learnings toggle (always visible) -->
-    <div class="product-header-row1">
-      <div class="view-toggle" role="tablist" aria-label="View">
-        <button
-          class="vt"
-          class:active={product.view === 'stories'}
-          role="tab"
-          aria-selected={product.view === 'stories'}
-          onclick={() => (product.view = 'stories')}
-        >Stories</button>
-        <button
-          class="vt"
-          class:active={product.view === 'learnings'}
-          role="tab"
-          aria-selected={product.view === 'learnings'}
-          onclick={() => (product.view = 'learnings')}
-        >Learnings</button>
-      </div>
-    </div>
-
-    <!-- Header row 2: per-story navigation (only when a story is selected in
-         Stories view). The TOP strip picks one of the 4 workflow groups; the
-         SECONDARY strip below it picks a sub-view within the active group. -->
+    <!-- Header band: per-story navigation, shown only when a story is selected
+         in Stories view. ONE row — the 4 workflow-group tabs (icon + label,
+         segmented) inline-start, the active group's sub-views as smaller pills
+         inline-end (wrapping on a narrow window); a single-sub group (Log)
+         shows no pills, since the group click already navigates there. -->
     {#if product.view === 'stories' && product.selectedId}
       <div class="product-header-row2">
         <div class="tab-strip" role="tablist" aria-label="Story tabs">
@@ -390,12 +386,16 @@
               role="tab"
               aria-selected={activeGroup.id === g.id}
               onclick={() => selectGroup(g)}
-            >{g.label}</button>
+            >
+              <Icon name={g.icon} size={13} />
+              {g.label}
+            </button>
           {/each}
         </div>
-      </div>
-      {#if activeGroup.subs.length > 1}
-        <div class="product-header-row3">
+        {#if activeGroup.subs.length > 1}
+          <!-- Keeps the `tab-strip` class too (on top of `sub-tab-strip`): the
+               product-mockups E2E locates a sub-view button via the generic
+               `.tab-strip .st` selector, matching whichever strip has it. -->
           <div class="tab-strip sub-tab-strip" role="tablist" aria-label="{activeGroup.label} sub-tabs">
             {#each activeGroup.subs as s (s.id)}
               <button
@@ -407,8 +407,8 @@
               >{s.label}</button>
             {/each}
           </div>
-        </div>
-      {/if}
+        {/if}
+      </div>
     {/if}
 
     <!-- Content -->
@@ -416,18 +416,18 @@
       {#if product.view === 'learnings'}
         <LearningsView filter={learningsFilter} />
       {:else if !product.selectedId}
-        <div class="empty-state">
-          <Icon name="file" size={28} />
-          <p>
-            Analyse a Jira/Confluence story — ask questions, draft a plan and test cases, then
-            publish back. Import an existing issue or start a blank draft.
-          </p>
+        <div class="empty-wrap">
+          <EmptyState
+            icon="file"
+            title="Analyse a story"
+            body="Ask questions, draft a plan and test cases, then publish back — on an existing Jira/Confluence issue or a blank draft."
+          />
           <div class="empty-actions">
-            <button class="btn primary" onclick={createDraft} disabled={draftCreating}>
+            <button class="p-btn primary" onclick={createDraft} disabled={draftCreating}>
               <Icon name="plus" size={13} />
               {draftCreating ? 'Creating…' : 'Start a draft'}
             </button>
-            <button class="btn ghost" onclick={() => (importOpen = true)}>
+            <button class="p-btn" onclick={() => (importOpen = true)}>
               <Icon name="plus" size={13} />
               Import story
             </button>
@@ -459,8 +459,6 @@
         <RefineTab />
       {:else if product.tab === 'mockups'}
         <MockupsTab />
-      {:else}
-        <div class="muted">{product.tab} — coming soon</div>
       {/if}
     </div>
   </div>
@@ -497,36 +495,6 @@
     display: flex;
     align-items: center;
     gap: 6px;
-  }
-  .head-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font-size: 11.5px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 110ms, border-color 110ms, opacity 110ms;
-  }
-  .head-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .head-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .head-btn.primary:hover:not(:disabled) {
-    opacity: 0.88;
-  }
-  .head-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
   .draft-badge {
     font-size: 9px;
@@ -642,9 +610,11 @@
     font-size: 12.5px;
     font-weight: 500;
     line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    line-clamp: 2;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .story-meta {
     display: flex;
@@ -764,106 +734,91 @@
     flex-direction: column;
     min-height: 0;
   }
-  /* Row 1: view toggle only */
-  .product-header-row1 {
-    display: flex;
-    align-items: center;
-    padding: 8px 14px 0;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  /* Row 2: per-story group strip (the 4 workflow groups) */
+  /* The ONE header band: the 4 workflow-group tabs (a segmented pill strip,
+     `.tab-strip`) inline-start, the active group's sub-view pills
+     (`.sub-tab-strip`) inline-end — wrapping onto their own line on a narrow
+     window rather than clipping. `.tab-strip`/`.sub-tab-strip`/`.st` keep
+     their old class names: several E2E specs (product-discovery,
+     product-mockups, product-sweep) locate tabs by them directly. */
   .product-header-row2 {
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-    padding: 0 14px;
-    /* The inner .tab-strip scrolls horizontally; overflow:hidden here clipped it
-       so tabs past the first few were unreachable on a narrow screen. */
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  /* Row 3: secondary sub-nav for the active group — visually subordinate to
-     row 2 (smaller, dimmer, slightly indented, a lighter divider). */
-  .product-header-row3 {
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    background: color-mix(in srgb, var(--text-dim) 4%, transparent);
-    flex-shrink: 0;
-    padding: 0 14px 0 22px;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .view-toggle {
     display: flex;
     align-items: center;
-    gap: 2px;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    border-bottom: 1px solid var(--border);
     flex-shrink: 0;
-  }
-  .vt {
-    height: 30px;
-    padding: 0 12px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    white-space: nowrap;
-  }
-  .vt:hover {
-    color: var(--text);
-  }
-  .vt.active {
-    color: var(--accent);
-    border-bottom-color: var(--accent);
+    padding: 6px 14px;
   }
   .tab-strip {
     display: flex;
     align-items: center;
-    gap: 1px;
+    gap: 2px;
+    padding: 3px;
+    background: color-mix(in srgb, var(--text-dim) 7%, transparent);
+    border-radius: var(--radius-m, 8px);
     overflow-x: auto;
     white-space: nowrap;
     scrollbar-width: none;
+    flex-shrink: 0;
   }
   .tab-strip::-webkit-scrollbar {
     display: none;
   }
   .st {
-    height: 30px;
-    padding: 0 11px;
+    height: 26px;
+    padding: 0 10px;
     border: none;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
     white-space: nowrap;
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
   }
   .st:hover {
     color: var(--text);
   }
-  .st.active {
+  .tab-strip .st.active {
+    background: var(--surface);
     color: var(--accent);
-    border-bottom-color: var(--accent);
   }
-  /* Secondary sub-nav: a sub-level reading — shorter, smaller, dimmer than the
-     group strip, with a thinner active underline. */
+  /* Secondary sub-nav: smaller, dimmer pills, no shared background — a
+     sub-level reading subordinate to the segmented group strip beside it.
+     Also carries the `.tab-strip` class (see the template comment), so this
+     resets everything `.tab-strip` set that doesn't apply here: no container
+     background/padding/radius, and pills WRAP instead of horizontal-scrolling. */
+  .sub-tab-strip {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 2px 4px;
+    margin-inline-start: auto;
+    padding: 0 0 0 10px;
+    background: none;
+    border-radius: 0;
+    overflow: visible;
+    white-space: normal;
+  }
   .sub-tab-strip .st {
-    height: 26px;
+    height: 24px;
     padding: 0 9px;
     font-size: 11px;
     color: color-mix(in srgb, var(--text-dim) 85%, transparent);
+    border: 1px solid transparent;
   }
   .sub-tab-strip .st:hover {
     color: var(--text);
+    border-color: var(--border);
   }
   .sub-tab-strip .st.active {
     color: var(--accent);
-    border-bottom-width: 1.5px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .product-body {
     flex: 1;
@@ -873,67 +828,17 @@
     display: flex;
     flex-direction: column;
   }
-  .empty-state {
+  .empty-wrap {
     flex: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 12px;
-    color: var(--text-dim);
-    text-align: center;
-  }
-  .empty-state p {
-    margin: 0;
-    font-size: 13px;
-    max-width: 380px;
-    line-height: 1.5;
+    gap: 4px;
   }
   .empty-actions {
     display: flex;
     gap: 8px;
-  }
-  .muted {
-    padding: 32px 16px;
-    color: var(--text-dim);
-    font-size: 13px;
-    font-style: italic;
-  }
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 14px;
-    border-radius: var(--radius-s);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-  }
-  .btn.ghost {
-    border-color: var(--border);
-  }
-  .btn.ghost:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .icon-btn {
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .icon-btn:hover {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text);
   }
   .mono {
     font-family: var(--font-mono, monospace);
@@ -972,12 +877,41 @@
     font-weight: 600;
   }
 
-  /* ── Mobile-only chrome — hidden on desktop/tablet ───────────────────── */
+  /* ── Mobile accordion headers — hidden on desktop/tablet ──────────────── */
   .m-acc-head {
     display: none;
   }
+
+  /* Stories|Learnings toggle — the ONE copy, a compact segmented control
+     living above the story list at every breakpoint. */
   .m-view-toggle {
-    display: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin: 8px 8px 2px;
+    padding: 2px;
+    border-radius: var(--radius-m, 8px);
+    background: color-mix(in srgb, var(--text-dim) 7%, transparent);
+    flex-shrink: 0;
+  }
+  .m-view-toggle .vt {
+    height: 24px;
+    padding: 0 10px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .m-view-toggle .vt:hover {
+    color: var(--text);
+  }
+  .m-view-toggle .vt.active {
+    background: var(--surface);
+    color: var(--accent);
   }
 
   @media (max-width: 640px) {
@@ -989,18 +923,14 @@
       flex-direction: column;
     }
 
-    /* The desktop view toggle lives in the content header; on mobile that header
-       collapses with the content panel, so show the list-panel copy instead. */
-    .product-header-row1 {
-      display: none;
-    }
+    /* Slightly bigger touch target for the segmented view toggle. */
     .m-view-toggle {
-      display: flex;
-      align-items: center;
-      gap: 2px;
-      flex-shrink: 0;
-      padding: 4px 8px 0;
-      border-bottom: 1px solid var(--border);
+      margin: 6px 8px 4px;
+    }
+    .m-view-toggle .vt {
+      height: 32px;
+      font-size: 13px;
+      padding: 0 12px;
     }
 
     .m-acc-head {
@@ -1078,7 +1008,7 @@
     .side-title {
       font-size: 12px;
     }
-    .head-btn {
+    .p-btn {
       font-size: 13px;
       padding: 6px 11px;
     }
@@ -1104,11 +1034,6 @@
       font-size: 14px;
       padding: 9px 12px;
     }
-    .vt {
-      height: 38px;
-      font-size: 14.5px;
-      padding: 0 14px;
-    }
     .st {
       height: 38px;
       font-size: 14px;
@@ -1124,10 +1049,7 @@
       font-size: 14.5px;
       padding: 10px 12px;
     }
-    .empty-state p {
-      font-size: 14.5px;
-    }
-    .btn {
+    .empty-actions .p-btn {
       font-size: 14px;
       padding: 9px 16px;
     }

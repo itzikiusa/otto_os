@@ -53,6 +53,8 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
     let input: serde_json::Value = serde_json::from_str(&r.get::<String, _>("input_json"))
         .unwrap_or(serde_json::Value::Null);
     let finished: Option<String> = r.get("finished_at");
+    let approved_at: Option<String> = r.try_get("approved_at").ok().flatten();
+    let waiting: i64 = r.try_get("waiting_approval").unwrap_or(0);
     Ok(WorkflowRun {
         id: r.get("id"),
         workflow_id: r.get("workflow_id"),
@@ -64,6 +66,12 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
         error: r.get("error"),
         started_at: ts(&r.get::<String, _>("started_at"))?,
         finished_at: finished.as_deref().map(ts).transpose()?,
+        rev: r.try_get("rev").unwrap_or(0),
+        waiting_approval: waiting != 0,
+        approval_node_id: r.try_get("approval_node_id").ok().flatten(),
+        approved_by: r.try_get("approved_by").ok().flatten(),
+        approval_note: r.try_get("approval_note").ok().flatten(),
+        approved_at: approved_at.as_deref().map(ts).transpose()?,
         workflow_version: r.try_get("workflow_version").ok().flatten(),
         proof_pack_id: r.try_get("proof_pack_id").ok().flatten(),
     })
@@ -454,7 +462,8 @@ impl WorkflowsRepo {
     }
 
     /// Persist run progress: status, the per-node states, optional error, and
-    /// (when terminal) the finished timestamp.
+    /// (when terminal) the finished timestamp. Bumps and returns the run's
+    /// monotonic `rev` so callers can stamp the change's WS event with it.
     pub async fn update_run(
         &self,
         id: &Id,
@@ -462,25 +471,27 @@ impl WorkflowsRepo {
         nodes: &[NodeRunState],
         error: Option<&str>,
         finished: bool,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let nodes_json =
             serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
         let finished_at = if finished { Some(fmt(Utc::now())) } else { None };
-        sqlx::query(
+        let rev: i64 = sqlx::query_scalar(
             "UPDATE workflow_runs
              SET status = ?, nodes_json = ?, error = ?,
-                 finished_at = COALESCE(?, finished_at)
-             WHERE id = ?",
+                 finished_at = COALESCE(?, finished_at),
+                 rev = rev + 1
+             WHERE id = ?
+             RETURNING rev",
         )
         .bind(status.as_str())
         .bind(&nodes_json)
         .bind(error)
         .bind(&finished_at)
         .bind(id)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(dberr("update run"))?;
-        Ok(())
+        Ok(rev)
     }
 }
 
@@ -580,5 +591,32 @@ mod tests {
         let run = repo.get_run(&run.id).await.unwrap();
         assert_eq!(run.workflow_version, Some(1));
         assert_eq!(run.proof_pack_id.as_deref(), Some("pack-123"));
+    }
+
+    #[tokio::test]
+    async fn update_run_bumps_a_monotonic_rev() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let wf = repo
+            .create(&"ws1".into(), "WF", "", &WorkflowGraph::default(), &"u1".into())
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(run.rev, 0, "fresh run starts at rev 0");
+
+        // Every progress write returns the next rev, and get_run round-trips it.
+        let r1 = repo.update_run(&run.id, RunStatus::Running, &[], None, false).await.unwrap();
+        let r2 = repo.update_run(&run.id, RunStatus::Running, &[], None, false).await.unwrap();
+        let r3 = repo
+            .update_run(&run.id, RunStatus::Success, &[], None, true)
+            .await
+            .unwrap();
+        assert_eq!((r1, r2, r3), (1, 2, 3), "rev increments per write");
+        let got = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(got.rev, 3);
+        assert_eq!(got.status, RunStatus::Success);
     }
 }

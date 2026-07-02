@@ -16,15 +16,22 @@
 //   node canvas.mjs create-scene <wsId> "<title>" [storyId]   # empty scene
 //   node canvas.mjs get-scene    <sceneId>
 //   node canvas.mjs add-mermaid  <sceneId> "<mermaid src>"    # append a mermaid node, PUT back
+//   node canvas.mjs add-d2       <sceneId> <file.d2>          # replace the scene's D2 source from a local file
 //   node canvas.mjs add-slide    <sceneId> "<slide title>"    # append a slide revealing all nodes
 //   node canvas.mjs assist       <sceneId> "<prompt>" [mode]  # assist on a scene (auto|sequence|flow|uml|nodes)
 //   node canvas.mjs assist       --preview "<prompt>" [mode]  # assist with no scene
 //
-// add-mermaid / add-slide do a read-modify-write: GET the scene, JSON.parse its
-// doc_json, mutate the Scene object per the schema, then PUT the whole doc back.
+// add-mermaid / add-slide do a read-modify-write on the legacy multi-node Scene
+// schema: GET the scene, JSON.parse its doc_json, append a node/slide, PUT the
+// whole doc back. add-d2 instead targets the FILE-BACKED single-source doc
+// (`{format:"d2", source}`, same shape the D2 canvas mode itself writes) — D2
+// sources are non-trivial multi-line text, so it reads from a local FILE rather
+// than taking the diagram inline on the command line.
 //
 // Output is pretty JSON on stdout. Any non-2xx prints `HTTP <code>` + the body to
 // stderr and exits 1. Other failures (missing token/args) exit 2.
+
+import { readFileSync } from 'node:fs';
 
 const BASE = (process.env.OTTO_BASE || process.env.OTTO_BASE_URL || 'http://127.0.0.1:7700').replace(/\/+$/, '');
 const TOKEN = process.env.OTTO_API_TOKEN || '';
@@ -164,6 +171,20 @@ async function cmdAddMermaid(id, src) {
   print({ added_node: node.id, kind, scene: { id: updated.id, title: updated.title, nodes: doc.nodes.length } });
 }
 
+async function cmdAddD2(id, filePath) {
+  need(id, 'sceneId');
+  need(filePath, 'file.d2 path');
+  let src;
+  try {
+    src = readFileSync(filePath, 'utf8');
+  } catch (e) {
+    fail(2, `could not read ${filePath}: ${e && e.message ? e.message : e}`);
+  }
+  const doc = { type: 'otto-canvas', version: 1, format: 'd2', source: src };
+  const updated = await saveScene(id, doc);
+  print({ scene_id: updated.id, format: 'd2', bytes: src.length });
+}
+
 async function cmdAddSlide(id, title) {
   need(id, 'sceneId');
   const { doc } = await loadScene(id);
@@ -203,6 +224,7 @@ const HELP = `canvas.mjs — drive Otto Canvas Studio over HTTP (OTTO_API_TOKEN,
   create-scene <wsId> "<title>" [storyId]
   get-scene    <sceneId>
   add-mermaid  <sceneId> "<mermaid src>"
+  add-d2       <sceneId> <file.d2>
   add-slide    <sceneId> ["<slide title>"]
   assist       <sceneId> "<prompt>" [auto|sequence|flow|uml|nodes]
   assist       --preview "<prompt>" [mode]
@@ -217,6 +239,7 @@ async function main() {
     case 'create-scene': return cmdCreateScene(rest[0], rest[1], rest[2]);
     case 'get-scene': return cmdGetScene(rest[0]);
     case 'add-mermaid': return cmdAddMermaid(rest[0], rest[1]);
+    case 'add-d2': return cmdAddD2(rest[0], rest[1]);
     case 'add-slide': return cmdAddSlide(rest[0], rest[1]);
     case 'assist': return cmdAssist(rest[0], rest[1], rest[2]);
     case undefined:
