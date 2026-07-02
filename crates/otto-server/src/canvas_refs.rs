@@ -71,7 +71,7 @@ async fn add_ref(
         .map_err(ApiError)?;
 
     let _ = ctx.events.send(Event::CanvasRefsChanged {
-        workspace_id: session.workspace_id.clone(),
+        workspace_id: session.workspace_id,
         session_id: sid,
     });
 
@@ -91,7 +91,7 @@ async fn remove_ref(
     ctx.canvas_repo.remove_ref(&scene_id, &sid).await.map_err(ApiError)?;
 
     let _ = ctx.events.send(Event::CanvasRefsChanged {
-        workspace_id: session.workspace_id.clone(),
+        workspace_id: session.workspace_id,
         session_id: sid,
     });
 
