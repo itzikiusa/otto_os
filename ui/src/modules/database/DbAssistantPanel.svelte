@@ -264,7 +264,15 @@
   .da-empty {
     margin: auto;
     text-align: center;
-    color: var(--text-dim, #aaa);
+    /* The shell is force-dark in every app scheme (it hosts the force-dark agent
+       Terminal), so pin an on-dark token context here — native-dark values — and
+       use standard tokens below instead of hardcoded greys, so the empty state
+       always renders light-on-dark and tracks the design system. */
+    --surface-2: rgba(255, 255, 255, 0.08);
+    --border: rgba(255, 255, 255, 0.16);
+    --text: #f2f2f5;
+    --text-dim: #98989f;
+    color: var(--text-dim);
     padding: 20px;
     display: flex;
     flex-direction: column;
@@ -276,7 +284,7 @@
     margin: 0;
     font-size: 14px;
     font-weight: 600;
-    color: #eee;
+    color: var(--text);
   }
   .da-empty .hint {
     margin: 0;
@@ -296,9 +304,9 @@
     gap: 6px;
   }
   .da-prov {
-    border: 1px solid color-mix(in srgb, #fff 18%, transparent);
-    background: color-mix(in srgb, #fff 6%, transparent);
-    color: #ddd;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-dim);
     border-radius: 999px;
     font-size: 11.5px;
     padding: 3px 11px;
@@ -307,12 +315,12 @@
   }
   .da-prov:hover {
     border-color: var(--accent);
-    color: #fff;
+    color: var(--text);
   }
   .da-prov.on {
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: #fff;
+    color: var(--text);
   }
   .da-ask {
     width: 100%;
@@ -324,10 +332,10 @@
     width: 100%;
     box-sizing: border-box;
     resize: none;
-    border: 1px solid color-mix(in srgb, #fff 18%, transparent);
+    border: 1px solid var(--border);
     border-radius: 10px;
-    background: color-mix(in srgb, #fff 5%, transparent);
-    color: #eee;
+    background: var(--surface-2);
+    color: var(--text);
     font: inherit;
     font-size: 13px;
     padding: 8px 10px;
@@ -345,7 +353,7 @@
     border: none;
     border-radius: 999px;
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast);
     font-size: 12.5px;
     font-weight: 600;
     padding: 6px 16px;

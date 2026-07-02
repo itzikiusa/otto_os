@@ -547,20 +547,21 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /connections/{id}/db/test | ws editor | — | connectivity probe result |
-| GET /connections/{id}/db/capabilities | ws viewer | — | engine capability flags |
+| GET /connections/{id}/db/capabilities | ws viewer | — | engine capability flags: `sql`, `joins`, `transactions`, `multi_statement`, `cancel`, `explain`, `default_port`, `schema_levels`, `query_language` (see the honesty notes below) |
 | GET /connections/{id}/db/schema | ws viewer | — | top-level schema tree (roots) |
-| POST /connections/{id}/db/schema/children | ws viewer | `{node}` | child schema nodes (lazy expand). MySQL databases expose `Tables`/`Views` folders always, plus `Procedures`/`Functions` folders (with a count) when routines exist; routine leaves carry `kind:"procedure"`/`"function"` |
-| POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.). For a procedure/function: `columns` are its parameters and `ddl` is the `SHOW CREATE` body |
+| POST /connections/{id}/db/schema/children | ws viewer | `{node}` | child schema nodes (lazy expand). MySQL databases expose `Tables`/`Views` folders always, plus `Procedures`/`Functions`/`Triggers` folders (with a count) when the database has any; routine leaves carry `kind:"procedure"`/`"function"`, trigger leaves `kind:"trigger"` |
+| POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.). For a procedure/function: `columns` are its parameters and `ddl` is the `SHOW CREATE` body. For a trigger (MySQL): `ddl` is `SHOW CREATE TRIGGER` and `extra` = `{timing, event, table}` |
 | POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
+| POST /connections/{id}/db/query-plan | ws **viewer** | `{statement, node?}` | `DbQueryPlan` — a normalized query plan from the engine's native EXPLAIN (MySQL `EXPLAIN FORMAT=JSON`, Postgres `EXPLAIN (FORMAT JSON)`, ClickHouse `EXPLAIN json=1` w/ plain-text fallback, Mongo `explain` queryPlanner). The statement is **EXPLAIN-wrapped, never executed raw** — read-only by construction, hence `viewer`. Redis → 400 (no plan surface). |
 | POST /connections/{id}/db/cancel | ws editor | `{query_id}` | 204 — cancel an in-flight query engine-side |
 | POST /connections/{id}/db/completion | ws viewer | `{prefix, suffix?, database?, node?}` | Context-aware completion items (`{items:[DbCompletionItem]}`). The daemon parses `prefix` (text before the cursor) + `suffix` (text after, to resolve a `FROM` that follows the cursor) to decide intent — tables after `FROM`/`JOIN`, columns after `WHERE`/`AND`/`alias.`, Mongo collections/methods/field-keys (incl. embedded `x.a`). Each item carries a `score` (→ CodeMirror `boost`) so **index columns/fields rank first**, then the rest of the schema. Backed by a per-connection schema snapshot **cached until refresh** (see below; ~5-min TTL safety net). |
 | POST /connections/{id}/db/completion/refresh | ws viewer | `{}` | 204 — drop the connection's cached completion snapshot so the next completion re-introspects. Wired to the UI "Refresh schema" action. No-op for engines without a snapshot cache (Redis). |
 | GET /connections/{id}/db/history | ws viewer | — | recent query history |
 | POST /connections/{id}/db/explain-with-agent | ws editor | `{sql}` | AI explanation of a query (spawns an agent) |
-| POST /connections/{id}/db/export | ws editor | `{statement, format?, node?}` | Buffered CSV/JSON browser download. NOTE: routes through the interactive `run` path, so it is capped at the driver's default row limit — **not** a true full export. Superseded in the UI by export-to-path; kept for compatibility. |
+| POST /connections/{id}/db/export | ws editor | `{statement, format?, node?}` | **Uncapped, streamed** CSV/JSON browser download (`Content-Disposition: attachment`). Bytes are produced by the driver's streaming exporter and piped straight to the response body — no row cap and no full-result buffering (fixes the prior silent truncation at the driver default). `format`: `csv` (header + rows) or `json` (array of objects). A write/DDL on a guarded connection is rejected up front. If the driver errors mid-stream the response body terminates early (truncated download + connection reset) rather than reporting success. |
 | POST /connections/{id}/db/export-to-path | ws editor | ExportToPathReq | Stream an uncapped result to a **local file** on the daemon host, selectable format. Response is a **streamed `application/x-ndjson`** progress feed (see below). |
-| POST /connections/{id}/db/import | ws editor | ImportReq | Import a **local file** (CSV/TSV/NDJSON/JSON) into an existing SQL table as batched INSERTs **through the same guarded `run` path** (a Prod/read-only connection refuses it without `confirm_write`). Response is a **streamed `application/x-ndjson`** line: `{ done, rows, batches }` or `{ error }` (text starting `write_blocked:` ⇒ typed confirmation needed). v1: MySQL/ClickHouse only. |
+| POST /connections/{id}/db/import | ws editor | ImportReq | Import a **local file** (CSV/TSV/NDJSON/JSON) into an existing table/collection, **guarded** (a Prod/read-only connection refuses it without `confirm_write`). SQL engines (MySQL/ClickHouse/**PostgreSQL**) → batched `INSERT`s via the `run` path (identifier quoting is engine-aware — Postgres double-quotes, MySQL/CH backtick); **MongoDB** → `insertMany` batches (`table` = collection; CSV/TSV cells coerced to numbers/bools/null; NDJSON/JSON keep their types). Response is a **streamed `application/x-ndjson`** line: `{ done, rows, batches }` or `{ error }` (text starting `write_blocked:` ⇒ typed confirmation needed). Redis is unsupported (no bulk-load). |
 | POST /connections/{id}/db/nl-to-sql | ws editor | NlToSqlReq | Draft a **read** query from natural language, **validated with `EXPLAIN`** against the live schema before returning. Plain JSON → `NlToSqlOutcome`. Never emits a write/DDL. 400 starting "NL-to-SQL is not configured" ⇒ no drafter wired; 400 starting "could not produce a valid read query" ⇒ retry loop exhausted (message carries the last engine error). Unavailable for Redis. |
 
 `ExportToPathReq` = `{ statement, node?, format?, local_path, max_rows? }`. `format`
@@ -591,18 +592,21 @@ editor`; global connections: root).
 `ImportReq` = `{ local_path, format, table, batch_size?, confirm_write? }`.
 `format` is one of `csv`/`tsv` (first row = header) or `ndjson`/`json` (objects;
 columns are the union of keys, missing keys → `null`). `local_path` is a file on
-the daemon host (leading `~` expands to the daemon home). `table` must already
-exist. `batch_size` is rows per `INSERT` (default 500, clamped 1..=5000). The
-import parses the file, builds batched `INSERT … VALUES (…),(…)` with
-backtick-quoted identifiers and single-quote-escaped literals, and runs each
-batch **through the guarded `run` path** — so masking/history apply and a
-Prod/read-only connection refuses it unless `confirm_write` is set. The
+the daemon host (leading `~` expands to the daemon home). `table` is the target table
+(SQL — must already exist) or collection (MongoDB — created on first insert).
+`batch_size` is rows per batch (default 500, clamped 1..=5000). SQL engines
+(MySQL/ClickHouse/PostgreSQL) build batched `INSERT … VALUES (…),(…)` with
+engine-aware identifier quoting (backticks for MySQL/ClickHouse, double quotes
+for PostgreSQL) and single-quote-escaped literals, and run each batch **through
+the guarded `run` path** — so masking/history apply and a Prod/read-only
+connection refuses it unless `confirm_write` is set. MongoDB imports via
+`insertMany` batches (CSV/TSV cells type-coerced: numbers/bools/null;
+NDJSON/JSON keep their types), guarded the same way. Redis is not supported. The
 **response is a streamed `application/x-ndjson` body** with a single terminal
 line: `{ done: true, rows, batches }` (rows inserted, batches run) or `{ error }`
 — a guarded connection without `confirm_write` yields `{ error }` whose text
 starts `write_blocked:` (the client re-sends with `confirm_write: true` after a
-typed confirmation). v1 supports SQL engines only (MySQL/ClickHouse); Mongo
-`insertMany` / Redis are follow-ups. Gated `ws editor` (global connections: root).
+typed confirmation). Gated `ws editor` (global connections: root).
 
 `NlToSqlReq` = `{ question, node?, max_attempts? }`. `max_attempts` is the
 draft→validate retry budget (default 3, clamped 1..=4). The server asks the
@@ -625,6 +629,68 @@ connection, not just the client's HTTP wait. Cancel is gated at the same role as
 `query` (`ws editor`; global connections: root). Cancelling an unknown /
 already-finished query, a query on a different connection, or one on an engine
 without a native per-query cancel (Redis/MongoDB) is a no-op success (`204`).
+
+`RunQueryReq` also accepts `offset?` (u64, `#[serde(default)]` — back-compat).
+It paginates an **auto-limited single SELECT** (Mongo: an unconstrained `find`):
+the SQL drivers append `LIMIT n OFFSET m`, Mongo maps it to `skip`. It is applied
+**only** when the server auto-injected the LIMIT — an explicit user `LIMIT`/`OFFSET`,
+a non-paginatable statement, or a multi-statement batch never gets an `offset`,
+so the client's pager and the server's paging can't disagree.
+
+**Multi-statement batches (`SELECT 1; SELECT 2`).** For MySQL/ClickHouse/MongoDB a
+`;`-separated script now runs **each statement in order** (a string/comment/quote-
+aware splitter decides the boundaries — a `;` inside a literal or comment is not
+one). `QueryResult` gained (all back-compat, omitted when empty/default):
+`more_results: QueryResult[]` — the later statements' results, in order; the
+**top-level fields describe the FIRST statement**. `statement?` — a ≤80-char
+single-line preview label, set on each entry of a batch (not for a single
+statement). `errored?: bool` — set on the terminal entry when a statement fails:
+execution **stops there**, and the response is a `200` carrying the completed
+results plus that one errored entry (its `message` holds the engine error). A
+**single**-statement failure is still an HTTP error, unchanged. Cancel kills the
+statement currently running, surfacing as that entry's error → the same partial
+path. A single statement (the common case) is unaffected — no injection changes,
+no new fields on the wire. **MongoDB behavior change:** `run_many` previously
+returned only the *last* statement's result; it now returns the first on top with
+the rest in `more_results` (so the UI's result-set switcher sees them all).
+
+`auto_limited?: u64` on `QueryResult` — the effective `LIMIT` the server injected
+for an auto-paginated single SELECT/`find`. Present ⇔ the result was
+server-paginated (so the UI shows its pager exactly then, without re-deriving the
+injector's bail rules); absent for explicit user LIMIT/OFFSET, non-paginatable
+statements, and every batch entry.
+
+**Honest capability flags** (`GET …/db/capabilities`). `transactions` is now
+`false` for MySQL and MongoDB (was `true` with no implementation): the explorer
+acquires each `run` from a connection pool, so there is no pinned session to hold
+a `BEGIN…COMMIT` open on. `multi_statement` is now `true` for MongoDB (it already
+ran `;`-separated scripts). Two new flags: `cancel` (server-side per-query cancel
+— `true` for MySQL/ClickHouse, `false` for MongoDB/Redis; the UI labels Stop as
+client-side-only when false) and `explain` (`true` everywhere except Redis, which
+has no plan surface — the UI hides the Explain button there).
+
+**`DbQueryPlan`** (`POST …/db/query-plan`) = `{ engine, root: PlanNode, raw }` where
+`PlanNode` = `{ op, object?, detail?, est_rows?, warnings[], children[] }`. `raw` is
+the engine's untouched EXPLAIN JSON (for a "raw" toggle). `warnings` flags the
+costly access patterns the UI badges red: full scans (`access_type: ALL` on MySQL,
+`Seq Scan` on Postgres, `COLLSCAN` on Mongo) and MySQL `Using filesort` / `Using
+temporary`. ClickHouse `ReadFromMergeTree` is deliberately **not** flagged (normal
+for MergeTree tables). Triggers browse: MySQL databases with triggers expose a
+`Triggers` tree folder (`information_schema.TRIGGERS`); a trigger's object detail
+carries `SHOW CREATE TRIGGER` DDL + `extra = {timing, event, table}`.
+
+**PostgreSQL engine** (`ConnectionKind`/`DbEngine` `"postgres"`, default port 5432).
+First-class parity with MySQL: schema browse, query, streaming export/import, ERD,
+JOIN builder, index-first completion. Capabilities: `{ sql:true, joins:true,
+transactions:false, multi_statement:true, cancel:true, explain:true,
+default_port:5432, query_language:"sql", schema_levels:["Schema","Table","Column"] }`.
+Cancel is `pg_cancel_backend(pid)` on a separate connection; `explain` uses
+`EXPLAIN (FORMAT JSON)`. A Postgres connection is scoped to one database and
+browsed **by schema** (`pg_*`/`information_schema` hidden, `public` first), so the
+tree's top level is the database's schemas and the active-database selector maps to
+`SET search_path` — the `db:<schema>` node segment carries the schema name, keeping
+every downstream node path identical in shape to MySQL's. Import maps
+`jdbc:postgresql://` (DataGrip/DBeaver) to this engine.
 
 ## DB Assistant — file-backed agent (`/connections/{id}/db/assist`, `/db-assist/{aid}/query`)
 
@@ -667,7 +733,8 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 |---|---|---|---|
 | GET /workspaces/{wid}/db/saved-queries | ws viewer | — | `SavedQuery[]` |
 | POST /workspaces/{wid}/db/saved-queries | ws editor | CreateSavedQueryReq | SavedQuery |
-| DELETE /db/saved-queries/{qid} | ws editor | — | 204 |
+| PATCH /db/saved-queries/{qid} | ws editor **+ owner/ws-Admin/root** | UpdateSavedQueryReq `{name?, statement?}` | updated `SavedQuery` |
+| DELETE /db/saved-queries/{qid} | ws editor **+ owner/ws-Admin/root** | — | 204 |
 | GET /workspaces/{wid}/db/dashboards | ws viewer | — | `Dashboard[]` |
 | POST /workspaces/{wid}/db/dashboards | ws editor | CreateDashboardReq | Dashboard |
 | GET /db/dashboards/{id} | ws viewer | — | Dashboard |
@@ -678,6 +745,14 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | PATCH /db/widgets/{id} | ws editor | UpdateWidgetReq | Widget |
 | DELETE /db/widgets/{id} | ws editor | — | 204 |
 | POST /db/widgets/{id}/run | ws editor | — | widget query result |
+
+`UpdateSavedQueryReq` = `{ name?, statement? }` — a partial update; an absent
+field is left unchanged (so a rename and a statement-edit can be sent
+independently). Like DELETE, PATCH requires **Editor on the query's workspace AND
+ownership** (the owner, a workspace Admin, or root) — saved queries are
+owner-private. An unknown `qid` → 404. The UI uses PATCH to rename a saved query
+inline and to update it in place when "Save" is pressed on a tab opened from it
+("Save as new" instead POSTs a fresh one).
 
 ## Git — repos & PR extras (beyond #34–#56)
 
@@ -1977,12 +2052,27 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 102 | GET /api/v1/workspaces/{ws}/canvas/scenes | ws viewer | — | `CanvasSceneSummary[]` (newest-updated first) |
-| 103 | POST /api/v1/workspaces/{ws}/canvas/scenes | ws editor | `{title, doc?, story_id?}` | CanvasScene (201; `doc` defaults to an empty scene) |
+| 103 | POST /api/v1/workspaces/{ws}/canvas/scenes | ws editor | `{title, doc?, story_id?, provider?, section?}` | CanvasScene (201; `doc` defaults to an empty scene) |
 | 104 | GET /api/v1/canvas/scenes/{id} | ws viewer | — | CanvasScene (full `doc_json`) |
-| 105 | PUT /api/v1/canvas/scenes/{id} | ws editor | `{title?, doc?, thumbnail?}` | CanvasScene (partial; omitted fields unchanged) |
+| 105 | PUT /api/v1/canvas/scenes/{id} | ws editor | `{title?, doc?, thumbnail?, provider?, section?, story_id?}` | CanvasScene (partial; omitted fields unchanged, COALESCE) |
 | 106 | DELETE /api/v1/canvas/scenes/{id} | ws editor | — | 204 |
-| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, nodes, edges, note}` (one agent turn; does not mutate the scene) |
+| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview) |
 | 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
+| 145 | GET /api/v1/sessions/{sid}/canvas-refs | ws viewer | — | `CanvasSceneSummary[]` — scenes referenced by this session |
+| 146 | POST /api/v1/sessions/{sid}/canvas-refs | ws editor | `{scene_id}` | 204 (idempotent; 404 if the scene isn't in the session's workspace) |
+| 147 | DELETE /api/v1/sessions/{sid}/canvas-refs/{scene_id} | ws editor | — | 204 (detaches; the scene itself is untouched) |
+
+Session references live in `crates/otto-server/src/canvas_refs.rs` (needs
+`SessionManager` to resolve a session's workspace, so they can't live in the
+`otto-canvas` crate like the routes above). Broadcasts `canvas_refs_changed`
+(see `docs/contracts/ws.md`) on attach/detach.
+
+The first-party MCP tool server (`ottod mcp-tools`) additionally exposes two
+GOVERNED WRITE tools — `canvas_create_scene` (posts to #103, then best-effort
+#146 to reference the new scene to the calling session) and
+`canvas_update_scene` (GET #104 then PUT #105, preserving `format`/`sketch`) —
+the only two mutating tools in an otherwise read-only MCP surface; both run as
+the session owner through the same `WorkspaceRole::Editor` gate a human hits.
 
 ## Discovery Chat
 

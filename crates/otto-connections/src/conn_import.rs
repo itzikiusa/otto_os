@@ -144,7 +144,7 @@ fn kind_for_engine(token: &str) -> Result<ConnectionKind, String> {
     } else if t.contains("mariadb") || t.contains("mysql") {
         Ok(ConnectionKind::Mysql)
     } else if t.contains("postgre") || t.contains("postgis") {
-        Err("PostgreSQL is not supported by Otto".into())
+        Ok(ConnectionKind::Postgres)
     } else if t.contains("sqlserver") || t.contains("mssql") || t.contains("microsoft") {
         Err("SQL Server is not supported by Otto".into())
     } else if t.contains("oracle") {

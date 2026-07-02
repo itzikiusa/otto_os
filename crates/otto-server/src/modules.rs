@@ -525,6 +525,9 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             "/canvas/assist/preview",
             post(crate::canvas_assist::assist_preview),
         )
+        // Session ↔ Canvas scene references — needs the SessionManager to resolve
+        // a session's workspace, so it lives here rather than in otto-canvas.
+        .merge(crate::canvas_refs::canvas_refs_routes())
         // Story attachments — upload route gets its own 40 MB body cap to bound
         // the ~33 % base64 inflation (raw content cap is enforced at 25 MB).
         .route(

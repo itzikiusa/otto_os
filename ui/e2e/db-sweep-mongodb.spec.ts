@@ -269,13 +269,14 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // The document itself must not scroll horizontally…
     expect(docScrollW, 'document should not scroll horizontally').toBeLessThanOrEqual(vw + 2);
     // …and nothing under .db-page should jut past the viewport (2px sub-pixel slack).
-    // KNOWN SHARED-UI BUG (escalated, not fixable from the Mongo driver): on tablet
-    // widths ~641–900px the DB Explorer keeps the desktop side-by-side layout, so
-    // the 280px sidebar + the main toolbar overflow horizontally and are clipped by
-    // `.content { overflow:hidden }` — the engine chip + Test button end up off
-    // screen and unreachable. This assertion correctly RED-flags that on
-    // iphone-landscape (814) and ipad-portrait (834); the fix belongs in the shared
-    // ui/src/modules/database/DatabasePage.svelte (a tablet breakpoint).
+    // This guards a fixed shared-UI overflow: on tablet widths (641–1024px) the DB
+    // Explorer keeps the side-by-side layout AND the shell adds a persistent ~220px
+    // Navigator, so the main pane is doubly squeezed. The fix (DatabasePage /
+    // QueryEditor / ResultsGrid) wraps the dense toolbars ≤1024px, keeps min-width:0
+    // down the flex chain so the main pane shrinks, and caps the connection sidebar
+    // (flex-shrink:0, persisted px width) at 45vw so it can't push content off
+    // screen. This assertion is the regression guard for that on iphone-landscape
+    // (814) and ipad-portrait (834).
     expect(
       widest,
       `no element under .db-page should exceed the viewport width — widest offender: ` +

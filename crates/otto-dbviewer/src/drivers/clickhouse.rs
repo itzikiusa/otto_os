@@ -27,12 +27,13 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
-use crate::export::{open_sink, ExportCounts, ExportFormat};
+use crate::export::{ExportCounts, ExportFormat, ExportSink};
+use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
-    Engine, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest, QueryResult, QueryStats,
-    ResolvedConfig, SchemaNode, TestResult,
+    DbQueryPlan, Engine, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest, QueryResult,
+    QueryStats, ResolvedConfig, SchemaNode, TestResult,
 };
 
 /// ClickHouse driver. Caches one transport handle per [`ResolvedConfig::cache_key`]:
@@ -550,18 +551,140 @@ impl ClickhouseDriver {
             }
         }
     }
+
+    /// Run one row-returning statement and shape it into a `QueryResult`,
+    /// capping at `max_rows` (flagging `truncated`) and capping oversized cells.
+    /// Shared by the single-statement fast path and the batch loop.
+    async fn exec_ch_read(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
+        max_rows: usize,
+    ) -> Result<QueryResult> {
+        let started = Instant::now();
+        let resp = self
+            .query_rows_db_timeout(cfg, sql, active_db, query_id, timeout_secs)
+            .await?;
+        let duration_ms = started.elapsed().as_millis() as u64;
+
+        let columns: Vec<Column> = resp
+            .meta
+            .iter()
+            .map(|(name, ty)| Column::typed(name, ty))
+            .collect();
+
+        let total = resp.data.len();
+        let truncated = total > max_rows;
+        // Cap oversized cells (e.g. AggregateFunction/*State blobs) so a giant
+        // value can't break the grid.
+        let rows: Vec<Vec<Value>> = resp
+            .data
+            .into_iter()
+            .take(max_rows)
+            .map(|row| row.into_iter().map(cap_cell).collect())
+            .collect();
+        let row_count = rows.len();
+
+        Ok(QueryResult {
+            columns,
+            rows,
+            stats: QueryStats {
+                duration_ms,
+                row_count,
+                bytes_read: Some(resp.bytes_read),
+            },
+            truncated,
+            ..QueryResult::empty()
+        })
+    }
+
+    /// Run one write/DDL statement (no rowset) and return the "OK" acknowledgement.
+    async fn exec_ch_write(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<QueryResult> {
+        let started = Instant::now();
+        self.query_text_db_timeout(cfg, sql, active_db, query_id, timeout_secs)
+            .await?;
+        let mut result = QueryResult::message("OK");
+        result.rows_affected = None;
+        result.stats = QueryStats {
+            duration_ms: started.elapsed().as_millis() as u64,
+            row_count: 0,
+            bytes_read: None,
+        };
+        Ok(result)
+    }
+
+    /// Execute a true multi-statement batch (>1 statement) in order. Each
+    /// statement gets its own fresh `query_id` (recorded in `token` on the HTTP
+    /// transport) so a concurrent cancel targets the statement currently running.
+    /// The first result is the top-level one, the rest go into `more_results`,
+    /// each labelled with its statement preview; on the first failure execution
+    /// stops with an `errored` entry and the completed results are returned (§2.2).
+    /// Batches get no auto-LIMIT/OFFSET injection (the pager is single-statement
+    /// only), but each read is still capped at `max_rows`.
+    async fn run_ch_batch(
+        &self,
+        cfg: &ResolvedConfig,
+        spans: &[StatementSpan],
+        max_rows: usize,
+        active_db: Option<&str>,
+        timeout_secs: Option<u64>,
+        token: &CancelToken,
+    ) -> Result<QueryResult> {
+        // Server-side cancel via query_id only exists on the HTTP transport.
+        let http = transport_for(cfg) == Transport::Http;
+        let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
+        for span in spans {
+            let stmt = span.text.as_str();
+            let query_id = new_query_id();
+            if http {
+                token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
+            }
+            let outcome = if returns_rows(stmt) {
+                self.exec_ch_read(cfg, stmt, active_db, Some(query_id), timeout_secs, max_rows)
+                    .await
+            } else {
+                self.exec_ch_write(cfg, stmt, active_db, Some(query_id), timeout_secs)
+                    .await
+            };
+            match outcome {
+                Ok(mut r) => {
+                    r.statement = Some(types::statement_preview(stmt));
+                    results.push(r);
+                }
+                Err(e) => {
+                    results.push(types::errored_batch_entry(
+                        types::statement_preview(stmt),
+                        e.to_string(),
+                    ));
+                    break;
+                }
+            }
+        }
+        Ok(types::fold_batch_results(results))
+    }
 }
 
 /// Build a fresh `reqwest::Client` from the resolved config, materializing any
 /// inline CA for custom-CA TLS. Never called directly by the driver methods —
 /// they go through [`ClickhouseDriver::client`] for caching.
 fn build_client(cfg: &ResolvedConfig) -> Result<reqwest::Client> {
-    // Bound both connection establishment (TCP+TLS) and the overall request so a
-    // misconfigured endpoint (e.g. HTTPS against a plain-HTTP port, or the native
-    // 9000/9440 port) fails fast with a clear error instead of hanging forever.
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60));
+    // Bound connection establishment (TCP+TLS) so a misconfigured endpoint (e.g.
+    // HTTPS against a plain-HTTP port, or the native 9000/9440 port) fails fast
+    // with a clear error instead of hanging forever. The per-request wall-clock
+    // timeout is set on each `post`/`post_stream` call instead of a blanket
+    // client-wide cap: the old 60s ceiling truncated long queries the user
+    // explicitly allowed via `timeout_ms`, and killed >60s streaming exports (§2.4).
+    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
     // Tunnel case: the URL host is the real hostname (for SNI/cert), but the TCP
     // must go to the local forward — map it there. (reqwest uses the URL port
     // with the overridden IP, so the forward's local port is honoured.)
@@ -622,6 +745,15 @@ impl Conn {
             // only positive values reach here.
             req = req.query(&[("max_execution_time", secs.to_string().as_str())]);
         }
+        // Per-request client-side wall clock (replaces the old blanket 60s client
+        // timeout, §2.4): honour the user's per-statement timeout with a few
+        // seconds of grace so ClickHouse's own `max_execution_time` fires first
+        // (cleaner server error); otherwise the 60s default.
+        let per_request = self
+            .timeout_secs
+            .map(|s| Duration::from_secs(s.saturating_add(5)))
+            .unwrap_or(Duration::from_secs(60));
+        req = req.timeout(per_request);
         let resp = req.body(body).send().await.map_err(req_err)?;
         let status = resp.status();
         let text = resp.text().await.map_err(types::upstream)?;
@@ -647,6 +779,10 @@ impl Conn {
         if let Some(qid) = &self.query_id {
             req = req.query(&[("query_id", qid.as_str())]);
         }
+        // The export stream owns its own progress/cancel semantics; an effectively
+        // unlimited (24h) per-request timeout keeps the old blanket 60s client cap
+        // from truncating a long export mid-stream (§2.4).
+        req = req.timeout(Duration::from_secs(24 * 60 * 60));
         let resp = req.body(body).send().await.map_err(req_err)?;
         if !resp.status().is_success() {
             let text = resp.text().await.map_err(types::upstream)?;
@@ -1076,6 +1212,12 @@ impl Driver for ClickhouseDriver {
             joins: true,
             transactions: false,
             multi_statement: true,
+            // Server-side cancel via `KILL QUERY WHERE query_id=…` — only tagged on
+            // the HTTP transport, but advertised as capable; the native transport's
+            // cancel is a harmless no-op.
+            cancel: true,
+            // `EXPLAIN` / `EXPLAIN json=1`.
+            explain: true,
             default_port: 8123,
             schema_levels: vec!["Database".into(), "Table".into(), "Column".into()],
             query_language: "sql".into(),
@@ -1342,78 +1484,52 @@ impl Driver for ClickhouseDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
-        let sql = req.statement.trim();
-        if sql.is_empty() {
+        let text = req.statement.trim();
+        if text.is_empty() {
             return Err(types::invalid("clickhouse: empty statement"));
         }
         let max_rows = req.max_rows.unwrap_or(1000);
-        let started = Instant::now();
 
         // The active database (if the user selected one) scopes unqualified
         // table names — see query_rows_db for how it's applied per transport.
         let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
+        // Convert ms → seconds (round up) for ClickHouse's `max_execution_time`.
+        let timeout_secs = req.timeout_ms.filter(|&t| t > 0).map(|t| t.div_ceil(1000));
+        // Server-side cancel via query_id only exists on the HTTP transport.
+        let http = transport_for(cfg) == Transport::Http;
+
+        // A true batch (>1 statement) runs each statement in order, tagging each
+        // with its own query_id so a cancel hits the running one; the single path
+        // keeps auto-LIMIT/OFFSET injection (§2.2).
+        let spans = split_statements(text, SqlDialect::Clickhouse);
+        if spans.len() > 1 {
+            return self
+                .run_ch_batch(cfg, &spans, max_rows, active_db, timeout_secs, token)
+                .await;
+        }
+        // 0 spans ⇒ comment-only paste: run the original text (unchanged behavior).
+        let stmt = spans.first().map(|s| s.text.as_str()).unwrap_or(text);
+
         // Tag this execution with a fresh server-side query_id (HTTP transport)
         // and record it in the token, so a concurrent cancel can KILL it. The
         // native transport ignores it (cancel becomes a no-op there).
         let query_id = new_query_id();
-        if transport_for(cfg) == Transport::Http {
+        if http {
             token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
         }
 
-        // Convert ms → seconds (round up) for ClickHouse's `max_execution_time`.
-        let timeout_secs = req.timeout_ms.filter(|&t| t > 0).map(|t| t.div_ceil(1000));
-
-        if returns_rows(sql) {
-            let limited = types::inject_row_limit(sql, max_rows.saturating_add(1));
-            let resp = self
-                .query_rows_db_timeout(cfg, &limited, active_db, Some(query_id), timeout_secs)
+        if returns_rows(stmt) {
+            let ri = types::inject_row_limit(stmt, max_rows.saturating_add(1), req.offset);
+            let mut r = self
+                .exec_ch_read(cfg, &ri.sql, active_db, Some(query_id), timeout_secs, max_rows)
                 .await?;
-            let duration_ms = started.elapsed().as_millis() as u64;
-
-            let columns: Vec<Column> = resp
-                .meta
-                .iter()
-                .map(|(name, ty)| Column::typed(name, ty))
-                .collect();
-
-            let total = resp.data.len();
-            let truncated = total > max_rows;
-            // Cap oversized cells (e.g. AggregateFunction/*State blobs) so a
-            // giant value can't break the grid.
-            let rows: Vec<Vec<Value>> = resp
-                .data
-                .into_iter()
-                .take(max_rows)
-                .map(|row| row.into_iter().map(cap_cell).collect())
-                .collect();
-            let row_count = rows.len();
-
-            Ok(QueryResult {
-                columns,
-                rows,
-                rows_affected: None,
-                stats: QueryStats {
-                    duration_ms,
-                    row_count,
-                    bytes_read: Some(resp.bytes_read),
-                },
-                message: None,
-                truncated,
-                masked: false,
-            })
+            // Report the user-visible page size (max_rows), not the +1 probe.
+            r.auto_limited = ri.limited.then_some(max_rows as u64);
+            Ok(r)
         } else {
-            // Write / DDL statement: no rowset, just acknowledge.
-            self.query_text_db_timeout(cfg, sql, active_db, Some(query_id), timeout_secs).await?;
-            let duration_ms = started.elapsed().as_millis() as u64;
-            let mut result = QueryResult::message("OK");
-            result.rows_affected = None;
-            result.stats = QueryStats {
-                duration_ms,
-                row_count: 0,
-                bytes_read: None,
-            };
-            Ok(result)
+            self.exec_ch_write(cfg, stmt, active_db, Some(query_id), timeout_secs)
+                .await
         }
     }
 
@@ -1434,6 +1550,63 @@ impl Driver for ClickhouseDriver {
         // transient error as a cancel failure.
         let _ = self.query_text(cfg, &sql).await;
         Ok(())
+    }
+
+    /// Structured query plan via `EXPLAIN json = 1` (a single JSON cell), falling
+    /// back to plain-text `EXPLAIN` (one node per line) when JSON isn't available.
+    /// The statement is EXPLAIN-wrapped — never executed raw.
+    async fn query_plan(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<DbQueryPlan> {
+        let stmt = statement.trim().trim_end_matches(';');
+        if stmt.is_empty() {
+            return Err(types::invalid("clickhouse: empty statement"));
+        }
+        let active_db = node.map(str::trim).filter(|s| !s.is_empty());
+
+        // Preferred: EXPLAIN json = 1 → the plan JSON in the first cell.
+        if let Ok(resp) = self
+            .query_rows_db_timeout(cfg, &format!("EXPLAIN json = 1 {stmt}"), active_db, None, None)
+            .await
+        {
+            let raw: Option<serde_json::Value> = match resp.data.first().and_then(|r| r.first()) {
+                Some(serde_json::Value::String(s)) => serde_json::from_str(s).ok(),
+                Some(other) => Some(other.clone()),
+                None => None,
+            };
+            if let Some(raw) = raw {
+                let root = crate::plan::from_clickhouse_json(&raw);
+                return Ok(DbQueryPlan {
+                    engine: "clickhouse".into(),
+                    root,
+                    raw,
+                });
+            }
+        }
+
+        // Fallback: plain EXPLAIN → text lines as a single-node plan.
+        let resp = self
+            .query_rows_db_timeout(cfg, &format!("EXPLAIN {stmt}"), active_db, None, None)
+            .await?;
+        let lines: Vec<String> = resp
+            .data
+            .iter()
+            .filter_map(|r| r.first())
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect();
+        let raw = serde_json::Value::Array(lines.iter().cloned().map(serde_json::Value::String).collect());
+        let root = crate::plan::from_clickhouse_text(&lines);
+        Ok(DbQueryPlan {
+            engine: "clickhouse".into(),
+            root,
+            raw,
+        })
     }
 
     async fn completion(
@@ -1466,14 +1639,14 @@ impl Driver for ClickhouseDriver {
     /// array format has no single-pass CH FORMAT, so it falls back to the
     /// daemon-side row formatter (logged); on the native transport we stream
     /// result blocks and format rows ourselves.
-    async fn export_to_path(
+    async fn export_to_writer(
         &self,
         cfg: &ResolvedConfig,
         statement: &str,
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        dest: &std::path::Path,
+        w: Box<dyn std::io::Write + Send>,
     ) -> Result<ExportCounts> {
         let sql = statement.trim();
         if sql.is_empty() {
@@ -1488,7 +1661,7 @@ impl Driver for ClickhouseDriver {
         if transport_for(cfg) == Transport::Http {
             if let Some(ch_format) = format.clickhouse_format() {
                 return self
-                    .export_http_format(cfg, sql, active_db, ch_format, max_rows, format, dest)
+                    .export_http_format(cfg, sql, active_db, ch_format, max_rows, format, w)
                     .await;
             }
             // JSON-array format: no single CH FORMAT — fall back to the buffered
@@ -1500,7 +1673,7 @@ impl Driver for ClickhouseDriver {
             let resp = self
                 .query_rows_db(cfg, &capped_sql(sql, max_rows), active_db, None)
                 .await?;
-            return write_rawrows(dest, format, &resp, max_rows);
+            return write_rawrows(w, format, &resp, max_rows);
         }
 
         // Native transport: stream result blocks (already done by native_query,
@@ -1512,13 +1685,13 @@ impl Driver for ClickhouseDriver {
              formatting (no FORMAT streaming); large exports may use more memory than HTTP"
         );
         let resp = self.native_query(cfg, &capped_sql(sql, max_rows)).await?;
-        write_rawrows(dest, format, &resp, max_rows)
+        write_rawrows(w, format, &resp, max_rows)
     }
 }
 
 impl ClickhouseDriver {
     /// The HTTP `FORMAT`-streaming export: issue `<sql> FORMAT <ch_format>` and
-    /// splice the response body to the file chunk-by-chunk. Row count isn't known
+    /// splice the response body through `w` chunk-by-chunk. Row count isn't known
     /// from the streamed bytes, so it's reported as 0 (bytes are exact).
     #[allow(clippy::too_many_arguments)]
     async fn export_http_format(
@@ -1529,7 +1702,7 @@ impl ClickhouseDriver {
         ch_format: &str,
         max_rows: Option<usize>,
         format: ExportFormat,
-        dest: &std::path::Path,
+        w: Box<dyn std::io::Write + Send>,
     ) -> Result<ExportCounts> {
         use futures_util::StreamExt as _;
 
@@ -1537,8 +1710,7 @@ impl ClickhouseDriver {
         let body = format!("{}\nFORMAT {ch_format}", capped_sql(sql, max_rows));
         let resp = conn.post_stream(body).await?;
 
-        let mut sink = open_sink(dest, format)
-            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+        let mut sink = ExportSink::new(w, format);
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(req_err)?;
@@ -1555,15 +1727,15 @@ impl ClickhouseDriver {
 /// the conservative limit injector shared with the interactive path.
 fn capped_sql(sql: &str, max_rows: Option<usize>) -> String {
     match max_rows {
-        Some(n) => types::inject_row_limit(sql, n),
+        Some(n) => types::inject_row_limit(sql, n, None).sql,
         None => sql.to_string(),
     }
 }
 
-/// Write a materialised [`RawRows`] (the JSON-array fallback / native path) to the
-/// file through the row formatter, honouring `max_rows`.
+/// Write a materialised [`RawRows`] (the JSON-array fallback / native path)
+/// through the row formatter to `w`, honouring `max_rows`.
 fn write_rawrows(
-    dest: &std::path::Path,
+    w: Box<dyn std::io::Write + Send>,
     format: ExportFormat,
     resp: &RawRows,
     max_rows: Option<usize>,
@@ -1573,8 +1745,7 @@ fn write_rawrows(
         .iter()
         .map(|(name, ty)| Column::typed(name, ty))
         .collect();
-    let mut sink = open_sink(dest, format)
-        .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+    let mut sink = ExportSink::new(w, format);
     sink.write_header(&columns)
         .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
     let take = max_rows.unwrap_or(usize::MAX);
@@ -1709,6 +1880,16 @@ const FUNCTIONS: &[(&str, &str)] = &[
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn capabilities_are_honest() {
+        let c = ClickhouseDriver::default().capabilities();
+        assert_eq!(c.engine, Engine::Clickhouse);
+        assert!(c.sql && c.joins && c.multi_statement);
+        assert!(!c.transactions);
+        assert!(c.cancel, "KILL QUERY WHERE query_id supported (HTTP)");
+        assert!(c.explain);
+    }
 
     fn base_cfg(port: u16) -> ResolvedConfig {
         ResolvedConfig {

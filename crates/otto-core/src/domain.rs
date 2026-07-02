@@ -165,6 +165,7 @@ pub enum ConnectionKind {
     Redis,
     Mongodb,
     Clickhouse,
+    Postgres,
     Custom,
 }
 
@@ -176,6 +177,7 @@ impl ConnectionKind {
             "redis" => Some(Self::Redis),
             "mongodb" => Some(Self::Mongodb),
             "clickhouse" => Some(Self::Clickhouse),
+            "postgres" => Some(Self::Postgres),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -188,6 +190,7 @@ impl ConnectionKind {
             Self::Redis => "redis",
             Self::Mongodb => "mongodb",
             Self::Clickhouse => "clickhouse",
+            Self::Postgres => "postgres",
             Self::Custom => "custom",
         }
     }

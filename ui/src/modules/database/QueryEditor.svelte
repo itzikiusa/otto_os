@@ -6,6 +6,7 @@
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import ResultsGrid from './ResultsGrid.svelte';
+  import PlanView from './PlanView.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { database, ROW_LIMIT_ALL, type QueryTab } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -14,6 +15,7 @@
   import type { DbCompletionKind } from '../../lib/api/types';
   import {
     statementAtCursor,
+    countStatements,
     extractVars,
     substituteVars,
     renderVar,
@@ -179,12 +181,10 @@
     });
   }
 
-  function run(): void {
-    const whole = tab.statement;
-    // Run the selection if there is one, else the statement under the cursor.
-    const base = editorSel.text.trim()
-      ? editorSel.text
-      : statementAtCursor(whole, editorSel.cursor, splitMode);
+  // Substitute query-level variables into `base` and execute it (transient — the
+  // tab's text is never overwritten by the rendered SQL). Shared by Run
+  // (selection / statement-at-cursor) and Run all (the whole buffer as a batch).
+  function execBase(base: string): void {
     if (!base.trim()) {
       void database.runQuery();
       return;
@@ -211,6 +211,22 @@
     );
     const finalSql = names.length > 0 ? substituteVars(base, rendered, splitMode) : base;
     void database.runQuery(finalSql, undefined, { transient: true });
+  }
+
+  function run(): void {
+    // Run the selection if there is one, else the statement under the cursor.
+    execBase(
+      editorSel.text.trim()
+        ? editorSel.text
+        : statementAtCursor(tab.statement, editorSel.cursor, splitMode),
+    );
+  }
+
+  // Run the WHOLE buffer as one multi-statement batch (the backend splits it and
+  // returns one result set per statement — the grid shows a result switcher).
+  const stmtCount = $derived(countStatements(tab.statement, splitMode));
+  function runAll(): void {
+    execBase(tab.statement);
   }
 
   // Draggable split between the editor and the results (persisted px height).
@@ -270,17 +286,33 @@
   // ── Save query ──────────────────────────────────────────────────────────
   let saving = $state(false);
   let saveName = $state('');
+  /** True when this tab was opened from a saved query that still exists — then
+   *  the primary Save UPDATES it in place ("Save as new" forks a fresh one). */
+  const savedLinked = $derived(
+    !!tab?.savedQueryId && database.savedQueries.some((q) => q.id === tab.savedQueryId),
+  );
   async function openSave(): Promise<void> {
     saveName = tab.name && tab.name !== 'Query' ? tab.name : '';
     saving = true;
     await tick();
   }
+  /** Primary save: update the linked saved query in place, else create a new one
+   *  (a name is required only for the create case). */
   async function confirmSave(): Promise<void> {
+    if (!savedLinked && !saveName.trim()) return;
+    const saved = await database.saveActiveTab(saveName);
+    if (saved) {
+      saving = false;
+      saveName = '';
+    }
+  }
+  /** Always create a fresh saved query from the current statement (a name is
+   *  required). Lets the user fork a saved query without overwriting it. */
+  async function confirmSaveAsNew(): Promise<void> {
     const name = saveName.trim();
     if (!name) return;
     const saved = await database.saveQuery(name, tab.statement);
     if (saved) {
-      tab.name = saved.name;
       saving = false;
       saveName = '';
     }
@@ -303,9 +335,121 @@
   let editorOpen = $state(true);
   let resultsOpen = $state(true);
   const hasResult = $derived(!!tab.result || !!tab.error);
+
+  // ── Keyboard shortcuts (active only while the DB query view owns focus) ───────
+  // Registered on window but gated to fire only when focus is inside this editor
+  // (or nowhere), so they never hijack another module's inputs. The component is
+  // mounted only on the Query tab, so the listener is naturally scoped to it.
+  let rootEl = $state<HTMLElement | null>(null);
+  // The global key map (lib/keys.ts) now matches modifiers exactly, so ⌥⌘/⇧⌘
+  // augmented chords don't collide with the plain-⌘ session actions (⌘T/⌘W/⌘F).
+  // ⌃Tab stays the app-global session cycler; query-tab nav uses ⌥⌘→/←.
+  const SHORTCUTS: { keys: string; label: string }[] = [
+    { keys: '⌘↵', label: 'Run' },
+    { keys: '⇧⌘↵', label: 'Run all statements' },
+    { keys: '⌘S', label: 'Save query' },
+    { keys: '⇧⌘F', label: 'Format' },
+    { keys: 'Esc', label: 'Cancel running query' },
+    { keys: '⌥⌘→ / ⌥⌘←', label: 'Next / previous query tab' },
+    { keys: '⌥⌘T', label: 'New query tab' },
+    { keys: '⌥⌘W', label: 'Close query tab' },
+  ];
+
+  function switchRelative(dir: 1 | -1): void {
+    const n = database.tabs.length;
+    if (n < 2) return;
+    const cur = database.activeTab;
+    database.switchTab(dir === 1 ? (cur + 1) % n : (cur - 1 + n) % n);
+  }
+
+  function handleShortcut(e: KeyboardEvent): void {
+    const cmd = e.metaKey || e.ctrlKey; // ⌘ on macOS, Ctrl elsewhere
+    // Letter chords match on e.code (physical key) so macOS Option-key character
+    // composition (⌥T → "†") doesn't defeat them.
+    // Esc — cancel a running query (or close the shortcuts popover).
+    if (e.key === 'Escape') {
+      if (tab.running) {
+        e.preventDefault();
+        database.abortQuery();
+      } else if (shortcutsOpen) {
+        shortcutsOpen = false;
+      }
+      return;
+    }
+    // ⇧⌘↵ — run the whole buffer as a batch (⌘↵ alone = editor's run-current).
+    if (cmd && e.shiftKey && !e.altKey && e.key === 'Enter') {
+      e.preventDefault();
+      if (!tab.running && database.selectedConnId) runAll();
+      return;
+    }
+    // ⌘S — save the query.
+    if (cmd && !e.shiftKey && !e.altKey && e.code === 'KeyS') {
+      e.preventDefault();
+      if (canEdit && tab.statement.trim()) void openSave();
+      return;
+    }
+    // ⇧⌘F — format (⌘F alone stays the app-global find).
+    if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyF') {
+      e.preventDefault();
+      if (database.queryLanguage !== 'redis' && tab.statement.trim() && !tab.running) {
+        database.formatStatement();
+        editorSel = { text: '', cursor: 0 };
+      }
+      return;
+    }
+    // ⌥⌘T new query tab / ⌥⌘W close query tab (⌘T/⌘W stay session actions).
+    if (e.metaKey && e.altKey && e.code === 'KeyT') {
+      e.preventDefault();
+      database.newTab();
+      return;
+    }
+    if (e.metaKey && e.altKey && e.code === 'KeyW') {
+      e.preventDefault();
+      if (database.tabs.length > 1) database.closeTab(database.activeTab);
+      return;
+    }
+    // ⌥⌘→ / ⌥⌘← — switch query tabs (⌃Tab is the app-global session cycler).
+    if (e.metaKey && e.altKey && e.key === 'ArrowRight') {
+      e.preventDefault();
+      switchRelative(1);
+      return;
+    }
+    if (e.metaKey && e.altKey && e.key === 'ArrowLeft') {
+      e.preventDefault();
+      switchRelative(-1);
+    }
+  }
+
+  $effect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const ae = document.activeElement;
+      // Only when the DB query view owns focus (or nothing else does) — never
+      // steal keys destined for another pane's inputs.
+      if (rootEl && ae && ae !== document.body && !rootEl.contains(ae)) return;
+      handleShortcut(e);
+      // When we handled it, stop the event so shell-level bindings (e.g. Ctrl+Tab)
+      // don't ALSO fire. Capture phase + stopPropagation makes the DB view win
+      // while it's focused.
+      if (e.defaultPrevented) e.stopPropagation();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  });
+
+  // ── Shortcuts popover (⌨) ─────────────────────────────────────────────────────
+  let shortcutsOpen = $state(false);
+  let kbdWrapEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    if (!shortcutsOpen) return;
+    const onDown = (e: PointerEvent): void => {
+      if (kbdWrapEl && !kbdWrapEl.contains(e.target as Node)) shortcutsOpen = false;
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    return () => window.removeEventListener('pointerdown', onDown, true);
+  });
 </script>
 
-<div class="query-editor">
+<div class="query-editor" bind:this={rootEl}>
   <div class="qe-tabs" role="tablist" aria-label="Query tabs">
     {#each database.tabs as t, i (t.id)}
       <div
@@ -374,20 +518,39 @@
         Run
         <span class="kbd">⌘↵</span>
       </button>
+      {#if stmtCount > 1}
+        <button
+          class="btn small"
+          onclick={runAll}
+          disabled={!database.selectedConnId}
+          title="Run all {stmtCount} statements as one batch — one result set per statement (⇧⌘↵)"
+        >
+          <Icon name="play" size={12} />
+          Run all
+        </button>
+      {/if}
     {/if}
     {#if canEdit}
-      <button class="btn small" onclick={openSave} disabled={!tab.statement.trim()}>
-        <Icon name="check" size={11} />Save
+      <button
+        class="btn small"
+        onclick={openSave}
+        disabled={!tab.statement.trim()}
+        title={savedLinked ? 'Update the saved query (or Save as new)' : 'Save this query'}
+      >
+        <Icon name="check" size={11} />{savedLinked ? 'Update' : 'Save'}
       </button>
     {/if}
-    <button
-      class="btn small ghost"
-      onclick={() => void database.runExplain()}
-      disabled={!tab.statement.trim() || tab.running}
-      title="Run the real query plan (EXPLAIN / Mongo explain)"
-    >
-      <Icon name="zap" size={11} />Explain
-    </button>
+    {#if database.capabilities?.explain !== false}
+      <button
+        class="btn small ghost"
+        class:on={database.planOpen}
+        onclick={() => void database.explainPlan()}
+        disabled={!tab.statement.trim() || tab.running}
+        title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
+      >
+        <Icon name="zap" size={11} />Explain
+      </button>
+    {/if}
     <button
       class="btn small ghost"
       class:on={database.assistOpen && database.assistMode === 'ask'}
@@ -419,6 +582,27 @@
         <Icon name="command" size={11} />Format
       </button>
     {/if}
+    <div class="qe-kbd" bind:this={kbdWrapEl}>
+      <button
+        class="btn small ghost"
+        class:on={shortcutsOpen}
+        onclick={() => (shortcutsOpen = !shortcutsOpen)}
+        title="Keyboard shortcuts"
+        aria-label="Keyboard shortcuts"
+        aria-expanded={shortcutsOpen}
+      >⌨</button>
+      {#if shortcutsOpen}
+        <div class="qe-kbd-pop" role="menu">
+          <div class="qe-kbd-title">Keyboard shortcuts</div>
+          {#each SHORTCUTS as s (s.label)}
+            <div class="qe-kbd-row">
+              <span class="qe-kbd-label">{s.label}</span>
+              <kbd class="qe-kbd-keys">{s.keys}</kbd>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
     <span class="grow"></span>
     {#if database.capabilities?.sql && database.databaseNames.length > 0}
       <label class="qe-db" title="Active database — queries run scoped to it, so you don't need a db. prefix">
@@ -545,7 +729,7 @@
       <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input grow"
-        placeholder="Query name"
+        placeholder={savedLinked ? 'Name (blank = keep current)' : 'Query name'}
         bind:value={saveName}
         autofocus
         onkeydown={(e) => {
@@ -553,7 +737,14 @@
           else if (e.key === 'Escape') saving = false;
         }}
       />
-      <button class="btn small primary" onclick={confirmSave} disabled={!saveName.trim()}>Save</button>
+      <button class="btn small primary" onclick={confirmSave} disabled={!savedLinked && !saveName.trim()}>
+        {savedLinked ? 'Update' : 'Save'}
+      </button>
+      {#if savedLinked}
+        <button class="btn small" onclick={confirmSaveAsNew} disabled={!saveName.trim()} title="Create a new saved query instead of updating">
+          Save as new
+        </button>
+      {/if}
       <button class="btn small" onclick={() => (saving = false)}>Cancel</button>
     </div>
   {/if}
@@ -601,11 +792,18 @@
     </button>
   {/if}
   <div class="qe-results" class:qe-collapsed={viewport.isPhone && !resultsOpen}>
+    {#if database.planOpen && database.queryPlan}
+      <div class="qe-plan">
+        <PlanView plan={database.queryPlan} onclose={() => database.closePlan()} />
+      </div>
+    {/if}
     <ResultsGrid
       result={tab.result}
       error={tab.error}
       statement={tab.statement}
       connectionId={database.selectedConnId}
+      running={tab.running}
+      offset={tab.offset}
     />
   </div>
 </div>
@@ -616,6 +814,9 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    /* Shrink with the (narrow tablet) main pane rather than forcing intrinsic
+       width, so the wrapping toolbar/tab strips stay inside the viewport. */
+    min-width: 0;
   }
   .qe-tabs {
     display: flex;
@@ -800,6 +1001,53 @@
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
+  /* ⌨ shortcuts popover */
+  .qe-kbd {
+    position: relative;
+    display: inline-flex;
+  }
+  .qe-kbd-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    inset-inline-start: 0;
+    z-index: 30;
+    min-width: 220px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .qe-kbd-title {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    padding: 2px 4px 4px;
+  }
+  .qe-kbd-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 2px 4px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .qe-kbd-keys {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 1px 6px;
+    white-space: nowrap;
+  }
   .btn.stop {
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
@@ -926,6 +1174,14 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  /* Query-plan panel sits above the grid, bounded so the results stay visible. */
+  .qe-plan {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 45%;
+    display: flex;
+    margin-bottom: 8px;
   }
   .grow {
     flex: 1;

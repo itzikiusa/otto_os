@@ -18,6 +18,7 @@ import type {
   DbCompletionItem,
   DbDashboard,
   DbHistoryEntry,
+  DbQueryPlan,
   DbSavedQuery,
   DbSchemaGraph,
   DbTestResult,
@@ -44,8 +45,8 @@ import {
 } from '../../modules/database/sql-util';
 import { bsonScalar } from '../../modules/database/bson';
 
-/** Connection kinds the explorer can browse (the four DB engines). */
-export const DB_KINDS = ['mysql', 'redis', 'mongodb', 'clickhouse'] as const;
+/** Connection kinds the explorer can browse (the DB engines). */
+export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
 export type DbKind = (typeof DB_KINDS)[number];
 
 function isDbKind(k: string): k is DbKind {
@@ -320,6 +321,19 @@ export interface QueryTab {
    * global); persisted so values survive reloads.
    */
   vars: Record<string, VarSpec>;
+  /**
+   * The saved-query id this tab was opened from, if any. When set, "Save" on the
+   * tab updates that saved query in place (PATCH); "Save as new" always creates a
+   * fresh one. Cleared when the tab's origin no longer applies.
+   */
+  savedQueryId?: Id;
+  /**
+   * Zero-based row offset for the footer pager. Only meaningful when the last
+   * result was auto-limited (a single paginatable SELECT / Mongo find). Reset to
+   * 0 whenever the statement changes; advanced by `runPage`. Transient (not
+   * persisted).
+   */
+  offset: number;
 }
 
 /** Normalize a persisted vars blob — legacy `Record<string,string>` (bare value)
@@ -355,6 +369,7 @@ function blankTab(statement = ''): QueryTab {
     timeout_ms: null,
     mask: false,
     vars: {},
+    offset: 0,
   };
 }
 
@@ -400,6 +415,11 @@ export interface ConnStatus {
   phase: ConnPhase;
   /** Failure reason (set only when phase === 'error'). */
   error?: string;
+  /** Server version string (from the `db/test` probe), shown in the health chip. */
+  serverVersion?: string;
+  /** Connect/probe latency in ms (schema-load timing or the `db/test` ping),
+   *  shown in the health chip tooltip. */
+  latencyMs?: number;
 }
 
 class DatabaseStore {
@@ -409,6 +429,16 @@ class DatabaseStore {
   selectedConnId: Id | null = $state(null);
   /** Connections currently open as top-level tabs, in display order. */
   openConnIds: Id[] = $state([]);
+  /**
+   * The workspace whose connections currently populate `connections`. Used to
+   * distinguish a genuine workspace SWITCH (drop open tabs) from a same-workspace
+   * connection-list refresh (keep them) — see `loadConnections`. Also gates
+   * `restoreWorkbench` to run once per workspace.
+   */
+  private loadedWorkspaceId: Id | null = null;
+  /** True while `restoreWorkbench` is re-opening persisted tabs, so the
+   *  per-open-change persistence calls don't thrash localStorage mid-restore. */
+  private restoring = false;
   /**
    * Per-connection liveness, keyed by connection id. Persisted across tab
    * switches (parallel to `openConnIds`); deliberately NOT part of a
@@ -517,6 +547,11 @@ class DatabaseStore {
   // ── Saved queries / history ─────────────────────────────────────────────
   savedQueries: DbSavedQuery[] = $state([]);
   history: DbHistoryEntry[] = $state([]);
+  /** How many history rows the current window requested. Bumped by "Load more"
+   *  (100 → up to the API's 1000 cap). Reset to 100 on a fresh connection load. */
+  historyLimit = $state(100);
+  /** True while a "Load more" fetch is in flight (disables the button). */
+  historyLoadingMore = $state(false);
 
   // ── Dashboards / widgets ──────────────────────────────────────────────────
   dashboards: DbDashboard[] = $state([]);
@@ -526,6 +561,12 @@ class DatabaseStore {
   selectedDashboard: DbDashboard | null = $derived(
     this.dashboards.find((d) => d.id === this.selectedDashboardId) ?? null,
   );
+
+  // ── Query plan (Explain) ──────────────────────────────────────────────────
+  // A normalized query plan from the engine's native EXPLAIN, shown in a
+  // collapsible tree panel beside the results. Null when the panel is closed.
+  queryPlan: DbQueryPlan | null = $state(null);
+  planOpen = $state(false);
 
   // ── DB Assistant (embedded, file-backed agent panel) ─────────────────────
   // The DB Assistant runs an agent as a managed Otto session beside the query
@@ -744,7 +785,10 @@ class DatabaseStore {
   }
   setStatement(value: string): void {
     const t = this.tab;
-    if (t) t.statement = value;
+    if (t) {
+      t.statement = value;
+      t.offset = 0; // editing the statement resets the pager to the first page
+    }
     this.persistTabs();
   }
 
@@ -773,7 +817,9 @@ class DatabaseStore {
         this.setStatement(formatMongo(t.statement));
         return;
       }
-      const dialect: 'mysql' | 'sql' = this.selectedConn?.kind === 'mysql' ? 'mysql' : 'sql';
+      const kind = this.selectedConn?.kind;
+      const dialect: 'mysql' | 'postgresql' | 'sql' =
+        kind === 'mysql' ? 'mysql' : kind === 'postgres' ? 'postgresql' : 'sql';
       const unwrapped = stripJavaStringConcat(t.statement);
       const { masked, tokens } = maskQueryPlaceholders(unwrapped);
       const formatted = formatSql(masked, { language: dialect, keywordCase: 'upper' });
@@ -797,7 +843,12 @@ class DatabaseStore {
       localStorage.setItem(
         key,
         JSON.stringify({
-          tabs: this.tabs.map((t) => ({ name: t.name, statement: t.statement, vars: t.vars })),
+          tabs: this.tabs.map((t) => ({
+            name: t.name,
+            statement: t.statement,
+            vars: t.vars,
+            savedQueryId: t.savedQueryId,
+          })),
           activeTab: this.activeTab,
           activeDb: this.activeDb,
         }),
@@ -816,7 +867,7 @@ class DatabaseStore {
     if (!raw) return null;
     try {
       const p = JSON.parse(raw) as {
-        tabs?: { name?: string; statement?: string; vars?: unknown }[];
+        tabs?: { name?: string; statement?: string; vars?: unknown; savedQueryId?: string }[];
         activeTab?: number;
         activeDb?: string | null;
       };
@@ -824,6 +875,7 @@ class DatabaseStore {
         ...blankTab(t.statement ?? ''),
         name: t.name || 'Query',
         vars: normalizeVars(t.vars),
+        savedQueryId: t.savedQueryId,
       }));
       if (!tabs.length) return null;
       const activeTab = Math.min(Math.max(0, p.activeTab ?? 0), tabs.length - 1);
@@ -866,6 +918,119 @@ class DatabaseStore {
     this.persistTabs();
   }
 
+  // ── Workbench persistence (which connections are open + their view) ────────
+  // Survives a reload: which connection tabs were open, which was focused, and
+  // each connection's main/side view. Keyed by workspace so switching workspaces
+  // restores that workspace's own workbench. Query-tab TEXT is persisted
+  // separately (persistTabs); RESULTS are intentionally not persisted.
+  private openKey(): string | null {
+    return ws.currentId ? `otto_db_open:${ws.currentId}` : null;
+  }
+  private viewKey(connId: Id): string | null {
+    return ws.currentId ? `otto_db_view:${ws.currentId}:${connId}` : null;
+  }
+
+  /** Persist the open-connection set + selection. No-op during a restore. */
+  private persistWorkbench(): void {
+    if (typeof localStorage === 'undefined' || this.restoring) return;
+    const key = this.openKey();
+    if (!key) return;
+    try {
+      localStorage.setItem(
+        key,
+        JSON.stringify({ open: this.openConnIds, selected: this.selectedConnId }),
+      );
+    } catch {
+      /* storage full / unavailable — non-fatal */
+    }
+  }
+
+  /** Persist the active connection's main/side view (which pane it's showing). */
+  private persistView(): void {
+    if (typeof localStorage === 'undefined' || this.restoring || !this.selectedConnId) return;
+    const key = this.viewKey(this.selectedConnId);
+    if (!key) return;
+    try {
+      // 'connections' is the global picker, never a per-connection view — store
+      // 'schema' instead so a restore lands on the connection's own schema.
+      const side = this.sideTab === 'connections' ? 'schema' : this.sideTab;
+      localStorage.setItem(key, JSON.stringify({ main: this.mainTab, side }));
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  /** Read a connection's persisted main/side view, validated to the known tab
+   *  ids. Returns null when absent/invalid so the caller falls back to defaults. */
+  private restoreView(connId: Id): { main: DbMainTab; side: DbSideTab } | null {
+    if (typeof localStorage === 'undefined') return null;
+    const key = this.viewKey(connId);
+    if (!key) return null;
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    try {
+      const p = JSON.parse(raw) as { main?: string; side?: string };
+      const mains: DbMainTab[] = ['query', 'builder', 'structure', 'diagram', 'dashboards'];
+      const sides: DbSideTab[] = ['schema', 'saved', 'history'];
+      const main = mains.includes(p.main as DbMainTab) ? (p.main as DbMainTab) : 'query';
+      const side = sides.includes(p.side as DbSideTab) ? (p.side as DbSideTab) : 'schema';
+      return { main, side };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Re-open the workspace's persisted workbench (open connections + focused tab).
+   * MUST run only AFTER `loadConnections` resolves — `loadConnections` clears the
+   * open set on a workspace switch, so restoring earlier would be wiped. No-op
+   * when tabs are already open (a same-workspace refresh mustn't re-open closed
+   * tabs) or when nothing was persisted. Each connection's main/side view is
+   * restored by `loadConnectionFresh` from its own `otto_db_view:` entry.
+   */
+  async restoreWorkbench(): Promise<void> {
+    if (typeof localStorage === 'undefined') return;
+    const key = this.openKey();
+    if (!key || this.openConnIds.length > 0) return;
+    const raw = localStorage.getItem(key);
+    if (!raw) return;
+    let parsed: { open?: string[]; selected?: string | null };
+    try {
+      parsed = JSON.parse(raw) as { open?: string[]; selected?: string | null };
+    } catch {
+      return;
+    }
+    // Only re-open connections that still exist in this workspace.
+    const open = (parsed.open ?? []).filter((id) => this.connections.some((c) => c.id === id));
+    if (open.length === 0) return;
+
+    this.restoring = true;
+    try {
+      for (const id of open) {
+        await this.openConnection(id);
+      }
+      // Focus the persisted selection when still open, else the first.
+      const selected =
+        parsed.selected && open.includes(parsed.selected) ? parsed.selected : open[0];
+      if (selected) await this.openConnection(selected);
+    } finally {
+      this.restoring = false;
+    }
+    // Persist once, now that the full set is open (converges the storage).
+    this.persistWorkbench();
+  }
+
+  /** Switch the main pane view for the active connection (persisted per conn). */
+  setMainTab(t: DbMainTab): void {
+    this.mainTab = t;
+    this.persistView();
+  }
+  /** Switch the sidebar view for the active connection (persisted per conn). */
+  setSideTab(t: DbSideTab): void {
+    this.sideTab = t;
+    this.persistView();
+  }
+
   // ── Loading ───────────────────────────────────────────────────────────────
 
   /** Load DB-kind connections for the current workspace. */
@@ -875,24 +1040,31 @@ class DatabaseStore {
     try {
       const all = await api.get<Connection[]>(`/workspaces/${wid}/connections`);
       const next = all.filter((c) => isDbKind(c.kind));
-      // If the workspace's connection set changed identity (different ids),
-      // treat it as a workspace switch: drop open tabs + snapshots so we don't
-      // carry stale connections from a previous workspace into this one.
-      const sameSet =
-        next.length === this.connections.length &&
-        next.every((c) => this.connections.some((p) => p.id === c.id));
+      // Distinguish a genuine WORKSPACE SWITCH from a same-workspace refresh
+      // (e.g. after adding/deleting a connection). Keying on the workspace id —
+      // not the connection-id set — is what lets a restored/open set survive a
+      // list refresh (adding one connection no longer wipes every open tab), and
+      // still wipe cleanly when the user actually switches workspaces. On the
+      // very first load `loadedWorkspaceId` is null, so we take the same
+      // non-destructive path and `restoreWorkbench` re-opens the persisted tabs.
+      const workspaceChanged = this.loadedWorkspaceId !== null && this.loadedWorkspaceId !== wid;
       this.connections = next;
-      if (!sameSet) {
+      this.loadedWorkspaceId = wid;
+      if (workspaceChanged) {
         this.openConnIds = [];
         this.snapshots.clear();
         this.selectedConnId = null;
         this.capabilities = null;
         this.schemaRoot = [];
       } else {
-        // Prune any open tab/snapshot whose connection no longer exists.
+        // Same workspace (or first load): prune any open tab/snapshot/selection
+        // whose connection no longer exists, but keep everything still valid.
         this.openConnIds = this.openConnIds.filter((id) => next.some((c) => c.id === id));
         for (const id of [...this.snapshots.keys()]) {
           if (!next.some((c) => c.id === id)) this.snapshots.delete(id);
+        }
+        if (this.selectedConnId && !next.some((c) => c.id === this.selectedConnId)) {
+          this.selectedConnId = null;
         }
       }
       // Start fresh — do NOT auto-open a connection; the user picks one from the
@@ -979,6 +1151,9 @@ class DatabaseStore {
       this.openConnIds = [...this.openConnIds, id];
     }
     this.selectedConnId = id;
+    // Persist the open set + selection now (both the snapshot-restore and
+    // fresh-load paths below have already updated them).
+    this.persistWorkbench();
     if (this.restoreSnapshot(id)) return;
     await this.loadConnectionFresh(id);
     // Capture an initial snapshot so subsequent switches restore this state.
@@ -1004,7 +1179,15 @@ class DatabaseStore {
     const cs = new Map(this.connStatus);
     cs.delete(id);
     this.connStatus = cs;
-    if (!wasActive) return;
+    // Drop this connection's persisted per-view entry (it's no longer open).
+    if (typeof localStorage !== 'undefined') {
+      const vk = this.viewKey(id);
+      if (vk) localStorage.removeItem(vk);
+    }
+    if (!wasActive) {
+      this.persistWorkbench();
+      return;
+    }
 
     if (this.openConnIds.length === 0) {
       // Nothing left open — clear the active working set.
@@ -1026,6 +1209,7 @@ class DatabaseStore {
       this.mainTab = 'query';
       // Back to the picker — there's no active connection to show a schema for.
       this.sideTab = 'connections';
+      this.persistWorkbench();
       return;
     }
     // Focus the previous tab (or the first if we closed index 0). The active id
@@ -1062,9 +1246,18 @@ class DatabaseStore {
     // Restore the active database too, so the first query after reopening a
     // connection is still scoped (otherwise Mongo/SQL error on an unscoped run).
     this.activeDb = restored?.activeDb ?? null;
-    this.mainTab = 'query';
-    this.sideTab = 'schema';
+    // Restore this connection's persisted main/side view (which pane it showed);
+    // fall back to the query editor + schema tree. loadCapabilities re-validates
+    // 'builder' against the engine below.
+    const view = this.restoreView(id);
+    this.mainTab = view?.main ?? 'query';
+    this.sideTab = view?.side ?? 'schema';
+    // Fresh window of history for this connection.
+    this.historyLimit = 100;
     await Promise.all([this.loadCapabilities(id), this.loadSchemaRoot(id), this.loadHistory(id)]);
+    // Best-effort health probe for the tab-strip chip (server version + latency).
+    // Fire-and-forget so it never blocks the first render; only when connected.
+    if (this.connStatus.get(id)?.phase === 'ready') void this.probeHealth(id);
   }
 
   private async loadCapabilities(id: Id): Promise<void> {
@@ -1082,9 +1275,19 @@ class DatabaseStore {
     this.connStatus = new Map(this.connStatus).set(id, status);
   }
 
+  /** Merge a patch into a connection's liveness, preserving fields not set (so a
+   *  refresh keeps the health chip's server version while it re-probes latency). */
+  private mergeConnStatus(id: Id, patch: Partial<ConnStatus>): void {
+    const prev = this.connStatus.get(id) ?? { phase: 'connecting' as ConnPhase };
+    this.connStatus = new Map(this.connStatus).set(id, { ...prev, ...patch });
+  }
+
   private async loadSchemaRoot(id: Id): Promise<void> {
     this.schemaLoading = true;
-    this.setConnStatus(id, { phase: 'connecting' });
+    // Preserve any prior serverVersion/latency across a refresh's connecting dip.
+    this.mergeConnStatus(id, { phase: 'connecting', error: undefined });
+    const started =
+      typeof performance !== 'undefined' ? performance.now() : Date.now();
     try {
       this.schemaRoot = await api.get<SchemaNode[]>(`${this.connBase(id)}/schema`);
       // Redis: default the active keyspace to the first DB (db0) so commands have
@@ -1094,12 +1297,42 @@ class DatabaseStore {
         const ks = this.schemaRoot.find((n) => n.kind === 'keyspace');
         if (ks) this.activeDb = ks.id;
       }
-      this.setConnStatus(id, { phase: 'ready' });
+      // Ready — record the schema round-trip as an immediate latency figure for
+      // the health chip (the db/test probe refines it + adds the server version).
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      this.mergeConnStatus(id, {
+        phase: 'ready',
+        error: undefined,
+        latencyMs: Math.round(now - started),
+      });
     } catch (e) {
+      // A hard failure drops any stale health data (replace, not merge).
       this.setConnStatus(id, { phase: 'error', error: errMsg(e) });
       toasts.error('Could not load schema', errMsg(e));
     } finally {
       this.schemaLoading = false;
+    }
+  }
+
+  /**
+   * Best-effort health probe for the tab-strip chip: pings `db/test` for the
+   * server version + latency and merges them into the connection's liveness
+   * WITHOUT touching `phase` (that's owned by the schema load). Silent on
+   * failure — the chip just shows what it has (the phase already reflects errors).
+   */
+  private async probeHealth(id: Id): Promise<void> {
+    try {
+      const started =
+        typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const res = await api.post<DbTestResult>(`${this.connBase(id)}/test`, {});
+      if (!res.ok) return;
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      this.mergeConnStatus(id, {
+        serverVersion: res.server_version ?? undefined,
+        latencyMs: res.latency_ms ?? Math.round(now - started),
+      });
+    } catch {
+      /* health chip is best-effort */
     }
   }
 
@@ -1236,7 +1469,7 @@ class DatabaseStore {
     this.selectedObjectPath = node.id;
     this.objectLoading = true;
     this.objectDetail = null;
-    this.mainTab = 'structure';
+    this.setMainTab('structure');
     try {
       this.objectDetail = await api.post<ObjectDetail>(`${this.connBase(id)}/object`, {
         path: node.id,
@@ -1378,7 +1611,7 @@ class DatabaseStore {
   async runQuery(
     statement?: string,
     node?: string,
-    opts?: { transient?: boolean },
+    opts?: { transient?: boolean; keepOffset?: boolean },
   ): Promise<QueryResult | null> {
     const id = this.selectedConnId;
     const t = this.tab;
@@ -1394,6 +1627,8 @@ class DatabaseStore {
     // A transient run (the selected / current statement, variable-substituted)
     // must NOT clobber the editor's full multi-statement buffer.
     if (statement !== undefined && !opts?.transient) t.statement = statement;
+    // A fresh run starts at the first page; only the pager (runPage) keeps offset.
+    if (!opts?.keepOffset) t.offset = 0;
     // Cancel any prior in-flight run for this tab before starting a new one
     // (server-side too, so a previous heavy query stops on the DB).
     this.abortQuery(t.id);
@@ -1427,6 +1662,8 @@ class DatabaseStore {
             // Per-run id so the cancel endpoint can issue engine-native
             // cancellation (KILL QUERY / etc.) for this in-flight query.
             query_id: queryId,
+            // Footer pager: server appends OFFSET (Mongo: skip) when auto-limiting.
+            ...(t.offset > 0 ? { offset: t.offset } : {}),
             // Driver-enforced timeout (engine-native, e.g. MySQL MAX_EXECUTION_TIME).
             ...(tabTimeoutMs && tabTimeoutMs > 0 ? { timeout_ms: tabTimeoutMs } : {}),
             // Server-side PII/prod masking: redacts cell values before they leave
@@ -1474,6 +1711,22 @@ class DatabaseStore {
         t.running = false;
       }
     }
+  }
+
+  /**
+   * Page the active tab's auto-limited result by `delta` pages (±1). The page
+   * size is the server's applied LIMIT (`auto_limited`); re-runs the same
+   * statement with the new row offset (server appends OFFSET / Mongo skip).
+   * No-op when the current result wasn't auto-paginated.
+   */
+  runPage(delta: number): void {
+    const t = this.tab;
+    const pageSize = t?.result?.auto_limited ?? 0;
+    if (!t || pageSize <= 0) return;
+    const next = Math.max(0, t.offset + delta * pageSize);
+    if (next === t.offset) return;
+    t.offset = next;
+    void this.runQuery(undefined, undefined, { keepOffset: true });
   }
 
   /**
@@ -1563,6 +1816,45 @@ class DatabaseStore {
     } finally {
       t.running = false;
     }
+  }
+
+  /**
+   * Fetch a NORMALIZED query plan (`POST …/db/query-plan`) for the active
+   * statement and open the plan panel. Falls back to the raw `EXPLAIN` → grid
+   * path (`runExplain`) if the endpoint fails or can't normalize the plan, so
+   * Explain always shows something. The statement is EXPLAIN-wrapped server-side
+   * (never executed raw), so this is read-only even on a guarded connection.
+   */
+  async explainPlan(): Promise<void> {
+    const id = this.selectedConnId;
+    const stmt = this.tab.statement.trim();
+    if (!id) {
+      toasts.error('No connection selected');
+      return;
+    }
+    if (!stmt) {
+      toasts.error('Statement is empty');
+      return;
+    }
+    try {
+      const plan = await api.post<DbQueryPlan>(`${this.connBase(id)}/query-plan`, {
+        statement: stmt,
+        node: this.activeDb || null,
+      });
+      this.queryPlan = plan;
+      this.planOpen = true;
+    } catch {
+      // Engine can't produce a normalized plan (or the endpoint failed) — fall
+      // back to the always-available raw EXPLAIN → grid path.
+      this.closePlan();
+      await this.runExplain();
+    }
+  }
+
+  /** Close the query-plan panel and drop the plan. */
+  closePlan(): void {
+    this.planOpen = false;
+    this.queryPlan = null;
   }
 
   /**
@@ -1893,6 +2185,8 @@ class DatabaseStore {
     }
   }
 
+  /** Create a NEW saved query, associating the active tab with it so a later
+   *  "Save" updates it in place. Used by "Save as new" and first-time saves. */
   async saveQuery(name: string, statement: string): Promise<DbSavedQuery | null> {
     const base = this.wsBase();
     if (!base) return null;
@@ -1903,6 +2197,12 @@ class DatabaseStore {
         statement,
       });
       this.savedQueries = [saved, ...this.savedQueries.filter((q) => q.id !== saved.id)];
+      const t = this.tab;
+      if (t) {
+        t.savedQueryId = saved.id;
+        t.name = saved.name;
+        this.persistTabs();
+      }
       toasts.success('Query saved', saved.name);
       return saved;
     } catch (e) {
@@ -1911,19 +2211,89 @@ class DatabaseStore {
     }
   }
 
+  /** Update a saved query in place (name and/or statement) via PATCH. Callers
+   *  own the success toast; this only surfaces errors. */
+  async updateSavedQuery(
+    id: Id,
+    patch: { name?: string; statement?: string },
+  ): Promise<DbSavedQuery | null> {
+    try {
+      const updated = await api.patch<DbSavedQuery>(`/db/saved-queries/${id}`, patch);
+      this.savedQueries = this.savedQueries.map((q) => (q.id === updated.id ? updated : q));
+      return updated;
+    } catch (e) {
+      toasts.error('Update query failed', errMsg(e));
+      return null;
+    }
+  }
+
+  /** Inline rename of a saved query (Saved list), keeping any open tab's title
+   *  in sync. */
+  async renameSavedQuery(id: Id, name: string): Promise<void> {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const updated = await this.updateSavedQuery(id, { name: trimmed });
+    if (!updated) return;
+    for (const t of this.tabs) if (t.savedQueryId === id) t.name = updated.name;
+    this.persistTabs();
+    toasts.success('Renamed', updated.name);
+  }
+
+  /**
+   * Save the ACTIVE tab. When the tab already came from a saved query (and it
+   * still exists) this updates that one in place (PATCH); otherwise it creates a
+   * new saved query. `name` overrides the stored name when non-empty (the Save
+   * dialog supplies it for the create case).
+   */
+  async saveActiveTab(name: string): Promise<DbSavedQuery | null> {
+    const t = this.tab;
+    if (!t) return null;
+    const existing =
+      t.savedQueryId && this.savedQueries.some((q) => q.id === t.savedQueryId)
+        ? t.savedQueryId
+        : null;
+    if (existing) {
+      const updated = await this.updateSavedQuery(existing, {
+        name: name.trim() || undefined,
+        statement: t.statement,
+      });
+      if (updated) {
+        t.name = updated.name;
+        this.persistTabs();
+        toasts.success('Query updated', updated.name);
+      }
+      return updated;
+    }
+    return this.saveQuery(name.trim() || 'Query', t.statement);
+  }
+
   async deleteSavedQuery(id: Id): Promise<void> {
     try {
       await api.del(`/db/saved-queries/${id}`);
       this.savedQueries = this.savedQueries.filter((q) => q.id !== id);
+      // Detach any open tab that pointed at it (its "Save" reverts to create).
+      for (const t of this.tabs) if (t.savedQueryId === id) t.savedQueryId = undefined;
     } catch (e) {
       toasts.error('Delete query failed', errMsg(e));
     }
   }
 
-  /** Load a saved query into a fresh tab. */
+  /** Open a saved query. If a tab already carries it, focus that tab (don't
+   *  duplicate); otherwise open a fresh tab that remembers the saved-query id. */
   openSavedQuery(q: DbSavedQuery): void {
+    const idx = this.tabs.findIndex((t) => t.savedQueryId === q.id);
+    if (idx >= 0) {
+      this.switchTab(idx);
+      this.setMainTab('query');
+      return;
+    }
     this.newTab(q.statement);
-    this.tab.name = q.name;
+    const t = this.tab;
+    if (t) {
+      t.name = q.name;
+      t.savedQueryId = q.id;
+    }
+    this.persistTabs();
   }
 
   // ── History ─────────────────────────────────────────────────────────────
@@ -1932,10 +2302,29 @@ class DatabaseStore {
     const id = connId ?? this.selectedConnId;
     if (!id) return;
     try {
-      this.history = await api.get<DbHistoryEntry[]>(`${this.connBase(id)}/history?limit=100`);
+      this.history = await api.get<DbHistoryEntry[]>(
+        `${this.connBase(id)}/history?limit=${this.historyLimit}`,
+      );
     } catch (e) {
       toasts.error('Could not load history', errMsg(e));
     }
+  }
+
+  /** Fetch a larger history window (100 → up to the API's 1000 cap). */
+  async loadMoreHistory(): Promise<void> {
+    if (this.historyLoadingMore || this.historyLimit >= 1000) return;
+    this.historyLimit = Math.min(1000, this.historyLimit + 100);
+    this.historyLoadingMore = true;
+    try {
+      await this.loadHistory();
+    } finally {
+      this.historyLoadingMore = false;
+    }
+  }
+
+  /** Whether more history rows may exist (window is full and under the cap). */
+  get canLoadMoreHistory(): boolean {
+    return this.historyLimit < 1000 && this.history.length >= this.historyLimit;
   }
 
   /** Load a history entry's statement into a fresh tab. */

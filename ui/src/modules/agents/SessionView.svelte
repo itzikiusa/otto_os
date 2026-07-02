@@ -12,6 +12,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { now } from '../../lib/stores/now.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
+  import { router } from '../../lib/router.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
 
   // Default idle-suspend grace period (5 minutes) used for the "suspends in N"
@@ -249,6 +251,18 @@
     menuOpen = false;
     handoverOpen = true;
   }
+
+  /** Agent sessions open the Canvas panel beside the terminal; other session
+   *  kinds (connections) have no right panel, so navigate to the Canvas
+   *  module directly instead. */
+  function openCanvas(): void {
+    menuOpen = false;
+    if (isAgent) {
+      ui.openRight('canvas');
+    } else {
+      router.go('canvas');
+    }
+  }
 </script>
 
 <svelte:window onclick={() => (menuOpen = false)} />
@@ -293,6 +307,7 @@
           { label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…', icon: 'ticket', action: openAttachIssue },
           ...(attachedIssue ? [{ label: 'Detach issue', icon: 'link', action: detachIssue }] : []),
           { label: 'Attach product story…', icon: 'file', action: openAttachProductStory },
+          { label: 'Canvas…', icon: 'shapes', action: openCanvas },
           { separator: true },
           { label: 'Archive', icon: 'archive', action: archive },
           { label: 'Delete', icon: 'trash', danger: true as const, action: del },
@@ -371,6 +386,7 @@
               <button role="menuitem" onclick={detachIssue}>Detach issue</button>
             {/if}
             <button role="menuitem" onclick={openAttachProductStory}>Attach product story…</button>
+            <button role="menuitem" onclick={openCanvas}>Canvas…</button>
             {#if isAgent}
               <button role="menuitem" onclick={toggleKeepAlive} title={keepAlive ? 'Disable keep-alive so the session may auto-suspend when idle' : 'Prevent this session from auto-suspending when idle'}>
                 {keepAlive ? 'Unpin (allow auto-suspend)' : 'Pin (keep alive)'}

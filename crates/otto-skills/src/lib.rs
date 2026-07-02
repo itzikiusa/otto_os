@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn bundled_development_commit_pr_skills_present() {
         let all = list_bundled();
-        for name in ["commit-message", "pull-request"] {
+        for name in ["commit-message", "pull-request", "d2-diagram"] {
             let s = all
                 .iter()
                 .find(|s| s.name == name)
@@ -229,6 +229,11 @@ mod tests {
             assert_eq!(s.category, "development", "{name} wrong category");
             assert!(!s.description.is_empty(), "{name} missing description");
         }
+        // d2-diagram must trigger on generic "work on a diagram" asks and defer
+        // Canvas-scene work to otto-canvas (the two skills split that boundary).
+        let d2 = all.iter().find(|s| s.name == "d2-diagram").unwrap();
+        assert!(d2.description.contains("diagram"), "d2-diagram trigger wording");
+        assert!(d2.description.contains("otto-canvas"), "d2-diagram canvas deferral");
     }
 
     #[test]

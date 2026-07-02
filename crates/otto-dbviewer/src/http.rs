@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
@@ -118,6 +118,16 @@ struct NewSavedQueryReq {
     statement: String,
 }
 
+/// Partial update for a saved query: rename, re-statement, or both. Absent fields
+/// are left unchanged (COALESCE in the repo).
+#[derive(Debug, Deserialize)]
+struct UpdateSavedQueryReq {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    statement: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateDashboardReq {
     name: String,
@@ -179,6 +189,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/object", post(object_detail::<S>))
         .route("/connections/{id}/db/schema-graph", post(schema_graph::<S>))
         .route("/connections/{id}/db/query", post(run_query::<S>))
+        .route("/connections/{id}/db/query-plan", post(query_plan::<S>))
         .route("/connections/{id}/db/mcp-query", post(mcp_query::<S>))
         .route("/connections/{id}/db/export", post(export_query::<S>))
         .route(
@@ -199,7 +210,10 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
             "/workspaces/{wid}/db/saved-queries",
             get(list_saved::<S>).post(create_saved::<S>),
         )
-        .route("/db/saved-queries/{qid}", delete(delete_saved::<S>))
+        .route(
+            "/db/saved-queries/{qid}",
+            patch(update_saved::<S>).delete(delete_saved::<S>),
+        )
         // Dashboards.
         .route(
             "/workspaces/{wid}/db/dashboards",
@@ -363,6 +377,33 @@ async fn run_query<S: DbViewerCtx>(
     Ok(Json(result).into_response())
 }
 
+/// Request body for the structured query-plan endpoint.
+#[derive(Debug, Deserialize)]
+struct QueryPlanReq {
+    statement: String,
+    /// Active database/schema to scope the plan (same as a query's `node`).
+    #[serde(default)]
+    node: Option<String>,
+}
+
+/// Return a normalized `DbQueryPlan` for a statement by running the engine's
+/// native EXPLAIN. The statement is EXPLAIN-wrapped and
+/// **never executed raw** — read-only by construction — so this is gated at
+/// `Viewer` (like schema browse), not `Editor`. Redis has no plan surface and
+/// returns `400` (the driver default).
+async fn query_plan<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<QueryPlanReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
+    let node = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let plan = ctx.db().query_plan(&id, &req.statement, node).await?;
+    Ok(Json(plan).into_response())
+}
+
 /// A read-only DB query issued by an agent over MCP. The body is intentionally a
 /// narrow subset of [`QueryRequest`] — no `confirm_write`, no `explain`, no raw
 /// `params` — so an agent can only ever ask for read data.
@@ -438,10 +479,15 @@ enum ExportFormat {
     Json,
 }
 
-/// Export a query result as CSV or NDJSON without the row cap applied to the
-/// interactive query endpoint. Returns a file attachment so the browser downloads
-/// it directly. Gated at `Editor` — same as `run_query` — because this executes
-/// a statement against the live database.
+/// Export a query result as a CSV or JSON browser file download, **streaming**
+/// (never buffering the full result) and **uncapped** — the interactive query
+/// endpoint's row cap does not apply. Bytes are produced by the driver's
+/// streaming `export_to_writer` and piped straight to the response body through
+/// an unbounded channel, so an arbitrarily large export downloads with bounded
+/// daemon memory. This is the fix for spec §2.1: the old path ran the *capped*
+/// interactive query (`run`) and silently truncated at the driver default (1000
+/// rows for MySQL/CH, 50 for Mongo). A guarded write is rejected up front with a
+/// clean error. Gated at `Editor` — same as `run_query`.
 async fn export_query<S: DbViewerCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -451,83 +497,96 @@ async fn export_query<S: DbViewerCtx>(
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
 
-    // Run without a row cap — the user opted in to a full export.
-    let query_req = QueryRequest {
-        statement: req.statement,
-        max_rows: None,
-        node: req.node,
-        ..QueryRequest::default()
+    let node = req
+        .node
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    // Pre-flight the write-guard so a guarded write returns a clean error here,
+    // before we commit to a 200 streaming body.
+    ctx.db()
+        .guard_export(&id, &req.statement, node.as_deref())
+        .await?;
+
+    // Map the browser export format (csv/json — the wire contract is unchanged)
+    // onto the streaming writer's richer format set. CSV keeps its header row (the
+    // old path emitted one) → CsvWithNames; JSON stays a single array of objects.
+    let (export_format, content_type, disposition) = match req.format {
+        ExportFormat::Csv => (
+            PathFormat::CsvWithNames,
+            "text/csv; charset=utf-8",
+            "attachment; filename=\"export.csv\"",
+        ),
+        ExportFormat::Json => (
+            PathFormat::Json,
+            "application/json; charset=utf-8",
+            "attachment; filename=\"export.json\"",
+        ),
     };
-    let result = ctx.db().run(&id, &user.id, &query_req).await?;
 
-    match req.format {
-        ExportFormat::Csv => {
-            // Minimal CSV: RFC 4180 — double-quote fields that contain commas,
-            // quotes, or newlines. Values are rendered as their JSON scalar form
-            // (strings unquoted for readability; nulls as empty cells).
-            let mut out = String::new();
-            // Header row
-            let header_row: Vec<String> = result.columns.iter().map(|c| csv_field(&c.name)).collect();
-            out.push_str(&header_row.join(","));
-            out.push('\n');
-            for row in &result.rows {
-                let fields: Vec<String> = row.iter().map(csv_value).collect();
-                out.push_str(&fields.join(","));
-                out.push('\n');
-            }
-            Ok((
-                [
-                    (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
-                    (header::CONTENT_DISPOSITION, "attachment; filename=\"export.csv\""),
-                ],
-                out,
-            )
-                .into_response())
+    let db = ctx.db().clone();
+    let uid = user.id.clone();
+    let conn_id = id.clone();
+    let statement = req.statement.clone();
+
+    // Unbounded so the driver's synchronous per-row writes never block the async
+    // runtime (a sync `ExportSink` can't `.await` backpressure); a 64 KiB
+    // `BufWriter` coalesces them into a few large chunks and the client's read
+    // drains the channel — worst-case buffering is the full result, i.e. no worse
+    // than the old fully-buffered path, and typically a small fraction of it.
+    let (tx, rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<axum::body::Bytes, std::io::Error>>();
+    let writer_tx = tx.clone();
+    tokio::spawn(async move {
+        let w: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::with_capacity(
+            64 * 1024,
+            ChannelWriter { tx: writer_tx },
+        ));
+        if let Err(e) = db
+            .export_to_writer(&conn_id, &uid, &statement, node.as_deref(), export_format, None, w)
+            .await
+        {
+            // Surface a mid-stream failure as a stream error so the download
+            // aborts (incomplete) rather than looking complete; bytes already
+            // sent stay, the client sees a truncated body + connection reset.
+            let _ = tx.send(Err(std::io::Error::other(e.to_string())));
         }
-        ExportFormat::Json => {
-            // JSON array of objects [{col: val, …}].
-            let col_names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
-            let objects: Vec<serde_json::Map<String, Value>> = result
-                .rows
-                .into_iter()
-                .map(|row| {
-                    col_names
-                        .iter()
-                        .zip(row)
-                        .map(|(&k, v)| (k.to_string(), v))
-                        .collect()
-                })
-                .collect();
-            let body = serde_json::to_string(&objects).unwrap_or_default();
-            Ok((
-                [
-                    (header::CONTENT_TYPE, "application/json; charset=utf-8"),
-                    (header::CONTENT_DISPOSITION, "attachment; filename=\"export.json\""),
-                ],
-                body,
-            )
-                .into_response())
-        }
-    }
+    });
+
+    let stream =
+        futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|i| (i, rx)) });
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
 }
 
-/// Escape a string for a CSV field (RFC 4180).
-fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
+/// A synchronous `io::Write` that hands each buffer to the `/db/export` response
+/// stream through an unbounded channel — non-blocking, so it is safe to call from
+/// the driver's sync `ExportSink` deep inside an async task. A closed receiver
+/// (client disconnected) surfaces as `BrokenPipe` so the driver stops early.
+struct ChannelWriter {
+    tx: tokio::sync::mpsc::UnboundedSender<Result<axum::body::Bytes, std::io::Error>>,
 }
 
-/// Render a JSON `Value` as a CSV cell (null → empty; strings unquoted when safe).
-fn csv_value(v: &Value) -> String {
-    match v {
-        Value::Null => String::new(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => csv_field(s),
-        other => csv_field(&other.to_string()),
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.tx
+            .send(Ok(axum::body::Bytes::copy_from_slice(buf)))
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "export stream closed")
+            })?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -904,6 +963,27 @@ async fn create_saved<S: DbViewerCtx>(
         })
         .await?;
     Ok(Json(saved).into_response())
+}
+
+async fn update_saved<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(qid): Path<Id>,
+    Json(req): Json<UpdateSavedQueryReq>,
+) -> ApiResult<Response> {
+    // Same gate as delete: editor on the query's workspace AND ownership
+    // (owner / ws-Admin / root) — saved queries are owner-private. Unknown id →
+    // `get_saved` errors (404) before any mutation.
+    let saved = ctx.db().get_saved(&qid).await?;
+    ctx.roles()
+        .check(&user, &saved.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    require_owner_or_ws_admin(&ctx, &user, &saved.created_by, &saved.workspace_id).await?;
+    let updated = ctx
+        .db()
+        .update_saved(&qid, req.name.as_deref(), req.statement.as_deref())
+        .await?;
+    Ok(Json(updated).into_response())
 }
 
 async fn delete_saved<S: DbViewerCtx>(

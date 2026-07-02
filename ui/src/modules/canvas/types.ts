@@ -171,6 +171,9 @@ export interface CanvasSceneSummary {
   thumbnail: string | null;
   /** Folder path for grouping in the list (e.g. "Platform/Staging"); null = root. */
   section: string | null;
+  /** The scene's source format, pulled out of `doc_json`. `undefined`/absent for
+   *  docs that predate/omit `format` — treat as `mermaid`. */
+  format?: CanvasFormat;
   created_at: string;
   updated_at: string;
 }
@@ -204,7 +207,9 @@ export interface AssistResult {
   excalidraw?: unknown;
   /** A mermaid diagram source (the default format — clean auto-layout). */
   mermaid: string | null;
-  /** The scene's source format — `mermaid` (default) | `excalidraw`. */
+  /** A D2 diagram source (when the scene's format is `d2`). */
+  d2?: string | null;
+  /** The scene's source format — `mermaid` (default) | `excalidraw` | `d2`. */
   format?: CanvasFormat;
   /** Freeform nodes when the agent produced tier-2 JSON instead of mermaid. */
   nodes: Partial<CanvasNode>[];
@@ -214,11 +219,12 @@ export interface AssistResult {
 
 // ---------------------------------------------------------------------------
 // File-backed canvas document — the agent EDITS a per-scene source file
-// (`canvas.mermaid` or `canvas.excalidraw.json`); the server stores its content
-// as the opaque `doc_json` and the UI renders it into editable Excalidraw shapes.
+// (`canvas.mermaid`, `canvas.excalidraw.json`, or `canvas.d2`); the server
+// stores its content as the opaque `doc_json` and the UI renders it (into
+// editable Excalidraw shapes, or an SVG for Mermaid/D2).
 // ---------------------------------------------------------------------------
 
-export type CanvasFormat = 'mermaid' | 'excalidraw';
+export type CanvasFormat = 'mermaid' | 'excalidraw' | 'd2';
 
 /** The opaque canvas doc shape the server + agent share (parsed from
  *  `doc_json`). A `source` present marks the scene as agent/file-backed; a plain
@@ -227,8 +233,10 @@ export interface CanvasDoc {
   type?: 'otto-canvas' | 'excalidraw';
   version?: number;
   format?: CanvasFormat;
-  /** The mermaid text or Excalidraw-JSON the agent edits. */
+  /** The mermaid/D2 text or Excalidraw-JSON the agent edits. */
   source?: string;
+  /** D2 hand-drawn "sketch" render mode (D2 scenes only). */
+  sketch?: boolean;
   /** Rendered element cache (best-effort) for instant first paint. */
   elements?: unknown[];
   appState?: { viewBackgroundColor?: string; gridSize?: number | null };

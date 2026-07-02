@@ -424,6 +424,7 @@ export async function seedRedis(
  *   - redis      127.0.0.1:16379  (auth ottoredis) db 0
  *   - mongodb    127.0.0.1:17017  otto/ottopw   db `shopdb` (authSource admin)
  *   - clickhouse 127.0.0.1:18123  otto/ottopw   db `analytics`
+ *   - postgres   127.0.0.1:15432  otto/ottopw   db `shopdb`
  *
  * Creates the profile as `environment: 'dev'`, `read_only: false` so the sweep
  * can exercise writes (INSERT/UPDATE), then calls `/db/.../test` via the
@@ -435,7 +436,7 @@ export async function seedDockerConnection(
   ctx: APIRequestContext,
   base: string,
   workspaceId: string,
-  kind: 'mysql' | 'redis' | 'mongodb' | 'clickhouse',
+  kind: 'mysql' | 'redis' | 'mongodb' | 'clickhouse' | 'postgres',
 ): Promise<string | null> {
   const specs: Record<
     string,
@@ -465,6 +466,11 @@ export async function seedDockerConnection(
     clickhouse: {
       name: 'e2e-clickhouse',
       params: { host: '127.0.0.1', port: 18123, user: 'otto', db: 'analytics' },
+      secret: 'ottopw',
+    },
+    postgres: {
+      name: 'e2e-postgres',
+      params: { host: '127.0.0.1', port: 15432, user: 'otto', db: 'shopdb' },
       secret: 'ottopw',
     },
   };

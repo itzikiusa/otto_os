@@ -1,0 +1,26 @@
+flow: {
+  shape: sequence_diagram
+
+  actor: "Actor"
+  frontend: "Frontend"
+  api: "API Service"
+  db: "Database"
+  cache: "Cache"
+  external: "External Provider"
+
+  actor -> frontend: start action
+  frontend -> api: HTTP request
+  api -> cache: read session/cache
+  api -> db: read/write domain data
+  api -> external: optional external call
+  external -> api: provider response
+  api -> db: persist result
+  api -> frontend: HTTP response
+  frontend -> actor: show result
+
+  error_path: {
+    api -> external: timeout/error
+    api -> db: persist failure/retry state
+    api -> frontend: return safe error
+  }
+}

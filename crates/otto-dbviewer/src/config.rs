@@ -155,6 +155,21 @@ mod tests {
     }
 
     #[test]
+    fn postgres_basic_and_default_port() {
+        let c = conn(
+            ConnectionKind::Postgres,
+            json!({"host":"127.0.0.1","port":15432,"user":"otto","db":"shopdb"}),
+        );
+        let parsed = parse(&c, Some("pw".into())).unwrap();
+        assert_eq!(parsed.config.engine, Engine::Postgres);
+        assert_eq!(parsed.config.port, 15432);
+        assert_eq!(parsed.config.database.as_deref(), Some("shopdb"));
+        // Default port 5432 when absent.
+        let c = conn(ConnectionKind::Postgres, json!({"host":"h"}));
+        assert_eq!(parse(&c, None).unwrap().config.port, 5432);
+    }
+
+    #[test]
     fn port_as_string() {
         let c = conn(ConnectionKind::Clickhouse, json!({"host":"h","port":"18123"}));
         let parsed = parse(&c, None).unwrap();

@@ -250,7 +250,7 @@ test.describe('DB Explorer — Redis (mobile sweep)', () => {
     }
   });
 
-  test('no horizontal overflow with a wide value (HGETALL stress)', async ({ page }, testInfo) => {
+  test('no horizontal overflow with a wide value (HGETALL stress)', async ({ page }) => {
     expect(redisConnId, 'docker-redis must be reachable').not.toBeNull();
     await openConnection(page);
 
@@ -273,20 +273,17 @@ test.describe('DB Explorer — Redis (mobile sweep)', () => {
       full.vw + 2,
     );
 
-    // Diagnostic (non-failing): the DB Explorer's TABLET layout (641–1024px)
-    // squeezes the main area between the persistent Navigator AND the 280px
-    // connection sidebar, so the editor + results TOOLBARS (which only `flex-wrap`
-    // at ≤640px) overflow horizontally and their right-most controls are clipped
-    // by .content (overflow:hidden) → unreachable. Recorded here for escalation;
-    // it's a shared-layout defect (all engines), not Redis-specific, and lives in
-    // files outside this sweep's edit scope.
-    const editorProbe = await overflowProbe(page, '.query-editor');
-    if (editorProbe.widest > editorProbe.vw + 2) {
-      testInfo.annotations.push({
-        type: 'shared-bug',
-        description: `DB toolbars overflow viewport (${editorProbe.widest}px > ${editorProbe.vw}px) at tablet width — .qe-toolbar/.grid-toolbar lack flex-wrap above 640px and the tablet main area is ~292px wide`,
-      });
-    }
+    // CHECK 5c: nothing OUTSIDE a horizontal scroll container may extend past the
+    // viewport — the same no-overflow invariant the Mongo/ClickHouse sweeps
+    // enforce. The DB Explorer's TABLET layout (641–1024px) squeezes the main area
+    // between the persistent Navigator AND the connection sidebar; the shared fix
+    // wraps the editor + results toolbars ≤1024px, keeps min-width:0 down the flex
+    // chain, and caps the sidebar at 45vw, so nothing is pushed off-screen. Hard-
+    // asserted (was a non-failing diagnostic).
+    expect(
+      full.widest,
+      `no element outside a horizontal scroller should exceed the viewport — widest=${full.widest}px vs vw=${full.vw}px`,
+    ).toBeLessThanOrEqual(full.vw + 2);
   });
 
   test('grid scrolls HORIZONTALLY for wide content (or fits without page overflow)', async ({

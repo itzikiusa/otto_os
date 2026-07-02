@@ -224,4 +224,35 @@ test.describe('DB Explorer · export', () => {
     // wasn't silently capped at the old 1000-row default.
     expect(statSync(dest).size, 'full export should be multiple MB').toBeGreaterThan(1_000_000);
   });
+
+  test('in-browser /db/export streams the full result uncapped (>1000 rows)', async ({ page }) => {
+    test.setTimeout(60_000);
+    test.skip(connId == null || !bigTableReady, 'mysql connection / fixture unavailable');
+    // The results-toolbar "CSV" button serializes only the (row-capped) loaded
+    // grid, so the uncapped in-browser download is the buffered `/db/export`
+    // endpoint (Content-Disposition attachment) — the one Task 3 fixed. No UI
+    // control is wired to it, so we exercise it FROM THE PAGE with the same base +
+    // bearer token the app uses, on a >1000-row subset, and assert the streamed
+    // CSV carries every row. The OLD path ran the *capped* interactive query and
+    // silently stopped at the 1000-row driver default (spec §2.1).
+    await openMysql(page);
+    const csv = await page.evaluate(async (id: string) => {
+      const base = localStorage.getItem('otto_base') || '';
+      const token = localStorage.getItem('otto_token') || '';
+      const resp = await fetch(`${base}/api/v1/connections/${id}/db/export`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ statement: `SELECT * FROM ${'e2e_export_big'} LIMIT 5000`, format: 'csv' }),
+      });
+      if (!resp.ok) throw new Error(`db/export returned ${resp.status}`);
+      return await resp.text();
+    }, connId as string);
+
+    // csv → CsvWithNames: one header line + N data lines.
+    const dataRows = csv.split('\n').filter((l) => l.trim().length > 0).length - 1;
+    expect(
+      dataRows,
+      'in-browser /db/export must stream all 5000 rows (not cap at the old 1000-row default)',
+    ).toBeGreaterThan(1000);
+  });
 });

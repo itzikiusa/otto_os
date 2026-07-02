@@ -3137,7 +3137,7 @@ async fn execute_node(
             let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &full, &acwd, session_tx).await?;
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
             // Write under the data dir (never the user's repo working tree).
-            let ext = if mode == "excalidraw" { "json" } else { "mmd" };
+            let ext = canvas_node_ext(mode);
             let rel = format!("workflow-canvas/{run_id}/{}.{ext}", node.id);
             let path = ctx.data_dir.join(&rel);
             if let Some(parent) = path.parent() {
@@ -4108,6 +4108,18 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// File extension for a `canvas` workflow node's written diagram artifact,
+/// keyed on its `mode` param. `excalidraw` writes JSON; `d2` writes `.d2`
+/// source; everything else (the default `mermaid`, and any unrecognized mode)
+/// writes `.mmd`.
+fn canvas_node_ext(mode: &str) -> &'static str {
+    match mode {
+        "excalidraw" => "json",
+        "d2" => "d2",
+        _ => "mmd",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4151,6 +4163,14 @@ mod tests {
         assert!(is_known_kind("agent_prompt"));
         assert!(is_known_kind("game_engine"));
         assert!(!is_known_kind("nope"));
+    }
+
+    #[test]
+    fn canvas_node_ext_matches_mode() {
+        assert_eq!(canvas_node_ext("excalidraw"), "json");
+        assert_eq!(canvas_node_ext("d2"), "d2");
+        assert_eq!(canvas_node_ext("mermaid"), "mmd");
+        assert_eq!(canvas_node_ext("sequence"), "mmd", "unrecognized modes default to mermaid");
     }
 
     #[test]

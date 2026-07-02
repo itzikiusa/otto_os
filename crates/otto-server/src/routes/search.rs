@@ -12,6 +12,7 @@
 //!   - vault memories (`MemoriesRepo` keyword search)
 //!   - git repos (`ctx.git_store`)
 //!   - broker clusters (`BrokerClustersRepo`)
+//!   - canvas scenes (`ctx.canvas_repo`)
 //!
 //! Skipped sources:
 //!   - live git commits/PRs/branches — require remote round-trip; excluded to
@@ -40,7 +41,7 @@ use crate::state::ServerCtx;
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     /// Discriminant: `"story"`, `"workflow"`, `"api_request"`, `"swarm_task"`,
-    /// `"swarm_project"`, `"memory"`, `"repo"`, `"broker_cluster"`.
+    /// `"swarm_project"`, `"memory"`, `"repo"`, `"broker_cluster"`, `"canvas"`.
     pub kind: String,
     /// Object id (workspace-scoped row id).
     pub id: String,
@@ -308,6 +309,27 @@ pub async fn search(
                     },
                 });
             }
+        }
+    }
+
+    // --- 8. Canvas scenes ---------------------------------------------------
+    if let Ok(scenes) = ctx.canvas_repo.list_for_workspace(&ws_id).await {
+        for s in scenes
+            .into_iter()
+            .filter(|s| matches_title_or_sub(&s.title, s.section.as_deref().unwrap_or(""), &q))
+            .take(CAP)
+        {
+            all.push(Scored {
+                score: score_title(&s.title, &q),
+                updated_at: s.updated_at.to_rfc3339(),
+                hit: SearchHit {
+                    kind: "canvas".into(),
+                    id: s.id.to_string(),
+                    title: s.title.clone(),
+                    subtitle: s.section.clone(),
+                    actions: vec!["Open in Canvas".into()],
+                },
+            });
         }
     }
 

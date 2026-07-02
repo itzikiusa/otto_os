@@ -72,6 +72,11 @@ INSERT INTO order_items (order_id, product_id, quantity, unit_cents) VALUES
   (3, 4, 1, 8900),
   (4, 2, 1, 1500);
 
+-- A trigger so the explorer's Triggers folder + SHOW CREATE TRIGGER have
+-- content to browse. Single-statement body → no DELIMITER needed.
+CREATE TRIGGER trg_orders_clamp_total BEFORE INSERT ON orders
+FOR EACH ROW SET NEW.total_cents = GREATEST(NEW.total_cents, 0);
+
 -- A second database so the explorer shows multiple schemas.
 CREATE DATABASE IF NOT EXISTS analytics_mirror;
 USE analytics_mirror;

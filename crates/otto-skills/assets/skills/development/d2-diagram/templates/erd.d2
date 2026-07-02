@@ -1,0 +1,27 @@
+direction: right
+
+users: {
+  shape: sql_table
+  id: bigint {constraint: primary_key}
+  email: varchar
+  created_at: timestamp
+}
+
+orders: {
+  shape: sql_table
+  id: bigint {constraint: primary_key}
+  user_id: bigint {constraint: foreign_key}
+  status: varchar
+  created_at: timestamp
+}
+
+order_items: {
+  shape: sql_table
+  id: bigint {constraint: primary_key}
+  order_id: bigint {constraint: foreign_key}
+  product_id: bigint
+  quantity: int
+}
+
+users.id -> orders.user_id: "1:N"
+orders.id -> order_items.order_id: "1:N"

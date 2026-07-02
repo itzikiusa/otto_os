@@ -21,12 +21,13 @@ use sqlx::{Column as _, Executor as _, Row, TypeInfo};
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
-use crate::export::{open_sink, ExportCounts, ExportFormat};
+use crate::export::{ExportCounts, ExportFormat, ExportSink};
+use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
-    Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest,
-    QueryResult, QueryStats, ResolvedConfig, SchemaNode, TestResult,
+    DbQueryPlan, Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle,
+    QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
 };
 
 const DEFAULT_MAX_ROWS: usize = 1000;
@@ -59,8 +60,15 @@ impl Driver for MysqlDriver {
             engine: Engine::Mysql,
             sql: true,
             joins: true,
-            transactions: true,
+            // Pooled connections: every `run` acquires an independent session, so
+            // there's no place to hold a BEGIN…COMMIT across calls. Advertise the
+            // honest `false` rather than a transaction affordance we can't back.
+            transactions: false,
             multi_statement: true,
+            // `KILL QUERY <conn_id>` on a separate pooled connection.
+            cancel: true,
+            // `EXPLAIN` / `EXPLAIN FORMAT=JSON`.
+            explain: true,
             default_port: 3306,
             schema_levels: vec!["Database".into(), "Table".into(), "Column".into()],
             query_language: "sql".into(),
@@ -196,6 +204,26 @@ impl Driver for MysqlDriver {
                     .expandable(),
                 );
             }
+            // Triggers live in information_schema.triggers (a different catalog
+            // table); show the folder only when the database has any.
+            let trig_count: Option<i64> = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema = ?",
+            )
+            .bind(&db)
+            .fetch_one(&pool)
+            .await
+            .ok();
+            if let Some(n) = trig_count.filter(|&n| n > 0) {
+                folders.push(
+                    SchemaNode::new(
+                        parent.child("folder", "triggers").to_id(),
+                        "Triggers",
+                        NodeKind::Folder,
+                    )
+                    .with_detail(n.to_string())
+                    .expandable(),
+                );
+            }
         }
         Ok(folders)
     }
@@ -205,6 +233,10 @@ impl Driver for MysqlDriver {
         // (rendered as the object's "columns") and the CREATE DDL.
         if path.get("procedure").is_some() || path.get("function").is_some() {
             return self.routine_detail(cfg, path).await;
+        }
+        // Trigger: event/timing/table metadata + SHOW CREATE TRIGGER DDL.
+        if path.get("trigger").is_some() {
+            return self.trigger_detail(cfg, path).await;
         }
         let db = path
             .get("db")
@@ -344,43 +376,59 @@ impl Driver for MysqlDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
-        let statement = req.statement.trim();
-        if statement.is_empty() {
+        let text = req.statement.trim();
+        if text.is_empty() {
             return Err(types::invalid("empty statement"));
         }
         let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
         let pool = self.pool(cfg).await?;
-        let started = Instant::now();
 
         // The active database (if the user selected one) scopes unqualified
         // table names: we `USE` it on the connection before running the query.
         let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-        let result = if is_read_statement(statement) {
-            let limited = types::inject_row_limit(statement, max_rows.saturating_add(1));
+        // Split with MySQL's lexical rules (backticks, `#` comments, backslash
+        // escapes). A true batch (>1 statement) runs every statement in order on
+        // one shared session; the single-statement fast path keeps its
+        // auto-LIMIT/OFFSET injection and MAX_EXECUTION_TIME hint (§2.2).
+        let spans = split_statements(text, SqlDialect::Mysql);
+        if spans.len() > 1 {
+            return run_batch(&pool, &spans, max_rows, active_db, token).await;
+        }
+        // 0 spans ⇒ comment-only paste: run the original text (unchanged behavior).
+        let statement = spans.first().map(|s| s.text.as_str()).unwrap_or(text);
+        let started = Instant::now();
+
+        let (result, auto_limited) = if is_read_statement(statement) {
+            let ri = types::inject_row_limit(statement, max_rows.saturating_add(1), req.offset);
             // Inject MySQL's MAX_EXECUTION_TIME(ms) optimizer hint when a per-statement
             // timeout is requested. The hint goes right after the SELECT keyword so it
             // is valid even after LIMIT injection. Non-SELECT reads (e.g. SHOW, EXPLAIN)
             // are passed through unchanged — MySQL only honours the hint on SELECTs.
-            let limited = if let Some(ms) = req.timeout_ms.filter(|&t| t > 0) {
-                if limited.trim_start().to_uppercase().starts_with("SELECT") {
+            let sql = if let Some(ms) = req.timeout_ms.filter(|&t| t > 0) {
+                if ri.sql.trim_start().to_uppercase().starts_with("SELECT") {
                     // "SELECT /*+ MAX_EXECUTION_TIME(N) */ ..."
-                    limited.replacen("SELECT", &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"), 1)
+                    ri.sql.replacen("SELECT", &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"), 1)
                 } else {
-                    limited
+                    ri.sql.clone()
                 }
             } else {
-                limited
+                ri.sql.clone()
             };
-            run_read(&pool, &limited, max_rows, active_db, token).await
+            (
+                run_read(&pool, &sql, max_rows, active_db, token).await,
+                // Report the user-visible page size (max_rows), not the +1 probe.
+                ri.limited.then_some(max_rows as u64),
+            )
         } else {
-            run_write(&pool, statement, active_db, token).await
+            (run_write(&pool, statement, active_db, token).await, None)
         };
         let duration_ms = started.elapsed().as_millis() as u64;
 
         let mut result = result?;
         result.stats.duration_ms = duration_ms;
         result.stats.row_count = result.rows.len();
+        result.auto_limited = auto_limited;
         Ok(result)
     }
 
@@ -402,6 +450,41 @@ impl Driver for MysqlDriver {
         // — that's a successful no-op cancel, not a failure to report.
         let _ = sqlx::query(&sql).execute(&pool).await;
         Ok(())
+    }
+
+    /// Structured query plan via `EXPLAIN FORMAT=JSON`. The statement is
+    /// EXPLAIN-wrapped (never executed raw), so this is read-only by construction.
+    async fn query_plan(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<DbQueryPlan> {
+        let stmt = statement.trim().trim_end_matches(';');
+        if stmt.is_empty() {
+            return Err(types::invalid("empty statement"));
+        }
+        let pool = self.pool(cfg).await?;
+        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
+            (&mut *conn)
+                .execute(sqlx::raw_sql(&use_db_sql(db)))
+                .await
+                .map_err(types::upstream)?;
+        }
+        let row = sqlx::query(&format!("EXPLAIN FORMAT=JSON {stmt}"))
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(types::upstream)?;
+        let json_str: String = row.try_get(0).map_err(types::upstream)?;
+        let raw: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| types::invalid(format!("parse EXPLAIN JSON: {e}")))?;
+        let root = crate::plan::from_mysql_json(&raw);
+        Ok(DbQueryPlan {
+            engine: "mysql".into(),
+            root,
+            raw,
+        })
     }
 
     async fn completion(
@@ -431,18 +514,18 @@ impl Driver for MysqlDriver {
 
     /// Streaming export: use sqlx's row CURSOR (`.fetch(&mut conn)`) so the
     /// (potentially huge) result is pulled one row at a time and written straight
-    /// to the file — daemon memory stays bounded (NOT `fetch_all`). Only
+    /// through `w` — daemon memory stays bounded (NOT `fetch_all`). Only
     /// row-returning statements are exportable; a write/DDL is rejected (the
     /// service's write-gate already blocks guarded writes, but an export of a
     /// non-read makes no sense).
-    async fn export_to_path(
+    async fn export_to_writer(
         &self,
         cfg: &ResolvedConfig,
         statement: &str,
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        dest: &std::path::Path,
+        w: Box<dyn std::io::Write + Send>,
     ) -> Result<ExportCounts> {
         use futures_util::TryStreamExt as _;
 
@@ -465,8 +548,7 @@ impl Driver for MysqlDriver {
         // A real cursor over the wire: each `try_next().await` fetches the next
         // row; nothing buffers the whole result.
         let mut rows = sqlx::query(statement).fetch(&mut *conn);
-        let mut sink = open_sink(dest, format)
-            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
+        let mut sink = ExportSink::new(w, format);
 
         let mut header_written = false;
         let mut n: usize = 0;
@@ -567,6 +649,10 @@ impl MysqlDriver {
         // their leaves have no children — clicking one opens its DDL in Structure.
         if folder == "procedures" || folder == "functions" {
             return self.routines_in_folder(cfg, db, folder, filter).await;
+        }
+        // Triggers live in information_schema.triggers; leaves open their DDL.
+        if folder == "triggers" {
+            return self.triggers_in_folder(cfg, db, filter).await;
         }
         let (table_type, kind, seg) = match folder {
             "tables" => ("BASE TABLE", NodeKind::Table, "table"),
@@ -859,6 +945,105 @@ impl MysqlDriver {
         let kw = if is_function { "FUNCTION" } else { "PROCEDURE" };
         let sql = format!("SHOW CREATE {kw} `{}`.`{}`", esc_ident(db), esc_ident(name));
         let row = sqlx::query(&sql).fetch_one(pool).await.map_err(types::upstream)?;
+        let ddl: Option<String> = row.try_get(2).map_err(types::upstream)?;
+        Ok(ddl)
+    }
+
+    /// List a database's triggers (the `Triggers` tree folder), optional
+    /// case-insensitive substring filter. Leaves aren't expandable — clicking one
+    /// opens its event/timing/table + DDL in Structure.
+    async fn triggers_in_folder(
+        &self,
+        cfg: &ResolvedConfig,
+        db: &str,
+        filter: Option<&str>,
+    ) -> Result<Vec<SchemaNode>> {
+        let pool = self.pool(cfg).await?;
+        let (sql, name_filter): (&str, Option<String>) = match filter {
+            Some(f) if !f.is_empty() => (
+                "SELECT CAST(trigger_name AS CHAR) FROM information_schema.triggers \
+                 WHERE trigger_schema = ? \
+                 AND LOWER(CAST(trigger_name AS CHAR)) LIKE LOWER(?) \
+                 ORDER BY trigger_name",
+                Some(format!("%{f}%")),
+            ),
+            _ => (
+                "SELECT CAST(trigger_name AS CHAR) FROM information_schema.triggers \
+                 WHERE trigger_schema = ? ORDER BY trigger_name",
+                None,
+            ),
+        };
+        let rows: Vec<(String,)> = if let Some(pat) = name_filter {
+            sqlx::query_as(sql).bind(db).bind(pat).fetch_all(&pool).await
+        } else {
+            sqlx::query_as(sql).bind(db).fetch_all(&pool).await
+        }
+        .map_err(types::upstream)?;
+        let db_path = NodePath::parse(&format!("db:{db}"));
+        Ok(rows
+            .into_iter()
+            .map(|(name,)| SchemaNode::new(db_path.child("trigger", &name).to_id(), name, NodeKind::Trigger))
+            .collect())
+    }
+
+    /// Trigger structure: its event/timing/table metadata (in `extra`) plus the
+    /// full `SHOW CREATE TRIGGER` DDL.
+    async fn trigger_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail> {
+        let db = path
+            .get("db")
+            .ok_or_else(|| types::invalid("trigger_detail: path has no database segment"))?
+            .to_string();
+        let name = path
+            .get("trigger")
+            .ok_or_else(|| types::invalid("trigger_detail: path has no trigger segment"))?
+            .to_string();
+        let pool = self.pool(cfg).await?;
+        let meta: Option<TriggerRow> = sqlx::query_as(
+            "SELECT CAST(event_manipulation AS CHAR) AS event_manipulation, \
+                    CAST(action_timing AS CHAR) AS action_timing, \
+                    CAST(event_object_table AS CHAR) AS event_object_table \
+             FROM information_schema.triggers \
+             WHERE trigger_schema = ? AND trigger_name = ?",
+        )
+        .bind(&db)
+        .bind(&name)
+        .fetch_optional(&pool)
+        .await
+        .map_err(types::upstream)?;
+
+        // `.ok().flatten()`: a hard error or a NULL definition (privilege missing)
+        // both collapse to `None`.
+        let ddl = self.show_create_trigger(&pool, &db, &name).await.ok().flatten();
+
+        let mut detail = ObjectDetail::new(name, NodeKind::Trigger);
+        if let Some(m) = meta {
+            detail.extra = serde_json::json!({
+                "timing": m.action_timing,
+                "event": m.event_manipulation,
+                "table": m.event_object_table,
+            });
+        }
+        detail.ddl = ddl;
+        Ok(detail)
+    }
+
+    /// `SHOW CREATE TRIGGER` DDL (the "SQL Original Statement" column, index 2).
+    /// `SHOW CREATE TRIGGER` resolves against the default database, so we `USE`
+    /// the trigger's schema on a scratch connection first. Returns `Ok(None)` when
+    /// the definition column is NULL (definer privilege missing).
+    async fn show_create_trigger(
+        &self,
+        pool: &sqlx::MySqlPool,
+        db: &str,
+        name: &str,
+    ) -> Result<Option<String>> {
+        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .await
+            .map_err(types::upstream)?;
+        let sql = format!("SHOW CREATE TRIGGER `{}`", esc_ident(name));
+        let row = sqlx::query(&sql).fetch_one(&mut *conn).await.map_err(types::upstream)?;
         let ddl: Option<String> = row.try_get(2).map_err(types::upstream)?;
         Ok(ddl)
     }
@@ -1191,6 +1376,86 @@ async fn run_read(
                 .await
                 .map_err(types::upstream)?;
     }
+    exec_read_conn(&mut conn, statement, max_rows).await
+}
+
+async fn run_write(
+    pool: &sqlx::MySqlPool,
+    statement: &str,
+    active_db: Option<&str>,
+    token: &CancelToken,
+) -> Result<QueryResult> {
+    // Same as run_read: `USE <db>` and the statement must share one session.
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    capture_conn_id(&mut conn, token).await;
+    if let Some(db) = active_db {
+        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
+                .await
+                .map_err(types::upstream)?;
+    }
+    exec_write_conn(&mut conn, statement).await
+}
+
+/// Execute a true multi-statement batch (>1 statement) on ONE shared pooled
+/// session, in order. The optional `USE <db>` and the captured backend id apply
+/// once to the whole batch (so a concurrent cancel `KILL QUERY`s whichever
+/// statement is running). Each statement's result carries its preview label; on
+/// the first failing statement execution stops and an `errored` entry is appended
+/// — the completed results are returned, not discarded (§2.2). No auto-LIMIT/OFFSET
+/// injection for batches (the pager is single-statement only), but each read is
+/// still capped at `max_rows`.
+async fn run_batch(
+    pool: &sqlx::MySqlPool,
+    spans: &[StatementSpan],
+    max_rows: usize,
+    active_db: Option<&str>,
+    token: &CancelToken,
+) -> Result<QueryResult> {
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    capture_conn_id(&mut conn, token).await;
+    if let Some(db) = active_db {
+        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
+                .await
+                .map_err(types::upstream)?;
+    }
+    let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let stmt = span.text.as_str();
+        let started = Instant::now();
+        let outcome = if is_read_statement(stmt) {
+            exec_read_conn(&mut conn, stmt, max_rows).await
+        } else {
+            exec_write_conn(&mut conn, stmt).await
+        };
+        match outcome {
+            Ok(mut r) => {
+                r.stats.duration_ms = started.elapsed().as_millis() as u64;
+                r.stats.row_count = r.rows.len();
+                r.statement = Some(types::statement_preview(stmt));
+                results.push(r);
+            }
+            Err(e) => {
+                // Stop at the first failure; keep the completed results and flag
+                // this one. The service returns 200 with the partial batch.
+                results.push(types::errored_batch_entry(
+                    types::statement_preview(stmt),
+                    e.to_string(),
+                ));
+                break;
+            }
+        }
+    }
+    Ok(types::fold_batch_results(results))
+}
+
+/// Run a row-returning statement on an already-prepared connection (`USE` +
+/// conn-id capture done by the caller) and shape the rows into a `QueryResult`,
+/// capping at `max_rows` and flagging `truncated` when the driver fetched more.
+async fn exec_read_conn(
+    conn: &mut sqlx::MySqlConnection,
+    statement: &str,
+    max_rows: usize,
+) -> Result<QueryResult> {
     let rows = sqlx::query(statement)
         .fetch_all(&mut *conn)
         .await
@@ -1217,28 +1482,17 @@ async fn run_read(
     Ok(QueryResult {
         columns,
         rows: out_rows,
-        rows_affected: None,
-        stats: QueryStats::default(),
-        message: None,
         truncated,
-        masked: false,
+        ..QueryResult::empty()
     })
 }
 
-async fn run_write(
-    pool: &sqlx::MySqlPool,
+/// Run a write/DDL statement on an already-prepared connection and return the
+/// affected-row acknowledgement.
+async fn exec_write_conn(
+    conn: &mut sqlx::MySqlConnection,
     statement: &str,
-    active_db: Option<&str>,
-    token: &CancelToken,
 ) -> Result<QueryResult> {
-    // Same as run_read: `USE <db>` and the statement must share one session.
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
-    capture_conn_id(&mut conn, token).await;
-    if let Some(db) = active_db {
-        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
-                .await
-                .map_err(types::upstream)?;
-    }
     let res = sqlx::query(statement)
         .execute(&mut *conn)
         .await
@@ -1369,6 +1623,13 @@ struct RoutineParamRow {
 }
 
 #[derive(sqlx::FromRow)]
+struct TriggerRow {
+    event_manipulation: Option<String>,
+    action_timing: Option<String>,
+    event_object_table: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
 struct FkRow {
     constraint_name: String,
     column_name: String,
@@ -1466,6 +1727,18 @@ const FUNCTIONS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capabilities_are_honest() {
+        let c = MysqlDriver::default().capabilities();
+        assert_eq!(c.engine, Engine::Mysql);
+        assert!(c.sql && c.joins && c.multi_statement);
+        // Pooled connections ⇒ no session-pinned transactions (was over-promised).
+        assert!(!c.transactions);
+        // Server-side cancel (KILL QUERY) + EXPLAIN both supported.
+        assert!(c.cancel);
+        assert!(c.explain);
+    }
 
     #[test]
     fn detects_read_statements() {

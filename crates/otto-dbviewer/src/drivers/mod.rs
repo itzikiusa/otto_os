@@ -6,4 +6,5 @@ pub mod mongo_parse;
 pub mod mongo_sql;
 pub mod mongodb;
 pub mod mysql;
+pub mod postgres;
 pub mod redis;

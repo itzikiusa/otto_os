@@ -14,6 +14,7 @@ pub struct Registry {
     redis: Arc<dyn Driver>,
     mongodb: Arc<dyn Driver>,
     clickhouse: Arc<dyn Driver>,
+    postgres: Arc<dyn Driver>,
 }
 
 impl Registry {
@@ -23,6 +24,7 @@ impl Registry {
             redis: Arc::new(drivers::redis::RedisDriver::default()),
             mongodb: Arc::new(drivers::mongodb::MongoDriver::default()),
             clickhouse: Arc::new(drivers::clickhouse::ClickhouseDriver::default()),
+            postgres: Arc::new(drivers::postgres::PostgresDriver::default()),
         }
     }
 
@@ -32,6 +34,7 @@ impl Registry {
             Engine::Redis => Arc::clone(&self.redis),
             Engine::Mongodb => Arc::clone(&self.mongodb),
             Engine::Clickhouse => Arc::clone(&self.clickhouse),
+            Engine::Postgres => Arc::clone(&self.postgres),
         }
     }
 }

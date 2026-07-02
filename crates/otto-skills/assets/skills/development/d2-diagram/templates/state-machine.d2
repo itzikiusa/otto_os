@@ -1,0 +1,18 @@
+direction: right
+
+initial: "Initial"
+pending: "Pending"
+processing: "Processing"
+succeeded: "Succeeded"
+failed: "Failed"
+retrying: "Retrying"
+cancelled: "Cancelled"
+
+initial -> pending: created
+pending -> processing: worker picked up
+processing -> succeeded: success
+processing -> failed: permanent error
+processing -> retrying: transient error
+retrying -> processing: retry due
+pending -> cancelled: user/system cancels
+processing -> cancelled: cancellation accepted
