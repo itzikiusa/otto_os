@@ -1,5 +1,10 @@
-//! `ottod mcp-tools` — the first-party Otto **read-only** MCP tool server
-//! (Task B2b).
+//! `ottod mcp-tools` — the first-party Otto MCP tool server (Task B2b).
+//! Nearly every tool here is **read-only**; the two exceptions are
+//! `canvas_create_scene` / `canvas_update_scene` (Task B5), which post to
+//! Canvas Studio's normal governed HTTP endpoints AS THE SESSION OWNER — the
+//! same workspace-role check (`Editor`) a human editing Canvas gets, no more.
+//! They exist because Canvas is meant to be agent-drawable; every other tool
+//! stays strictly read-only (see "Safety properties" below).
 //!
 //! Otto exposes a slice of its own data to an agent session as MCP tools. When
 //! `otto_mcp_enabled` is on (default), `otto-sessions` injects an `otto` server
@@ -14,13 +19,17 @@
 //! `otto_db_schema`/`_children`/`_object`, `otto_db_query`) expose the user's
 //! database **connections**: schema introspection and **read-only** queries.
 //!
-//! Safety properties (every tool, no exceptions):
-//! - **Read-only** — all upstream calls are `GET`s, or `POST`s to a hard-coded
-//!   allow-list of **read-only-enforced** endpoints. The DB query path,
-//!   `…/db/mcp-query`, refuses any write/DDL server-side (`run_read_only`) before a
-//!   driver runs, independent of the connection's write-guard; the only other read
-//!   POST is the vault `…/memory/search` (a Viewer-gated search that never mutates).
-//!   No tool here mutates.
+//! Safety properties:
+//! - **Read-only, with two named exceptions** — all upstream calls are `GET`s, or
+//!   `POST`s to a hard-coded allow-list of **read-only-enforced** endpoints. The
+//!   DB query path, `…/db/mcp-query`, refuses any write/DDL server-side
+//!   (`run_read_only`) before a driver runs, independent of the connection's
+//!   write-guard; the only other read POST is the vault `…/memory/search` (a
+//!   Viewer-gated search that never mutates). `canvas_create_scene` and
+//!   `canvas_update_scene` are the ONLY tools that mutate: they POST/PUT to
+//!   Canvas Studio's normal `otto-canvas` HTTP routes, which apply the same
+//!   `WorkspaceRole::Editor` gate a human caller hits — the token can only do
+//!   what the session's owner is already allowed to do.
 //! - **Capped** — each upstream call has a wall-clock timeout; the response body
 //!   is size-capped before parsing, and JSON arrays are row-capped.
 //! - **Redacted** — every tool result is passed through `otto_core::redact` so
@@ -127,6 +136,46 @@ impl Ctx {
             CALL_TIMEOUT,
             self.http
                 .post(&url)
+                .bearer_auth(&self.token)
+                .header("X-Otto-Session", self.session_id.clone().unwrap_or_default())
+                .json(body)
+                .send(),
+        )
+        .await
+        .map_err(|_| "upstream timeout".to_string())?
+        .map_err(|e| format!("request failed: {e}"))?;
+        let status = resp.status();
+        if let Some(len) = resp.content_length() {
+            if len as usize > MAX_BODY_BYTES {
+                return Err(format!("response too large ({len} bytes > {MAX_BODY_BYTES} cap)"));
+            }
+        }
+        let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
+        if bytes.len() > MAX_BODY_BYTES {
+            return Err(format!(
+                "response too large ({} bytes > {MAX_BODY_BYTES} cap)",
+                bytes.len()
+            ));
+        }
+        if !status.is_success() {
+            let snippet = String::from_utf8_lossy(&bytes);
+            return Err(format!(
+                "daemon returned {status}: {}",
+                snippet.chars().take(300).collect::<String>()
+            ));
+        }
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
+    }
+
+    /// PUT an `/api/v1` path with the bearer token. Used ONLY by
+    /// `canvas_update_scene` — the one mutating call site that isn't a POST.
+    /// Same size cap / error handling as [`Self::post_json`].
+    async fn put_json(&self, path: &str, body: &Value) -> Result<Value, String> {
+        let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
+        let resp = tokio::time::timeout(
+            CALL_TIMEOUT,
+            self.http
+                .put(&url)
                 .bearer_auth(&self.token)
                 .header("X-Otto-Session", self.session_id.clone().unwrap_or_default())
                 .json(body)
@@ -318,7 +367,7 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "canvas_list_scenes",
-                "description": "Read-only: list the Canvas Studio scenes (id/title/timestamps) in a workspace. To CREATE or EDIT a scene, use the otto-canvas skill's HTTP scripts (writes are not exposed as MCP tools).",
+                "description": "Read-only: list the Canvas Studio scenes (id/title/timestamps) in a workspace. Use canvas_create_scene to draw a new one.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -329,13 +378,39 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "canvas_get_scene",
-                "description": "Read-only: a Canvas Studio scene by id, including its full Scene JSON document (nodes/edges/slides).",
+                "description": "Read-only: a Canvas Studio scene by id, including its full Scene JSON document (nodes/edges/slides). Use canvas_update_scene to edit it.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "scene_id": { "type": "string", "description": "Otto canvas scene id." }
                     },
                     "required": ["scene_id"]
+                }
+            },
+            {
+                "name": "canvas_create_scene",
+                "description": "Create a Canvas scene (format: mermaid | d2 | excalidraw) and reference it to this session — it appears in the session's Canvas panel and the Canvas module. Uses this session's workspace (OTTO_WORKSPACE_ID). `source` is the mermaid/D2 diagram text (omit for excalidraw or to start blank).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Scene title." },
+                        "format": { "type": "string", "description": "mermaid (default) | d2 | excalidraw." },
+                        "source": { "type": "string", "description": "Mermaid/D2 diagram source text." },
+                        "section": { "type": "string", "description": "Optional folder path to group the scene under, e.g. \"Platform/Staging\"." }
+                    },
+                    "required": ["title"]
+                }
+            },
+            {
+                "name": "canvas_update_scene",
+                "description": "Replace a Canvas scene's diagram source (mermaid/D2 text) with new content, preserving its format. Use canvas_get_scene first to read the current source.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scene_id": { "type": "string", "description": "Otto canvas scene id." },
+                        "source": { "type": "string", "description": "The new mermaid/D2 diagram source text." }
+                    },
+                    "required": ["scene_id", "source"]
                 }
             },
             {
@@ -738,6 +813,94 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .get_json(&format!("/canvas/scenes/{}", seg(&scene)))
                 .await?;
             Ok(finalize(json!({ "scene_id": scene, "scene": raw })))
+        }
+        "canvas_create_scene" => {
+            let Some(ws) = ctx.workspace_id.clone() else {
+                return Err(
+                    "no workspace context (OTTO_WORKSPACE_ID unset); cannot create a scene".into(),
+                );
+            };
+            let title = arg_str(args, "title")?;
+            let format = args
+                .get("format")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("mermaid");
+            if !matches!(format, "mermaid" | "d2" | "excalidraw") {
+                return Err(format!(
+                    "invalid format `{format}` — must be one of: mermaid | d2 | excalidraw"
+                ));
+            }
+            let source = match args.get("source").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                Some(s) => s.to_string(),
+                None if format == "excalidraw" => {
+                    json!({ "type": "excalidraw", "version": 2, "source": "otto", "elements": [] })
+                        .to_string()
+                }
+                None => String::new(),
+            };
+            let mut body = json!({
+                "title": title,
+                "doc": { "type": "otto-canvas", "version": 1, "format": format, "source": source },
+            });
+            if let Some(section) = args.get("section").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                body["section"] = json!(section);
+            }
+            let created = ctx
+                .post_json(&format!("/workspaces/{}/canvas/scenes", seg(&ws)), &body)
+                .await?;
+            let scene_id = created
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "daemon did not return a scene id".to_string())?
+                .to_string();
+
+            // Reference the new scene to this session — best-effort: a session-less
+            // caller (e.g. `canvas/assist/preview`-style testing) still gets the
+            // created scene back even if the ref-attach can't run.
+            if let Some(sid) = ctx.session_id.clone() {
+                let _ = ctx
+                    .post_json(
+                        &format!("/sessions/{}/canvas-refs", seg(&sid)),
+                        &json!({ "scene_id": scene_id }),
+                    )
+                    .await;
+            }
+
+            Ok(finalize(json!({ "scene_id": scene_id, "workspace_id": ws })))
+        }
+        "canvas_update_scene" => {
+            let scene_id = arg_str(args, "scene_id")?;
+            let source = arg_str(args, "source")?;
+
+            let existing = ctx
+                .get_json(&format!("/canvas/scenes/{}", seg(&scene_id)))
+                .await?;
+            let existing_doc: Value = existing
+                .get("doc_json")
+                .and_then(Value::as_str)
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(json!({}));
+            let format = existing_doc
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("mermaid")
+                .to_string();
+
+            let mut new_doc = json!({
+                "type": "otto-canvas",
+                "version": 1,
+                "format": format,
+                "source": source,
+            });
+            if let Some(sketch) = existing_doc.get("sketch") {
+                new_doc["sketch"] = sketch.clone();
+            }
+
+            ctx.put_json(&format!("/canvas/scenes/{}", seg(&scene_id)), &json!({ "doc": new_doc }))
+                .await?;
+
+            Ok(finalize(json!({ "ok": true, "format": format })))
         }
         // First-party feature reads (workflows / brokers / issues / swarm / vault /
         // repos / sessions / product / findings / usage / self-improvement). All
@@ -1250,6 +1413,80 @@ mod tests {
                 tool["name"]
             );
         }
+    }
+
+    #[test]
+    fn catalog_lists_the_canvas_write_tools() {
+        let cat = tool_catalog();
+        let names: Vec<&str> = cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"canvas_create_scene"), "catalog missing canvas_create_scene");
+        assert!(names.contains(&"canvas_update_scene"), "catalog missing canvas_update_scene");
+    }
+
+    #[tokio::test]
+    async fn canvas_create_scene_errors_without_title() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                    "params": { "name": "canvas_create_scene", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("title"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn canvas_create_scene_errors_on_bad_format() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+                    "params": { "name": "canvas_create_scene",
+                                 "arguments": { "title": "T", "format": "svg" } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("format"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn canvas_create_scene_errors_without_workspace() {
+        let mut ctx = test_ctx();
+        ctx.workspace_id = None;
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 13, "method": "tools/call",
+                    "params": { "name": "canvas_create_scene", "arguments": { "title": "T" } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("workspace"));
+    }
+
+    #[tokio::test]
+    async fn canvas_update_scene_errors_without_source() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 14, "method": "tools/call",
+                    "params": { "name": "canvas_update_scene", "arguments": { "scene_id": "s1" } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("source"), "got: {text}");
     }
 
     #[test]
