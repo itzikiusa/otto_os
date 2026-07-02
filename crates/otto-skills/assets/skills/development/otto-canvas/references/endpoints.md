@@ -60,11 +60,15 @@ The read-modify-write pattern for editing a scene:
 
 ## Canvas agent-assist (prompt → diagram blocks)
 
-These run a single headless agent turn and **return blocks without mutating any
-scene** — you insert the result and save it yourself. Both return `AssistResult`:
-`{ mermaid: string|null, nodes: object[], edges: object[], note: string }`. The
-agent returns EITHER a mermaid source (the common path) OR tier-2
-`{nodes,edges}` JSON.
+Both run a single headless agent turn and return `AssistResult`:
+`{ mermaid: string|null, d2?: string, excalidraw?: object, format: string, nodes: object[], edges: object[], note: string }`.
+The agent returns EITHER a mermaid/D2 source (the common path, per the scene's
+`format`) OR an Excalidraw skeleton OR tier-2 `{nodes,edges}` JSON.
+`/canvas/scenes/{id}/assist` EDITS the scene's backing file (`canvas.mermaid` /
+`canvas.json` / `canvas.d2`) and **commits it** as the scene's new `doc_json` —
+the result is already persisted, no separate save needed. `/canvas/assist/preview`
+(no scene) returns the blocks WITHOUT persisting anything — you insert + save it
+yourself.
 
 `mode` is an optional hint: `auto` (default) | `sequence` | `flow` | `uml` |
 `nodes`.

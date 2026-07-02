@@ -1931,7 +1931,7 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 | 104 | GET /api/v1/canvas/scenes/{id} | ws viewer | — | CanvasScene (full `doc_json`) |
 | 105 | PUT /api/v1/canvas/scenes/{id} | ws editor | `{title?, doc?, thumbnail?}` | CanvasScene (partial; omitted fields unchanged) |
 | 106 | DELETE /api/v1/canvas/scenes/{id} | ws editor | — | 204 |
-| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, nodes, edges, note}` (one agent turn; does not mutate the scene) |
+| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits + commits the scene's backing file) |
 | 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
 
 ## Discovery Chat

@@ -5,18 +5,21 @@
 </script>
 
 <script lang="ts">
-  // The Mermaid canvas: a live preview of the scene's `.mermaid` SOURCE PLUS a full
-  // editor. You edit the diagram three ways, all writing the SAME `canvas.mermaid`
-  // file: (1) the agent via "Ask AI", (2) directly in the Code panel (the Mermaid
-  // source, with live preview), (3) — nothing is converted to Excalidraw; this stays
-  // Mermaid. Mermaid's own renderer draws the full rich spectrum (subgraphs, classDef
-  // colours, every shape). Pan/zoom the preview.
+  // The D2 canvas: a live preview of the scene's `.d2` SOURCE PLUS a full editor.
+  // Modeled 1:1 on MermaidCanvas.svelte (same pan/zoom surface, zoombar, code
+  // pane, live canvasDocBus effect, save guard against scene switches) — the
+  // only real differences are the renderer (renderD2, WASM/lazy-loaded) and a
+  // Sketch-mode pill whose state rides along in the doc as `sketch`. You edit
+  // the diagram three ways, all writing the SAME `canvas.d2` file: (1) the agent
+  // via "Ask AI", (2) directly in the Code panel, (3) — nothing is converted to
+  // Mermaid/Excalidraw; this stays D2. Pan/zoom the preview.
   import { onMount, onDestroy, tick } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
-  import { renderMermaid } from './mermaid';
+  import { renderD2 } from './d2';
   import { svgToPngDownload, copyText } from './export';
   import type { CanvasDoc, CanvasFormat } from './types';
   import Icon from '../../lib/components/Icon.svelte';
@@ -35,9 +38,10 @@
   let content = $state<HTMLDivElement | null>(null);
   let svgHtml = $state('');
   let renderError = $state('');
-  let notMermaid = $state(false);
+  let notD2 = $state(false);
   let generating = $state(false);
   let codeOpen = $state(false);
+  let sketch = $state(false);
 
   // Pan/zoom transform.
   let scale = $state(1);
@@ -48,14 +52,17 @@
   let natH = 600;
   let renderToken = 0;
   let lastRendered = '';
+  let lastRenderedSketch = false;
+  let lastRenderedDark = false;
 
   const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-  // The agent + the user share ONE file. Save the edited Mermaid SOURCE to THIS
-  // scene (guarded: if the scene switched, drop the stale save).
-  async function saveMermaid(value: string): Promise<void> {
+  // The agent + the user share ONE file. Save the edited D2 SOURCE (+ the sketch
+  // toggle, which rides along in the doc) to THIS scene (guarded: if the scene
+  // switched, drop the stale save).
+  async function saveD2(value: string): Promise<void> {
     if (canvas.currentId !== sceneId || !sceneId) return;
-    const doc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: value };
+    const doc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: value, sketch };
     canvas.source = value; // drives the live preview re-render
     canvas.rawDoc = doc;
     try {
@@ -70,31 +77,36 @@
   let codeTimer: ReturnType<typeof setTimeout> | null = null;
   function onCode(value: string): void {
     if (codeTimer) clearTimeout(codeTimer);
-    codeTimer = setTimeout(() => void saveMermaid(value), 500);
+    codeTimer = setTimeout(() => void saveD2(value), 500);
+  }
+  function toggleSketch(): void {
+    sketch = !sketch;
+    void saveD2(canvas.source ?? '');
   }
 
-  /** Render the current source to SVG (Mermaid native) and auto-fit. */
+  /** Render the current source to SVG (D2 WASM) and auto-fit. */
   async function renderNow(src: string): Promise<void> {
     const token = ++renderToken;
     const text = (src ?? '').trim();
     if (!text) {
       svgHtml = '';
       renderError = '';
-      notMermaid = false;
+      notD2 = false;
       lastRendered = '';
       return;
     }
     // Guard: a scene whose source is Excalidraw JSON (e.g. mislabelled) is not
-    // Mermaid — show a clear message instead of a raw mermaid parse error.
+    // D2 — show a clear message instead of a raw D2 parse error.
     if (text.startsWith('{') && /"(type|elements)"\s*:/.test(text.slice(0, 80))) {
-      notMermaid = true;
+      notD2 = true;
       svgHtml = '';
       renderError = '';
       return;
     }
-    notMermaid = false;
-    if (text === lastRendered) return; // nothing changed
-    const out = await renderMermaid(`cv-${sceneId ?? 'x'}-${token}`, text);
+    notD2 = false;
+    const dark = ui.resolvedScheme === 'dark';
+    if (text === lastRendered && sketch === lastRenderedSketch && dark === lastRenderedDark) return; // nothing changed
+    const out = await renderD2(`cv-${sceneId ?? 'x'}-${token}`, text, { sketch, dark });
     if (token !== renderToken) return; // superseded
     if (out.error || !out.svg) {
       renderError = out.error || 'Could not render the diagram';
@@ -102,6 +114,8 @@
     }
     renderError = '';
     lastRendered = text;
+    lastRenderedSketch = sketch;
+    lastRenderedDark = dark;
     svgHtml = out.svg;
     await tick();
     sizeSvg();
@@ -208,11 +222,11 @@
   }
   async function copySource(): Promise<void> {
     const ok = await copyText(canvas.source ?? '');
-    if (ok) toasts.success('Copied', 'Mermaid source copied to clipboard.');
+    if (ok) toasts.success('Copied', 'D2 source copied to clipboard.');
     else toasts.error('Copy failed', 'Could not copy to the clipboard.');
   }
 
-  /** Ask the agent to edit this scene's .mermaid source. */
+  /** Ask the agent to edit this scene's .d2 source. */
   export async function generate(prompt: string): Promise<void> {
     const p = prompt.trim();
     if (!p || generating) return;
@@ -221,13 +235,13 @@
     canvas.pushConvo('user', p);
     try {
       const res = await canvas.assist(p, 'flow');
-      const src = res.mermaid ?? '';
+      const src = res.d2 ?? '';
       if (!src.trim()) {
         canvas.pushConvo('assistant', res.note || 'No diagram was produced.');
         toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
         return;
       }
-      canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'mermaid', source: src });
+      canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'd2', source: src, sketch });
       canvas.pushConvo('assistant', res.note || 'Updated the canvas.');
       toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
       void canvas.refreshSession();
@@ -242,22 +256,29 @@
     return generating;
   }
 
-  // Live edits: translate the canvas_updated push into the store.
+  // Live edits: translate the canvas_updated push into the store (+ pick up a
+  // sketch-flag change made by the agent, e.g. a follow-up "sketchier" request).
   $effect(() => {
     const _t = canvasDocBus.tick;
     if (!_t || canvasDocBus.sceneId !== canvas.currentId) return;
     const doc = canvasDocBus.doc as CanvasDoc | null;
-    if (doc && typeof doc.source === 'string') canvas.ingestDoc(doc);
+    if (doc && typeof doc.source === 'string') {
+      canvas.ingestDoc(doc);
+      if (typeof doc.sketch === 'boolean') sketch = doc.sketch;
+    }
   });
 
-  // Render whenever the source changes (open / generate / live / code edit).
+  // Render whenever the source, sketch toggle, or app theme changes.
   $effect(() => {
     const src = canvas.source; // dependency
+    const _sk = sketch; // dependency
+    const _scheme = ui.resolvedScheme; // dependency
     void renderNow(src ?? '');
   });
 
   onMount(() => {
     liveId = canvas.currentId;
+    sketch = (canvas.rawDoc as CanvasDoc | null)?.sketch ?? false;
   });
   onDestroy(() => {
     if (codeTimer) clearTimeout(codeTimer);
@@ -270,12 +291,12 @@
     {#if codeOpen && !readonly}
       <aside class="code-pane">
         <div class="code-head">
-          <span><Icon name="branch" size={13} /> Mermaid source</span>
+          <span><Icon name="layers" size={13} /> D2 source</span>
           <span class="code-hint">edits save + render live</span>
         </div>
         <div class="code-body">
           <CodeEditor
-            path="canvas.mermaid"
+            path="canvas.d2"
             root=""
             content={canvas.source ?? ''}
             readOnly={false}
@@ -308,19 +329,19 @@
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
             {@html svgHtml}
           </div>
-        {:else if notMermaid}
+        {:else if notD2}
           <div class="empty">
             <Icon name="shapes" size={28} />
             <p class="lead">This canvas holds Excalidraw content</p>
-            <p class="hint">It's labelled Mermaid but contains an Excalidraw scene. Create a new
+            <p class="hint">It's labelled D2 but contains an Excalidraw scene. Create a new
               <strong>Excalidraw</strong> canvas to edit those shapes.</p>
           </div>
         {:else if !renderError}
           <div class="empty">
-            <Icon name="branch" size={28} />
-            <p class="lead">Mermaid diagram</p>
+            <Icon name="layers" size={28} />
+            <p class="lead">D2 diagram</p>
             <p class="hint">Describe it in <strong>Ask AI</strong>, or open <strong>Code</strong> to
-              edit the Mermaid yourself — both write the same diagram and render here live.</p>
+              edit the D2 yourself — both write the same diagram and render here live.</p>
           </div>
         {/if}
 
@@ -332,13 +353,21 @@
       </div>
 
       <div class="mode-bar">
-        <span class="mode-chip"><Icon name="branch" size={12} /> Mermaid</span>
+        <span class="mode-chip"><Icon name="layers" size={12} /> D2</span>
         {#if !readonly}
+          <button
+            class="sketch-toggle"
+            class:on={sketch}
+            onclick={toggleSketch}
+            title="Hand-drawn sketch style"
+          >
+            <Icon name="edit" size={12} /> Sketch
+          </button>
           <button
             class="code-toggle"
             class:on={codeOpen}
             onclick={() => (codeOpen = !codeOpen)}
-            title="Edit the Mermaid source"
+            title="Edit the D2 source"
           >
             <Icon name="edit" size={12} /> Code
           </button>
@@ -514,6 +543,7 @@
     font-weight: 600;
     box-shadow: var(--shadow, 0 2px 8px rgba(0, 0, 0, 0.12));
   }
+  .sketch-toggle,
   .code-toggle {
     display: inline-flex;
     align-items: center;
@@ -528,6 +558,8 @@
     cursor: pointer;
     box-shadow: var(--shadow, 0 2px 8px rgba(0, 0, 0, 0.12));
   }
+  .sketch-toggle:hover,
+  .sketch-toggle.on,
   .code-toggle:hover,
   .code-toggle.on {
     border-color: var(--accent);

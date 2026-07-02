@@ -17,8 +17,8 @@
 //! instead of hand-computing coordinates for dozens of nodes. The UI renders the
 //! source into real, editable Excalidraw elements.
 //!
-//! The reply is a FALLBACK source: if the agent printed a ```d2 /```mermaid /
-//! ```json block instead of editing the file (or in the offline E2E stub, where
+//! The reply is a FALLBACK source: if the agent printed a fenced `d2`/`mermaid`/
+//! `json` block instead of editing the file (or in the offline E2E stub, where
 //! no agent runs), we take the source from the reply and write it into the file
 //! so the next resumed turn sees it.
 //!

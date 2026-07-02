@@ -118,7 +118,8 @@ class CanvasStore {
       }
       this.rawDoc = doc;
       this.source = typeof doc?.source === 'string' ? doc.source : null;
-      this.format = doc?.format === 'excalidraw' ? 'excalidraw' : 'mermaid';
+      this.format =
+        doc?.format === 'excalidraw' ? 'excalidraw' : doc?.format === 'd2' ? 'd2' : 'mermaid';
       this.provider = (row as { provider?: string }).provider ?? 'claude';
       this.convo = [];
       this.sessionId = row.session_id;

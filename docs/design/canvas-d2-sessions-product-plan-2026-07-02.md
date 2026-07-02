@@ -268,9 +268,11 @@
   cargo build --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
   cd ui && npm run check && npm run build
   cargo build --release -p ottod   # for OTTO_E2E_BIN
-  OTTO_E2E_BIN=$PWD/../target/release/ottod OTTO_SECRETS=file OTTO_E2E_SLOT=3 npm run test:e2e
+  # RELEVANT specs only (user directive: never the full suite — overkill):
+  OTTO_E2E_BIN=$PWD/../target/release/ottod OTTO_SECRETS=file OTTO_E2E_SLOT=3 \
+    npx playwright test canvas desktop-canvas-panel product-tabs product-mobile product-mockups product-refine discovery-chat
   ```
-  (Slot 3 avoids the default 7799 + any concurrent agent runs; kill stale daemons from `.auth-3/daemon.json` if a previous run crashed.) ALL specs green. Commit.
+  (Slot 3 avoids the default 7799 + any concurrent agent runs; kill stale daemons from `.auth-3/daemon.json` if a previous run crashed.) The listed specs = every spec whose surface this branch touches (canvas module, session right panel, product chrome/tabs incl. ListPane adopters). All of them green. Commit.
 
 ### Task E — Review, merge, deploy
 

@@ -6,7 +6,8 @@
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { CanvasSceneSummary, CanvasFormat } from './types';
+  import { api } from '../../lib/api/client';
+  import type { CanvasSceneSummary, CanvasFormat, CanvasScene } from './types';
 
   interface Props {
     /** Create a brand-new scene of the chosen format (the page opens it). */
@@ -91,6 +92,32 @@
     }
   }
 
+  /** Clone a scene's full doc (fetched fresh — the summary row has no `doc_json`)
+   *  into a new scene titled "<title> (copy)", in the SAME section and workspace
+   *  as the original (Canvas lists scenes across all workspaces, so this can
+   *  differ from the currently-active one). */
+  async function duplicate(e: MouseEvent, s: CanvasSceneSummary): Promise<void> {
+    e.stopPropagation();
+    try {
+      const row = await api.get<CanvasScene>(`/canvas/scenes/${s.id}`);
+      let doc: unknown;
+      try {
+        doc = JSON.parse(row.doc_json);
+      } catch {
+        doc = undefined;
+      }
+      await api.post(`/workspaces/${row.workspace_id}/canvas/scenes`, {
+        title: `${row.title} (copy)`,
+        doc,
+        section: row.section,
+      });
+      await canvas.loadScenes().catch(() => {});
+      toasts.success('Scene duplicated', `${row.title} (copy)`);
+    } catch (err) {
+      toasts.error('Duplicate failed', err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function remove(e: MouseEvent, s: CanvasSceneSummary): Promise<void> {
     e.stopPropagation();
     const ok = await confirmer.ask(`Delete scene "${s.title}"? This can't be undone.`, {
@@ -123,6 +150,10 @@
         <button onclick={() => create('mermaid')}>
           <Icon name="branch" size={15} />
           <span><strong>Mermaid diagram</strong><small>Auto-rendered, any type</small></span>
+        </button>
+        <button onclick={() => create('d2')}>
+          <Icon name="layers" size={15} />
+          <span><strong>D2 diagram</strong><small>Architecture, sequence &amp; SQL tables</small></span>
         </button>
       </div>
     {/if}
@@ -183,6 +214,9 @@
                 </button>
                 <button onclick={(e) => move(e, s)} aria-label="Move to section" title="Move to section">
                   <Icon name="folder" size={13} />
+                </button>
+                <button onclick={(e) => duplicate(e, s)} aria-label="Duplicate" title="Duplicate">
+                  <Icon name="copy" size={13} />
                 </button>
                 <button class="del" onclick={(e) => remove(e, s)} aria-label="Delete" title="Delete">
                   <Icon name="trash" size={13} />
