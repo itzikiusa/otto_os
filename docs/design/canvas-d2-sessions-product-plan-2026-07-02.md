@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Worktree: `/Users/itziklavon/otto_os-worktrees/canvas-d2-product`, branch `feat/canvas-d2-product-polish`. ALL work happens there.
-- Migrations are append-only; new migration number is **0092** (provisional — renumber above main's max at merge).
+- Migrations are append-only; new migration number is **0093** (0092 was claimed on local main by the workflows live-run merge on 2026-07-02; re-verify max at merge).
 - Contracts first: any endpoint/WS change updates `docs/contracts/api.md` + `docs/contracts/ws.md` + `ui/src/lib/api/types.ts` (or `ui/src/modules/canvas/types.ts`) in the same task.
 - Match surrounding code idiom (dense doc comments, logical CSS properties, tokens, no hardcoded colors except existing error red).
 - Desktop-only Playwright specs MUST be named `desktop-*.spec.ts` (config `testMatch`); all other specs run on 5 mobile/tablet projects.
@@ -165,7 +165,7 @@
 ### Task B — Session canvas references (migration + routes + events + MCP + panel)
 
 **Files:**
-- Create: `crates/otto-state/migrations/0092_canvas_scene_refs.sql`
+- Create: `crates/otto-state/migrations/0093_canvas_scene_refs.sql`
 - Modify: `crates/otto-state/src/canvas.rs` (repo methods + `CanvasRepo::delete` cascade)
 - Modify: `crates/otto-canvas/src/http.rs` (3 new routes; `CanvasCtx` unchanged — repo already exposed) — **plus** resolve session→workspace via a new small trait method `sessions_ws()` on `CanvasCtx` OR (simpler, chosen) register the routes in `crates/otto-server/src/canvas_assist.rs`-style module `crates/otto-server/src/canvas_refs.rs` where `ServerCtx` has sessions + canvas_repo + events. **Decision: new module `canvas_refs.rs` in otto-server**, routes registered in `modules.rs` next to the assist routes (:520-527).
 - Modify: `crates/otto-core/src/event.rs` (+`CanvasRefsChanged { workspace_id, session_id }`)
@@ -190,7 +190,7 @@
 
 **Steps:**
 
-- [ ] **B1: Migration 0092** — exactly the design-doc SQL (table + `idx_canvas_refs_session` index). `cargo build -p otto-state` (sqlx migrate embeds).
+- [ ] **B1: Migration 0093** — exactly the design-doc SQL (table + `idx_canvas_refs_session` index). `cargo build -p otto-state` (sqlx migrate embeds).
 - [ ] **B2: Repo methods (TDD).** Inline `#[cfg(test)]` in `otto-state/src/canvas.rs` following the crate's existing in-memory-pool test pattern: create scene → add_ref (twice, idempotent) → list_refs_for_session returns 1 summary → remove_ref → empty. Extend `CanvasRepo::delete` with `DELETE FROM canvas_scene_refs WHERE scene_id = ?` before the row delete. ALSO here (so Task C never touches otto-state): add `pub format: Option<String>` to `CanvasSceneSummary`, populated via `json_extract(doc_json,'$.format')` in ALL summary SELECTs (`list_for_workspace`, `list_for_story`, `list_for_user`, `list_refs_for_session`), mirrored in `ui/src/modules/canvas/types.ts` (`format?: CanvasFormat`). Run `cargo test -p otto-state canvas` → PASS. Commit.
 - [ ] **B3: Routes module `canvas_refs.rs`.** Handlers resolve the session via `ctx.manager.get_session(&sid)` (or the sessions repo — mirror how `attach-product` at `modules.rs:4805` loads a session), take its `workspace_id`, role-check Viewer (GET) / Editor (mutations) via `crate::auth::require_ws_role`, verify the scene exists and (on POST) belongs to the same workspace → 400 otherwise, call repo, broadcast `Event::CanvasRefsChanged`. Register in `modules.rs` near the canvas assist routes. Policy: add a `/canvas-refs` match arm mapping to `Require(Canvas, View|Edit)` — insert BEFORE any generic `/sessions/` rule so it wins; run `cargo test -p otto-server policy_coverage` to prove coverage. Integration test `canvas_refs_api.rs` with the minimal-router harness (in-memory sqlite + `sqlx::migrate!` + synthetic AuthUser): GET empty → POST → GET has 1 → cross-workspace POST 400/404 → DELETE → GET empty. Commit.
 - [ ] **B4: Event plumbing.** `event.rs` variant + `ws_events.rs` delivery (copy the `CanvasUpdated` arm — workspace-member scoped). `docs/contracts/ws.md`: add `canvas_updated`, `canvas_session_started`, `mockup_updated`, `mockup_session_started` (existing, undocumented) AND `canvas_refs_changed` to the catalog; fix the "16 variants" count. Commit.
@@ -209,7 +209,8 @@
   - Empty state via shared `EmptyState.svelte` ("No canvases referenced — attach one or ask the agent to draw").
 - [ ] **B8: Shell wiring.** `ui.svelte.ts`: extend `RightTab` union with `'canvas'`. `RightPanel.svelte`: tab entry `{ id: 'canvas', icon: 'shapes', label: 'Canvas' }` + body branch `<CanvasPanel />`. `events.svelte.ts`: add `canvasRefsBus` (tick + sessionId, modeled on `CanvasDocBus` :192-205) + dispatch branch for `canvas_refs_changed`. `SessionView.svelte` ⋯ menu: "Canvas" item → agent session: `ui.openRight('canvas')`; other kinds: navigate to canvas module. Commit.
 - [ ] **B9: Contracts.** `api.md`: new numbered rows for the 3 refs endpoints under the Canvas Studio section + note on MCP write tools; fix stale #105/#107 notes (update req fields `provider/section/story_id`; assist DOES commit). `ui/src/modules/canvas/types.ts` — no new DTOs needed (`CanvasSceneSummary` reused); ensure `api.md` documents that. Commit `feat(canvas): session canvas references — refs table, routes, MCP write tools, session panel`.
-- [ ] **B10: Gates.** `cargo build/test/clippy` workspace + `npm run check` → green.
+- [ ] **B10: Workflow-engine d2 consistency.** `crates/otto-server/src/workflow_engine.rs` (~:2588) has an independent "canvas" workflow node whose `mode` param maps to an output file extension, special-casing only `"excalidraw"` (everything else → `.mmd`). Add a `"d2"` arm → `.d2` extension so `mode: "d2"` produces a correctly-named file (Task A flagged this). Extend the nearest existing test of that mapping if one exists; otherwise add a minimal unit test for the extension choice.
+- [ ] **B11: Gates.** `cargo build/test/clippy` workspace + `npm run check` → green.
 
 ### Task C — Product page UX refresh (chrome consolidation, shared idioms)
 
@@ -278,7 +279,7 @@
 
 - [ ] **E1: Requirements audit** — walk R1–R8 against the diff; fix gaps.
 - [ ] **E2: Code review** (superpowers:requesting-code-review) on `git diff main...HEAD`; fix findings; re-run gates.
-- [ ] **E3: Merge.** Sync `main` (other agents may have merged): `git fetch . && git -C <mainrepo> log --oneline -3`; check `crates/otto-state/migrations/` max on main — if ≥0092 exists, renumber ours to max+1 (single commit `chore: renumber migration NNNN→MMMM`). Merge branch → local main (merge commit, no push). Re-run `cargo test --workspace` + `npm run check` on merged main.
+- [ ] **E3: Merge.** Sync `main` (other agents may have merged): `git fetch . && git -C <mainrepo> log --oneline -3`; check `crates/otto-state/migrations/` max on main — if ≥0093 exists, renumber ours to max+1 (single commit `chore: renumber migration NNNN→MMMM`). Merge branch → local main (merge commit, no push). Re-run `cargo test --workspace` + `npm run check` on merged main.
 - [ ] **E4: Deploy.** From the MAIN checkout: `mkdir -p apps/desktop/src-tauri/binaries; PATH="$HOME/.hermes/node/bin:$PATH" ./deploy.sh`; verify `curl -s http://127.0.0.1:7700/api/v1/health`, app relaunched, daemon PID stable past the supervisor window (deploy.sh verifies). Sanity: open a D2 scene in the running app via API seed if feasible.
 
 ## Self-review
