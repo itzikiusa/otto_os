@@ -665,6 +665,19 @@ ran `;`-separated scripts). Two new flags: `cancel` (server-side per-query cance
 client-side-only when false) and `explain` (`true` everywhere except Redis, which
 has no plan surface — the UI hides the Explain button there).
 
+**PostgreSQL engine** (`ConnectionKind`/`DbEngine` `"postgres"`, default port 5432).
+First-class parity with MySQL: schema browse, query, streaming export/import, ERD,
+JOIN builder, index-first completion. Capabilities: `{ sql:true, joins:true,
+transactions:false, multi_statement:true, cancel:true, explain:true,
+default_port:5432, query_language:"sql", schema_levels:["Schema","Table","Column"] }`.
+Cancel is `pg_cancel_backend(pid)` on a separate connection; `explain` uses
+`EXPLAIN (FORMAT JSON)`. A Postgres connection is scoped to one database and
+browsed **by schema** (`pg_*`/`information_schema` hidden, `public` first), so the
+tree's top level is the database's schemas and the active-database selector maps to
+`SET search_path` — the `db:<schema>` node segment carries the schema name, keeping
+every downstream node path identical in shape to MySQL's. Import maps
+`jdbc:postgresql://` (DataGrip/DBeaver) to this engine.
+
 ## DB Assistant — file-backed agent (`/connections/{id}/db/assist`, `/db-assist/{aid}/query`)
 
 A managed, resumable, **file-backed** database agent that replaces the old

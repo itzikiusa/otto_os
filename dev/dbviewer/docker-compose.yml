@@ -6,6 +6,7 @@
 #   Redis 8.8        -> 127.0.0.1:16379   (auth: ottoredis)
 #   MongoDB 8.2      -> 127.0.0.1:17017   (user: otto / pass: ottopw,  replica set rs0)
 #   ClickHouse 26.4  -> 127.0.0.1:18123 (http) / 19000 (native)  (user: otto / pass: ottopw)
+#   PostgreSQL 17    -> 127.0.0.1:15432   (user: otto / pass: ottopw,  db shopdb)
 #
 # Bring up:   docker compose -f dev/dbviewer/docker-compose.yml up -d
 # Tear down:  docker compose -f dev/dbviewer/docker-compose.yml down -v
@@ -95,6 +96,23 @@ services:
       - ./seed/clickhouse:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:17
+    container_name: otto-dbv-postgres
+    environment:
+      POSTGRES_USER: otto
+      POSTGRES_PASSWORD: ottopw
+      POSTGRES_DB: shopdb
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - ./seed/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U otto -d shopdb"]
       interval: 5s
       timeout: 5s
       retries: 20

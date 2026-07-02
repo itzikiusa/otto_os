@@ -17,6 +17,7 @@ pub enum Engine {
     Redis,
     Mongodb,
     Clickhouse,
+    Postgres,
 }
 
 impl Engine {
@@ -26,6 +27,7 @@ impl Engine {
             Engine::Redis => "redis",
             Engine::Mongodb => "mongodb",
             Engine::Clickhouse => "clickhouse",
+            Engine::Postgres => "postgres",
         }
     }
 
@@ -37,6 +39,7 @@ impl Engine {
             ConnectionKind::Redis => Some(Engine::Redis),
             ConnectionKind::Mongodb => Some(Engine::Mongodb),
             ConnectionKind::Clickhouse => Some(Engine::Clickhouse),
+            ConnectionKind::Postgres => Some(Engine::Postgres),
             ConnectionKind::Ssh | ConnectionKind::Custom => None,
         }
     }
@@ -47,6 +50,7 @@ impl Engine {
             Engine::Redis => 6379,
             Engine::Mongodb => 27017,
             Engine::Clickhouse => 8123,
+            Engine::Postgres => 5432,
         }
     }
 }
@@ -490,6 +494,8 @@ pub enum QueryHandle {
     MysqlConnId(u64),
     /// ClickHouse `query_id` set on the request → `KILL QUERY WHERE query_id=…`.
     ClickhouseQueryId(String),
+    /// PostgreSQL backend PID (from `pg_backend_pid()`) → `pg_cancel_backend(pid)`.
+    PostgresBackendPid(i32),
 }
 
 /// A slot a driver fills with the [`QueryHandle`] for an in-flight query as soon
@@ -936,7 +942,7 @@ fn has_word_then_digit(haystack: &str, word: &str) -> bool {
 /// input is a write if *any* part is a write (or unrecognised).
 pub fn statement_is_write(engine: Engine, statement: &str) -> bool {
     match engine {
-        Engine::Mysql | Engine::Clickhouse => sql_is_write(statement),
+        Engine::Mysql | Engine::Clickhouse | Engine::Postgres => sql_is_write(statement),
         Engine::Redis => redis_is_write(statement),
         // Mongo's `run` accepts JSON commands / `db.coll.op(...)` shorthand whose
         // surface is large and easy to mis-parse; treat everything except a

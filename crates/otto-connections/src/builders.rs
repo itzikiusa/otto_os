@@ -255,6 +255,42 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
             )?;
             Ok((spec, warn_argv))
         }
+        ConnectionKind::Postgres => {
+            let host = match opt_str(p, "host") {
+                Some(h) => h,
+                None => return Ok((login_shell(), false)),
+            };
+            let mut args = vec!["-h".to_string(), host.to_string()];
+            if let Some(port) = opt_port(p, "port", "postgres")? {
+                args.push("-p".into());
+                args.push(port.to_string());
+            }
+            if let Some(user) = opt_str(p, "user") {
+                args.push("-U".into());
+                args.push(user.into());
+            }
+            if let Some(db) = opt_str(p, "db").or_else(|| opt_str(p, "database")) {
+                args.push("-d".into());
+                args.push(db.into());
+            }
+            let mut env = Vec::new();
+            if let Some(pw) = secret {
+                // psql reads the password from PGPASSWORD (never argv — it would
+                // leak in the process list).
+                env.push(("PGPASSWORD".to_string(), pw.to_string()));
+            }
+            let spec = maybe_wrap_ssh_tunnel(
+                p,
+                CommandSpec {
+                    program: "psql".into(),
+                    args,
+                    cwd: None,
+                    env,
+                },
+                "postgres",
+            )?;
+            Ok((spec, false))
+        }
         ConnectionKind::Custom => {
             let template = match opt_str(p, "command_template") {
                 Some(t) => t,
@@ -424,6 +460,33 @@ mod tests {
     #[test]
     fn mysql_missing_host() {
         let c = conn(ConnectionKind::Mysql, json!({"user":"root"}));
+        let (spec, _) = build_command(&c, None).unwrap();
+        assert_eq!(spec.args, vec!["-l"], "missing host → login shell");
+    }
+
+    #[test]
+    fn postgres_password_via_env_never_argv() {
+        let c = conn(
+            ConnectionKind::Postgres,
+            json!({"host":"127.0.0.1","port":15432,"user":"otto","db":"shopdb"}),
+        );
+        let (spec, warn) = build_command(&c, Some("s3cret")).unwrap();
+        assert_eq!(spec.program, "psql");
+        assert_eq!(
+            spec.args,
+            vec!["-h", "127.0.0.1", "-p", "15432", "-U", "otto", "-d", "shopdb"]
+        );
+        assert_eq!(spec.env, vec![("PGPASSWORD".to_string(), "s3cret".to_string())]);
+        assert!(!warn);
+        assert!(
+            !spec.args.iter().any(|a| a.contains("s3cret")),
+            "password must never appear in argv"
+        );
+    }
+
+    #[test]
+    fn postgres_missing_host() {
+        let c = conn(ConnectionKind::Postgres, json!({"user":"otto"}));
         let (spec, _) = build_command(&c, None).unwrap();
         assert_eq!(spec.args, vec!["-l"], "missing host → login shell");
     }

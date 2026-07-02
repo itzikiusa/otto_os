@@ -882,7 +882,7 @@ impl DbViewerService {
         let engine = Engine::from_kind(conn.kind)
             .ok_or_else(|| "connection is not a browsable database".to_string())?;
         let req = match engine {
-            Engine::Mysql | Engine::Clickhouse => QueryRequest {
+            Engine::Mysql | Engine::Clickhouse | Engine::Postgres => QueryRequest {
                 statement: format!("EXPLAIN {sql}"),
                 node: node.map(str::to_string),
                 ..QueryRequest::default()
