@@ -2468,40 +2468,62 @@ async fn execute_node(
             // downstream "create PR" step is error-skipped unless the review passed.
             let require_pass = p.get("require_pass").and_then(Value::as_bool).unwrap_or(false);
             // Which repo(s)/worktree(s)/base(s) to review — (repo_id, worktree,
-            // want_base, label):
+            // want_base, label), in priority order:
             //
-            // 1. An EXPLICIT target (node params or an upstream-published
-            //    reference in the input) wins — the classic single-repo path.
-            // 2. Otherwise the run's repos registry (the declared
-            //    branches/worktrees, source+destination) supplies one target
-            //    per valid entry — a run declaring several repos reviews all
-            //    of them, aggregated below.
-            // 3. Otherwise one implicit target from the run context (design
-            //    §B resilience: working_directory/run_cwd → registered repo).
-            let explicit = p.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
-                || p.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
-                || input.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
-                || input.get("worktree").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
+            // 1. NODE params name a target → the classic single-repo path.
+            // 2. The input carries a published `repos[]` array (a multi-repo
+            //    review/loop handing its full set forward) → one target each,
+            //    so a chained review re-reviews EVERY repo, not just the
+            //    first-mirrored one.
+            // 3. The input carries a published single `worktree` reference →
+            //    single target (an upstream step handing off the exact place
+            //    it worked).
+            // 4. The run's repos registry (the declared branches/worktrees,
+            //    source+destination) → one target per valid entry.
+            // 5. One implicit target from the run context (design §B
+            //    resilience: working_directory/run_cwd → registered repo).
+            //
+            // A bare `input.repo_id`/`working_directory` never counts as a
+            // target by itself — run-start seeding puts those into the input
+            // of every declared run, and counting them would permanently mask
+            // the multi-entry paths.
+            let params_explicit = p.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
+                || p.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some();
+            let input_repo_targets: Vec<(String, String, Option<String>, String)> = input
+                .get("repos")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| {
+                            let rid = t.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())?;
+                            let wt = t.get("worktree").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())?;
+                            let base = t.get("base").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                            Some((rid.to_string(), expand_tilde(wt), base, String::new()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let input_worktree_ref = input.get("worktree").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
                 || input.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some();
-            let declared = env.files.repos();
-            // EVERY declared entry failed to resolve → fail with the reasons.
-            // Falling through to the run-cwd path here would review whatever
-            // happens to be checked out — and an empty diff there reads as a
-            // false-green "score 100" on a run whose target never resolved.
-            if !explicit {
+            let mut targets: Vec<(String, String, Option<String>, String)> = Vec::new();
+            if !params_explicit && !input_repo_targets.is_empty() {
+                targets = input_repo_targets;
+            } else if !params_explicit && !input_worktree_ref {
+                // Declarations: EVERY entry failed to resolve → fail with the
+                // reasons. Falling through to the run-cwd path would review
+                // whatever happens to be checked out — and an empty diff there
+                // reads as a false-green "score 100" on a run whose declared
+                // target never resolved.
+                let declared = env.files.repos();
                 if let Some(msg) = crate::workflow_context::all_declared_errored(&declared) {
                     return Err(otto_core::Error::Invalid(format!(
                         "review_run: no declared repos[] entry resolved — {msg}"
                     )));
                 }
-            }
-            let registry: Vec<crate::workflow_context::RepoEntry> = declared
-                .into_iter()
-                .filter(|e| e.error.is_none() && e.repo_id.is_some() && e.worktree.is_some())
-                .collect();
-            let mut targets: Vec<(String, String, Option<String>, String)> = Vec::new();
-            if !explicit && !registry.is_empty() {
-                for e in &registry {
+                for e in declared
+                    .iter()
+                    .filter(|e| e.error.is_none() && e.repo_id.is_some() && e.worktree.is_some())
+                {
                     targets.push((
                         e.repo_id.clone().unwrap_or_default(),
                         e.worktree.clone().unwrap_or_default(),
@@ -2511,7 +2533,8 @@ async fn execute_node(
                         e.repo.clone(),
                     ));
                 }
-            } else {
+            }
+            if targets.is_empty() {
                 // Resilient repo resolution (design §B): explicit repo_id wins,
                 // else derive it from the step's worktree_path / the run's
                 // working_directory / run_cwd against the workspace's registered
@@ -2647,21 +2670,27 @@ async fn execute_node(
             let mut logs: Vec<String> = Vec::new();
             let mut outs: Vec<serde_json::Map<String, Value>> = Vec::new();
             for (t_idx, (repo_id, worktree, want_base, label)) in targets.iter().enumerate() {
+                // Validate the repo exists (clear error if not); the review
+                // engine looks the repo up again by id internally. Its name
+                // labels the per-repo progress lines when the target didn't
+                // carry one (input-published references).
+                let label = match ctx.git_store.get_repo(repo_id).await {
+                    Ok(r) if label.is_empty() => r.name,
+                    Ok(_) => label.clone(),
+                    Err(e) => {
+                        let msg = format!("review_run [{label}]: repo: {e}");
+                        if multi {
+                            logs.push(msg);
+                            continue;
+                        }
+                        return Err(otto_core::Error::NotFound(msg));
+                    }
+                };
                 let tag = if multi {
                     format!(" [{} {}/{}]", label, t_idx + 1, targets.len())
                 } else {
                     String::new()
                 };
-                // Validate the repo exists (clear error if not); the review
-                // engine looks the repo up again by id internally.
-                if let Err(e) = ctx.git_store.get_repo(repo_id).await {
-                    let msg = format!("review_run{tag}: repo: {e}");
-                    if multi {
-                        logs.push(msg);
-                        continue;
-                    }
-                    return Err(otto_core::Error::NotFound(msg));
-                }
                 if progress.enabled() {
                     progress.post(format!(
                         "🔍 *{iter_label}{tag}* started (pass ≥ {threshold}){lens_txt}{prov_txt}{chk_txt}"
