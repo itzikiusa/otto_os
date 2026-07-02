@@ -1,0 +1,42 @@
+direction: right
+
+client: "Client"
+edge: "Edge/CDN"
+ingress: "Ingress"
+router: "Internal Router"
+service: "Service"
+dependency: "Dependency"
+
+client -> edge: "1. request"
+edge -> ingress: "2. forward"
+ingress -> router: "3. route"
+router -> service: "4. upstream call"
+service -> dependency: "5. dependency call"
+dependency -> service: "6. response/error"
+service -> router: "7. response"
+router -> ingress: "8. response maybe changed"
+ingress -> edge: "9. response"
+edge -> client: "10. final response"
+
+observations: |md
+  # Observed
+  - Symptom:
+  - Frequency:
+  - Known good path:
+  - Known bad path:
+|
+
+hypotheses: |md
+  # Hypotheses
+  - H1:
+  - H2:
+  - H3:
+|
+
+probes: |md
+  # Probes
+  - Add/request correlation ID at each hop
+  - Log status + body bytes written
+  - Compare upstream vs downstream response size
+  - Capture timeout/retry/connection reset metrics
+|
