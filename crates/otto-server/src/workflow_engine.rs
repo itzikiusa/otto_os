@@ -950,7 +950,8 @@ pub async fn run_workflow(
         // Snapshot when the (latest) attempt began: a step file the agent wrote
         // during a FAILED earlier attempt must not be mistaken for the winning
         // attempt's handoff (persist_step compares mtimes against this).
-        let mut attempt_started = std::time::SystemTime::now();
+        // Assigned at the top of every attempt; the loop runs at least once.
+        let mut attempt_started;
         let result = loop {
             attempt += 1;
             attempt_started = std::time::SystemTime::now();
