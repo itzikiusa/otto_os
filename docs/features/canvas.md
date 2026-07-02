@@ -246,10 +246,11 @@ dispatched in `ui/src/lib/events.svelte.ts`):
 |---|---|---|
 | `canvas_updated` | `{ workspace_id, scene_id, doc }` | Emitted **live** per file change while an agent edits, and once more with the committed result. The open editor re-renders the matching scene in place (no refetch) via `canvasDocBus`. |
 | `canvas_session_started` | `{ workspace_id, scene_id, session_id }` | Emitted at the **start** of an Ask-AI turn so the Assistant panel attaches the agent's shell immediately (sets the open scene's `session_id`). |
+| `canvas_refs_changed` | `{ workspace_id, session_id }` | Emitted when a scene is attached to or detached from an agent session (see §7a). The session's Canvas panel refetches its ref list via `canvasRefsBus`. |
 
-Both are workspace-scoped (carry `workspace_id`) and reach workspace members per
-the standard event scoping. (These two variants postdate the WS "full event
-catalog" prose in `docs/contracts/ws.md`; `event.rs` is authoritative.)
+All three are workspace-scoped (carry `workspace_id`) and reach workspace
+members per the standard event scoping. `docs/contracts/ws.md` now documents
+all three (`event.rs` remains authoritative for the payload shapes).
 
 ---
 
@@ -267,6 +268,30 @@ the body, runs a **throwaway** agent session (killed immediately after), and
 returns a Mermaid `AssistResult` — there's no scene to own a file, so nothing is
 persisted. See **[Discovery Chat](./discovery-chat.md)** and
 **[Product](./product.md)**.
+
+---
+
+## 7a. Session references
+
+A scene can be **attached to an agent session** so it appears in that
+session's right-panel **Canvas** tab (`CanvasPanel.svelte`) — a compact list
+with a format chip, an expandable inline SVG preview (Mermaid/D2, rendered
+from the live source; Excalidraw rows show a static "board" card instead of
+mounting the full editor), "Open in Canvas", and "Detach". The panel's footer
+can attach an existing scene or create a new blank Mermaid one (auto-referenced
++ opened). A session's ⋯ menu also has a **"Canvas…"** item.
+
+The backing table is `canvas_scene_refs` (`scene_id, session_id` — many-to-many;
+cascades when either the scene or the session is deleted). Routes live in
+`crates/otto-server/src/canvas_refs.rs` (needs `SessionManager` to resolve a
+session's workspace, so they're not in `otto-canvas`); see §8 for the endpoints
+and §6 for the `canvas_refs_changed` event.
+
+The first-party MCP tool server (`ottod mcp-tools`) exposes two write tools —
+`canvas_create_scene` and `canvas_update_scene` — the ONLY mutating tools in an
+otherwise read-only surface. Both run as the calling session's owner through
+the normal `WorkspaceRole::Editor` gate; `canvas_create_scene` also
+best-effort references the new scene to the calling session. See §8.
 
 ---
 
@@ -289,13 +314,9 @@ workspace from the scene row.
 | 106 | `DELETE /api/v1/canvas/scenes/{id}` | ws editor | delete → 204 |
 | 107 | `POST /api/v1/canvas/scenes/{id}/assist` | ws editor | one file-backed agent turn → `AssistResult`; **commits** the scene + broadcasts `CanvasUpdated` |
 | 108 | `POST /api/v1/canvas/assist/preview` | Canvas Edit | scene-less draw (`{prompt, mode?, workspace_id}`); throwaway session → `AssistResult` |
-
-> **Contract drift to be aware of.** The api.md row for #107 still reads "one agent
-> turn; does not mutate the scene" and lists the PUT body as `{title?, doc?,
-> thumbnail?}`. The shipping code (`canvas_assist.rs`) **does** commit the result to
-> `doc_json` and broadcast it, and `UpdateSceneReq` additionally accepts `provider`,
-> `section`, and `story_id` — this guide documents the code's real behavior. (Those
-> entries predate the file-backed redesign; the contract should be reconciled.)
+| 145 | `GET /api/v1/sessions/{sid}/canvas-refs` | ws viewer | scenes referenced by this session (§7a) |
+| 146 | `POST /api/v1/sessions/{sid}/canvas-refs` | ws editor | reference a scene (`{scene_id}`) → 204; idempotent; 404 if the scene isn't in the session's workspace |
+| 147 | `DELETE /api/v1/sessions/{sid}/canvas-refs/{scene_id}` | ws editor | detach a scene → 204 |
 
 `POST /api/v1/product/stories/{sid}/linked-canvases` is the related Product route
 that lists the Canvas scenes linked to a story.
@@ -328,6 +349,11 @@ that lists the Canvas scenes linked to a story.
   providers run fresh each turn.
 - **Mobile**: the Excalidraw board is read-only on a phone; the scene list
   collapses once a board is open. Tablets keep editing.
+- **Session references (§7a) are workspace-scoped, not cross-workspace.** A
+  session can only reference scenes in its OWN workspace — attaching one from
+  a different workspace is rejected (404). The Canvas panel's inline preview
+  renders Mermaid/D2 only; Excalidraw refs show a static card (no React mount
+  in the right panel).
 
 ---
 
