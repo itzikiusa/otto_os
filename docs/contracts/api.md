@@ -592,18 +592,21 @@ editor`; global connections: root).
 `ImportReq` = `{ local_path, format, table, batch_size?, confirm_write? }`.
 `format` is one of `csv`/`tsv` (first row = header) or `ndjson`/`json` (objects;
 columns are the union of keys, missing keys → `null`). `local_path` is a file on
-the daemon host (leading `~` expands to the daemon home). `table` must already
-exist. `batch_size` is rows per `INSERT` (default 500, clamped 1..=5000). The
-import parses the file, builds batched `INSERT … VALUES (…),(…)` with
-backtick-quoted identifiers and single-quote-escaped literals, and runs each
-batch **through the guarded `run` path** — so masking/history apply and a
-Prod/read-only connection refuses it unless `confirm_write` is set. The
+the daemon host (leading `~` expands to the daemon home). `table` is the target table
+(SQL — must already exist) or collection (MongoDB — created on first insert).
+`batch_size` is rows per batch (default 500, clamped 1..=5000). SQL engines
+(MySQL/ClickHouse/PostgreSQL) build batched `INSERT … VALUES (…),(…)` with
+engine-aware identifier quoting (backticks for MySQL/ClickHouse, double quotes
+for PostgreSQL) and single-quote-escaped literals, and run each batch **through
+the guarded `run` path** — so masking/history apply and a Prod/read-only
+connection refuses it unless `confirm_write` is set. MongoDB imports via
+`insertMany` batches (CSV/TSV cells type-coerced: numbers/bools/null;
+NDJSON/JSON keep their types), guarded the same way. Redis is not supported. The
 **response is a streamed `application/x-ndjson` body** with a single terminal
 line: `{ done: true, rows, batches }` (rows inserted, batches run) or `{ error }`
 — a guarded connection without `confirm_write` yields `{ error }` whose text
 starts `write_blocked:` (the client re-sends with `confirm_write: true` after a
-typed confirmation). v1 supports SQL engines only (MySQL/ClickHouse); Mongo
-`insertMany` / Redis are follow-ups. Gated `ws editor` (global connections: root).
+typed confirmation). Gated `ws editor` (global connections: root).
 
 `NlToSqlReq` = `{ question, node?, max_attempts? }`. `max_attempts` is the
 draft→validate retry budget (default 3, clamped 1..=4). The server asks the
