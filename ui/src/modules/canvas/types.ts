@@ -171,6 +171,9 @@ export interface CanvasSceneSummary {
   thumbnail: string | null;
   /** Folder path for grouping in the list (e.g. "Platform/Staging"); null = root. */
   section: string | null;
+  /** The scene's source format, pulled out of `doc_json`. `undefined`/absent for
+   *  docs that predate/omit `format` — treat as `mermaid`. */
+  format?: CanvasFormat;
   created_at: string;
   updated_at: string;
 }
