@@ -12,7 +12,13 @@
   import { proof } from '../lib/stores/proof.svelte';
   import ProofStatusChip from '../lib/components/ProofStatusChip.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
-  import { availableModules, resolveOrder, visibleOrder, type SidebarModule } from '../lib/sidebar';
+  import {
+    availableModules,
+    navIdForModule,
+    resolveOrder,
+    visibleOrder,
+    type SidebarModule,
+  } from '../lib/sidebar';
   import type { Session, SessionStatus } from '../lib/api/types';
 
   // Load the per-session task roll-up for the current workspace (sidebar chips);
@@ -128,13 +134,14 @@
 
   // Active when the route matches the module id. Plugin entries carry a
   // `plugin/<slug>` id while router.module is just `plugin`, so compare the slug.
-  // Agents also owns the default ('') route.
+  // Agents also owns the default ('') route; database/brokers routes highlight
+  // Connections (their views are opened from the unified hub — navIdForModule).
   function isActive(id: string): boolean {
     if (id.startsWith('plugin/')) {
       return router.module === 'plugin' && `plugin/${router.parts[1] ?? ''}` === id;
     }
     if (id === 'agents') return router.module === 'agents' || router.module === '';
-    return router.module === id;
+    return navIdForModule(router.module) === id;
   }
 
   function isHidden(id: string): boolean {

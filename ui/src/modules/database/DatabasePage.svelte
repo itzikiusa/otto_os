@@ -13,8 +13,11 @@
   import DbAssistantPanel from './DbAssistantPanel.svelte';
   import ConnectionForm from '../connections/ConnectionForm.svelte';
   import ConnectionImportDialog from '../connections/ConnectionImportDialog.svelte';
+  import SftpBrowser from '../connections/SftpBrowser.svelte';
+  import ClusterForm from '../brokers/ClusterForm.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
+  import { brokers } from '../../lib/stores/brokers.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { api } from '../../lib/api/client';
@@ -23,19 +26,62 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import type {
+    BrokerCluster,
     Connection,
     ConnectionKind,
     ConnectionSection,
     DbSavedQuery,
+    Session,
   } from '../../lib/api/types';
 
-  // DB connections are created/managed here (hidden from the Connections page).
-  const DB_KINDS: ConnectionKind[] = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'];
+  // The unified Connections hub: EVERY profile kind is created/managed in this
+  // tree — DB engines open the workbench, ssh/custom open a terminal session,
+  // Kafka clusters open Message Brokers.
+  const ALL_KINDS: ConnectionKind[] = [
+    'ssh',
+    'mysql',
+    'postgres',
+    'redis',
+    'mongodb',
+    'clickhouse',
+    'custom',
+  ];
   let connFormOpen = $state(false);
   let editingConn = $state<Connection | null>(null);
   // Import connection profiles from other DB tools (MySQL Workbench / DBeaver /
   // DataGrip / NoSQLBooster) — the daemon reads each tool's config from disk.
   let connImportOpen = $state(false);
+  // Kafka cluster form (New Cluster / edit a cluster row).
+  let clusterFormOpen = $state(false);
+  let editingCluster = $state<BrokerCluster | null>(null);
+  // SFTP file browser over an ssh profile's row action.
+  let sftpFor = $state<Connection | null>(null);
+  // Spinner guard while a terminal session is being spawned for a row.
+  let opening = $state<Record<string, boolean>>({});
+
+  // ── Type-filter chips (single-select; 'kafka' matches broker clusters) ─────
+  const FILTER_KEY = 'otto_connhub_filter';
+  const FILTER_CHIPS: { id: string; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'ssh', label: 'SSH' },
+    { id: 'mysql', label: 'MySQL' },
+    { id: 'postgres', label: 'PostgreSQL' },
+    { id: 'redis', label: 'Redis' },
+    { id: 'mongodb', label: 'MongoDB' },
+    { id: 'clickhouse', label: 'ClickHouse' },
+    { id: 'kafka', label: 'Kafka' },
+    { id: 'custom', label: 'Custom' },
+  ];
+  let filterKind = $state(
+    typeof localStorage === 'undefined' ? 'all' : localStorage.getItem(FILTER_KEY) || 'all',
+  );
+  function setFilter(id: string): void {
+    filterKind = id;
+    if (typeof localStorage !== 'undefined') localStorage.setItem(FILTER_KEY, id);
+  }
+  const filtering = $derived(filterKind !== 'all');
+  const connMatchesKind = (c: Connection): boolean => !filtering || c.kind === filterKind;
+  const clusterMatchesKind = (): boolean => !filtering || filterKind === 'kafka';
 
   // ── Saved / History sidebar (search + inline rename) ──────────────────────
   let savedSearch = $state('');
@@ -104,26 +150,47 @@
     return sections.find((s) => s.id === c.section_id)?.name ?? '';
   }
   function connMenu(e: MouseEvent, c: Connection): void {
+    const isDb = database.connections.some((x) => x.id === c.id);
     ctxMenu.show(e, [
-      { label: 'Open beside agents (split)', icon: 'split', action: () => openConnInAgents(c) },
+      // Per-kind primary/secondary opens: DB kinds live in the workbench but
+      // keep their CLI client; ssh adds the SFTP file browser.
+      ...(isDb
+        ? [
+            { label: 'Open beside agents (split)', icon: 'split', action: () => openConnInAgents(c) },
+            { label: 'Open terminal client', icon: 'terminal', action: () => void openTerminal(c) },
+          ]
+        : [{ label: 'Open terminal session', icon: 'terminal', action: () => void openTerminal(c) }]),
+      ...(c.kind === 'ssh'
+        ? [{ label: 'Browse files (SFTP)', icon: 'folder', action: () => (sftpFor = c) }]
+        : []),
       { separator: true },
       { label: 'Edit', icon: 'edit', action: () => editConnection(c) },
       { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) },
     ]);
   }
 
-  // --- Section hierarchy (mirrors the Connections page tree) -----------------
+  // --- Section hierarchy (THE unified tree: every kind + broker clusters) ----
   interface TreeNode {
     sec: ConnectionSection;
     items: Connection[];
+    clusters: BrokerCluster[];
     children: TreeNode[];
   }
   let sections = $state<ConnectionSection[]>([]);
   let collapsed = $state<Record<string, boolean>>({});
   let draggedConnId = $state<string | null>(null);
+  let draggedClusterId = $state<string | null>(null);
   let draggedSectionId = $state<string | null>(null);
 
   const sortByName = (a: Connection, b: Connection): number => a.name.localeCompare(b.name);
+  const sortClusters = (a: BrokerCluster, b: BrokerCluster): number =>
+    a.name.localeCompare(b.name);
+
+  // Every profile the tree shows (DB kinds + ssh/custom), kind-filtered.
+  const allConns = $derived(
+    [...database.connections, ...database.otherConnections].filter(connMatchesKind),
+  );
+  const treeClusters = $derived(clusterMatchesKind() ? brokers.clusters : []);
 
   // Build the section tree from the flat list; `parentId = null` is the root.
   function buildTree(parentId: string | null): TreeNode[] {
@@ -132,7 +199,8 @@
       .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
       .map((sec) => ({
         sec,
-        items: database.connections.filter((c) => c.section_id === sec.id).sort(sortByName),
+        items: allConns.filter((c) => c.section_id === sec.id).sort(sortByName),
+        clusters: treeClusters.filter((cl) => cl.section_id === sec.id).sort(sortClusters),
         children: buildTree(sec.id),
       }));
   }
@@ -141,10 +209,20 @@
   // not among them falls back to Ungrouped, so connections never vanish.
   const knownSectionIds = $derived(new Set(sections.map((s) => s.id)));
   const ungrouped = $derived(
-    database.connections
-      .filter((c) => !c.section_id || !knownSectionIds.has(c.section_id))
-      .sort(sortByName),
+    allConns.filter((c) => !c.section_id || !knownSectionIds.has(c.section_id)).sort(sortByName),
   );
+  const ungroupedClusters = $derived(
+    treeClusters
+      .filter((cl) => !cl.section_id || !knownSectionIds.has(cl.section_id))
+      .sort(sortClusters),
+  );
+  /** Matching descendants under a node (drives count chips + hide-when-empty
+   *  while a type filter narrows the tree). */
+  function nodeCount(n: TreeNode): number {
+    return (
+      n.items.length + n.clusters.length + n.children.reduce((sum, c) => sum + nodeCount(c), 0)
+    );
+  }
 
   // --- Connection search / filter --------------------------------------------
   // A filter box over the connection list (mirrors SchemaTree's "Filter schema").
@@ -161,7 +239,7 @@
   const connMatches = $derived.by(() => {
     const q = connFilter.trim().toLowerCase();
     if (!q) return [];
-    return database.connections
+    return allConns
       .filter(
         (c) =>
           c.name.toLowerCase().includes(q) ||
@@ -170,6 +248,18 @@
           sectionPath(c).toLowerCase().includes(q),
       )
       .sort(sortByName);
+  });
+  const clusterMatches = $derived.by(() => {
+    const q = connFilter.trim().toLowerCase();
+    if (!q) return [];
+    return treeClusters
+      .filter(
+        (cl) =>
+          cl.name.toLowerCase().includes(q) ||
+          'kafka'.includes(q) ||
+          cl.bootstrap_servers.toLowerCase().includes(q),
+      )
+      .sort(sortClusters);
   });
 
   async function loadSections(): Promise<void> {
@@ -238,9 +328,15 @@
       };
       collect(sec.id);
       sections = sections.filter((s) => !removed.has(s.id));
-      // Locally drop the section_id of any connection that fell out.
+      // Locally drop the section_id of anything that fell out (rows never vanish).
       database.connections = database.connections.map((c) =>
         c.section_id && removed.has(c.section_id) ? { ...c, section_id: null } : c,
+      );
+      database.otherConnections = database.otherConnections.map((c) =>
+        c.section_id && removed.has(c.section_id) ? { ...c, section_id: null } : c,
+      );
+      brokers.clusters = brokers.clusters.map((cl) =>
+        cl.section_id && removed.has(cl.section_id) ? { ...cl, section_id: null } : cl,
       );
     } catch (e) {
       toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
@@ -263,6 +359,9 @@
         read_only: c.read_only,
       });
       database.connections = database.connections.map((x) => (x.id === c.id ? saved : x));
+      database.otherConnections = database.otherConnections.map((x) =>
+        x.id === c.id ? saved : x,
+      );
     } catch (e) {
       toasts.error('Move failed', e instanceof Error ? e.message : String(e));
     }
@@ -294,13 +393,23 @@
     }
   }
 
-  // A drop onto a section: a dragged connection files into it; a dragged
-  // section nests under it. A drop onto the root zone reverses both.
+  // A drop onto a section: a dragged connection/cluster files into it; a
+  // dragged section nests under it. A drop onto the root zone reverses all.
+  function findAnyConn(id: string): Connection | undefined {
+    return (
+      database.connections.find((x) => x.id === id) ??
+      database.otherConnections.find((x) => x.id === id)
+    );
+  }
   function onSectionDrop(sectionId: string): void {
     if (draggedConnId) {
-      const c = database.connections.find((x) => x.id === draggedConnId);
+      const c = findAnyConn(draggedConnId);
       draggedConnId = null;
       if (c) void moveConn(c, sectionId);
+    } else if (draggedClusterId) {
+      const id = draggedClusterId;
+      draggedClusterId = null;
+      void brokers.moveCluster(id, sectionId);
     } else if (draggedSectionId) {
       const src = draggedSectionId;
       draggedSectionId = null;
@@ -309,9 +418,13 @@
   }
   function onRootDrop(): void {
     if (draggedConnId) {
-      const c = database.connections.find((x) => x.id === draggedConnId);
+      const c = findAnyConn(draggedConnId);
       draggedConnId = null;
       if (c) void moveConn(c, null);
+    } else if (draggedClusterId) {
+      const id = draggedClusterId;
+      draggedClusterId = null;
+      void brokers.moveCluster(id, null);
     } else if (draggedSectionId) {
       const src = draggedSectionId;
       draggedSectionId = null;
@@ -330,7 +443,57 @@
   async function onConnSaved(c: Connection): Promise<void> {
     connFormOpen = false;
     await database.loadConnections();
-    void database.openConnection(c.id);
+    // DB kinds open straight into the workbench; ssh/custom just appear in the
+    // tree (opening them spawns a terminal, which the user does deliberately).
+    if (database.connections.some((x) => x.id === c.id)) void database.openConnection(c.id);
+  }
+  function newCluster(): void {
+    editingCluster = null;
+    clusterFormOpen = true;
+  }
+  function editCluster(cl: BrokerCluster): void {
+    editingCluster = cl;
+    clusterFormOpen = true;
+  }
+  function openCluster(cl: BrokerCluster): void {
+    brokers.select(cl.id);
+    router.go('brokers');
+  }
+  async function deleteCluster(cl: BrokerCluster): Promise<void> {
+    if (
+      !(await confirmer.ask(`Delete cluster “${cl.name}”? Its Keychain secrets are removed too.`, {
+        title: 'Delete cluster',
+      }))
+    )
+      return;
+    try {
+      await brokers.remove(cl.id);
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Open an ssh/custom profile (or a DB kind's CLI client) as a live terminal
+   *  session beside the agents — the Connections-page behavior, now a row
+   *  action of the unified tree. */
+  async function openTerminal(c: Connection): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) {
+      toasts.error('No workspace', 'Create or select a workspace to attach the session to');
+      return;
+    }
+    opening[c.id] = true;
+    try {
+      const session = await api.post<Session>(`/connections/${c.id}/open`, {
+        workspace_id: wsId,
+      });
+      ws.addSession(session);
+      router.go(`agents/${session.id}`);
+    } catch (e) {
+      toasts.error('Open failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      opening[c.id] = false;
+    }
   }
   async function deleteConnection(c: Connection): Promise<void> {
     if (
@@ -359,6 +522,7 @@
         await database.restoreWorkbench();
       })();
       void loadSections();
+      void brokers.load(ws.currentId); // clusters render in the same tree
       void database.loadSavedQueries();
       void database.loadDashboards();
     }
@@ -479,10 +643,12 @@
   // ── Environment guardrail (danger styling) ─────────────────────────────────
   // Prod connections are dangerous; read-only are locked. Both get a badge, and
   // the selected one draws a red rail down the main area as a constant reminder.
-  const isProdConn = (c: Connection): boolean => c.environment === 'prod';
-  const isGuardedConn = (c: Connection): boolean => c.environment === 'prod' || c.read_only;
+  // Structural pick so broker clusters (same guard fields) share the badges.
+  type EnvGuarded = Pick<Connection, 'environment' | 'read_only'>;
+  const isProdConn = (c: EnvGuarded): boolean => c.environment === 'prod';
+  const isGuardedConn = (c: EnvGuarded): boolean => c.environment === 'prod' || c.read_only;
   // Short badge label, or '' when neither (dev/staging, not read-only).
-  function envBadge(c: Connection): string {
+  function envBadge(c: EnvGuarded): string {
     if (c.environment === 'prod') return 'PROD';
     if (c.read_only) return 'RO';
     if (c.environment === 'staging') return 'STG';
@@ -699,55 +865,63 @@
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
   {@const isOpen = !collapsed[node.sec.id]}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="sec-head"
-    class:drop-target={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedConnId}
-    style="padding-inline-start: {depth * 14 + 2}px"
-    draggable="true"
-    ondragstart={(e) => {
-      draggedSectionId = node.sec.id;
-      e.stopPropagation();
-    }}
-    ondragend={() => (draggedSectionId = null)}
-    ondragover={(e) => {
-      if (draggedConnId || (draggedSectionId && draggedSectionId !== node.sec.id)) e.preventDefault();
-    }}
-    ondrop={(e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      onSectionDrop(node.sec.id);
-    }}
-  >
-    <button class="caret" onclick={() => toggleCollapse(node.sec.id)} aria-label="Toggle section">
-      <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-    </button>
-    <Icon name="folder" size={12} />
-    <span class="sec-name grow ellipsis">{node.sec.name}</span>
-    <span class="count">{node.items.length}</span>
-    <div class="sec-actions">
-      <button class="icon-btn" title="Add sub-section" aria-label="Add sub-section" onclick={() => createSection(node.sec.id)}>
-        <Icon name="plus" size={11} />
+  {#if !(filtering && nodeCount(node) === 0)}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="sec-head"
+      class:drop-target={(draggedSectionId && draggedSectionId !== node.sec.id) ||
+        draggedConnId ||
+        draggedClusterId}
+      style="padding-inline-start: {depth * 14 + 2}px"
+      draggable="true"
+      ondragstart={(e) => {
+        draggedSectionId = node.sec.id;
+        e.stopPropagation();
+      }}
+      ondragend={() => (draggedSectionId = null)}
+      ondragover={(e) => {
+        if (draggedConnId || draggedClusterId || (draggedSectionId && draggedSectionId !== node.sec.id)) e.preventDefault();
+      }}
+      ondrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onSectionDrop(node.sec.id);
+      }}
+    >
+      <button class="caret" onclick={() => toggleCollapse(node.sec.id)} aria-label="Toggle section">
+        <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
-      <button class="icon-btn" title="Rename section" aria-label="Rename section" onclick={() => renameSection(node.sec)}>
-        <Icon name="edit" size={11} />
-      </button>
-      <button class="icon-btn" title="Delete section" aria-label="Delete section" onclick={() => deleteSection(node.sec)}>
-        <Icon name="trash" size={11} />
-      </button>
+      <Icon name="folder" size={12} />
+      <span class="sec-name grow ellipsis">{node.sec.name}</span>
+      <span class="count">{nodeCount(node)}</span>
+      <div class="sec-actions">
+        <button class="icon-btn" title="Add sub-section" aria-label="Add sub-section" onclick={() => createSection(node.sec.id)}>
+          <Icon name="plus" size={11} />
+        </button>
+        <button class="icon-btn" title="Rename section" aria-label="Rename section" onclick={() => renameSection(node.sec)}>
+          <Icon name="edit" size={11} />
+        </button>
+        <button class="icon-btn" title="Delete section" aria-label="Delete section" onclick={() => deleteSection(node.sec)}>
+          <Icon name="trash" size={11} />
+        </button>
+      </div>
     </div>
-  </div>
-  {#if isOpen}
-    {#each node.items as c (c.id)}
-      {@render connRow(c, depth + 1)}
-    {/each}
-    {#each node.children as child (child.sec.id)}
-      {@render sectionNode(child, depth + 1)}
-    {/each}
+    {#if isOpen}
+      {#each node.items as c (c.id)}
+        {@render connRow(c, depth + 1)}
+      {/each}
+      {#each node.clusters as cl (cl.id)}
+        {@render clusterRow(cl, depth + 1)}
+      {/each}
+      {#each node.children as child (child.sec.id)}
+        {@render sectionNode(child, depth + 1)}
+      {/each}
+    {/if}
   {/if}
 {/snippet}
 
 {#snippet connRow(c: Connection, depth: number)}
+  {@const isDb = database.connections.some((x) => x.id === c.id)}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="conn-row"
@@ -763,9 +937,15 @@
     ondragend={() => (draggedConnId = null)}
     oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}
   >
-    <button class="conn-item" onclick={() => database.openConnection(c.id)} title="{c.name} · {c.kind}{isProdConn(c) ? ' · PRODUCTION' : c.read_only ? ' · read-only' : ''} — right-click to open beside agents">
+    <button
+      class="conn-item"
+      onclick={() => (isDb ? database.openConnection(c.id) : void openTerminal(c))}
+      title="{c.name} · {c.kind}{isProdConn(c) ? ' · PRODUCTION' : c.read_only ? ' · read-only' : ''} — {isDb ? 'opens the workbench; right-click for more' : 'opens a terminal session; right-click for more'}"
+    >
       <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
       <span class="conn-name">{c.name}</span>
+      <span class="kind-tag mono">{c.kind}</span>
+      {#if opening[c.id]}<span class="env-badge mono">…</span>{/if}
       {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
     </button>
     <div class="conn-actions">
@@ -773,6 +953,49 @@
         <Icon name="edit" size={11} />
       </button>
       <button class="icon-btn" aria-label="Delete connection" title="Delete" onclick={() => deleteConnection(c)}>
+        <Icon name="trash" size={11} />
+      </button>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet clusterRow(cl: BrokerCluster, depth: number)}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="conn-row"
+    class:dragging={draggedClusterId === cl.id}
+    style="padding-inline-start: {depth * 14}px"
+    draggable="true"
+    ondragstart={(e) => {
+      draggedClusterId = cl.id;
+      e.stopPropagation();
+    }}
+    ondragend={() => (draggedClusterId = null)}
+    oncontextmenu={(e) => {
+      e.preventDefault();
+      ctxMenu.show(e, [
+        { label: 'Open in Message Brokers', icon: 'split', action: () => openCluster(cl) },
+        { separator: true },
+        { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
+        { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
+      ]);
+    }}
+  >
+    <button
+      class="conn-item"
+      onclick={() => openCluster(cl)}
+      title="{cl.name} · kafka{isProdConn(cl) ? ' · PRODUCTION' : cl.read_only ? ' · read-only' : ''} — opens Message Brokers"
+    >
+      <span class="conn-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
+      <span class="conn-name">{cl.name}</span>
+      <span class="kind-tag mono">kafka</span>
+      {#if envBadge(cl)}<span class="env-badge mono" class:prod={isProdConn(cl)}>{envBadge(cl)}</span>{/if}
+    </button>
+    <div class="conn-actions">
+      <button class="icon-btn" aria-label="Edit cluster" title="Edit" onclick={() => editCluster(cl)}>
+        <Icon name="edit" size={11} />
+      </button>
+      <button class="icon-btn" aria-label="Delete cluster" title="Delete" onclick={() => void deleteCluster(cl)}>
         <Icon name="trash" size={11} />
       </button>
     </div>
@@ -797,25 +1020,40 @@
       <!-- New section / connection live here on tablet/desktop (the phone keeps
            them in the accordion header), so the tab strip never overflows. -->
       <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={12} /></button>
-      <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection"><Icon name="plus" size={12} /></button>
+      <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection (SSH, database or custom CLI)"><Icon name="plus" size={12} /></button>
+      <button class="icon-btn" onclick={newCluster} aria-label="New Kafka cluster" title="New Kafka cluster"><Icon name="split" size={12} /></button>
       <button class="icon-btn" onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={12} /></button>
     {/if}
+  </div>
+  <!-- Type-filter chips: one tree, narrowed by connection type. -->
+  <div class="type-chips" role="tablist" aria-label="Filter by connection type">
+    {#each FILTER_CHIPS as chip (chip.id)}
+      <button
+        class="type-chip"
+        class:on={filterKind === chip.id}
+        data-testid="connhub-filter-{chip.id}"
+        onclick={() => setFilter(chip.id)}
+      >{chip.label}</button>
+    {/each}
   </div>
 {/snippet}
 
 {#snippet connListBody()}
   {@render connSearchBox()}
-  {#if database.connections.length === 0 && sections.length === 0}
+  {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0}
     <div class="conn-empty">
-      No database connections.
+      No connections yet.
       <button class="link" onclick={newConnection}>New connection →</button>
     </div>
   {:else if connFilter.trim()}
-    {#if connMatches.length === 0}
+    {#if connMatches.length === 0 && clusterMatches.length === 0}
       <div class="list-empty">No connections match “{connFilter.trim()}”.</div>
     {:else}
       {#each connMatches as c (c.id)}
         {@render connRow(c, 0)}
+      {/each}
+      {#each clusterMatches as cl (cl.id)}
+        {@render clusterRow(cl, 0)}
       {/each}
     {/if}
   {:else}
@@ -824,30 +1062,38 @@
     {/each}
 
     {#if sections.length > 0}
-      <!-- Ungrouped doubles as the root / no-section drop target. -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="sec-head plain"
-        class:drop-target={draggedConnId || draggedSectionId}
-        ondragover={(e) => {
-          if (draggedConnId || draggedSectionId) e.preventDefault();
-        }}
-        ondrop={(e) => {
-          e.preventDefault();
-          onRootDrop();
-        }}
-        title="Drop here to remove from a section / make a section top-level"
-      >
-        <span class="caret-spacer"></span>
-        <span class="sec-name grow">Ungrouped</span>
-        {#if ungrouped.length > 0}<span class="count">{ungrouped.length}</span>{/if}
-      </div>
-      {#each ungrouped as c (c.id)}
-        {@render connRow(c, 1)}
-      {/each}
+      {#if !(filtering && ungrouped.length + ungroupedClusters.length === 0)}
+        <!-- Ungrouped doubles as the root / no-section drop target. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="sec-head plain"
+          class:drop-target={draggedConnId || draggedClusterId || draggedSectionId}
+          ondragover={(e) => {
+            if (draggedConnId || draggedClusterId || draggedSectionId) e.preventDefault();
+          }}
+          ondrop={(e) => {
+            e.preventDefault();
+            onRootDrop();
+          }}
+          title="Drop here to remove from a section / make a section top-level"
+        >
+          <span class="caret-spacer"></span>
+          <span class="sec-name grow">Ungrouped</span>
+          {#if ungrouped.length + ungroupedClusters.length > 0}<span class="count">{ungrouped.length + ungroupedClusters.length}</span>{/if}
+        </div>
+        {#each ungrouped as c (c.id)}
+          {@render connRow(c, 1)}
+        {/each}
+        {#each ungroupedClusters as cl (cl.id)}
+          {@render clusterRow(cl, 1)}
+        {/each}
+      {/if}
     {:else}
       {#each ungrouped as c (c.id)}
         {@render connRow(c, 0)}
+      {/each}
+      {#each ungroupedClusters as cl (cl.id)}
+        {@render clusterRow(cl, 0)}
       {/each}
     {/if}
   {/if}
@@ -937,10 +1183,18 @@
 {#if connFormOpen}
   <ConnectionForm
     existing={editingConn}
-    kinds={DB_KINDS}
+    kinds={ALL_KINDS}
     onclose={() => (connFormOpen = false)}
     onsaved={onConnSaved}
   />
+{/if}
+
+{#if clusterFormOpen}
+  <ClusterForm cluster={editingCluster} onclose={() => (clusterFormOpen = false)} />
+{/if}
+
+{#if sftpFor}
+  <SftpBrowser conn={sftpFor} onclose={() => (sftpFor = null)} />
 {/if}
 
 <!-- Import connection profiles from another DB tool (MySQL Workbench / DBeaver /
@@ -1416,6 +1670,42 @@
     border-radius: 999px;
     color: var(--status-working);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
+  }
+  /* Per-row connection-type tag (mysql / ssh / kafka / …) — neutral, so the
+     env badge keeps the color signal. */
+  .kind-tag {
+    flex-shrink: 0;
+    font-size: 8.5px;
+    letter-spacing: 0.03em;
+    padding: 1px 5px;
+    border-radius: 999px;
+    color: var(--text-3);
+    background: color-mix(in srgb, var(--text-3) 12%, transparent);
+  }
+  /* Type-filter chips under the tree search. */
+  .type-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 8px 6px;
+    border-bottom: 1px solid var(--border-1);
+  }
+  .type-chip {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-1);
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .type-chip:hover {
+    background: var(--bg-2);
+  }
+  .type-chip.on {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .env-badge.prod {
     color: var(--status-exited);

@@ -1,7 +1,8 @@
 import { test, expect, type Locator } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 
-// Desktop BROWSER regression for the unified Connections hub: ONE section tree
+// Desktop BROWSER regression for the unified Connections hub (the DB-workbench
+// page serving as the single Connections surface): ONE section tree
 // holds SSH + DB connections AND a Kafka cluster, and the type-filter chips
 // narrow it — hiding non-matching rows AND sections with no matching descendant.
 // Seeds real rows via the API against the isolated throwaway daemon; asserts
@@ -107,15 +108,18 @@ test.describe('connections hub', () => {
     await ctx.dispose();
 
     // ---- Drive the hub UI ----------------------------------------------------
-    await page.addInitScript((w) => localStorage.setItem('otto_workspace', w as string), wsId);
+    await page.addInitScript((w) => {
+      localStorage.setItem('otto_workspace', w as string);
+      localStorage.setItem('otto_connhub_filter', 'all'); // chip choice persists — pin it
+    }, wsId);
     await page.goto('/#/connections');
     await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
     const sshRow = page.locator('.conn-row', { hasText: 'hub-ssh' });
     const mysqlRow = page.locator('.conn-row', { hasText: 'hub-mysql' });
     const clusterRow = page.locator('.conn-row', { hasText: 'hub-kafka' });
-    const hubSec = page.locator('.section-head', { hasText: 'HUB-SEC' });
-    const ungrouped = page.locator('.section-head.plain', { hasText: 'Ungrouped' });
+    const hubSec = page.locator('.sec-head', { hasText: 'HUB-SEC' });
+    const ungrouped = page.locator('.sec-head.plain', { hasText: 'Ungrouped' });
     const y = async (l: Locator): Promise<number> => (await l.first().boundingBox())!.y;
 
     const ran: string[] = [];
