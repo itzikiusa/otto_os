@@ -150,6 +150,7 @@ pub async fn assist_scene(
         &scene.provider,
         meta,
         &prompt,
+        crate::agent_session::STUCK_IDLE,
         on_ready,
     )
     .await;
@@ -217,6 +218,7 @@ pub async fn assist_preview(
         "claude",
         meta,
         &prompt,
+        crate::agent_session::STUCK_IDLE,
         |_| {},
     )
     .await?;

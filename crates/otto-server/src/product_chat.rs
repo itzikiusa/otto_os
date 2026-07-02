@@ -242,6 +242,7 @@ pub async fn send_message(
         "claude",
         meta,
         &prompt,
+        crate::agent_session::STUCK_IDLE,
         |_| {},
     )
     .await?;

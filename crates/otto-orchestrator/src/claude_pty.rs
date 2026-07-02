@@ -344,6 +344,51 @@ pub fn completed_turn_count(jsonl: &str) -> usize {
     n
 }
 
+/// Text of the LAST `role:"user"` message in `jsonl`. claude records the user's
+/// submitted prompt here, so a caller can confirm its prompt was actually ENTERED
+/// (vs. lost to a startup/promo screen that swallowed the paste). `content` is a
+/// plain string for a typed/pasted prompt, or an array of `{type:"text",text}`
+/// blocks; tool-result user turns (arrays of `{type:"tool_result",…}`) carry no
+/// text and are skipped, so this returns the last *typed* prompt, never a tool
+/// result. `None` while no user text is present yet.
+pub fn last_user_text(jsonl: &str) -> Option<String> {
+    let mut result = None;
+    for line in jsonl.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let Some(msg) = v.get("message") else { continue };
+        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        let text = match msg.get("content") {
+            Some(serde_json::Value::String(s)) => s.trim().to_string(),
+            Some(serde_json::Value::Array(blocks)) => {
+                let mut t = String::new();
+                for block in blocks {
+                    if block.get("type").and_then(|k| k.as_str()) != Some("text") {
+                        continue;
+                    }
+                    if let Some(s) = block.get("text").and_then(|s| s.as_str()) {
+                        if !s.is_empty() {
+                            if !t.is_empty() {
+                                t.push('\n');
+                            }
+                            t.push_str(s);
+                        }
+                    }
+                }
+                t.trim().to_string()
+            }
+            _ => continue,
+        };
+        if !text.is_empty() {
+            result = Some(text);
+        }
+    }
+    result
+}
+
 /// The text of an assistant message claude flagged with `isApiErrorMessage:
 /// true` — claude's own error surface (wrong/unknown `--model`, auth, rate-limit,
 /// overload). These carry `stop_reason: "stop_sequence"` (NOT `end_turn`), so
@@ -440,6 +485,26 @@ mod tests {
         assert_eq!(completed_turn_count(""), 0);
         assert_eq!(completed_turn_count(one), 1);
         assert_eq!(completed_turn_count(&format!("{one}\n{mid}\n{one}")), 2); // mid_turn not counted
+    }
+
+    #[test]
+    fn last_user_text_returns_typed_prompt_and_skips_tool_results() {
+        // string content (the common shape for a typed/pasted prompt)
+        let s = r#"{"type":"user","message":{"role":"user","content":"do the thing"}}"#;
+        assert_eq!(last_user_text(s).as_deref(), Some("do the thing"));
+        // array-of-text-blocks content
+        let a = r#"{"message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#;
+        assert_eq!(last_user_text(a).as_deref(), Some("hello"));
+        // a later tool_result user turn carries no text → the typed prompt still wins
+        let tool = r#"{"message":{"role":"user","content":[{"type":"tool_result","content":"42"}]}}"#;
+        assert_eq!(last_user_text(&format!("{s}\n{tool}")).as_deref(), Some("do the thing"));
+        // the LAST typed prompt wins across turns
+        let s2 = r#"{"message":{"role":"user","content":"second prompt"}}"#;
+        assert_eq!(last_user_text(&format!("{s}\n{s2}")).as_deref(), Some("second prompt"));
+        // assistant turns and empty transcripts contribute nothing
+        let asst = r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(last_user_text(asst), None);
+        assert_eq!(last_user_text(""), None);
     }
 
     #[test]

@@ -11,11 +11,13 @@
 //! previous reply instantly). It also fails FAST on a claude API error (wrong
 //! model / auth / rate-limit) with the real message instead of a "stuck" timeout.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use otto_core::api::CreateSessionReq;
 use otto_core::domain::{SessionKind, User, Workspace};
 use otto_core::{Error, Id};
+use otto_sessions::SessionManager;
 use serde_json::Value;
 
 use crate::error::{ApiError, ApiResult};
@@ -28,13 +30,26 @@ use crate::state::ServerCtx;
 /// having it killed out from under them. A genuine claude API error still fails
 /// FAST (see below) — this cap only bounds *legitimate* long work.
 const TURN_TIMEOUT: Duration = Duration::from_secs(10 * 60 * 60);
-/// Treat the session as wedged once it produces no output for this long. Also very
-/// generous (10h) so a step that's quietly working — compiling, running a long
-/// test suite — is never mistaken for a hung session. The operator cancels if
-/// they truly want to stop it.
-const STUCK_IDLE: Duration = Duration::from_secs(10 * 60 * 60);
+/// Default no-output idle backstop (10h) — the session's max lifespan floor. This
+/// is the value non-workflow callers pass for `stuck_after`, so a step that's
+/// quietly working — compiling, running a long test suite — is never mistaken for
+/// a hung session. Workflow steps pass a much shorter `stuck_after` (see
+/// `run_session_turn`) as an EARLIER, additional trip; this 10h backstop and
+/// `TURN_TIMEOUT` are never reduced.
+pub const STUCK_IDLE: Duration = Duration::from_secs(10 * 60 * 60);
 /// Watch poll cadence.
 const POLL: Duration = Duration::from_millis(1000);
+/// How long we keep trying to land the prompt on the CLI's real input box before
+/// giving up with a visible error. A cold claude spawn + a promo/onboarding screen
+/// can delay the input box; we re-submit within this window rather than silently
+/// polling a no-op turn for 10h.
+const SUBMIT_CONFIRM: Duration = Duration::from_secs(45);
+/// Re-send the prompt this often, within `SUBMIT_CONFIRM`, until claude records it
+/// as a user turn (a banner can swallow the first paste/Enter).
+const RESUBMIT_EVERY: Duration = Duration::from_secs(8);
+/// Cap on paste attempts (first + re-sends) so a genuinely broken session can't
+/// spin forever inside the confirm window.
+const MAX_SUBMIT_ATTEMPTS: u32 = 4;
 
 /// Run one turn. Returns `(reply_text, session_id)`. Persist the returned
 /// `session_id` so the next turn resumes the SAME session.
@@ -49,6 +64,10 @@ pub async fn run_session_turn(
     provider: &str,
     meta: Value,
     prompt: &str,
+    // No-output idle trip. Workflow steps pass a short value (e.g. 3 min) as an
+    // early "stuck" signal; interactive callers pass STUCK_IDLE (10h) to keep the
+    // long backstop. Never lengthens past TURN_TIMEOUT.
+    stuck_after: Duration,
     on_ready: impl FnOnce(&Id),
 ) -> ApiResult<(String, Id)> {
     // 1. E2E short-circuit: the offline test daemon points CLAUDE_BIN at a
@@ -97,28 +116,78 @@ pub async fn run_session_turn(
     // shell in the Canvas panel) BEFORE the long turn runs.
     on_ready(&sid);
 
-    // 4. Baseline the transcript so a resumed session's PRIOR reply isn't
-    //    mistaken for this turn (claude appends to the same <psid>.jsonl on resume).
-    let baseline = transcript_path(provider, &cwd_canon, psid.as_deref())
+    // 4. Submit the prompt AND confirm it actually landed on the CLI's input box.
+    //    A startup/promo/onboarding banner is quiescent output, so wait_for_tui /
+    //    dispatched can report "ready"/"sent" while the real input box isn't up
+    //    yet — swallowing the paste and leaving the step a no-op. Only claude
+    //    writes a pollable transcript, so only there can we verify; other providers
+    //    keep the best-effort single submit.
+    let can_confirm = transcript_path(provider, &cwd_canon, psid.as_deref()).is_some();
+    let needle = confirm_needle(prompt);
+
+    submit_once(&ctx.manager, &sid, prompt).await;
+    ctx.manager.record_user_message(&sid, prompt).await;
+
+    // Baseline of completed assistant turns. For a resumed/non-claude session we
+    // seed it from the pre-submit count; when we can confirm (claude), we RE-baseline
+    // at the exact instant our prompt is seen as the latest user turn (below), so a
+    // stray reply to an empty submit is already counted and can't be mistaken for
+    // THIS turn's result.
+    let mut baseline = transcript_path(provider, &cwd_canon, psid.as_deref())
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|c| otto_orchestrator::claude_pty::completed_turn_count(&c))
         .unwrap_or(0);
 
-    // 5. Submit the prompt once the TUI has settled (bracketed paste keeps a
-    //    multi-line prompt atomic), confirming dispatch with a re-`\r` retry.
-    if wait_for_tui(&ctx.manager, &sid).await {
-        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager.input(&sid, b"\r").await;
-        if !dispatched(&ctx.manager, &sid, before).await {
-            let _ = ctx.manager.input(&sid, b"\r").await;
+    if can_confirm {
+        let confirm_deadline = Instant::now() + SUBMIT_CONFIRM;
+        let mut next_resubmit = Instant::now() + RESUBMIT_EVERY;
+        let mut attempts: u32 = 1;
+        let mut entered = false;
+        loop {
+            if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref()) {
+                if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                    if let Some(err) = otto_orchestrator::claude_pty::transcript_api_error(&content) {
+                        return Err(ApiError(Error::Upstream(format!("agent error: {err}"))));
+                    }
+                    if prompt_entered(&content, &needle) {
+                        baseline = otto_orchestrator::claude_pty::completed_turn_count(&content);
+                        entered = true;
+                        break;
+                    }
+                }
+            }
+            match ctx.manager.live_handle(&sid) {
+                Some(h) if h.on_exit().borrow().is_some() => {
+                    return Err(ApiError(Error::Upstream(
+                        "agent session exited before accepting the prompt".into(),
+                    )));
+                }
+                None => return Err(ApiError(Error::Upstream("agent session vanished".into()))),
+                _ => {}
+            }
+            if Instant::now() >= confirm_deadline {
+                break;
+            }
+            if Instant::now() >= next_resubmit && attempts < MAX_SUBMIT_ATTEMPTS {
+                submit_once(&ctx.manager, &sid, prompt).await;
+                attempts += 1;
+                next_resubmit = Instant::now() + RESUBMIT_EVERY;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        if !entered {
+            // The prompt never became a user turn — the step is a no-op. Fail
+            // LOUD (and retryable) instead of polling a dead turn for 10h or
+            // mistaking a stray greeting for completion.
+            return Err(ApiError(Error::Upstream(
+                "agent never accepted the prompt (stuck on a startup screen?)".into(),
+            )));
         }
     }
-    ctx.manager.record_user_message(&sid, prompt).await;
 
-    // 6. Watch for the NEW completed turn (count > baseline). Fail fast on a
-    //    claude API error / stuck / exit / timeout. Leave the session OPEN.
+    // 5. Watch for the NEW completed turn (count > baseline). Fail fast on a
+    //    claude API error / no progress for `stuck_after` / exit / timeout. Leave
+    //    the session OPEN.
     let deadline = Instant::now() + TURN_TIMEOUT;
     loop {
         if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref()) {
@@ -140,10 +209,11 @@ pub async fn run_session_turn(
                         "agent session exited before replying".into(),
                     )));
                 }
-                if h.last_output_at().elapsed() >= STUCK_IDLE {
-                    return Err(ApiError(Error::Upstream(
-                        "agent session stuck — no output".into(),
-                    )));
+                if h.last_output_at().elapsed() >= stuck_after {
+                    return Err(ApiError(Error::Upstream(format!(
+                        "step made no progress for {}m",
+                        stuck_after.as_secs() / 60
+                    ))));
                 }
             }
             None => {
@@ -157,11 +227,95 @@ pub async fn run_session_turn(
     }
 }
 
+/// One paste + Enter into the session, with a single re-`\r` when the first didn't
+/// visibly dispatch. Bracketed paste keeps a multi-line prompt atomic.
+async fn submit_once(manager: &Arc<SessionManager>, sid: &Id, prompt: &str) {
+    if wait_for_tui(manager, sid).await {
+        let _ = manager.input(sid, &bracketed_paste(prompt)).await;
+        tokio::time::sleep(PASTE_TO_ENTER).await;
+        let before = manager.live_handle(sid).map(|h| h.last_output_at());
+        let _ = manager.input(sid, b"\r").await;
+        if !dispatched(manager, sid, before).await {
+            let _ = manager.input(sid, b"\r").await;
+        }
+    }
+}
+
+/// Collapse every run of whitespace to a single space, so a paste reflow / newline
+/// differences don't defeat a substring match.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A normalized, distinctive slice of `prompt` to look for in claude's recorded
+/// user turn. Sampled from ~30% in to skip any shared leading boilerplate (the
+/// workflow context preamble), so it's specific to THIS prompt.
+fn confirm_needle(prompt: &str) -> String {
+    let norm = normalize_ws(prompt);
+    let chars: Vec<char> = norm.chars().collect();
+    if chars.len() <= 24 {
+        return norm;
+    }
+    let start = chars.len() * 3 / 10;
+    let end = (start + 60).min(chars.len());
+    chars[start..end].iter().collect()
+}
+
+/// Whether claude's latest USER turn in `transcript` contains our prompt slice —
+/// i.e. the prompt was actually entered, not lost to a startup/promo banner.
+fn prompt_entered(transcript: &str, needle: &str) -> bool {
+    match otto_orchestrator::claude_pty::last_user_text(transcript) {
+        Some(t) => normalize_ws(&t).contains(needle),
+        None => false,
+    }
+}
+
 /// The claude JSONL transcript path for this session, or `None` for non-claude
 /// providers (codex/agy don't write a JSONL transcript we can poll).
 fn transcript_path(provider: &str, cwd: &str, psid: Option<&str>) -> Option<std::path::PathBuf> {
     match (provider, psid) {
         ("claude", Some(p)) => Some(otto_orchestrator::claude_pty::session_jsonl_path(cwd, p)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_ws_collapses_all_whitespace() {
+        assert_eq!(normalize_ws("a\n\n  b\tc  "), "a b c");
+    }
+
+    #[test]
+    fn confirm_needle_samples_a_distinctive_slice() {
+        assert_eq!(confirm_needle("do it"), "do it"); // short prompts use the whole thing
+        let long = "[workflow context] read the files. \
+             Now write the leaderboard tests for the tournament feature in module X.";
+        let needle = confirm_needle(long);
+        assert!(!needle.is_empty());
+        // The needle is a normalized slice OF the prompt…
+        assert!(normalize_ws(long).contains(&needle), "needle: {needle}");
+        // …sampled past the shared preamble, so it carries step-specific text.
+        assert!(!needle.starts_with("[workflow context]"));
+    }
+
+    #[test]
+    fn prompt_entered_matches_only_our_user_turn() {
+        let prompt =
+            "[workflow context] read files. Implement the deposit-bonus template creation flow now.";
+        let needle = confirm_needle(prompt);
+        // A transcript whose latest user turn IS our prompt → entered.
+        let mine = format!(
+            r#"{{"message":{{"role":"user","content":{}}}}}"#,
+            serde_json::to_string(prompt).unwrap()
+        );
+        assert!(prompt_entered(&mine, &needle));
+        // A DIFFERENT user turn (a prior resumed prompt / a stray empty submit) → not entered.
+        let other = r#"{"message":{"role":"user","content":"totally unrelated earlier prompt"}}"#;
+        assert!(!prompt_entered(other, &needle));
+        // Empty transcript → not entered (so we keep re-submitting, then fail loud).
+        assert!(!prompt_entered("", &needle));
     }
 }

@@ -290,6 +290,7 @@ pub async fn assist(
         &provider,
         meta,
         &prompt,
+        crate::agent_session::STUCK_IDLE,
         on_ready,
     )
     .await;
@@ -377,6 +378,7 @@ pub async fn summary(
         &entry.provider,
         meta,
         &prompt,
+        crate::agent_session::STUCK_IDLE,
         |_| {},
     )
     .await?;

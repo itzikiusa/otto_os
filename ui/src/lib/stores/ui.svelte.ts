@@ -42,6 +42,9 @@ const LS = {
   termToolbar: 'otto_term_toolbar',
   dbDock: 'otto_db_dock',
   dbDockWidth: 'otto_db_dock_width',
+  wfCtx: 'otto_wf_ctx_open',
+  wfCtxWidth: 'otto_wf_ctx_width',
+  runDetailH: 'otto_wf_run_detail_h',
   clientId: 'otto_client_id',
   sessionIsolation: 'otto_session_isolation',
   sidebarOrder: 'otto_sidebar_order',
@@ -57,6 +60,11 @@ export const RIGHT_MAX = 2000;
 const RIGHT_LEAVE = 360;
 export const RAIL_MIN = 190;
 export const RAIL_MAX = 420;
+/** Workflow run "Context files" sidebar bounds (a focused file browser). */
+export const WF_CTX_MIN = 240;
+export const WF_CTX_MAX = 560;
+/** Workflow run-detail (inspector) resizable-height floor; the cap is viewport-aware. */
+export const RUN_DETAIL_MIN = 160;
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -111,6 +119,14 @@ function clampRight(px: number): number {
 function clampRail(px: number): number {
   return Math.max(RAIL_MIN, Math.min(RAIL_MAX, Math.round(px)));
 }
+function clampWfCtx(px: number): number {
+  return Math.max(WF_CTX_MIN, Math.min(WF_CTX_MAX, Math.round(px)));
+}
+function clampRunDetail(px: number): number {
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
+  const max = Math.max(RUN_DETAIL_MIN, Math.round(vh * 0.85));
+  return Math.max(RUN_DETAIL_MIN, Math.min(max, Math.round(px)));
+}
 
 class UiStore {
   railExpanded = $state(lsGet(LS.rail) !== '0');
@@ -121,6 +137,11 @@ class UiStore {
   // DB dock: the DB Explorer docked beside the agent panes (side-by-side).
   dbDockOpen = $state(lsGet(LS.dbDock) === '1');
   dbDockWidth = $state(Math.min(900, Math.max(320, Number(lsGet(LS.dbDockWidth)) || 480)));
+  // Workflow run "Context files" sidebar: defaults open, resizable, desktop-only.
+  wfCtxOpen = $state(lsGet(LS.wfCtx) !== '0');
+  wfCtxWidth = $state(clampWfCtx(Number(lsGet(LS.wfCtxWidth)) || 340));
+  // Workflow run-detail (inspector) resizable max-height cap.
+  runDetailHeight = $state(clampRunDetail(Number(lsGet(LS.runDetailH)) || 300));
   paletteOpen = $state(false);
   /** Which mode the palette should open in. */
   paletteMode: 'commands' | 'english' = $state('commands');
@@ -306,6 +327,22 @@ class UiStore {
       this.rightRestore = this.rightWidth;
       this.setRightWidth(wide);
     }
+  }
+
+  /** Toggle the workflow run "Context files" sidebar open/collapsed. */
+  toggleWfCtx(): void {
+    this.wfCtxOpen = !this.wfCtxOpen;
+    lsSet(LS.wfCtx, this.wfCtxOpen ? '1' : '0');
+  }
+
+  setWfCtxWidth(px: number): void {
+    this.wfCtxWidth = clampWfCtx(px);
+    lsSet(LS.wfCtxWidth, String(this.wfCtxWidth));
+  }
+
+  setRunDetailHeight(px: number): void {
+    this.runDetailHeight = clampRunDetail(px);
+    lsSet(LS.runDetailH, String(this.runDetailHeight));
   }
 
   setRailWidth(px: number): void {

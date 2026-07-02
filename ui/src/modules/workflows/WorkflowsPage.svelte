@@ -7,6 +7,8 @@
   import RunSteps from './RunSteps.svelte';
   import FileTree from '../panels/FileTree.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
@@ -594,6 +596,54 @@
     }
   }
 
+  // Whether the selected run is still active (so a Cancel affordance makes sense
+  // even when this editor didn't initiate it — e.g. opened from the Running list).
+  const runActive = $derived(run?.status === 'running' || run?.status === 'pending');
+
+  // Run-detail (inspector) resize: drag the top grip to grow the height cap; the
+  // maximize toggle "zooms" the whole run to ~85vh. (R6)
+  let runDetailMax = $state(false);
+  function inspMaxPx(): number {
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
+    return runDetailMax ? Math.round(vh * 0.85) : ui.runDetailHeight;
+  }
+  function startInspResize(e: MouseEvent): void {
+    e.preventDefault();
+    runDetailMax = false;
+    const startY = e.clientY;
+    const startH = ui.runDetailHeight;
+    const onMove = (ev: MouseEvent) => ui.setRunDetailHeight(startH + (startY - ev.clientY));
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  // Context-files sidebar width: drag its left edge (anchored right → dragging
+  // left widens it). (R1)
+  function startCtxResize(e: MouseEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = ui.wfCtxWidth;
+    const onMove = (ev: MouseEvent) => ui.setWfCtxWidth(startW + (startX - ev.clientX));
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
   async function loadRuns(): Promise<void> {
     if (!current) return;
     try {
@@ -996,7 +1046,7 @@
             <div class="palette runs-pop">
               {#if runs.length === 0}<div class="runs-empty">No runs yet</div>{/if}
               {#each runs as r (r.id)}
-                <button class="run-item" class:active={run?.id === r.id} onclick={() => { run = r; runsOpen = false; void refetchRun(r.id); }}>
+                <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => { run = r; runsOpen = false; void refetchRun(r.id); }}>
                   <span class="dot {r.status}"></span>
                   <span class="run-status">{r.status}</span>
                   <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
@@ -1131,10 +1181,41 @@
       {/if}
 
       {#if run || selectedNode || selectedEdge}
-        <div class="inspector">
+        <!-- Drag grip: grow the run-detail height cap; double-click resets. (R6) -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="insp-grip"
+          onmousedown={startInspResize}
+          ondblclick={() => ui.setRunDetailHeight(300)}
+          title="Drag to resize · double-click to reset"
+        ></div>
+        <div class="inspector" class:maxed={runDetailMax} style="max-height:{inspMaxPx()}px">
           {#if run}
-            <div class="timeline">
+            <!-- Run bar: live status + Cancel (R7) + maximize/zoom (R6). -->
+            <div class="insp-bar">
               <span class="tl-label"><span class="dot {run.status}"></span>{run.status}</span>
+              <span class="grow"></span>
+              {#if runActive}
+                <button
+                  class="btn small danger"
+                  data-testid="run-cancel"
+                  onclick={stop}
+                  title="Cancel this run (finishes the current step, then halts)"
+                >
+                  <Icon name="square" size={11} /> Cancel run
+                </button>
+              {/if}
+              <button
+                class="icon-btn"
+                data-testid="run-detail-max"
+                onclick={() => (runDetailMax = !runDetailMax)}
+                aria-pressed={runDetailMax}
+                title={runDetailMax ? 'Restore run-detail height' : 'Maximize run detail'}
+              >
+                <Icon name={runDetailMax ? 'minimize' : 'maximize'} size={13} />
+              </button>
+            </div>
+            <div class="timeline">
               {#each run.nodes as ns (ns.node_id)}
                 <button
                   class="tl-step"
@@ -1149,10 +1230,11 @@
               {/each}
             </div>
             <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} /></div>
-            {#if run.context_dir}
-              <!-- THIS run's context files (instruction brief, repos.json,
-                   per-step handoffs) — same browsable tree + viewer the agent
-                   Files panel uses, rooted at the run's own directory. -->
+            {#if run.context_dir && !viewport.isDesktop}
+              <!-- Mobile/tablet: the run's context files inline (instruction brief,
+                   repos.json, per-step handoffs). On desktop these move to the
+                   full-height Context-files sidebar (see below) so they get real
+                   room — same browsable tree + viewer the agent Files panel uses. -->
               <details class="ctx-files">
                 <summary>
                   <Icon name="folder" size={13} />
@@ -1919,6 +2001,48 @@
       </div>
     {/if}
   </main>
+
+  <!-- Context-files sidebar (R1): desktop-only, shown for a run that has a
+       context dir. Reuses the agents' file viewer (tree + Source/Preview) at full
+       height — no Git/Notes/other tabs. Collapsible + resizable. -->
+  {#if viewport.isDesktop && run && run.context_dir}
+    {#if ui.wfCtxOpen}
+      <aside class="ctx-sidebar" style="width:{ui.wfCtxWidth}px" data-testid="ctx-sidebar">
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="ctx-resize" onmousedown={startCtxResize} title="Drag to resize"></div>
+        <div class="ctx-head">
+          <span class="ctx-title"><Icon name="folder" size={12} /> Context files</span>
+          <code class="ctx-path dim" title={run.context_dir}>{run.context_dir}</code>
+          <button
+            class="icon-btn"
+            data-testid="ctx-sidebar-toggle"
+            onclick={() => ui.toggleWfCtx()}
+            title="Collapse context files"
+            aria-label="Collapse context files"
+          >
+            <Icon name="panel" size={13} />
+          </button>
+        </div>
+        <div class="ctx-body">
+          {#key run.context_dir}
+            <FileTree root={run.context_dir} primary={false} />
+          {/key}
+        </div>
+      </aside>
+    {:else}
+      <aside class="ctx-strip">
+        <button
+          class="icon-btn strip-btn"
+          data-testid="ctx-sidebar-toggle"
+          onclick={() => ui.toggleWfCtx()}
+          title="Context files"
+          aria-label="Show context files"
+        >
+          <Icon name="file" size={15} />
+        </button>
+      </aside>
+    {/if}
+  {/if}
 </div>
 
 <style>
@@ -2279,11 +2403,45 @@
     border-top: 1px solid var(--border);
     background: var(--surface);
     padding: 10px 12px;
-    max-height: 38%;
+    /* max-height is set inline (ui.runDetailHeight / maximize) — the run-detail
+       area is resizable via the top grip. (R6) */
     overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 6px;
+    flex-shrink: 0;
+  }
+  /* Drag grip that sits just above the inspector (between the canvas and the
+     run detail), so it never scrolls with the content. (R6) */
+  .insp-grip {
+    height: 7px;
+    flex-shrink: 0;
+    cursor: row-resize;
+    border-top: 1px solid var(--border);
+  }
+  .insp-grip:hover {
+    background: linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--accent) 40%, transparent),
+      transparent
+    );
+  }
+  /* Run bar: sticky so status + Cancel + maximize stay reachable while the run
+     detail scrolls. (R6/R7) */
+  .insp-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: sticky;
+    top: -10px;
+    margin: -10px -12px 4px;
+    padding: 8px 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    z-index: 2;
+  }
+  .insp-bar .grow {
+    flex: 1;
   }
   .insp-note {
     margin: 0;
@@ -2402,6 +2560,9 @@
     padding-bottom: 8px;
     margin-bottom: 8px;
     border-bottom: 1px solid var(--border);
+    /* overflow-x zeroes a flex item's automatic min-height, so the flex-column
+       inspector would vertically compress (clip) this row. Pin it. (R8) */
+    flex-shrink: 0;
   }
   .run-detail {
     margin: 8px 0;
@@ -2480,6 +2641,88 @@
     font-size: 10px;
     color: var(--text-dim);
     font-family: var(--font-mono);
+  }
+
+  /* Context-files sidebar (R1): a full-height file viewer on the right edge. */
+  .ctx-sidebar {
+    position: relative;
+    flex-shrink: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    border-inline-start: 1px solid var(--border);
+    background: var(--bg);
+    min-height: 0;
+  }
+  .ctx-resize {
+    position: absolute;
+    inset-inline-start: -3px;
+    top: 0;
+    bottom: 0;
+    width: 7px;
+    cursor: col-resize;
+    z-index: 5;
+  }
+  .ctx-resize:hover {
+    background: linear-gradient(
+      to right,
+      transparent,
+      color-mix(in srgb, var(--accent) 40%, transparent),
+      transparent
+    );
+  }
+  .ctx-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 8px 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+    min-width: 0;
+  }
+  .ctx-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .ctx-path {
+    flex: 1;
+    min-width: 0;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: ltr;
+  }
+  .ctx-body {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .ctx-strip {
+    width: 36px;
+    flex-shrink: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 10px;
+    border-inline-start: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .ctx-strip .strip-btn {
+    width: 28px;
+    height: 28px;
   }
 
   /* Runs history popover */

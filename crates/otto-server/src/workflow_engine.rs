@@ -3510,6 +3510,20 @@ fn eval_outgoing(
 
 /// The effective retry policy for a node: an explicit `node.retry`, else a
 /// `params.retry` object, else the default (no retry). Clamped to sane bounds.
+/// Execution rules appended to EVERY agent-backed workflow step prompt: the step's
+/// single agent must do all the work itself — no sub-agents / background tasks —
+/// and must not yield its turn until the work is done. A plain directive, applied
+/// uniformly to every provider (claude/codex/agy). See design R2/R3.
+const WF_STEP_RULES: &str = "\n\n[workflow step — execution rules]\n\
+    You are running as a single automated workflow step. Do ALL of the work yourself in THIS turn.\n\
+    - Do NOT spawn, launch, or delegate to sub-agents, background agents, parallel workers, or the Task tool. No run_in_background, no fan-out — you are the only agent for this step.\n\
+    - Do NOT end your turn until the task is fully complete. Never stop early to \"wait for\" something you started; finish everything yourself, then write your handoff summary.\n";
+
+/// A workflow `agent_prompt` step that produces no output for this long is treated
+/// as stuck and retried. Separate from — and never longer than — the 10h max
+/// session lifespan backstop. See design R5.
+const WF_STEP_STUCK: Duration = Duration::from_secs(3 * 60);
+
 fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
     if let Some(p) = &node.retry {
         return p.clamped();
@@ -3518,6 +3532,14 @@ fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
         if let Ok(p) = serde_json::from_value::<otto_core::workflows::RetryPolicy>(rp.clone()) {
             return p.clamped();
         }
+    }
+    // Default: agent steps get a small retry budget (2 retries = 3 attempts) so a
+    // transient stuck/no-op spawn — e.g. a startup screen that swallowed the prompt,
+    // surfaced as the 3-min no-progress error — is re-attempted with a FRESH session,
+    // then errors ("call it a day"). Every other kind keeps the no-retry default.
+    if node.kind == "agent_prompt" {
+        return otto_core::workflows::RetryPolicy { max_attempts: 2, backoff_ms: 2000, factor: 2.0 }
+            .clamped();
     }
     otto_core::workflows::RetryPolicy::default()
 }
@@ -3566,6 +3588,16 @@ async fn run_node_agent(
     };
     let meta = json!({ "source": "workflow", "node_id": node.id, "node_kind": node.kind, "cwd": cwd });
     let tx = session_tx.clone();
+    // R2/R3: every agent-backed step runs as a single agent that does all the work
+    // itself — no sub-agents / background tasks — and doesn't yield its turn early.
+    let guarded = format!("{prompt}{WF_STEP_RULES}");
+    // R5: an `agent_prompt` step gets an early 3-min no-progress trip (retryable via
+    // resolve_retry); heavier agent kinds (review/product/canvas) keep the 10h backstop.
+    let stuck_after = if node.kind == "agent_prompt" {
+        WF_STEP_STUCK
+    } else {
+        crate::agent_session::STUCK_IDLE
+    };
     crate::agent_session::run_session_turn(
         ctx,
         ws,
@@ -3575,7 +3607,8 @@ async fn run_node_agent(
         cwd,
         provider,
         meta,
-        prompt,
+        &guarded,
+        stuck_after,
         move |id| {
             let _ = tx.send(id.to_string());
         },
@@ -4253,7 +4286,11 @@ mod tests {
     #[test]
     fn retry_policy_resolution_and_clamps() {
         let mut n = node("a", "agent_prompt");
-        assert_eq!(resolve_retry(&n).max_attempts, 0, "default no retry");
+        // R5: agent steps default to a small retry budget (2 retries = 3 attempts)
+        // so a stuck no-op spawn is re-attempted with a fresh session.
+        assert_eq!(resolve_retry(&n).max_attempts, 2, "agent_prompt default 2 retries");
+        // Non-agent kinds keep the no-retry default.
+        assert_eq!(resolve_retry(&node("b", "log")).max_attempts, 0, "non-agent no retry");
         n.params = json!({ "retry": { "max_attempts": 99, "backoff_ms": 999999 } });
         let p = resolve_retry(&n);
         assert_eq!(p.max_attempts, 5, "clamped to 5");

@@ -2,6 +2,7 @@
   // Reusable run detail: every step of a WorkflowRun with its status, duration,
   // logs, error, and rendered "work product" (agent reply / JSON).
   import Icon from '../../lib/components/Icon.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { proof } from '../../lib/stores/proof.svelte';
@@ -114,6 +115,10 @@
   function asText(out: unknown): string {
     return typeof out === 'string' ? out : JSON.stringify(out, null, 2);
   }
+
+  // "Zoom in on a specific step" (R6): open the step's full logs + work product
+  // in a large modal, so a big JSON config/output is actually readable.
+  let zoomed = $state<NodeRunState | null>(null);
 </script>
 
 {#if run.proof_pack_id || run.workflow_version != null}
@@ -146,11 +151,24 @@
         <span class="name">{nodeName(ns.node_id)}</span>
         <span class="status">{ns.status}</span>
         {#if (ns.attempts ?? 1) > 1}<span class="chip" title="step was retried">×{ns.attempts} attempts</span>{/if}
+        <span class="sp-grow"></span>
         {#if ns.duration_ms != null}
           <span class="ms">{fmtMs(ns.duration_ms)}</span>
         {:else if ns.status === 'running' && elapsedMs(ns) != null}
           <span class="ms live">{fmtMs(elapsedMs(ns))}</span>
         {/if}
+        <button
+          class="zoom-btn"
+          title="Zoom in on this step"
+          aria-label="Zoom in on this step"
+          onclick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            zoomed = ns;
+          }}
+        >
+          <Icon name="maximize" size={12} />
+        </button>
       </summary>
       <div class="body">
         {#if ns.error}
@@ -202,6 +220,36 @@
     </details>
   {/each}
 </div>
+
+{#if zoomed}
+  {@const z = zoomed}
+  <Modal title={`Step · ${nodeName(z.node_id)}`} width={920} onclose={() => (zoomed = null)}>
+    <div class="zoom">
+      {#if z.error}<div class="err">{z.error}</div>{/if}
+      {#if z.logs?.length}
+        <div class="zh"><span>Logs</span></div>
+        <pre class="logs zbig">{z.logs.join('\n')}</pre>
+      {/if}
+      {#if hasOutput(z)}
+        {@const zt = reply(z.output)}
+        <div class="zh">
+          <span>Work product</span>
+          <span class="ph-grow"></span>
+          <button class="copy-btn" title="Copy to clipboard" onclick={() => copy(asText(z.output), 'output')}>
+            <Icon name="file" size={11} /> Copy
+          </button>
+        </div>
+        {#if zt}
+          <pre class="text zbig">{zt}</pre>
+        {:else}
+          <pre class="json zbig">{JSON.stringify(z.output, null, 2)}</pre>
+        {/if}
+      {:else if !z.error && !z.logs?.length}
+        <div class="muted">No output.</div>
+      {/if}
+    </div>
+  </Modal>
+{/if}
 
 <style>
   .steps {
@@ -353,6 +401,55 @@
   .scrolly {
     max-height: 340px;
     overflow: auto;
+  }
+  .sp-grow {
+    flex: 1;
+  }
+  .zoom-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 2px;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .zoom-btn:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  /* Zoomed step modal (R6): big, readable logs + work product. */
+  .zoom {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .zh {
+    display: flex;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+  }
+  .zbig {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 12px;
+    margin: 0;
+    max-height: 68vh;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
   .muted {
     font-size: 11.5px;
