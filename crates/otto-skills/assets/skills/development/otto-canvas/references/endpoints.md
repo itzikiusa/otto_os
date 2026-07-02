@@ -58,6 +58,27 @@ The read-modify-write pattern for editing a scene:
 
 ---
 
+## Session ↔ scene references
+
+Lets a scene show up in an agent session's Canvas panel. A session may
+reference many scenes; a scene may be referenced by many sessions. Lives in
+`crates/otto-server/src/canvas_refs.rs` (needs `SessionManager`, so it isn't in
+`otto-canvas` alongside the CRUD routes above).
+
+### `GET /sessions/{sid}/canvas-refs` — list a session's referenced scenes (Viewer)
+Returns `CanvasSceneSummary[]`.
+
+### `POST /sessions/{sid}/canvas-refs` — reference a scene (Editor)
+Body: `{ "scene_id": "…" }`. `204 No Content`. Idempotent — referencing an
+already-referenced scene is a no-op. The scene must belong to the SAME
+workspace as the session, else `404`.
+
+### `DELETE /sessions/{sid}/canvas-refs/{scene_id}` — detach a scene (Editor)
+`204 No Content`. Detaching an already-detached scene is a silent no-op. The
+scene itself is untouched.
+
+---
+
 ## Canvas agent-assist (prompt → diagram blocks)
 
 Both run a single headless agent turn and return `AssistResult`:
@@ -163,11 +184,22 @@ otto POST /product/discovery-chats/$CID/apply \
 
 ---
 
-## Read-only MCP note
+## MCP tools note
 
-The first-party MCP server (`ottod mcp-tools`) is **read-only by hard invariant —
-GET only, no write path exists**. If wired, `canvas_list_scenes` /
-`canvas_get_scene` may appear as MCP tools for inspecting scenes. **All writes**
-(create/update/delete a scene, `assist`, every discovery-chat mutation) go through
-the HTTP routes above with `OTTO_API_TOKEN` — there is no MCP write tool for the
-canvas and there will not be one.
+The first-party MCP server (`ottod mcp-tools`) is read-only, with exactly TWO
+named exceptions for Canvas: `canvas_create_scene` and `canvas_update_scene`.
+Both post/put to the same HTTP routes above, as the calling session's owner
+(same `WorkspaceRole::Editor` gate a human hits) — no elevated access. If
+wired, `canvas_list_scenes` / `canvas_get_scene` also appear for inspecting
+scenes.
+
+- `canvas_create_scene {title, format?, source?, section?}` → `{scene_id,
+  workspace_id}` — creates a scene (`POST /workspaces/{ws}/canvas/scenes`) and
+  best-effort references it to the calling session
+  (`POST /sessions/{sid}/canvas-refs`).
+- `canvas_update_scene {scene_id, source}` → `{ok: true, format}` — replaces a
+  scene's diagram source, preserving its `format`/`sketch`.
+
+Deleting a scene, every discovery-chat mutation, and every field NOT covered
+by the two tools above still go through the HTTP routes with `OTTO_API_TOKEN` —
+there is no MCP tool for those.
