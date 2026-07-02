@@ -1,0 +1,47 @@
+direction: right
+
+internet: "Internet / Client"
+
+edge: {
+  label: "Edge"
+  cdn: "CDN / WAF"
+  tunnel: "Tunnel / Load Balancer"
+}
+
+cluster: {
+  label: "Kubernetes Cluster"
+  ingress: "Ingress Controller"
+
+  namespace: {
+    label: "Namespace"
+    service: "K8s Service"
+    pod: "Application Pod(s)"
+    worker: "Worker Pod(s)"
+  }
+}
+
+data: {
+  label: "Data / Messaging"
+  db: "Database"
+  cache: "Redis"
+  queue: "Kafka/SQS"
+}
+
+observability: {
+  label: "Observability"
+  logs: "Logs"
+  metrics: "Metrics"
+  traces: "Traces"
+}
+
+internet -> edge.cdn: HTTPS
+edge.cdn -> edge.tunnel: forwards
+edge.tunnel -> cluster.ingress: private route
+cluster.ingress -> cluster.namespace.service: routes
+cluster.namespace.service -> cluster.namespace.pod: load balances
+cluster.namespace.pod -> data.db: reads/writes
+cluster.namespace.pod -> data.cache: cache/session
+cluster.namespace.pod -> data.queue: publish/consume
+cluster.namespace.pod -> observability.logs: emits logs
+cluster.namespace.pod -> observability.metrics: emits metrics
+cluster.namespace.pod -> observability.traces: emits traces

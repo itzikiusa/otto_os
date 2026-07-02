@@ -1,0 +1,53 @@
+direction: right
+
+legend: |md
+  # Legend
+  Solid edge = synchronous call
+  Dashed edge = async/event flow
+  Dashed border = external system
+|
+
+actors: {
+  label: "Actors"
+  user: "User"
+  admin: "Admin"
+}
+
+edge: {
+  label: "Edge"
+  web: "Web / Mobile UI"
+  api_gateway: "API Gateway / Ingress"
+}
+
+backend: {
+  label: "Backend Services"
+  service_a: "Service A"
+  worker_a: "Worker A"
+}
+
+data: {
+  label: "Data Stores"
+  db: "Primary DB"
+  cache: "Redis Cache"
+}
+
+events: {
+  label: "Events"
+  topic: "Kafka/SQS Topic"
+}
+
+external: {
+  label: "External Systems"
+  style.stroke-dash: 4
+  provider: "Third-party Provider"
+}
+
+actors.user -> edge.web: opens app
+actors.admin -> edge.web: manages
+edge.web -> edge.api_gateway: HTTPS
+edge.api_gateway -> backend.service_a: routes API calls
+backend.service_a -> data.db: reads/writes
+backend.service_a -> data.cache: caches/session
+backend.service_a -> events.topic: publishes events
+backend.worker_a -> events.topic: consumes events
+backend.service_a -> external.provider: calls provider

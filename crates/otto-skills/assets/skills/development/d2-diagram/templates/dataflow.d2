@@ -1,0 +1,24 @@
+direction: right
+
+source: "Source System"
+ingest: "Ingestion API"
+queue: "Kafka/SQS Topic"
+processor: "Processor / Worker"
+dedup: "Idempotency / Dedup"
+storage: "Analytical Store"
+views: "Materialized Views / Aggregates"
+consumer: "Dashboard / Downstream Consumer"
+
+source -> ingest: sends events
+ingest -> queue: publishes
+queue -> processor: consumes
+processor -> dedup: checks idempotency
+dedup -> storage: writes unique records
+storage -> views: aggregates
+views -> consumer: queries
+
+assumptions: |md
+  # Assumptions
+  - Replace nodes with concrete services/topics/tables.
+  - Add retention/retry/DLQ details when known.
+|
