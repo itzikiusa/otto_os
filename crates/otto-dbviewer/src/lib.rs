@@ -20,6 +20,7 @@ pub mod import;
 pub mod nl;
 pub mod registry;
 pub mod service;
+pub mod split;
 pub mod tls;
 pub mod types;
 
@@ -33,6 +34,7 @@ pub use nl::{
 };
 pub use registry::Registry;
 pub use service::DbViewerService;
+pub use split::{split_statements, SqlDialect, StatementSpan};
 pub use types::{
     Capabilities, Column, ColumnDef, CompletionContext, CompletionItem, CompletionKind,
     CompletionResponse, Engine, ForeignKey, GraphColumn, GraphEdge, GraphTable, IndexDef, NodeKind,

@@ -3,6 +3,7 @@
 //! per-engine capabilities. These form the stable contract every driver
 //! implements — keep them engine-agnostic.
 
+use crate::split::{split_statements, SqlDialect};
 use otto_core::domain::ConnectionKind;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -831,12 +832,17 @@ pub fn statement_is_write(engine: Engine, statement: &str) -> bool {
 /// SQL: a write unless every (non-empty) statement starts with a read keyword.
 /// An empty / comment-only statement isn't a write.
 fn sql_is_write(statement: &str) -> bool {
-    // Split on `;` so a batch like `SELECT 1; DROP TABLE t` is correctly a write.
-    for part in statement.split(';') {
-        if part.trim().is_empty() {
-            continue;
-        }
-        if !sql_first_keyword_is_read(part) {
+    // Use the shared string/comment-aware splitter (Generic dialect: the
+    // conservative common denominator) rather than a naive `text.split(';')`, so
+    // a `;` sitting inside a string literal or a comment stops faking a phantom
+    // statement boundary. This can only ever *relax* the guard, and only for
+    // that provable in-literal/in-comment class — every genuine batched
+    // statement is still classified per-part. The `split::tests` parity corpus
+    // proves the guard never classifies fewer writes than the old naive split
+    // outside that class. Blank / comment-only segments produce no spans, so
+    // input that executes nothing is (correctly) not a write.
+    for span in split_statements(statement, SqlDialect::Generic) {
+        if !sql_first_keyword_is_read(&span.text) {
             return true;
         }
     }
@@ -1184,6 +1190,79 @@ mod tests {
                 statement_is_write(Engine::Mysql, sql),
                 "write missed: {sql}"
             );
+        }
+    }
+
+    /// The pre-splitter guard: naive `text.split(';')`, kept verbatim here as the
+    /// parity baseline the string-aware guard must never regress against.
+    fn naive_sql_is_write(statement: &str) -> bool {
+        for part in statement.split(';') {
+            if part.trim().is_empty() {
+                continue;
+            }
+            if !sql_first_keyword_is_read(part) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Security-critical parity: the string-aware guard must classify **at least
+    /// as many writes** as the naive `;`-split for every input, EXCEPT the one
+    /// sanctioned relaxation class — a `;` that is provably inside a string
+    /// literal or a comment (plus comment/blank-only input, which executes
+    /// nothing). For each `relaxation` case the naive split over-counts a phantom
+    /// write and the new guard correctly reads it; everywhere else the two agree.
+    #[test]
+    fn write_guard_parity_never_drops_a_write_outside_literals_and_comments() {
+        // (sql, is_relaxation)
+        let cases: &[(&str, bool)] = &[
+            // --- genuine batched writes: MUST stay writes (no relaxation) ---
+            ("SELECT 1; DROP TABLE t", false),
+            ("INSERT INTO x VALUES (1); SELECT 1", false),
+            ("SELECT 1; UPDATE t SET a = 1", false),
+            ("DROP TABLE t", false),
+            // pure reads: both agree it is not a write
+            ("SELECT 1", false),
+            ("SELECT 1; SELECT 2", false),
+            ("   ", false),
+            // a real DROP with comments *around* it — the comment must NOT hide it
+            ("SELECT 1; /* note */ DROP TABLE t", false),
+            ("SELECT 1;\n-- note\nDROP TABLE t", false),
+            ("/* lead */ DROP TABLE t", false),
+            // `;` *after* a block comment is still a real separator
+            ("SELECT 1 /* c */; DROP TABLE t", false),
+            // --- relaxations: `;` provably inside a string literal ---
+            ("SELECT 'x; DROP TABLE t'", true),
+            ("SELECT \"x; DROP TABLE t\"", true),
+            ("SELECT 'a' , 'b; DROP TABLE t'", true),
+            // --- relaxations: `;` provably inside a comment ---
+            ("SELECT 1 -- x; DROP TABLE t", true),
+            ("SELECT 1 /* ; DROP TABLE t */ FROM t", true),
+            // --- relaxations: input executes nothing (comment/blank-only) ---
+            ("-- just a comment", true),
+            ("/* block only */", true),
+        ];
+        for (sql, is_relaxation) in cases {
+            let naive = naive_sql_is_write(sql);
+            let guarded = sql_is_write(sql);
+            if *is_relaxation {
+                assert!(
+                    naive,
+                    "corpus bug: relaxation case must be one the naive split over-counted: {sql:?}"
+                );
+                assert!(
+                    !guarded,
+                    "relaxation case must now classify as read (the `;` is inside a literal/comment, or nothing executes): {sql:?}"
+                );
+            } else {
+                // Never fewer writes than naive, and reads stay reads.
+                assert_eq!(guarded, naive, "guard diverged from naive for {sql:?}");
+                assert!(
+                    guarded || !naive,
+                    "SECURITY REGRESSION: new guard dropped a write the naive split caught: {sql:?}"
+                );
+            }
         }
     }
 
