@@ -10,6 +10,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+
 use tiny_http::{Header, Method, Response, Server};
 
 fn env(k: &str) -> String {
@@ -20,7 +21,10 @@ fn env(k: &str) -> String {
 
 fn host_get(path: &str) -> Result<Value, String> {
     ureq::get(&format!("{}{}", env("OTTO_HOST_API"), path))
-        .set("Authorization", &format!("Bearer {}", env("OTTO_PLUGIN_TOKEN")))
+        .set(
+            "Authorization",
+            &format!("Bearer {}", env("OTTO_PLUGIN_TOKEN")),
+        )
         .call()
         .map_err(|e| e.to_string())?
         .into_json::<Value>()
@@ -29,7 +33,10 @@ fn host_get(path: &str) -> Result<Value, String> {
 
 fn host_post(path: &str, body: Value) -> Result<Value, String> {
     ureq::post(&format!("{}{}", env("OTTO_HOST_API"), path))
-        .set("Authorization", &format!("Bearer {}", env("OTTO_PLUGIN_TOKEN")))
+        .set(
+            "Authorization",
+            &format!("Bearer {}", env("OTTO_PLUGIN_TOKEN")),
+        )
         .send_json(body)
         .map_err(|e| e.to_string())?
         .into_json::<Value>()
@@ -56,7 +63,16 @@ struct Commit {
 }
 
 fn load_commits(repo: &str) -> Vec<Commit> {
-    let out = git(repo, &["log", "--all", "-n", "2000", "--pretty=%ct\x1f%P\x1f%s\x1f%D"]);
+    let out = git(
+        repo,
+        &[
+            "log",
+            "--all",
+            "-n",
+            "2000",
+            "--pretty=%ct\x1f%P\x1f%s\x1f%D",
+        ],
+    );
     out.lines()
         .filter_map(|line| {
             let f: Vec<&str> = line.split('\x1f').collect();
@@ -70,7 +86,12 @@ fn load_commits(repo: &str) -> Vec<Commit> {
             } else {
                 f[3].split(", ").map(|s| s.to_string()).collect()
             };
-            Some(Commit { ts, subject: f[2].to_string(), parents, refs })
+            Some(Commit {
+                ts,
+                subject: f[2].to_string(),
+                parents,
+                refs,
+            })
         })
         .collect()
 }
@@ -153,7 +174,7 @@ fn compute(commits: &[Commit], days: i64, repo_name: &str, now: i64) -> Value {
     for d in &deploys {
         let included: Vec<&(i64, &str, String)> = merges
             .iter()
-            .filter(|m| m.0 <= d.0 && prev.map_or(true, |p| m.0 > p))
+            .filter(|m| m.0 <= d.0 && prev.is_none_or(|p| m.0 > p))
             .collect();
         if let Some(oldest) = included.iter().map(|m| m.0).min() {
             lead.push((d.0 - oldest) as f64 / 3600.0);
@@ -170,12 +191,20 @@ fn compute(commits: &[Commit], days: i64, repo_name: &str, now: i64) -> Value {
     };
     let freq = deploys.len() as f64 / (days.max(1) as f64 / 7.0);
 
-    let feat_dates: Vec<i64> = merges.iter().filter(|m| m.1 == "feature").map(|m| m.0).collect();
-    let rel_dates: Vec<i64> = merges.iter().filter(|m| m.1 == "release").map(|m| m.0).collect();
+    let feat_dates: Vec<i64> = merges
+        .iter()
+        .filter(|m| m.1 == "feature")
+        .map(|m| m.0)
+        .collect();
+    let rel_dates: Vec<i64> = merges
+        .iter()
+        .filter(|m| m.1 == "release")
+        .map(|m| m.0)
+        .collect();
     let dep_dates: Vec<i64> = deploys.iter().map(|d| d.0).collect();
 
     let mut recent = merges.clone();
-    recent.sort_by(|a, b| b.0.cmp(&a.0));
+    recent.sort_by_key(|m| std::cmp::Reverse(m.0));
     recent.truncate(50);
 
     json!({
@@ -208,7 +237,10 @@ fn resolve(needle: &str) -> Result<(String, String), String> {
 }
 
 fn now_secs() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn metrics(needle: &str, days: i64) -> Result<Value, String> {
@@ -225,7 +257,11 @@ fn analyze(needle: &str, days: i64) -> Result<Value, String> {
         serde_json::to_string_pretty(&m).unwrap_or_default()
     );
     let r = host_post("/agents/run", json!({ "prompt": prompt }))?;
-    let summary = r.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let summary = r
+        .get("text")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     Ok(json!({ "summary": summary, "metrics": m }))
 }
 
@@ -276,7 +312,11 @@ fn handle(method: &Method, path: &str, query: &str, body: &str) -> (u16, Value) 
         }
         (Method::Post, "/analyze") => {
             let b: Value = serde_json::from_str(body).unwrap_or(json!({}));
-            let repo = b.get("repo").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let repo = b
+                .get("repo")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let days = b.get("days").and_then(|x| x.as_i64()).unwrap_or(30);
             match analyze(&repo, days) {
                 Ok(v) => (200, v),
@@ -304,9 +344,11 @@ fn main() {
         }
         let (code, val) = handle(&method, &path, &query, &body);
         let data = serde_json::to_vec(&val).unwrap_or_default();
-        let resp = Response::from_data(data).with_status_code(code).with_header(
-            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-        );
+        let resp = Response::from_data(data)
+            .with_status_code(code)
+            .with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
         let _ = req.respond(resp);
     }
 }
