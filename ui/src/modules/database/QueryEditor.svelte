@@ -270,17 +270,33 @@
   // ── Save query ──────────────────────────────────────────────────────────
   let saving = $state(false);
   let saveName = $state('');
+  /** True when this tab was opened from a saved query that still exists — then
+   *  the primary Save UPDATES it in place ("Save as new" forks a fresh one). */
+  const savedLinked = $derived(
+    !!tab?.savedQueryId && database.savedQueries.some((q) => q.id === tab.savedQueryId),
+  );
   async function openSave(): Promise<void> {
     saveName = tab.name && tab.name !== 'Query' ? tab.name : '';
     saving = true;
     await tick();
   }
+  /** Primary save: update the linked saved query in place, else create a new one
+   *  (a name is required only for the create case). */
   async function confirmSave(): Promise<void> {
+    if (!savedLinked && !saveName.trim()) return;
+    const saved = await database.saveActiveTab(saveName);
+    if (saved) {
+      saving = false;
+      saveName = '';
+    }
+  }
+  /** Always create a fresh saved query from the current statement (a name is
+   *  required). Lets the user fork a saved query without overwriting it. */
+  async function confirmSaveAsNew(): Promise<void> {
     const name = saveName.trim();
     if (!name) return;
     const saved = await database.saveQuery(name, tab.statement);
     if (saved) {
-      tab.name = saved.name;
       saving = false;
       saveName = '';
     }
@@ -376,8 +392,13 @@
       </button>
     {/if}
     {#if canEdit}
-      <button class="btn small" onclick={openSave} disabled={!tab.statement.trim()}>
-        <Icon name="check" size={11} />Save
+      <button
+        class="btn small"
+        onclick={openSave}
+        disabled={!tab.statement.trim()}
+        title={savedLinked ? 'Update the saved query (or Save as new)' : 'Save this query'}
+      >
+        <Icon name="check" size={11} />{savedLinked ? 'Update' : 'Save'}
       </button>
     {/if}
     <button
@@ -545,7 +566,7 @@
       <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input grow"
-        placeholder="Query name"
+        placeholder={savedLinked ? 'Name (blank = keep current)' : 'Query name'}
         bind:value={saveName}
         autofocus
         onkeydown={(e) => {
@@ -553,7 +574,14 @@
           else if (e.key === 'Escape') saving = false;
         }}
       />
-      <button class="btn small primary" onclick={confirmSave} disabled={!saveName.trim()}>Save</button>
+      <button class="btn small primary" onclick={confirmSave} disabled={!savedLinked && !saveName.trim()}>
+        {savedLinked ? 'Update' : 'Save'}
+      </button>
+      {#if savedLinked}
+        <button class="btn small" onclick={confirmSaveAsNew} disabled={!saveName.trim()} title="Create a new saved query instead of updating">
+          Save as new
+        </button>
+      {/if}
       <button class="btn small" onclick={() => (saving = false)}>Cancel</button>
     </div>
   {/if}

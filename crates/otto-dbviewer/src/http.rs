@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
@@ -118,6 +118,16 @@ struct NewSavedQueryReq {
     statement: String,
 }
 
+/// Partial update for a saved query: rename, re-statement, or both. Absent fields
+/// are left unchanged (COALESCE in the repo).
+#[derive(Debug, Deserialize)]
+struct UpdateSavedQueryReq {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    statement: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateDashboardReq {
     name: String,
@@ -199,7 +209,10 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
             "/workspaces/{wid}/db/saved-queries",
             get(list_saved::<S>).post(create_saved::<S>),
         )
-        .route("/db/saved-queries/{qid}", delete(delete_saved::<S>))
+        .route(
+            "/db/saved-queries/{qid}",
+            patch(update_saved::<S>).delete(delete_saved::<S>),
+        )
         // Dashboards.
         .route(
             "/workspaces/{wid}/db/dashboards",
@@ -922,6 +935,27 @@ async fn create_saved<S: DbViewerCtx>(
         })
         .await?;
     Ok(Json(saved).into_response())
+}
+
+async fn update_saved<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(qid): Path<Id>,
+    Json(req): Json<UpdateSavedQueryReq>,
+) -> ApiResult<Response> {
+    // Same gate as delete: editor on the query's workspace AND ownership
+    // (owner / ws-Admin / root) — saved queries are owner-private. Unknown id →
+    // `get_saved` errors (404) before any mutation.
+    let saved = ctx.db().get_saved(&qid).await?;
+    ctx.roles()
+        .check(&user, &saved.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    require_owner_or_ws_admin(&ctx, &user, &saved.created_by, &saved.workspace_id).await?;
+    let updated = ctx
+        .db()
+        .update_saved(&qid, req.name.as_deref(), req.statement.as_deref())
+        .await?;
+    Ok(Json(updated).into_response())
 }
 
 async fn delete_saved<S: DbViewerCtx>(

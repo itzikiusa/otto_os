@@ -706,7 +706,8 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 |---|---|---|---|
 | GET /workspaces/{wid}/db/saved-queries | ws viewer | — | `SavedQuery[]` |
 | POST /workspaces/{wid}/db/saved-queries | ws editor | CreateSavedQueryReq | SavedQuery |
-| DELETE /db/saved-queries/{qid} | ws editor | — | 204 |
+| PATCH /db/saved-queries/{qid} | ws editor **+ owner/ws-Admin/root** | UpdateSavedQueryReq `{name?, statement?}` | updated `SavedQuery` |
+| DELETE /db/saved-queries/{qid} | ws editor **+ owner/ws-Admin/root** | — | 204 |
 | GET /workspaces/{wid}/db/dashboards | ws viewer | — | `Dashboard[]` |
 | POST /workspaces/{wid}/db/dashboards | ws editor | CreateDashboardReq | Dashboard |
 | GET /db/dashboards/{id} | ws viewer | — | Dashboard |
@@ -717,6 +718,14 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | PATCH /db/widgets/{id} | ws editor | UpdateWidgetReq | Widget |
 | DELETE /db/widgets/{id} | ws editor | — | 204 |
 | POST /db/widgets/{id}/run | ws editor | — | widget query result |
+
+`UpdateSavedQueryReq` = `{ name?, statement? }` — a partial update; an absent
+field is left unchanged (so a rename and a statement-edit can be sent
+independently). Like DELETE, PATCH requires **Editor on the query's workspace AND
+ownership** (the owner, a workspace Admin, or root) — saved queries are
+owner-private. An unknown `qid` → 404. The UI uses PATCH to rename a saved query
+inline and to update it in place when "Save" is pressed on a tab opened from it
+("Save as new" instead POSTs a fresh one).
 
 ## Git — repos & PR extras (beyond #34–#56)
 

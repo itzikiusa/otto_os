@@ -22,7 +22,12 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
-  import type { Connection, ConnectionKind, ConnectionSection } from '../../lib/api/types';
+  import type {
+    Connection,
+    ConnectionKind,
+    ConnectionSection,
+    DbSavedQuery,
+  } from '../../lib/api/types';
 
   // DB connections are created/managed here (hidden from the Connections page).
   const DB_KINDS: ConnectionKind[] = ['mysql', 'redis', 'mongodb', 'clickhouse'];
@@ -31,6 +36,38 @@
   // Import connection profiles from other DB tools (MySQL Workbench / DBeaver /
   // DataGrip / NoSQLBooster) — the daemon reads each tool's config from disk.
   let connImportOpen = $state(false);
+
+  // ── Saved / History sidebar (search + inline rename) ──────────────────────
+  let savedSearch = $state('');
+  let historySearch = $state('');
+  let renamingId = $state<string | null>(null);
+  let renameDraft = $state('');
+  const filteredSaved = $derived.by(() => {
+    const s = savedSearch.trim().toLowerCase();
+    if (!s) return database.savedQueries;
+    return database.savedQueries.filter(
+      (q) => q.name.toLowerCase().includes(s) || q.statement.toLowerCase().includes(s),
+    );
+  });
+  const filteredHistory = $derived.by(() => {
+    const s = historySearch.trim().toLowerCase();
+    if (!s) return database.history;
+    return database.history.filter(
+      (h) => h.statement.toLowerCase().includes(s) || (h.error ?? '').toLowerCase().includes(s),
+    );
+  });
+  function startRename(q: DbSavedQuery): void {
+    renamingId = q.id;
+    renameDraft = q.name;
+  }
+  async function commitRename(): Promise<void> {
+    const id = renamingId;
+    if (id && renameDraft.trim()) await database.renameSavedQuery(id, renameDraft);
+    renamingId = null;
+  }
+  function cancelRename(): void {
+    renamingId = null;
+  }
 
   // ── Phone accordion ────────────────────────────────────────────────────────
   // On a phone the whole page scrolls and each major section (Connections /
@@ -312,14 +349,28 @@
   }
 
   // Load connections + workspace-scoped saved/dashboards when the workspace changes.
+  // Restore the persisted workbench (open connection tabs + focus) ONLY after
+  // loadConnections resolves — it clears the open set on a workspace switch, so
+  // restoring earlier would be wiped.
   $effect(() => {
     if (ws.currentId) {
-      void database.loadConnections();
+      void (async () => {
+        await database.loadConnections();
+        await database.restoreWorkbench();
+      })();
       void loadSections();
       void database.loadSavedQueries();
       void database.loadDashboards();
     }
   });
+
+  /** Tooltip for the connection health chip: "Connected · <version> · <ms> ms". */
+  function healthTitle(st: { serverVersion?: string; latencyMs?: number }): string {
+    const parts = ['Connected'];
+    if (st.serverVersion) parts.push(st.serverVersion);
+    if (st.latencyMs != null) parts.push(`${st.latencyMs} ms`);
+    return parts.join(' · ');
+  }
 
   const mainTabs: { id: DbMainTab; label: string; show: () => boolean }[] = [
     { id: 'query', label: 'Query', show: () => true },
@@ -474,9 +525,9 @@
           {/if}
         </div>
         <div class="side-switch" class:acc-collapsed={!schemaOpen} role="tablist">
-          <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => (database.sideTab = 'schema')}>Schema</button>
-          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => (database.sideTab = 'saved')}>Saved</button>
-          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => (database.sideTab = 'history')}>History</button>
+          <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => database.setSideTab('schema')}>Schema</button>
+          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
+          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
         </div>
         <div class="side-body" class:acc-collapsed={!schemaOpen}>
           {@render schemaSideBody()}
@@ -486,10 +537,10 @@
       <!-- TABLET / DESKTOP: one tab strip. "Connections" is the picker tab, so
            the list takes the full sidebar height instead of a capped section. -->
       <div class="side-switch" role="tablist">
-        <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} onclick={() => (database.sideTab = 'connections')}>Connections</button>
-        <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => (database.sideTab = 'schema')}>Schema</button>
-        <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => (database.sideTab = 'saved')}>Saved</button>
-        <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => (database.sideTab = 'history')}>History</button>
+        <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} onclick={() => database.setSideTab('connections')}>Connections</button>
+        <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => database.setSideTab('schema')}>Schema</button>
+        <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
+        <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
         {#if database.sideTab === 'schema' && database.selectedConnId}
           <span class="grow"></span>
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
@@ -578,7 +629,7 @@
 
       <div class="main-tabs">
         {#each visibleTabs as t (t.id)}
-          <button class="mt" class:active={database.mainTab === t.id} role="tab" aria-selected={database.mainTab === t.id} onclick={() => (database.mainTab = t.id)}>
+          <button class="mt" class:active={database.mainTab === t.id} role="tab" aria-selected={database.mainTab === t.id} onclick={() => database.setMainTab(t.id)}>
             {t.label}
           </button>
         {/each}
@@ -591,6 +642,16 @@
             <span class="conn-state"><span class="conn-tab-spin spin"><Icon name="refresh" size={11} /></span>Connecting…</span>
           {:else if database.activeConnStatus?.phase === 'error'}
             <span class="conn-state err" title={database.activeConnStatus.error}>Disconnected</span>
+          {:else if database.activeConnStatus?.phase === 'ready'}
+            <span class="conn-state ok" title={healthTitle(database.activeConnStatus)}>
+              <span class="health-dot"></span>
+              {#if database.activeConnStatus.serverVersion}
+                <span class="health-ver mono ellipsis">{database.activeConnStatus.serverVersion}</span>
+              {/if}
+              {#if database.activeConnStatus.latencyMs != null}
+                <span class="health-lat">{database.activeConnStatus.latencyMs} ms</span>
+              {/if}
+            </span>
           {/if}
           <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing}>
             <Icon name="plug" size={11} />{database.testing ? 'Testing…' : 'Test'}
@@ -794,30 +855,79 @@
 
 {#snippet schemaSideBody()}
   {#if database.sideTab === 'saved'}
+    <div class="list-search">
+      <Icon name="search" size={12} />
+      <input
+        class="list-search-input"
+        placeholder="Search saved…"
+        bind:value={savedSearch}
+        aria-label="Search saved queries"
+      />
+      {#if savedSearch}
+        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
+      {/if}
+    </div>
     {#if database.savedQueries.length === 0}
       <div class="list-empty">No saved queries. Save one from the Query tab.</div>
+    {:else if filteredSaved.length === 0}
+      <div class="list-empty">No saved queries match “{savedSearch}”.</div>
     {:else}
-      {#each database.savedQueries as q (q.id)}
+      {#each filteredSaved as q (q.id)}
         <div class="saved-row">
-          <button class="saved-open" onclick={() => database.openSavedQuery(q)} title={q.statement}>
-            <Icon name="file" size={12} />
-            <span class="ellipsis">{q.name}</span>
-          </button>
-          <button class="icon-btn row-del" onclick={() => database.deleteSavedQuery(q.id)} aria-label="Delete saved query"><Icon name="trash" size={11} /></button>
+          {#if renamingId === q.id}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="rename-input"
+              bind:value={renameDraft}
+              autofocus
+              onkeydown={(e) => {
+                if (e.key === 'Enter') void commitRename();
+                else if (e.key === 'Escape') cancelRename();
+              }}
+              onblur={() => void commitRename()}
+              aria-label="Rename saved query"
+            />
+          {:else}
+            <button class="saved-open" onclick={() => database.openSavedQuery(q)} title={q.statement}>
+              <Icon name="file" size={12} />
+              <span class="ellipsis">{q.name}</span>
+            </button>
+            <button class="icon-btn row-del" onclick={() => startRename(q)} aria-label="Rename saved query" title="Rename"><Icon name="edit" size={11} /></button>
+            <button class="icon-btn row-del" onclick={() => database.deleteSavedQuery(q.id)} aria-label="Delete saved query" title="Delete"><Icon name="trash" size={11} /></button>
+          {/if}
         </div>
       {/each}
     {/if}
   {:else if database.sideTab === 'history'}
+    <div class="list-search">
+      <Icon name="search" size={12} />
+      <input
+        class="list-search-input"
+        placeholder="Search history…"
+        bind:value={historySearch}
+        aria-label="Search query history"
+      />
+      {#if historySearch}
+        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
+      {/if}
+    </div>
     {#if database.history.length === 0}
       <div class="list-empty">No query history yet.</div>
+    {:else if filteredHistory.length === 0}
+      <div class="list-empty">No history matches “{historySearch}”.</div>
     {:else}
-      {#each database.history as h (h.id)}
+      {#each filteredHistory as h (h.id)}
         <button class="hist-row" class:bad={!h.ok} onclick={() => database.openHistory(h)} title={h.error ?? h.statement}>
           <span class="hist-dot" class:ok={h.ok}></span>
           <span class="hist-stmt ellipsis mono">{h.statement}</span>
           <span class="hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {fmtAgo(h.created_at)}</span>
         </button>
       {/each}
+      {#if database.canLoadMoreHistory}
+        <button class="load-more" onclick={() => database.loadMoreHistory()} disabled={database.historyLoadingMore}>
+          {database.historyLoadingMore ? 'Loading…' : 'Load more'}
+        </button>
+      {/if}
     {/if}
   {:else}
     <SchemaTree />
@@ -929,6 +1039,58 @@
     color: var(--text-dim);
     padding: 8px 6px;
     line-height: 1.5;
+  }
+  .list-search {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px 6px;
+    color: var(--text-dim);
+  }
+  .list-search-input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    border-radius: var(--radius-s);
+    padding: 4px 7px;
+    font-size: 11.5px;
+  }
+  .list-search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .rename-input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--accent);
+    background: var(--surface-2);
+    color: var(--text);
+    border-radius: var(--radius-s);
+    padding: 4px 7px;
+    margin: 0 2px;
+    font-size: 12px;
+  }
+  .rename-input:focus {
+    outline: none;
+  }
+  .load-more {
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 11.5px;
+    padding: 8px 6px;
+    text-align: center;
+  }
+  .load-more:hover:not(:disabled) {
+    text-decoration: underline;
+  }
+  .load-more:disabled {
+    color: var(--text-dim);
+    cursor: default;
   }
   .link {
     border: none;
@@ -1448,6 +1610,28 @@
   .conn-state.err {
     color: var(--status-exited);
     font-weight: 500;
+  }
+  .conn-state.ok {
+    color: var(--text-dim);
+    max-width: 220px;
+  }
+  .health-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--status-working);
+    flex-shrink: 0;
+  }
+  .health-ver {
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .health-lat {
+    color: var(--text-faint, var(--text-dim));
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
   }
   /* Component-scoped spinner (SchemaTree's copy doesn't leak here). */
   .spin {

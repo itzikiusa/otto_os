@@ -1014,6 +1014,14 @@ impl DbViewerService {
     pub async fn get_saved(&self, id: &Id) -> Result<SavedQuery> {
         self.repo.get_saved(id).await
     }
+    pub async fn update_saved(
+        &self,
+        id: &Id,
+        name: Option<&str>,
+        statement: Option<&str>,
+    ) -> Result<SavedQuery> {
+        self.repo.update_saved(id, name, statement).await
+    }
     pub async fn delete_saved(&self, id: &Id) -> Result<()> {
         self.repo.delete_saved(id).await
     }

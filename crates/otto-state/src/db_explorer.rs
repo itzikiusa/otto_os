@@ -190,6 +190,30 @@ impl DbExplorerRepo {
         row_to_saved(&row)
     }
 
+    /// Update a saved query's name and/or statement in place. `None` fields are
+    /// left unchanged (COALESCE keeps the stored value), so a rename and a
+    /// statement update can be sent independently. Returns the updated row.
+    pub async fn update_saved(
+        &self,
+        id: &Id,
+        name: Option<&str>,
+        statement: Option<&str>,
+    ) -> Result<SavedQuery> {
+        sqlx::query(
+            "UPDATE db_saved_queries
+                SET name = COALESCE(?, name),
+                    statement = COALESCE(?, statement)
+              WHERE id = ?",
+        )
+        .bind(name)
+        .bind(statement)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update saved query"))?;
+        self.get_saved(id).await
+    }
+
     pub async fn delete_saved(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM db_saved_queries WHERE id = ?")
             .bind(id)
@@ -719,6 +743,45 @@ mod tests {
             b_saved.is_empty(),
             "user B must not see user A's saved queries"
         );
+    }
+
+    /// `update_saved` patches name and statement independently (COALESCE keeps
+    /// the untouched field).
+    #[tokio::test]
+    async fn update_saved_patches_name_and_statement_independently() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+        let user = seed_user(&pool, "alice", false).await;
+        let ws_id = seed_workspace(&pool).await;
+
+        let saved = repo
+            .create_saved(NewSavedQuery {
+                workspace_id: ws_id.clone(),
+                connection_id: None,
+                name: "orig".into(),
+                statement: "SELECT 1".into(),
+                created_by: user.clone(),
+            })
+            .await
+            .unwrap();
+
+        // Rename only — statement unchanged.
+        let renamed = repo.update_saved(&saved.id, Some("renamed"), None).await.unwrap();
+        assert_eq!(renamed.name, "renamed");
+        assert_eq!(renamed.statement, "SELECT 1");
+
+        // Update statement only — name unchanged.
+        let restmt = repo.update_saved(&saved.id, None, Some("SELECT 2")).await.unwrap();
+        assert_eq!(restmt.name, "renamed");
+        assert_eq!(restmt.statement, "SELECT 2");
+
+        // Both at once.
+        let both = repo
+            .update_saved(&saved.id, Some("final"), Some("SELECT 3"))
+            .await
+            .unwrap();
+        assert_eq!(both.name, "final");
+        assert_eq!(both.statement, "SELECT 3");
     }
 
     /// B's saved query appears in B's per-user list.
