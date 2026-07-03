@@ -71,6 +71,7 @@ pub mod swarm_workspace;
 pub mod workflow_chat;
 pub mod workflow_context;
 pub mod workflow_engine;
+pub mod workflow_prepare;
 pub mod workflow_trigger_scheduler;
 pub mod workgraph_projector;
 pub mod ws_events;

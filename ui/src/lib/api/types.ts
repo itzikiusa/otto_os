@@ -3760,8 +3760,11 @@ export interface Workflow {
   workspace_id: Id;
   name: string;
   description: string;
+  /** Standing free-text guidance every run/step follows (distinct from
+   *  `description`, which is a summary). */
+  instructions: string;
   graph: WorkflowGraph;
-  /** Monotonic version counter, bumped on each graph edit/restore. */
+  /** Monotonic version counter, bumped on each graph/instructions edit/restore. */
   version?: number;
   created_by: Id;
   created_at: string;
@@ -3840,10 +3843,10 @@ export interface ActiveWorkflowRun {
 }
 
 // ---------------------------------------------------------------------------
-// Workflow triggers (schedule / webhook / event)
+// Workflow triggers (schedule / webhook / event / chat)
 // ---------------------------------------------------------------------------
 
-export type TriggerKind = 'schedule' | 'webhook' | 'event';
+export type TriggerKind = 'schedule' | 'webhook' | 'event' | 'chat';
 
 /** A workflow trigger row from the database. */
 export interface WorkflowTrigger {
@@ -3898,6 +3901,7 @@ export interface WorkflowVersion {
   version: number;
   name: string;
   description: string;
+  instructions: string;
   graph: WorkflowGraph;
   note: string;
   created_by: string;
@@ -3907,6 +3911,14 @@ export interface WorkflowVersion {
 export interface CreateWorkflowReq {
   name: string;
   description?: string | null;
+  instructions?: string | null;
+  graph?: WorkflowGraph | null;
+}
+
+export interface UpdateWorkflowReq {
+  name?: string | null;
+  description?: string | null;
+  instructions?: string | null;
   graph?: WorkflowGraph | null;
 }
 
@@ -4384,6 +4396,7 @@ export interface WorkflowTemplate {
   id: string;
   name: string;
   description: string;
+  instructions: string;
   icon: string;
   graph: WorkflowGraph;
 }

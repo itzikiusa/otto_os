@@ -105,6 +105,8 @@ pub struct Workflow {
     pub workspace_id: Id,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub instructions: String,
     pub graph: WorkflowGraph,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
@@ -309,6 +311,8 @@ pub struct CreateWorkflowReq {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
     pub graph: Option<WorkflowGraph>,
 }
 
@@ -318,6 +322,8 @@ pub struct UpdateWorkflowReq {
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub instructions: Option<String>,
     #[serde(default)]
     pub graph: Option<WorkflowGraph>,
 }
@@ -342,6 +348,7 @@ pub struct WorkflowTemplate {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub instructions: String,
     /// Icon name for the UI.
     pub icon: String,
     pub graph: WorkflowGraph,
@@ -369,6 +376,8 @@ pub struct WorkflowVersion {
     pub version: i64,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub instructions: String,
     pub graph: WorkflowGraph,
     /// A short note (e.g. "edited graph", "restored from v3").
     #[serde(default)]

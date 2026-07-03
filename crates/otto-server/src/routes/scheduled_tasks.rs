@@ -119,6 +119,9 @@ async fn convert_to_workflow(
             &task.workspace_id,
             &format!("{} (from scheduled task)", task.name),
             &format!("Converted from scheduled task {}", task.id),
+            // A converted scheduled task has no instructions source; the
+            // description above records what it was converted from.
+            "",
             &graph,
             &user.id,
         )
