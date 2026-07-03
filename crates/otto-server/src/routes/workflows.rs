@@ -830,6 +830,141 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                 ],
             },
         },
+        // 4) UI test authoring: story → app-fetched Jira context → write UI
+        // tests → review-fix loop → PR on pass → final report (both branches).
+        WorkflowTemplate {
+            id: "ui-test-authoring".into(),
+            name: "UI test authoring".into(),
+            description: "Story → app-fetched Jira context → write UI tests → review-fix loop \
+                          until green → PR on pass → final report. Bind a Slack channel or run \
+                          with a prompt."
+                .into(),
+            instructions: "# Standing instructions — UI test authoring\n\
+                - Tests are Playwright specs; follow the repo's existing spec layout and naming.\n\
+                - Never sleep-poll; use Playwright auto-waiting and web-first assertions.\n\
+                - Selectors: prefer role/test-id selectors over CSS/text.\n\
+                - Each spec must be independently runnable and idempotent.\n\
+                - Run ONLY the specs you created or changed — never the full suite.\n\
+                - If a jira-<KEY>.md exists in the context dir, it is the requirements source of truth.\n\
+                - Write your step handoff file before finishing (path given in your prompt)."
+                .into(),
+            icon: "check-square".into(),
+            graph: WorkflowGraph {
+                nodes: vec![
+                    node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
+                    node("prep", "prepare_context", "Prepare relevant data", 300.0, json!({
+                        "prompt": "Analyze the story and the codebase. If a jira-<KEY>.md file \
+                                   exists in the context directory it is the source of truth for \
+                                   requirements — read it fully (description AND comments). \
+                                   Produce a test plan: what to cover, where the tests live, exact \
+                                   conventions to follow per instructions.md."
+                    })),
+                    node("implement", "agent_prompt", "Write UI tests", 600.0, json!({
+                        "prompt": "Write the UI tests per the test plan, following instructions.md \
+                                   by the letter. Run only the specs you created/changed and make \
+                                   them pass."
+                    })),
+                    fix_review_loop(
+                        3,
+                        80,
+                        json!([
+                            { "lens": "correctness-review", "providers": ["claude"] },
+                            { "lens": "test-review", "providers": ["claude"] }
+                        ]),
+                        900.0,
+                    ),
+                    node("pr", "git_pr", "Open PR (on pass)", 1300.0, json!({ "open": true })),
+                    node("report", "agent_prompt", "Final report", 1600.0, json!({
+                        "prompt": "Write the final run report: what was requested, what was \
+                                   implemented (files/specs), the final suite result, and PR links \
+                                   from the input if present. If the review loop did not pass, \
+                                   state exactly what is still failing. This report is the run's \
+                                   final output."
+                    })),
+                    offer_improvements(1300.0),
+                ],
+                edges: vec![
+                    edge("trigger", "prep"),
+                    edge("prep", "implement"),
+                    edge("implement", "iterate"),
+                    // Open the PR only when the review→fix loop passed.
+                    edge_if("iterate", "pr", "output.satisfied == true"),
+                    edge("pr", "report"),
+                    // The final report always runs, even when the loop didn't pass.
+                    edge("iterate", "report"),
+                    // Offer improvements after the loop, pass or fail.
+                    edge("iterate", "improve"),
+                ],
+            },
+        },
+        // 5) API acceptance test authoring: same shape as UI test authoring,
+        // targeting the acceptance-test framework's Gateway/ServiceLocator layers.
+        WorkflowTemplate {
+            id: "api-acceptance-test-authoring".into(),
+            name: "API acceptance test authoring".into(),
+            description: "Story → app-fetched Jira context → write API acceptance tests → \
+                          review-fix loop until green → PR on pass → final report. Bind a Slack \
+                          channel or run with a prompt."
+                .into(),
+            instructions: "# Standing instructions — API acceptance test authoring\n\
+                - Follow the acceptance-test framework's two layers strictly: Gateway APIs for \
+                player-behavior flows, ServiceLocator for internal service features.\n\
+                - Keep API-call code and validation/assertion code in their designated layers.\n\
+                - Reuse existing player-creation / balance helpers; never duplicate setup utilities.\n\
+                - Tests must be independently runnable and leave no dirty state.\n\
+                - Run ONLY the tests you created or changed — never the full suite.\n\
+                - If a jira-<KEY>.md exists in the context dir, it is the requirements source of truth.\n\
+                - Write your step handoff file before finishing (path given in your prompt)."
+                .into(),
+            icon: "send".into(),
+            graph: WorkflowGraph {
+                nodes: vec![
+                    node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
+                    node("prep", "prepare_context", "Prepare relevant data", 300.0, json!({
+                        "prompt": "Analyze the story and the codebase. If a jira-<KEY>.md file \
+                                   exists in the context directory it is the source of truth for \
+                                   requirements — read it fully (description AND comments). \
+                                   Produce a test plan: what to cover, where the tests live, exact \
+                                   conventions to follow per instructions.md."
+                    })),
+                    node("implement", "agent_prompt", "Write API acceptance tests", 600.0, json!({
+                        "prompt": "Write the API acceptance tests per the test plan, following \
+                                   instructions.md by the letter. Run only the specs you \
+                                   created/changed and make them pass."
+                    })),
+                    fix_review_loop(
+                        3,
+                        80,
+                        json!([
+                            { "lens": "correctness-review", "providers": ["claude"] },
+                            { "lens": "test-review", "providers": ["claude"] }
+                        ]),
+                        900.0,
+                    ),
+                    node("pr", "git_pr", "Open PR (on pass)", 1300.0, json!({ "open": true })),
+                    node("report", "agent_prompt", "Final report", 1600.0, json!({
+                        "prompt": "Write the final run report: what was requested, what was \
+                                   implemented (files/specs), the final suite result, and PR links \
+                                   from the input if present. If the review loop did not pass, \
+                                   state exactly what is still failing. This report is the run's \
+                                   final output."
+                    })),
+                    offer_improvements(1300.0),
+                ],
+                edges: vec![
+                    edge("trigger", "prep"),
+                    edge("prep", "implement"),
+                    edge("implement", "iterate"),
+                    // Open the PR only when the review→fix loop passed.
+                    edge_if("iterate", "pr", "output.satisfied == true"),
+                    edge("pr", "report"),
+                    // The final report always runs, even when the loop didn't pass.
+                    edge("iterate", "report"),
+                    // Offer improvements after the loop, pass or fail.
+                    edge("iterate", "improve"),
+                ],
+            },
+        },
     ]
 }
 
@@ -1248,6 +1383,23 @@ mod tests {
                 assert!(ids.contains(e.source.as_str()), "{}: dangling edge source", t.id);
                 assert!(ids.contains(e.target.as_str()), "{}: dangling edge target", t.id);
             }
+        }
+    }
+
+    #[test]
+    fn test_flow_templates_shape() {
+        let all = flow_templates();
+        for id in ["ui-test-authoring", "api-acceptance-test-authoring"] {
+            let t = all.iter().find(|t| t.id == id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(!t.instructions.trim().is_empty(), "{id} ships standing instructions");
+            assert!(t.graph.nodes.iter().any(|n| n.kind == "prepare_context"));
+            assert!(t.graph.nodes.iter().any(|n| n.id == "report" && n.kind == "agent_prompt"));
+            for n in &t.graph.nodes {
+                assert!(crate::workflow_engine::is_known_kind(&n.kind), "unknown kind {}", n.kind);
+            }
+            // report is reachable from BOTH pr and iterate (runs on failure too)
+            assert!(t.graph.edges.iter().any(|e| e.source == "pr" && e.target == "report"));
+            assert!(t.graph.edges.iter().any(|e| e.source == "iterate" && e.target == "report"));
         }
     }
 
