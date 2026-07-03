@@ -1335,7 +1335,7 @@ count refresh on each `workflow_run_updated` WS event without per-run fetches.
 expression hints + warn-only runtime validation) and `params_schema`. The control
 flow / wired kinds added in this wave: `condition`, `loop`, `product_analyze`,
 `product_rewrite`, `product_plan`, `product_publish`, `review_run`, `canvas`,
-`git_pr` (see the Workflows feature doc for each kind's params/output).
+`git_pr`, `prepare_context` (see the Workflows feature doc for each kind's params/output).
 `WorkflowEdge` carries an optional `condition` (an `otto_core::expr` expression
 over `{output, input, node, run}`; the edge is active only when truthy) and
 `WorkflowNode` an optional `retry` `{max_attempts(≤5), backoff_ms(≤60000), factor}`.
@@ -1351,8 +1351,34 @@ the prompt. `review_run` runs the multi-agent PR-review engine per step: `provid
 incoming edge passing). A run started from a chat (`Action: Workflow`) **streams
 live per-step progress** back into the trigger thread (origin `channel`/`chat`/
 `thread`, or a `result_chat`/`result_channel`/`result_thread` override) before the
-final `summary.md`; manual/webhook-only runs do not stream. See the Workflows
-feature doc for full per-kind params/output.
+final result delivery (`final-output.md` when the run produced one, else
+`summary.md` — see *Run context files* below); manual/webhook-only runs do not
+stream. See the Workflows feature doc for full per-kind params/output.
+
+**`prepare_context` node.** App-side context gathering, run before the agent turns
+that need it: it resolves a Jira key — `params.key` → `input.jira_ticket` (both
+trusted verbatim) → the first Jira-key-shaped token scanned out of `input.prompt`,
+then `input.msg` — fetches the ticket through the workspace's configured Jira issue
+account (`params.account_id` wins; else the run user's account; else any configured
+Jira account), and writes it to `jira-<KEY>.md` in the run's context dir. A fetch
+failure writes a loud "could not fetch" placeholder instead of failing the node,
+**unless** `params.require: true`, which errors the step. Output:
+`{ jira: { found, key?, fetched?, summary?, status?, url?, error? } }`. An optional
+`params.prompt` (+ `provider`, default `claude`) runs a second, `agent_prompt`-style
+phase over the gathered context — a visible session, its `reply` merged into the
+output. `prepare_context` is **excluded from the per-node output cache** (unlike
+every other kind): a re-run always re-fetches, since a Jira ticket can change
+between runs. The `ui-test-authoring` and `api-acceptance-test-authoring` templates
+lead with this node.
+
+**Run input: the `prompt` convention.** Every trigger path converges on
+`input.prompt` as the run's ask: a chat message's text, the simplified `run <name>:
+<prompt>` command's tail, the manual Run-dialog's Prompt box, a webhook body's
+`prompt` field, and a `schedule` trigger's `spec.prompt` all land there before the
+graph executes. When a trigger only set `msg` (the chat paths) and left `prompt`
+unset or blank, the engine's `normalize_prompt` copies `msg` into `prompt` — so
+every agent-facing step and `prompt.md` (below) can rely on `input.prompt` without
+caring which trigger started the run. An explicit `prompt` is never overwritten.
 
 **Run input: repos declarations.** The run input accepts a `repos` array naming
 every repo/branch/worktree the run operates on — **source and destination** —
@@ -1378,20 +1404,44 @@ entries are normalized and seeded into the input (`working_directory`, `base`,
 reviews every entry (aggregate: `score` = min, `passed` = all; per-repo detail
 under `reviews[]`) and `git_pr` drafts/opens one PR per entry.
 
-**Run context files.** Every run owns `<data_dir>/workflow-context/<run_id>/`:
-`wf-<run_id>-instruction.md` (mission brief written at run start),
-`repos.json` (live registry of the declarations above — updated whenever a
-step publishes a repo reference), and per-step handoff files
-`step{N}-{name}.md` + `step{N}-{name}.output.json` (raw output, 5 MiB cap;
-loop iterations add `-iter{X}`). Agent-backed steps are pointed at the
-directory in their prompt and asked to write their own step summary; the
-engine writes a full-fidelity fallback (agent replies untruncated) when they
-don't. `GET /workflow-runs/{id}` carries the derived `context_dir` (absolute
-path; present when the directory exists — absent on list endpoints); the run
-view renders a browsable file tree over it via the existing sandboxed
-`/fs/browse` + `/fs/read`. Context files are unredacted local artifacts in
-the same trust domain as `nodes_json`; any future remote serving (share
-links) must redact on delivery.
+**Run context files.** Every run owns `<data_dir>/workflow-context/<run_id>/`,
+the file-based step-handoff layer (`workflow_context.rs`). Every write here is
+best-effort — a failure logs and the run continues; context files never fail a
+node.
+
+| File | Written when | Contents |
+|---|---|---|
+| `instructions.md` | `workflow.instructions` is non-empty | Verbatim copy of the workflow's standing instructions. |
+| `prompt.md` | `input.prompt` is non-empty (after the `prompt` convention above resolves it) | This run's ask, verbatim. |
+| `run-brief.md` | always | The mission brief written at run start: trigger, mission (msg/prompt/Jira ticket/goals/relevant info), the repos table, the planned steps, and a "how to use this directory" section naming only the files that actually exist for this run. Renamed from the legacy `wf-<run_id>-instruction.md`. |
+| `repos.json` | at least one `repos[]` entry was declared/resolved | Live registry of the repo declarations (see above) — updated whenever a step publishes a repo reference. |
+| `jira-<KEY>.md` | a `prepare_context` node resolved a Jira key | The fetched ticket (or a loud "could not fetch" placeholder on failure) — see the `prepare_context` node above. |
+| `step{N}-{slug}.md` + `.output.json` | after every node attempt concludes | Curated handoff summary (agent-written, or an engine-rendered fallback with the reply untruncated) + the raw output (pretty JSON, 5 MiB cap with a truncation marker). Loop iterations add `-iter{X}`. |
+| `final-output.md` | the run finishes `success` | Copy of the last content-bearing, error-free step's `.md` — the run's deliverable. "Content-bearing" excludes utility/bookkeeping kinds (`manual_trigger`, `log`, `delay`, `channel_notify`, `budget_gate`, `human_approval`); a run whose only successful steps are utility kinds produces no `final-output.md`. |
+
+Agent-backed steps are pointed at the directory in their prompt (an ordered
+read list: `instructions.md` → `prompt.md` → `run-brief.md` → `repos.json` →
+prior `step*.md`, each named only when it exists) and asked to write their own
+`step{N}-{slug}.md` handoff before finishing; the engine writes the
+full-fidelity fallback (agent replies untruncated) when they don't — a file
+left behind by a failed earlier attempt is replaced, so downstream steps never
+read a failed attempt's summary. `GET /workflow-runs/{id}` carries the derived
+`context_dir` (absolute path; present when the directory exists — absent on
+list endpoints); the run view renders a browsable file tree over it via the
+existing sandboxed `/fs/browse` + `/fs/read`, including a dedicated Final
+output panel that reads `final-output.md` on a successful run. Context files
+are unredacted local artifacts in the same trust domain as `nodes_json`; any
+future remote serving (share links) must redact on delivery.
+
+**Delivery.** A run started from a chat finishes by replying in the origin
+channel/thread (or a `result_chat` override) with a brief status plus one
+attachment: `final-output.md` when the run produced one (success with a
+qualifying step), otherwise the always-generated `summary.md` (every step,
+its status/duration/attempts, and an output peek). Both attachment kinds are
+redacted before leaving the machine. A `result_webhook`/`callback_url` in the
+run input receives the same summary via the SSRF-guarded webhook path.
+Canceled/errored runs never attach `final-output.md` (only a `success` run
+computes it) — they always get `summary.md`.
 
 ## API client ("Postman") — collections, requests, environments, automations
 
@@ -1985,7 +2035,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 
 New workflow node kinds (node-types catalog): product_analyze, product_rewrite, product_plan,
 product_publish, review_run, canvas, git_pr, condition, loop, swarm_task, api_run, db_query,
-broker_peek, channel_notify, budget_gate, human_approval. The four formerly-stub product/review
+broker_peek, channel_notify, budget_gate, human_approval, prepare_context. The four formerly-stub product/review
 kinds are now wired (real single-agent turns + the local-review engine); `condition`/`loop` plus
 `WorkflowEdge.condition` provide branching and bounded iterate-until control flow. The schedule
 trigger scheduler (`workflow_trigger_scheduler::start`) is started at daemon boot (cron + IANA
@@ -2024,6 +2074,14 @@ Loop guard: Slack drops any event carrying a `bot_id` (including the nested `mes
 structurally never returns the bot's own outbound sends. The chat-binding path (only) adds a
 second, defensive guard: it never treats a message starting with the bot's own ack prefix
 (`"🚀 Started workflow"`) as a binding trigger.
+
+> ⚠ **`POST /workflows/{id}/triggers` with `kind: "chat"` currently fails at the DB
+> layer.** `create_trigger` validates `kind` against `schedule|webhook|event|chat`
+> (route-level), but migration 0058's `workflow_triggers.kind` `CHECK` was never
+> widened past `schedule|webhook|event` — the `INSERT` violates the constraint. A
+> migration adding `'chat'` to the allowed set is required before channel bindings
+> (resolution step 3 above) can be persisted; the legacy/simplified command paths
+> (steps 1–2) are unaffected — they don't write to `workflow_triggers`.
 
 First-party Otto MCP tools (no new HTTP route): the `otto` MCP server is injected into `.mcp.json`
 at spawn when the per-workspace `otto_mcp_enabled` setting is on (default off, via `PUT /settings`).

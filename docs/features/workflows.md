@@ -11,27 +11,36 @@
 > `condition` node), **bounded loops** (`loop`, iterate-until), **retry/backoff**,
 > **typed outputs** (warn-only validation), **versioning** (graph snapshot
 > history), a per-run **Proof Pack** link, plus `canvas`, `git_pr`, and
-> `product_publish` nodes. **All three trigger kinds fire unattended now** —
-> webhook, event, *and* schedule (the cadence scheduler is spawned at daemon boot,
-> with cron + IANA-timezone parity). A structured `Action: Workflow` chat message
-> can start a run by name — and such a run now **streams live per-step progress
-> back into the same chat thread** (start line, per-step ▶/✅/❌, and a `🔍` review
-> block for the fix→review loop), flushed before the final `summary.md`. Agent steps
-> can inline named **skills**; `review_run` fans out the full multi-provider ×
-> multi-lens **PR-review engine** and scores it, and `git_pr` can **auto-open the
-> PR** once the review passes (the review is the approval — no human gate). The
-> separate **API-client "Automations"** surface (a multi-step saved-request runner)
-> is also fully functional. A couple of honest
-> caveats remain (the game `game_engine`/`verifier` are scaffolds; agent output is
-> cached) — stated inline; do not assume full parity with mature n8n/Zapier engines.
+> `product_publish` nodes. A workflow can also carry **standing `instructions`**
+> (free-text guidance every step follows, versioned alongside the graph), and a
+> `prepare_context` node does app-side Jira-ticket fetching into the run's
+> context dir. **All trigger kinds fire unattended now** — webhook, event, and
+> schedule (the cadence scheduler is spawned at daemon boot, with cron +
+> IANA-timezone parity), plus a **`chat`-kind trigger** (channel bindings,
+> evaluated live by the channels Bridge, not polled). A structured
+> `Action: Workflow` chat message, the simplified **`run <name>: <prompt>`**
+> command, or a channel binding can all start a run by name — and such a run now
+> **streams live per-step progress back into the same chat thread** (start line,
+> per-step ▶/✅/❌, and a `🔍` review block for the fix→review loop), flushed
+> before the final result (the run's `final-output.md` deliverable when it
+> produced one, else `summary.md`). Agent steps can inline named **skills**;
+> `review_run` fans out the full multi-provider × multi-lens **PR-review engine**
+> and scores it, and `git_pr` can **auto-open the PR** once the review passes
+> (the review is the approval — no human gate). The separate **API-client
+> "Automations"** surface (a multi-step saved-request runner) is also fully
+> functional. A couple of honest caveats remain (the game `game_engine`/`verifier`
+> are scaffolds; agent output is cached) — stated inline; do not assume full
+> parity with mature n8n/Zapier engines.
 
 The doc is grounded in the code in `crates/otto-server/src/workflow_engine.rs`,
+`crates/otto-server/src/workflow_context.rs` (run context files),
+`crates/otto-server/src/workflow_prepare.rs` (`prepare_context`),
 `crates/otto-server/src/routes/workflows.rs`,
 `crates/otto-server/src/workflow_trigger_scheduler.rs`,
 `crates/otto-server/src/workflow_chat.rs`, `crates/otto-core/src/expr.rs`,
 `ui/src/modules/workflows/`, `ui/src/modules/api/AutomationsView.svelte`, the
 migrations under `crates/otto-state/migrations/` (incl. **0089** — versioning +
-run→proof link), and the authoritative contracts `docs/contracts/api.md`
+run→proof link, **0096** — standing `instructions`), and the authoritative contracts `docs/contracts/api.md`
 (§ "Workflow engine", § "API client", Wave-3/Wave-4 routes) and
 `docs/contracts/ws.md` (Workflow run progress).
 
@@ -91,9 +100,10 @@ A **`Workflow`** is a named, workspace-scoped, directed graph plus run history.
 ```ts
 interface Workflow {
   id; workspace_id; name; description;
+  instructions: string;       // standing free-text guidance every run/step follows (§ Standing instructions)
   graph: WorkflowGraph;       // { nodes: WorkflowNode[]; edges: WorkflowEdge[] }
   created_by; created_at; updated_at;
-  version: number;            // monotonic; bumped + snapshotted on every graph-changing edit
+  version: number;            // monotonic; bumped + snapshotted on every graph- OR instructions-changing edit
 }
 interface WorkflowNode {
   id; kind; name; x; y; params: unknown;          // x/y are canvas layout
@@ -113,6 +123,27 @@ interface WorkflowEdge {
   always active (the legacy behavior).
 - The graph is executed in **topological order** (`topo_order`). A cycle makes
   the whole run fail immediately with an error (no nodes execute).
+
+### Standing instructions (`workflow.instructions`)
+A `Workflow` carries a second free-text field alongside `description`:
+`instructions` — standing guidance every run/step should follow "by the letter"
+(e.g. spec-framework conventions, house style, things to never do), distinct
+from `description` (a one-line summary shown in lists). It is:
+- **Edited in the UI** via the canvas top-bar's collapsible **Instructions**
+  panel (an "unsaved" badge + **Save** button — same pattern as the graph).
+- **Versioned like the graph.** An instructions-only `PATCH /workflows/{id}`
+  bumps `version` and snapshots exactly like a graph-changing edit (note
+  `"edited"`); restoring an older `WorkflowVersion` restores its `instructions`
+  alongside its `graph` (name/description are not restored — they only live in
+  the snapshot).
+- **Inherited by templates.** `POST .../workflows/from-template` copies the
+  template's `instructions` verbatim (the `ui-test-authoring` and
+  `api-acceptance-test-authoring` templates ship real standing instructions —
+  see §6). An AI-generated workflow (`POST .../generate`) always gets `""` —
+  the generation prompt IS `description`.
+- **Written to the run's context dir** as `instructions.md`, verbatim, when
+  non-empty — the first file every agent-backed step is told to read (see
+  *Run context files* in §7).
 
 ### The expression language (`otto_core::expr`)
 A tiny, **safe** (pure; no I/O, no `eval`) expression language evaluates against a
@@ -211,6 +242,7 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 |---|---|---|---|---|
 | `manual_trigger` | Manual Trigger / Triggers | Entry node; emits the run input. `inputs:0`. | — | **Real** |
 | `agent_prompt` | Agent / AI | Runs an agent turn as a **real, openable session**; output `{ "reply", "session_id" }`. `skill`/`skills` inline a skill body ahead of the prompt (see *Per-step skills*). | `prompt`, `provider` (default `claude`), `skill?`, `skills?` | **Real** |
+| `prepare_context` | Prepare relevant data / AI | App-side context gathering: resolves + fetches a referenced Jira ticket into `jira-<KEY>.md`, then optionally runs an analysis agent turn over it (see *Prepare relevant data*). | `key?`, `require?`, `account_id?`, `prompt?`, `provider?` | **Real** |
 | `http_request` | HTTP Request / Network | Calls an HTTP endpoint, captures response `{ status, body }`. | `method`, `url`, `body` (JSON) | **Real** |
 | `transform` | Set / Transform / Data | Merges a static JSON object into the data flowing through. | `json` (object) | **Real** |
 | `delay` | Delay / Flow | Sleeps `ms` milliseconds, then passes input through. | `ms` (0–10000) | **Real** |
@@ -264,6 +296,36 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 > other features being set up. A missing dependency causes the **node** to error
 > (and downstream active-path nodes to skip) — not a silent no-op.
 
+### Prepare relevant data (`prepare_context`)
+A dedicated node (`workflow_prepare.rs`) for the common "go read the ticket
+before you start" step, run **app-side** rather than by the agent (so a slow or
+unreliable Jira fetch never eats an agent's context or turn budget):
+
+1. **Resolve a Jira key**, in order: `params.key` → `input.jira_ticket` (both
+   trusted verbatim — the caller already knows the exact key) → the first
+   Jira-key-shaped token (`[A-Z][A-Z0-9]{1,9}-[0-9]{1,7}`) scanned out of
+   `input.prompt`, then `input.msg` (free text — scanned, not trusted blindly).
+   No key found ⇒ output `{ jira: { found: false } }`, no fetch attempted.
+2. **Fetch it** through the workspace's configured Jira issue account:
+   `params.account_id` wins; else the run user's own Jira account; else any
+   Jira account configured on the daemon (single-user/admin-configured setups).
+   On success, the full issue (description, comments, links, attachments,
+   custom fields) is rendered to markdown and written to `jira-<KEY>.md` in the
+   run's context dir (see §7). On failure, a **loud** placeholder is written
+   instead (*"⚠ Could not fetch \<KEY\>"* + the error + "treat ticket details as
+   UNAVAILABLE") and the node still **succeeds** — unless `params.require:
+   true`, which errors the step. Either way the output carries
+   `{ jira: { found, key?, fetched?, summary?, status?, url?, error? } }`.
+3. **Optional analysis phase.** When `params.prompt` is set, the node runs a
+   second phase identical to `agent_prompt` (same preamble, skills, provider
+   default `claude`) over the gathered context as a real, openable session; its
+   `reply`/`session_id`/`working_directory` merge into the output.
+
+`prepare_context` is the **only** kind excluded from the per-node output cache
+(§3 *Run-time graph behavior*) — a re-run always re-fetches, since the ticket
+can have changed since the last run. The `ui-test-authoring` and
+`api-acceptance-test-authoring` templates (§6) both lead with this node.
+
 ### Per-step skills (`skill` / `skills`)
 An `agent_prompt` step can name a skill to run *via prompt*: set `skill` (a string)
 and/or `skills` (an array of strings) on the node params. Each named skill's body
@@ -302,9 +364,10 @@ approval: put `output.satisfied == true` (the loop's pass flag) — or rely on
 node's **`open:true`** then actually opens the PR on the remote; because the
 incoming edge only fires on a passing review, the PR opens automatically *and only*
 when the bar is cleared. `open` defaults to `false` (draft-only), so this is per-step
-opt-in. The bundled `write-tests` and `implement-feature` templates wire exactly
-this (their old `human_approval` nodes were removed — the review is the approval);
-`po-lifecycle` is unchanged and still uses `human_approval`.
+opt-in. The bundled `write-tests`, `implement-feature`, `ui-test-authoring`, and
+`api-acceptance-test-authoring` templates all wire exactly this (their old
+`human_approval` nodes were removed — the review is the approval); `po-lifecycle`
+is unchanged and still uses `human_approval`.
 
 ### Branching & loops in practice
 - **`condition` + edge conditions** are the if/else primitive: a `condition` node
@@ -330,7 +393,7 @@ A workflow runs **manually by default**. You can attach triggers in the
 `workflow_trigger_scheduler.rs`.
 
 ```ts
-type TriggerKind = 'schedule' | 'webhook' | 'event';
+type TriggerKind = 'schedule' | 'webhook' | 'event' | 'chat';
 interface WorkflowTrigger { id; workflow_id; kind; spec: object; enabled; created_at }
 ```
 
@@ -338,7 +401,8 @@ interface WorkflowTrigger { id; workflow_id; kind; spec: object; enabled; create
 |---|---|---|---|---|
 | **webhook** | `{ token }` (32-byte URL-safe token auto-generated server-side on create) | An external system calls `POST /workflows/{id}/webhook/{token}`. The token **is** the credential — no bearer auth required. | The request body (JSON), or `null`. | **Yes** — handler `webhook_trigger` spawns the run. |
 | **event** | `{ event_kind, filter_json? }` | A daemon event whose mapped name equals `event_kind` fires on the event bus. | `{ "trigger": "event", "event_kind": "..." }` | **Yes** — `spawn_workflow_event_trigger_listener` is started at daemon boot (`ottod` main, "workflow event-trigger listener started"). |
-| **schedule** | `{ cadence, every_min, at, weekday, expr, timezone, last_run, enabled }` (the **shared cadence** format — same as Scheduled Tasks) | Cadence comes due: `interval` (every N min, default 60), `daily` (at `HH:MM`), `weekly` (weekday 0=Mon at `HH:MM`), or **`cron`** (`expr`, 5-field). All interpreted in the spec's IANA **`timezone`** (default UTC). | `{ "trigger": "schedule" }` | **Yes** — `workflow_trigger_scheduler::start` is started at daemon boot (`ottod` main, "workflow schedule-trigger scheduler started"). |
+| **schedule** | `{ cadence, every_min, at, weekday, expr, timezone, last_run, enabled, prompt? }` (the **shared cadence** format — same as Scheduled Tasks; `prompt` is new — see *Prompts & chat bindings*) | Cadence comes due: `interval` (every N min, default 60), `daily` (at `HH:MM`), `weekly` (weekday 0=Mon at `HH:MM`), or **`cron`** (`expr`, 5-field). All interpreted in the spec's IANA **`timezone`** (default UTC). | `{ "trigger": "schedule" }`, plus `"prompt"` when `spec.prompt` is set. | **Yes** — `workflow_trigger_scheduler::start` is started at daemon boot (`ottod` main, "workflow schedule-trigger scheduler started"). |
+| **chat** | `{ channel: "slack"\|"telegram", chat: "<id>", thread?: "<ts>", mention_only?: bool }` | Any inbound message that matches the binding (channel/chat exact, thread pinned or open, `@mention` if `mention_only`) — see *Prompts & chat bindings* below. | `{ trigger: "chat", origin_workspace_id, channel, chat, thread, user, prompt, msg, raw }` | **Yes** — evaluated **live** by the channels `Bridge` on every inbound message (not polled, unlike the other three kinds). |
 
 ### Event-kind mapping (configure by string in the trigger spec)
 The event listener maps daemon `Event` variants to stable strings; the UI default
@@ -441,23 +505,90 @@ blocks on chat latency:
 Structural/plumbing nodes (`log`, `transform`, `delay`, `condition`,
 `manual_trigger`) are intentionally **not** announced, to keep the thread readable;
 `review_run` is also excluded from the generic ▶/✅ lines because it streams its own
-richer `🔍` block. All streamed lines are **flushed before the final `summary.md`**
-is delivered, and every line is redacted. Manual UI runs and webhook-only triggers
-**do not stream** (there is no chat target). The target is the trigger origin
-(`channel`/`chat`/`thread`), or an explicit `result_chat` (+ `result_channel` /
-`result_thread`) override; the integration token is resolved **per-workspace** (from
-the origin/trigger workspace — workflows themselves are global).
+richer `🔍` block. All streamed lines are **flushed before the final result is
+delivered** (below), and every line is redacted. Manual UI runs and webhook-only
+triggers **do not stream** (there is no chat target). The target is the trigger
+origin (`channel`/`chat`/`thread`), or an explicit `result_chat` (+
+`result_channel` / `result_thread`) override; the integration token is resolved
+**per-workspace** (from the origin/trigger workspace — workflows themselves are
+global).
 
-**Result delivery (done/failed + summary).** When a run that was started from a
-chat **finishes**, the engine replies in the **same channel + thread** it was
+**Result delivery (done/failed + deliverable).** When a run that was started from
+a chat **finishes**, the engine replies in the **same channel + thread** it was
 triggered from with a brief status (`✅/❌` + `N/M steps ok · failed · skipped`,
-the review score if any, the proof-pack id) and attaches a full **`summary.md`**
-(every step, its status/duration/attempts, and a peek at each output). This is
+the review score if any, the proof-pack id) and attaches **one file**: on a
+successful run that produced one, that's `final-output.md` — the run's actual
+deliverable (see *Final output* in §7); otherwise it's the always-generated
+`summary.md` (every step, its status/duration/attempts, and a peek at each
+output). Both are redacted the same way before they leave the machine. This is
 origin-driven (`deliver_run_result` reads `channel`/`chat`/`thread` from the run
-input), so manual UI runs don't post anything. To also POST the summary to an
+input), so manual UI runs don't post anything. To also POST the result to an
 external system, include a `result_webhook` (or `callback_url`) in the run input —
-it's delivered through the SSRF-guarded webhook path. Cancellations and time-outs
-report too.
+it's delivered through the SSRF-guarded webhook path, with the same
+final-output/summary choice. Cancellations and time-outs report too (always with
+`summary.md` — only a `success` run can have a `final-output.md`).
+
+### Prompts & chat bindings
+Two more ways to start a run by chat, both handled by `otto-server::workflow_chat`
+(`WorkflowChatTriggerImpl`) alongside the structured `Action: Workflow` command
+above — all three resolve in order (legacy structured → simplified command →
+channel binding) against every inbound Slack/Telegram/webhook message, before
+normal session routing.
+
+**The `input.prompt` convention.** Regardless of which path starts a run, the
+ask ends up in `input.prompt`: a chat message's text, this section's simplified
+command tail, the manual Run-dialog's **Prompt** box, a webhook body's `prompt`
+field, and a `schedule` trigger's `spec.prompt` (table above) all land there. When
+a trigger only set `msg` (the chat paths) and `prompt` is absent/blank, the
+engine's `normalize_prompt` copies `msg` into `prompt` before the graph runs — so
+every agent-facing step, and `prompt.md` in the run's context dir (§7), can rely
+on `input.prompt` without caring which trigger fired.
+
+**Simplified command — `run <name>: <prompt>`.** No `Action: Workflow` scaffolding
+needed: post `run <name>: <prompt>`, `workflow <name>: <prompt>`, or
+`run workflow <name>: <prompt>` (keywords matched case-insensitively at the start
+of the message, tried **longest-first** so `run workflow` isn't shadowed by
+`run`). `<name>` is the text up to the first `:` on that line (resolved
+case-insensitively against the workspace's workflows); `<prompt>` is the rest of
+that line plus every following line.
+
+```text
+run Write tests for a story: Add tests for the new deposit-limit rule.
+Jira ticket GS-1421, cover happy path + over-limit + boundary.
+```
+
+An unknown name behaves differently depending on which keyword matched: the
+**explicit** `workflow`/`run workflow` keyword replies *"No workflow named
+**X**…"* without starting a run; the **bare** `run` keyword silently falls
+through to normal chat (bare "run" reads too much like ordinary English to
+hijack a message that wasn't meant for it).
+
+**Channel bindings — pin a workflow to a chat.** A `chat`-kind `WorkflowTrigger`
+(add one in the **Triggers** panel → **Chat binding**) starts its workflow on
+**every** matching inbound message, no keyword required — good for a
+workflow that IS the channel's purpose (e.g. a #test-requests channel where
+every message is a test-writing ask). Spec: `{channel, chat, thread?,
+mention_only?}`. `channel` + `chat` must match exactly; an absent `thread` in
+the spec matches any thread, a present one requires an exact match (a
+thread-pinned binding wins over an unpinned one when both match); `mention_only`
+(default `false`) requires the message to contain a Slack `<@…>` mention. On a
+match the run input is `{trigger:"chat", origin_workspace_id, channel, chat,
+thread, user, prompt, msg, raw}` — `prompt`/`msg` are the mention-stripped text.
+
+**Loop guard.** Slack drops any event carrying a `bot_id` (including the nested
+`message` of a `message_changed` edit) before it reaches the bridge; Telegram's
+`getUpdates` long-poll structurally never returns the bot's own sends — so
+neither adapter needs bot-detection logic to avoid the bot triggering itself.
+The channel-binding path (only, since it has no keyword to require) adds a
+**second, defensive** guard on top: it never treats a message starting with the
+bot's own ack prefix (`"🚀 Started workflow"`) as a binding trigger, so a
+binding can't retrigger itself off its own start-line reply.
+
+> **Ordering note.** `implement-feature`/`po-lifecycle`-style templates that need
+> a `repo_id` still don't get one from a bare chat message or binding (chat
+> carries `msg`/`prompt`/`jira_ticket` only) — run those from the UI **Run…**
+> editor, or have the first node resolve the repo from `working_directory`, same
+> as the `Action: Workflow` worked example above.
 
 ### Human approval is **not** a trigger
 The `human_approval` *node* pauses a run mid-flight (it writes `waiting_approval`
@@ -503,6 +634,20 @@ to create a workflow; the center is the canvas editor.
        → `product_publish` (RFC, dry-run). They expect the run **input** to carry `repo_id` (and
        optionally `base`, `story_id`, `goals`) — a Slack `Action: Workflow` message
        or the Run dialog supplies these.
+     - **`ui-test-authoring`** — *UI test authoring*: `prepare_context` (app-fetched
+       Jira context, if a ticket is referenced) → write UI tests → the same
+       `fix → review_run` loop → **auto-opened `git_pr`** on pass → a final
+       "Final report" `agent_prompt` step that always runs (reachable from both the
+       PR step *and* directly from the loop, so it still runs when the loop didn't
+       pass) and becomes the run's `final-output.md`. Ships real **standing
+       instructions** (Playwright conventions: no sleep-polling, role/test-id
+       selectors, run only the changed specs, treat `jira-<KEY>.md` as the
+       requirements source of truth). Bind a Slack channel (chat-kind trigger) or
+       run it with a Prompt.
+     - **`api-acceptance-test-authoring`** — the same shape targeting the API
+       acceptance-test framework's two layers (Gateway APIs for player-behavior
+       flows, ServiceLocator for internal service features); its standing
+       instructions say so explicitly and forbid duplicating setup helpers.
    - **Game pipelines** (`game-slots` / `game-crash` / `game-scratch`), each chaining
      an agent design step into the game engine + verifier scaffold.
 
@@ -517,15 +662,22 @@ to create a workflow; the center is the canvas editor.
   inspector). **Trash** removes the selected node (and its edges).
 - **Configure params**: the bottom **inspector** shows a per-kind form for the
   selected node (e.g. `agent_prompt` → prompt + provider; `http_request` →
-  method/url/body; `review_run` → repo_id/base/threshold/goals). Unrecognized or
-  future kinds fall back to a **raw-JSON params editor**.
+  method/url/body; `review_run` → repo_id/base/threshold/goals). Kinds without a
+  bespoke form yet — including `prepare_context` as of this writing — fall back
+  to a **raw-JSON params editor**.
 - **Save**: edits set an "unsaved" badge; **Save** (`PATCH /workflows/{id}` with
   the new `graph`) persists. Running while dirty auto-saves first.
+- **Instructions**: a separate top-bar toggle opens the collapsible standing-
+  instructions panel (its own "unsaved" badge + **Save**, independent of the
+  graph editor) — see *Standing instructions* in §3.
 
 ### Triggers
 Top-bar **Triggers** toggles the `TriggersPanel`: add/enable/disable/delete
-schedule, webhook, or event triggers — all three fire unattended in the running
-daemon (see §5).
+schedule, webhook, event, or **chat binding** triggers — all four fire
+unattended in the running daemon (see §5; the chat kind is evaluated live by
+the channels Bridge on every message, not polled like the other three). The
+**Chat binding** form (channel, chat id, optional thread, "@mention only")
+maps directly onto the `{channel, chat, thread?, mention_only?}` spec.
 
 ---
 
@@ -576,34 +728,64 @@ loop's worktree) **merge it back into `repos.json`** as the run progresses.
 
 ### Run context files (file-based step handoff)
 
-Every run owns `<data_dir>/workflow-context/<run_id>/` — browsable in the run
-view under **Context files** (same tree + viewer as the agent Files panel,
-scoped to this run):
+Every run owns `<data_dir>/workflow-context/<run_id>/` (`workflow_context.rs`)
+— browsable in the run view under **Context files** (same tree + viewer as the
+agent Files panel, scoped to this run). Every write here is best-effort — a
+failure logs a warning and the run continues; context files never fail a node:
 
 ```
-wf-<run_id>-instruction.md      # mission brief: goals, repos table, planned steps
-repos.json                      # live registry of repos/branches (see above)
+instructions.md                 # workflow.instructions, verbatim — only when non-empty
+prompt.md                       # this run's ask, verbatim — only when a prompt exists
+run-brief.md                    # mission brief: trigger, mission, repos table, planned steps
+                                 #   (renamed from the old wf-<run_id>-instruction.md)
+repos.json                      # live registry of repos/branches — only when repos declared
+jira-<KEY>.md                   # a prepare_context node's fetched ticket (or fetch-failed notice)
 step1-gather-info.md            # per-step handoff summary
-step1-gather-info.output.json   # the step's raw output (5 MiB cap)
+step1-gather-info.output.json   # the step's raw output (5 MiB cap, truncation marker if hit)
 step3-review-iter2.md           # loop inner steps, per iteration
+final-output.md                 # on a successful run: the deliverable (see Final output below)
 ```
 
 Steps hand context to each other **through files, not truncated prompt
-text**: each agent-backed step is pointed at the directory (read the
-instruction brief, `repos.json`, and the prior `step*.md` you need) and asked
-to write its own `step{N}-{name}.md` summary before finishing. If it doesn't,
-the engine writes a full-fidelity fallback — an agent's reply lands
+text**: each agent-backed step is pointed at the directory and told to read,
+**in order**, `instructions.md` → `prompt.md` → `run-brief.md` → `repos.json`
+→ the prior `step*.md` files it needs (each named only when it exists — a run
+with no standing instructions never tells a step to go read a file that isn't
+there), then write its own `step{N}-{name}.md` summary before finishing. If it
+doesn't, the engine writes a full-fidelity fallback — an agent's reply lands
 **untruncated**, `review_run` files carry the score breakdown + findings, and
 failed steps (including failed loop iterations) leave their error in the
-trail. A retried step only trusts a summary written during the winning
-attempt. The inline `[input data]` excerpt in prompts remains as a quick
-glance; the files are the complete channel.
+trail. A retried step only trusts a summary written during the **winning**
+attempt (a stale file left by an earlier failed attempt is replaced). The
+inline `[input data]` excerpt in prompts remains as a quick glance; the files
+are the complete channel.
 
 Chat-triggered runs attach each meaningful step's `.md` handoff file to its
 per-step progress message (success *and* failure, loop iterations included) —
 the thread carries the brief, the attachment the full detail. Attachments are
 redacted like `summary.md` and capped at 1 MiB (the full file always remains
 in the run's context directory).
+
+### Final output
+
+On a run that finishes `success`, the engine tracks — as steps complete — the
+**last step that succeeded and wasn't a bookkeeping/control-only kind**
+(`manual_trigger`, `log`, `delay`, `channel_notify`, `budget_gate`,
+`human_approval` don't count; everything else does, including a `loop`'s own
+`.md` and a `prepare_context` with no agent phase). At run completion, that
+step's `.md` handoff is copied to `final-output.md` — the run's actual
+deliverable, as opposed to `summary.md`'s per-step bookkeeping. A run whose
+only successful steps are all utility kinds (e.g. it errored before any real
+work ran) produces no `final-output.md`.
+
+The run view's **Final output** panel (a sandboxed `<iframe>`, shown only when
+`run.status === 'success'` and the run has a `context_dir`) fetches
+`final-output.md` once per run and renders it — it just stays hidden when the
+file doesn't exist. Chat/webhook delivery prefers it too: see *Result delivery*
+in §5. This is why the `ui-test-authoring`/`api-acceptance-test-authoring`
+templates' last step is an explicit "Final report" `agent_prompt` (§6) — it's
+what ends up as the deliverable both in the UI panel and in the chat/webhook
+attachment.
 
 ### Statuses
 ```ts
@@ -719,11 +901,11 @@ build on.
 | `GET /workflows/node-types` | member | node-type catalog (`NodeTypeSpec[]`) |
 | `GET /workflows/templates` | member | built-in templates |
 | `GET /workspaces/{wid}/workflows` | ws viewer | `Workflow[]` |
-| `POST /workspaces/{wid}/workflows` | ws editor | create (`CreateWorkflowReq`) |
-| `POST /workspaces/{wid}/workflows/from-template` | ws editor | instantiate a template |
-| `POST /workspaces/{wid}/workflows/generate` | ws editor | AI-generate from `{description, name?}` |
+| `POST /workspaces/{wid}/workflows` | ws editor | create (`CreateWorkflowReq {name, description?, instructions?, graph?}`) |
+| `POST /workspaces/{wid}/workflows/from-template` | ws editor | instantiate a template (inherits the template's `instructions`) |
+| `POST /workspaces/{wid}/workflows/generate` | ws editor | AI-generate from `{description, name?}` (`instructions` always `""`) |
 | `GET /workflows/{id}` | ws viewer | one workflow |
-| `PATCH /workflows/{id}` | ws editor | update (e.g. `{graph}`) |
+| `PATCH /workflows/{id}` | ws editor | update (e.g. `{graph}` and/or `{instructions}` — either bumps `version`) |
 | `DELETE /workflows/{id}` | ws editor | 204 |
 | `POST /workflows/{id}/run` | ws editor | `RunWorkflowReq?` `{start_node?, only_node?}` → `WorkflowRun` |
 | `GET /workflows/{id}/runs` | ws viewer | `WorkflowRun[]` |
@@ -737,7 +919,7 @@ Plus, on the Scheduled-Tasks surface: `POST /scheduled-tasks/{id}/convert-to-wor
 (`{disable_task?}` → `{workflow_id, trigger_id?}`) materializes a task as a Workflow
 + schedule trigger — see `./scheduled-tasks.md`.
 
-Trigger / webhook / approval routes (api.md Wave-3 additions, lines 1295–1300):
+Trigger / webhook / approval routes (api.md Wave-3 additions):
 
 | Method & path | Auth | Notes |
 |---|---|---|
@@ -758,7 +940,7 @@ API-client automations (api.md §"API client"):
 | `DELETE /workspaces/{wid}/api-client/automations/{id}` | ws editor |
 | `POST /workspaces/{wid}/api-client/automations/{id}/run` | ws editor |
 
-Cross-module search (api.md Wave-4, line 1323): `GET /workspaces/{id}/search?q=`
+Cross-module search (api.md Wave-4): `GET /workspaces/{id}/search?q=`
 returns ranked `SearchHit[]` **across modules including workflows** (alongside
 stories, api-requests, swarm, memories, repos, broker-clusters). This lets you
 find a workflow by name/description from the global search; it is a discovery
@@ -784,9 +966,18 @@ report synchronously from the run endpoint and have no dedicated WS event.
   `workflow_versions` history table (`id, workflow_id, version, name, description,
   graph_json, note, created_by, created_at`; `UNIQUE(workflow_id, version)`). The
   migration backfills a `v1` snapshot for every pre-existing workflow.
+- **0096** `workflows.instructions` + `workflow_versions.instructions` (both
+  `TEXT NOT NULL DEFAULT ''`) — the standing-instructions field (§3).
 - **0014/0015** `api_client` base + `api_automations` (name, `steps_json`).
 - `retry` and edge `condition` need **no migration** — they live inside
-  `graph_json`.
+  `graph_json`. Run context files (§7) are plain files under
+  `<data_dir>/workflow-context/`, not a table.
+
+> ⚠ **`workflow_triggers.kind` CHECK is stale.** Migration 0058's `CHECK (kind IN
+> ('schedule', 'webhook', 'event'))` was never widened when the `chat` kind was
+> added — `create_trigger` accepts `kind: "chat"` at the route layer, but the
+> `INSERT` will fail the table's `CHECK` constraint. A migration adding `'chat'`
+> to the allowed set is needed before channel bindings can actually be saved.
 
 All ids are ULID strings; timestamps are UTC RFC-3339; rows cascade-delete with
 their workspace (and triggers/runs/cache cascade with the workflow). Migrations
@@ -807,7 +998,8 @@ are **append-only** — never edit or renumber an existing one.
   language (also available as `{{ }}` templating).
 - **Retry/backoff** per node (`retry`), and **typed outputs** (warn-only validation
   against each kind's `output_schema`).
-- **All node kinds are real:** `manual_trigger`, `agent_prompt`, `http_request`,
+- **All node kinds are real:** `manual_trigger`, `agent_prompt`, `prepare_context`
+  (app-side Jira fetch + optional analysis agent), `http_request`,
   `transform`, `delay`, `log`, `db_query` (read-only), `broker_peek`,
   `channel_notify`, `budget_gate`, `human_approval`, `condition`, `loop`,
   `swarm_task`, `api_run`, and the **now-wired** `product_analyze`,
@@ -816,14 +1008,18 @@ are **append-only** — never edit or renumber an existing one.
   (PR draft, or `open:true` to auto-open on a passing review).
 - **Visible sessions per step** (openable while running) and a **Proof Pack** linked
   to each completed run.
-- **Versioning:** graph snapshot history with view + restore (append-only).
-- Live WS run progress + per-step logs/output/"work product".
-- **All three trigger kinds fire in the running daemon** — webhook, event, **and
-  schedule** (spawned at boot; cron + IANA timezone via the shared cadence engine).
-- A **chat trigger** (`Action: Workflow` Slack/Telegram/webhook message) starts a
-  run by name, and the run **streams live per-step progress** (▶/✅/❌ + a `🔍`
-  review block) back into the same thread before the final `summary.md`. **Convert**
-  a scheduled task into a workflow + schedule trigger.
+- **Versioning:** graph snapshot history with view + restore (append-only), now
+  covering **standing `instructions`** alongside the graph.
+- Live WS run progress + per-step logs/output/"work product", plus a **Final
+  output** panel that renders the run's `final-output.md` deliverable on success.
+- **All trigger kinds fire in the running daemon** — webhook, event, and schedule
+  (spawned at boot; cron + IANA timezone via the shared cadence engine), plus a
+  **`chat`-kind** channel binding evaluated live on every inbound message.
+- Three ways to start a run by chat: the structured `Action: Workflow` message,
+  the simplified **`run <name>: <prompt>`** command, or a channel binding — all
+  **stream live per-step progress** (▶/✅/❌ + a `🔍` review block) back into the
+  thread, then deliver `final-output.md` (or `summary.md` if the run made none).
+  **Convert** a scheduled task into a workflow + schedule trigger.
 - **Per-step skills** (`skill`/`skills` on an `agent_prompt` step inline a skill body
   ahead of the prompt) and **threshold-gated auto-PR** (`review_run` →
   `git_pr open:true` via an `output.satisfied == true` edge — the review is the
@@ -850,6 +1046,14 @@ are **append-only** — never edit or renumber an existing one.
 - **Typed-output validation is warn-only** — schema mismatches log `⚠` but never
   fail a run; `params_schema` is currently unpopulated (UI hint only).
 - API-client automations have **no scheduler** — run-on-demand only.
+- **Channel bindings (`chat`-kind trigger) currently can't be saved** — the
+  `workflow_triggers.kind` `CHECK` (migration 0058) was never widened past
+  `schedule|webhook|event`, so `POST /workflows/{id}/triggers` with `kind:
+  "chat"` passes route validation but fails the `INSERT` (§9 Persistence). The
+  `Action: Workflow` message and the simplified `run <name>: <prompt>` command
+  are unaffected — they don't touch `workflow_triggers`.
+- **`prepare_context` has no dedicated inspector form yet** — configure it via
+  the canvas's raw-JSON params editor (§6).
 
 ---
 
@@ -866,12 +1070,21 @@ are **append-only** — never edit or renumber an existing one.
   credential, matched against an enabled webhook trigger. Treat the URL as a
   secret; delete the trigger to revoke. Anyone with the URL can start runs (with
   attacker-controlled JSON input).
-- **Chat `Action: Workflow` runs on the channel-trust model.** A structured
-  message in a configured Slack/Telegram/webhook channel can start a run by name
-  (the run acts as the workflow's `created_by`, falling back to a synthetic
-  "Workflow" user for system-initiated runs). Anyone who can post to a wired
-  channel can start any workflow in that workspace by name — treat channel access
-  as run-start capability.
+- **Chat-started runs (`Action: Workflow`, `run <name>: <prompt>`, or a channel
+  binding) run on the channel-trust model.** A message in a configured
+  Slack/Telegram/webhook channel can start a run by name (the run acts as the
+  workflow's `created_by`, falling back to a synthetic "Workflow" user for
+  system-initiated runs). Anyone who can post to a wired channel can start any
+  workflow in that workspace by name — treat channel access as run-start
+  capability. This is unaffected by the `workflow_triggers.kind` `CHECK` bug
+  (§10) — the message-based paths never touch that table.
+- **`prepare_context` fetches through the run's resolved Jira account** —
+  `params.account_id`, else the run user's own account, else any Jira account
+  configured on the daemon (§4). The fetched ticket (description, comments,
+  attachments list) lands in the run's context dir and, on a chat-started run,
+  can end up in the chat thread via a step's `.md` attachment or
+  `final-output.md` — treat a bound channel's audience as the ticket's
+  effective audience for that run.
 - **`db_query` is read-only by construction** — the engine forces
   `confirm_write = false`, so a workflow can never silently issue DB writes (a
   graph that genuinely needs a write must set the param explicitly).
@@ -910,6 +1123,9 @@ are **append-only** — never edit or renumber an existing one.
 | Run "exceeded the N-minute time limit" | The global wall-clock fired; the graph (often an `agent_prompt` chain) is too long. Split it or reduce work. |
 | Approve/Reject button does nothing | The run must actually be paused at a `human_approval` node (`waiting_approval`), and you need `Workflows:Edit`. |
 | API-client automation step fails on a 2xx | It has a failing assertion. With **no** assertions a step passes on any 2xx; check the assertion `desc` in the report. |
+| Adding a **Chat binding** trigger errors | Known issue (§10): the `workflow_triggers` table's `kind` `CHECK` doesn't yet include `chat`. Use the `Action: Workflow` message or `run <name>: <prompt>` command (§5) until the constraint is widened. |
+| `prepare_context` node errors "required Jira fetch failed" | `params.require: true` and the fetch failed (no matching Jira key, no configured Jira account, or the API call errored) — check `jira-<KEY>.md` in the run's context dir for the reason, or drop `require`. |
+| A run finished but the **Final output** panel is empty/hidden | The run isn't `success`, or every successful step was a utility kind (`log`/`delay`/`channel_notify`/`budget_gate`/`human_approval`/`manual_trigger` — §7 *Final output*) — add a content-bearing step (e.g. a closing `agent_prompt` "report" node) if you want a deliverable. |
 
 ---
 
