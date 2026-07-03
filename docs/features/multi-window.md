@@ -74,3 +74,8 @@ ui/src/lib/win.ts                          per-window identity + key namespacing
 - **Same tab layout in every window** — that's the pre-feature behavior; make
   sure the app was rebuilt (secondary windows need `__OTTO_WIN__` injected by
   the shell).
+- **Secondary window won't drag / double-click-maximize** — the custom
+  titlebar drives both over IPC (`startDragging` / `toggleMaximize`), which the
+  Tauri capability must grant to `w*` labels (`capabilities/default.json`,
+  pinned by a regression test in `windows.rs`). Capabilities are baked at build
+  time — rebuild the app (`deploy.sh`), a daemon-only rebuild is not enough.

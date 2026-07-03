@@ -396,7 +396,7 @@
       { id: 'core.split-v', title: 'Split Vertically', group: 'Sessions', shortcut: '⌘D', run: () => ws.split('col') },
       { id: 'core.split-h', title: 'Split Horizontally', group: 'Sessions', shortcut: '⌘⇧D', run: () => ws.split('row') },
       { id: 'core.new-workspace', title: 'Add Workspace', group: 'Workspaces', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
-      { id: 'core.update-clis', title: 'Update all CLIs', group: 'Sessions', shortcut: '⌘U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
+      { id: 'core.update-clis', title: 'Update all CLIs', group: 'Sessions', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
       { id: 'core.go-agents', title: 'Go to Agents', group: 'Navigate', keywords: 'module terminal', run: () => router.go('agents') },
       { id: 'core.go-connections', title: 'Go to Connections', group: 'Navigate', keywords: 'module ssh mysql redis', run: () => router.go('connections') },
       { id: 'core.go-git', title: 'Go to Git', group: 'Navigate', keywords: 'module repos prs pull requests', run: () => router.go('git') },

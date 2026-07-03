@@ -97,6 +97,28 @@ pub fn clamp_frame(frame: &mut WinFrame, monitors: &[(i32, i32, u32, u32)]) {
     }
 }
 
+/// Fit a frame fully onto the monitor it mostly lives on: shrink to the
+/// monitor if oversized, then pull x/y back so the right/bottom edges stay
+/// on-screen. Used for the new-window cascade — a +24 offset from a
+/// monitor-filling base window otherwise pushes the bottom-right resize
+/// corner off-screen (and with it the only obvious resize affordance).
+pub fn fit_frame(frame: &mut WinFrame, monitors: &[(i32, i32, u32, u32)]) {
+    fn overlap(a: i32, alen: u32, b: i32, blen: u32) -> i64 {
+        let lo = (a as i64).max(b as i64);
+        let hi = (a as i64 + alen as i64).min(b as i64 + blen as i64);
+        (hi - lo).max(0)
+    }
+    let Some(&(mx, my, mw, mh)) = monitors.iter().max_by_key(|&&(bx, by, bw, bh)| {
+        overlap(frame.x, frame.w, bx, bw) * overlap(frame.y, frame.h, by, bh)
+    }) else {
+        return;
+    };
+    frame.w = frame.w.min(mw);
+    frame.h = frame.h.min(mh);
+    frame.x = frame.x.min(mx + mw as i32 - frame.w as i32).max(mx);
+    frame.y = frame.y.min(my + mh as i32 - frame.h as i32).max(my);
+}
+
 fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
     let mut guard = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     let reg = guard.get_or_insert_with(|| load(&registry_path()));
@@ -291,7 +313,8 @@ pub fn create_new_window(app: &tauri::AppHandle) {
     frame.x += 24;
     frame.y += 24;
     frame.fullscreen = false;
-    clamp_frame(&mut frame, &monitors);
+    clamp_frame(&mut frame, &monitors); // recentre if it landed on no monitor
+    fit_frame(&mut frame, &monitors); // then keep every edge grabbable
     match build_window(app, &frame) {
         Ok(_) => {
             with_registry(|reg| reg.windows.push(frame));
@@ -393,5 +416,158 @@ mod tests {
         let before = untouched.clone();
         clamp_frame(&mut untouched, &[]);
         assert_eq!(untouched, before);
+    }
+
+    #[test]
+    fn fit_frame_pulls_cascaded_frame_fully_on_screen() {
+        let monitors = vec![(1728, 30, 2560u32, 1440u32)];
+        // +24 cascade from a monitor-filling base: corner lands off-screen.
+        let mut f = WinFrame {
+            label: "w2".into(),
+            x: 1752,
+            y: 54,
+            w: 2560,
+            h: 1410,
+            fullscreen: false,
+        };
+        fit_frame(&mut f, &monitors);
+        assert!(f.x + f.w as i32 <= 1728 + 2560, "right edge on-screen");
+        assert!(f.y + f.h as i32 <= 30 + 1440, "bottom edge on-screen");
+        assert!(f.x >= 1728 && f.y >= 30, "top-left on-screen");
+        assert_eq!((f.w, f.h), (2560, 1410), "size preserved when it fits");
+    }
+
+    #[test]
+    fn fit_frame_shrinks_oversized_frame_to_monitor() {
+        let monitors = vec![(0, 0, 1512u32, 982u32)];
+        let mut f = WinFrame {
+            label: "w2".into(),
+            x: 24,
+            y: 24,
+            w: 2560,
+            h: 1410,
+            fullscreen: false,
+        };
+        fit_frame(&mut f, &monitors);
+        assert_eq!((f.w, f.h), (1512, 982));
+        assert_eq!((f.x, f.y), (0, 0));
+    }
+
+    #[test]
+    fn fit_frame_leaves_fitting_frame_and_empty_monitors_alone() {
+        let monitors = vec![(0, 0, 2560u32, 1440u32)];
+        let mut ok = WinFrame {
+            label: "w2".into(),
+            x: 100,
+            y: 100,
+            w: 1280,
+            h: 800,
+            fullscreen: false,
+        };
+        let before = ok.clone();
+        fit_frame(&mut ok, &monitors);
+        assert_eq!(ok, before);
+        let mut untouched = before.clone();
+        fit_frame(&mut untouched, &[]);
+        assert_eq!(untouched, before);
+    }
+
+    #[test]
+    fn fit_frame_uses_largest_overlap_monitor() {
+        // Two monitors side by side; frame mostly on the second.
+        let monitors = vec![(0, 0, 1512u32, 982u32), (1512, 0, 2560u32, 1440u32)];
+        let mut f = WinFrame {
+            label: "w2".into(),
+            x: 1600,
+            y: 400,
+            w: 2560,
+            h: 1410,
+            fullscreen: false,
+        };
+        fit_frame(&mut f, &monitors);
+        // Fitted within the SECOND monitor's bounds.
+        assert!(f.x >= 1512);
+        assert!(f.x + f.w as i32 <= 1512 + 2560);
+        assert!(f.y + f.h as i32 <= 1440);
+    }
+
+    /// Guard: the capability file must grant IPC to every real Otto window
+    /// (`main`, `w2`, `w3`, …) or drag/maximize/menu/zoom silently die in
+    /// secondary windows.
+    ///
+    /// Security invariant, pinned two ways: embedded-browser tabs
+    /// (`otto-browser-*`) are child WEBVIEWS of these very windows, so they
+    /// PASS tauri's window-label predicate — what actually denies them IPC is
+    /// the execution context: this capability must stay local-only (no
+    /// `remote` block, `local` not disabled, no `webviews` list). The label
+    /// assertions below are a second tripwire against someone widening the
+    /// patterns themselves (e.g. `"*"` or `"otto-*"`).
+    #[test]
+    fn capability_covers_secondary_windows_but_not_browser() {
+        // '*'-only glob, mirroring how tauri matches capability window
+        // patterns. Any other glob syntax must extend this helper, not
+        // silently mismatch tauri semantics.
+        fn glob_match(pat: &str, s: &str) -> bool {
+            assert!(
+                !pat.contains('?') && !pat.contains('['),
+                "extend glob_match for {pat}"
+            );
+            match pat.split_once('*') {
+                None => pat == s,
+                Some((pre, rest)) => {
+                    assert!(!rest.contains('*'), "extend glob_match for {pat}");
+                    s.strip_prefix(pre)
+                        .is_some_and(|tail| tail.ends_with(rest) && tail.len() >= rest.len())
+                }
+            }
+        }
+        let raw = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/capabilities/default.json"
+        ))
+        .expect("capability file");
+        let cap: serde_json::Value = serde_json::from_slice(&raw).expect("valid json");
+        let patterns: Vec<String> = cap["windows"]
+            .as_array()
+            .expect("windows array")
+            .iter()
+            .map(|v| v.as_str().expect("string pattern").to_string())
+            .collect();
+        let covered = |label: &str| patterns.iter().any(|p| glob_match(p, label));
+        assert!(covered("main"), "main window must keep IPC");
+        assert!(covered("w2"), "first secondary window needs IPC");
+        assert!(covered("w34"), "all minted w<N> labels need IPC");
+        // Tripwire only: browser webviews reach the label predicate via their
+        // PARENT window's label, so this alone can't protect them — the
+        // context assertions below are the real gate.
+        assert!(
+            !covered("otto-browser-1"),
+            "window patterns must never be widened toward otto-browser-*"
+        );
+        // The actual remote-content gate: local-only execution context. A
+        // `remote` block (or `local: false`, or a `webviews` list naming the
+        // browser webviews) would hand IPC to remote pages inside these
+        // windows.
+        assert!(
+            cap.get("remote").is_none(),
+            "capability must not grant a remote execution context"
+        );
+        assert!(
+            cap.get("local").and_then(|v| v.as_bool()).unwrap_or(true),
+            "capability must stay enabled for the local context only"
+        );
+        assert!(
+            cap.get("webviews").is_none(),
+            "capability must match by window label, never by webview label"
+        );
+        // Drag + double-click-maximize both go through JS IPC (windowDrag.ts).
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .expect("permissions array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(perms.contains(&"core:window:allow-start-dragging"));
+        assert!(perms.contains(&"core:window:allow-toggle-maximize"));
     }
 }
