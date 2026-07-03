@@ -47,12 +47,13 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   // ONE tree here, so there are no separate Database / Message Brokers entries —
   // their views (`#/database`, `#/brokers`) are reached by opening a row and
   // highlight this entry (see navIdForModule). Visible with EITHER feature.
+  // Plain row (no nested open-connections list in the sidebar): open
+  // connections already show as tabs on the Agents view.
   {
     id: 'connections',
     icon: 'plug',
     label: 'Connections',
     featureAny: ['connections', 'database'],
-    special: true,
   },
   { id: 'swarm', icon: 'grid', label: 'Swarm', feature: 'swarm' },
   { id: 'loops', icon: 'refresh', label: 'Goal Loops' },

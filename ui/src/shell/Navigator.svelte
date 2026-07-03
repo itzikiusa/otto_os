@@ -51,7 +51,6 @@
   // the user expands on demand.
   let telegramOpen = $state(false);
   let slackOpen = $state(false);
-  let connectionsOpen = $state(true);
   let archivedOpen = $state(false);
   let renamingId: string | null = $state(null);
   let draft = $state('');
@@ -267,15 +266,14 @@
       <!-- Modules render in the user's saved order (shared registry). While
            editing, every resolved module shows as a compact draggable row
            (incl. hidden ones, so they can be toggled back on); otherwise the
-           special Agents/Connections blocks (with their nested session lists)
-           and plain rows render normally. -->
+           special Agents block (with its nested session list) and plain rows
+           render normally. Connections is a plain row — open connections live
+           as tabs on the Agents view, so the sidebar doesn't repeat them. -->
       {#each navList as m, i (m.id)}
         {#if ui.sidebarEditMode}
           {@render editRow(m, i)}
         {:else if m.id === 'agents'}
           {@render agentsBlock()}
-        {:else if m.id === 'connections'}
-          {@render connectionsBlock()}
         {:else}
           {@render simpleRow(m)}
         {/if}
@@ -558,39 +556,6 @@
         {/if}
       </div>
     {/if}
-  {/if}
-{/snippet}
-
-{#snippet connectionsBlock()}
-  <div class="nav-item-row">
-    <button
-      class="nav-item"
-      class:active={router.module === 'connections'}
-      onclick={() => router.go('connections')}
-    >
-      <Icon name="plug" size={14} />
-      <span class="grow">Connections</span>
-      {#if ws.connectionSessions.length > 0}
-        <span class="count-chip">{ws.connectionSessions.length}</span>
-      {/if}
-    </button>
-    <button
-      class="icon-btn twisty"
-      onclick={() => (connectionsOpen = !connectionsOpen)}
-      aria-label="Toggle connection list"
-    >
-      <Icon name={connectionsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-    </button>
-  </div>
-
-  {#if connectionsOpen}
-    <div class="nested">
-      {#each ws.connectionSessions as s (s.id)}
-        {@render sessionRow(s)}
-      {:else}
-        <div class="nested-empty">No open connections — open one from the page</div>
-      {/each}
-    </div>
   {/if}
 {/snippet}
 
