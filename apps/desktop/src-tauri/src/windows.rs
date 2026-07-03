@@ -225,6 +225,17 @@ pub fn on_close_requested(app: &tauri::AppHandle, label: &str) {
 /// Builder options shared by every Otto window — parity with the `main` window
 /// declared in tauri.conf.json, plus the per-window id the SPA keys state off.
 fn build_window(app: &tauri::AppHandle, frame: &WinFrame) -> tauri::Result<tauri::WebviewWindow> {
+    build_window_with_init(app, frame, None)
+}
+
+/// `extra_init` is appended to the identity init script — used by the snip
+/// editor window to inject its initial route (`__OTTO_ROUTE__`). Callers are
+/// responsible for only passing validated, quote-free payloads.
+fn build_window_with_init(
+    app: &tauri::AppHandle,
+    frame: &WinFrame,
+    extra_init: Option<&str>,
+) -> tauri::Result<tauri::WebviewWindow> {
     let win = WebviewWindowBuilder::new(app, &frame.label, WebviewUrl::App("index.html".into()))
         .title("Otto")
         .min_inner_size(980.0, 640.0)
@@ -233,7 +244,11 @@ fn build_window(app: &tauri::AppHandle, frame: &WinFrame) -> tauri::Result<tauri
         .transparent(true)
         .accept_first_mouse(true)
         .disable_drag_drop_handler()
-        .initialization_script(format!("window.__OTTO_WIN__='{}';", frame.label))
+        .initialization_script(format!(
+            "window.__OTTO_WIN__='{}';{}",
+            frame.label,
+            extra_init.unwrap_or("")
+        ))
         .build()?;
     let _ = win.set_position(PhysicalPosition::new(frame.x, frame.y));
     let _ = win.set_size(PhysicalSize::new(frame.w, frame.h));
@@ -321,6 +336,49 @@ pub fn create_new_window(app: &tauri::AppHandle) {
             persist();
         }
         Err(e) => eprintln!("could not create window: {e}"),
+    }
+}
+
+/// Snip editor window: a normal `w<N>` window (same ACL/registry/restore
+/// path as File → New Window) whose init script pre-routes the SPA to
+/// `#/snip/<id>`. The id is validated by the caller (snip.rs) — alnum only —
+/// before it is embedded in the script.
+pub fn create_snip_window(app: &tauri::AppHandle, snip_id: &str) -> Result<(), String> {
+    let monitors = monitors_of(app);
+    let base = app
+        .webview_windows()
+        .values()
+        .find(|w| w.is_focused().unwrap_or(false) && !w.label().starts_with("otto-browser-"))
+        .and_then(live_frame)
+        .or_else(|| app.get_webview_window("main").as_ref().and_then(live_frame));
+    let mut frame = base.unwrap_or(WinFrame {
+        label: String::new(),
+        x: 120,
+        y: 120,
+        w: 1160,
+        h: 800,
+        fullscreen: false,
+    });
+    frame.label = with_registry(|reg| {
+        let n = reg.next_id.max(2);
+        reg.next_id = n + 1;
+        format!("w{n}")
+    });
+    frame.x += 48;
+    frame.y += 48;
+    frame.w = frame.w.min(1160);
+    frame.h = frame.h.min(820);
+    frame.fullscreen = false;
+    clamp_frame(&mut frame, &monitors);
+    fit_frame(&mut frame, &monitors);
+    let init = format!("window.__OTTO_ROUTE__='snip/{snip_id}';");
+    match build_window_with_init(app, &frame, Some(&init)) {
+        Ok(_) => {
+            with_registry(|reg| reg.windows.push(frame));
+            persist();
+            Ok(())
+        }
+        Err(e) => Err(format!("could not create snip window: {e}")),
     }
 }
 

@@ -8,6 +8,7 @@
 )]
 
 mod browser;
+mod snip;
 mod supervisor;
 mod windows;
 
@@ -19,6 +20,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // Forward native menu-bar clicks to the SPA (which owns all behavior).
         // Registered on the Builder — the reliable place in Tauri v2 for an
         // app-wide menu set via `app.set_menu`. Window-lifecycle items
@@ -70,6 +72,9 @@ fn main() {
             browser::browser_close_all,
             browser::browser_devtools,
             windows::windows_registry,
+            snip::snip_get_shortcut,
+            snip::snip_set_shortcut,
+            snip::open_snip_window,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
@@ -86,6 +91,10 @@ fn main() {
             // windows); each window's SPA restores its own tabs/route from
             // per-window (`__OTTO_WIN__`-keyed) localStorage.
             windows::restore(app.handle());
+
+            // System-wide snip shortcut (persisted chord or the ⌘⌃⇧2 default);
+            // failure is non-fatal — in-app triggers still work.
+            snip::init(app.handle());
 
             // Ensure the daemon is up in the background; the SPA polls /health
             // and surfaces state, so failures here are non-fatal.
@@ -172,6 +181,11 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
                 true,
                 None::<&str>,
             )?,
+            &PredefinedMenuItem::separator(handle)?,
+            // No accelerator here: ⌘⇧S is handled by the SPA keymap (keys.ts) so
+            // the chord works in browsers too; a native accelerator would
+            // intercept it before the webview and dispatch twice on some paths.
+            &MenuItem::with_id(handle, "snip", "Take Snip", true, None::<&str>)?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "close-tab", "Close Tab", true, Some("Cmd+W"))?,
         ],

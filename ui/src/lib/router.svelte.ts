@@ -27,6 +27,16 @@ const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in windo
 
 function restoreLastRoute(): void {
   if (!IS_TAURI) return;
+  // A freshly-minted window may carry an injected initial route (e.g. the snip
+  // editor window: windows.rs adds `window.__OTTO_ROUTE__='snip/<id>'` to the
+  // init script). Consume-once — delete before applying — so a later hard
+  // reload of the window falls back to the normal per-window restore below.
+  const injected = (window as { __OTTO_ROUTE__?: unknown }).__OTTO_ROUTE__;
+  delete (window as { __OTTO_ROUTE__?: unknown }).__OTTO_ROUTE__;
+  if (typeof injected === 'string' && /^[A-Za-z0-9/_-]+$/.test(injected)) {
+    history.replaceState(null, '', '#/' + injected);
+    return;
+  }
   const h = window.location.hash;
   if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
   const saved = localStorage.getItem(winKey(LS_LAST_ROUTE));

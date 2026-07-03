@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Core capability for every real Otto window: `main` plus the `w<N>` secondary windows minted by File → New Window (windows.rs). Notably grants `core:event` (via core:default) so the SPA can `listen()` for native menu-bar events forwarded from Rust (`otto://menu`), `allow-start-dragging` + `allow-toggle-maximize` for the custom titlebar (windowDrag.ts drags on mousedown, toggles maximize on double-click), and webview zoom. `otto-browser-*` browser-tab webviews are CHILDREN of these windows and therefore pass the window-label match — what actually denies them IPC is the execution context: this capability is local-only (no `remote` block), and browser tabs run remote content. Never add a `remote` block or a `webviews` list here (windows.rs has a regression test pinning this).",
   "windows": ["main", "w*"],
-  "permissions": ["core:default", "core:window:allow-start-dragging", "core:window:allow-toggle-maximize", "core:webview:allow-set-webview-zoom", "shell:allow-open", "opener:allow-open-url", "notification:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "core:window:allow-toggle-maximize", "core:window:allow-close", "core:webview:allow-set-webview-zoom", "shell:allow-open", "opener:allow-open-url", "notification:default"]
 }

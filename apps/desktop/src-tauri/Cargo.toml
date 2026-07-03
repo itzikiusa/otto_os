@@ -15,6 +15,7 @@ tauri = { version = "2", features = ["macos-private-api", "tray-icon", "unstable
 tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
 window-vibrancy = "0.6"
 # Used only to open the browser's Web Inspector DETACHED (its own window) via the
 # private WKWebView `_inspector` API — same objc2 version wry uses.
