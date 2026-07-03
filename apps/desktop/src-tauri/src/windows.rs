@@ -394,4 +394,52 @@ mod tests {
         clamp_frame(&mut untouched, &[]);
         assert_eq!(untouched, before);
     }
+
+    /// Guard: the capability file must grant IPC to every real Otto window
+    /// (`main`, `w2`, `w3`, …) or drag/maximize/menu/zoom silently die in
+    /// secondary windows — and must NEVER cover the embedded-browser windows,
+    /// which host remote web content.
+    #[test]
+    fn capability_covers_secondary_windows_but_not_browser() {
+        // '*'-only glob, mirroring how tauri matches capability window patterns.
+        fn glob_match(pat: &str, s: &str) -> bool {
+            match pat.split_once('*') {
+                None => pat == s,
+                Some((pre, rest)) => {
+                    assert!(!rest.contains('*'), "extend glob_match for {pat}");
+                    s.strip_prefix(pre)
+                        .is_some_and(|tail| tail.ends_with(rest) && tail.len() >= rest.len())
+                }
+            }
+        }
+        let raw = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/capabilities/default.json"
+        ))
+        .expect("capability file");
+        let cap: serde_json::Value = serde_json::from_slice(&raw).expect("valid json");
+        let patterns: Vec<String> = cap["windows"]
+            .as_array()
+            .expect("windows array")
+            .iter()
+            .map(|v| v.as_str().expect("string pattern").to_string())
+            .collect();
+        let covered = |label: &str| patterns.iter().any(|p| glob_match(p, label));
+        assert!(covered("main"), "main window must keep IPC");
+        assert!(covered("w2"), "first secondary window needs IPC");
+        assert!(covered("w34"), "all minted w<N> labels need IPC");
+        assert!(
+            !covered("otto-browser-1"),
+            "embedded-browser windows host REMOTE content and must never get IPC"
+        );
+        // Drag + double-click-maximize both go through JS IPC (windowDrag.ts).
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .expect("permissions array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(perms.contains(&"core:window:allow-start-dragging"));
+        assert!(perms.contains(&"core:window:allow-toggle-maximize"));
+    }
 }

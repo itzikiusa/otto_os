@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core capability for the main window. Notably grants `core:event` so the SPA can `listen()` for native menu-bar events forwarded from Rust (`otto://menu`). Without this, menu clicks are silently dropped while keyboard shortcuts (handled purely in JS) still work.",
-  "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-start-dragging", "core:webview:allow-set-webview-zoom", "shell:allow-open", "opener:allow-open-url", "notification:default"]
+  "description": "Core capability for every real Otto window: `main` plus the `w<N>` secondary windows minted by File → New Window (windows.rs). Notably grants `core:event` (via core:default) so the SPA can `listen()` for native menu-bar events forwarded from Rust (`otto://menu`), `allow-start-dragging` + `allow-toggle-maximize` for the custom titlebar (windowDrag.ts drags on mousedown, toggles maximize on double-click), and webview zoom. `otto-browser-*` windows are deliberately NOT covered: they host remote web content and must never get IPC.",
+  "windows": ["main", "w*"],
+  "permissions": ["core:default", "core:window:allow-start-dragging", "core:window:allow-toggle-maximize", "core:webview:allow-set-webview-zoom", "shell:allow-open", "opener:allow-open-url", "notification:default"]
 }
