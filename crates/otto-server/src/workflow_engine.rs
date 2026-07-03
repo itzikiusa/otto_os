@@ -756,9 +756,9 @@ pub async fn run_workflow(
         }
         inp
     };
-    // The run's mission brief (`wf-<run_id>-instruction.md`): mission, repos
-    // table, planned steps (IN-SCOPE only, so numbering matches what actually
-    // executes on a start-from-here run) and the step-file protocol.
+    // The run's mission brief (`run-brief.md`): mission, repos table, planned
+    // steps (IN-SCOPE only, so numbering matches what actually executes on a
+    // start-from-here run) and the step-file protocol.
     {
         let planned: Vec<(String, String)> = order
             .iter()
@@ -771,13 +771,17 @@ pub async fn run_workflow(
                 )
             })
             .collect();
-        files.write_instruction(&crate::workflow_context::render_instruction(
+        // TODO(task 4): wire real instructions.md/prompt.md presence instead
+        // of these placeholders once the engine writes those files.
+        files.write_brief(&crate::workflow_context::render_brief(
             &workflow.name,
             &workflow.description,
             &run_id,
             &input,
             &files.repos(),
             &planned,
+            false,
+            false,
         ));
     }
     // The per-node execution environment (run identity + ambient cwd/base +
@@ -1668,9 +1672,13 @@ async fn execute_node(
                             scope.inner_idx,
                         )
                     );
+                    // TODO(task 4): wire real has_instructions/has_prompt once
+                    // the engine writes instructions.md/prompt.md.
                     crate::workflow_context::agent_preamble(
                         &d,
-                        &env.files.instruction_name(),
+                        false,
+                        false,
+                        !env.files.repos().is_empty(),
                         &env.files.list_step_mds(),
                         &own_md,
                     )
@@ -3066,9 +3074,13 @@ async fn execute_node(
                             scope.inner_idx,
                         )
                     );
+                    // TODO(task 4): wire real has_instructions/has_prompt once
+                    // the engine writes instructions.md/prompt.md.
                     crate::workflow_context::agent_preamble(
                         &d,
-                        &env.files.instruction_name(),
+                        false,
+                        false,
+                        !env.files.repos().is_empty(),
                         &env.files.list_step_mds(),
                         &own_md,
                     )
