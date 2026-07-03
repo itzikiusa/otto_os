@@ -104,8 +104,8 @@ pub fn clamp_frame(frame: &mut WinFrame, monitors: &[(i32, i32, u32, u32)]) {
 /// corner off-screen (and with it the only obvious resize affordance).
 pub fn fit_frame(frame: &mut WinFrame, monitors: &[(i32, i32, u32, u32)]) {
     fn overlap(a: i32, alen: u32, b: i32, blen: u32) -> i64 {
-        let lo = a.max(b) as i64;
-        let hi = ((a + alen as i32) as i64).min((b + blen as i32) as i64);
+        let lo = (a as i64).max(b as i64);
+        let hi = (a as i64 + alen as i64).min(b as i64 + blen as i64);
         (hi - lo).max(0)
     }
     let Some(&(mx, my, mw, mh)) = monitors.iter().max_by_key(|&&(bx, by, bw, bh)| {
@@ -493,12 +493,25 @@ mod tests {
 
     /// Guard: the capability file must grant IPC to every real Otto window
     /// (`main`, `w2`, `w3`, …) or drag/maximize/menu/zoom silently die in
-    /// secondary windows — and must NEVER cover the embedded-browser windows,
-    /// which host remote web content.
+    /// secondary windows.
+    ///
+    /// Security invariant, pinned two ways: embedded-browser tabs
+    /// (`otto-browser-*`) are child WEBVIEWS of these very windows, so they
+    /// PASS tauri's window-label predicate — what actually denies them IPC is
+    /// the execution context: this capability must stay local-only (no
+    /// `remote` block, `local` not disabled, no `webviews` list). The label
+    /// assertions below are a second tripwire against someone widening the
+    /// patterns themselves (e.g. `"*"` or `"otto-*"`).
     #[test]
     fn capability_covers_secondary_windows_but_not_browser() {
-        // '*'-only glob, mirroring how tauri matches capability window patterns.
+        // '*'-only glob, mirroring how tauri matches capability window
+        // patterns. Any other glob syntax must extend this helper, not
+        // silently mismatch tauri semantics.
         fn glob_match(pat: &str, s: &str) -> bool {
+            assert!(
+                !pat.contains('?') && !pat.contains('['),
+                "extend glob_match for {pat}"
+            );
             match pat.split_once('*') {
                 None => pat == s,
                 Some((pre, rest)) => {
@@ -524,9 +537,28 @@ mod tests {
         assert!(covered("main"), "main window must keep IPC");
         assert!(covered("w2"), "first secondary window needs IPC");
         assert!(covered("w34"), "all minted w<N> labels need IPC");
+        // Tripwire only: browser webviews reach the label predicate via their
+        // PARENT window's label, so this alone can't protect them — the
+        // context assertions below are the real gate.
         assert!(
             !covered("otto-browser-1"),
-            "embedded-browser windows host REMOTE content and must never get IPC"
+            "window patterns must never be widened toward otto-browser-*"
+        );
+        // The actual remote-content gate: local-only execution context. A
+        // `remote` block (or `local: false`, or a `webviews` list naming the
+        // browser webviews) would hand IPC to remote pages inside these
+        // windows.
+        assert!(
+            cap.get("remote").is_none(),
+            "capability must not grant a remote execution context"
+        );
+        assert!(
+            cap.get("local").and_then(|v| v.as_bool()).unwrap_or(true),
+            "capability must stay enabled for the local context only"
+        );
+        assert!(
+            cap.get("webviews").is_none(),
+            "capability must match by window label, never by webview label"
         );
         // Drag + double-click-maximize both go through JS IPC (windowDrag.ts).
         let perms: Vec<&str> = cap["permissions"]

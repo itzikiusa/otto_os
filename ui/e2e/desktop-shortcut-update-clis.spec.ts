@@ -24,13 +24,17 @@ test.beforeEach(async ({ page }, info) => {
   await page.route('**/providers/update', (route) =>
     route.fulfill({ status: 503, contentType: 'text/plain', body: 'e2e-intercepted' }),
   );
+  // updateAllCLIs bails ("No workspace selected") until ws.currentId is set.
+  // select() assigns currentId BEFORE fetching the workspace's sessions, so
+  // the sessions request is a race-free "workspace resolved" signal. Arm the
+  // wait before goto so an early fetch can't slip past it.
+  const workspaceResolved = page.waitForRequest(
+    (r) => r.url().includes(`/workspaces/${workspaceId}/sessions`),
+    { timeout: 30_000 },
+  );
   await page.goto('/#/agents');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  // updateAllCLIs bails ("No workspace selected") until the workspace store
-  // resolves ws.currentId — its persisted localStorage write marks that point.
-  await expect
-    .poll(async () => page.evaluate(() => localStorage.getItem('otto_workspace')))
-    .toBeTruthy();
+  await workspaceResolved;
 });
 
 for (const [chord, name] of [
