@@ -519,7 +519,7 @@ fn output_schema_for(kind: &str) -> Option<Value> {
     };
     match kind {
         "agent_prompt" => obj(&[("reply", "string"), ("working_directory", "string")]),
-        "prepare_context" => Some(json!({"jira": "object"})),
+        "prepare_context" => obj(&[("jira", "object")]),
         "http_request" | "api_run" => obj(&[("status", "number"), ("body", "any")]),
         "db_query" => obj(&[("columns", "array"), ("rows", "array"), ("rows_returned", "number")]),
         "broker_peek" => obj(&[("topic", "string"), ("messages", "array"), ("count", "number")]),
@@ -4397,7 +4397,9 @@ mod tests {
     #[test]
     fn prepare_context_output_schema_declares_jira() {
         let schema = output_schema_for("prepare_context").expect("schema present");
-        assert_eq!(schema, json!({"jira": "object"}));
+        assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
+        let fields = schema.get("fields").and_then(|v| v.as_object()).expect("fields present");
+        assert_eq!(fields.get("jira").and_then(|v| v.as_str()), Some("object"));
     }
 
     #[test]
