@@ -711,6 +711,26 @@ pub async fn run_workflow(
         files.set_repos(entries.clone());
         seed_input_from_entries(input, &entries)
     };
+    // Fill `prompt` from a chat `msg` when the run didn't set one explicitly —
+    // `prompt.md` and every agent-facing step want `prompt`; the trigger only
+    // guarantees `msg`. Then write the two standing-context files this run
+    // actually has: `instructions.md` (the workflow's, verbatim, only when
+    // non-empty) and `prompt.md` (this run's ask, only when one exists). Both
+    // flags feed the brief/preamble "how to use this directory" sections below
+    // so they only ever point agents at files that exist.
+    let input = normalize_prompt(input);
+    let has_instructions = !workflow.instructions.trim().is_empty();
+    if has_instructions {
+        files.write_instructions_md(&workflow.instructions);
+    }
+    let has_prompt = input
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if let Some(p) = input.get("prompt").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+        files.write_prompt_md(p);
+    }
     // Run-level working directory: the `working_directory` from the run input
     // (e.g. a Slack `Working Directory:` field), else the workspace root. Agent
     // nodes run here — so a workflow owned by workspace A can operate on repo X.
@@ -771,8 +791,6 @@ pub async fn run_workflow(
                 )
             })
             .collect();
-        // TODO(task 4): wire real instructions.md/prompt.md presence instead
-        // of these placeholders once the engine writes those files.
         files.write_brief(&crate::workflow_context::render_brief(
             &workflow.name,
             &workflow.description,
@@ -780,8 +798,8 @@ pub async fn run_workflow(
             &input,
             &files.repos(),
             &planned,
-            false,
-            false,
+            has_instructions,
+            has_prompt,
         ));
     }
     // The per-node execution environment (run identity + ambient cwd/base +
@@ -929,10 +947,16 @@ pub async fn run_workflow(
         // earlier unchanged nodes. All node kinds participate in the cache.
         let params_hash = hash_value(&node.params);
         let input_hash = hash_value(&node_input);
-        if let Some(cached_out) = repo
-            .get_cached_output(&workflow.id, &node_id, &params_hash, &input_hash)
-            .await
-        {
+        // prepare_context writes a side-effect file (jira-<KEY>.md) into the run's
+        // context dir — a cache replay can't recreate that, so it never reads from
+        // (or writes to, see below) the node-result cache.
+        let cached_out = if node.kind != "prepare_context" {
+            repo.get_cached_output(&workflow.id, &node_id, &params_hash, &input_hash)
+                .await
+        } else {
+            None
+        };
+        if let Some(cached_out) = cached_out {
             states[idx].status = NodeStatus::Success;
             states[idx].output = Some(cached_out.clone());
             states[idx].logs = vec!["Success (cached)".into()];
@@ -1133,10 +1157,14 @@ pub async fn run_workflow(
                 if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
                     progress.post_step_file(&files, &step_file_base);
                 }
-                // Persist to the node cache for future re-runs.
-                let _ = repo
-                    .set_cached_output(&workflow.id, &node_id, &params_hash, &input_hash, &out)
-                    .await;
+                // Persist to the node cache for future re-runs — except prepare_context,
+                // whose jira-<KEY>.md side effect a cache replay cannot recreate (see the
+                // matching read-side guard above).
+                if node.kind != "prepare_context" {
+                    let _ = repo
+                        .set_cached_output(&workflow.id, &node_id, &params_hash, &input_hash, &out)
+                        .await;
+                }
                 outputs.insert(node_id.clone(), out);
             }
             Err(e) => {
@@ -1195,7 +1223,7 @@ pub async fn run_workflow(
             .update_run(&run_id, RunStatus::Canceled, &states, Some("canceled"), true)
             .await
             .unwrap_or(0);
-        deliver_run_result(&ctx, &workflow, &states, RunStatus::Canceled, None, &input).await;
+        deliver_run_result(&ctx, &workflow, &states, RunStatus::Canceled, None, &input, None).await;
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "canceled", None, rev, None, &states, false);
         return;
     }
@@ -1215,7 +1243,7 @@ pub async fn run_workflow(
             .update_run(&run_id, RunStatus::Error, &states, Some(&msg), true)
             .await
             .unwrap_or(0);
-        deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, None, &input).await;
+        deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, None, &input, None).await;
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None, rev, None, &states, false);
         return;
     }
@@ -1235,6 +1263,10 @@ pub async fn run_workflow(
         .update_run(&run_id, final_status, &states, err_msg.as_deref(), true)
         .await
         .unwrap_or(0);
+    // The run's deliverable: a copy of the last content-bearing step's handoff
+    // file, only on outright success — an errored run has no coherent "answer"
+    // to hand back, so delivery falls back to the per-step summary.md instead.
+    let final_output = if final_status == RunStatus::Success { files.write_final_output() } else { None };
     // Proof pack: package the run's node outputs, human approvals, and budget
     // gate into inspectable evidence; link the pack to the run. Best-effort.
     let pack_id = assemble_workflow_proof(&ctx, &workflow, &run_id, &states).await;
@@ -1242,8 +1274,9 @@ pub async fn run_workflow(
         let _ = repo.set_run_proof_pack(&run_id, pid).await;
     }
     // Report the result back to wherever the run was triggered from (Slack
-    // thread / webhook): a brief status + the full summary.md. Best-effort.
-    deliver_run_result(&ctx, &workflow, &states, final_status, pack_id.as_deref(), &input).await;
+    // thread / webhook): a brief status + the run's deliverable (final-output.md
+    // when the run produced one, else the generated summary.md). Best-effort.
+    deliver_run_result(&ctx, &workflow, &states, final_status, pack_id.as_deref(), &input, final_output.as_deref()).await;
     // Final event: run complete.
     emit_run_updated(&ctx, &workflow.workspace_id, &run_id, final_status.as_str(), None, rev, None, &states, false);
 }
@@ -1433,8 +1466,9 @@ fn build_run_summary(
 /// Deliver a finished run's result to wherever it was triggered from: the chat
 /// channel + thread that started it (Slack/Telegram — the main path), and/or a
 /// `result_webhook`/`callback_url` in the run input. A brief status message is
-/// posted with the full `summary.md` attached. Manual UI runs (no origin) no-op.
-/// Best-effort; redacted before it leaves the machine.
+/// posted with an attachment: `final-output.md` (the run's actual deliverable)
+/// when `final_output` is `Some`, else the generated `summary.md`. Manual UI
+/// runs (no origin) no-op. Best-effort; redacted before it leaves the machine.
 async fn deliver_run_result(
     ctx: &ServerCtx,
     workflow: &Workflow,
@@ -1442,6 +1476,7 @@ async fn deliver_run_result(
     status: RunStatus,
     proof_pack_id: Option<&str>,
     input: &Value,
+    final_output: Option<&[u8]>,
 ) {
     let obj = match input.as_object() {
         Some(o) => o,
@@ -1470,8 +1505,17 @@ async fn deliver_run_result(
 
     let (brief, full) = build_run_summary(workflow, states, status, proof_pack_id);
     let brief = otto_core::redact::redact_text(&brief).value;
-    let full = otto_core::redact::redact_text(&full).value;
-    let bytes = full.into_bytes();
+    // The attachment: the run's actual deliverable when it produced one (the
+    // last content-bearing step's handoff, copied to final-output.md), else
+    // the per-step summary.md this function always generates. Same redaction
+    // either way — this leaves the machine over chat/webhook.
+    let (attach_name, bytes): (&str, Vec<u8>) = match final_output {
+        Some(raw) => (
+            "final-output.md",
+            otto_core::redact::redact_text(&String::from_utf8_lossy(raw)).value.into_bytes(),
+        ),
+        None => ("summary.md", otto_core::redact::redact_text(&full).value.into_bytes()),
+    };
 
     // --- chat (Slack / Telegram) ---
     if let (Some(ch), Some(chat)) = (channel, chat) {
@@ -1494,7 +1538,7 @@ async fn deliver_run_result(
                         if let Some(adapter) =
                             otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ)
                         {
-                            if let Err(e) = adapter.upload(chat, thread, "summary.md", &bytes).await {
+                            if let Err(e) = adapter.upload(chat, thread, attach_name, &bytes).await {
                                 tracing::debug!("workflow result: summary upload failed: {e}");
                             }
                         }
@@ -1510,7 +1554,7 @@ async fn deliver_run_result(
     // --- webhook (SSRF-guarded, reuses the scheduled-task delivery path) ---
     if let Some(url) = webhook {
         if let Err(e) =
-            crate::scheduled_tasks_engine::deliver_webhook(url, &brief, "summary.md", &bytes).await
+            crate::scheduled_tasks_engine::deliver_webhook(url, &brief, attach_name, &bytes).await
         {
             tracing::debug!("workflow result: webhook delivery failed: {e}");
         }
@@ -1659,31 +1703,12 @@ async fn execute_node(
             // run's context dir (instruction, repos.json, prior step files)
             // and name the step file IT must write. The inline [input data]
             // excerpt stays as a glance — the files are the complete channel.
-            let preamble = env
-                .files
-                .dir_str()
-                .map(|d| {
-                    let own_md = format!(
-                        "{}.md",
-                        crate::workflow_context::step_base_name(
-                            scope.step_no,
-                            node_display_name(node),
-                            scope.iter,
-                            scope.inner_idx,
-                        )
-                    );
-                    // TODO(task 4): wire real has_instructions/has_prompt once
-                    // the engine writes instructions.md/prompt.md.
-                    crate::workflow_context::agent_preamble(
-                        &d,
-                        false,
-                        false,
-                        !env.files.repos().is_empty(),
-                        &env.files.list_step_mds(),
-                        &own_md,
-                    )
-                })
-                .unwrap_or_default();
+            let preamble = env.files.preamble_for(
+                scope.step_no,
+                node_display_name(node),
+                scope.iter,
+                scope.inner_idx,
+            );
             // Inject any per-step skills (`skill`/`skills`) ahead of the prompt so
             // the step runs a specific method "via prompt".
             let full = prepend_skills(
@@ -3061,31 +3086,12 @@ async fn execute_node(
             let extra = p.get("instruction").and_then(Value::as_str).unwrap_or("");
             // Same file-based handoff as agent_prompt: context dir + the step
             // file this node must write (engine fallback covers omission).
-            let preamble = env
-                .files
-                .dir_str()
-                .map(|d| {
-                    let own_md = format!(
-                        "{}.md",
-                        crate::workflow_context::step_base_name(
-                            scope.step_no,
-                            node_display_name(node),
-                            scope.iter,
-                            scope.inner_idx,
-                        )
-                    );
-                    // TODO(task 4): wire real has_instructions/has_prompt once
-                    // the engine writes instructions.md/prompt.md.
-                    crate::workflow_context::agent_preamble(
-                        &d,
-                        false,
-                        false,
-                        !env.files.repos().is_empty(),
-                        &env.files.list_step_mds(),
-                        &own_md,
-                    )
-                })
-                .unwrap_or_default();
+            let preamble = env.files.preamble_for(
+                scope.step_no,
+                node_display_name(node),
+                scope.iter,
+                scope.inner_idx,
+            );
             let prompt = format!(
                 "{preamble}{skill}\n\n# Task\n{instruction}\n{extra}\n\n# Story context\n{}",
                 truncate(&context, 8000)
@@ -3935,6 +3941,23 @@ fn seed_input_from_entries(
     Value::Object(m)
 }
 
+/// Some triggers (chat) send `msg`, agent-facing steps and `prompt.md` want
+/// `prompt` — fill `prompt` from `msg` when `prompt` is absent or blank, and
+/// never the reverse (an explicit `prompt` always wins; `msg` still renders
+/// separately in the brief unless it's identical, see `render_brief`). A
+/// non-object input (or one already without either field) passes through
+/// unchanged.
+fn normalize_prompt(input: Value) -> Value {
+    let Value::Object(mut m) = input else { return input };
+    let has_prompt = m.get("prompt").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty());
+    if !has_prompt {
+        if let Some(msg) = m.get("msg").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+            m.insert("prompt".into(), Value::String(msg.to_string()));
+        }
+    }
+    Value::Object(m)
+}
+
 /// Resolve declared repo entries against registered repos + live git state:
 /// fill `repo_id`/`worktree`/`base`, or set a per-entry `error` (kept visible
 /// in `repos.json`; the run proceeds with the valid entries). A `branch`
@@ -4725,6 +4748,18 @@ mod tests {
         let input = json!({ "msg": "hi" });
         assert_eq!(seed_input_from_entries(input.clone(), &entries), input);
         assert_eq!(seed_input_from_entries(Value::Null, &[]), Value::Null);
+    }
+
+    #[test]
+    fn normalize_prompt_fills_from_msg_only() {
+        let v = normalize_prompt(json!({"msg": "hello"}));
+        assert_eq!(v["prompt"], "hello");
+        let v = normalize_prompt(json!({"prompt": "p", "msg": "m"}));
+        assert_eq!(v["prompt"], "p"); // never overwritten
+        let v = normalize_prompt(json!({"prompt": "  ", "msg": "m"}));
+        assert_eq!(v["prompt"], "m"); // blank counts as absent
+        let v = normalize_prompt(json!("scalar"));
+        assert_eq!(v, json!("scalar")); // non-object untouched
     }
 
     // --- reviewer checks (commands delegated to the review agent) ---------------

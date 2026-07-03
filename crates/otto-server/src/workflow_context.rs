@@ -33,18 +33,11 @@ use serde_json::Value;
 pub(crate) const RUN_BRIEF_FILE: &str = "run-brief.md";
 /// Standing instructions for the workflow (verbatim copy of
 /// `workflow.instructions`) — written only when non-empty.
-// TODO(task 4): wired up once the engine writes instructions.md at run start.
-#[allow(dead_code)]
 pub(crate) const INSTRUCTIONS_FILE: &str = "instructions.md";
 /// This run's ask, verbatim — written only when a prompt exists.
-// TODO(task 4): wired up once the engine writes prompt.md at run start.
-#[allow(dead_code)]
 pub(crate) const PROMPT_FILE: &str = "prompt.md";
 /// Copy of the last content-bearing, error-free step's `.md` — the run's
 /// deliverable, written on run success.
-// TODO(task 4/5): wired up once the engine calls write_final_output and
-// delivery reads it.
-#[allow(dead_code)]
 pub(crate) const FINAL_OUTPUT_FILE: &str = "final-output.md";
 
 /// Kinds whose step `.md` is never the run deliverable — bookkeeping/control
@@ -225,7 +218,11 @@ pub(crate) fn render_brief(
     }
     md.push('\n');
 
-    // Mission: the free-text fields a trigger provides.
+    // Mission: the free-text fields a trigger provides. `prompt` is filled
+    // from `msg` when absent (see `normalize_prompt` in the engine) — when
+    // that happened the two are identical, so the `msg` row is redundant and
+    // skipped rather than showing the same line twice.
+    let prompt_val = input.get("prompt").and_then(Value::as_str).map(str::trim);
     let mut mission = String::new();
     for (key, label) in [
         ("msg", "Message"),
@@ -233,7 +230,11 @@ pub(crate) fn render_brief(
         ("jira_ticket", "Jira ticket"),
     ] {
         if let Some(v) = input.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
-            mission.push_str(&format!("- **{label}:** {}\n", v.trim()));
+            let v = v.trim();
+            if key == "msg" && Some(v) == prompt_val {
+                continue;
+            }
+            mission.push_str(&format!("- **{label}:** {v}\n"));
         }
     }
     for (key, label) in [("goals", "Goals"), ("relevant_info", "Relevant info")] {
@@ -253,11 +254,16 @@ pub(crate) fn render_brief(
         md.push('\n');
     }
 
-    // No repos declared ⇒ no `repos.json` at all (`set_repos` is never called
-    // with a non-empty registry) — omit the whole section rather than point
-    // agents at guidance/a file that doesn't exist.
-    if !repos.is_empty() {
-        md.push_str("## Repos & branches\n\n");
+    // The heading always renders — its presence/absence is itself a signal an
+    // agent shouldn't have to infer from silence. No repos declared ⇒ no
+    // `repos.json` at all (`set_repos` is never called with a non-empty
+    // registry), so the table and its guidance sentence are skipped in favor
+    // of an explicit placeholder rather than pointing at a file that doesn't
+    // exist.
+    md.push_str("## Repos & branches\n\n");
+    if repos.is_empty() {
+        md.push_str("_No repos declared for this run._\n\n");
+    } else {
         md.push_str("| repo | type | work | source | worktree |\n|---|---|---|---|---|\n");
         for e in repos {
             let status = e.error.as_deref().map(|err| format!(" ⚠ {err}")).unwrap_or_default();
@@ -440,7 +446,8 @@ impl RunContextFiles {
     }
 
     /// Name of the auto-generated run brief — always `RUN_BRIEF_FILE`.
-    // TODO(task 4): wired up at the write_brief/agent_preamble call sites.
+    // TODO(task 5): unused until an API/UI surface wants to name this file
+    // without reaching for the constant directly.
     #[allow(dead_code)]
     pub fn brief_name(&self) -> String {
         RUN_BRIEF_FILE.to_string()
@@ -452,30 +459,24 @@ impl RunContextFiles {
 
     /// Verbatim copy of the workflow's standing instructions. Caller only
     /// calls this when the field is non-empty (see `has_file`/callers).
-    // TODO(task 4): called from run start once workflow.instructions exists.
-    #[allow(dead_code)]
     pub fn write_instructions_md(&self, content: &str) {
         self.write_file(INSTRUCTIONS_FILE, content);
     }
 
     /// Verbatim copy of this run's prompt/ask.
-    // TODO(task 4): called from run start once the run's prompt is threaded here.
-    #[allow(dead_code)]
     pub fn write_prompt_md(&self, content: &str) {
         self.write_file(PROMPT_FILE, content);
     }
 
     /// General-purpose named write (e.g. `jira-<KEY>.md`) — the public face
     /// of the internal best-effort writer. True on success.
-    // TODO(task 4): consumed by prepare_context for jira-<KEY>.md.
+    // TODO(task 5): consumed by prepare_context for jira-<KEY>.md.
     #[allow(dead_code)]
     pub fn write_named(&self, name: &str, content: &str) -> bool {
         self.write_file(name, content)
     }
 
     /// Whether `name` exists in this run's context dir (disabled ⇒ false).
-    // TODO(task 4): consumed by the run-start brief/preamble flag computation.
-    #[allow(dead_code)]
     pub fn has_file(&self, name: &str) -> bool {
         self.dir.as_ref().is_some_and(|d| d.join(name).exists())
     }
@@ -614,8 +615,6 @@ impl RunContextFiles {
     /// `FINAL_OUTPUT_FILE`. `None` when disabled, no qualifying step ran yet,
     /// or the source file is unreadable — best-effort, like every write here.
     /// Returns the copied bytes (the caller uses them for delivery) on success.
-    // TODO(task 4/5): called by the engine on run-success and by delivery.
-    #[allow(dead_code)]
     pub fn write_final_output(&self) -> Option<Vec<u8>> {
         let dir = self.dir.as_ref()?;
         let base = self.content_step.lock().unwrap().clone()?;
@@ -630,6 +629,31 @@ impl RunContextFiles {
             tracing::warn!("workflow-context({}): write {FINAL_OUTPUT_FILE} failed: {e}", self.run_id);
         }
         Some(bytes)
+    }
+
+    /// The full `[workflow context]` preamble for an agent-backed step: reads
+    /// what's actually on disk for this run (instructions.md/prompt.md/repos)
+    /// so every call site stays in sync without re-deriving the flags itself,
+    /// builds the step's own handoff-file name via `step_base_name`, and hands
+    /// off to `agent_preamble`. Disabled context files ⇒ `""` (no dir to point
+    /// an agent at), matching every other best-effort method here.
+    pub fn preamble_for(
+        &self,
+        step_no: usize,
+        display_name: &str,
+        iter: Option<u64>,
+        inner_idx: Option<usize>,
+    ) -> String {
+        let Some(dir) = self.dir_str() else { return String::new() };
+        let own_md = format!("{}.md", step_base_name(step_no, display_name, iter, inner_idx));
+        agent_preamble(
+            &dir,
+            self.has_file(INSTRUCTIONS_FILE),
+            self.has_file(PROMPT_FILE),
+            !self.repos().is_empty(),
+            &self.list_step_mds(),
+            &own_md,
+        )
     }
 
     fn write_repos_json(&self) {
@@ -753,9 +777,22 @@ mod tests {
         assert!(md.contains("run-brief.md") && !md.contains("wf-r1-instruction"));
         assert!(md.contains("instructions.md") && md.contains("prompt.md"));
         assert!(!md.contains("repos.json"), "no repos declared → no repos.json guidance");
+        assert!(md.contains("## Repos & branches") && md.contains("_No repos declared for this run._"), "empty case still gets the heading + placeholder as signal");
         let md2 = render_brief("W", "", "r1", &json!({}), &sample_repos(), &[], false, false);
         assert!(md2.contains("repos.json"));
         assert!(!md2.contains("instructions.md — standing"), "no instructions → not referenced");
+    }
+
+    #[test]
+    fn brief_mission_dedups_msg_equal_to_prompt() {
+        // normalize_prompt copies msg into prompt when prompt is absent — the
+        // brief must not then show the identical line twice under two labels.
+        let md = render_brief("W", "", "r1", &json!({"msg": "do it", "prompt": "do it"}), &[], &[], false, false);
+        assert!(md.contains("**Prompt:** do it"));
+        assert!(!md.contains("**Message:** do it"), "msg row skipped when identical to prompt");
+        // Distinct msg/prompt still both render.
+        let md2 = render_brief("W", "", "r1", &json!({"msg": "raw msg", "prompt": "distinct prompt"}), &[], &[], false, false);
+        assert!(md2.contains("**Message:** raw msg") && md2.contains("**Prompt:** distinct prompt"));
     }
 
     #[test]
