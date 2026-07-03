@@ -52,6 +52,7 @@
   import ScheduledTasksPage from '../modules/scheduled-tasks/ScheduledTasksPage.svelte';
   import RunWithOttoPage from '../modules/run-with-otto/RunWithOttoPage.svelte';
   import VaultPage from '../modules/vault/VaultPage.svelte';
+  import SnipEditor from '../modules/snip/SnipEditor.svelte';
   import PluginFrame from '../modules/plugins/PluginFrame.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { router } from '../lib/router.svelte';
@@ -526,6 +527,11 @@
 {#if router.module === 's'}
   <!-- Guest share view: full-screen terminal, no shell chrome. -->
   <SharePage sessionId={router.parts[1] ?? ''} />
+{:else if router.module === 'snip'}
+  <!-- Snip annotation editor: full-screen canvas, no shell chrome (it gets its
+       own Tauri window; in a browser it takes over the current one). Stays
+       behind the login gate — the image fetch needs the bearer token. -->
+  <SnipEditor />
 {:else}
 <!-- Center column: banners + notification bell + (agents) TabBar + the module
      router. Extracted to a snippet so the desktop 3-pane and the mobile
