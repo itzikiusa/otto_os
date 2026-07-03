@@ -968,16 +968,13 @@ report synchronously from the run endpoint and have no dedicated WS event.
   migration backfills a `v1` snapshot for every pre-existing workflow.
 - **0096** `workflows.instructions` + `workflow_versions.instructions` (both
   `TEXT NOT NULL DEFAULT ''`) — the standing-instructions field (§3).
+- **0097** widens `workflow_triggers.kind` CHECK to `schedule|webhook|event|chat`
+  (table rebuild — SQLite can't `ALTER` a CHECK) so `chat`-kind channel
+  bindings can be persisted.
 - **0014/0015** `api_client` base + `api_automations` (name, `steps_json`).
 - `retry` and edge `condition` need **no migration** — they live inside
   `graph_json`. Run context files (§7) are plain files under
   `<data_dir>/workflow-context/`, not a table.
-
-> ⚠ **`workflow_triggers.kind` CHECK is stale.** Migration 0058's `CHECK (kind IN
-> ('schedule', 'webhook', 'event'))` was never widened when the `chat` kind was
-> added — `create_trigger` accepts `kind: "chat"` at the route layer, but the
-> `INSERT` will fail the table's `CHECK` constraint. A migration adding `'chat'`
-> to the allowed set is needed before channel bindings can actually be saved.
 
 All ids are ULID strings; timestamps are UTC RFC-3339; rows cascade-delete with
 their workspace (and triggers/runs/cache cascade with the workflow). Migrations
@@ -1046,12 +1043,6 @@ are **append-only** — never edit or renumber an existing one.
 - **Typed-output validation is warn-only** — schema mismatches log `⚠` but never
   fail a run; `params_schema` is currently unpopulated (UI hint only).
 - API-client automations have **no scheduler** — run-on-demand only.
-- **Channel bindings (`chat`-kind trigger) currently can't be saved** — the
-  `workflow_triggers.kind` `CHECK` (migration 0058) was never widened past
-  `schedule|webhook|event`, so `POST /workflows/{id}/triggers` with `kind:
-  "chat"` passes route validation but fails the `INSERT` (§9 Persistence). The
-  `Action: Workflow` message and the simplified `run <name>: <prompt>` command
-  are unaffected — they don't touch `workflow_triggers`.
 - **`prepare_context` has no dedicated inspector form yet** — configure it via
   the canvas's raw-JSON params editor (§6).
 
@@ -1123,7 +1114,6 @@ are **append-only** — never edit or renumber an existing one.
 | Run "exceeded the N-minute time limit" | The global wall-clock fired; the graph (often an `agent_prompt` chain) is too long. Split it or reduce work. |
 | Approve/Reject button does nothing | The run must actually be paused at a `human_approval` node (`waiting_approval`), and you need `Workflows:Edit`. |
 | API-client automation step fails on a 2xx | It has a failing assertion. With **no** assertions a step passes on any 2xx; check the assertion `desc` in the report. |
-| Adding a **Chat binding** trigger errors | Known issue (§10): the `workflow_triggers` table's `kind` `CHECK` doesn't yet include `chat`. Use the `Action: Workflow` message or `run <name>: <prompt>` command (§5) until the constraint is widened. |
 | `prepare_context` node errors "required Jira fetch failed" | `params.require: true` and the fetch failed (no matching Jira key, no configured Jira account, or the API call errored) — check `jira-<KEY>.md` in the run's context dir for the reason, or drop `require`. |
 | A run finished but the **Final output** panel is empty/hidden | The run isn't `success`, or every successful step was a utility kind (`log`/`delay`/`channel_notify`/`budget_gate`/`human_approval`/`manual_trigger` — §7 *Final output*) — add a content-bearing step (e.g. a closing `agent_prompt` "report" node) if you want a deliverable. |
 

@@ -2075,14 +2075,6 @@ structurally never returns the bot's own outbound sends. The chat-binding path (
 second, defensive guard: it never treats a message starting with the bot's own ack prefix
 (`"🚀 Started workflow"`) as a binding trigger.
 
-> ⚠ **`POST /workflows/{id}/triggers` with `kind: "chat"` currently fails at the DB
-> layer.** `create_trigger` validates `kind` against `schedule|webhook|event|chat`
-> (route-level), but migration 0058's `workflow_triggers.kind` `CHECK` was never
-> widened past `schedule|webhook|event` — the `INSERT` violates the constraint. A
-> migration adding `'chat'` to the allowed set is required before channel bindings
-> (resolution step 3 above) can be persisted; the legacy/simplified command paths
-> (steps 1–2) are unaffected — they don't write to `workflow_triggers`.
-
 First-party Otto MCP tools (no new HTTP route): the `otto` MCP server is injected into `.mcp.json`
 at spawn when the per-workspace `otto_mcp_enabled` setting is on (default off, via `PUT /settings`).
 It runs as `ottod mcp-tools` (stdio JSON-RPC) exposing read-only, redacted, row/timeout-capped,

@@ -196,6 +196,8 @@ impl TriggersRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workflows::WorkflowsRepo;
+    use otto_core::workflows::WorkflowGraph;
 
     /// Verify that `default_true` returns `true` so newly-created triggers are
     /// enabled by default when the field is absent from the request JSON.
@@ -212,5 +214,63 @@ mod tests {
         let parsed: Value =
             serde_json::from_str("not-json").unwrap_or(Value::Object(Default::default()));
         assert!(parsed.as_object().is_some());
+    }
+
+    async fn mem_pool() -> SqlitePool {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(false);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        pool
+    }
+
+    /// Regression for the `chat` trigger kind: it was added to route
+    /// validation (`create_trigger` in otto-server) and documented, but the
+    /// original 0058 `workflow_triggers.kind` CHECK only allowed
+    /// `schedule|webhook|event`, so a `chat` INSERT failed at the DB layer.
+    /// Covers every kind (not just `chat`) so a regression in the widened
+    /// CHECK for any of them is caught here too, and round-trips the chat
+    /// binding spec shape (`{channel, chat, mention_only}`).
+    #[tokio::test]
+    async fn create_accepts_every_trigger_kind_including_chat() {
+        let pool = mem_pool().await;
+        let workflows = WorkflowsRepo::new(pool.clone());
+        let repo = TriggersRepo::new(pool);
+
+        let graph = WorkflowGraph::default();
+        let wf = workflows
+            .create(&"ws1".into(), "WF", "desc", "", &graph, &"u1".into())
+            .await
+            .unwrap();
+
+        let chat_spec = serde_json::json!({
+            "channel": "slack",
+            "chat": "C1",
+            "mention_only": false,
+        });
+
+        for kind in ["schedule", "webhook", "event", "chat"] {
+            let spec = if kind == "chat" {
+                chat_spec.clone()
+            } else {
+                serde_json::json!({})
+            };
+            let created = repo
+                .create(NewWorkflowTrigger {
+                    workflow_id: wf.id.clone(),
+                    kind: kind.to_string(),
+                    spec: spec.clone(),
+                    enabled: true,
+                })
+                .await
+                .unwrap_or_else(|e| panic!("create trigger kind={kind} failed: {e}"));
+            assert_eq!(created.kind, kind);
+            assert_eq!(created.spec, spec, "spec round-trips for kind={kind}");
+        }
     }
 }
