@@ -4390,6 +4390,7 @@ mod tests {
             workspace_id: "ws".into(),
             name: "Write tests".into(),
             description: String::new(),
+            instructions: String::new(),
             graph: WorkflowGraph {
                 nodes: vec![node("a", "agent_prompt"), node("b", "review_run")],
                 edges: vec![],
@@ -4483,6 +4484,7 @@ mod tests {
             workspace_id: "wf-ws".into(),
             name: "x".into(),
             description: String::new(),
+            instructions: String::new(),
             graph: WorkflowGraph { nodes: vec![], edges: vec![] },
             created_by: "u".into(),
             created_at: chrono::Utc::now(),

@@ -119,6 +119,7 @@ async fn convert_to_workflow(
             &task.workspace_id,
             &format!("{} (from scheduled task)", task.name),
             &format!("Converted from scheduled task {}", task.id),
+            "",
             &graph,
             &user.id,
         )

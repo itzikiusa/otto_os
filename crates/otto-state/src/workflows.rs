@@ -25,6 +25,7 @@ fn row_to_workflow(r: &sqlx::sqlite::SqliteRow) -> Result<Workflow> {
         workspace_id: r.get("workspace_id"),
         name: r.get("name"),
         description: r.get("description"),
+        instructions: r.try_get("instructions").unwrap_or_default(),
         graph: parse_graph(&r.get::<String, _>("graph_json"))?,
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
@@ -40,6 +41,7 @@ fn row_to_version(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowVersion> {
         version: r.get("version"),
         name: r.get("name"),
         description: r.get("description"),
+        instructions: r.try_get("instructions").unwrap_or_default(),
         graph: parse_graph(&r.get::<String, _>("graph_json"))?,
         note: r.get("note"),
         created_by: r.get("created_by"),
@@ -113,6 +115,7 @@ impl WorkflowsRepo {
         workspace_id: &Id,
         name: &str,
         description: &str,
+        instructions: &str,
         graph: &WorkflowGraph,
         created_by: &Id,
     ) -> Result<Workflow> {
@@ -121,14 +124,15 @@ impl WorkflowsRepo {
         let graph_json =
             serde_json::to_string(graph).map_err(|e| Error::Internal(e.to_string()))?;
         sqlx::query(
-            "INSERT INTO workflows (id, workspace_id, name, description, graph_json,
+            "INSERT INTO workflows (id, workspace_id, name, description, instructions, graph_json,
                                     created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(workspace_id)
         .bind(name)
         .bind(description)
+        .bind(instructions)
         .bind(&graph_json)
         .bind(created_by)
         .bind(&now)
@@ -137,7 +141,7 @@ impl WorkflowsRepo {
         .await
         .map_err(dberr("create workflow"))?;
         // Snapshot the initial version so every workflow has a v1 in history.
-        self.snapshot_version(&id, 1, name, description, graph, "initial", created_by)
+        self.snapshot_version(&id, 1, name, description, instructions, graph, "initial", created_by)
             .await?;
         self.get(&id).await
     }
@@ -183,6 +187,7 @@ impl WorkflowsRepo {
         id: &Id,
         name: Option<&str>,
         description: Option<&str>,
+        instructions: Option<&str>,
         graph: Option<&WorkflowGraph>,
     ) -> Result<Workflow> {
         let now = fmt(Utc::now());
@@ -197,6 +202,15 @@ impl WorkflowsRepo {
         }
         if let Some(v) = description {
             sqlx::query("UPDATE workflows SET description = ?, updated_at = ? WHERE id = ?")
+                .bind(v)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update workflow"))?;
+        }
+        if let Some(v) = instructions {
+            sqlx::query("UPDATE workflows SET instructions = ?, updated_at = ? WHERE id = ?")
                 .bind(v)
                 .bind(&now)
                 .bind(id)
@@ -363,6 +377,7 @@ impl WorkflowsRepo {
         version: i64,
         name: &str,
         description: &str,
+        instructions: &str,
         graph: &WorkflowGraph,
         note: &str,
         created_by: &Id,
@@ -373,9 +388,9 @@ impl WorkflowsRepo {
             serde_json::to_string(graph).map_err(|e| Error::Internal(e.to_string()))?;
         sqlx::query(
             "INSERT INTO workflow_versions
-                 (id, workflow_id, version, name, description, graph_json, note,
+                 (id, workflow_id, version, name, description, instructions, graph_json, note,
                   created_by, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(workflow_id, version) DO NOTHING",
         )
         .bind(&id)
@@ -383,6 +398,7 @@ impl WorkflowsRepo {
         .bind(version)
         .bind(name)
         .bind(description)
+        .bind(instructions)
         .bind(&graph_json)
         .bind(note)
         .bind(created_by)
@@ -522,7 +538,7 @@ mod tests {
         let g0 = WorkflowGraph::default();
 
         let wf = repo
-            .create(&"ws1".into(), "WF", "desc", &g0, &"u1".into())
+            .create(&"ws1".into(), "WF", "desc", "", &g0, &"u1".into())
             .await
             .unwrap();
         assert_eq!(wf.version, 1, "new workflow starts at version 1");
@@ -540,7 +556,7 @@ mod tests {
         .unwrap();
         let v = repo.bump_version(&wf.id).await.unwrap();
         assert_eq!(v, 2);
-        repo.snapshot_version(&wf.id, v, "WF", "desc", &g2, "edited graph", &"u1".into())
+        repo.snapshot_version(&wf.id, v, "WF", "desc", "", &g2, "edited graph", &"u1".into())
             .await
             .unwrap();
         assert_eq!(repo.current_version(&wf.id).await.unwrap(), 2);
@@ -559,8 +575,8 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let g = WorkflowGraph::default();
-        let a = repo.create(&"wsA".into(), "Write tests", "", &g, &"u".into()).await.unwrap();
-        let b = repo.create(&"wsB".into(), "Write tests", "", &g, &"u".into()).await.unwrap();
+        let a = repo.create(&"wsA".into(), "Write tests", "", "", &g, &"u".into()).await.unwrap();
+        let b = repo.create(&"wsB".into(), "Write tests", "", "", &g, &"u".into()).await.unwrap();
 
         // Global resolution finds it from a third workspace; case-insensitive.
         let any = repo.find_by_name("write TESTS", &"wsC".into()).await.unwrap();
@@ -573,11 +589,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn instructions_round_trip_and_version_snapshot() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let ws: Id = "ws1".into();
+        let wf = repo
+            .create(&ws, "generic", "d", "FOLLOW THE RULES", &WorkflowGraph { nodes: vec![], edges: vec![] }, &"u1".into())
+            .await
+            .unwrap();
+        assert_eq!(wf.instructions, "FOLLOW THE RULES");
+        let up = repo.update(&wf.id, None, None, Some("v2 rules"), None).await.unwrap();
+        assert_eq!(up.instructions, "v2 rules");
+        let versions = repo.list_versions(&wf.id).await.unwrap();
+        assert_eq!(versions.last().unwrap().instructions, "FOLLOW THE RULES"); // v1 snapshot
+    }
+
+    #[tokio::test]
     async fn run_records_version_and_proof_pack() {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let wf = repo
-            .create(&"ws1".into(), "WF", "", &WorkflowGraph::default(), &"u1".into())
+            .create(&"ws1".into(), "WF", "", "", &WorkflowGraph::default(), &"u1".into())
             .await
             .unwrap();
 
@@ -601,7 +633,7 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let wf = repo
-            .create(&"ws1".into(), "WF", "", &WorkflowGraph::default(), &"u1".into())
+            .create(&"ws1".into(), "WF", "", "", &WorkflowGraph::default(), &"u1".into())
             .await
             .unwrap();
         let run = repo

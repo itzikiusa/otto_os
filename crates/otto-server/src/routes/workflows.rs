@@ -55,7 +55,8 @@ pub async fn create_workflow(
     }
     let graph = req.graph.unwrap_or_default();
     let wf = repo(&ctx)
-        .create(&wid, name, req.description.as_deref().unwrap_or(""), &graph, &user.id)
+        // TODO(task 2): wire req.instructions through instead of "".
+        .create(&wid, name, req.description.as_deref().unwrap_or(""), "", &graph, &user.id)
         .await
         .map_err(ApiError)?;
     Ok(Json(wf))
@@ -83,10 +84,12 @@ pub async fn update_workflow(
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     let graph_changed = req.graph.is_some();
     let updated = repo(&ctx)
+        // TODO(task 2): wire req.instructions through instead of None.
         .update(
             &id,
             req.name.as_deref(),
             req.description.as_deref(),
+            None,
             req.graph.as_ref(),
         )
         .await
@@ -100,6 +103,7 @@ pub async fn update_workflow(
                 v,
                 &updated.name,
                 &updated.description,
+                &updated.instructions,
                 &updated.graph,
                 "edited graph",
                 &user.id,
@@ -154,7 +158,10 @@ pub async fn restore_version(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("version {v}"))))?;
     repo(&ctx)
-        .update(&id, None, None, Some(&ver.graph))
+        // Mirrors name/description: restore only rewinds the live graph; the
+        // historical instructions/name/description are recorded in the version
+        // snapshot below, not applied back to the live row.
+        .update(&id, None, None, None, Some(&ver.graph))
         .await
         .map_err(ApiError)?;
     let newv = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
@@ -162,7 +169,16 @@ pub async fn restore_version(
         .and_then(|b| b.0.note)
         .unwrap_or_else(|| format!("restored from v{v}"));
     repo(&ctx)
-        .snapshot_version(&id, newv, &ver.name, &ver.description, &ver.graph, &note, &user.id)
+        .snapshot_version(
+            &id,
+            newv,
+            &ver.name,
+            &ver.description,
+            &ver.instructions,
+            &ver.graph,
+            &note,
+            &user.id,
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(repo(&ctx).get(&id).await.map_err(ApiError)?))
@@ -214,7 +230,8 @@ pub async fn generate_workflow(
         .unwrap_or_else(|| slug_title(description));
 
     let wf = repo(&ctx)
-        .create(&wid, &name, description, &graph, &user.id)
+        // TODO(task 2): generate/wire real standing instructions instead of "".
+        .create(&wid, &name, description, "", &graph, &user.id)
         .await
         .map_err(ApiError)?;
     Ok(Json(wf))
@@ -501,7 +518,7 @@ pub async fn create_from_template(
         .map(str::to_string)
         .unwrap_or_else(|| tpl.name.clone());
     let wf = repo(&ctx)
-        .create(&wid, &name, &tpl.description, &tpl.graph, &user.id)
+        .create(&wid, &name, &tpl.description, &tpl.instructions, &tpl.graph, &user.id)
         .await
         .map_err(ApiError)?;
     Ok(Json(wf))
@@ -546,6 +563,7 @@ fn game_templates() -> Vec<WorkflowTemplate> {
             id: "game-slots".into(),
             name: "Slots game".into(),
             description: "5×3 slot machine: agent designs the paytable & RTP, then the engine assembles and verifies it.".into(),
+            instructions: String::new(),
             icon: "grid".into(),
             graph: pipeline(
                 "slots",
@@ -556,6 +574,7 @@ fn game_templates() -> Vec<WorkflowTemplate> {
             id: "game-crash".into(),
             name: "Crash game (Aviator style)".into(),
             description: "Aviator-style crash game: agent designs the multiplier curve & provably-fair RNG, then build & verify.".into(),
+            instructions: String::new(),
             icon: "zap".into(),
             graph: pipeline(
                 "crash",
@@ -566,6 +585,7 @@ fn game_templates() -> Vec<WorkflowTemplate> {
             id: "game-scratch".into(),
             name: "Scratch card".into(),
             description: "Scratch-card game: agent designs prize tiers & win probabilities, then build & verify.".into(),
+            instructions: String::new(),
             icon: "ticket".into(),
             graph: pipeline(
                 "scratch",
@@ -682,6 +702,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                           automatically on pass (the review IS the approval). Provide repo_id \
                           (and base) in the run input."
                 .into(),
+            instructions: String::new(),
             icon: "check-square".into(),
             graph: WorkflowGraph {
                 nodes: vec![
@@ -722,6 +743,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                           review-iterate until passing → open the PR automatically on pass (the \
                           review IS the approval). Provide repo_id and story_id in the run input."
                 .into(),
+            instructions: String::new(),
             icon: "command".into(),
             graph: WorkflowGraph {
                 nodes: vec![
@@ -765,6 +787,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                           review → publish as RFC or Jira (dry-run by default). Provide story_id \
                           in the input to persist/publish."
                 .into(),
+            instructions: String::new(),
             icon: "compass".into(),
             graph: WorkflowGraph {
                 nodes: vec![
