@@ -1283,13 +1283,26 @@ workspace from the workflow/run row.
 | GET /workflows/{id}/versions/{v} | ws viewer | — | `WorkflowVersion` — one snapshot (404 if `v` unknown) |
 | POST /workflows/{id}/versions/{v}/restore | ws editor | `RestoreVersionReq {note?}` | Workflow — copies `v`'s graph back in as a **new** version (append-only history) |
 
+**Instructions (0096).** `Workflow`, `WorkflowVersion`, and `WorkflowTemplate` all
+carry `instructions: string` — standing free-text guidance every run/step follows,
+distinct from `description` (a summary). `CreateWorkflowReq`/`UpdateWorkflowReq`
+accept an optional `instructions`; create defaults to `""` when omitted, a
+template-created workflow (`POST .../from-template`) inherits the template's
+`instructions`, and an AI-generated workflow (`POST .../generate`) always gets
+`""` (the generation prompt IS `description`). An instructions-only `PATCH` bumps
+the version and snapshots exactly like a graph-changing one (see Versioning).
+Backed by migration **0096** (`instructions` column on `workflows` and
+`workflow_versions`).
+
 **Versioning.** A `Workflow` carries a monotonic `version` (default 1). A snapshot
-is written on create (v1) and on **every graph-changing PATCH** (`bump_version` +
-`snapshot_version`, note `"edited graph"`); restoring writes a new version equal to
-the chosen one rather than rewinding the counter (note `"restored from v{n}"`).
-`WorkflowVersion` = `{id, workflow_id, version, name, description, graph, note,
-created_by, created_at}`. Backed by migration **0089** (`workflows.version`,
-`workflow_versions` table).
+is written on create (v1) and on **every graph- or instructions-changing PATCH**
+(`bump_version` + `snapshot_version`, note `"edited"`); restoring writes a new
+version equal to the chosen one rather than rewinding the counter (note
+`"restored from v{n}"`) and restores the graph **and** instructions to the live
+row (name/description are not — they only live in the version snapshot).
+`WorkflowVersion` = `{id, workflow_id, version, name, description, instructions,
+graph, note, created_by, created_at}`. Backed by migration **0089**
+(`workflows.version`, `workflow_versions` table).
 
 **Run fields (0089).** A `WorkflowRun` now also carries `workflow_version` (the
 version snapshot it executed) and `proof_pack_id` (the Proof Pack assembled on

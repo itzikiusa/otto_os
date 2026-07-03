@@ -55,8 +55,14 @@ pub async fn create_workflow(
     }
     let graph = req.graph.unwrap_or_default();
     let wf = repo(&ctx)
-        // TODO(task 2): wire req.instructions through instead of "".
-        .create(&wid, name, req.description.as_deref().unwrap_or(""), "", &graph, &user.id)
+        .create(
+            &wid,
+            name,
+            req.description.as_deref().unwrap_or(""),
+            req.instructions.as_deref().unwrap_or(""),
+            &graph,
+            &user.id,
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(wf))
@@ -83,19 +89,20 @@ pub async fn update_workflow(
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     let graph_changed = req.graph.is_some();
+    let instructions_changed = req.instructions.is_some();
     let updated = repo(&ctx)
-        // TODO(task 2): wire req.instructions through instead of None.
         .update(
             &id,
             req.name.as_deref(),
             req.description.as_deref(),
-            None,
+            req.instructions.as_deref(),
             req.graph.as_ref(),
         )
         .await
         .map_err(ApiError)?;
-    // A graph-changing edit bumps the version and snapshots the new graph.
-    if graph_changed {
+    // A graph- or instructions-changing edit bumps the version and snapshots
+    // the new state (an instructions-only edit is treated like a graph edit).
+    if graph_changed || instructions_changed {
         let v = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
         repo(&ctx)
             .snapshot_version(
@@ -105,7 +112,7 @@ pub async fn update_workflow(
                 &updated.description,
                 &updated.instructions,
                 &updated.graph,
-                "edited graph",
+                "edited",
                 &user.id,
             )
             .await
@@ -158,10 +165,10 @@ pub async fn restore_version(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("version {v}"))))?;
     repo(&ctx)
-        // Mirrors name/description: restore only rewinds the live graph; the
-        // historical instructions/name/description are recorded in the version
-        // snapshot below, not applied back to the live row.
-        .update(&id, None, None, None, Some(&ver.graph))
+        // Restore rewinds the live graph AND instructions; the historical
+        // name/description are recorded in the version snapshot below, not
+        // applied back to the live row.
+        .update(&id, None, None, Some(&ver.instructions), Some(&ver.graph))
         .await
         .map_err(ApiError)?;
     let newv = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
@@ -230,7 +237,8 @@ pub async fn generate_workflow(
         .unwrap_or_else(|| slug_title(description));
 
     let wf = repo(&ctx)
-        // TODO(task 2): generate/wire real standing instructions instead of "".
+        // Agent-generated workflows have no separate instructions source (the
+        // description IS the generation prompt); leave instructions empty.
         .create(&wid, &name, description, "", &graph, &user.id)
         .await
         .map_err(ApiError)?;
