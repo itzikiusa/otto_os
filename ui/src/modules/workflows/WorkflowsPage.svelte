@@ -2,6 +2,7 @@
   // Workflows: build automations by *describing* them (agent mode) or by hand
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { untrack } from 'svelte';
+  import { marked } from 'marked';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
@@ -24,6 +25,7 @@
     WorkflowTemplate,
     WorkflowTrigger,
     WorkflowVersion,
+    FsRead,
   } from '../../lib/api/types';
 
   let workflows = $state<Workflow[]>([]);
@@ -44,17 +46,35 @@
   // that the trigger emits to the graph.
   let runInputOpen = $state(false);
   let runInputText = $state('');
+  // Prompt box shown above the JSON textarea in the run popover — merged into
+  // the parsed input as `prompt` (non-empty only) on run.
+  let runPromptText = $state('');
   let paletteOpen = $state(false);
   let templatesOpen = $state(false);
   let triggersOpen = $state(false);
   let triggers = $state<WorkflowTrigger[]>([]);
   let approving = $state(false);
 
+  // Instructions editor: standing free-text guidance every step follows,
+  // distinct from `description`. Saved via an explicit action (like graph
+  // Save), not tied into the canvas's `dirty` flag.
+  let instructionsOpen = $state(false);
+  let wfInstructions = $state('');
+  let savingInstructions = $state(false);
+
+  // Final-output panel: `<context_dir>/final-output.md`, fetched once per
+  // successful run id. `finalOutputRunId` doubles as the "already attempted"
+  // guard so a run with no deliverable doesn't get refetched forever.
+  let finalOutputRunId = $state<string | null>(null);
+  let finalOutputHtml = $state('');
+  let finalOutputAvailable = $state(false);
+
   const runStates = $derived<Record<string, NodeRunState>>(
     Object.fromEntries((run?.nodes ?? []).map((n) => [n.node_id, n])),
   );
   const selectedNode = $derived(graph.nodes.find((n) => n.id === selectedId) ?? null);
   const selectedRun = $derived(selectedId ? (runStates[selectedId] ?? null) : null);
+  const instructionsDirty = $derived(wfInstructions !== (current?.instructions ?? ''));
 
   $effect(() => {
     if (ws.currentId) {
@@ -191,6 +211,55 @@
     return () => clearInterval(iv);
   });
 
+  // ── final-output panel ──────────────────────────────────────────────────
+  // On a successful run, `<context_dir>/final-output.md` holds the run's
+  // deliverable (see workflow_context.rs's write_final_output). Rendered the
+  // same way FileTree previews markdown: `marked` → a sandboxed iframe
+  // (srcdoc, no scripts run) — that's the only "sanitizer" FileTree applies,
+  // so mirror it exactly rather than injecting raw HTML into the page.
+  const FINAL_OUTPUT_CSS = `
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 16px; color: #ddd; background: transparent; }
+    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid #ffffff22; padding-bottom: .2em; }
+    a { color: #6ea8fe; } code { background: #ffffff14; padding: .15em .35em; border-radius: 4px; font-family: ui-monospace, monospace; }
+    pre { background: #ffffff10; padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; } th,td { border: 1px solid #ffffff22; padding: 4px 8px; }
+    blockquote { border-left: 3px solid #ffffff33; margin: 0; padding-left: 12px; color: #aaa; }
+    img { max-width: 100%; }
+  `;
+  function renderFinalOutputSrcdoc(md: string): string {
+    let inner: string;
+    try {
+      inner = marked.parse(md, { async: false, gfm: true, breaks: true }) as string;
+    } catch {
+      inner = `<pre>${md.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
+    }
+    return `<!doctype html><html><head><meta charset="utf-8"><style>${FINAL_OUTPUT_CSS}</style></head><body>${inner}</body></html>`;
+  }
+  async function loadFinalOutput(runId: string, contextDir: string): Promise<void> {
+    finalOutputRunId = runId; // mark attempted up front — no duplicate fetches
+    finalOutputAvailable = false;
+    finalOutputHtml = '';
+    try {
+      const data = await api.get<FsRead>(`/fs/read?path=${encodeURIComponent(`${contextDir}/final-output.md`)}`);
+      if (run?.id !== runId) return; // the view moved on while this was in flight
+      finalOutputHtml = renderFinalOutputSrcdoc(data.content);
+      finalOutputAvailable = true;
+    } catch {
+      // no final-output.md (or unreadable) — the panel just stays hidden
+    }
+  }
+  $effect(() => {
+    const cur = run;
+    if (!cur || cur.status !== 'success' || !cur.context_dir) return;
+    const runId = cur.id;
+    const contextDir = cur.context_dir;
+    untrack(() => {
+      if (finalOutputRunId === runId) return;
+      void loadFinalOutput(runId, contextDir);
+    });
+  });
+
   /** Open a run from the "Running" sidebar list: ensure its workflow is open,
    *  then show the run (which the auto-update effects keep live). */
   async function openRunById(workflowId: string, runId: string): Promise<void> {
@@ -251,6 +320,10 @@
     runsOpen = false;
     versionsOpen = false;
     versions = [];
+    wfInstructions = wf.instructions ?? '';
+    finalOutputRunId = null;
+    finalOutputHtml = '';
+    finalOutputAvailable = false;
     void loadRuns();
     dirty = false;
   }
@@ -301,6 +374,25 @@
       toasts.success('Saved');
     } catch (e) {
       toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Instructions save via the same PATCH endpoint as graph save, kept
+  // separate so editing instructions never depends on (or clobbers) an
+  // in-flight graph edit — an instructions-only PATCH bumps the workflow
+  // version exactly like a graph-changing one.
+  async function saveInstructions(): Promise<void> {
+    if (!current) return;
+    savingInstructions = true;
+    try {
+      const wf = await api.patch<Workflow>(`/workflows/${current.id}`, { instructions: wfInstructions });
+      current = wf;
+      workflows = workflows.map((w) => (w.id === wf.id ? wf : w));
+      toasts.success('Instructions saved');
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      savingInstructions = false;
     }
   }
 
@@ -503,17 +595,28 @@
     runInputOpen = !runInputOpen;
   }
 
+  /** Merge the Prompt box into the parsed run input as `prompt`, only when
+   *  non-empty — leaves `input` untouched otherwise (including `undefined`,
+   *  which still means "run with no input"). */
+  function mergeRunPrompt(input: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+    const p = runPromptText.trim();
+    if (!p) return input;
+    return { ...(input ?? {}), prompt: p };
+  }
+
   async function confirmRun(): Promise<void> {
     const input = parseRunInput();
     if (input === null) return; // invalid JSON; toast already shown
+    const merged = mergeRunPrompt(input);
     runInputOpen = false;
-    await execRun(input === undefined ? {} : { input });
+    await execRun(merged === undefined ? {} : { input: merged });
   }
 
   const runFrom = (nodeId: string, only: boolean): Promise<void> => {
     const input = parseRunInput();
     if (input === null) return Promise.resolve();
-    return execRun({ start_node: nodeId, only_node: only, ...(input !== undefined ? { input } : {}) });
+    const merged = mergeRunPrompt(input);
+    return execRun({ start_node: nodeId, only_node: only, ...(merged !== undefined ? { input: merged } : {}) });
   };
 
   // Re-flow the graph into a few readable rows (topological order, snaking
@@ -1077,6 +1180,15 @@
           {/if}
         </div>
 
+        <!-- Instructions toggle: standing rules every step follows -->
+        <button
+          class="btn small"
+          onclick={() => (instructionsOpen = !instructionsOpen)}
+          title="Standing rules every step follows, by the letter"
+        >
+          <Icon name="note" size={12} /> Instructions
+        </button>
+
         <!-- Triggers config toggle -->
         <button class="btn small" onclick={() => (triggersOpen = !triggersOpen)} title="Configure workflow triggers">
           <Icon name="clock" size={12} /> Triggers
@@ -1114,6 +1226,16 @@
            trigger emits (repo_id, story_id, goals, msg, jira_ticket, …). -->
       {#if runInputOpen}
         <div class="run-input">
+          <div class="ri-head">
+            <strong>Prompt</strong>
+            <span class="ri-hint">What you want done this run — merged into the JSON below as `prompt` (optional).</span>
+          </div>
+          <textarea
+            class="ri-text"
+            rows="3"
+            bind:value={runPromptText}
+            placeholder="What you want done — instructions for the agents."
+          ></textarea>
           <div class="ri-head">
             <strong>Run input</strong>
             <span class="ri-hint">JSON the Start trigger emits to the graph — fill in repo_id / story_id / goals as needed. Leave empty to run with no input.</span>
@@ -1161,6 +1283,28 @@
           onchange={() => (dirty = true)}
         />
       </div>
+
+      {#if instructionsOpen && current}
+        <div class="instructions-wrap">
+          <div class="instructions-h">
+            <span>Instructions</span>
+            {#if instructionsDirty}<span class="badge">unsaved</span>{/if}
+            <span class="grow"></span>
+            <button class="btn primary small" disabled={!instructionsDirty || savingInstructions} onclick={saveInstructions}>
+              {savingInstructions ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+          <p class="instructions-hint">
+            Standing rules every step follows by the letter — distinct from the workflow's description.
+          </p>
+          <textarea
+            class="ri-text mono"
+            rows="8"
+            bind:value={wfInstructions}
+            placeholder="Standing rules every step follows by the letter (markdown)"
+          ></textarea>
+        </div>
+      {/if}
 
       {#if triggersOpen && current}
         <div class="triggers-wrap">
@@ -1251,6 +1395,17 @@
               {/each}
             </div>
             <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} /></div>
+            {#if run.status === 'success' && run.context_dir && finalOutputAvailable && finalOutputRunId === run.id && !viewport.isDesktop}
+              <!-- Mobile/tablet: the run's deliverable, above the context-file tree
+                   below. On desktop this moves into the Context-files sidebar. -->
+              <details open class="final-output">
+                <summary>
+                  <Icon name="check" size={13} />
+                  <span>Final output</span>
+                </summary>
+                <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputHtml}></iframe>
+              </details>
+            {/if}
             {#if run.context_dir && !viewport.isDesktop}
               <!-- Mobile/tablet: the run's context files inline (instruction brief,
                    repos.json, per-step handoffs). On desktop these move to the
@@ -2044,6 +2199,15 @@
             <Icon name="panel" size={13} />
           </button>
         </div>
+        {#if run.status === 'success' && finalOutputAvailable && finalOutputRunId === run.id}
+          <details open class="final-output">
+            <summary>
+              <Icon name="check" size={13} />
+              <span>Final output</span>
+            </summary>
+            <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputHtml}></iframe>
+          </details>
+        {/if}
         <div class="ctx-body">
           {#key run.context_dir}
             <FileTree root={run.context_dir} primary={false} />
@@ -2634,6 +2798,35 @@
     max-height: 420px;
     overflow: auto;
   }
+  /* Final-output panel: the run's deliverable, shown above the context-file
+     tree (both the mobile inline block and the desktop sidebar). Same shell
+     as .ctx-files; content is a sandboxed iframe like FileTree's own markdown
+     preview (see renderFinalOutputSrcdoc). */
+  .final-output {
+    margin: 8px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-subtle, transparent);
+    flex-shrink: 0;
+  }
+  .final-output > summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+  }
+  .final-output-frame {
+    display: block;
+    width: 100%;
+    height: 320px;
+    border: none;
+    border-top: 1px solid var(--border);
+    background: var(--surface-1, #1a1a1a);
+  }
   .tl-label {
     display: inline-flex;
     align-items: center;
@@ -2898,6 +3091,31 @@
     border-top: 1px solid var(--border);
     max-height: 320px;
     overflow-y: auto;
+  }
+  /* Instructions panel: collapsible section below the canvas (mirrors
+     .versions-wrap / .versions-h). */
+  .instructions-wrap {
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 10px 12px;
+  }
+  .instructions-h {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .instructions-hint {
+    margin: 0 0 6px;
+    font-size: 11.5px;
+    color: var(--text-dim);
   }
   /* Human-approval banner */
   .run-input {

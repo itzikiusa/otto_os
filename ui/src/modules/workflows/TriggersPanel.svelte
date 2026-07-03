@@ -51,6 +51,12 @@
   // Event params
   let eventKind = $state('ReviewChanged');
   // Webhook has no extra params (token is auto-generated server-side).
+  // Chat params: pins this workflow to a channel/chat(/thread) — any message
+  // there starts it, no keyword needed (see workflow_chat.rs binding_matches).
+  let chatChannel = $state<'slack' | 'telegram'>('slack');
+  let chatId = $state('');
+  let chatThread = $state('');
+  let chatMentionOnly = $state(false);
 
   let saving = $state(false);
 
@@ -76,6 +82,12 @@
         return { cadence, at: atTime, weekday, enabled: true };
       case 'event':
         return { event_kind: eventKind };
+      case 'chat': {
+        const spec: Record<string, unknown> = { channel: chatChannel, chat: chatId.trim() };
+        if (chatThread.trim()) spec.thread = chatThread.trim();
+        if (chatMentionOnly) spec.mention_only = true;
+        return spec;
+      }
       case 'webhook':
       default:
         return {};
@@ -143,12 +155,20 @@
       return tok ? `token: ${tok.slice(0, 8)}…` : 'token pending';
     }
     if (t.kind === 'event') return `on ${s.event_kind ?? 'event'}`;
+    if (t.kind === 'chat') {
+      const ch = (s.channel as string | undefined) ?? '?';
+      const chat = (s.chat as string | undefined) ?? '?';
+      const thread = s.thread ? ` · thread ${s.thread}` : '';
+      const mention = s.mention_only ? ' · @mention only' : '';
+      return `${ch}: ${chat}${thread}${mention}`;
+    }
     return '';
   }
 
   function kindIcon(kind: TriggerKind): string {
     if (kind === 'schedule') return 'clock';
     if (kind === 'webhook') return 'zap';
+    if (kind === 'chat') return 'comment';
     return 'bell';
   }
 </script>
@@ -169,6 +189,7 @@
           <option value="schedule">Schedule</option>
           <option value="webhook">Webhook</option>
           <option value="event">Event</option>
+          <option value="chat">Chat binding</option>
         </select>
       </label>
 
@@ -208,6 +229,27 @@
           <input type="text" placeholder="ReviewChanged" bind:value={eventKind} />
         </label>
         <p class="hint">The workflow starts whenever this daemon event fires.</p>
+      {:else if newKind === 'chat'}
+        <label class="fl">
+          <span>Channel</span>
+          <select bind:value={chatChannel}>
+            <option value="slack">Slack</option>
+            <option value="telegram">Telegram</option>
+          </select>
+        </label>
+        <label class="fl">
+          <span>Chat id</span>
+          <input type="text" placeholder="C0123456 (Slack) / -100987654321 (Telegram)" bind:value={chatId} />
+        </label>
+        <label class="fl">
+          <span>Thread (optional)</span>
+          <input type="text" placeholder="thread ts — leave blank to match any thread" bind:value={chatThread} />
+        </label>
+        <label class="chk-row">
+          <input type="checkbox" bind:checked={chatMentionOnly} />
+          <span>Only when the bot is @mentioned</span>
+        </label>
+        <p class="hint">Any message in this channel/chat starts the workflow — no keyword needed.</p>
       {:else}
         <p class="hint">
           A unique token will be auto-generated. Call
@@ -350,6 +392,17 @@
     border-radius: var(--radius-s);
     background: var(--input-bg, var(--bg));
     color: var(--text);
+  }
+  .chk-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .chk-row input {
+    margin: 0;
   }
   .add-btns {
     display: flex;
