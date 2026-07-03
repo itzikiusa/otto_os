@@ -4,9 +4,15 @@
 import { ui } from './stores/ui.svelte';
 import { ws } from './stores/workspace.svelte';
 import { router } from './router.svelte';
+import { startSnip } from './snip';
 
 export function handleMenu(id: string): void {
   switch (id) {
+    case 'snip':
+      // File → Take Snip, and the global shortcut (the Rust handler emits the
+      // same menu id to exactly one window — focused, else main).
+      void startSnip();
+      break;
     case 'settings':
       router.go('settings/appearance');
       break;

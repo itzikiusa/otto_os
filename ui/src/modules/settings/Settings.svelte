@@ -14,6 +14,7 @@
   import SelfImprovement from './SelfImprovement.svelte';
   import McpServers from './McpServers.svelte';
   import InsightsSettings from './InsightsSettings.svelte';
+  import SnipSettings from './SnipSettings.svelte';
   import SkillEvalSettings from './SkillEvalSettings.svelte';
   import ContextSoul from './ContextSoul.svelte';
   import ContextLibrary from './ContextLibrary.svelte';
@@ -48,6 +49,7 @@
     { id: 'self-improvement', label: 'Self-Improvement' },
     { id: 'mcp-servers', label: 'MCP Servers' },
     { id: 'insights', label: 'Insights' },
+    { id: 'snipping', label: 'Snipping' },
     { id: 'context-soul', label: 'Context & Soul' },
     { id: 'language-servers', label: 'Language Servers' },
     { id: 'sharing', label: 'Sharing' },
@@ -114,6 +116,8 @@
       <McpServers />
     {:else if page === 'insights'}
       <InsightsSettings />
+    {:else if page === 'snipping'}
+      <SnipSettings />
     {:else if page === 'skills' && auth.can('settings', 'admin')}
       <SkillsLibrary />
     {:else if page === 'skill-eval' && auth.can('settings', 'admin')}

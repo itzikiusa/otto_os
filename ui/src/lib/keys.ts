@@ -33,7 +33,8 @@ export type KeyAction =
   | 'termZoomOut'
   | 'termZoomReset'
   | 'navBack'
-  | 'navForward';
+  | 'navForward'
+  | 'snip';
 
 /** Mutable context the Terminal component updates on focus/blur. */
 export const keyContext: {
@@ -122,6 +123,15 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
           // ⌘⇧B → plain-English box pre-filled to broadcast.
           e.preventDefault();
           dispatch('broadcast', e);
+          return;
+        }
+        return;
+      case 's':
+        if (e.shiftKey) {
+          // ⌘⇧S → snip: interactive screen capture → annotation editor.
+          // (Plain ⌘S stays free — browsers claim it for "save page".)
+          e.preventDefault();
+          dispatch('snip', e);
           return;
         }
         return;
@@ -222,6 +232,7 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘I', label: 'Ask Otto (plain English)' },
       { keys: '⌘⇧B', label: 'Broadcast to sessions' },
       { keys: '⌘U / ⌘⇧U', label: 'Update all agent CLIs' },
+      { keys: '⌘⇧S', label: 'Snip — capture screen region & annotate' },
       { keys: '⌘⇧R', label: 'Hard reload — refresh UI (sessions kept)' },
       { keys: '⌘,', label: 'Settings' },
       { keys: '?', label: 'Keyboard shortcuts (this sheet)' },
