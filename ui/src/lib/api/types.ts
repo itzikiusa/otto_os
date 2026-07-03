@@ -5450,3 +5450,36 @@ export interface RunDetectResp {
     url: string;
   };
 }
+
+// ── Snips (screenshot → annotate → clipboard) ────────────────────────────────
+
+/** A stored screenshot (file-backed under `data_dir/snips/`). Mirrors the Rust
+ *  `Snip` DTO in `crates/otto-server/src/routes/snips.rs`. */
+export interface Snip {
+  id: Id;
+  created_at: string;
+  width: number;
+  height: number;
+  source: 'capture' | 'upload';
+  /** Computed from the filesystem: a flattened annotated export exists. */
+  has_annotated: boolean;
+}
+
+/** `POST /snips/capture` — long-polls while the native crosshair is on screen.
+ *  Esc cancels cleanly (`cancelled:true`, no snip). */
+export interface CaptureSnipResp {
+  cancelled: boolean;
+  snip?: Snip | null;
+}
+
+/** `POST /snips` body — base64 PNG upload (also the "annotate an image" path). */
+export interface UploadSnipReq {
+  data_b64: string;
+  filename?: string;
+}
+
+/** Copy-style responses: whether the clipboard now holds the image (a `false`
+ *  is a degraded success — the snip itself is saved). */
+export interface SnipCopyResp {
+  copied: boolean;
+}
