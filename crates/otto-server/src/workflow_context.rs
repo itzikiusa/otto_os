@@ -469,9 +469,8 @@ impl RunContextFiles {
     }
 
     /// General-purpose named write (e.g. `jira-<KEY>.md`) — the public face
-    /// of the internal best-effort writer. True on success.
-    // TODO(task 5): consumed by prepare_context for jira-<KEY>.md.
-    #[allow(dead_code)]
+    /// of the internal best-effort writer. True on success. Consumed by
+    /// `prepare_context` for `jira-<KEY>.md`.
     pub fn write_named(&self, name: &str, content: &str) -> bool {
         self.write_file(name, content)
     }

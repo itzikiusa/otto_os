@@ -439,6 +439,8 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
           "Starts the workflow and emits its input payload.", 0, 1, "#6b7bff", "play"),
         n("agent_prompt", "Agent", "AI",
           "Run an agent turn with a prompt (params: provider, skill/skills to inject, cwd); outputs its reply.", 1, 1, "#d97cff", "command"),
+        n("prepare_context", "Prepare relevant data", "AI",
+          "App-side context gathering: fetches a referenced Jira ticket (params: key/account_id/require) into jira-<KEY>.md, then optionally runs an analysis agent (params: prompt/provider).", 1, 1, "#d97cff", "download"),
         n("http_request", "HTTP Request", "Network",
           "Call an HTTP endpoint and capture the response.", 1, 1, "#46c0a0", "globe"),
         n("transform", "Set / Transform", "Data",
@@ -517,6 +519,7 @@ fn output_schema_for(kind: &str) -> Option<Value> {
     };
     match kind {
         "agent_prompt" => obj(&[("reply", "string"), ("working_directory", "string")]),
+        "prepare_context" => Some(json!({"jira": "object"})),
         "http_request" | "api_run" => obj(&[("status", "number"), ("body", "any")]),
         "db_query" => obj(&[("columns", "array"), ("rows", "array"), ("rows_returned", "number")]),
         "broker_peek" => obj(&[("topic", "string"), ("messages", "array"), ("count", "number")]),
@@ -1738,6 +1741,74 @@ async fn execute_node(
                 }
             }
             Ok((Value::Object(out), vec!["agent turn complete".into()]))
+        }
+
+        "prepare_context" => {
+            let mut jira = serde_json::Map::new();
+            match crate::workflow_prepare::extract_jira_key(p, &input) {
+                None => {
+                    jira.insert("found".into(), json!(false));
+                }
+                Some(key) => {
+                    jira.insert("found".into(), json!(true));
+                    jira.insert("key".into(), json!(key));
+                    let fetched = match crate::workflow_prepare::resolve_jira_account(
+                        ctx, &user.id, p.get("account_id").and_then(Value::as_str)).await
+                    {
+                        Ok(account) => {
+                            let token = ctx.secrets.get(&account.token_ref).ok().flatten();
+                            match token {
+                                Some(t) => otto_issues::JiraClient::new(&account.base_url, &account.email, &t)
+                                    .get_issue_full(&key).await.map_err(|e| e.to_string()),
+                                None => Err(format!("missing token for issue account {}", account.id)),
+                            }
+                        }
+                        Err(e) => Err(e),
+                    };
+                    match fetched {
+                        Ok(issue) => {
+                            env.files.write_named(&format!("jira-{key}.md"),
+                                &crate::workflow_prepare::render_issue_md(&issue));
+                            jira.insert("fetched".into(), json!(true));
+                            jira.insert("summary".into(), json!(issue.summary));
+                            jira.insert("status".into(), json!(issue.status));
+                            jira.insert("url".into(), json!(issue.url));
+                        }
+                        Err(e) => {
+                            // Indicate loudly, don't die (unless required): every later
+                            // step + the human must see the ticket data is missing.
+                            env.files.write_named(&format!("jira-{key}.md"),
+                                &format!("# ⚠ Could not fetch {key}\n\n{e}\n\nProceed from the prompt/instructions; treat ticket details as UNAVAILABLE.\n"));
+                            jira.insert("fetched".into(), json!(false));
+                            jira.insert("error".into(), json!(e));
+                            if p.get("require").and_then(Value::as_bool).unwrap_or(false) {
+                                return Err(otto_core::Error::Invalid(format!("prepare_context: required Jira fetch failed: {jira:?}")));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut out = serde_json::Map::new();
+            out.insert("jira".into(), Value::Object(jira));
+            // Optional agent phase — mirrors agent_prompt exactly.
+            let agent_prompt_txt = p.get("prompt").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let mut logs = vec![format!("prepare_context: jira {}", out["jira"])];
+            if !agent_prompt_txt.is_empty() {
+                let preamble = env.files.preamble_for(scope.step_no, node_display_name(node), scope.iter, scope.inner_idx);
+                let full = prepend_skills(ctx, p,
+                    &format!("{preamble}{agent_prompt_txt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)));
+                let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+                let acwd = node_cwd(node, &input, run_cwd);
+                let (reply, sid) = run_node_agent(ctx, ws, user, node, provider, &full, &acwd, session_tx).await?;
+                out.insert("reply".into(), json!(reply));
+                out.insert("session_id".into(), json!(sid));
+                out.insert("working_directory".into(), json!(acwd));
+                for k in ["repo_id", "base", "repos", "worktree"] {
+                    if let Some(v) = input.get(k) { if !v.is_null() { out.insert(k.into(), v.clone()); } }
+                }
+                logs.push("agent phase complete".into());
+            }
+            Ok((Value::Object(out), logs))
         }
 
         "http_request" => {
@@ -3630,7 +3701,11 @@ fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
     // transient stuck/no-op spawn — e.g. a startup screen that swallowed the prompt,
     // surfaced as the 3-min no-progress error — is re-attempted with a FRESH session,
     // then errors ("call it a day"). Every other kind keeps the no-retry default.
-    if node.kind == "agent_prompt" {
+    // `prepare_context` only reaches an agent turn when it has a non-empty
+    // `params.prompt` — treat it like `agent_prompt` exactly in that case.
+    let has_agent_phase = node.kind == "prepare_context"
+        && node.params.get("prompt").and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false);
+    if node.kind == "agent_prompt" || has_agent_phase {
         return otto_core::workflows::RetryPolicy { max_attempts: 2, backoff_ms: 2000, factor: 2.0 }
             .clamped();
     }
@@ -3686,7 +3761,9 @@ async fn run_node_agent(
     let guarded = format!("{prompt}{WF_STEP_RULES}");
     // R5: an `agent_prompt` step gets an early 3-min no-progress trip (retryable via
     // resolve_retry); heavier agent kinds (review/product/canvas) keep the 10h backstop.
-    let stuck_after = if node.kind == "agent_prompt" {
+    // `prepare_context` only ever reaches this call with an agent phase (a non-empty
+    // `params.prompt`) — treat it the same as `agent_prompt`.
+    let stuck_after = if node.kind == "agent_prompt" || node.kind == "prepare_context" {
         WF_STEP_STUCK
     } else {
         crate::agent_session::STUCK_IDLE
@@ -4313,7 +4390,14 @@ mod tests {
     fn catalog_kinds_are_known() {
         assert!(is_known_kind("agent_prompt"));
         assert!(is_known_kind("game_engine"));
+        assert!(is_known_kind("prepare_context"));
         assert!(!is_known_kind("nope"));
+    }
+
+    #[test]
+    fn prepare_context_output_schema_declares_jira() {
+        let schema = output_schema_for("prepare_context").expect("schema present");
+        assert_eq!(schema, json!({"jira": "object"}));
     }
 
     #[test]
@@ -4419,6 +4503,22 @@ mod tests {
     }
 
     #[test]
+    fn prepare_context_gets_agent_retry_budget_only_with_a_prompt() {
+        // No prompt (pure Jira-fetch step) → default no-retry, like any other kind.
+        let no_prompt = node("p", "prepare_context");
+        assert_eq!(resolve_retry(&no_prompt).max_attempts, 0, "no agent phase → no retry");
+        // A blank/whitespace prompt doesn't count as an agent phase either.
+        let mut blank_prompt = node("p", "prepare_context");
+        blank_prompt.params = json!({ "prompt": "   " });
+        assert_eq!(resolve_retry(&blank_prompt).max_attempts, 0);
+        // Non-empty prompt → same retry budget as agent_prompt.
+        let mut with_prompt = node("p", "prepare_context");
+        with_prompt.params = json!({ "prompt": "analyze the ticket" });
+        assert_eq!(resolve_retry(&with_prompt).max_attempts, 2, "agent phase → agent_prompt budget");
+        assert!(is_retryable("prepare_context"));
+    }
+
+    #[test]
     fn run_summary_has_status_steps_and_score() {
         let wf = Workflow {
             id: "w".into(),
@@ -4505,6 +4605,7 @@ mod tests {
         assert!(is_reportable("agent_prompt"));
         assert!(is_reportable("loop"));
         assert!(is_reportable("git_pr"));
+        assert!(is_reportable("prepare_context"));
         // review_run self-reports; structural kinds stay quiet.
         assert!(!is_reportable("review_run"));
         assert!(!is_reportable("log"));
