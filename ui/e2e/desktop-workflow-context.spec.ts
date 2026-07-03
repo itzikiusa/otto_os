@@ -10,7 +10,7 @@ import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
 // daemon's own OTTO_DATA_DIR (read from e2e/.auth-{SLOT}/daemon.json):
 //
 //  - a run materializes <data_dir>/workflow-context/<run_id>/ with the
-//    wf-<run_id>-instruction.md brief, repos.json, and per-step handoff files
+//    run-brief.md brief, repos.json, and per-step handoff files
 //    (step{N}-{name}.md + .output.json; loop iterations add -iter{X});
 //  - an agent step's file carries the FULL stub reply (engine fallback — the
 //    stub returns before any real agent could write its own summary);
@@ -124,7 +124,7 @@ test.afterAll(async () => {
   await ctx?.dispose();
 });
 
-test('run materializes instruction, repos.json and per-step files; context_dir surfaced', async () => {
+test('run materializes run-brief, repos.json and per-step files; context_dir surfaced', async () => {
   const { repoId, dir: repoDir } = await seedGitRepo(ctx, base, ws);
   const wfId = await createWorkflow(
     'E2E Context Files',
@@ -144,11 +144,12 @@ test('run materializes instruction, repos.json and per-step files; context_dir s
   expect(run.context_dir).toBe(d);
   expect(existsSync(d)).toBe(true);
 
-  // Instruction brief, named by the user's wf-{run_id} convention.
-  const instruction = readFileSync(join(d, `wf-${run.id}-instruction.md`), 'utf8');
-  expect(instruction).toContain('E2E Context Files');
-  expect(instruction).toContain('repos.json');
-  expect(instruction).toContain('trigger');
+  // Mission brief, named `run-brief.md` (renamed from the old
+  // wf-<run_id>-instruction.md convention).
+  const brief = readFileSync(join(d, 'run-brief.md'), 'utf8');
+  expect(brief).toContain('E2E Context Files');
+  expect(brief).toContain('repos.json');
+  expect(brief).toContain('trigger');
 
   // repos.json: the declared worktree entry, resolved to the registered repo.
   const repos = JSON.parse(readFileSync(join(d, 'repos.json'), 'utf8'));
