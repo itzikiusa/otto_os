@@ -3843,10 +3843,10 @@ export interface ActiveWorkflowRun {
 }
 
 // ---------------------------------------------------------------------------
-// Workflow triggers (schedule / webhook / event)
+// Workflow triggers (schedule / webhook / event / chat)
 // ---------------------------------------------------------------------------
 
-export type TriggerKind = 'schedule' | 'webhook' | 'event';
+export type TriggerKind = 'schedule' | 'webhook' | 'event' | 'chat';
 
 /** A workflow trigger row from the database. */
 export interface WorkflowTrigger {

@@ -874,9 +874,9 @@ pub async fn create_trigger(
 ) -> ApiResult<Json<WorkflowTrigger>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
-    if !matches!(req.kind.as_str(), "schedule" | "webhook" | "event") {
+    if !matches!(req.kind.as_str(), "schedule" | "webhook" | "event" | "chat") {
         return Err(ApiError(Error::Invalid(
-            "trigger kind must be 'schedule', 'webhook', or 'event'".into(),
+            "trigger kind must be 'schedule', 'webhook', 'event', or 'chat'".into(),
         )));
     }
     // For webhook triggers, auto-generate a cryptographically random token if

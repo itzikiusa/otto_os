@@ -1989,9 +1989,41 @@ broker_peek, channel_notify, budget_gate, human_approval. The four formerly-stub
 kinds are now wired (real single-agent turns + the local-review engine); `condition`/`loop` plus
 `WorkflowEdge.condition` provide branching and bounded iterate-until control flow. The schedule
 trigger scheduler (`workflow_trigger_scheduler::start`) is started at daemon boot (cron + IANA
-timezone parity via the shared cadence engine), so all three trigger kinds — webhook, event,
-schedule — fire unattended. A structured `Action: Workflow` chat message (Slack/Telegram/webhook)
-starts a run by name via the channels Bridge (`WorkflowChatTrigger`).
+timezone parity via the shared cadence engine), so all four trigger kinds — webhook, event,
+schedule, chat — fire unattended (chat bindings are evaluated live by the channels Bridge, not
+polled). A `schedule` trigger's `spec.prompt` (string, optional), when set, is threaded into the
+run's input as `input.prompt` (in addition to `input.trigger:"schedule"`) — same input shape at
+both `create_run` and the spawned `run_workflow` call — so a fixed instruction reaches the
+engine's prompt normalization exactly like a chat-started run.
+
+**Chat trigger (`kind: "chat"`)** and the simplified run command are handled entirely by
+`otto-server::workflow_chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
+every inbound Slack/Telegram/webhook message *before* normal session routing. Resolution order:
+
+1. **Legacy structured command** — a message declaring `Action: Workflow` + `Name:` (see
+   `parse_workflow_command`) starts the named workflow; the run input additionally carries
+   `jira_ticket`/`working_directory`/`relevant_info`/`goals` plus `prompt` (mirrors `msg`,
+   belt-and-braces with normalize_prompt).
+2. **Simplified command** — `run <name>: <prompt>`, `workflow <name>: <prompt>`, or
+   `run workflow <name>: <prompt>` (keywords case-insensitive, tried longest-first; `name` is the
+   text up to the first `:` on that line, `prompt` is the rest of that line plus all following
+   lines). An unknown name with the explicit `workflow`/`run workflow` keyword replies
+   "No workflow named **X**…" without starting a run; an unknown name with the bare `run` keyword
+   falls through (bare "run" reads too much like ordinary English to hijack the message).
+3. **Channel bindings** — enabled `chat`-kind `WorkflowTrigger`s pin a workflow to a
+   channel/chat(/thread): spec shape `{"channel": "slack"|"telegram", "chat": "<id>", "thread"?:
+   "<ts>", "mention_only"?: bool}`. `channel`+`chat` must match exactly; an absent `thread` in the
+   spec matches any thread (a present one requires an exact match — a thread-pinned binding is
+   preferred over an unpinned one when both match); `mention_only` (default false) requires the
+   inbound text to contain a Slack mention token (`<@…>`). The run input is
+   `{trigger:"chat", origin_workspace_id, channel, chat, thread, user, prompt, msg, raw}` where
+   `prompt`/`msg` are the mention-stripped message text and `raw` is the original.
+
+Loop guard: Slack drops any event carrying a `bot_id` (including the nested `message` of a
+`message_changed` edit) before it reaches the bridge; Telegram's `getUpdates` long-poll
+structurally never returns the bot's own outbound sends. The chat-binding path (only) adds a
+second, defensive guard: it never treats a message starting with the bot's own ack prefix
+(`"🚀 Started workflow"`) as a binding trigger.
 
 First-party Otto MCP tools (no new HTTP route): the `otto` MCP server is injected into `.mcp.json`
 at spawn when the per-workspace `otto_mcp_enabled` setting is on (default off, via `PUT /settings`).

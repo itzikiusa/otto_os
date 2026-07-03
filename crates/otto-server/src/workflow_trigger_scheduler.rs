@@ -85,9 +85,24 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             continue;
         }
 
+        // Build the run input once, shared by `create_run` and the spawned
+        // `run_workflow` call. `spec.prompt` (if set) threads a fixed prompt
+        // through to the engine's `normalize_prompt`, same as a chat-started run.
+        let mut input = serde_json::Map::new();
+        input.insert("trigger".into(), json!("schedule"));
+        if let Some(p) = trigger
+            .spec
+            .get("prompt")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            input.insert("prompt".into(), json!(p));
+        }
+        let input = Value::Object(input);
+
         // Create the run row, then execute in a background task.
         let run = match workflows_repo
-            .create_run(&wf.id, &wf.workspace_id, &json!({"trigger": "schedule"}))
+            .create_run(&wf.id, &wf.workspace_id, &input)
             .await
         {
             Ok(r) => r,
@@ -108,7 +123,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         tokio::spawn(async move {
             crate::workflow_engine::run_workflow(
                 ctx2, ws, wf, run_id,
-                json!({"trigger": "schedule"}),
+                input,
                 None, false,
             )
             .await;
