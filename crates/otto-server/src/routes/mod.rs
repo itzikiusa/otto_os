@@ -34,6 +34,7 @@ pub mod proof;
 pub mod product_memory;
 pub mod settings;
 pub mod share;
+pub mod snips;
 pub mod swarm_ingest;
 pub mod usage;
 pub mod users;
@@ -449,4 +450,6 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/workflow-runs/{id}/cancel", post(workflows::cancel_run))
         // Human-approval resume: requires bearer auth, Editor in the run's workspace.
         .route("/workflow-runs/{id}/approve", post(workflows::approve_run))
+        // --- Snips (screenshot → annotate → clipboard) -------------------
+        .merge(snips::snips_routes())
 }

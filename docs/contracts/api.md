@@ -2376,3 +2376,33 @@ trigger (read the result via REST/WS/UI).
 Slack/Telegram entry: a `/run <ref>` (or "run with otto …") message launches a run;
 an `approve`/`reject` reply in the run's thread resolves the approval gate (authorized
 by the integration's `allowed_users`, executed as the daemon root user).
+
+---
+
+## Snips (screenshot → annotate → clipboard)
+
+One-gesture screenshot flow: capture (or upload) a PNG, annotate it in the
+editor at `#/snip/{id}`, and every step lands on the macOS clipboard
+automatically — capture/upload copies the original, each annotated save
+re-copies the flattened export, so the latest state is always paste-ready in an
+agent session. Storage is file-backed under `data_dir/snips/` (`{id}.png`,
+`{id}.annotated.png`, `{id}.json` sidecar; no SQLite table); snips older than
+14 days are pruned on create. The bytes last written to the clipboard are
+mirrored to `data_dir/snips/clipboard-last.png` (observability + E2E sink;
+under `OTTO_E2E` only the mirror is written, the pasteboard is untouched).
+Feature gate: `Agents` (GET = View, everything else = Edit).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /snips/capture | member (Agents:Edit) | `{}` | `CaptureSnipResp {cancelled, snip?}` — runs interactive `screencapture -i` (Esc ⇒ `cancelled:true`); 409 while another capture is on screen; 500 with a Screen-Recording hint when macOS blocks the capture |
+| POST /snips | member (Agents:Edit) | `UploadSnipReq {data_b64, filename?}` (PNG only, 25 MB raw / 40 MB body) | `Snip` |
+| GET /snips | member (Agents:View) | — | `Snip[]` (newest first, cap 100) |
+| GET /snips/{id}/image | member (Agents:View) | — | `image/png` (nosniff, inline) |
+| GET /snips/{id}/annotated | member (Agents:View) | — | `image/png`, 404 until the first annotated save |
+| POST /snips/{id}/annotated | member (Agents:Edit) | `{data_b64}` (PNG, 40 MB body) | `SnipCopyResp {copied}` — saves the flattened export and puts it on the clipboard |
+| POST /snips/{id}/copy | member (Agents:Edit) | `{}` | `SnipCopyResp` — re-copy (annotated if present, else original) |
+| DELETE /snips/{id} | member (Agents:Edit) | — | 204 |
+
+`Snip {id, created_at, width, height, source: "capture"|"upload",
+has_annotated}` — `has_annotated` is computed from the filesystem at read time.
+Clipboard failure degrades to `copied:false` (the snip itself is always saved).

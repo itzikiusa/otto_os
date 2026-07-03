@@ -344,6 +344,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Connections, if get { View } else { Edit });
     }
 
+    // ---- Snips (screenshot → annotate → clipboard) -----------------------------
+    // Screen captures feed session prompts, so they ride the Agents feature:
+    // list/fetch images = View; capture/upload/annotate/copy/delete = Edit.
+    // Root bypasses.
+    if p == "/snips" || p.starts_with("/snips/") {
+        return Require(Agents, if get { View } else { Edit });
+    }
+
     // ---- Agents (sessions, orchestration, broadcast, handover, input, LSP) ----
     // §3.2: list/inspect own = View; create/restart/archive/input/broadcast/
     // orchestrate = Edit. No Admin tier.
