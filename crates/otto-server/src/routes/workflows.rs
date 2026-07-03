@@ -889,6 +889,15 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                     edge("implement", "iterate"),
                     // Open the PR only when the review→fix loop passed.
                     edge_if("iterate", "pr", "output.satisfied == true"),
+                    // `report` MUST remain the run's LAST content-bearing step: on
+                    // success it becomes final-output.md (workflow_context.rs's
+                    // `content_step` is overwritten by every non-utility step that
+                    // runs, last one wins — see `write_final_output`). This edge is
+                    // what forces `report` to execution-order after `improve`
+                    // (`self_improve` is content-bearing too, and both `report` and
+                    // `improve` are otherwise parallel branches off `iterate`).
+                    // Deleting this edge would silently make the self-improve offer
+                    // the run's deliverable instead of the report.
                     edge("pr", "report"),
                     // The final report always runs, even when the loop didn't pass.
                     edge("iterate", "report"),
@@ -957,6 +966,15 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                     edge("implement", "iterate"),
                     // Open the PR only when the review→fix loop passed.
                     edge_if("iterate", "pr", "output.satisfied == true"),
+                    // `report` MUST remain the run's LAST content-bearing step: on
+                    // success it becomes final-output.md (workflow_context.rs's
+                    // `content_step` is overwritten by every non-utility step that
+                    // runs, last one wins — see `write_final_output`). This edge is
+                    // what forces `report` to execution-order after `improve`
+                    // (`self_improve` is content-bearing too, and both `report` and
+                    // `improve` are otherwise parallel branches off `iterate`).
+                    // Deleting this edge would silently make the self-improve offer
+                    // the run's deliverable instead of the report.
                     edge("pr", "report"),
                     // The final report always runs, even when the loop didn't pass.
                     edge("iterate", "report"),

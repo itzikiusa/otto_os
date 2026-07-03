@@ -1,4 +1,4 @@
-//! Repository for workflow triggers (schedule / webhook / event kinds).
+//! Repository for workflow triggers (schedule / webhook / event / chat kinds).
 //!
 //! Mirrors the pattern used by [`crate::workflows::WorkflowsRepo`]: thin data
 //! layer, all SQL inline, types re-exported from `otto_core`.
@@ -15,7 +15,9 @@ use crate::convert::{dberr, ts};
 pub struct WorkflowTrigger {
     pub id: Id,
     pub workflow_id: Id,
-    /// "schedule" | "webhook" | "event"
+    /// "schedule" | "webhook" | "event" | "chat" — a `chat` spec is
+    /// `{channel, chat, thread?, mention_only?}` and starts a run from a
+    /// message posted in the bound channel/chat(/thread).
     pub kind: String,
     /// Kind-specific configuration (JSON object).
     pub spec: Value,

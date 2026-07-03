@@ -2069,6 +2069,14 @@ every inbound Slack/Telegram/webhook message *before* normal session routing. Re
    `{trigger:"chat", origin_workspace_id, channel, chat, thread, user, prompt, msg, raw}` where
    `prompt`/`msg` are the mention-stripped message text and `raw` is the original.
 
+**Security note (chat bindings vs. named commands):** `TriggersRepo::list_enabled_by_kind("chat")`
+is GLOBAL across every workspace, so match candidates are walked in preference order and each
+candidate's workflow is re-checked against the inbound `workspace_id` before being trusted — a
+channel bound by workspace B's Slack/Telegram integration never fires a workflow (or leaks that
+channel's messages) into workspace A. This is unlike the legacy/simplified name-addressed
+commands above (1 and 2), which intentionally resolve against the GLOBAL workflow library
+(`find_by_name`, preferring but not requiring the message's own workspace).
+
 Loop guard: Slack drops any event carrying a `bot_id` (including the nested `message` of a
 `message_changed` edit) before it reaches the bridge; Telegram's `getUpdates` long-poll
 structurally never returns the bot's own outbound sends. The chat-binding path (only) adds a

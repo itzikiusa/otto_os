@@ -58,6 +58,14 @@
   let chatThread = $state('');
   let chatMentionOnly = $state(false);
 
+  // `mention_only` is matched against the Slack `<@…>` entity token
+  // (workflow_chat.rs's `has_mention` check) — Telegram mentions never match
+  // that shape, so the checkbox is meaningless (and always false) there.
+  // Keep the toggle disabled + reset off whenever Telegram is selected.
+  $effect(() => {
+    if (chatChannel === 'telegram' && chatMentionOnly) chatMentionOnly = false;
+  });
+
   let saving = $state(false);
 
   async function load(): Promise<void> {
@@ -245,9 +253,13 @@
           <span>Thread (optional)</span>
           <input type="text" placeholder="thread ts — leave blank to match any thread" bind:value={chatThread} />
         </label>
-        <label class="chk-row">
-          <input type="checkbox" bind:checked={chatMentionOnly} />
-          <span>Only when the bot is @mentioned</span>
+        <label class="chk-row" class:disabled={chatChannel === 'telegram'}>
+          <input
+            type="checkbox"
+            bind:checked={chatMentionOnly}
+            disabled={chatChannel === 'telegram'}
+          />
+          <span>Only when the bot is @mentioned{chatChannel === 'telegram' ? ' (Slack only)' : ''}</span>
         </label>
         <p class="hint">Any message in this channel/chat starts the workflow — no keyword needed.</p>
       {:else}
@@ -400,6 +412,10 @@
     font-size: 12px;
     color: var(--text);
     cursor: pointer;
+  }
+  .chk-row.disabled {
+    color: var(--text-dim);
+    cursor: default;
   }
   .chk-row input {
     margin: 0;

@@ -261,35 +261,32 @@ pub fn binding_matches(spec: &Value, channel: &str, chat: &str, thread: Option<&
     true
 }
 
-/// Pick the best-matching `chat` binding among enabled triggers: a
-/// thread-pinned spec (`spec.thread` set) is preferred over an unpinned one
-/// so a thread-scoped automation doesn't lose to a channel-wide one.
-fn best_binding<'a>(
+/// Order the enabled `chat`-kind triggers that match the inbound message,
+/// best-first: a thread-pinned spec (`spec.thread` set) is preferred over an
+/// unpinned one so a thread-scoped automation doesn't lose to a channel-wide
+/// one; ties keep the input (oldest-first) order. Pure — matches purely on
+/// (channel, chat, thread, mention), same as [`binding_matches`]. `triggers`
+/// comes from `TriggersRepo::list_enabled_by_kind("chat")`, which is GLOBAL
+/// across every workspace, so the caller (`try_start`) MUST additionally gate
+/// each candidate on the owning workflow's `workspace_id` before trusting it
+/// — otherwise a channel bound by one workspace's Slack/Telegram integration
+/// could leak that channel's content into another workspace's workflow runs.
+fn binding_candidates<'a>(
     triggers: &'a [WorkflowTrigger],
     channel: &str,
     chat: &str,
     thread: Option<&str>,
     has_mention: bool,
-) -> Option<&'a WorkflowTrigger> {
-    let mut best: Option<&WorkflowTrigger> = None;
-    for t in triggers {
-        if !binding_matches(&t.spec, channel, chat, thread, has_mention) {
-            continue;
-        }
-        let pinned = t.spec.get("thread").and_then(Value::as_str).is_some();
-        best = match best {
-            None => Some(t),
-            Some(cur) => {
-                let cur_pinned = cur.spec.get("thread").and_then(Value::as_str).is_some();
-                if pinned && !cur_pinned {
-                    Some(t)
-                } else {
-                    Some(cur)
-                }
-            }
-        };
-    }
-    best
+) -> Vec<&'a WorkflowTrigger> {
+    let mut matches: Vec<&WorkflowTrigger> = triggers
+        .iter()
+        .filter(|t| binding_matches(&t.spec, channel, chat, thread, has_mention))
+        .collect();
+    // Stable sort: thread-pinned specs sort before unpinned ones; relative
+    // order within each group is preserved (matches the old best-match loop,
+    // which kept the first pinned/unpinned candidate it saw).
+    matches.sort_by_key(|t| std::cmp::Reverse(t.spec.get("thread").and_then(Value::as_str).is_some()));
+    matches
 }
 
 /// otto-server's implementation of the channel workflow trigger.
@@ -301,11 +298,20 @@ impl WorkflowChatTriggerImpl {
     /// Shared run-start body for all three resolution paths: create the run
     /// row, spawn the workflow engine in the background, and build the ack.
     /// `detail` overrides the default tail sentence (legacy path reports
-    /// goals; the simplified/binding paths use the default).
-    async fn start_named(&self, wf: Workflow, input: Value, detail: Option<String>) -> Option<WorkflowChatAck> {
+    /// goals; the simplified/binding paths use the default). `channel`/`chat`
+    /// are the inbound message's origin, logged for traceability only (they're
+    /// already threaded into `input` by every call site).
+    async fn start_named(
+        &self,
+        wf: Workflow,
+        input: Value,
+        detail: Option<String>,
+        channel: &str,
+        chat: &str,
+    ) -> Option<WorkflowChatAck> {
         let repo = WorkflowsRepo::new(self.ctx.pool.clone());
         tracing::info!(
-            "workflow chat: starting workflow '{}' (id {}, ws {})",
+            "workflow chat: starting workflow '{}' (id {}, ws {}) from {channel}/{chat}",
             wf.name,
             wf.id,
             wf.workspace_id
@@ -322,7 +328,7 @@ impl WorkflowChatTriggerImpl {
 
         let tail = detail.unwrap_or_else(|| "Working through the steps now.".to_string());
         Some(WorkflowChatAck {
-            reply: format!("🚀 Started workflow **{}** (run `{}`). {}", wf.name, run.id, tail),
+            reply: format!("{ACK_PREFIX} **{}** (run `{}`). {}", wf.name, run.id, tail),
         })
     }
 }
@@ -386,7 +392,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                 cmd.goals.join("; ")
             };
             let detail = format!("Working through the steps now — goals: {goals_txt}.");
-            return self.start_named(wf, input, Some(detail)).await;
+            return self.start_named(wf, input, Some(detail), channel, chat).await;
         }
 
         // (2) Simplified `run <name>: <prompt>` / `workflow <name>: …` command.
@@ -404,7 +410,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                         "msg": prompt,
                         "raw": text,
                     });
-                    return self.start_named(wf, input, None).await;
+                    return self.start_named(wf, input, None, channel, chat).await;
                 }
                 Ok(None) if explicit => {
                     // Explicit `workflow`/`run workflow` keyword names an
@@ -447,17 +453,38 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                 return None;
             }
         };
-        let trigger = best_binding(&triggers, channel, chat, thread, has_mention)?;
-        let wf = match repo.get(&trigger.workflow_id).await {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!(
-                    "workflow chat: binding trigger {} workflow lookup failed: {e}",
-                    trigger.id
+        // `triggers` spans EVERY workspace (list_enabled_by_kind is global), so
+        // walk the match candidates in preference order and only accept the
+        // first one whose workflow actually belongs to the inbound workspace —
+        // otherwise a channel bound by workspace B's Slack/Telegram integration
+        // could leak into workspace A's workflow library and vice versa.
+        let candidates = binding_candidates(&triggers, channel, chat, thread, has_mention);
+        let mut wf = None;
+        for trigger in candidates {
+            let candidate = match repo.get(&trigger.workflow_id).await {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!(
+                        "workflow chat: binding trigger {} workflow lookup failed: {e}",
+                        trigger.id
+                    );
+                    continue;
+                }
+            };
+            if candidate.workspace_id != workspace_id {
+                tracing::info!(
+                    "workflow chat: binding trigger {} targets workflow '{}' in workspace {} \
+                     — inbound message is from workspace {workspace_id}, skipping",
+                    trigger.id,
+                    candidate.name,
+                    candidate.workspace_id
                 );
-                return None;
+                continue;
             }
-        };
+            wf = Some(candidate);
+            break;
+        }
+        let wf = wf?;
         let input = json!({
             "trigger": "chat",
             "origin_workspace_id": workspace_id,
@@ -469,7 +496,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
             "msg": stripped,
             "raw": text,
         });
-        self.start_named(wf, input, None).await
+        self.start_named(wf, input, None, channel, chat).await
     }
 }
 
@@ -574,6 +601,16 @@ mod tests {
         assert!(!is_own_ack("please start the workflow"));
     }
 
+    /// The loop guard (`is_own_ack`) and the ack reply built in `start_named`
+    /// must never drift apart — both are anchored to `ACK_PREFIX`. Assert the
+    /// guard recognizes anything built from the same constant, whatever the
+    /// rest of the reply looks like.
+    #[test]
+    fn own_ack_guard_matches_anything_built_from_the_shared_prefix() {
+        assert!(is_own_ack(&format!("{ACK_PREFIX} **Some Workflow** (run `xyz`). blah blah")));
+        assert!(is_own_ack(&format!("{ACK_PREFIX} anything at all")));
+    }
+
     fn make_trigger(spec: Value) -> WorkflowTrigger {
         WorkflowTrigger {
             id: otto_core::new_id(),
@@ -591,16 +628,36 @@ mod tests {
         let pinned = make_trigger(json!({"channel":"slack","chat":"C1","thread":"t1"}));
 
         let triggers = vec![unpinned.clone(), pinned.clone()];
-        let picked = best_binding(&triggers, "slack", "C1", Some("t1"), false).unwrap();
-        assert_eq!(picked.id, pinned.id, "pinned trigger should win when order is unpinned-first");
+        let picked = binding_candidates(&triggers, "slack", "C1", Some("t1"), false);
+        assert_eq!(
+            picked.first().unwrap().id,
+            pinned.id,
+            "pinned trigger should win when order is unpinned-first"
+        );
 
         // Order shouldn't matter — same result reversed.
         let triggers2 = vec![pinned.clone(), unpinned.clone()];
-        let picked2 = best_binding(&triggers2, "slack", "C1", Some("t1"), false).unwrap();
-        assert_eq!(picked2.id, pinned.id);
+        let picked2 = binding_candidates(&triggers2, "slack", "C1", Some("t1"), false);
+        assert_eq!(picked2.first().unwrap().id, pinned.id);
 
         // With no thread on the inbound message, only the unpinned spec matches.
-        let picked3 = best_binding(&triggers, "slack", "C1", None, false).unwrap();
-        assert_eq!(picked3.id, unpinned.id);
+        let picked3 = binding_candidates(&triggers, "slack", "C1", None, false);
+        assert_eq!(picked3.first().unwrap().id, unpinned.id);
+    }
+
+    /// `binding_candidates` returns ALL matches in preference order (not just
+    /// the best one) — this is what lets `try_start` walk past a candidate
+    /// whose workflow belongs to a different workspace and fall through to
+    /// the next-best match instead of just refusing the whole message.
+    #[test]
+    fn binding_candidates_returns_all_matches_in_preference_order() {
+        let unpinned = make_trigger(json!({"channel":"slack","chat":"C1"}));
+        let pinned = make_trigger(json!({"channel":"slack","chat":"C1","thread":"t1"}));
+        let triggers = vec![unpinned.clone(), pinned.clone()];
+
+        let all = binding_candidates(&triggers, "slack", "C1", Some("t1"), false);
+        assert_eq!(all.len(), 2, "both specs match a threaded message");
+        assert_eq!(all[0].id, pinned.id, "pinned candidate ranked first");
+        assert_eq!(all[1].id, unpinned.id);
     }
 }
