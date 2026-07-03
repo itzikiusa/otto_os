@@ -111,8 +111,9 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
         dispatch('askOtto', e);
         return;
       case 'u':
-        // ⌘U → update all agent CLIs (spawns the Update CLIs session).
-        if (e.shiftKey) return;
+        // ⌘U / ⌘⇧U → update all agent CLIs (spawns the Update CLIs session).
+        // Both chords intentionally: ⌘⇧U predates the exact-modifier pass and
+        // stays supported; nothing else binds it.
         e.preventDefault();
         dispatch('updateCLIs', e);
         return;
@@ -220,7 +221,7 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘K', label: 'Command palette' },
       { keys: '⌘I', label: 'Ask Otto (plain English)' },
       { keys: '⌘⇧B', label: 'Broadcast to sessions' },
-      { keys: '⌘U', label: 'Update all agent CLIs' },
+      { keys: '⌘U / ⌘⇧U', label: 'Update all agent CLIs' },
       { keys: '⌘⇧R', label: 'Hard reload — refresh UI (sessions kept)' },
       { keys: '⌘,', label: 'Settings' },
       { keys: '?', label: 'Keyboard shortcuts (this sheet)' },
