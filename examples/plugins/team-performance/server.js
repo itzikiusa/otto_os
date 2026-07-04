@@ -135,6 +135,8 @@ const DEFAULT_CONFIG = {
   git_fetch: true,
   deploy_tag_pattern: 'deployed',
   stale_days: 45,
+  fix_window_days: 30, // commits after delivery beyond this aren't 'fixes'
+  hours_per_day: 8, // working hours per business day (for the hours display)
   estimate_enabled: true,
   estimate_window_months: 6,
   estimate_since: '', // ISO date; when set it wins over the month window
@@ -194,6 +196,8 @@ function validateConfig(body) {
     ['estimate_window_months', 0, 60],
     ['estimate_max_batches', 1, 200],
     ['auto_scan_minutes', 0, 1440],
+    ['fix_window_days', 1, 365],
+    ['hours_per_day', 1, 24],
   ]) {
     if (body[k] !== undefined) {
       const n = Number(body[k]);

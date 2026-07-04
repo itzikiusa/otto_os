@@ -151,7 +151,12 @@
       const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
       const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
       const err = (m) => ($('err').textContent = m || '');
-      const fmtD = (v) => (v == null ? '—' : (Math.round(v * 10) / 10) + 'd');
+      let HPD = 8; // working hours per business day (from config)
+      const fmtD = (v) => {
+        if (v == null) return '—';
+        if (v > 0 && v < 1) return (Math.round(v * HPD * 10) / 10) + 'h';
+        return (Math.round(v * 10) / 10) + 'd';
+      };
       const fmtRange = (st) => (st && st.p50 != null ? `${fmtD(st.p50)} <span class="dim">[${fmtD(st.p25)}–${fmtD(st.p75)}]</span>` : '—');
       const fmtDate = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '—');
       const fmtPct = (v) => (v == null ? '—' : Math.round(v * 100) + '%');
@@ -342,6 +347,7 @@
         API = m.apiBase; TOKEN = m.token || '';
         PARENT_ORIGIN = ev.origin || '*';
         applyTheme(m.theme);
+        try { const c = await api('/config'); if (c && c.hours_per_day) HPD = c.hours_per_day; } catch { /* default 8 */ }
         await boot();
       });
 
@@ -1372,6 +1378,8 @@
                   <span class="lbl">git fetch before scan</span><input id="cfg-fetch" type="checkbox" ${config.git_fetch ? 'checked' : ''} style="justify-self:start">
                   <span class="lbl">Deploy tag contains</span><input id="cfg-deploytag" value="${esc(config.deploy_tag_pattern)}" title="case-insensitive substring, e.g. deployed">
                   <span class="lbl">Stale after (days)</span><input id="cfg-stale" type="number" min="5" max="365" value="${config.stale_days}" title="done tasks with no git signal and a Jira cycle beyond this are excluded from medians">
+                  <span class="lbl">Fix window (days)</span><input id="cfg-fixwin" type="number" min="1" max="365" value="${config.fix_window_days ?? 30}" title="commits mentioning a key more than this many days after delivery are NOT counted as fixes (stray later touches)">
+                  <span class="lbl">Working hours / day</span><input id="cfg-hpd" type="number" min="1" max="24" value="${config.hours_per_day ?? 8}" title="sub-day durations are shown in these working hours">
                   <span class="lbl">Auto-scan (min, 0=off)</span><input id="cfg-autoscan" type="number" min="0" max="1440" value="${config.auto_scan_minutes ?? 15}" title="silently repeats your last scan every N minutes: new tickets fetched + estimated, timelines refreshed">
                 </div>
               </div>
@@ -1456,6 +1464,8 @@
               git_fetch: $('cfg-fetch').checked,
               deploy_tag_pattern: $('cfg-deploytag').value.trim(),
               stale_days: parseInt($('cfg-stale').value, 10),
+              fix_window_days: parseInt($('cfg-fixwin').value, 10),
+              hours_per_day: parseInt($('cfg-hpd').value, 10),
               auto_scan_minutes: parseInt($('cfg-autoscan').value, 10),
               estimate_enabled: $('cfg-est-on').checked,
               estimate_since: $('cfg-est-since').value || '',

@@ -180,3 +180,15 @@ test('feature repos: direct-to-master commits become per-author repo activity', 
   const plain = buildIndex([{ name: 'fix', path: repoDir }], { git_fetch: false });
   assert.equal((plain.repo_activity || []).length, 0);
 });
+
+test('buildIndex: a stray commit long after delivery is NOT a fix (fix window)', () => {
+  // add a commit mentioning TP-1 ~90 days after its merge (2026-06-05).
+  git(['checkout', '-q', 'develop']);
+  commit('TP-1: unrelated later touch', '2026-09-10T10:00:00Z', 'Alice A');
+  git(['merge', '-q', '--no-ff', '-m', "Merge branch 'develop'", 'develop'], at('2026-09-10T10:05:00Z'));
+  const def = buildIndex([{ name: 'fix', path: repoDir }], { git_fetch: false }).byKey.get('TP-1');
+  assert.equal(def.fix_count, 1, 'only the in-window release fix counts (default 30d)');
+  assert.ok(def.late_touches >= 1, 'the 90-day-later touch is a late_touch, not a fix');
+  const wide = buildIndex([{ name: 'fix', path: repoDir }], { git_fetch: false, fix_window_days: 200 }).byKey.get('TP-1');
+  assert.equal(wide.fix_count, 2, 'a wider window includes the later commit');
+});

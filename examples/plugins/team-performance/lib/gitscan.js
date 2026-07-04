@@ -446,15 +446,20 @@ function buildIndex(repos, config = {}) {
 
   // Resolve on-target events into done/fix per key. Merge-events win when any
   // exist (PR flow); otherwise the first direct commit is the delivery.
+  // Fixes only count within `fix_window_days` of delivery — a stray commit
+  // that mentions the key months later is unrelated re-touch, not fixing THIS
+  // delivery, and must not show up as (e.g.) "60 days of fixes".
+  const fixWindowMs = (Number(config.fix_window_days) > 0 ? config.fix_window_days : 30) * 86400000;
   for (const [k, evs] of events) {
     const e = entry(k);
     evs.sort((a, b) => a.ts - b.ts);
     const merges = evs.filter((ev) => ev.merge);
     const done = merges.length ? merges[0].ts : evs[0].ts;
     e.done_git_at = done;
-    const fixes = evs.filter((ev) => ev.ts > done);
+    const fixes = evs.filter((ev) => ev.ts > done && ev.ts <= done + fixWindowMs);
     e.fix_count = fixes.length;
     e.last_fix_at = fixes.length ? fixes[fixes.length - 1].ts : null;
+    e.late_touches = evs.filter((ev) => ev.ts > done + fixWindowMs).length;
   }
 
   // Freeze author maps into plain arrays (records are JSON-persisted).

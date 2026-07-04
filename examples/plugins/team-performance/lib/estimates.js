@@ -44,10 +44,11 @@ const DAY = 86400000;
  * (months; 0 = no window → everything) — an explicit `sinceMs` cutoff wins
  * over the month window — and not already cached at this hash.
  */
-// Prompt generation version. v4: diff size is a SIGNAL, not a ceiling —
-// investigation/root-cause effort can make a tiny change a multi-day task.
-// Any cached entry from an older prompt is re-estimated once.
-const PROMPT_V = 4;
+// Prompt generation version. v5: large diffs from copy-paste (reverse
+// integrations / new provider repos mirroring existing ones) and from churn
+// (reverts + repeated refactors of the lead's own code) are LOW novel effort;
+// size the novel work, and treat the integration rubric as a strong prior.
+const PROMPT_V = 5;
 
 function selectTargets(records, cache, windowMonths, nowMs, sinceMs = 0) {
   const cutoff = sinceMs > 0 ? sinceMs : windowMonths > 0 ? nowMs - windowMonths * 30 * DAY : -Infinity;
@@ -89,6 +90,7 @@ const DEFAULT_RUBRIC = [
   'Full integration WITH significant caveats or infra that must be rewritten in many places (e.g. Mega, Digitain): 30–40d (1.5–2 months).',
   'Judge the CORE work, not mechanical fan-out: if one repo holds an 18-file rewrite and 15 others get a 1-line bump, size the 18-file core plus a little glue — not the sum.',
   'A tiny diff is NOT automatically trivial: a one-line fix to a subtle bug/race/prod issue can be days of investigation. Size the understanding+debugging, not just the lines changed. Only mechanical small changes (bump/config/rename) are cheap.',
+  'A LARGE diff is NOT automatically big: a reverse integration / new provider repo (koala-<x>-go) copied from an existing one is ~1d despite the line count. Discount churn — reverts and repeated refactors of the same new code inflate lines without adding scope; count the net novel work once.',
 ];
 
 function batchPrompt(records, rubric, corrections, instructions) {
@@ -109,7 +111,10 @@ function batchPrompt(records, rubric, corrections, instructions) {
 
 Use the ACTUAL CODE CHANGE (the \`change=\` evidence: files touched, lines added/removed, which repos, commit subjects) as a strong signal, weighed against the ticket prose (tickets over- and under-describe). Do NOT inflate — most tasks are small; a large multi-file rewrite is large even if the ticket is terse.
 
-BUT diff size is a SIGNAL, NOT a ceiling: a tiny change can be a large task when the effort was in the INVESTIGATION — root-causing a subtle production bug, a race condition, finding the one config value that fixes it, understanding a gnarly system before the one-line fix. A 1-line change is NOT automatically a 1-minute task. Read the type (Bug/investigation), the description, and the commit subjects (e.g. "fix race", "root cause", "investigate", "reproduce") to judge whether a small change was hard-won, and size the UNDERSTANDING + fix, not just the diff. Only genuinely mechanical small changes (version bump, config toggle, rename, copy tweak) are truly cheap.
+Diff size cuts BOTH ways — it is a signal, not a verdict:
+ (a) A TINY diff can be LARGE effort when the work was INVESTIGATION — root-causing a subtle production bug/race, finding the one config value that fixes it, understanding a gnarly system before a one-line fix. Read the type (Bug), description and commit subjects ("fix race", "root cause", "investigate", "reproduce") and size the understanding, not the lines.
+ (b) A LARGE diff can be SMALL effort when it is COPY-PASTE or CHURN. A reverse integration or a NEW provider repo (e.g. koala-<provider>-go) that mirrors an existing one is copied structure with minor changes — size it by the rubric (~1d) EVEN IF it is hundreds of lines across many files; the novel work is small. Likewise discount CHURN: reverts, and repeated refactors of the author's own just-written code, inflate line counts without adding scope — count the NET novel work once, not every rewrite. The integration rules in the rubric are STRONG priors that override raw line counts.
+Do NOT inflate: estimate the genuinely-new engineering, not the byte count.
 
 Calibration rubric (follow it):
 ${rules}
