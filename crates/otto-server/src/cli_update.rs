@@ -245,66 +245,70 @@ async fn read_last_run(settings: &SettingsRepo) -> Option<DateTime<Utc>> {
 // The run: update CLIs → reload sessions → record → notify
 // ---------------------------------------------------------------------------
 
+/// One provider's update result: `detail` is empty on success, else the short
+/// human-readable reason (exit + stderr tail / launch error / timeout).
+#[derive(Debug, Clone)]
+struct UpdateOutcome {
+    name: String,
+    ok: bool,
+    detail: String,
+}
+
 /// Run one update pass. Public so a future "run now" route can reuse it.
 pub async fn run(ctx: &ServerCtx, cfg: &CliAutoUpdateConfig) {
     let settings = SettingsRepo::new(ctx.pool.clone());
 
-    let pairs = ctx.manager.provider_update_commands();
+    let mut pairs = ctx.manager.provider_update_commands();
     if pairs.is_empty() {
         info!("cli_auto_update: no providers have an update command; nothing to do");
         let _ = settings.put(LAST_RUN_KEY, &json_now()).await;
         return;
     }
-    let provider_names: HashSet<String> = pairs.iter().map(|(n, _)| n.clone()).collect();
-    let label = {
-        let mut v: Vec<&str> = pairs.iter().map(|(n, _)| n.as_str()).collect();
-        v.sort_unstable();
-        v.join(", ")
-    };
-    // Join steps so each provider's output is separated by a blank line, then run
-    // through a login shell so the user's PATH/profile resolves every CLI.
-    let compound = pairs
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Each provider updates in its OWN shell invocation so one CLI's failure
+    // can't mask another's status or get mis-attributed in the notice (a single
+    // compound command only surfaces the LAST command's exit code).
+    let mut outcomes: Vec<UpdateOutcome> = Vec::with_capacity(pairs.len());
+    for (name, cmd) in &pairs {
+        let (ok, detail) = run_one_update(cmd).await;
+        info!(provider = %name, ok, "cli_auto_update: update finished");
+        outcomes.push(UpdateOutcome {
+            name: name.clone(),
+            ok,
+            detail,
+        });
+    }
+
+    // Reload open agent sessions — only for providers whose update SUCCEEDED
+    // (re-exec onto a binary whose update just failed helps nobody).
+    let updated_names: HashSet<String> = outcomes
         .iter()
-        .map(|(_, cmd)| cmd.as_str())
-        .collect::<Vec<_>>()
-        .join("; echo; ");
-
-    let (update_ok, detail) = run_updates(&compound).await;
-    info!(ok = update_ok, providers = %label, "cli_auto_update: updates finished");
-
-    // Reload open agent sessions whose provider was just updated.
-    let (reloaded, reload_failed) = if cfg.reload_sessions {
-        reload_agent_sessions(ctx, &provider_names).await
+        .filter(|o| o.ok)
+        .map(|o| o.name.clone())
+        .collect();
+    let reload = if cfg.reload_sessions {
+        Some(reload_agent_sessions(ctx, &updated_names).await)
     } else {
-        (0, 0)
+        None
     };
 
     let _ = settings.put(LAST_RUN_KEY, &json_now()).await;
 
     // Summary notice (system-wide, de-duped by source key).
-    let severity = if update_ok && reload_failed == 0 {
+    let any_update_failed = outcomes.iter().any(|o| !o.ok);
+    let severity = if !any_update_failed && reload.is_none_or(|(_, failed)| failed == 0) {
         NoticeSeverity::Info
     } else {
         NoticeSeverity::Warn
     };
-    let mut body = format!("Updated CLIs: {label}.");
-    if cfg.reload_sessions {
-        body.push_str(&format!(" Reloaded {reloaded} open session(s)"));
-        if reload_failed > 0 {
-            body.push_str(&format!(" ({reload_failed} failed)"));
-        }
-        body.push('.');
-    }
-    if !update_ok {
-        body.push_str(&format!(" Note: {detail}"));
-    }
     let _ = ctx
         .notifications()
         .create(NewNotice {
             kind: NoticeKind::System,
             severity,
             title: "Daily CLI update".to_string(),
-            body,
+            body: build_body(&outcomes, reload),
             source_key: Some(NOTICE_KEY.to_string()),
             action: None,
             user_id: None,
@@ -312,14 +316,48 @@ pub async fn run(ctx: &ServerCtx, cfg: &CliAutoUpdateConfig) {
         .await;
 }
 
-/// Run the compound update command via a login shell, bounded by a timeout.
-/// Returns `(success, short_detail)`.
-async fn run_updates(compound: &str) -> (bool, String) {
+/// Compose the notice body from per-provider outcomes: only providers that
+/// actually updated are listed as updated, and each failure names its provider
+/// and reason. Pure, so the exact wording is unit-tested.
+fn build_body(outcomes: &[UpdateOutcome], reload: Option<(u32, u32)>) -> String {
+    let updated: Vec<&str> = outcomes
+        .iter()
+        .filter(|o| o.ok)
+        .map(|o| o.name.as_str())
+        .collect();
+    let failed: Vec<String> = outcomes
+        .iter()
+        .filter(|o| !o.ok)
+        .map(|o| format!("{} — {}", o.name, o.detail))
+        .collect();
+
+    let mut body = if updated.is_empty() {
+        "No CLIs updated.".to_string()
+    } else {
+        format!("Updated CLIs: {}.", updated.join(", "))
+    };
+    if !failed.is_empty() {
+        body.push_str(&format!(" Failed: {}.", failed.join("; ")));
+    }
+    if let Some((reloaded, reload_failed)) = reload {
+        body.push_str(&format!(" Reloaded {reloaded} open session(s)"));
+        if reload_failed > 0 {
+            body.push_str(&format!(" ({reload_failed} failed)"));
+        }
+        body.push('.');
+    }
+    body
+}
+
+/// Run ONE provider's update command via a login shell (so the user's
+/// PATH/profile resolves the CLI), bounded by a timeout. Returns
+/// `(success, short_detail)` — detail is empty on success.
+async fn run_one_update(cmd: &str) -> (bool, String) {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let fut = tokio::process::Command::new(&shell)
         .arg("-l")
         .arg("-c")
-        .arg(compound)
+        .arg(cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -461,5 +499,65 @@ mod tests {
         assert_eq!(c.time_of_day, "03:00"); // defaulted
         assert!(c.use_utc); // defaulted
         assert!(c.reload_sessions); // defaulted
+    }
+
+    fn outcome(name: &str, ok: bool, detail: &str) -> UpdateOutcome {
+        UpdateOutcome {
+            name: name.to_string(),
+            ok,
+            detail: detail.to_string(),
+        }
+    }
+
+    #[test]
+    fn body_all_ok_lists_every_provider_as_updated() {
+        let o = [outcome("agy", true, ""), outcome("claude", true, "")];
+        assert_eq!(
+            build_body(&o, Some((2, 0))),
+            "Updated CLIs: agy, claude. Reloaded 2 open session(s)."
+        );
+    }
+
+    #[test]
+    fn body_one_failure_names_the_provider_and_reason() {
+        // The regression this fixes: a codex config-parse failure must NOT be
+        // reported as "Updated CLIs: … codex" with a dangling anonymous note.
+        let o = [
+            outcome("agy", true, ""),
+            outcome("claude", true, ""),
+            outcome("codex", false, "exit 1: Error loading configuration: unknown variant `xhigh`"),
+        ];
+        assert_eq!(
+            build_body(&o, Some((1, 0))),
+            "Updated CLIs: agy, claude. Failed: codex — exit 1: Error loading configuration: \
+             unknown variant `xhigh`. Reloaded 1 open session(s)."
+        );
+    }
+
+    #[test]
+    fn body_all_failed_says_none_updated() {
+        let o = [
+            outcome("claude", false, "update timed out"),
+            outcome("codex", false, "exit 7: boom"),
+        ];
+        assert_eq!(
+            build_body(&o, None),
+            "No CLIs updated. Failed: claude — update timed out; codex — exit 7: boom."
+        );
+    }
+
+    #[test]
+    fn body_reload_failures_are_counted() {
+        let o = [outcome("claude", true, "")];
+        assert_eq!(
+            build_body(&o, Some((3, 2))),
+            "Updated CLIs: claude. Reloaded 3 open session(s) (2 failed)."
+        );
+    }
+
+    #[test]
+    fn body_reload_disabled_omits_the_reload_sentence() {
+        let o = [outcome("claude", true, "")];
+        assert_eq!(build_body(&o, None), "Updated CLIs: claude.");
     }
 }
