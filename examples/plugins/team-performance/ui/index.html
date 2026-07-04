@@ -127,6 +127,7 @@
       <select id="role-filter"><option value="">All roles</option></select>
       <select id="group-by"><option value="">No grouping</option><option value="role">Group by role</option></select>
       <select id="chart-mode" title="what the bars show">
+        <option value="all">Charts: all</option>
         <option value="pipeline">Chart: pipeline</option>
         <option value="velocity">Chart: velocity (est-d delivered)</option>
         <option value="est_actual">Chart: estimation vs actual</option>
@@ -317,7 +318,7 @@
       const state = {
         account: null, projects: [], allProjects: [], selected: [],
         overview: null, features: null, dev: null, config: null, people: {},
-        roleFilter: '', groupBy: '', chartMode: 'pipeline', search: '', period: '12', periodDate: '', polling: null,
+        roleFilter: '', groupBy: '', chartMode: 'all', search: '', period: '12', periodDate: '', polling: null,
       };
 
       function sinceMs() {
@@ -343,15 +344,24 @@
         await boot();
       });
 
-      // The iframe swallows keydown — forward modifier chords to the shell so
-      // global shortcuts (⌘⇧←/→ navigation, ⌘K …) keep working on this page.
-      window.addEventListener('keydown', (e) => {
-        if (!(e.metaKey || e.ctrlKey || e.altKey)) return;
-        window.parent.postMessage(
-          { type: 'otto:keydown', key: e.key, code: e.code, metaKey: e.metaKey, ctrlKey: e.ctrlKey, altKey: e.altKey, shiftKey: e.shiftKey },
-          PARENT_ORIGIN,
-        );
-      });
+      // A focused iframe swallows keydown, so global app shortcuts (⌘⇧←/→
+      // back/forward, ⌘K, …) die on plugin pages. Forward every modifier chord
+      // to the shell, which re-dispatches it so the plugin inherits ALL app
+      // shortcuts. Capture phase = we see it even if an inner control would
+      // consume it; target '*' so no parent-origin mismatch can drop it (the
+      // payload is only key metadata). We never preventDefault, so the plugin's
+      // own text editing (⌘A/⌘C in the search box) still works.
+      window.addEventListener(
+        'keydown',
+        (e) => {
+          if (!(e.metaKey || e.ctrlKey || e.altKey)) return;
+          window.parent.postMessage(
+            { type: 'otto:keydown', key: e.key, code: e.code, keyCode: e.keyCode, metaKey: e.metaKey, ctrlKey: e.ctrlKey, altKey: e.altKey, shiftKey: e.shiftKey },
+            '*',
+          );
+        },
+        true,
+      );
 
       // ---- task search (filters every task table row by text) -----------------
       function applySearch() {
@@ -375,6 +385,8 @@
           try {
             const p = localStorage.getItem(LS('period'));
             if (p !== null) { state.period = p; $('period').value = p; $('period-date').style.display = p === 'custom' ? '' : 'none'; }
+            const cm = localStorage.getItem(LS('chart'));
+            if (cm) { state.chartMode = cm; $('chart-mode').value = cm; }
           } catch { /* private mode */ }
           await loadProjects();
           pollScan(true); // resume progress display if a scan is already running
@@ -429,7 +441,11 @@
       $('account').onchange = async (e) => { state.account = e.target.value; state.dev = null; await loadProjects(); };
       $('role-filter').onchange = (e) => { state.roleFilter = e.target.value; renderTeam(); };
       $('group-by').onchange = (e) => { state.groupBy = e.target.value; renderTeam(); };
-      $('chart-mode').onchange = (e) => { state.chartMode = e.target.value; if (!state.dev) renderTeam(); };
+      $('chart-mode').onchange = (e) => {
+        state.chartMode = e.target.value;
+        try { localStorage.setItem(LS('chart'), state.chartMode); } catch { /* private mode */ }
+        if (!state.dev) renderTeam();
+      };
       $('task-search').oninput = (e) => { state.search = e.target.value; applySearch(); };
       $('period').onchange = async (e) => {
         state.period = e.target.value;
@@ -623,8 +639,8 @@
         },
       };
 
-      function assigneeChart(o) {
-        const mode = state.chartMode || 'pipeline';
+      function assigneeChart(o, modeArg) {
+        const mode = modeArg || state.chartMode || 'pipeline';
         const devs = visibleAssignees(o).filter((a) => a.completed > 0 || (a.weighted_done || 0) > 0);
         const def = CHART_DEFS[mode] || CHART_DEFS.pipeline;
         const groups = state.groupBy === 'role'
@@ -825,7 +841,8 @@
 
         const view = $('team-view');
         view.innerHTML = tiles + goalsCardHtml(o) + table + openCard + featCard + reportsHubHtml() + guide + flagsCard;
-        view.insertBefore(assigneeChart(o), view.children[2]);
+        const modes = state.chartMode === 'all' ? ['velocity', 'est_actual', 'dev_est_actual', 'monthly', 'pipeline'] : [state.chartMode];
+        modes.reverse().forEach((m) => view.insertBefore(assigneeChart(o, m), view.children[2]));
         view.querySelectorAll('tr.clickable').forEach((tr) => (tr.onclick = () => { state.dev = tr.dataset.dev; renderDev(); }));
         const byId = new Map(o.assignees.map((a) => [a.assignee_id, a]));
         view.querySelectorAll('td.monthly').forEach((td) => {
@@ -1010,7 +1027,14 @@
             <div class="kpi-tile"><div class="l">Output (est-d / week)</div><div class="v">${s.output_wk ?? '—'}${s.output_factor != null ? `<small> ×${s.output_factor.toFixed(2)} vs team</small>` : ''}</div></div>
             <div class="kpi-tile"><div class="l">Estimate error</div><div class="v">${s.mape != null ? fmtPct(s.mape) : '—'}</div></div>
             <div class="kpi-tile"><div class="l">Avg parallel tasks</div><div class="v">${s.avg_wip ?? '—'}</div></div>
+            ${(s.repo_commits || s.unscoped_commits) ? `<div class="kpi-tile"><div class="l">Fix / automation commits</div><div class="v">${(s.unscoped_commits || 0) + (s.repo_commits || 0)}<small>${s.repo_commits ? ` in ${(s.repo_names || []).join(', ')}` : ' prod fixes'}</small></div></div>` : ''}
           </div>
+          <div class="card" id="dev-charts"><h2>Trends <span class="dim">(this developer, last 12 months)</span></h2>
+            <div class="legend">
+              <span class="key"><span class="swatch" style="background:var(--s1)"></span>delivered scope (est-d)</span>
+              <span class="key"><span class="swatch" style="background:var(--s2)"></span>actual days spent</span>
+            </div>
+            <div id="dev-chart-wrap" class="chart-wrap"></div></div>
           <div class="card" id="goals"><h2>Goals <span class="dim">(targets are editable; progress updates every scan)</span></h2><div id="goal-rows"></div>
             <div class="row" style="margin:10px 0 0"><button class="primary" id="save-goals">Save goals</button><span id="goals-msg" class="dim"></span></div></div>
           <div class="card" id="dev-reports"><h2>Summary reports <span class="dim">(agent-written; compares vs the same period last year + prior saved reports; kept in the hub)</span></h2>
@@ -1030,6 +1054,20 @@
           <div class="card" id="dev-open"><h2>Open tasks — predicted timeline</h2>
             ${v.open.length ? `<table><thead><tr><th>Key</th><th>Status</th><th class="num">Elapsed</th><th class="num">Est AI</th><th class="num">Est dev</th><th class="num">Expected</th><th>Consumed</th><th class="num">Projected</th></tr></thead><tbody>${openRows}</tbody></table>` : '<p class="dim">Nothing in flight.</p>'}
           </div>`;
+
+        // Per-dev monthly chart: delivered scope (est-d) vs actual days.
+        const est = s.monthly_est || s.monthly || [];
+        const act = s.monthly_actual || [];
+        if (est.some((v) => v > 0) || act.some((v) => v > 0)) {
+          const now = new Date();
+          const rows = est.map((v, i) => {
+            const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (est.length - 1 - i), 1));
+            return { label: d.toISOString().slice(0, 7), a: { v, varName: '--s1' }, b: { v: act[i] || 0, varName: '--s2' }, end: `${Math.round(v)}d vs ${Math.round(act[i] || 0)}d` };
+          });
+          $('dev-chart-wrap').appendChild(pairedHBar(rows, Math.max(1, ...est, ...act)));
+        } else {
+          $('dev-chart-wrap').innerHTML = '<p class="dim">No estimated tasks in the window yet.</p>';
+        }
 
         const goalWrap = $('goal-rows');
         goalRows.forEach((r) => goalWrap.appendChild(r));

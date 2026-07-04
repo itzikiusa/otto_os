@@ -229,6 +229,7 @@ function buildIndex(repos, config = {}) {
   const fetched = {};
   const features = [];
   const unscoped = new Map(); // "name\x1femail" -> {name,email,commits,monthly,last_at}
+  const repoActivity = new Map(); // feature-repo raw commit activity per author
   const featureRepos = new Set(config.feature_repos || []);
   let hasRepos = false;
 
@@ -318,9 +319,41 @@ function buildIndex(repos, config = {}) {
     });
 
     // Git-only features for opted-in repos (work without Jira stories).
-    const repoFeatures = featureRepos.has(r.name) ? featureIndex(r.name, r.path, target, depth) : [];
+    const isFeatureRepo = featureRepos.has(r.name);
+    const repoFeatures = isFeatureRepo ? featureIndex(r.name, r.path, target, depth) : [];
     const featureByMergeHash = new Map(repoFeatures.map((f) => [f.merge_hash, f]));
     features.push(...repoFeatures);
+
+    // Raw per-author commit activity for feature repos: automation/test people
+    // commit DIRECTLY to master with no story key and no PR branch, so neither
+    // the key index nor the merged-feature path sees their work. Tally every
+    // non-merge commit by author (per repo, per month) so their output is
+    // visible. Display-only — not folded into weighted throughput (the merged
+    // features already credit that), so nothing is double-counted.
+    if (isFeatureRepo) {
+      // Raw walk (NOT scanLog — that only fires on key-bearing subjects; these
+      // commits have no keys). One line per non-merge commit: ts, author.
+      const raw = git(r.path, ['log', target, '--no-merges', ...depth, `--pretty=%ct${US}%an${US}%ae`]);
+      if (raw) {
+        for (const line of raw.split('\n')) {
+          const p = line.split(US);
+          if (p.length < 3) continue;
+          const ts = parseInt(p[0], 10) * 1000;
+          if (Number.isNaN(ts)) continue;
+          const who = `${p[1]}${US}${p[2]}`;
+          let a = repoActivity.get(who);
+          if (!a) {
+            a = { name: p[1], email: p[2], commits: 0, monthly: {}, repos: {}, last_at: null };
+            repoActivity.set(who, a);
+          }
+          a.commits++;
+          a.repos[r.name] = (a.repos[r.name] || 0) + 1;
+          const ym = `${new Date(ts).getUTCFullYear()}-${String(new Date(ts).getUTCMonth() + 1).padStart(2, '0')}`;
+          a.monthly[ym] = (a.monthly[ym] || 0) + 1;
+          if (a.last_at === null || ts > a.last_at) a.last_at = ts;
+        }
+      }
+    }
 
     // (4) deploy tags ascending; `--not prev` visits each commit once, so the
     // first tag that reaches a key (or a feature's merge commit) is its
@@ -378,6 +411,7 @@ function buildIndex(repos, config = {}) {
     byKey,
     features,
     unscoped: [...unscoped.values()].sort((a, b) => b.commits - a.commits),
+    repo_activity: [...repoActivity.values()].sort((a, b) => b.commits - a.commits),
     target_used: targetUsed,
     fetched,
     hasRepos,
@@ -437,6 +471,7 @@ if (require.main === module) {
           by_key: Object.fromEntries(idx.byKey),
           features: idx.features,
           unscoped: idx.unscoped,
+          repo_activity: idx.repo_activity,
           target_used: idx.target_used,
           fetched: idx.fetched,
           hasRepos: idx.hasRepos,

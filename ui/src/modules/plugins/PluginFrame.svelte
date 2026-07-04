@@ -37,18 +37,27 @@
   }
 
   function onMessage(ev: MessageEvent) {
-    if (ev.source !== frame?.contentWindow || ev.origin !== origin) return;
     const m = ev.data;
     if (!m || m.type !== 'otto:keydown' || typeof m.key !== 'string') return;
+    // Only accept from OUR plugin frame. Some webviews (Tauri/WKWebView)
+    // deliver iframe messages with `source === null`, so we can't require a
+    // strict source match — fall back to the same-origin check when it is.
+    const bySource = ev.source != null && ev.source === frame?.contentWindow;
+    if (!bySource && ev.origin !== origin) return;
+    // Re-dispatch as a real keydown so the shell's global key map (keys.ts,
+    // capture-phase window listener) handles it exactly as if the app itself
+    // were focused — an external plugin inherits every app shortcut.
     window.dispatchEvent(
       new KeyboardEvent('keydown', {
         key: m.key,
         code: typeof m.code === 'string' ? m.code : undefined,
+        keyCode: typeof m.keyCode === 'number' ? m.keyCode : 0,
         metaKey: !!m.metaKey,
         ctrlKey: !!m.ctrlKey,
         altKey: !!m.altKey,
         shiftKey: !!m.shiftKey,
         bubbles: true,
+        cancelable: true,
       }),
     );
   }

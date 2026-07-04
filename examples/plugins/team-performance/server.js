@@ -107,6 +107,7 @@ function buildIndexAsync(repos, config) {
           byKey: new Map(Object.entries(idx.by_key || {})),
           features: idx.features || [],
           unscoped: idx.unscoped || [],
+          repo_activity: idx.repo_activity || [],
           target_used: idx.target_used || {},
           fetched: idx.fetched || {},
           hasRepos: Boolean(idx.hasRepos),
@@ -572,6 +573,7 @@ async function runScan(account, projects, full, assignees) {
     store.writeJsonAtomic(store.featuresPath(DATA_DIR), {
       features: gitIndex.features,
       unscoped: gitIndex.unscoped || [],
+      repo_activity: gitIndex.repo_activity || [],
       scanned_at: Date.now(),
     });
 
@@ -946,6 +948,29 @@ function overview(account, projectsParam, sinceMs = 0) {
     if (n > 0) unscopedByPerson[cid] = (unscopedByPerson[cid] || 0) + n;
   }
   for (const s of withGoals) s.unscoped_commits = unscopedByPerson[s.assignee_id] || 0;
+
+  // Feature-repo raw commit activity (automation/test work is direct commits
+  // with no story key) matched to people, summed within the period.
+  const repoCommitsByPerson = {};
+  const repoNamesByPerson = {};
+  for (const a of (featFile && featFile.repo_activity) || []) {
+    const pid = scope.matcher(a.name, a.email);
+    if (!pid) continue;
+    const cid = canonical(pid);
+    let n = 0;
+    for (const [ym, count] of Object.entries(a.monthly || {})) {
+      const t = Date.parse(`${ym}-01T00:00:00Z`);
+      if (!sinceMs || t >= sinceMs - 31 * 86400000) n += count;
+    }
+    if (n > 0) {
+      repoCommitsByPerson[cid] = (repoCommitsByPerson[cid] || 0) + n;
+      for (const rn of Object.keys(a.repos || {})) (repoNamesByPerson[cid] ||= new Set()).add(rn);
+    }
+  }
+  for (const s of withGoals) {
+    s.repo_commits = repoCommitsByPerson[s.assignee_id] || 0;
+    s.repo_names = [...(repoNamesByPerson[s.assignee_id] || [])];
+  }
 
   return {
     scanned: scope.scanned,

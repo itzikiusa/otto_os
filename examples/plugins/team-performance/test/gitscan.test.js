@@ -165,3 +165,18 @@ test('placeholder keys (ABC-0000 style) become per-author unscoped fix work, not
   assert.equal(dave.commits, 1);
   assert.equal(dave.monthly['2026-06'], 1);
 });
+
+test('feature repos: direct-to-master commits become per-author repo activity', () => {
+  git(['checkout', '-q', 'develop']);
+  commit('add login smoke test', '2026-06-26T10:00:00Z', 'Quinn QA');
+  commit('add checkout smoke test', '2026-06-27T10:00:00Z', 'Quinn QA');
+  const idx = IDX(); // feature_repos: ['fix']
+  const quinn = (idx.repo_activity || []).find((a) => a.name === 'Quinn QA');
+  assert.ok(quinn, `repo activity tracked (${JSON.stringify((idx.repo_activity||[]).map(a=>a.name))})`);
+  assert.ok(quinn.commits >= 2);
+  assert.equal(quinn.repos.fix >= 2, true);
+  assert.ok(quinn.monthly['2026-06'] >= 2);
+  // Non-feature repo: no repo_activity collected.
+  const plain = buildIndex([{ name: 'fix', path: repoDir }], { git_fetch: false });
+  assert.equal((plain.repo_activity || []).length, 0);
+});

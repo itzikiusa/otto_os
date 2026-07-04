@@ -2,7 +2,7 @@
   "slug": "team-performance",
   "name": "Team Performance",
   "icon": "gauge",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Multi-project Jira + git delivery analytics: git-primary task timing (first commit \u2192 develop/release merge \u2192 fixes \u2192 -DEPLOYED tag), dev-agnostic AI scope estimates (3 levels: estimate \u2192 per-dev \u2192 actual) with provider-split workers, scope-weighted throughput with multi-dev commit-share credit, routine-work detection, people/role registry with filters, git-only feature scan for repos without Jira stories, per-story outlier marks + manual times, and goals at team/role/developer level. Node sidecar \u2014 zero npm install.",
   "exec": [
     "node",
