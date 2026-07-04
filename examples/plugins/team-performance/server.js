@@ -136,6 +136,7 @@ const DEFAULT_CONFIG = {
   deploy_tag_pattern: 'deployed',
   stale_days: 45,
   fix_window_days: 30, // commits after delivery beyond this aren't 'fixes'
+  fix_include_min_commits: 3, // fixes with >= this many commits fold into the actual
   hours_per_day: 8, // working hours per business day (for the hours display)
   estimate_enabled: true,
   estimate_window_months: 6,
@@ -197,6 +198,7 @@ function validateConfig(body) {
     ['estimate_max_batches', 1, 200],
     ['auto_scan_minutes', 0, 1440],
     ['fix_window_days', 1, 365],
+    ['fix_include_min_commits', 1, 100],
     ['hours_per_day', 1, 24],
   ]) {
     if (body[k] !== undefined) {
@@ -706,7 +708,7 @@ function loadScope(account, projectsParam) {
     capped = capped || Boolean(corpus.capped);
     Object.assign(targetUsed, corpus.target_used || {});
     const overrides = store.readJson(store.overridesPath(DATA_DIR, account, p), null);
-    records = records.concat(applyOverrides(Object.values(corpus.issues), overrides));
+    records = records.concat(applyOverrides(Object.values(corpus.issues), overrides, config.fix_include_min_commits));
     Object.assign(estimates, loadEstimates(account, p));
     // A lead-corrected agnostic estimate replaces the AI value everywhere.
     for (const [k, o] of Object.entries((overrides && overrides.issues) || {})) {
@@ -1124,6 +1126,9 @@ function assigneeView(account, projectsParam, assigneeId, sinceMs = 0) {
       routine: A.isRoutine(r, sigCounts, estimates[r.key]),
       excluded: A.isExcluded(r),
       git_change: r.git_change || null,
+      include_fixes: r.include_fixes === true,
+      include_fixes_override: r.include_fixes_override ?? null,
+      late_touches: r.late_touches || 0,
       suspect_outlier: suspectOutlier(r, base),
       baseline: bucket
         ? { level: hit.level, n: bucket.n, design: bucket.design, impl: bucket.impl, total: bucket.total }
@@ -1799,6 +1804,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
       if (body.est_reason !== undefined) o.est_reason = body.est_reason === null ? null : String(body.est_reason).slice(0, 500);
+      if (body.include_fixes !== undefined) o.include_fixes = body.include_fixes === null ? undefined : Boolean(body.include_fixes);
       o.updated_at = Date.now();
       cur.issues[key] = o;
       store.writeJsonAtomic(file, cur);

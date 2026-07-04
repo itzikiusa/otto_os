@@ -744,3 +744,21 @@ test('resurrected ancients: multi-year effective cycles are excluded even with g
   );
   assert.ok(!big.flags.includes('stale_timing'), big.flags.join(','));
 });
+
+// ---- v0.4.1: fix-inclusion into the actual ----------------------------------
+
+test('include_fixes folds fix time into the actual; manual override still wins', () => {
+  const base = rec({ key: 'IF-1', eff_cycle_days: 5, cycle_days: 5, fix_days: 4, fix_count: 12 });
+  assert.equal(A.median([5]), 5);
+  // default record (no include_fixes) → base only
+  const b = A.baselines([{ ...base, include_fixes: false }, rec({ key: 'X1', eff_cycle_days: 5, cycle_days: 5 }), rec({ key: 'X2', eff_cycle_days: 5, cycle_days: 5 })]);
+  assert.equal(b.lookup('Story', 3).bucket.total.p50, 5, 'fixes not folded when include_fixes false');
+  // include_fixes true → base + fix_days (5+4=9)
+  const withFix = { ...base, include_fixes: true };
+  const stats = A.assigneeStats([withFix], A.baselines([withFix]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
+  assert.equal(stats[0].median_cycle, 9, 'actual = cycle + fix_days when included');
+  // manual override beats fix inclusion
+  const manual = { ...base, include_fixes: true, manual_days: 6 };
+  const s2 = A.assigneeStats([manual], A.baselines([manual]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
+  assert.equal(s2[0].median_cycle, 6, 'manual actual wins');
+});

@@ -1064,13 +1064,23 @@
                 ${t.est_overridden ? '<span class="badge warn">overridden</span>' : ''}
               </div>
             </div>
+            <div class="row" style="margin:6px 0" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}">
+              <b class="dim" style="font-size:11px">ACTUAL TIME</b>
+              <span>override actual (days): <input class="inline-input ov-manual" type="number" step="0.1" min="0.1" value="${t.manual_days ?? ''}" placeholder="${fmtD(t.actual_days)}"></span>
+              <button class="small ov-manual-save">Set</button>
+              <button class="small ov-manual-clear">Clear</button>
+              ${t.fix_count ? `<span title="fold this task's fix time into its actual">fixes (${t.fix_count} commits, ${fmtD(t.fix_days)}):
+                <select class="ov-incfix">
+                  <option value="auto" ${t.include_fixes_override == null ? 'selected' : ''}>auto${t.include_fixes ? ' (included)' : ' (separate)'}</option>
+                  <option value="yes" ${t.include_fixes_override === true ? 'selected' : ''}>include</option>
+                  <option value="no" ${t.include_fixes_override === false ? 'selected' : ''}>exclude</option>
+                </select></span>` : ''}
+              ${t.late_touches ? `<span class="dim" title="commits after the fix window — not counted">+${t.late_touches} late touches</span>` : ''}
+            </div>
             <span class="row" style="margin:6px 0">
               <button class="small ov-exclude" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" data-cur="${t.excluded_override ? '1' : ''}">${t.excluded_override ? 'Include story' : 'Exclude story'}</button>
               <button class="small ov-outlier" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" data-cur="${t.outlier ? '1' : ''}">${t.outlier ? 'Unmark outlier' : 'Mark as outlier'}</button>
-              <span>manual days: <input class="inline-input ov-manual" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" type="number" step="0.1" min="0.1" value="${t.manual_days ?? ''}" placeholder="—"></span>
-              <button class="small ov-manual-save" data-key="${esc(t.key)}">Set time</button>
-              <button class="small ov-manual-clear" data-key="${esc(t.key)}">Clear</button>
-              <span class="dim">outliers leave all stats; a manual time re-enters at that value</span>
+              <span class="dim">outliers leave all stats; the actual override wins over git/Jira timing; fixes fold in only when substantial (auto) or you force it</span>
             </span>
             <table style="margin-top:6px"><thead><tr><th>Status</th><th>Phase</th><th class="num">Span</th><th class="num">Calendar</th></tr></thead><tbody>${evid}</tbody></table></td></tr>`;
         }).join('');
@@ -1232,22 +1242,34 @@
             } catch (e) { err(e.message); }
           };
         });
+        // Actual-time controls (data-key/project live on the wrapping row).
         $('dev-view').querySelectorAll('.ov-manual-save').forEach((b) => {
           b.onclick = async () => {
-            const input = $('dev-view').querySelector(`.ov-manual[data-key="${CSS.escape(b.dataset.key)}"]`);
-            const val = parseFloat(input.value);
+            const row = b.closest('[data-key]');
+            const val = parseFloat(row.querySelector('.ov-manual').value);
             if (!Number.isFinite(val) || val <= 0) { err('enter a positive number of days'); return; }
             try {
-              await saveOverride(b.dataset.key, input.dataset.project, { manual_days: val });
+              await saveOverride(row.dataset.key, row.dataset.project, { manual_days: val });
               await refresh();
             } catch (e) { err(e.message); }
           };
         });
         $('dev-view').querySelectorAll('.ov-manual-clear').forEach((b) => {
           b.onclick = async () => {
-            const input = $('dev-view').querySelector(`.ov-manual[data-key="${CSS.escape(b.dataset.key)}"]`);
+            const row = b.closest('[data-key]');
             try {
-              await saveOverride(b.dataset.key, input.dataset.project, { manual_days: null });
+              await saveOverride(row.dataset.key, row.dataset.project, { manual_days: null });
+              await refresh();
+            } catch (e) { err(e.message); }
+          };
+        });
+        // Fold this task's fix time into the actual: auto / force include / force exclude.
+        $('dev-view').querySelectorAll('.ov-incfix').forEach((sel) => {
+          sel.onchange = async () => {
+            const row = sel.closest('[data-key]');
+            const v = sel.value === 'yes' ? true : sel.value === 'no' ? false : null;
+            try {
+              await saveOverride(row.dataset.key, row.dataset.project, { include_fixes: v });
               await refresh();
             } catch (e) { err(e.message); }
           };
@@ -1379,6 +1401,7 @@
                   <span class="lbl">Deploy tag contains</span><input id="cfg-deploytag" value="${esc(config.deploy_tag_pattern)}" title="case-insensitive substring, e.g. deployed">
                   <span class="lbl">Stale after (days)</span><input id="cfg-stale" type="number" min="5" max="365" value="${config.stale_days}" title="done tasks with no git signal and a Jira cycle beyond this are excluded from medians">
                   <span class="lbl">Fix window (days)</span><input id="cfg-fixwin" type="number" min="1" max="365" value="${config.fix_window_days ?? 30}" title="commits mentioning a key more than this many days after delivery are NOT counted as fixes (stray later touches)">
+                  <span class="lbl">Fold fixes ≥ (commits)</span><input id="cfg-fixmin" type="number" min="1" max="100" value="${config.fix_include_min_commits ?? 3}" title="fixes with at least this many commits automatically fold into the task's actual time; fewer stay separate (override per task)">
                   <span class="lbl">Working hours / day</span><input id="cfg-hpd" type="number" min="1" max="24" value="${config.hours_per_day ?? 8}" title="sub-day durations are shown in these working hours">
                   <span class="lbl">Auto-scan (min, 0=off)</span><input id="cfg-autoscan" type="number" min="0" max="1440" value="${config.auto_scan_minutes ?? 15}" title="silently repeats your last scan every N minutes: new tickets fetched + estimated, timelines refreshed">
                 </div>
@@ -1465,6 +1488,7 @@
               deploy_tag_pattern: $('cfg-deploytag').value.trim(),
               stale_days: parseInt($('cfg-stale').value, 10),
               fix_window_days: parseInt($('cfg-fixwin').value, 10),
+              fix_include_min_commits: parseInt($('cfg-fixmin').value, 10),
               hours_per_day: parseInt($('cfg-hpd').value, 10),
               auto_scan_minutes: parseInt($('cfg-autoscan').value, 10),
               estimate_enabled: $('cfg-est-on').checked,

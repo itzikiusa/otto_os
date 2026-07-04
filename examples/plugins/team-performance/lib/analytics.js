@@ -244,6 +244,7 @@ function deriveGit(record, gitEntry, opts) {
     delivered_at: g.delivered_at ?? record.delivered_at ?? null,
     done_git_at: doneGit,
     fix_count: g.fix_count ?? record.fix_count ?? 0,
+    late_touches: g.late_touches ?? record.late_touches ?? 0,
     last_fix_at: lastFix,
     deployed_at: deployed,
     git_authors: authors,
@@ -263,7 +264,18 @@ function deriveGit(record, gitEntry, opts) {
 // Effective accessors tolerating pre-v2 records (no eff_* fields yet).
 // A per-story manual override (lead-entered actual days) beats everything.
 const rImpl = (r) => r.eff_impl_days ?? r.impl_days ?? null;
-const rCycle = (r) => r.manual_days ?? r.eff_cycle_days ?? r.cycle_days ?? null;
+// Actual time. A lead-entered manual time wins. Otherwise the base is the
+// delivery cycle (first-active/commit → merge, NO fixes). Fix time is FOLDED
+// IN only when the fixing was substantial real work — `include_fixes` is
+// resolved upstream (explicit per-task override, else auto by fix-commit
+// count) so a stray one-off touch never inflates a task but a genuine 10-commit
+// fixing effort does.
+const rCycle = (r) => {
+  if (r.manual_days != null) return r.manual_days;
+  const base = r.eff_cycle_days ?? r.cycle_days ?? null;
+  if (base != null && r.include_fixes && r.fix_days) return round2(base + r.fix_days);
+  return base;
+};
 const rDoneAt = (r) => r.eff_done_at ?? r.done_at ?? null;
 const isStale = (r) => (r.flags || []).includes('stale_timing') || (r.flags || []).includes('zero_time');
 // Excluded from every median/baseline/throughput: a lead-excluded story
