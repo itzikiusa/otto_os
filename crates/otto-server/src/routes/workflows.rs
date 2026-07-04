@@ -55,7 +55,14 @@ pub async fn create_workflow(
     }
     let graph = req.graph.unwrap_or_default();
     let wf = repo(&ctx)
-        .create(&wid, name, req.description.as_deref().unwrap_or(""), &graph, &user.id)
+        .create(
+            &wid,
+            name,
+            req.description.as_deref().unwrap_or(""),
+            req.instructions.as_deref().unwrap_or(""),
+            &graph,
+            &user.id,
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(wf))
@@ -82,17 +89,20 @@ pub async fn update_workflow(
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     let graph_changed = req.graph.is_some();
+    let instructions_changed = req.instructions.is_some();
     let updated = repo(&ctx)
         .update(
             &id,
             req.name.as_deref(),
             req.description.as_deref(),
+            req.instructions.as_deref(),
             req.graph.as_ref(),
         )
         .await
         .map_err(ApiError)?;
-    // A graph-changing edit bumps the version and snapshots the new graph.
-    if graph_changed {
+    // A graph- or instructions-changing edit bumps the version and snapshots
+    // the new state (an instructions-only edit is treated like a graph edit).
+    if graph_changed || instructions_changed {
         let v = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
         repo(&ctx)
             .snapshot_version(
@@ -100,8 +110,9 @@ pub async fn update_workflow(
                 v,
                 &updated.name,
                 &updated.description,
+                &updated.instructions,
                 &updated.graph,
-                "edited graph",
+                "edited",
                 &user.id,
             )
             .await
@@ -154,7 +165,10 @@ pub async fn restore_version(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("version {v}"))))?;
     repo(&ctx)
-        .update(&id, None, None, Some(&ver.graph))
+        // Restore rewinds the live graph AND instructions; the historical
+        // name/description are recorded in the version snapshot below, not
+        // applied back to the live row.
+        .update(&id, None, None, Some(&ver.instructions), Some(&ver.graph))
         .await
         .map_err(ApiError)?;
     let newv = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
@@ -162,7 +176,16 @@ pub async fn restore_version(
         .and_then(|b| b.0.note)
         .unwrap_or_else(|| format!("restored from v{v}"));
     repo(&ctx)
-        .snapshot_version(&id, newv, &ver.name, &ver.description, &ver.graph, &note, &user.id)
+        .snapshot_version(
+            &id,
+            newv,
+            &ver.name,
+            &ver.description,
+            &ver.instructions,
+            &ver.graph,
+            &note,
+            &user.id,
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(repo(&ctx).get(&id).await.map_err(ApiError)?))
@@ -214,7 +237,9 @@ pub async fn generate_workflow(
         .unwrap_or_else(|| slug_title(description));
 
     let wf = repo(&ctx)
-        .create(&wid, &name, description, &graph, &user.id)
+        // Agent-generated workflows have no separate instructions source (the
+        // description IS the generation prompt); leave instructions empty.
+        .create(&wid, &name, description, "", &graph, &user.id)
         .await
         .map_err(ApiError)?;
     Ok(Json(wf))
@@ -501,7 +526,7 @@ pub async fn create_from_template(
         .map(str::to_string)
         .unwrap_or_else(|| tpl.name.clone());
     let wf = repo(&ctx)
-        .create(&wid, &name, &tpl.description, &tpl.graph, &user.id)
+        .create(&wid, &name, &tpl.description, &tpl.instructions, &tpl.graph, &user.id)
         .await
         .map_err(ApiError)?;
     Ok(Json(wf))
@@ -546,6 +571,7 @@ fn game_templates() -> Vec<WorkflowTemplate> {
             id: "game-slots".into(),
             name: "Slots game".into(),
             description: "5×3 slot machine: agent designs the paytable & RTP, then the engine assembles and verifies it.".into(),
+            instructions: String::new(),
             icon: "grid".into(),
             graph: pipeline(
                 "slots",
@@ -556,6 +582,7 @@ fn game_templates() -> Vec<WorkflowTemplate> {
             id: "game-crash".into(),
             name: "Crash game (Aviator style)".into(),
             description: "Aviator-style crash game: agent designs the multiplier curve & provably-fair RNG, then build & verify.".into(),
+            instructions: String::new(),
             icon: "zap".into(),
             graph: pipeline(
                 "crash",
@@ -566,6 +593,7 @@ fn game_templates() -> Vec<WorkflowTemplate> {
             id: "game-scratch".into(),
             name: "Scratch card".into(),
             description: "Scratch-card game: agent designs prize tiers & win probabilities, then build & verify.".into(),
+            instructions: String::new(),
             icon: "ticket".into(),
             graph: pipeline(
                 "scratch",
@@ -682,6 +710,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                           automatically on pass (the review IS the approval). Provide repo_id \
                           (and base) in the run input."
                 .into(),
+            instructions: String::new(),
             icon: "check-square".into(),
             graph: WorkflowGraph {
                 nodes: vec![
@@ -722,6 +751,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                           review-iterate until passing → open the PR automatically on pass (the \
                           review IS the approval). Provide repo_id and story_id in the run input."
                 .into(),
+            instructions: String::new(),
             icon: "command".into(),
             graph: WorkflowGraph {
                 nodes: vec![
@@ -765,6 +795,7 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                           review → publish as RFC or Jira (dry-run by default). Provide story_id \
                           in the input to persist/publish."
                 .into(),
+            instructions: String::new(),
             icon: "compass".into(),
             graph: WorkflowGraph {
                 nodes: vec![
@@ -796,6 +827,159 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                     edge("review1", "refine"),
                     edge("refine", "review2"),
                     edge("review2", "publish"),
+                ],
+            },
+        },
+        // 4) UI test authoring: story → app-fetched Jira context → write UI
+        // tests → review-fix loop → PR on pass → final report (both branches).
+        WorkflowTemplate {
+            id: "ui-test-authoring".into(),
+            name: "UI test authoring".into(),
+            description: "Story → app-fetched Jira context → write UI tests → review-fix loop \
+                          until green → PR on pass → final report. Bind a Slack channel or run \
+                          with a prompt."
+                .into(),
+            instructions: "# Standing instructions — UI test authoring\n\
+                - Tests are Playwright specs; follow the repo's existing spec layout and naming.\n\
+                - Never sleep-poll; use Playwright auto-waiting and web-first assertions.\n\
+                - Selectors: prefer role/test-id selectors over CSS/text.\n\
+                - Each spec must be independently runnable and idempotent.\n\
+                - Run ONLY the specs you created or changed — never the full suite.\n\
+                - If a jira-<KEY>.md exists in the context dir, it is the requirements source of truth.\n\
+                - Write your step handoff file before finishing (path given in your prompt)."
+                .into(),
+            icon: "check-square".into(),
+            graph: WorkflowGraph {
+                nodes: vec![
+                    node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
+                    node("prep", "prepare_context", "Prepare relevant data", 300.0, json!({
+                        "prompt": "Analyze the story and the codebase. If a jira-<KEY>.md file \
+                                   exists in the context directory it is the source of truth for \
+                                   requirements — read it fully (description AND comments). \
+                                   Produce a test plan: what to cover, where the tests live, exact \
+                                   conventions to follow per instructions.md."
+                    })),
+                    node("implement", "agent_prompt", "Write UI tests", 600.0, json!({
+                        "prompt": "Write the UI tests per the test plan, following instructions.md \
+                                   by the letter. Run only the specs you created/changed and make \
+                                   them pass."
+                    })),
+                    fix_review_loop(
+                        3,
+                        80,
+                        json!([
+                            { "lens": "correctness-review", "providers": ["claude"] },
+                            { "lens": "test-review", "providers": ["claude"] }
+                        ]),
+                        900.0,
+                    ),
+                    node("pr", "git_pr", "Open PR (on pass)", 1300.0, json!({ "open": true })),
+                    node("report", "agent_prompt", "Final report", 1600.0, json!({
+                        "prompt": "Write the final run report: what was requested, what was \
+                                   implemented (files/specs), the final suite result, and PR links \
+                                   from the input if present. If the review loop did not pass, \
+                                   state exactly what is still failing. This report is the run's \
+                                   final output."
+                    })),
+                    offer_improvements(1300.0),
+                ],
+                edges: vec![
+                    edge("trigger", "prep"),
+                    edge("prep", "implement"),
+                    edge("implement", "iterate"),
+                    // Open the PR only when the review→fix loop passed.
+                    edge_if("iterate", "pr", "output.satisfied == true"),
+                    // `report` MUST remain the run's LAST content-bearing step: on
+                    // success it becomes final-output.md (workflow_context.rs's
+                    // `content_step` is overwritten by every non-utility step that
+                    // runs, last one wins — see `write_final_output`). This edge is
+                    // what forces `report` to execution-order after `improve`
+                    // (`self_improve` is content-bearing too, and both `report` and
+                    // `improve` are otherwise parallel branches off `iterate`).
+                    // Deleting this edge would silently make the self-improve offer
+                    // the run's deliverable instead of the report.
+                    edge("pr", "report"),
+                    // The final report always runs, even when the loop didn't pass.
+                    edge("iterate", "report"),
+                    // Offer improvements after the loop, pass or fail.
+                    edge("iterate", "improve"),
+                ],
+            },
+        },
+        // 5) API acceptance test authoring: same shape as UI test authoring,
+        // targeting the acceptance-test framework's Gateway/ServiceLocator layers.
+        WorkflowTemplate {
+            id: "api-acceptance-test-authoring".into(),
+            name: "API acceptance test authoring".into(),
+            description: "Story → app-fetched Jira context → write API acceptance tests → \
+                          review-fix loop until green → PR on pass → final report. Bind a Slack \
+                          channel or run with a prompt."
+                .into(),
+            instructions: "# Standing instructions — API acceptance test authoring\n\
+                - Follow the acceptance-test framework's two layers strictly: Gateway APIs for \
+                player-behavior flows, ServiceLocator for internal service features.\n\
+                - Keep API-call code and validation/assertion code in their designated layers.\n\
+                - Reuse existing player-creation / balance helpers; never duplicate setup utilities.\n\
+                - Tests must be independently runnable and leave no dirty state.\n\
+                - Run ONLY the tests you created or changed — never the full suite.\n\
+                - If a jira-<KEY>.md exists in the context dir, it is the requirements source of truth.\n\
+                - Write your step handoff file before finishing (path given in your prompt)."
+                .into(),
+            icon: "send".into(),
+            graph: WorkflowGraph {
+                nodes: vec![
+                    node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
+                    node("prep", "prepare_context", "Prepare relevant data", 300.0, json!({
+                        "prompt": "Analyze the story and the codebase. If a jira-<KEY>.md file \
+                                   exists in the context directory it is the source of truth for \
+                                   requirements — read it fully (description AND comments). \
+                                   Produce a test plan: what to cover, where the tests live, exact \
+                                   conventions to follow per instructions.md."
+                    })),
+                    node("implement", "agent_prompt", "Write API acceptance tests", 600.0, json!({
+                        "prompt": "Write the API acceptance tests per the test plan, following \
+                                   instructions.md by the letter. Run only the specs you \
+                                   created/changed and make them pass."
+                    })),
+                    fix_review_loop(
+                        3,
+                        80,
+                        json!([
+                            { "lens": "correctness-review", "providers": ["claude"] },
+                            { "lens": "test-review", "providers": ["claude"] }
+                        ]),
+                        900.0,
+                    ),
+                    node("pr", "git_pr", "Open PR (on pass)", 1300.0, json!({ "open": true })),
+                    node("report", "agent_prompt", "Final report", 1600.0, json!({
+                        "prompt": "Write the final run report: what was requested, what was \
+                                   implemented (files/specs), the final suite result, and PR links \
+                                   from the input if present. If the review loop did not pass, \
+                                   state exactly what is still failing. This report is the run's \
+                                   final output."
+                    })),
+                    offer_improvements(1300.0),
+                ],
+                edges: vec![
+                    edge("trigger", "prep"),
+                    edge("prep", "implement"),
+                    edge("implement", "iterate"),
+                    // Open the PR only when the review→fix loop passed.
+                    edge_if("iterate", "pr", "output.satisfied == true"),
+                    // `report` MUST remain the run's LAST content-bearing step: on
+                    // success it becomes final-output.md (workflow_context.rs's
+                    // `content_step` is overwritten by every non-utility step that
+                    // runs, last one wins — see `write_final_output`). This edge is
+                    // what forces `report` to execution-order after `improve`
+                    // (`self_improve` is content-bearing too, and both `report` and
+                    // `improve` are otherwise parallel branches off `iterate`).
+                    // Deleting this edge would silently make the self-improve offer
+                    // the run's deliverable instead of the report.
+                    edge("pr", "report"),
+                    // The final report always runs, even when the loop didn't pass.
+                    edge("iterate", "report"),
+                    // Offer improvements after the loop, pass or fail.
+                    edge("iterate", "improve"),
                 ],
             },
         },
@@ -843,9 +1027,9 @@ pub async fn create_trigger(
 ) -> ApiResult<Json<WorkflowTrigger>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
-    if !matches!(req.kind.as_str(), "schedule" | "webhook" | "event") {
+    if !matches!(req.kind.as_str(), "schedule" | "webhook" | "event" | "chat") {
         return Err(ApiError(Error::Invalid(
-            "trigger kind must be 'schedule', 'webhook', or 'event'".into(),
+            "trigger kind must be 'schedule', 'webhook', 'event', or 'chat'".into(),
         )));
     }
     // For webhook triggers, auto-generate a cryptographically random token if
@@ -1217,6 +1401,23 @@ mod tests {
                 assert!(ids.contains(e.source.as_str()), "{}: dangling edge source", t.id);
                 assert!(ids.contains(e.target.as_str()), "{}: dangling edge target", t.id);
             }
+        }
+    }
+
+    #[test]
+    fn test_flow_templates_shape() {
+        let all = flow_templates();
+        for id in ["ui-test-authoring", "api-acceptance-test-authoring"] {
+            let t = all.iter().find(|t| t.id == id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(!t.instructions.trim().is_empty(), "{id} ships standing instructions");
+            assert!(t.graph.nodes.iter().any(|n| n.kind == "prepare_context"));
+            assert!(t.graph.nodes.iter().any(|n| n.id == "report" && n.kind == "agent_prompt"));
+            for n in &t.graph.nodes {
+                assert!(crate::workflow_engine::is_known_kind(&n.kind), "unknown kind {}", n.kind);
+            }
+            // report is reachable from BOTH pr and iterate (runs on failure too)
+            assert!(t.graph.edges.iter().any(|e| e.source == "pr" && e.target == "report"));
+            assert!(t.graph.edges.iter().any(|e| e.source == "iterate" && e.target == "report"));
         }
     }
 

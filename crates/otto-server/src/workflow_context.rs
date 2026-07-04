@@ -3,18 +3,23 @@
 //! Every workflow run owns `<data_dir>/workflow-context/<run_id>/`:
 //!
 //! ```text
-//! wf-<run_id>-instruction.md      # mission brief written at run start
-//! repos.json                      # live registry of repos/branches/worktrees
+//! instructions.md                 # standing instructions (workflow.instructions), verbatim — only when non-empty
+//! prompt.md                       # this run's ask, verbatim — only when a prompt exists
+//! run-brief.md                    # mission brief written at run start (renamed from wf-<run_id>-instruction.md)
+//! repos.json                      # live registry of repos/branches/worktrees — only when repos are declared
 //! step1-gather-info.md            # curated handoff summary per executed node
 //! step1-gather-info.output.json   # raw node output (capped, never inlined-truncated)
 //! step3-review-iter2.md           # loop inner steps, per iteration
+//! final-output.md                 # on success: copy of the last content-bearing step's .md — the run's deliverable
 //! ```
 //!
-//! Agents are pointed at the directory in their prompt and asked to write
-//! their own step summary; the engine writes a full-fidelity fallback when
-//! they don't. All I/O here is best-effort: a failure logs a warning and the
-//! run continues on the legacy inline-prompt behavior — context files never
-//! fail a node.
+//! Agents are pointed at the directory in their prompt and asked to read, in
+//! order, `instructions.md` → `prompt.md` → `run-brief.md` → `repos.json` →
+//! prior `step*.md` (each named only when it exists), then write their own
+//! step summary; the engine writes a full-fidelity fallback when they don't.
+//! All I/O here is best-effort: a failure logs a warning and the run
+//! continues on the legacy inline-prompt behavior — context files never fail
+//! a node.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -22,6 +27,27 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Auto-generated run brief (mission, repos, planned steps) — replaces the
+/// old `wf-<run_id>-instruction.md`.
+pub(crate) const RUN_BRIEF_FILE: &str = "run-brief.md";
+/// Standing instructions for the workflow (verbatim copy of
+/// `workflow.instructions`) — written only when non-empty.
+pub(crate) const INSTRUCTIONS_FILE: &str = "instructions.md";
+/// This run's ask, verbatim — written only when a prompt exists.
+pub(crate) const PROMPT_FILE: &str = "prompt.md";
+/// Copy of the last content-bearing, error-free step's `.md` — the run's
+/// deliverable, written on run success.
+pub(crate) const FINAL_OUTPUT_FILE: &str = "final-output.md";
+
+/// Kinds whose step `.md` is never the run deliverable — bookkeeping/control
+/// nodes that don't produce content worth surfacing as `final-output.md`.
+pub(crate) fn is_utility_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "manual_trigger" | "log" | "delay" | "channel_notify" | "budget_gate" | "human_approval"
+    )
+}
 
 /// Cap for `*.output.json` — loop outputs embed full iteration history and a
 /// runaway node must not fill the disk. A truncated file gets an explicit
@@ -164,16 +190,22 @@ pub(crate) fn step_base_name(
     out
 }
 
-/// The mission brief written to `wf-<run_id>-instruction.md` at run start.
-/// Pure so it is unit-testable; `steps` is (display name, kind) in execution
-/// order — in-scope nodes only, so numbering matches what actually runs.
-pub(crate) fn render_instruction(
+/// The mission brief written to `run-brief.md` at run start. Pure so it is
+/// unit-testable; `steps` is (display name, kind) in execution order —
+/// in-scope nodes only, so numbering matches what actually runs.
+/// `has_instructions`/`has_prompt` reflect whether `instructions.md`/
+/// `prompt.md` were written for this run — the "How to use this directory"
+/// section only points agents at files that actually exist.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_brief(
     wf_name: &str,
     wf_desc: &str,
     run_id: &str,
     input: &Value,
     repos: &[RepoEntry],
     steps: &[(String, String)],
+    has_instructions: bool,
+    has_prompt: bool,
 ) -> String {
     let mut md = String::new();
     md.push_str(&format!("# Workflow run: {wf_name}\n\n"));
@@ -186,7 +218,11 @@ pub(crate) fn render_instruction(
     }
     md.push('\n');
 
-    // Mission: the free-text fields a trigger provides.
+    // Mission: the free-text fields a trigger provides. `prompt` is filled
+    // from `msg` when absent (see `normalize_prompt` in the engine) — when
+    // that happened the two are identical, so the `msg` row is redundant and
+    // skipped rather than showing the same line twice.
+    let prompt_val = input.get("prompt").and_then(Value::as_str).map(str::trim);
     let mut mission = String::new();
     for (key, label) in [
         ("msg", "Message"),
@@ -194,7 +230,11 @@ pub(crate) fn render_instruction(
         ("jira_ticket", "Jira ticket"),
     ] {
         if let Some(v) = input.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
-            mission.push_str(&format!("- **{label}:** {}\n", v.trim()));
+            let v = v.trim();
+            if key == "msg" && Some(v) == prompt_val {
+                continue;
+            }
+            mission.push_str(&format!("- **{label}:** {v}\n"));
         }
     }
     for (key, label) in [("goals", "Goals"), ("relevant_info", "Relevant info")] {
@@ -214,6 +254,12 @@ pub(crate) fn render_instruction(
         md.push('\n');
     }
 
+    // The heading always renders — its presence/absence is itself a signal an
+    // agent shouldn't have to infer from silence. No repos declared ⇒ no
+    // `repos.json` at all (`set_repos` is never called with a non-empty
+    // registry), so the table and its guidance sentence are skipped in favor
+    // of an explicit placeholder rather than pointing at a file that doesn't
+    // exist.
     md.push_str("## Repos & branches\n\n");
     if repos.is_empty() {
         md.push_str("_No repos declared for this run._\n\n");
@@ -231,8 +277,8 @@ pub(crate) fn render_instruction(
             ));
         }
         md.push('\n');
+        md.push_str("The machine-readable version of this table is `repos.json` in this directory — it is kept up to date as the run progresses and is the authoritative list.\n\n");
     }
-    md.push_str("The machine-readable version of this table is `repos.json` in this directory — it is kept up to date as the run progresses and is the authoritative list.\n\n");
 
     if !steps.is_empty() {
         md.push_str("## Planned steps\n\n");
@@ -242,13 +288,26 @@ pub(crate) fn render_instruction(
         md.push('\n');
     }
 
+    // Layout, enumerated in the order agents should read it — only naming
+    // files that actually exist for this run.
+    md.push_str("## How to use this directory\n\n");
+    if has_instructions {
+        md.push_str("- `instructions.md` — standing instructions for this workflow; follow them **by the letter** in every step.\n");
+    }
+    if has_prompt {
+        md.push_str("- `prompt.md` — the ask that started this run.\n");
+    }
     md.push_str(&format!(
-        "## How to use this directory\n\n\
-         - This file (`wf-{run_id}-instruction.md`) is the run's mission brief.\n\
-         - Each finished step leaves `step{{N}}-{{name}}.md` (its handoff summary) and `step{{N}}-{{name}}.output.json` (its raw output). Loop iterations add `-iter{{X}}`.\n\
+        "- This file (`{RUN_BRIEF_FILE}`) is the run's mission brief.\n"
+    ));
+    if !repos.is_empty() {
+        md.push_str("- `repos.json` — machine-readable registry of every repo/branch/worktree in play.\n");
+    }
+    md.push_str(
+        "- Each finished step leaves `step{N}-{name}.md` (its handoff summary) and `step{N}-{name}.output.json` (its raw output). Loop iterations add `-iter{X}`.\n\
          - Read the prior step files you need before starting your own work — they are complete, unlike any inline excerpt in your prompt.\n\
          - Before you finish, write YOUR step's `.md` file (the exact path is given in your prompt): what you did/found/changed, files touched, decisions, and anything the next step needs.\n"
-    ));
+    );
     md
 }
 
@@ -303,7 +362,9 @@ pub(crate) fn render_step_md(
 /// are, what to read, and the exact handoff file this step must write.
 pub(crate) fn agent_preamble(
     dir: &str,
-    instruction_file: &str,
+    has_instructions: bool,
+    has_prompt: bool,
+    repos_present: bool,
     prior_mds: &[String],
     own_md: &str,
 ) -> String {
@@ -312,16 +373,28 @@ pub(crate) fn agent_preamble(
     } else {
         prior_mds.join(", ")
     };
-    format!(
-        "[workflow context]\n\
-         Context directory: {dir}\n\
-         - Read {instruction_file} first: the run's mission, goals, and the repos/branches (source and destination) it operates on.\n\
-         - repos.json — machine-readable list of every repo/branch/worktree in play.\n\
-         - Prior step summaries: {prior}\n\
+    let mut md = format!("[workflow context]\nContext directory: {dir}\nRead, in order:\n");
+    if has_instructions {
+        md.push_str(
+            "- instructions.md — standing instructions for this workflow; follow them **by the letter** in every step.\n",
+        );
+    }
+    if has_prompt {
+        md.push_str("- prompt.md — the ask that started this run.\n");
+    }
+    md.push_str(&format!(
+        "- {RUN_BRIEF_FILE} — the run's mission, goals, and the repos/branches (source and destination) it operates on.\n"
+    ));
+    if repos_present {
+        md.push_str("- repos.json — machine-readable list of every repo/branch/worktree in play.\n");
+    }
+    md.push_str(&format!(
+        "- Prior step summaries: {prior}\n\
          Read the files you need before starting.\n\n\
          [your handoff — required]\n\
          When finished, write a complete summary of what you did/found/changed (files touched, decisions, anything the next step needs) to: {dir}/{own_md}\n\n"
-    )
+    ));
+    md
 }
 
 /// Handle on one run's context directory. `dir = None` = disabled (creation
@@ -333,6 +406,11 @@ pub(crate) struct RunContextFiles {
     dir: Option<PathBuf>,
     run_id: String,
     repos: Mutex<Vec<RepoEntry>>,
+    /// `base_name` (no extension) of the last step `persist_step` recorded as
+    /// content-bearing: `error.is_none() && !is_utility_kind(kind)`. Source
+    /// for `write_final_output` — the run's deliverable is whatever the last
+    /// substantive, successful step left behind.
+    content_step: Mutex<Option<String>>,
 }
 
 impl RunContextFiles {
@@ -345,6 +423,7 @@ impl RunContextFiles {
                 dir: Some(dir),
                 run_id: run_id.to_string(),
                 repos: Mutex::new(vec![]),
+                content_step: Mutex::new(None),
             },
             Err(e) => {
                 tracing::warn!("workflow-context: create {} failed: {e}", dir.display());
@@ -358,6 +437,7 @@ impl RunContextFiles {
             dir: None,
             run_id: run_id.to_string(),
             repos: Mutex::new(vec![]),
+            content_step: Mutex::new(None),
         }
     }
 
@@ -365,13 +445,39 @@ impl RunContextFiles {
         self.dir.as_ref().map(|d| d.to_string_lossy().into_owned())
     }
 
-    pub fn instruction_name(&self) -> String {
-        format!("wf-{}-instruction.md", self.run_id)
+    /// Name of the auto-generated run brief — always `RUN_BRIEF_FILE`.
+    // TODO(task 5): unused until an API/UI surface wants to name this file
+    // without reaching for the constant directly.
+    #[allow(dead_code)]
+    pub fn brief_name(&self) -> String {
+        RUN_BRIEF_FILE.to_string()
     }
 
-    pub fn write_instruction(&self, content: &str) {
-        let name = self.instruction_name();
-        self.write_file(&name, content);
+    pub fn write_brief(&self, content: &str) {
+        self.write_file(RUN_BRIEF_FILE, content);
+    }
+
+    /// Verbatim copy of the workflow's standing instructions. Caller only
+    /// calls this when the field is non-empty (see `has_file`/callers).
+    pub fn write_instructions_md(&self, content: &str) {
+        self.write_file(INSTRUCTIONS_FILE, content);
+    }
+
+    /// Verbatim copy of this run's prompt/ask.
+    pub fn write_prompt_md(&self, content: &str) {
+        self.write_file(PROMPT_FILE, content);
+    }
+
+    /// General-purpose named write (e.g. `jira-<KEY>.md`) — the public face
+    /// of the internal best-effort writer. True on success. Consumed by
+    /// `prepare_context` for `jira-<KEY>.md`.
+    pub fn write_named(&self, name: &str, content: &str) -> bool {
+        self.write_file(name, content)
+    }
+
+    /// Whether `name` exists in this run's context dir (disabled ⇒ false).
+    pub fn has_file(&self, name: &str) -> bool {
+        self.dir.as_ref().is_some_and(|d| d.join(name).exists())
     }
 
     /// Replace the registry (run start) and persist `repos.json`.
@@ -494,7 +600,59 @@ impl RunContextFiles {
                 lines.push(format!("context: wrote {base_name}.md"));
             }
         }
+        // Track the run's current deliverable candidate: the latest step that
+        // succeeded (no error) and isn't bookkeeping/control-only. Overwritten
+        // by every later qualifying step — `write_final_output` reads whatever
+        // this points at when the run concludes.
+        if error.is_none() && !is_utility_kind(kind) {
+            *self.content_step.lock().unwrap() = Some(base_name.to_string());
+        }
         lines
+    }
+
+    /// Copy the last content-bearing, error-free step's `.md` to
+    /// `FINAL_OUTPUT_FILE`. `None` when disabled, no qualifying step ran yet,
+    /// or the source file is unreadable — best-effort, like every write here.
+    /// Returns the copied bytes (the caller uses them for delivery) on success.
+    pub fn write_final_output(&self) -> Option<Vec<u8>> {
+        let dir = self.dir.as_ref()?;
+        let base = self.content_step.lock().unwrap().clone()?;
+        let bytes = match std::fs::read(dir.join(format!("{base}.md"))) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("workflow-context({}): read {base}.md for final-output failed: {e}", self.run_id);
+                return None;
+            }
+        };
+        if let Err(e) = std::fs::write(dir.join(FINAL_OUTPUT_FILE), &bytes) {
+            tracing::warn!("workflow-context({}): write {FINAL_OUTPUT_FILE} failed: {e}", self.run_id);
+        }
+        Some(bytes)
+    }
+
+    /// The full `[workflow context]` preamble for an agent-backed step: reads
+    /// what's actually on disk for this run (instructions.md/prompt.md/repos)
+    /// so every call site stays in sync without re-deriving the flags itself,
+    /// builds the step's own handoff-file name via `step_base_name`, and hands
+    /// off to `agent_preamble`. Disabled context files ⇒ `""` (no dir to point
+    /// an agent at), matching every other best-effort method here.
+    pub fn preamble_for(
+        &self,
+        step_no: usize,
+        display_name: &str,
+        iter: Option<u64>,
+        inner_idx: Option<usize>,
+    ) -> String {
+        let Some(dir) = self.dir_str() else { return String::new() };
+        let own_md = format!("{}.md", step_base_name(step_no, display_name, iter, inner_idx));
+        agent_preamble(
+            &dir,
+            self.has_file(INSTRUCTIONS_FILE),
+            self.has_file(PROMPT_FILE),
+            !self.repos().is_empty(),
+            &self.list_step_mds(),
+            &own_md,
+        )
     }
 
     fn write_repos_json(&self) {
@@ -509,7 +667,7 @@ impl RunContextFiles {
         match std::fs::write(dir.join(name), content) {
             Ok(()) => true,
             Err(e) => {
-                tracing::warn!("workflow-context: write {name} failed: {e}");
+                tracing::warn!("workflow-context({}): write {name} failed: {e}", self.run_id);
                 false
             }
         }
@@ -571,9 +729,10 @@ mod tests {
         assert_eq!(t, json!({"repo_id": "R1", "worktree": "/w", "base": "develop"}));
     }
 
-    #[test]
-    fn instruction_lists_mission_repos_steps() {
-        let repos = vec![RepoEntry {
+    /// One resolved repo entry — a sample non-empty `repos` list for tests
+    /// that only care that repos WERE declared, not the specific shape.
+    fn sample_repos() -> Vec<RepoEntry> {
+        vec![RepoEntry {
             repo: "otto_os".into(),
             repo_id: Some("r1".into()),
             kind: "branch".into(),
@@ -582,9 +741,14 @@ mod tests {
             worktree: Some("/w/x".into()),
             base: Some("main".into()),
             error: None,
-        }];
+        }]
+    }
+
+    #[test]
+    fn instruction_lists_mission_repos_steps() {
+        let repos = sample_repos();
         let input = json!({"msg": "Write tests", "goals": ["tests pass"], "trigger": "chat"});
-        let md = render_instruction(
+        let md = render_brief(
             "UI-TEST",
             "desc",
             "run1",
@@ -594,14 +758,40 @@ mod tests {
                 ("Start".into(), "manual_trigger".into()),
                 ("Write tests".into(), "agent_prompt".into()),
             ],
+            false,
+            false,
         );
-        assert!(md.contains("wf-run1-instruction"), "self-references its filename");
+        assert!(md.contains("run-brief.md"), "self-references its filename");
         assert!(md.contains("feat/x") && md.contains("main"), "repos table has work + source");
         assert!(md.contains("Write tests"));
         assert!(md.contains("repos.json"));
         assert!(md.contains("Trigger: chat"));
         assert!(md.contains("tests pass"));
         assert!(md.contains("step{N}-{name}.md"), "explains the step-file protocol");
+    }
+
+    #[test]
+    fn brief_conditional_sections() {
+        let md = render_brief("W", "", "r1", &json!({"prompt":"do it"}), &[], &[], true, true);
+        assert!(md.contains("run-brief.md") && !md.contains("wf-r1-instruction"));
+        assert!(md.contains("instructions.md") && md.contains("prompt.md"));
+        assert!(!md.contains("repos.json"), "no repos declared → no repos.json guidance");
+        assert!(md.contains("## Repos & branches") && md.contains("_No repos declared for this run._"), "empty case still gets the heading + placeholder as signal");
+        let md2 = render_brief("W", "", "r1", &json!({}), &sample_repos(), &[], false, false);
+        assert!(md2.contains("repos.json"));
+        assert!(!md2.contains("instructions.md — standing"), "no instructions → not referenced");
+    }
+
+    #[test]
+    fn brief_mission_dedups_msg_equal_to_prompt() {
+        // normalize_prompt copies msg into prompt when prompt is absent — the
+        // brief must not then show the identical line twice under two labels.
+        let md = render_brief("W", "", "r1", &json!({"msg": "do it", "prompt": "do it"}), &[], &[], false, false);
+        assert!(md.contains("**Prompt:** do it"));
+        assert!(!md.contains("**Message:** do it"), "msg row skipped when identical to prompt");
+        // Distinct msg/prompt still both render.
+        let md2 = render_brief("W", "", "r1", &json!({"msg": "raw msg", "prompt": "distinct prompt"}), &[], &[], false, false);
+        assert!(md2.contains("**Message:** raw msg") && md2.contains("**Prompt:** distinct prompt"));
     }
 
     #[test]
@@ -624,11 +814,22 @@ mod tests {
 
     #[test]
     fn preamble_names_files_and_own_target() {
-        let p = agent_preamble("/d", "wf-r-instruction.md", &["step1-a.md".into()], "step2-b.md");
-        assert!(p.contains("/d") && p.contains("wf-r-instruction.md"));
+        let p = agent_preamble("/d", true, true, true, &["step1-a.md".into()], "step2-b.md");
+        assert!(p.contains("/d") && p.contains("run-brief.md"));
         assert!(p.contains("step1-a.md") && p.contains("step2-b.md"));
-        let p = agent_preamble("/d", "wf-r-instruction.md", &[], "step1-a.md");
+        let p = agent_preamble("/d", false, false, false, &[], "step1-a.md");
         assert!(p.contains("first step"));
+    }
+
+    #[test]
+    fn preamble_conditional_files() {
+        let p = agent_preamble("/d", true, true, false, &[], "step1-a.md");
+        assert!(p.contains("instructions.md") && p.contains("by the letter"));
+        assert!(p.contains("prompt.md") && p.contains("run-brief.md"));
+        assert!(!p.contains("repos.json"));
+        let p2 = agent_preamble("/d", false, false, true, &[], "step1-a.md");
+        assert!(!p2.contains("instructions.md") && !p2.contains("prompt.md"));
+        assert!(p2.contains("repos.json"));
     }
 
     #[test]
@@ -636,8 +837,8 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let f = RunContextFiles::create(td.path(), "r1");
         assert!(f.dir_str().unwrap().ends_with("workflow-context/r1"));
-        f.write_instruction("# hi");
-        assert!(td.path().join("workflow-context/r1/wf-r1-instruction.md").exists());
+        f.write_brief("# hi");
+        assert!(td.path().join("workflow-context/r1/run-brief.md").exists());
         let logs = f.persist_step("step1-a", "log", "a", &json!({"k": "v"}), &[], None, None);
         assert!(td.path().join("workflow-context/r1/step1-a.md").exists());
         assert!(td.path().join("workflow-context/r1/step1-a.output.json").exists());
@@ -647,6 +848,51 @@ mod tests {
         let d = RunContextFiles::disabled("rX");
         assert!(d.dir_str().is_none());
         assert!(d.persist_step("s", "log", "a", &json!({}), &[], None, None).is_empty());
+    }
+
+    #[test]
+    fn named_writes_and_has_file() {
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "r6");
+        assert_eq!(f.brief_name(), "run-brief.md");
+        assert!(!f.has_file("instructions.md"));
+        f.write_instructions_md("standing rules");
+        assert!(f.has_file("instructions.md"));
+        f.write_prompt_md("the ask");
+        assert!(f.has_file("prompt.md"));
+        assert!(f.write_named("jira-ABC-1.md", "ticket body"));
+        assert!(f.has_file("jira-ABC-1.md"));
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("workflow-context/r6/jira-ABC-1.md")).unwrap(),
+            "ticket body"
+        );
+        // Disabled handle: no-ops, never panics.
+        let d = RunContextFiles::disabled("rY");
+        assert!(!d.has_file("prompt.md"));
+        assert!(!d.write_named("x.md", "y"));
+    }
+
+    #[test]
+    fn final_output_last_content_step() {
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "r9");
+        f.persist_step("step1-prep", "prepare_context", "prep", &json!({"jira":{"found":false}}), &[], None, None);
+        f.persist_step("step2-report", "agent_prompt", "report", &json!({"reply":"THE DELIVERABLE"}), &[], None, None);
+        f.persist_step("step3-notify", "channel_notify", "notify", &json!({"sent":true}), &[], None, None);
+        let bytes = f.write_final_output().expect("copied");
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.contains("THE DELIVERABLE"));
+        assert!(td.path().join("workflow-context/r9/final-output.md").exists());
+    }
+
+    #[test]
+    fn final_output_skips_errored_and_handles_none() {
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "r10");
+        f.persist_step("step1-x", "agent_prompt", "x", &Value::Null, &[], Some("boom"), None);
+        assert!(f.write_final_output().is_none(), "errored step is not a deliverable");
+        let d = RunContextFiles::disabled("r11");
+        assert!(d.write_final_output().is_none());
     }
 
     #[test]
