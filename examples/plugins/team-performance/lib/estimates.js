@@ -81,16 +81,18 @@ function evidenceLine(c) {
   return ` change={commits:${c.commits}, files:${c.files}, +${c.insertions}/-${c.deletions}; repos:[${repos}]; subjects:[${subs}]}`;
 }
 
-/** The default, editable calibration rubric (casino-platform scoping norms). */
+// Default, editable calibration rubric — GENERIC software-scoping norms. Teams
+// tailor it to their own domain in Settings (stored in their data dir, never
+// in this repo); the shipped defaults name no product, provider, or repo.
 const DEFAULT_RUBRIC = [
-  'Trivial change (log-noise/config/copy tweak, or a version bump — even one propagated across many services): 0.25–0.5d. A bump repeated across N repos is still ONE ~0.5d task, not N.',
-  'Small change to an existing service (add a filter/field/endpoint, a few files): 1–3d.',
-  'Reverse integration (the game provider implements our API, following an existing pattern): ~1d.',
-  'Full new game-provider integration (we implement the provider API from scratch): ~15d (3 weeks).',
-  'Full integration WITH significant caveats or infra that must be rewritten in many places (e.g. Mega, Digitain): 30–40d (1.5–2 months).',
-  'Judge the CORE work, not mechanical fan-out: if one repo holds an 18-file rewrite and 15 others get a 1-line bump, size the 18-file core plus a little glue — not the sum.',
+  'Trivial change (config/copy tweak, or a dependency/version bump — even one propagated across many services): 0.25–0.5d. A bump repeated across N repos is still ONE ~0.5d task, not N.',
+  'Small change to an existing component (add a field/endpoint/flag, a few files): 1–3d.',
+  'Scaffolding a new component/module by copying an existing template or pattern with minor changes: small (~1d) despite the line count.',
+  'A new self-contained module/service built from scratch: substantially larger (days to weeks by its real complexity).',
+  'A large cross-cutting feature touching many parts of the system: weeks to months by scope.',
+  'Judge the CORE work, not mechanical fan-out: if one place holds a big rewrite and many others get a 1-line change, size the core plus a little glue — not the sum.',
   'A tiny diff is NOT automatically trivial: a one-line fix to a subtle bug/race/prod issue can be days of investigation. Size the understanding+debugging, not just the lines changed. Only mechanical small changes (bump/config/rename) are cheap.',
-  'A LARGE diff is NOT automatically big: a reverse integration / new provider repo (koala-<x>-go) copied from an existing one is ~1d despite the line count. Discount churn — reverts and repeated refactors of the same new code inflate lines without adding scope; count the net novel work once.',
+  'A LARGE diff is NOT automatically big: code copied/scaffolded from an existing pattern is low effort despite the line count. Discount churn — reverts and repeated refactors of the same new code inflate lines without adding scope; count the net novel work once.',
 ];
 
 function batchPrompt(records, rubric, corrections, instructions) {
@@ -113,7 +115,7 @@ Use the ACTUAL CODE CHANGE (the \`change=\` evidence: files touched, lines added
 
 Diff size cuts BOTH ways — it is a signal, not a verdict:
  (a) A TINY diff can be LARGE effort when the work was INVESTIGATION — root-causing a subtle production bug/race, finding the one config value that fixes it, understanding a gnarly system before a one-line fix. Read the type (Bug), description and commit subjects ("fix race", "root cause", "investigate", "reproduce") and size the understanding, not the lines.
- (b) A LARGE diff can be SMALL effort when it is COPY-PASTE or CHURN. A reverse integration or a NEW provider repo (e.g. koala-<provider>-go) that mirrors an existing one is copied structure with minor changes — size it by the rubric (~1d) EVEN IF it is hundreds of lines across many files; the novel work is small. Likewise discount CHURN: reverts, and repeated refactors of the author's own just-written code, inflate line counts without adding scope — count the NET novel work once, not every rewrite. The integration rules in the rubric are STRONG priors that override raw line counts.
+ (b) A LARGE diff can be SMALL effort when it is COPY-PASTE or CHURN. Code scaffolded from an existing template/pattern, or a new module that mirrors an existing one with minor changes, is copied structure — size it by the rubric EVEN IF it is hundreds of lines across many files; the novel work is small. Likewise discount CHURN: reverts, and repeated refactors of the author's own just-written code, inflate line counts without adding scope — count the NET novel work once, not every rewrite. The rubric rules are STRONG priors that override raw line counts.
 Do NOT inflate: estimate the genuinely-new engineering, not the byte count.
 
 Calibration rubric (follow it):

@@ -104,13 +104,13 @@ test('changeFingerprint invalidates the cache as the diff grows; prompt embeds e
   const p = E.batchPrompt([grown]);
   assert.ok(p.includes('change={commits:6, files:18, +900/-1300'), 'diff evidence embedded');
   assert.ok(p.includes('Calibration rubric'), 'rubric present');
-  assert.ok(p.includes('Reverse integration'), 'default rubric line present');
+  assert.ok(p.includes('Scaffolding a new component'), 'default rubric line present');
 });
 
 test('custom rubric overrides the default lines', () => {
   const p = E.batchPrompt([rec({ key: 'R-1' })], ['Everything is exactly 2 days.']);
   assert.ok(p.includes('Everything is exactly 2 days.'));
-  assert.ok(!p.includes('Reverse integration'), 'default lines replaced');
+  assert.ok(!p.includes('Scaffolding a new component'), 'default lines replaced');
 });
 
 test('older prompt-version estimates are re-selected', () => {

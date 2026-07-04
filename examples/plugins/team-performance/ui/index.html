@@ -1431,7 +1431,7 @@
                   <span class="lbl">Evidence window (months)</span><input id="cfg-ev-months" type="number" min="1" max="120" value="${config.evidence_months ?? 18}" title="how far back to collect git diff evidence (files/lines/commits) fed to the estimator">
                 </div>
                 <h3>Calibration rubric <span class="dim">(one rule per line; blank = built-in defaults)</span> <a class="rub-default" style="font-size:11px">use defaults</a></h3>
-                <textarea id="cfg-rubric" rows="6" style="width:100%;font:12px/1.4 ui-monospace,monospace" placeholder="e.g. Reverse integration: ~1 day&#10;Full new provider integration: ~15 days">${esc((config.estimate_rubric || []).join('\n'))}</textarea>
+                <textarea id="cfg-rubric" rows="6" style="width:100%;font:12px/1.4 ui-monospace,monospace" placeholder="One scoping rule per line, e.g.&#10;Small change to an existing component: 1-3 days&#10;New module built from scratch: ~15 days">${esc((config.estimate_rubric || []).join('\n'))}</textarea>
                 <h3>Extra estimator instructions <span class="dim">(appended to the estimation prompt; blank = none)</span></h3>
                 <textarea id="cfg-est-instr" rows="3" style="width:100%;font:12px/1.4 ui-monospace,monospace" placeholder="e.g. Be stricter on bug tickets without a linked commit.">${esc(config.estimate_instructions || '')}</textarea>
                 <h3>Workers <span class="dim">(batches split across providers in parallel)</span></h3>
