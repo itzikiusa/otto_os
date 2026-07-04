@@ -91,7 +91,7 @@ function buildIndexAsync(repos, config) {
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       reject(new Error('git index timed out'));
-    }, 20 * 60 * 1000);
+    }, 60 * 60 * 1000); // large repo fleets: parallel fetch + ~100s of log walks
     let out = '';
     child.stdout.on('data', (c) => (out += c));
     child.on('error', (e) => {

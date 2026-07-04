@@ -390,13 +390,48 @@ module.exports = { buildIndex, featureIndex, branchOfMerge, KEY_RE, PLACEHOLDER_
 // the serialized index on stdout. The git walk is all blocking execFileSync —
 // running it in a child keeps the sidecar's event loop (scan status, views)
 // responsive through multi-minute fetch+log passes.
+//
+// Fetch runs FIRST as a parallel pool (the walk then runs with fetch off):
+// with a large repo fleet, serial 30s-timeout fetches alone could take the
+// better part of an hour.
+async function prefetch(repos, concurrency = 8) {
+  const { spawn } = require('node:child_process');
+  const queue = [...repos];
+  const fetched = {};
+  const one = (r) =>
+    new Promise((resolve) => {
+      const child = spawn('git', ['-C', r.path, 'fetch', '--prune', '--quiet'], { stdio: 'ignore' });
+      const timer = setTimeout(() => child.kill('SIGKILL'), 30000);
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        fetched[r.name] = code === 0;
+        resolve();
+      });
+      child.on('error', () => {
+        clearTimeout(timer);
+        fetched[r.name] = false;
+        resolve();
+      });
+    });
+  const lanes = Array.from({ length: concurrency }, async () => {
+    while (queue.length) await one(queue.shift());
+  });
+  await Promise.all(lanes);
+  return fetched;
+}
+
 if (require.main === module) {
   let buf = '';
   process.stdin.on('data', (c) => (buf += c));
-  process.stdin.on('end', () => {
+  process.stdin.on('end', async () => {
     try {
       const { repos, config } = JSON.parse(buf || '{}');
-      const idx = buildIndex(repos || [], config || {});
+      const cfg = { ...(config || {}) };
+      let fetched = {};
+      if (cfg.git_fetch !== false) fetched = await prefetch(repos || []);
+      cfg.git_fetch = false;
+      const idx = buildIndex(repos || [], cfg);
+      idx.fetched = fetched;
       process.stdout.write(
         JSON.stringify({
           by_key: Object.fromEntries(idx.byKey),
