@@ -213,14 +213,34 @@ async fn store_snip(ctx: &ServerCtx, bytes: &[u8], source: &str) -> Result<Snip,
 }
 
 /// Best-effort retention sweep: drop snip file sets older than `RETENTION_DAYS`.
+/// A snip whose ANNOTATED file was touched recently survives even past the
+/// cutoff — an old snip re-opened in an editor is being actively worked on, and
+/// deleting it mid-session would 404 its next auto-copy. Also reaps orphaned
+/// `capture-*.pending.png` scratch files (a daemon killed mid-capture leaks
+/// one; they're keyed off no sidecar, so nothing else ever removes them).
 async fn prune_old(ctx: &ServerCtx) {
     let cutoff = Utc::now() - chrono::Duration::days(RETENTION_DAYS);
+    let cutoff_sys = std::time::SystemTime::now()
+        - Duration::from_secs(60 * 60 * 24 * RETENTION_DAYS as u64);
+    let pending_cutoff = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
     let Ok(mut entries) = tokio::fs::read_dir(snips_dir(ctx)).await else {
         return;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name();
-        let Some(id) = name.to_str().and_then(|n| n.strip_suffix(".json")) else {
+        let Some(name) = name.to_str() else { continue };
+        if name.ends_with(".pending.png") || name.ends_with(".tmp") {
+            let stale = tokio::fs::metadata(entry.path())
+                .await
+                .and_then(|m| m.modified())
+                .map(|m| m < pending_cutoff)
+                .unwrap_or(false);
+            if stale {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+            continue;
+        }
+        let Some(id) = name.strip_suffix(".json") else {
             continue;
         };
         let id = id.to_string();
@@ -233,11 +253,20 @@ async fn prune_old(ctx: &ServerCtx) {
         let Ok(created) = chrono::DateTime::parse_from_rfc3339(&snip.created_at) else {
             continue;
         };
-        if created.with_timezone(&Utc) < cutoff {
-            let _ = tokio::fs::remove_file(png_path(ctx, &id)).await;
-            let _ = tokio::fs::remove_file(annotated_path(ctx, &id)).await;
-            let _ = tokio::fs::remove_file(sidecar_path(ctx, &id)).await;
+        if created.with_timezone(&Utc) >= cutoff {
+            continue;
         }
+        let recently_edited = tokio::fs::metadata(annotated_path(ctx, &id))
+            .await
+            .and_then(|m| m.modified())
+            .map(|m| m >= cutoff_sys)
+            .unwrap_or(false);
+        if recently_edited {
+            continue;
+        }
+        let _ = tokio::fs::remove_file(png_path(ctx, &id)).await;
+        let _ = tokio::fs::remove_file(annotated_path(ctx, &id)).await;
+        let _ = tokio::fs::remove_file(sidecar_path(ctx, &id)).await;
     }
 }
 
@@ -251,19 +280,32 @@ async fn prune_old(ctx: &ServerCtx) {
 /// clipboard now (logically) holds the image — callers treat `false` as a
 /// degraded success, never a request failure: the snip itself is saved.
 async fn copy_png_to_clipboard(ctx: &ServerCtx, png: &Path) -> bool {
-    if let Err(e) = tokio::fs::copy(png, snips_dir(ctx).join("clipboard-last.png")).await {
-        tracing::warn!("snips: clipboard sink write failed: {e}");
+    // Atomic sink write (temp + rename): uploads/annotated-saves/copies aren't
+    // single-flighted, and the E2E suite reads this file byte-exactly — a
+    // plain truncate-and-copy could be observed half-written.
+    let sink = snips_dir(ctx).join("clipboard-last.png");
+    let tmp = snips_dir(ctx).join(format!("clipboard-last.{}.tmp", otto_core::new_id()));
+    match tokio::fs::copy(png, &tmp).await {
+        Ok(_) => {
+            if let Err(e) = tokio::fs::rename(&tmp, &sink).await {
+                tracing::warn!("snips: clipboard sink rename failed: {e}");
+                let _ = tokio::fs::remove_file(&tmp).await;
+            }
+        }
+        Err(e) => tracing::warn!("snips: clipboard sink write failed: {e}"),
     }
     if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
         return true;
     }
-    // AppleScript string literal: escape backslashes then quotes. The path is
-    // daemon-controlled but may contain spaces ("Application Support").
-    let esc = png.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("set the clipboard to (read (POSIX file \"{esc}\") as \u{ab}class PNGf\u{bb})");
+    // The path is passed OUT-OF-BAND as an argv item (`on run argv`) rather
+    // than interpolated into the AppleScript source — no escaping to get
+    // wrong, structurally injection-free even though the path is
+    // daemon-controlled anyway.
+    let script = "on run argv\nset the clipboard to (read (POSIX file (item 1 of argv)) as \u{ab}class PNGf\u{bb})\nend run";
     let run = tokio::process::Command::new("/usr/bin/osascript")
         .arg("-e")
-        .arg(&script)
+        .arg(script)
+        .arg(png)
         .output();
     match tokio::time::timeout(Duration::from_secs(10), run).await {
         Ok(Ok(out)) if out.status.success() => true,
@@ -522,10 +564,4 @@ mod tests {
         assert!(!valid_id(&"x".repeat(65)));
     }
 
-    #[test]
-    fn applescript_path_escaping() {
-        let p = Path::new("/Users/x/Application Support/we\"ird\\name.png");
-        let esc = p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-        assert_eq!(esc, "/Users/x/Application Support/we\\\"ird\\\\name.png");
-    }
 }

@@ -58,6 +58,11 @@
   let dragMode: 'draw' | 'move' | 'resize' | null = null;
   let dragHandle = 0;
   let dragLast = { x: 0, y: 0 };
+  // Move/resize history is lazy: the pre-drag snapshot is stashed on
+  // pointerdown but only pushed on the first REAL change, so a plain
+  // select-click doesn't grow the undo stack or trigger a no-op re-copy.
+  let dragSnap: Anno[] | null = null;
+  let dragChanged = false;
   let nextId = 1;
   let nextBadge = 1;
 
@@ -118,9 +123,27 @@
 
   // ── History + auto-copy ────────────────────────────────────────────────────
 
+  function cloneAnnos(): Anno[] {
+    return annos.map((a) => ({ ...a, points: a.points?.slice() }));
+  }
+
   function snapshot(): void {
-    undoStack = [...undoStack, annos.map((a) => ({ ...a, points: a.points?.slice() }))];
+    undoStack = [...undoStack, cloneAnnos()];
     redoStack = [];
+  }
+
+  function beginDrag(mode: 'move' | 'resize'): void {
+    dragMode = mode;
+    dragSnap = cloneAnnos();
+    dragChanged = false;
+  }
+
+  /** First real mutation of a move/resize commits the stashed snapshot. */
+  function markDragChanged(): void {
+    if (dragChanged || !dragSnap) return;
+    undoStack = [...undoStack, dragSnap];
+    redoStack = [];
+    dragChanged = true;
   }
 
   function commit(next: Anno[]): void {
@@ -135,7 +158,10 @@
   }
 
   async function copyNow(): Promise<void> {
-    if (!img) return;
+    if (!img) {
+      copyState = 'idle'; // never stick on "Copying…" before the image loads
+      return;
+    }
     if (copyInFlight) {
       copyAgain = true;
       return;
@@ -201,18 +227,14 @@
       if (sel) {
         const h = hitHandle(sel, p.x, p.y);
         if (h !== null) {
-          snapshot();
-          dragMode = 'resize';
+          beginDrag('resize');
           dragHandle = h;
           return;
         }
       }
       const hit = hitTest(annos, p.x, p.y);
       selected = hit?.id ?? null;
-      if (hit) {
-        snapshot();
-        dragMode = 'move';
-      }
+      if (hit) beginDrag('move');
       return;
     }
 
@@ -266,8 +288,10 @@
       const dx = p.x - dragLast.x;
       const dy = p.y - dragLast.y;
       dragLast = p;
+      if (dx !== 0 || dy !== 0) markDragChanged();
       annos = annos.map((a) => (a.id === selected ? moveAnno(a, dx, dy) : a));
     } else if (dragMode === 'resize' && selected !== null) {
+      markDragChanged();
       annos = annos.map((a) => (a.id === selected ? resizeAnno(a, dragHandle, p.x, p.y) : a));
     }
   }
@@ -282,10 +306,11 @@
       }
       drafting = null;
       redraw();
-    } else if (dragMode === 'move' || dragMode === 'resize') {
+    } else if ((dragMode === 'move' || dragMode === 'resize') && dragChanged) {
       scheduleCopy();
     }
     dragMode = null;
+    dragSnap = null;
   }
 
   // ── Text tool ──────────────────────────────────────────────────────────────

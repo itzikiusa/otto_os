@@ -865,6 +865,27 @@ mod tests {
         policy_for(&m, path)
     }
 
+    // ---- Snips --------------------------------------------------------------
+
+    #[test]
+    fn snips_routes_ride_the_agents_feature() {
+        assert_eq!(pol(Method::GET, "/api/v1/snips"), Require(Agents, View));
+        assert_eq!(pol(Method::POST, "/api/v1/snips"), Require(Agents, Edit));
+        assert_eq!(pol(Method::POST, "/api/v1/snips/capture"), Require(Agents, Edit));
+        assert_eq!(
+            pol(Method::GET, "/api/v1/snips/{id}/image"),
+            Require(Agents, View),
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/snips/{id}/annotated"),
+            Require(Agents, Edit),
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/snips/{id}"),
+            Require(Agents, Edit),
+        );
+    }
+
     // ---- Proof Packs --------------------------------------------------------
 
     #[test]

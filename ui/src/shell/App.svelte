@@ -535,8 +535,13 @@
 {:else if router.module === 'snip'}
   <!-- Snip annotation editor: full-screen canvas, no shell chrome (it gets its
        own Tauri window; in a browser it takes over the current one). Stays
-       behind the login gate — the image fetch needs the bearer token. -->
-  <SnipEditor />
+       behind the login gate — the image fetch needs the bearer token. Keyed by
+       id: the image loads on mount, so an unkeyed editor surviving a
+       snip→snip route change would keep drawing (and auto-copying!) the OLD
+       image onto the new snip. -->
+  {#key router.parts[1]}
+    <SnipEditor />
+  {/key}
 {:else}
 <!-- Center column: banners + notification bell + (agents) TabBar + the module
      router. Extracted to a snippet so the desktop 3-pane and the mobile
