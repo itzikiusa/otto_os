@@ -1,0 +1,6 @@
+interface:
+  display_name: "Skills Reviewer"
+  short_description: "Audits SKILL.md packages for spec quality, examples, references, evals, bloat, and conflicts."
+  default_prompt: "Review this skill package and tell me if it is ready to publish."
+policy:
+  allow_implicit_invocation: true

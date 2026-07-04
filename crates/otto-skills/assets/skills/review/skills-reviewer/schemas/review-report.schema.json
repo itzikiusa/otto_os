@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skill Review JSON Report",
+  "type": "object",
+  "required": ["target", "skill_name", "verdict", "average_score", "scorecard", "findings", "assets"],
+  "properties": {
+    "target": {"type": "string"},
+    "skill_name": {"type": "string"},
+    "verdict": {"type": "string", "enum": ["Ready", "Ready with fixes", "Do not publish"]},
+    "average_score": {"type": "number", "minimum": 0, "maximum": 5},
+    "scorecard": {"type": "object"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "code", "title", "evidence", "why", "fix"],
+        "properties": {
+          "severity": {"type": "string", "enum": ["Critical", "High", "Medium", "Low"]},
+          "code": {"type": "string"},
+          "title": {"type": "string"},
+          "evidence": {"type": "string"},
+          "why": {"type": "string"},
+          "fix": {"type": "string"}
+        }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "required": ["examples", "references", "evals", "scripts"]
+    }
+  }
+}

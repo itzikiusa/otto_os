@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "skill_under_test": "skills-reviewer",
+  "description": "Regression fixtures for the bundled static skills reviewer. Cases cover good, bad, negative, conflict, bloat, and script risk behavior.",
+  "cases": [
+    {
+      "id": "good-focused-skill",
+      "fixture": "cases/good-focused",
+      "task": "Review this focused skill and decide if it is ready to publish.",
+      "expect": {
+        "verdict": "Ready",
+        "min_average_score": 4.0,
+        "must_not_find_severities": ["Critical", "High"],
+        "must_not_find_codes": ["NO_EXAMPLES", "NO_EVALS", "GENERIC_DESCRIPTION", "ASK_CONFLICT", "SKILL_MD_TOO_LONG", "RISKY_SCRIPT_PATTERN"]
+      }
+    },
+    {
+      "id": "bad-bloated-skill",
+      "fixture": "cases/bad-bloated",
+      "task": "Review this bloated catch-all skill.",
+      "expect": {
+        "verdict": "Do not publish",
+        "max_average_score": 3.2,
+        "must_find_codes": ["GENERIC_DESCRIPTION", "SKILL_MD_TOO_LONG"]
+      }
+    },
+    {
+      "id": "bad-conflicting-skill",
+      "fixture": "cases/bad-conflicts",
+      "task": "Review this skill with conflicting instructions.",
+      "expect": {
+        "verdict": "Do not publish",
+        "must_find_codes": ["ASK_CONFLICT"]
+      }
+    },
+    {
+      "id": "bad-no-examples-skill",
+      "fixture": "cases/bad-no-examples",
+      "task": "Review this skill that lacks examples.",
+      "expect": {
+        "verdict": "Ready with fixes",
+        "must_find_codes": ["NO_EXAMPLES"]
+      }
+    },
+    {
+      "id": "bad-script-risk-skill",
+      "fixture": "cases/bad-script-risk",
+      "task": "Review this skill with risky script behavior.",
+      "expect": {
+        "verdict": "Do not publish",
+        "must_find_codes": ["RISKY_SCRIPT_PATTERN"]
+      }
+    }
+  ]
+}

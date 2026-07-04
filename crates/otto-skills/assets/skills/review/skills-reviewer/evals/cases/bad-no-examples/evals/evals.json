@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0",
+  "cases": [
+    {"id": "positive", "kind": "positive", "task": "Review SQL skill"},
+    {"id": "negative", "kind": "negative", "task": "Optimize SQL directly"},
+    {"id": "conflict-bloat-script", "kind": "regression", "task": "conflict bloat script"}
+  ]
+}

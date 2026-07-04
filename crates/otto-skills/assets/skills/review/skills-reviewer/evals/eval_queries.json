@@ -1,0 +1,32 @@
+[
+  {
+    "query": "Can you review this SKILL.md and tell me if it follows best practices?",
+    "should_trigger": true,
+    "reason": "Direct request to review a skill"
+  },
+  {
+    "query": "Audit this skill package for bloat, conflicts, examples, references, and evals",
+    "should_trigger": true,
+    "reason": "Direct audit request"
+  },
+  {
+    "query": "Create a new chart from this spreadsheet",
+    "should_trigger": false,
+    "reason": "Spreadsheet task, not skill review"
+  },
+  {
+    "query": "Rewrite this email to sound more professional",
+    "should_trigger": false,
+    "reason": "Writing task, not skill review"
+  },
+  {
+    "query": "Is this evals.json strong enough for a skill I am building?",
+    "should_trigger": true,
+    "reason": "Skill eval review"
+  },
+  {
+    "query": "Find the latest hotels in Prague",
+    "should_trigger": false,
+    "reason": "Travel recommendation, not skill review"
+  }
+]

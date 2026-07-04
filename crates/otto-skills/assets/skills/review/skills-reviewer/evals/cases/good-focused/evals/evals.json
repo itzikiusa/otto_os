@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0",
+  "cases": [
+    {"id": "positive-d2-review", "kind": "positive", "task": "Review a D2 skill", "expect": {"verdict": "review"}},
+    {"id": "negative-plain-diagram", "kind": "negative", "task": "Draw a D2 diagram", "expect": {"should_trigger": false}},
+    {"id": "conflict-bloat-script", "kind": "regression", "task": "Check conflict bloat script coverage", "expect": {"mentions": ["conflict", "bloat", "script"]}}
+  ]
+}
