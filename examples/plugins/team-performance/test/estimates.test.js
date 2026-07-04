@@ -36,8 +36,8 @@ test('selectTargets: window filter, cache hits skipped, hash mismatch re-selecte
   const cached = rec({ key: 'R-4' });
   const changed = rec({ key: 'R-5' });
   const cache = {
-    'R-4': { hash: E.contentHash(cached), days: 2, routine: false },
-    'R-5': { hash: 'stale-hash', days: 2, routine: false },
+    'R-4': { hash: E.contentHash(cached), days: 2, routine: false, v: 3 },
+    'R-5': { hash: 'stale-hash', days: 2, routine: false, v: 3 },
   };
   const keys = E.selectTargets([recent, old, open, cached, changed], cache, 6, NOW).map((r) => r.key);
   assert.ok(keys.includes('R-1'), 'recent done selected');
@@ -90,4 +90,31 @@ test('runEstimation: caches results, splits batches across workers, falls back o
   const res2 = await E.runEstimation({ records, cache, windowMonths: 6, maxBatches: 10, workers: [{ provider: 'claude', model: '' }], agentRun, nowMs: NOW });
   assert.equal(res2.estimated, 0);
   assert.equal(calls.length, before, 'no calls when fully cached');
+});
+
+test('changeFingerprint invalidates the cache as the diff grows; prompt embeds evidence', () => {
+  const base = rec({ key: 'C-1', git_change: { commits: 1, files: 1, insertions: 5, deletions: 0 } });
+  const grown = rec({ key: 'C-1', git_change: { commits: 6, files: 18, insertions: 900, deletions: 1300 } });
+  const cache = {};
+  // First estimate caches at the small fingerprint.
+  cache['C-1'] = { hash: E.contentHash(base), days: 1, routine: false, v: 3 };
+  assert.equal(E.selectTargets([base], cache, 6, NOW).length, 0, 'unchanged small diff stays cached');
+  assert.equal(E.selectTargets([grown], cache, 6, NOW).length, 1, 'a much larger diff re-estimates');
+
+  const p = E.batchPrompt([grown]);
+  assert.ok(p.includes('change={commits:6, files:18, +900/-1300'), 'diff evidence embedded');
+  assert.ok(p.includes('Calibration rubric'), 'rubric present');
+  assert.ok(p.includes('Reverse integration'), 'default rubric line present');
+});
+
+test('custom rubric overrides the default lines', () => {
+  const p = E.batchPrompt([rec({ key: 'R-1' })], ['Everything is exactly 2 days.']);
+  assert.ok(p.includes('Everything is exactly 2 days.'));
+  assert.ok(!p.includes('Reverse integration'), 'default lines replaced');
+});
+
+test('older prompt-version estimates are re-selected', () => {
+  const r = rec({ key: 'V-1' });
+  const cache = { 'V-1': { hash: E.contentHash(r), days: 3, routine: false, v: 2 } };
+  assert.equal(E.selectTargets([r], cache, 6, NOW).length, 1, 'v2 entry re-estimates under v3');
 });

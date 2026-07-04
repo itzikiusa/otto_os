@@ -247,6 +247,7 @@ function deriveGit(record, gitEntry, opts) {
     last_fix_at: lastFix,
     deployed_at: deployed,
     git_authors: authors,
+    git_change: g.change ?? record.git_change ?? null,
     impl_days_git: implGit,
     fix_days: fixDays,
     deploy_wait_days: deployWait,
@@ -287,7 +288,6 @@ const inPeriod = (r, sinceMs, untilMs) => {
 // Hierarchy: sub-task rollups + design-from-sub-tasks
 // ---------------------------------------------------------------------------
 
-const RE_DEV_SUBTASK = /develop|^dev\b|coding/i;
 const RE_DESIGN_TYPE = /design/i;
 
 /**
@@ -312,8 +312,10 @@ function enrichHierarchy(records) {
       const t = rCycle(r) ?? rImpl(r) ?? 0;
       designByParent.set(r.parent_key, (designByParent.get(r.parent_key) || 0) + t);
     }
-    if (RE_DEV_SUBTASK.test(r.type)) return { ...r, rollup: true };
-    return r;
+    // EVERY sub-task (dev, QA, design, …) rolls up into its parent story —
+    // the story is the unit of work; counting its breakdown too would double
+    // it and a pile of tiny QA/dev sub-tasks would drown the real stories.
+    return { ...r, rollup: true };
   });
   if (!designByParent.size) return out;
   return out.map((r) =>

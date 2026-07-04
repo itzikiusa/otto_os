@@ -28,6 +28,7 @@ const KEY_RE = /\b[A-Z][A-Z0-9]+-\d+\b/g;
 // — real work that belongs to no story. Tracked separately per author.
 const PLACEHOLDER_RE = /^[A-Z][A-Z0-9]*-0+$/;
 const US = '\x1f';
+const RS = '\x1e';
 
 function git(repoPath, args, opts = {}) {
   try {
@@ -230,6 +231,16 @@ function buildIndex(repos, config = {}) {
   const features = [];
   const unscoped = new Map(); // "name\x1femail" -> {name,email,commits,monthly,last_at}
   const repoActivity = new Map(); // feature-repo raw commit activity per author
+  const changeByKey = new Map(); // key -> diff evidence for the AI estimator
+  const change = (k) => {
+    let c = changeByKey.get(k);
+    if (!c) {
+      c = { commits: 0, fileCount: 0, ins: 0, del: 0, files: new Set(), subjects: new Set(), repos: {} };
+      changeByKey.set(k, c);
+    }
+    return c;
+  };
+  const evidenceSinceArg = config.evidence_since ? [`--since=${config.evidence_since}`] : [];
   const featureRepos = new Set(config.feature_repos || []);
   let hasRepos = false;
 
@@ -355,6 +366,56 @@ function buildIndex(repos, config = {}) {
       }
     }
 
+    // (3b) change evidence: per-key diff stats (files, +/- lines, commit
+    // subjects, per-repo split) so the AI estimator sizes tasks from the ACTUAL
+    // code change, not the ticket prose. Bounded by `evidence_since` (numstat
+    // is verbose) — everything the estimation window covers.
+    if (evidenceSinceArg.length) {
+      const raw = git(r.path, ['log', target, '--no-merges', '--numstat', ...evidenceSinceArg, `--pretty=${RS}%s`], {
+        maxBuffer: 512 * 1024 * 1024,
+      });
+      if (raw) {
+        let curKeys = [];
+        for (const line of raw.split('\n')) {
+          if (line.charCodeAt(0) === 0x1e) {
+            const subject = line.slice(1);
+            curKeys = [...new Set((subject.match(KEY_RE) || []).filter((k) => !PLACEHOLDER_RE.test(k)))];
+            for (const k of curKeys) {
+              const c = change(k);
+              c.commits++;
+              if (c.subjects.size < 10) c.subjects.add(subject.slice(0, 120));
+              c.repos[r.name] = c.repos[r.name] || { commits: 0, ins: 0, del: 0, files: 0 };
+              c.repos[r.name].commits++;
+            }
+            continue;
+          }
+          if (!curKeys.length) continue;
+          const tab1 = line.indexOf('\t');
+          if (tab1 <= 0) continue;
+          const tab2 = line.indexOf('\t', tab1 + 1);
+          if (tab2 < 0) continue;
+          const addS = line.slice(0, tab1);
+          const delS = line.slice(tab1 + 1, tab2);
+          const path = line.slice(tab2 + 1);
+          const add = addS === '-' ? 0 : parseInt(addS, 10) || 0;
+          const del = delS === '-' ? 0 : parseInt(delS, 10) || 0;
+          for (const k of curKeys) {
+            const c = change(k);
+            c.ins += add;
+            c.del += del;
+            c.fileCount++;
+            if (c.files.size < 40) c.files.add(path);
+            const rr = c.repos[r.name];
+            if (rr) {
+              rr.ins += add;
+              rr.del += del;
+              rr.files++;
+            }
+          }
+        }
+      }
+    }
+
     // (4) deploy tags ascending; `--not prev` visits each commit once, so the
     // first tag that reaches a key (or a feature's merge commit) is its
     // earliest prod deployment.
@@ -407,6 +468,22 @@ function buildIndex(repos, config = {}) {
   }
 
   for (const f of features) if (f.deployed_at === undefined) f.deployed_at = null;
+
+  // Fold diff evidence into each key's entry (Sets → capped arrays for JSON).
+  for (const [k, c] of changeByKey) {
+    entry(k).change = {
+      commits: c.commits,
+      files: c.fileCount,
+      insertions: c.ins,
+      deletions: c.del,
+      sample_files: [...c.files],
+      subjects: [...c.subjects],
+      repos: Object.entries(c.repos)
+        .map(([name, s]) => ({ name, ...s }))
+        .sort((a, b) => b.ins + b.del - (a.ins + a.del)),
+    };
+  }
+
   return {
     byKey,
     features,

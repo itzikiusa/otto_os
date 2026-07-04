@@ -18,9 +18,17 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** FNV-1a over the estimation-relevant content of a record. */
+/** Coarse fingerprint of the git change — so an estimate refines as code lands. */
+function changeFingerprint(record) {
+  const c = record.git_change;
+  if (!c) return '';
+  const bucket = (n) => (n <= 0 ? 0 : Math.round(Math.log2(n + 1)));
+  return `f${bucket(c.files)}i${bucket(c.insertions)}d${bucket(c.deletions)}c${bucket(c.commits)}`;
+}
+
+/** FNV-1a over the estimation-relevant content of a record (incl. change size). */
 function contentHash(record) {
-  const s = `${record.summary}|${record.description_snippet || ''}|${record.type}|${record.points ?? ''}`;
+  const s = `${record.summary}|${record.description_snippet || ''}|${record.type}|${record.points ?? ''}|${changeFingerprint(record)}`;
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
@@ -36,12 +44,10 @@ const DAY = 86400000;
  * (months; 0 = no window → everything) — an explicit `sinceMs` cutoff wins
  * over the month window — and not already cached at this hash.
  */
-// Prompt generation version. v2: 0.25–60 range with explicit large-scope
-// guidance + longer description + epic context. v1 entries near the old 30d
-// saturation ceiling are re-estimated — a multi-month system that clipped to
-// ~25-30d halves its author's pace credit.
-const PROMPT_V = 2;
-const SATURATION_D = 25;
+// Prompt generation version. v3: git-diff evidence + editable calibration
+// rubric + strict "size from the ACTUAL change, don't inflate" guidance. Any
+// cached entry from an older prompt is re-estimated once.
+const PROMPT_V = 3;
 
 function selectTargets(records, cache, windowMonths, nowMs, sinceMs = 0) {
   const cutoff = sinceMs > 0 ? sinceMs : windowMonths > 0 ? nowMs - windowMonths * 30 * DAY : -Infinity;
@@ -53,7 +59,9 @@ function selectTargets(records, cache, windowMonths, nowMs, sinceMs = 0) {
     const doneAt = r.eff_done_at ?? r.done_at ?? null;
     if (doneAt !== null && doneAt < cutoff) continue;
     const hit = cache[r.key];
-    if (hit && hit.hash === contentHash(r) && !(hit.v !== PROMPT_V && hit.days >= SATURATION_D)) continue;
+    // Re-estimate when the content/change hash changed OR the prompt version
+    // advanced (older estimates predate the diff-evidence rubric).
+    if (hit && hit.hash === contentHash(r) && hit.v === PROMPT_V) continue;
     out.push(r);
   }
   // Most-recent first — the tasks the lead is actually looking at.
@@ -61,13 +69,42 @@ function selectTargets(records, cache, windowMonths, nowMs, sinceMs = 0) {
   return out;
 }
 
-function batchPrompt(records) {
+/** Compact one-line rendering of a task's git diff evidence for the prompt. */
+function evidenceLine(c) {
+  if (!c || !c.commits) return '';
+  const repos = (c.repos || [])
+    .slice(0, 6)
+    .map((r) => `${r.name}(${r.files}f +${r.ins}/-${r.del})`)
+    .join(', ');
+  const subs = (c.subjects || []).slice(0, 5).map((s) => JSON.stringify(s)).join(', ');
+  return ` change={commits:${c.commits}, files:${c.files}, +${c.insertions}/-${c.deletions}; repos:[${repos}]; subjects:[${subs}]}`;
+}
+
+/** The default, editable calibration rubric (casino-platform scoping norms). */
+const DEFAULT_RUBRIC = [
+  'Trivial change (log-noise/config/copy tweak, or a version bump — even one propagated across many services): 0.25–0.5d. A bump repeated across N repos is still ONE ~0.5d task, not N.',
+  'Small change to an existing service (add a filter/field/endpoint, a few files): 1–3d.',
+  'Reverse integration (the game provider implements our API, following an existing pattern): ~1d.',
+  'Full new game-provider integration (we implement the provider API from scratch): ~15d (3 weeks).',
+  'Full integration WITH significant caveats or infra that must be rewritten in many places (e.g. Mega, Digitain): 30–40d (1.5–2 months).',
+  'Judge the CORE work, not mechanical fan-out: if one repo holds an 18-file rewrite and 15 others get a 1-line bump, size the 18-file core plus a little glue — not the sum.',
+];
+
+function batchPrompt(records, rubric) {
   const lines = records.map((r) => {
     const desc = (r.description_snippet || '').slice(0, 1200);
     const epic = r.epic_hint ? ` part_of=${JSON.stringify(String(r.epic_hint).slice(0, 90))}` : '';
-    return `- key=${r.key} type=${r.type} points=${r.points ?? 'n/a'}${epic} summary=${JSON.stringify(r.summary.slice(0, 200))}${desc ? ` description=${JSON.stringify(desc)}` : ''}`;
+    return `- key=${r.key} type=${r.type} points=${r.points ?? 'n/a'}${epic} summary=${JSON.stringify(r.summary.slice(0, 200))}${desc ? ` description=${JSON.stringify(desc)}` : ''}${evidenceLine(r.git_change)}`;
   });
-  return `You size engineering tasks for a delivery-analytics tool. For EACH task below, estimate the ideal effort in engineering days (fractional allowed, 0.25–60 — do use large values for genuinely huge scope like multi-month features) for an AVERAGE developer familiar with the codebase — the estimate must be developer-agnostic, based only on the work described. Also flag routine work: routine=true when the task is repetitive/mechanical (dependency or version upgrade, config-only change, copy tweak, straightforward port of an existing pattern).
+  const rules = (Array.isArray(rubric) && rubric.length ? rubric : DEFAULT_RUBRIC).map((r) => `  • ${r}`).join('\n');
+  return `You size engineering tasks for a delivery-analytics tool. For EACH task, estimate the IDEAL effort in engineering days (fractional; 0.25–60) for an AVERAGE developer familiar with this codebase. The estimate is developer-AGNOSTIC — ignore who did it, any story points, and any prior estimate; judge the work itself.
+
+CRITICAL: size from the ACTUAL CODE CHANGE (the \`change=\` evidence: files touched, lines added/removed, which repos, commit subjects) far more than from the ticket prose — tickets over- and under-describe. Do NOT inflate. Most tasks are small; give proper, tight numbers. A tiny diff is a tiny task even if the ticket sounds grand; a large multi-file rewrite is large even if the ticket is terse. When there is no change evidence (no code, or evidence omitted), fall back to the description but stay conservative.
+
+Calibration rubric (follow it):
+${rules}
+
+Also flag routine=true for repetitive/mechanical work (version/dependency bump, config-only, copy tweak, straightforward port of an existing pattern).
 
 Tasks:
 ${lines.join('\n')}
@@ -116,7 +153,7 @@ function parseBatch(text, expectedKeys) {
  * → {estimated, failed_batches, remaining}
  */
 async function runEstimation(opts) {
-  const { records, cache, agentRun } = opts;
+  const { records, cache, agentRun, rubric } = opts;
   const nowMs = opts.nowMs || Date.now();
   const targets = selectTargets(records, cache, opts.windowMonths ?? 6, nowMs, opts.sinceMs || 0);
   const maxBatches = opts.maxBatches ?? 40;
@@ -148,12 +185,12 @@ async function runEstimation(opts) {
       if (bi >= workers.length) await sleep(PACE_MS);
       let text = null;
       try {
-        text = await agentRun(batchPrompt(batch), workers[workerIdx]);
+        text = await agentRun(batchPrompt(batch, rubric), workers[workerIdx]);
       } catch {
         // Worker (provider) failed — retry this batch once on the first worker.
         if (workerIdx !== 0) {
           try {
-            text = await agentRun(batchPrompt(batch), workers[0]);
+            text = await agentRun(batchPrompt(batch, rubric), workers[0]);
           } catch {
             text = null;
           }
@@ -170,4 +207,4 @@ async function runEstimation(opts) {
   return { estimated, failed_batches: failed, remaining: Math.max(0, targets.length - total) };
 }
 
-module.exports = { contentHash, selectTargets, batchPrompt, parseBatch, runEstimation, BATCH_SIZE };
+module.exports = { contentHash, selectTargets, batchPrompt, parseBatch, runEstimation, evidenceLine, DEFAULT_RUBRIC, BATCH_SIZE };

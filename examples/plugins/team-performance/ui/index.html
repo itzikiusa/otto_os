@@ -991,6 +991,7 @@
           <tr class="evidence"><td colspan="11"><b>${esc(t.key)}</b> — ${esc(t.summary)}<br>
             ${t.epic_key ? `<span class="dim">Epic ${esc(t.epic_key)} ${esc((t.epic_summary || '').slice(0, 80))}${t.parent_key && t.parent_key !== t.epic_key ? ` › ${esc(t.parent_key)}` : ''} › ${esc(t.key)}</span><br>` : ''}
             <span class="dim">git: ${gitLine}${authors ? ` · authors: ${authors}` : ''}</span><br>
+            ${t.git_change ? `<span class="dim">change: ${t.git_change.commits} commits · ${t.git_change.files} files · +${t.git_change.insertions}/-${t.git_change.deletions}${(t.git_change.repos || []).length ? ` · ${(t.git_change.repos).slice(0,4).map((rr) => `${esc(rr.name)}(${rr.files}f)`).join(', ')}` : ''} <span title="the estimator sizes from this">— fed to AI estimate</span></span><br>` : ''}
             ${kids ? `<details style="margin:4px 0"><summary class="dim">${(t.children || []).length} sub-tasks</summary><table style="margin-top:4px"><thead><tr><th>Key</th><th>Type</th><th>Summary</th><th>Assignee</th><th class="num">Days</th></tr></thead><tbody>${kids}</tbody></table></details>` : ''}
             <span class="row" style="margin:6px 0">
               <button class="small ov-exclude" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" data-cur="${t.excluded_override ? '1' : ''}">${t.excluded_override ? 'Include story' : 'Exclude story'}</button>
@@ -1282,7 +1283,10 @@
                   <span class="lbl">Estimate since</span><input id="cfg-est-since" type="date" value="${esc(config.estimate_since || '')}" title="estimate every task completed after this date (wins over the month window)">
                   <span class="lbl">Window (months, 0 = all)</span><input id="cfg-est-window" type="number" min="0" max="60" value="${config.estimate_window_months}" title="used only when no since-date is set">
                   <span class="lbl">Max batches / scan</span><input id="cfg-est-batches" type="number" min="1" max="200" value="${config.estimate_max_batches}" title="15 issues per batch; the rest continues next scan">
+                  <span class="lbl">Evidence window (months)</span><input id="cfg-ev-months" type="number" min="1" max="120" value="${config.evidence_months ?? 18}" title="how far back to collect git diff evidence (files/lines/commits) fed to the estimator">
                 </div>
+                <h3>Calibration rubric <span class="dim">(one rule per line; blank = built-in defaults)</span></h3>
+                <textarea id="cfg-rubric" rows="6" style="width:100%;font:12px/1.4 ui-monospace,monospace" placeholder="e.g. Reverse integration: ~1 day&#10;Full new provider integration: ~15 days">${esc((config.estimate_rubric || []).join('\n'))}</textarea>
                 <h3>Workers <span class="dim">(batches split across providers in parallel)</span></h3>
                 <div id="workers">${workersHtml}</div>
                 <button class="small" id="wk-add">+ add worker</button>
@@ -1346,6 +1350,8 @@
               estimate_since: $('cfg-est-since').value || '',
               estimate_window_months: parseInt($('cfg-est-window').value, 10),
               estimate_max_batches: parseInt($('cfg-est-batches').value, 10),
+              evidence_months: parseInt($('cfg-ev-months').value, 10),
+              estimate_rubric: $('cfg-rubric').value.split('\n').map((x) => x.trim()).filter(Boolean),
               estimate_workers: workers.length ? workers : undefined,
               feature_repos: [...card.querySelectorAll('.fr-cb')].filter((cb) => cb.checked).map((cb) => cb.value),
               roles: $('cfg-roles').value.split(',').map((x) => x.trim()).filter(Boolean),

@@ -608,7 +608,7 @@ test('enrichHierarchy: dev sub-tasks roll up; design sub-tasks paint the parent 
   const byKey = Object.fromEntries(out.map((r) => [r.key, r]));
   assert.equal(byKey['H-2'].rollup, true, 'dev sub-task rolled up');
   assert.ok(A.isExcluded(byKey['H-2']), 'rolled-up records leave the stats');
-  assert.equal(byKey['H-4'].rollup, undefined, 'QA sub-task stays a standalone work item');
+  assert.equal(byKey['H-4'].rollup, true, 'QA sub-task rolls up too (the story is the work item)');
   assert.equal(byKey['H-5'].rollup, undefined, 'orphan sub-task (parent not in corpus) stays');
   assert.equal(byKey['H-1'].design_days_eff, 3, 'story design = own 1 + design child 2');
 });

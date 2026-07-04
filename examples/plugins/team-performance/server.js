@@ -139,6 +139,8 @@ const DEFAULT_CONFIG = {
   estimate_window_months: 6,
   estimate_since: '', // ISO date; when set it wins over the month window
   estimate_max_batches: 40,
+  estimate_rubric: [], // editable calibration lines; [] = built-in defaults
+  evidence_months: 18, // how far back to collect git diff evidence
   estimate_workers: [{ provider: 'claude', model: '' }],
   feature_repos: [],
   auto_scan_minutes: 15, // 0 = off — silently re-runs the last scan's params
@@ -209,6 +211,17 @@ function validateConfig(body) {
     const s = String(body.estimate_since).trim();
     if (s && Number.isNaN(Date.parse(s))) throw new Error('estimate_since must be an ISO date (or empty)');
     c.estimate_since = s;
+  }
+  if (body.estimate_rubric !== undefined) {
+    if (!Array.isArray(body.estimate_rubric) || !body.estimate_rubric.every((x) => typeof x === 'string')) {
+      throw new Error('estimate_rubric must be a string array');
+    }
+    c.estimate_rubric = body.estimate_rubric.map((x) => x.trim()).filter(Boolean).slice(0, 40);
+  }
+  if (body.evidence_months !== undefined) {
+    const n = Number(body.evidence_months);
+    if (!Number.isInteger(n) || n < 1 || n > 120) throw new Error('evidence_months must be an integer in 1..120');
+    c.evidence_months = n;
   }
   if (body.estimate_workers !== undefined) {
     if (!Array.isArray(body.estimate_workers) || !body.estimate_workers.length || body.estimate_workers.length > 8) {
@@ -521,6 +534,7 @@ async function estimateScope(account, projects, config, job) {
       sinceMs: config.estimate_since ? Date.parse(config.estimate_since) || 0 : 0,
       maxBatches: config.estimate_max_batches,
       workers,
+      rubric: config.estimate_rubric,
       agentRun,
       onProgress: (done, total) => {
         job.fetched = done;
@@ -546,6 +560,7 @@ async function estimateScope(account, projects, config, job) {
       sinceMs: config.estimate_since ? Date.parse(config.estimate_since) || 0 : 0,
       maxBatches: config.estimate_max_batches,
       workers,
+      rubric: config.estimate_rubric,
       agentRun,
       onProgress: (done, total) => {
         job.fetched = done;
@@ -567,7 +582,13 @@ async function runScan(account, projects, full, assignees) {
     // One git pass for the whole scan — every project shares the same repos.
     job.step = config.git_fetch ? 'git fetch + index' : 'git index';
     const repos = await hostRepos();
-    const gitIndex = await buildIndexAsync(repos, config);
+    // Diff evidence covers at least the estimation window (estimate_since wins,
+    // else evidence_months back). ISO date string for `git log --since`.
+    const evMs = config.estimate_since
+      ? Date.parse(config.estimate_since)
+      : Date.now() - (config.evidence_months || 18) * 30 * A.DAY;
+    const gitCfg = { ...config, evidence_since: new Date(evMs).toISOString().slice(0, 10) };
+    const gitIndex = await buildIndexAsync(repos, gitCfg);
     // Always persisted: git-only features (opted-in repos) + unscoped fix work
     // (ABC-0000-style commits — real work that belongs to no story).
     store.writeJsonAtomic(store.featuresPath(DATA_DIR), {
@@ -1056,6 +1077,7 @@ function assigneeView(account, projectsParam, assigneeId, sinceMs = 0) {
       ...lineage(r),
       routine: A.isRoutine(r, sigCounts, estimates[r.key]),
       excluded: A.isExcluded(r),
+      git_change: r.git_change || null,
       suspect_outlier: suspectOutlier(r, base),
       baseline: bucket
         ? { level: hit.level, n: bucket.n, design: bucket.design, impl: bucket.impl, total: bucket.total }
