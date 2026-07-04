@@ -4,8 +4,9 @@
   // the open run + its events straight from the store.
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
+  import RunStageRail from './RunStageRail.svelte';
   import type { OttoRun } from '../../lib/api/types';
-  import { humanize, isTerminal, statusTone } from './runStatus';
+  import { humanize, isTerminal, sourceColor, sourceLabel, statusTone } from './runStatus';
 
   interface Props {
     run: OttoRun;
@@ -79,7 +80,7 @@
 <aside class="detail">
   <header class="d-head">
     <div class="d-title">
-      <span class="badge src-{run.source_kind}">{run.source_kind}</span>
+      <span class="badge src-badge" style="--src: {sourceColor(run.source_kind)}">{sourceLabel(run.source_kind)}</span>
       <strong>{run.title || run.source_ref}</strong>
       <span class="pill {statusTone(run.status)}">{humanize(run.status)}</span>
     </div>
@@ -87,6 +88,11 @@
   </header>
 
   {#if error}<div class="err" role="alert">{error}</div>{/if}
+
+  <!-- where the run is on the pipeline right now -->
+  <section class="block">
+    <RunStageRail status={run.status} />
+  </section>
 
   <section class="block">
     <div class="goal">{run.goal || '(no goal text)'}</div>
@@ -98,7 +104,10 @@
       {/if}
       <span class="dot">·</span>
       <span class="muted">{humanize(run.mode)}</span>
-      {#if run.provider}<span class="dot">·</span><span class="muted">{run.provider}</span>{/if}
+      {#if run.provider}
+        <span class="dot">·</span>
+        <span class="muted mono">{run.provider}{run.model ? ` · ${run.model}` : ''}</span>
+      {/if}
     </div>
   </section>
 
@@ -258,6 +267,11 @@
   .badge {
     font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px;
     border: 1px solid var(--border); color: var(--text-dim); text-transform: capitalize;
+  }
+  .src-badge {
+    color: var(--src);
+    border-color: color-mix(in srgb, var(--src) 40%, var(--border));
+    background: color-mix(in srgb, var(--src) 10%, transparent);
   }
   .pill {
     font-size: 0.7rem; padding: 0.05rem 0.5rem; border-radius: 999px;

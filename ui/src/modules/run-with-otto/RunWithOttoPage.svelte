@@ -8,8 +8,9 @@
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
   import RunLauncher from './RunLauncher.svelte';
   import RunDetail from './RunDetail.svelte';
+  import RunStageRail from './RunStageRail.svelte';
   import type { OttoRun } from '../../lib/api/types';
-  import { humanize, statusTone } from './runStatus';
+  import { humanize, sourceColor, sourceLabel, statusTone } from './runStatus';
 
   // Load the workspace's runs whenever the active workspace changes. This effect
   // reads ONLY ws.currentId (not the run list it loads), so it never self-loops.
@@ -61,11 +62,12 @@
                 onclick={() => selectRun(r)}
               >
                 <div class="run-top">
-                  <span class="badge src-{r.source_kind}">{r.source_kind}</span>
+                  <span class="badge src-badge" style="--src: {sourceColor(r.source_kind)}">{sourceLabel(r.source_kind)}</span>
                   <span class="run-title">{r.title || r.source_ref}</span>
                   <span class="pill {statusTone(r.status)}">{humanize(r.status)}</span>
                 </div>
                 <div class="run-meta">
+                  <RunStageRail status={r.status} mini />
                   {#if r.proof_pack_id && r.proof_status}
                     <ProofStatusChip status={r.proof_status} risk={r.risk_score} compact />
                   {/if}
@@ -74,6 +76,9 @@
                     {#if r.findings_blocking > 0}
                       <span class="blocking">{r.findings_blocking} blocking</span>
                     {/if}
+                  </span>
+                  <span class="agent mono" title="Executing agent (provider · model)">
+                    {r.provider}{r.model ? ` · ${r.model}` : ''}
                   </span>
                   <span class="when">{r.updated_at}</span>
                 </div>
@@ -125,6 +130,12 @@
     font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px;
     border: 1px solid var(--border); color: var(--text-dim); text-transform: capitalize;
   }
+  .src-badge {
+    color: var(--src);
+    border-color: color-mix(in srgb, var(--src) 40%, var(--border));
+    background: color-mix(in srgb, var(--src) 10%, transparent);
+  }
+  .agent { font-size: 0.74rem; font-family: var(--font-mono); }
   .pill {
     font-size: 0.7rem; padding: 0.05rem 0.5rem; border-radius: 999px;
     border: 1px solid transparent; text-transform: capitalize; white-space: nowrap;

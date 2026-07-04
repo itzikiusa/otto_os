@@ -16,6 +16,7 @@ let base = '';
 let wsA = '';
 let wsB = '';
 let repoId = '';
+let repoDir = '';
 let seededRunId = '';
 
 const TERMINAL = ['completed', 'failed', 'rejected', 'cancelled'];
@@ -42,6 +43,7 @@ test.beforeAll(async () => {
   wsB = await seedWorkspace(a.ctx, base);
   const repo = await seedGitRepo(a.ctx, base, wsA);
   repoId = repo.repoId;
+  repoDir = repo.dir;
 
   // Launch a single-agent run; it should drive itself to the approval gate.
   const r = await a.ctx.post(`${base}${V1}/workspaces/${wsA}/runs`, {
@@ -217,6 +219,63 @@ test.describe('run-with-otto API (route → policy → engine → proof → revi
     await ctx.dispose();
   });
 
+  test('launch stores the model override; blank means provider default', async () => {
+    const { ctx } = await apiCtx();
+    const withModel = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/runs`, {
+        data: {
+          source_kind: 'channel',
+          source_ref: 'e2e-model',
+          seed_text: 'Model plumbing check.',
+          mode: 'single_agent',
+          repo_id: repoId,
+          model: 'sonnet',
+        },
+      })
+    ).json();
+    expect(withModel.model).toBe('sonnet');
+    expect(withModel.provider).toBe('claude');
+    const got = await (await ctx.get(`${base}${V1}/runs/${withModel.id}`)).json();
+    expect(got.model, 'model round-trips through the DB').toBe('sonnet');
+    await ctx.post(`${base}${V1}/runs/${withModel.id}/cancel`, { data: {} });
+
+    const noModel = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/runs`, {
+        data: {
+          source_kind: 'channel',
+          source_ref: 'e2e-no-model',
+          seed_text: 'Default model.',
+          mode: 'single_agent',
+          repo_id: repoId,
+        },
+      })
+    ).json();
+    expect(noModel.model, 'absent model → provider default (empty)').toBe('');
+    await ctx.post(`${base}${V1}/runs/${noModel.id}/cancel`, { data: {} });
+    await ctx.dispose();
+  });
+
+  test('repos/detect (the Browse… bridge) is idempotent for a path inside a repo', async () => {
+    const { ctx } = await apiCtx();
+    // Any path INSIDE the seeded repo resolves to its git toplevel and registers
+    // (or returns) one repo — picking the same folder twice must not duplicate.
+    const first = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/repos/detect`, {
+        data: { path: `${repoDir}/` },
+      })
+    ).json();
+    expect(first.id, JSON.stringify(first)).toBeTruthy();
+    const second = await (
+      await ctx.post(`${base}${V1}/workspaces/${wsA}/repos/detect`, {
+        data: { path: `${repoDir}/` },
+      })
+    ).json();
+    expect(second.id).toBe(first.id);
+    const repos = await (await ctx.get(`${base}${V1}/workspaces/${wsA}/repos`)).json();
+    expect(repos.filter((r: any) => r.id === first.id)).toHaveLength(1);
+    await ctx.dispose();
+  });
+
   // NOTE: The webhook ENTRY (`POST /webhooks/{ws}/run`) needs the channel
   // `Bridge`, which the daemon builds at boot only when a root user already
   // exists. The E2E daemon boots empty and onboards root over HTTP afterwards, so
@@ -266,5 +325,36 @@ test.describe('run-with-otto UI', () => {
     await expect(page.getByText('E2E seeded run').first()).toBeVisible({ timeout: 15_000 });
     await expectContentHasHeight(page);
     await expectNoHorizontalOverflow(page);
+  });
+
+  test('the launcher shows source chips, the pipeline rail, and repo/model controls', async ({
+    page,
+  }) => {
+    await openPage(page, 'run-with-otto');
+    // Source chips (what you can paste) — a couple of representatives.
+    await expect(page.getByRole('button', { name: 'Jira' })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: 'GitHub PR' })).toBeVisible();
+    // The pipeline rail — the fixed stage machine, incl. the human gate.
+    await expect(page.getByText('Approval').first()).toBeVisible();
+    await expect(page.getByText('PR draft').first()).toBeVisible();
+    // Repo select lists the seeded repo; Browse… + model input are present.
+    const repoSel = page.getByLabel('Repository');
+    await expect(repoSel).toBeVisible();
+    await expect(repoSel.locator('option', { hasText: 'e2e-repo' })).toHaveCount(1);
+    await expect(page.getByRole('button', { name: 'Browse…' })).toBeVisible();
+    await expect(page.getByLabel('Model override')).toBeVisible();
+    // The in-product differentiation from Workflows.
+    await expect(page.getByRole('link', { name: 'Build a Workflow' })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test('a launched run row carries the mini stage rail and the agent chip', async ({ page }) => {
+    await openPage(page, 'run-with-otto');
+    const row = page.locator('.run', { hasText: 'E2E seeded run' }).first();
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    // The mini rail renders one segment per pipeline step.
+    await expect(row.locator('.rail.mini .seg')).toHaveCount(8);
+    // provider (· model) chip.
+    await expect(row.locator('.agent')).toContainText('claude');
   });
 });

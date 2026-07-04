@@ -5390,6 +5390,8 @@ export interface OttoRun {
   goal: string;
   mode: RunMode;
   provider: string;
+  /** Model override handed to the executing agent ("" = provider default). */
+  model: string;
   repo_id?: string;
   repo_path?: string;
   base_branch?: string;
@@ -5444,6 +5446,8 @@ export interface LaunchRunReq {
   seed_text?: string;
   mode?: RunMode;
   provider?: string;
+  /** Model override (e.g. "opus"); blank/absent = the provider's default. */
+  model?: string;
   repo_id?: string;
   auto_open_pr?: boolean;
   title?: string;

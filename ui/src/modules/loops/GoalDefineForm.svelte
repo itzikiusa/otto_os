@@ -1,13 +1,16 @@
 <script lang="ts">
   import { ws } from '../../lib/stores/workspace.svelte';
   import { loops } from '../../lib/stores/loops.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AcceptanceCriterion, GoalLoopDraft } from '../../lib/api/types';
 
   let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
 
   let seed = $state('');
   let repoPath = $state('');
+  let picking = $state(false);
   let feedback = $state('');
   let defining = $state(false);
   let launching = $state(false);
@@ -19,6 +22,14 @@
   let maxMinutes = $state(30);
   let perPhaseMinutes = $state(10);
   let executorCount = $state(1);
+  // Executor agent: provider from /meta (shell can't take an agent prompt);
+  // model is a free-text alias ("" = provider default).
+  let execProvider = $state('claude');
+  let execModel = $state('');
+  const providers = $derived(
+    (auth.meta?.providers ?? ['claude', 'codex']).filter((p) => p !== 'shell'),
+  );
+  const MODEL_SUGGESTIONS = ['opus', 'sonnet', 'haiku'];
 
   async function define(): Promise<void> {
     const wsId = ws.currentId;
@@ -36,6 +47,8 @@
       maxIterations = d.suggested_limits.max_iterations;
       maxMinutes = Math.round(d.suggested_limits.max_runtime_secs / 60);
       perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
+      execProvider = d.suggested_config.executors[0]?.provider || 'claude';
+      execModel = d.suggested_config.executors[0]?.model || '';
       feedback = '';
     } catch (e) {
       toasts.error('Define failed', e instanceof Error ? e.message : String(e));
@@ -83,6 +96,8 @@
       };
       const executors = Array.from({ length: Math.max(1, executorCount) }, (_, i) => ({
         ...base,
+        provider: execProvider,
+        model: execModel.trim(),
         name: executorCount > 1 ? `${base.name} ${i + 1}` : base.name,
       }));
       const loop = await loops.create(wsId, {
@@ -121,7 +136,10 @@
 
   <section class="block">
     <label class="lbl" for="gl-repo">Repository path</label>
-    <input id="gl-repo" class="in" bind:value={repoPath} placeholder="/absolute/path/to/repo" />
+    <div class="repo-row">
+      <input id="gl-repo" class="in grow" bind:value={repoPath} placeholder="/absolute/path/to/repo" />
+      <button type="button" class="btn" onclick={() => (picking = true)}>Browse…</button>
+    </div>
     <label class="lbl" for="gl-seed">Goal</label>
     <textarea
       id="gl-seed"
@@ -183,6 +201,28 @@
         <label>Per-phase minutes <input class="in num" type="number" min="1" bind:value={perPhaseMinutes} /></label>
         <label>Executors <input class="in num" type="number" min="1" max="6" bind:value={executorCount} /></label>
       </div>
+      <div class="lbl">Executor agent</div>
+      <div class="budget">
+        <label>Provider
+          <select class="in num prov" bind:value={execProvider}>
+            {#each providers as p (p)}
+              <option value={p}>{p}</option>
+            {/each}
+          </select>
+        </label>
+        <label>Model
+          <input
+            class="in num prov"
+            bind:value={execModel}
+            list="gl-models"
+            placeholder="default"
+            title="Model for the executor agents — blank uses the provider default"
+          />
+          <datalist id="gl-models">
+            {#each MODEL_SUGGESTIONS as m (m)}<option value={m}></option>{/each}
+          </datalist>
+        </label>
+      </div>
       <p class="muted small">
         Executors run sequentially on an isolated branch <code>goal-loop/&lt;id&gt;</code> — your working
         tree is never touched.
@@ -196,6 +236,18 @@
     </div>
   {/if}
 </div>
+
+{#if picking}
+  <FolderPicker
+    title="Choose a repository"
+    gitOnly
+    onpick={(p) => {
+      repoPath = p;
+      picking = false;
+    }}
+    onclose={() => (picking = false)}
+  />
+{/if}
 
 <style>
   .form {
@@ -288,6 +340,14 @@
   }
   .num {
     width: 80px;
+  }
+  .prov {
+    width: 120px;
+  }
+  .repo-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
   }
   .budget {
     display: flex;
