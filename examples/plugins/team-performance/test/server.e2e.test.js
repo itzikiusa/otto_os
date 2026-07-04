@@ -723,3 +723,26 @@ test('fix inclusion resolves through applyOverrides (auto + explicit + partial)'
   assert.equal(t.include_fixes_override, null, 'reset clears the explicit choice');
   assert.equal(typeof t.include_fixes, 'boolean', 'auto resolution still yields a boolean');
 });
+
+test('combined report: team overview + a section per developer, maskable', async () => {
+  const start = await api('POST', '/report', { account: 'acc1', scope: 'combined', kind: 'month', year: 2026, month: 6, mask: true });
+  assert.equal(start.status, 200);
+  let s;
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    s = (await api('GET', `/report/status?job=${encodeURIComponent(start.json.job)}`)).json;
+    if (s.state !== 'running') break;
+    if (Date.now() > deadline) throw new Error('combined report never finished');
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.equal(s.state, 'done', s.error || '');
+  assert.equal(s.report.report_scope, 'combined');
+  assert.equal(s.report.masked, true);
+  // The prompt must ask for a per-developer section and carry per_developer data.
+  const prompt = agentPrompts[agentPrompts.length - 1];
+  assert.ok(prompt.includes('individual section for EVERY developer'), 'combined headline');
+  assert.ok(prompt.includes('per_developer'), 'per-developer data embedded');
+  // combined reports surface under a team-scope filter query too.
+  const teamList = await api('GET', '/reports?account=acc1&scope=combined');
+  assert.ok(teamList.json.reports.some((r) => r.id === s.report.id));
+});

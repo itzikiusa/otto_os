@@ -875,16 +875,21 @@
         const yrs = Array.from({ length: 7 }, (_, k) => new Date().getUTCFullYear() - k);
         return `<div class="card" id="reports-hub"><h2>Reports hub <span class="dim">(agent-written; team &amp; per-developer, month / quarter / year, saved history)</span></h2>
           <div class="row" style="margin:0 0 8px">
-            <b class="dim" style="font-size:11px">TEAM REPORT</b>
+            <b class="dim" style="font-size:11px">GENERATE REPORT</b>
+            <select id="trep-scope" title="team = overview only; combined = team overview + a section for every developer">
+              <option value="team">Team overview</option>
+              <option value="combined">Team + every developer (full)</option>
+            </select>
             <select id="trep-kind"><option value="month">Month</option><option value="quarter">Quarter</option><option value="year">Full year</option></select>
             <select id="trep-month">${MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join('')}</select>
             <select id="trep-q" style="display:none"><option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option></select>
             <select id="trep-year">${yrs.map((y) => `<option>${y}</option>`).join('')}</select>
             <label style="display:inline-flex;gap:5px;align-items:center"><input type="checkbox" id="trep-mask"> mask names</label>
             <label style="display:inline-flex;gap:5px;align-items:center"><input type="checkbox" id="trep-mask-tasks"> + mask tasks</label>
-            <button class="primary small" id="trep-gen">Generate team report</button>
+            <button class="primary small" id="trep-gen">Generate</button>
             <span id="trep-status" class="dim"></span>
           </div>
+          <div class="dim" style="font-size:11px;margin:-4px 0 8px">Per-developer reports are also on each developer's page. This hub keeps all generated reports.</div>
           <div id="reports-list" class="dim">Loading…</div></div>`;
       }
 
@@ -905,8 +910,9 @@
         $('trep-year').value = String(pm.getUTCFullYear());
         $('trep-gen').onclick = async () => {
           const kind = $('trep-kind').value;
+          const scope = $('trep-scope').value;
           const body = {
-            account: state.account, scope: 'team', kind,
+            account: state.account, scope, kind,
             year: parseInt($('trep-year').value, 10),
             month: kind === 'month' ? parseInt($('trep-month').value, 10) : undefined,
             quarter: kind === 'quarter' ? parseInt($('trep-q').value, 10) : undefined,
@@ -914,7 +920,9 @@
             mask_tasks: $('trep-mask-tasks').checked,
           };
           $('trep-gen').disabled = true;
-          $('trep-status').textContent = 'generating (the agent writes the report — a few minutes)…';
+          $('trep-status').textContent = scope === 'combined'
+            ? 'generating team + every developer — this is a big one, several minutes…'
+            : 'generating (the agent writes the report — a few minutes)…';
           try {
             const start = await api('/report', { method: 'POST', body: JSON.stringify(body) });
             const poll = setInterval(async () => {
@@ -931,7 +939,7 @@
         if (!reports.length) { list.innerHTML = '<span class="dim">No reports yet — generate a team report above, or open a developer for a personal one (month/quarter/year, any past period).</span>'; return; }
         const groups = new Map();
         for (const r of reports) {
-          const g = (r.report_scope || 'dev') === 'team' ? '▣ Team reports' : r.assignee_name;
+          const g = ['team', 'combined'].includes(r.report_scope || 'dev') ? '▣ Team reports' : r.assignee_name;
           if (!groups.has(g)) groups.set(g, []);
           groups.get(g).push(r);
         }

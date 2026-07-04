@@ -1358,6 +1358,9 @@ const DEFAULT_DEV_REPORT_INSTRUCTIONS =
 const DEFAULT_TEAM_REPORT_INSTRUCTIONS =
   'This is a monthly/quarterly team reflection for a presentation. The report must include: a team executive summary; a clear "what improved / what declined vs the comparison period" section with concrete numbers; team & role GOALS with met/not-met status and the gap; a per-developer table (output, vs-team, vs-estimate, trend); highlights and concerns; and proposed team goals for the next period. Use charts/tables where it helps a slide. Be honest and specific.';
 
+const DEFAULT_COMBINED_REPORT_INSTRUCTIONS =
+  'This is a full team review in ONE document. Start with the TEAM section: an executive summary, "what improved / what declined vs the comparison period" with numbers, and team & role GOALS with met/not-met status. Then, for EVERY developer in per_developer, write an individual section: their delivery volume & pace, strengths, areas to improve (use their biggest_tasks), goal status, and one concrete next-period goal. Use a clear table of contents or headings so each person is easy to find. Keep any anonymized names anonymized throughout. Be honest and specific — an internal management document.';
+
 /** Build the report prompt from data + the (possibly lead-edited) instructions. */
 function reportPrompt(headline, dataBlock, instructions) {
   return `You are writing ${headline}. Write a COMPLETE, SELF-CONTAINED HTML document (inline CSS, presentation-friendly, works in light and dark, no external assets, no javascript) — respond with ONLY the HTML, starting with <!doctype html>.
@@ -1411,22 +1414,46 @@ async function runReport(account, opts) {
     let entryName;
     let fileHint;
 
-    if (rscope === 'team') {
+    if (rscope === 'team' || rscope === 'combined') {
       const cur = teamPeriodSummary(account, scope, start, end);
       const prev = teamPeriodSummary(account, scope, pb.start, pb.end);
       const masker = mask ? makeMasker(cur.devs.map((d) => ({ assignee_name: d.name, weighted_done: d.weighted_done })), maskTasks) : null;
-      const maskDevs = (list) => (masker ? list.map((d) => ({ ...d, name: masker.name(d.name) })) : list);
+      const maskName = (n) => (masker ? masker.name(n) : n);
+      const maskDevs = (list) => list.map((d) => ({ ...d, name: maskName(d.name) }));
       const data = {
         period: label,
         comparison: pb.label,
         this_period: { team: cur.scope, goals: cur.team_goals, role_goals: cur.role_goals, developers: maskDevs(cur.devs) },
         comparison_period: { team: prev.scope, developers: maskDevs(prev.devs) },
       };
+      // Combined: also embed a per-developer detail block for EVERY included
+      // dev (stats + biggest tasks + goals) so one report holds the team
+      // overview AND an individual section for each person.
+      if (rscope === 'combined') {
+        const goalsFile = loadDevGoals(account);
+        const teamMed = A.teamMedians(nowStats(scope, start, end).stats);
+        data.per_developer = cur.devs.map((d) => {
+          const s = nowStats(scope, start, end).stats.find((x) => x.assignee_name === d.name);
+          const id = s ? s.assignee_id : null;
+          const ps = id ? periodSummary(scope, id, start, end) : { tasks: [], task_count: 0 };
+          const slot = (id && goalsFile.assignees[id]) || { goals: [], snapshots: [] };
+          const goals = s ? devGoalRows(slot, s, teamMed).map((g) => ({ metric: g.metric, target: g.target, current: g.current, met: g.met })) : [];
+          return {
+            developer: maskName(d.name),
+            role: d.role,
+            stats: { ...d, name: maskName(d.name) },
+            biggest_tasks: ps.tasks.slice(0, 12).map((t) => (masker ? { ...t, key: masker.task(t.key), summary: maskTasks ? '(masked)' : t.summary } : t)),
+            task_count: ps.task_count,
+            goals,
+          };
+        });
+      }
       dataBlock = fmtNum(data);
-      headline = `a ${label} TEAM delivery report for an engineering team lead${mask ? ' (names ANONYMIZED — keep them anonymized in the output)' : ''}`;
-      instructions = (cfg.report_instructions || '').trim() || DEFAULT_TEAM_REPORT_INSTRUCTIONS;
-      entryName = 'Team';
-      fileHint = 'team';
+      const kindWord = rscope === 'combined' ? 'a TEAM report that ALSO contains an individual section for EVERY developer' : 'a TEAM delivery report';
+      headline = `${kindWord} for ${label}, for an engineering team lead${mask ? ' (names ANONYMIZED — keep them anonymized throughout)' : ''}`;
+      instructions = (cfg.report_instructions || '').trim() || (rscope === 'combined' ? DEFAULT_COMBINED_REPORT_INSTRUCTIONS : DEFAULT_TEAM_REPORT_INSTRUCTIONS);
+      entryName = rscope === 'combined' ? 'Team + everyone' : 'Team';
+      fileHint = rscope;
     } else {
       const cur = periodSummary(scope, assignee, start, end);
       if (!cur.stats) throw new Error('no data for this developer in that period');
@@ -1591,6 +1618,7 @@ const server = http.createServer(async (req, res) => {
           rubric: E.DEFAULT_RUBRIC,
           dev_report_instructions: DEFAULT_DEV_REPORT_INSTRUCTIONS,
           team_report_instructions: DEFAULT_TEAM_REPORT_INSTRUCTIONS,
+          combined_report_instructions: DEFAULT_COMBINED_REPORT_INSTRUCTIONS,
         },
       });
     }
@@ -1724,7 +1752,7 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/report' && req.method === 'POST') {
       const body = await readBody(req);
       const account = body.account;
-      const rscope = body.scope === 'team' ? 'team' : 'dev';
+      const rscope = body.scope === 'team' ? 'team' : body.scope === 'combined' ? 'combined' : 'dev';
       const kind = body.kind;
       const year = Number(body.year);
       const quarter = body.quarter ? Number(body.quarter) : null;
