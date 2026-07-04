@@ -251,6 +251,8 @@ pub struct OttoRun {
     pub goal: String,
     pub mode: RunMode,
     pub provider: String,
+    /// Model override handed to the executing agent ("" = provider default).
+    pub model: String,
     pub repo_id: Option<String>,
     pub repo_path: Option<String>,
     pub base_branch: Option<String>,
@@ -316,6 +318,10 @@ pub struct LaunchRunReq {
     pub mode: Option<RunMode>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Model override for the executing agent (e.g. "opus"); blank/absent =
+    /// the provider's default model.
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub repo_id: Option<String>,
     #[serde(default)]

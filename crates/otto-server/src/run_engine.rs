@@ -238,9 +238,12 @@ async fn execute_single_agent(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         .await?;
     let resolved = reconstruct_resolved(run);
     let packet = crate::run_context::build_packet(run, &resolved, &repo);
+    // "" = provider default; single-agent execution runs on the claude PTY, so
+    // the model alias goes straight through as `--model`.
+    let model = (!run.model.trim().is_empty()).then(|| run.model.trim());
     let reply = ctx
         .orchestrator
-        .run_agent(&packet.prompt, &wt, None, EXEC_NO_PROGRESS)
+        .run_agent(&packet.prompt, &wt, model, EXEC_NO_PROGRESS)
         .await?;
 
     // E2E seam: the stubbed `run_agent` writes no files. Commit a deterministic
@@ -288,6 +291,18 @@ async fn execute_goal_loop(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         out_of_scope: vec![],
         success_signal: String::new(),
     };
+    // The run's provider/model choice drives the change-producing executors;
+    // the bookkeeping roles (planner/evaluator/digester) keep their tuned
+    // defaults from `GoalLoopConfig::default()`.
+    let mut config = GoalLoopConfig::default();
+    for exec in &mut config.executors {
+        if !run.provider.trim().is_empty() {
+            exec.provider = run.provider.trim().to_string();
+        }
+        if !run.model.trim().is_empty() {
+            exec.model = run.model.trim().to_string();
+        }
+    }
     let loop_ = ctx
         .goal_loops_repo
         .create(NewGoalLoop {
@@ -296,7 +311,7 @@ async fn execute_goal_loop(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
             repo_path: repo.path.clone(),
             definition,
             limits: GoalLoopLimits::default(),
-            config: GoalLoopConfig::default(),
+            config,
             created_by: run.created_by.clone(),
         })
         .await?;

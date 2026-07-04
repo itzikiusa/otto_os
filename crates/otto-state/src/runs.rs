@@ -31,6 +31,8 @@ pub struct NewRun {
     pub goal: String,
     pub mode: RunMode,
     pub provider: String,
+    /// Model override for the executing agent ("" = provider default).
+    pub model: String,
     pub repo_id: Option<String>,
     pub origin_kind: RunOrigin,
     pub origin_chat: Option<String>,
@@ -99,6 +101,7 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<OttoRun> {
         goal: r.get("goal"),
         mode: RunMode::parse(&mode).unwrap_or_default(),
         provider: r.get("provider"),
+        model: r.get("model"),
         repo_id: r.get("repo_id"),
         repo_path: r.get("repo_path"),
         base_branch: r.get("base_branch"),
@@ -169,9 +172,9 @@ impl RunsRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO otto_runs (id, workspace_id, title, source_kind, source_ref, source_url, \
-             goal, mode, provider, repo_id, status, origin_kind, origin_chat, origin_thread, \
+             goal, mode, provider, model, repo_id, status, origin_kind, origin_chat, origin_thread, \
              origin_user, callback_url, auto_open_pr, context_summary, created_by, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&n.workspace_id)
@@ -182,6 +185,7 @@ impl RunsRepo {
         .bind(&n.goal)
         .bind(n.mode.as_str())
         .bind(&n.provider)
+        .bind(&n.model)
         .bind(&n.repo_id)
         .bind(n.origin_kind.as_str())
         .bind(&n.origin_chat)
@@ -460,6 +464,7 @@ mod tests {
             goal: "Fix the finding".into(),
             mode: RunMode::SingleAgent,
             provider: "claude".into(),
+            model: "opus".into(),
             repo_id: None,
             origin_kind: RunOrigin::Slack,
             origin_chat: Some("C1".into()),
@@ -485,6 +490,7 @@ mod tests {
         assert_eq!(got.id, run.id);
         assert_eq!(got.title, "Fix login");
         assert_eq!(got.origin_chat.as_deref(), Some("C1"));
+        assert_eq!(got.model, "opus", "model column round-trips");
     }
 
     #[tokio::test]

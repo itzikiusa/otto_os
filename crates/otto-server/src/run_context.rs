@@ -94,6 +94,7 @@ mod tests {
             goal: "g".into(),
             mode: RunMode::SingleAgent,
             provider: "claude".into(),
+            model: String::new(),
             repo_id: Some("r1".into()),
             repo_path: Some("/tmp/widgets".into()),
             base_branch: Some("main".into()),

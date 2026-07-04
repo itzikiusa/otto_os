@@ -907,12 +907,17 @@ async fn run_executor_attempt(
     timeout: Duration,
 ) -> RunOutcome {
     let provider = if exec.provider.is_empty() { "claude" } else { &exec.provider };
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "source": "goal_loop",
         "loop_id": loop_.id,
         "iter_idx": idx,
         "agent_index": exec_index,
     });
+    // Executor model override → `--model` at spawn (SessionManager::model_args
+    // reads `meta.model`; providers without the flag ignore it).
+    if !exec.model.trim().is_empty() {
+        meta["model"] = serde_json::Value::String(exec.model.trim().to_string());
+    }
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(provider.to_string()),

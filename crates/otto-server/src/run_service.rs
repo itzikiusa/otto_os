@@ -72,6 +72,13 @@ pub async fn launch(
                 .provider
                 .filter(|p| !p.trim().is_empty())
                 .unwrap_or_else(|| "claude".to_string()),
+            model: req
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .unwrap_or_default()
+                .to_string(),
             repo_id: req.repo_id.clone().filter(|s| !s.is_empty()),
             origin_kind: origin,
             origin_chat: origin_meta.kind_chat.clone(),

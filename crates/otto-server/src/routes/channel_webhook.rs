@@ -242,6 +242,9 @@ pub struct RunInboundReq {
     pub mode: Option<otto_core::run::RunMode>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Model override for the executing agent ("" / absent = provider default).
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub repo_id: Option<String>,
     #[serde(default)]
@@ -337,6 +340,7 @@ pub async fn run_inbound(
         seed_text: req.seed_text,
         mode: req.mode,
         provider: req.provider,
+        model: req.model,
         repo_id: req.repo_id,
         auto_open_pr: req.auto_open_pr,
         title: None,
