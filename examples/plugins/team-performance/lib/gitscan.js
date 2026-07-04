@@ -1,20 +1,40 @@
-// One-pass git delivery index. Per repo: two `git log` calls total —
-//   (1) the target branch's history  -> delivered_at(key) = max ts of a
-//       key-mentioning commit reachable from the target (history membership ≡
-//       ancestry; merge-commit subjects carry branch names, covering PR flows)
-//   (2) --all                        -> first_commit_at(key) = min ts
-// Never a per-issue subprocess call. Depth-bounded (config `git_depth`).
+// One-pass git delivery index (v2 — git is the primary timing signal).
+//
+// Per repo, a bounded number of `git log` / `for-each-ref` calls total — never
+// a per-issue subprocess:
+//   (0) optional `git fetch --prune` (moderated: once per scan, 30s timeout,
+//       failures swallowed — offline scans still work on the local clone)
+//   (1) target branch log (develop → main → master) with parent info —
+//       merge-events vs direct commits per key
+//   (2) each release/* branch, `--not target` (release-only commits are few)
+//   (3) `--all` with authors — first_commit_at + per-key non-merge authors
+//       (multi-dev credit)
+//   (4) *-DEPLOYED* tags ascending by creatordate, each `--not prevTags` so
+//       every commit is visited once — earliest prod deployment per key
+//
+// Delivery model (matches the team's Bitbucket flow):
+//   done_git_at   = first merge-event on develop|release mentioning the key
+//                   (fallback: first direct on-target commit — single-commit
+//                   flows like version bumps)
+//   fix_*         = key commits/merges landing after done_git_at
+//   deployed_at   = creatordate of the earliest deploy tag reaching the key
+// Depth 0 = unlimited.
 'use strict';
 
 const { execFileSync } = require('node:child_process');
 
 const KEY_RE = /\b[A-Z][A-Z0-9]+-\d+\b/g;
+// Catch-all keys devs use for unscoped fixes / prod issues (ABC-0000, ABC-000 …)
+// — real work that belongs to no story. Tracked separately per author.
+const PLACEHOLDER_RE = /^[A-Z][A-Z0-9]*-0+$/;
+const US = '\x1f';
 
-function git(repoPath, args) {
+function git(repoPath, args, opts = {}) {
   try {
     return execFileSync('git', ['-C', repoPath, ...args], {
       encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
+      maxBuffer: 256 * 1024 * 1024,
+      timeout: opts.timeout || 0,
     });
   } catch {
     return null;
@@ -31,54 +51,365 @@ function resolveTarget(repoPath, targets) {
   return null;
 }
 
-function scanLog(out, onHit) {
-  if (!out) return;
+/** All release/* + hotfix/* refs (local + origin), deduped by short name. */
+function releaseBranches(repoPath) {
+  const out = git(repoPath, [
+    'for-each-ref',
+    'refs/heads/release', 'refs/remotes/origin/release',
+    'refs/heads/hotfix', 'refs/remotes/origin/hotfix',
+    '--format=%(refname:short)',
+  ]);
+  if (!out) return [];
+  const seen = new Set();
+  const refs = [];
   for (const line of out.split('\n')) {
-    const idx = line.indexOf('\x1f');
+    const ref = line.trim();
+    if (!ref) continue;
+    const short = ref.replace(/^origin\//, '');
+    if (seen.has(short)) continue;
+    seen.add(short);
+    refs.push(ref);
+  }
+  return refs;
+}
+
+/** Deploy tags (name matches `pattern`, case-insensitive substring), ascending by creatordate. */
+function deployTags(repoPath, pattern) {
+  const out = git(repoPath, ['for-each-ref', 'refs/tags', '--format=%(creatordate:unix)\x1f%(refname:short)']);
+  if (!out) return [];
+  const needle = String(pattern || 'deployed').toLowerCase();
+  const tags = [];
+  for (const line of out.split('\n')) {
+    const idx = line.indexOf(US);
     if (idx <= 0) continue;
     const ts = parseInt(line.slice(0, idx), 10) * 1000;
-    if (Number.isNaN(ts)) continue;
-    const subject = line.slice(idx + 1);
-    const keys = subject.match(KEY_RE);
-    if (keys) for (const k of new Set(keys)) onHit(k, ts);
+    const name = line.slice(idx + 1).trim();
+    if (Number.isNaN(ts) || !name) continue;
+    if (name.toLowerCase().includes(needle)) tags.push({ name, ts });
   }
+  tags.sort((a, b) => a.ts - b.ts);
+  return tags;
+}
+
+/** Parse `git log` output where each line is US-joined fields, last field = subject. */
+function scanLog(out, nFields, onLine) {
+  if (!out) return;
+  for (const line of out.split('\n')) {
+    const parts = line.split(US);
+    if (parts.length < nFields) continue;
+    const ts = parseInt(parts[0], 10) * 1000;
+    if (Number.isNaN(ts)) continue;
+    const subject = parts.slice(nFields - 1).join(US); // subjects may contain the separator
+    const keys = subject.match(KEY_RE);
+    if (keys) onLine(parts, ts, [...new Set(keys)]);
+  }
+}
+
+function depthArgs(depth) {
+  const n = Number(depth) || 0;
+  return n > 0 ? ['-n', String(n)] : [];
+}
+
+// ---------------------------------------------------------------------------
+// Git-only feature extraction (work that never had a Jira story — e.g.
+// automation repos): every merge into the target is a "feature"; its commits
+// are recovered from the parent graph (one full-graph `git log`, no per-merge
+// subprocess), so timing = first branch commit → merge.
+// ---------------------------------------------------------------------------
+
+const RE_MERGE_BRANCH = [
+  /Merged in ([^\s']+) \(pull request/i, // Bitbucket
+  /Merge pull request #\d+ (?:in [^\s]+ )?from [^\s/]+\/([^\s]+)/i, // GitHub
+  /Merge branch '([^']+)'/i,
+  /Merge remote-tracking branch '(?:origin\/)?([^']+)'/i,
+];
+
+function branchOfMerge(subject) {
+  for (const re of RE_MERGE_BRANCH) {
+    const m = re.exec(subject);
+    if (m) {
+      const b = m[1].replace(/^origin\//, '');
+      // Merge-backs between long-lived branches are not features.
+      if (/^(develop|main|master|release\/|hotfix\/|feature\/release)/i.test(b) && !/^(feature|bugfix|fix|task|chore)\//i.test(b)) return null;
+      return b;
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract merged features of one repo from its target-branch graph.
+ * → [{id, repo, branch, summary, merge_hash, merged_at, first_commit_at,
+ *     commit_count, subjects: [..≤12], authors: [{name,email,commits}],
+ *     jira_keys: [..]}]
+ */
+function featureIndex(repoName, repoPath, target, depth) {
+  const out = git(repoPath, ['log', target, ...depth, `--pretty=%H${US}%P${US}%ct${US}%an${US}%ae${US}%s`]);
+  if (!out) return [];
+  const nodes = new Map(); // hash -> {parents, ts, an, ae, subject}
+  let tip = null;
+  for (const line of out.split('\n')) {
+    const p = line.split(US);
+    if (p.length < 6) continue;
+    const ts = parseInt(p[2], 10) * 1000;
+    if (Number.isNaN(ts)) continue;
+    const hash = p[0];
+    if (tip === null) tip = hash; // `git log` emits the tip first
+    nodes.set(hash, { parents: p[1] ? p[1].split(' ') : [], ts, an: p[3], ae: p[4], subject: p.slice(5).join(US) });
+  }
+  // Mainline = the first-parent chain from the tip.
+  const mainline = new Set();
+  for (let h = tip; h && nodes.has(h) && !mainline.has(h); h = nodes.get(h).parents[0]) mainline.add(h);
+
+  const claimed = new Set(); // commits already attributed to a feature
+  const features = [];
+  for (const h of mainline) {
+    const n = nodes.get(h);
+    if (n.parents.length < 2) continue;
+    const branch = branchOfMerge(n.subject);
+    if (!branch) continue;
+    // BFS from the merged head; stop at mainline / other features / truncation.
+    const commits = [];
+    const q = n.parents.slice(1);
+    while (q.length) {
+      const c = q.pop();
+      if (!nodes.has(c) || mainline.has(c) || claimed.has(c)) continue;
+      claimed.add(c);
+      const cn = nodes.get(c);
+      if (cn.parents.length < 2) commits.push({ ts: cn.ts, an: cn.an, ae: cn.ae, subject: cn.subject });
+      q.push(...cn.parents);
+    }
+    if (!commits.length) continue;
+    commits.sort((a, b) => a.ts - b.ts);
+    const authors = new Map();
+    const keys = new Set((n.subject.match(KEY_RE) || []).filter((k) => !PLACEHOLDER_RE.test(k)));
+    for (const c of commits) {
+      const who = `${c.an}${US}${c.ae}`;
+      authors.set(who, (authors.get(who) || 0) + 1);
+      for (const k of c.subject.match(KEY_RE) || []) if (!PLACEHOLDER_RE.test(k)) keys.add(k);
+    }
+    features.push({
+      id: `${repoName}:${branch}@${h.slice(0, 7)}`,
+      repo: repoName,
+      branch,
+      summary: branch.replace(/^[a-z]+\//i, '').replace(/[-_]+/g, ' ').trim(),
+      merge_hash: h,
+      merged_at: n.ts,
+      first_commit_at: commits[0].ts,
+      commit_count: commits.length,
+      subjects: commits.slice(0, 12).map((c) => c.subject.slice(0, 120)),
+      authors: [...authors.entries()]
+        .map(([who, count]) => {
+          const [name, email] = who.split(US);
+          return { name, email, commits: count };
+        })
+        .sort((a, b) => b.commits - a.commits),
+      jira_keys: [...keys],
+    });
+  }
+  return features;
 }
 
 /**
  * Build the delivery index across registered repos.
- * repos: [{name, path}] · config: {target_branches?, git_depth?}
- * → {byKey: Map<key,{first_commit_at, delivered_at}>, target_used: {repo:branch},
+ * repos: [{name, path}]
+ * config: {target_branches?, git_depth?, git_fetch?, deploy_tag_pattern?,
+ *          feature_repos?: [name]} — repos listed in `feature_repos` also get
+ *          git-only feature extraction (work without Jira stories).
+ * → {byKey: Map<key, {first_commit_at, done_git_at, delivered_at, last_fix_at,
+ *      fix_count, deployed_at, authors: [{name, email, commits}]}>,
+ *    features: [...], target_used: {repo: branch}, fetched: {repo: bool},
  *    hasRepos}
  */
 function buildIndex(repos, config = {}) {
   const targets = config.target_branches || ['develop', 'main', 'master'];
-  const depth = String(config.git_depth || 5000);
+  const depth = depthArgs(config.git_depth);
   const byKey = new Map();
   const targetUsed = {};
+  const fetched = {};
+  const features = [];
+  const unscoped = new Map(); // "name\x1femail" -> {name,email,commits,monthly,last_at}
+  const featureRepos = new Set(config.feature_repos || []);
   let hasRepos = false;
 
   const entry = (k) => {
-    if (!byKey.has(k)) byKey.set(k, { first_commit_at: null, delivered_at: null });
-    return byKey.get(k);
+    let e = byKey.get(k);
+    if (!e) {
+      e = {
+        first_commit_at: null,
+        done_git_at: null,
+        delivered_at: null, // kept for back-compat: last on-target key commit
+        last_fix_at: null,
+        fix_count: 0,
+        deployed_at: null,
+        authors: new Map(), // "name\x1femail" -> count (converted to array at the end)
+      };
+      byKey.set(k, e);
+    }
+    return e;
+  };
+
+  // Per-key on-target events across ALL repos/branches; resolved into
+  // done/fixes after every repo is scanned (a key may span repos).
+  const events = new Map(); // key -> [{ts, merge: bool}]
+  const addEvent = (k, ts, merge) => {
+    if (!events.has(k)) events.set(k, []);
+    events.get(k).push({ ts, merge });
   };
 
   for (const r of repos || []) {
+    if (config.git_fetch !== false) {
+      // Moderated: one fetch per repo per scan; network failures are fine.
+      fetched[r.name] = git(r.path, ['fetch', '--prune', '--quiet'], { timeout: 30000 }) !== null;
+    }
     const target = resolveTarget(r.path, targets);
     if (target === null) continue; // unreadable / not a repo
     hasRepos = true;
     targetUsed[r.name] = target.replace(/^origin\//, '');
 
-    scanLog(git(r.path, ['log', target, '-n', depth, '--pretty=%ct\x1f%s']), (k, ts) => {
-      const e = entry(k);
-      if (e.delivered_at === null || ts > e.delivered_at) e.delivered_at = ts;
+    // (1) target history: ts, parents, subject — merge = multiple parents.
+    scanLog(git(r.path, ['log', target, ...depth, `--pretty=%ct${US}%P${US}%s`]), 3, (parts, ts, keys) => {
+      const merge = parts[1].trim().includes(' ');
+      for (const k of keys) {
+        if (PLACEHOLDER_RE.test(k)) continue;
+        addEvent(k, ts, merge);
+        const e = entry(k);
+        if (e.delivered_at === null || ts > e.delivered_at) e.delivered_at = ts;
+      }
     });
-    scanLog(git(r.path, ['log', '--all', '-n', depth, '--pretty=%ct\x1f%s']), (k, ts) => {
-      const e = entry(k);
-      if (e.first_commit_at === null || ts < e.first_commit_at) e.first_commit_at = ts;
+
+    // (2) release-only commits (fixes waiting for prod, or done-without-develop).
+    for (const ref of releaseBranches(r.path)) {
+      scanLog(git(r.path, ['log', ref, '--not', target, ...depth, `--pretty=%ct${US}%P${US}%s`]), 3, (parts, ts, keys) => {
+        const merge = parts[1].trim().includes(' ');
+        for (const k of keys) if (!PLACEHOLDER_RE.test(k)) addEvent(k, ts, merge);
+      });
+    }
+
+    // (3) everything: first commit + authorship (non-merge commits only — the
+    // merger of a PR is not the author of the work). Placeholder keys
+    // (ABC-0000 …) don't index as issues; they accumulate per-author unscoped
+    // fix work instead.
+    scanLog(git(r.path, ['log', '--all', ...depth, `--pretty=%ct${US}%P${US}%an${US}%ae${US}%s`]), 5, (parts, ts, keys) => {
+      const merge = parts[1].trim().includes(' ');
+      for (const k of keys) {
+        if (PLACEHOLDER_RE.test(k)) {
+          if (merge) continue;
+          const who = `${parts[2]}${US}${parts[3]}`;
+          let u = unscoped.get(who);
+          if (!u) {
+            u = { name: parts[2], email: parts[3], commits: 0, monthly: {}, last_at: null };
+            unscoped.set(who, u);
+          }
+          u.commits++;
+          const d = new Date(ts);
+          const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+          u.monthly[ym] = (u.monthly[ym] || 0) + 1;
+          if (u.last_at === null || ts > u.last_at) u.last_at = ts;
+          continue;
+        }
+        const e = entry(k);
+        if (e.first_commit_at === null || ts < e.first_commit_at) e.first_commit_at = ts;
+        if (!merge) {
+          const who = `${parts[2]}${US}${parts[3]}`;
+          e.authors.set(who, (e.authors.get(who) || 0) + 1);
+        }
+      }
     });
+
+    // Git-only features for opted-in repos (work without Jira stories).
+    const repoFeatures = featureRepos.has(r.name) ? featureIndex(r.name, r.path, target, depth) : [];
+    const featureByMergeHash = new Map(repoFeatures.map((f) => [f.merge_hash, f]));
+    features.push(...repoFeatures);
+
+    // (4) deploy tags ascending; `--not prev` visits each commit once, so the
+    // first tag that reaches a key (or a feature's merge commit) is its
+    // earliest prod deployment.
+    const tags = deployTags(r.path, config.deploy_tag_pattern);
+    const prev = [];
+    for (const tag of tags) {
+      const args = ['log', tag.name, ...prev.flatMap((p) => ['--not', p]), `--pretty=%ct${US}%H${US}%s`];
+      const out = git(r.path, args);
+      if (out !== null) {
+        for (const line of out.split('\n')) {
+          const parts = line.split(US);
+          if (parts.length < 3) continue;
+          const hash = parts[1];
+          const feat = featureByMergeHash.get(hash);
+          if (feat && (feat.deployed_at === undefined || feat.deployed_at === null)) feat.deployed_at = tag.ts;
+          const keys = parts.slice(2).join(US).match(KEY_RE);
+          if (!keys) continue;
+          for (const k of new Set(keys)) {
+            if (PLACEHOLDER_RE.test(k)) continue;
+            const e = entry(k);
+            if (e.deployed_at === null || tag.ts < e.deployed_at) e.deployed_at = tag.ts;
+          }
+        }
+      }
+      prev.push(tag.name);
+    }
   }
 
-  return { byKey, target_used: targetUsed, hasRepos };
+  // Resolve on-target events into done/fix per key. Merge-events win when any
+  // exist (PR flow); otherwise the first direct commit is the delivery.
+  for (const [k, evs] of events) {
+    const e = entry(k);
+    evs.sort((a, b) => a.ts - b.ts);
+    const merges = evs.filter((ev) => ev.merge);
+    const done = merges.length ? merges[0].ts : evs[0].ts;
+    e.done_git_at = done;
+    const fixes = evs.filter((ev) => ev.ts > done);
+    e.fix_count = fixes.length;
+    e.last_fix_at = fixes.length ? fixes[fixes.length - 1].ts : null;
+  }
+
+  // Freeze author maps into plain arrays (records are JSON-persisted).
+  for (const e of byKey.values()) {
+    e.authors = [...e.authors.entries()]
+      .map(([who, commits]) => {
+        const [name, email] = who.split(US);
+        return { name, email, commits };
+      })
+      .sort((a, b) => b.commits - a.commits);
+  }
+
+  for (const f of features) if (f.deployed_at === undefined) f.deployed_at = null;
+  return {
+    byKey,
+    features,
+    unscoped: [...unscoped.values()].sort((a, b) => b.commits - a.commits),
+    target_used: targetUsed,
+    fetched,
+    hasRepos,
+  };
 }
 
-module.exports = { buildIndex, KEY_RE };
+module.exports = { buildIndex, featureIndex, branchOfMerge, KEY_RE, PLACEHOLDER_RE, deployTags, releaseBranches, resolveTarget };
+
+// Worker mode: `node lib/gitscan.js` with {repos, config} JSON on stdin prints
+// the serialized index on stdout. The git walk is all blocking execFileSync —
+// running it in a child keeps the sidecar's event loop (scan status, views)
+// responsive through multi-minute fetch+log passes.
+if (require.main === module) {
+  let buf = '';
+  process.stdin.on('data', (c) => (buf += c));
+  process.stdin.on('end', () => {
+    try {
+      const { repos, config } = JSON.parse(buf || '{}');
+      const idx = buildIndex(repos || [], config || {});
+      process.stdout.write(
+        JSON.stringify({
+          by_key: Object.fromEntries(idx.byKey),
+          features: idx.features,
+          unscoped: idx.unscoped,
+          target_used: idx.target_used,
+          fetched: idx.fetched,
+          hasRepos: idx.hasRepos,
+        }),
+      );
+    } catch (e) {
+      console.error('gitscan worker failed:', e);
+      process.exit(1);
+    }
+  });
+}

@@ -202,6 +202,15 @@ function startMockJira() {
       hits.projects++;
       return send(200, { values: [{ key: 'TP', name: 'Team Performance Fixture' }] });
     }
+    if (u.pathname === '/rest/api/3/user/assignable/search') {
+      hits.users = (hits.users || 0) + 1;
+      return send(200, [
+        { accountId: 'u-alice', displayName: 'Alice', accountType: 'atlassian' },
+        { accountId: 'u-bob', displayName: 'Bob', accountType: 'atlassian' },
+        { accountId: 'u-carol', displayName: 'Carol', accountType: 'atlassian' },
+        { accountId: 'u-app', displayName: 'Some Bot', accountType: 'app' },
+      ]);
+    }
     return send(404, { errorMessages: ['not found'] });
   });
 

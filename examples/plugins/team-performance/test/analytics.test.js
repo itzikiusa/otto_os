@@ -180,6 +180,7 @@ test('analyzeIssue: completed story numbers are exact', () => {
   const opts = OPTS();
   opts.gitIndex.byKey.set('TP-1', {
     first_commit_at: T('2026-06-02T12:00:00Z'),
+    done_git_at: T('2026-06-05T11:00:00Z'),
     delivered_at: T('2026-06-05T11:00:00Z'),
   });
   const r = A.analyzeIssue(raw, opts);
@@ -193,6 +194,12 @@ test('analyzeIssue: completed story numbers are exact', () => {
   assert.ok(Math.abs(r.cycle_days - 4.0) < 1e-9, `cycle ${r.cycle_days}`);
   assert.equal(r.delivered_at, T('2026-06-05T11:00:00Z'));
   assert.deepEqual(r.flags, []);
+  // Git-primary effective timing: first commit -> merge; eff start = first
+  // active (earlier than the first commit here).
+  assert.equal(r.timing_source, 'git');
+  assert.equal(r.eff_done_at, T('2026-06-05T11:00:00Z'));
+  assert.ok(Math.abs(r.impl_days_git - 2.96) < 0.01, `impl_git ${r.impl_days_git}`);
+  assert.ok(r.eff_cycle_days > 4 && r.eff_cycle_days < 4.1, `eff cycle ${r.eff_cycle_days}`);
 });
 
 test('analyzeIssue: flags no_code / no_estimate / skipped_design', () => {
@@ -223,8 +230,8 @@ test('analyzeIssue: reopened + late_merge flags', () => {
     ],
   });
   const opts = OPTS();
-  // delivered Wed Jun 17 (>2 business days after done Jun 10)
-  opts.gitIndex.byKey.set('TP-10', { first_commit_at: null, delivered_at: T('2026-06-17T10:00:00Z') });
+  // merged Wed Jun 17 (>2 business days after done Jun 10)
+  opts.gitIndex.byKey.set('TP-10', { first_commit_at: null, done_git_at: T('2026-06-17T10:00:00Z'), delivered_at: T('2026-06-17T10:00:00Z') });
   const r = A.analyzeIssue(raw, opts);
   assert.ok(r.flags.includes('reopened'));
   assert.ok(r.flags.includes('late_merge'));
@@ -401,12 +408,16 @@ test('suggestGoals: zero medians never suggest an unsaveable 0 target', () => {
   assert.ok(gs.every((g) => g.target > 0));
 });
 
-test('goalProgress: lower-is-better semantics', () => {
+test('goalProgress: direction-aware semantics', () => {
   assert.deepEqual(A.goalProgress({ metric: 'median_cycle_days', target: 4 }, { median_cycle_days: 3.5 }), {
     current: 3.5,
     met: true,
+    dir: 'down',
   });
   assert.equal(A.goalProgress({ metric: 'median_cycle_days', target: 4 }, {}).met, false);
+  // Higher-is-better metrics flip the comparison.
+  assert.equal(A.goalProgress({ metric: 'weighted_throughput', target: 10 }, { weighted_done: 12 }).met, true);
+  assert.equal(A.goalProgress({ metric: 'efficiency', target: 1.2 }, { efficiency: 1.0 }).met, false);
 });
 
 // ---- assigneeStats ----------------------------------------------------------
@@ -446,4 +457,222 @@ test('assigneeStats: medians, mape, wip and trend', () => {
   assert.ok(Math.abs(alice.median_cycle - 6) < 1e-9, `median ${alice.median_cycle}`);
   assert.equal(alice.trend, 'improving');
   assert.ok(alice.mape !== null);
+});
+
+// ---- v2: git-primary derivation, overrides, routine, credit, scope goals ----
+
+test('deriveGit: fixes and deploy-wait segments (deploy starts where fixing ends)', () => {
+  const base = rec({ key: 'G1', first_active_at: T('2026-06-01T00:00:00Z') });
+  const r = A.deriveGit(base, {
+    first_commit_at: T('2026-06-01T00:00:00Z'),
+    done_git_at: T('2026-06-03T00:00:00Z'),
+    last_fix_at: T('2026-06-05T00:00:00Z'),
+    fix_count: 2,
+    deployed_at: T('2026-06-10T00:00:00Z'),
+    authors: [{ name: 'a', email: 'a@x', commits: 3 }],
+  }, { workweek: [1, 2, 3, 4, 5], hasRepos: true });
+  assert.equal(r.timing_source, 'git');
+  assert.ok(Math.abs(r.impl_days_git - 2) < 1e-9, `impl ${r.impl_days_git}`);
+  assert.ok(Math.abs(r.fix_days - 2) < 1e-9, `fix ${r.fix_days}`); // Wed->Fri
+  // deploy wait counts from the LAST fix (Fri) to deploy (next Wed) = 3 business days
+  assert.ok(Math.abs(r.deploy_wait_days - 3) < 1e-9, `deploy ${r.deploy_wait_days}`);
+});
+
+test('deriveGit: merged but Jira still open -> done_by_git_only; unmerged code flagged', () => {
+  const open = rec({ key: 'G2', done_at: null, cycle_days: null });
+  const merged = A.deriveGit(open, { first_commit_at: 1, done_git_at: T('2026-06-03T00:00:00Z') }, { hasRepos: true });
+  assert.ok(A.isDone(merged));
+  assert.ok(merged.flags.includes('done_by_git_only'));
+
+  const done = rec({ key: 'G3' });
+  const unmerged = A.deriveGit(done, { first_commit_at: T('2026-06-01T00:00:00Z') }, { hasRepos: true });
+  assert.ok(unmerged.flags.includes('unmerged_code'));
+  assert.equal(unmerged.timing_source, 'jira');
+});
+
+test('deriveGit: stale Jira timing without git signal is excluded from stats', () => {
+  const stale = A.deriveGit(rec({ key: 'S1', cycle_days: 200 }), undefined, { hasRepos: true, staleDays: 45 });
+  assert.ok(stale.flags.includes('stale_timing'));
+  assert.ok(A.isExcluded(stale));
+  const b = A.baselines([stale, rec({ key: 'S2' }), rec({ key: 'S3' }), rec({ key: 'S4' })]);
+  assert.equal(b.completed_n, 3, 'stale record left the baseline');
+});
+
+test('overrides: outlier excludes; manual time re-includes at the entered value', () => {
+  const out = { ...rec({ key: 'O1', cycle_days: 90 }), outlier: true };
+  assert.ok(A.isExcluded(out));
+  const manual = { ...out, manual_days: 12 };
+  assert.ok(!A.isExcluded(manual));
+  const b = A.baselines([manual, rec({ key: 'O2', cycle_days: 4 }), rec({ key: 'O3', cycle_days: 4 })]);
+  assert.equal(b.completed_n, 3);
+  assert.equal(b.lookup('Story', 3).bucket.total.p75, 12, 'manual value feeds the bucket');
+});
+
+test('routine detection: repeated version-bump summaries cluster; AI flag also counts', () => {
+  const recs = [];
+  for (let i = 0; i < 5; i++) recs.push(rec({ key: `U${i}`, summary: `Upgrade wallet to version 5.0.${i}` }));
+  recs.push(rec({ key: 'F1', summary: 'Implement multi-currency withdrawal limits' }));
+  const sig = A.routineSignatures(recs);
+  assert.ok(A.isRoutine(recs[0], sig, undefined), 'bulk signature');
+  assert.ok(!A.isRoutine(recs[5], sig, undefined), 'unique feature is not routine');
+  assert.ok(A.isRoutine(recs[5], sig, { days: 1, routine: true }), 'AI flag wins');
+});
+
+test('author matcher: display name, reversed name, email, alias', () => {
+  const m = A.makeAuthorMatcher({
+    'id-1': { name: 'Jane Doe', aliases: ['janed@corp.com', 'jane.doe'] },
+    'id-2': { name: 'John Smith', aliases: [] },
+  });
+  assert.equal(m('Jane Doe', 'x@y'), 'id-1');
+  assert.equal(m('Doe Jane', 'x@y'), 'id-1');
+  assert.equal(m('someone', 'janed@corp.com'), 'id-1');
+  assert.equal(m('jane.doe', ''), 'id-1');
+  assert.equal(m('John Smith', ''), 'id-2');
+  assert.equal(m('Unknown Person', 'u@u'), null);
+});
+
+test('contributorCredits: commit-share split; assignee fallback when nobody matches', () => {
+  const m = A.makeAuthorMatcher({ 'id-1': { name: 'Alice', aliases: [] }, 'id-2': { name: 'Bob', aliases: [] } });
+  const shared = rec({
+    key: 'M1',
+    assignee_id: 'id-1',
+    git_authors: [
+      { name: 'Alice', email: 'a@x', commits: 6 },
+      { name: 'Bob', email: 'b@x', commits: 2 },
+      { name: 'Stranger', email: 's@x', commits: 4 }, // unmatched -> out of the denominator
+    ],
+  });
+  const credits = A.contributorCredits(shared, m);
+  assert.equal(credits.length, 2);
+  assert.ok(Math.abs(credits[0].share - 0.75) < 1e-9);
+  assert.equal(credits[0].person_id, 'id-1');
+  assert.ok(Math.abs(credits[1].share - 0.25) < 1e-9);
+
+  const noCode = rec({ key: 'M2', assignee_id: 'id-2', git_authors: [] });
+  assert.deepEqual(A.contributorCredits(noCode, m), [{ person_id: 'id-2', share: 1, commits: 0 }]);
+});
+
+test('assigneeStats: weighted throughput uses AI estimates and splits multi-dev credit', () => {
+  const m = A.makeAuthorMatcher({ 'u-a': { name: 'Alice', aliases: [] }, 'u-b': { name: 'Bob', aliases: [] } });
+  const recs = [
+    // Task worth 8 est-days, split 50/50 between Alice (assignee) and Bob.
+    rec({
+      key: 'W1', assignee_id: 'u-a', assignee_name: 'Alice', cycle_days: 4, eff_cycle_days: 4,
+      git_authors: [{ name: 'Alice', email: 'a', commits: 2 }, { name: 'Bob', email: 'b', commits: 2 }],
+      flags: ['multi_dev'],
+    }),
+    rec({ key: 'W2', assignee_id: 'u-a', assignee_name: 'Alice', cycle_days: 2, eff_cycle_days: 2 }),
+    rec({ key: 'W3', assignee_id: 'u-b', assignee_name: 'Bob', cycle_days: 2, eff_cycle_days: 2 }),
+  ];
+  const b = A.baselines(recs);
+  const estimates = { W1: { days: 8, routine: false }, W2: { days: 2, routine: true }, W3: { days: 2, routine: false } };
+  const stats = A.assigneeStats(recs, b, [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), { estimates, matcher: m });
+  const alice = stats.find((s) => s.assignee_id === 'u-a');
+  const bob = stats.find((s) => s.assignee_id === 'u-b');
+  assert.ok(Math.abs(alice.weighted_done - (4 + 2)) < 1e-9, `alice weighted ${alice.weighted_done}`);
+  assert.ok(Math.abs(bob.weighted_done - (4 + 2)) < 1e-9, `bob weighted ${bob.weighted_done}`);
+  assert.equal(bob.contributed, 1, 'W1 counted as a contribution for Bob');
+  assert.ok(alice.routine_done > 0, 'routine share tracked');
+  assert.ok(alice.efficiency > 1, 'estimate/actual ratio computed');
+});
+
+test('scopeMetrics + evalScopeGoals: fix rate, deploy lead, direction-aware goals', () => {
+  const recs = [
+    rec({ key: 'SM1', eff_cycle_days: 4, done_git_at: T('2026-06-03T00:00:00Z'), deployed_at: T('2026-06-05T00:00:00Z'), deploy_wait_days: 2, fix_count: 0, eff_done_at: T('2026-06-03T00:00:00Z') }),
+    rec({ key: 'SM2', eff_cycle_days: 6, done_git_at: T('2026-06-10T00:00:00Z'), deployed_at: T('2026-06-12T00:00:00Z'), deploy_wait_days: 2, fix_count: 3, eff_done_at: T('2026-06-10T00:00:00Z') }),
+    rec({ key: 'SM3', eff_cycle_days: 2, done_git_at: T('2026-06-11T00:00:00Z'), eff_done_at: T('2026-06-11T00:00:00Z') }),
+  ];
+  const b = A.baselines(recs);
+  const v = A.scopeMetrics(recs, b, [1, 2, 3, 4, 5], T('2026-06-20T00:00:00Z'), {});
+  assert.equal(v.median_cycle_days, 4);
+  assert.equal(v.median_deploy_lead_days, 2);
+  assert.ok(Math.abs(v.fix_rate - 1 / 3) < 0.01, `fix rate ${v.fix_rate}`);
+  assert.ok(v.weighted_throughput_wk > 0);
+  const evald = A.evalScopeGoals(
+    [{ metric: 'median_cycle_days', target: 5 }, { metric: 'weighted_throughput_wk', target: 100 }],
+    v,
+  );
+  assert.equal(evald[0].met, true, 'lower-is-better met');
+  assert.equal(evald[1].met, false, 'higher-is-better missed');
+});
+
+// ---- v3.1: hierarchy rollup, merge, period, size-weighted pace ---------------
+
+test('enrichHierarchy: dev sub-tasks roll up; design sub-tasks paint the parent design phase', () => {
+  const story = rec({ key: 'H-1', type: 'Story', eff_cycle_days: 8, cycle_days: 8 });
+  const devSub = rec({ key: 'H-2', type: 'Development Sub-Tasks', subtask: true, parent_key: 'H-1', cycle_days: 1 });
+  const designSub = rec({ key: 'H-3', type: 'Design sub-task', subtask: true, parent_key: 'H-1', cycle_days: 2, eff_cycle_days: 2 });
+  const qaSub = rec({ key: 'H-4', type: 'QA sub task', subtask: true, parent_key: 'H-1', cycle_days: 1 });
+  const orphan = rec({ key: 'H-5', type: 'Development Sub-Tasks', subtask: true, parent_key: 'GONE-1', cycle_days: 1 });
+  const out = A.enrichHierarchy([story, devSub, designSub, qaSub, orphan]);
+  const byKey = Object.fromEntries(out.map((r) => [r.key, r]));
+  assert.equal(byKey['H-2'].rollup, true, 'dev sub-task rolled up');
+  assert.ok(A.isExcluded(byKey['H-2']), 'rolled-up records leave the stats');
+  assert.equal(byKey['H-4'].rollup, undefined, 'QA sub-task stays a standalone work item');
+  assert.equal(byKey['H-5'].rollup, undefined, 'orphan sub-task (parent not in corpus) stays');
+  assert.equal(byKey['H-1'].design_days_eff, 3, 'story design = own 1 + design child 2');
+});
+
+test('makeCanonical: chains resolve, cycles break, merged stats fold together', () => {
+  const canonical = A.makeCanonical({
+    old1: { name: 'X (old)', merged_into: 'new1' },
+    new1: { name: 'X' },
+    a: { name: 'A', merged_into: 'b' },
+    b: { name: 'B', merged_into: 'a' }, // cycle — must not hang
+  });
+  assert.equal(canonical('old1'), 'new1');
+  assert.equal(canonical('new1'), 'new1');
+  assert.ok(['a', 'b'].includes(canonical('a')));
+
+  const recs = [
+    rec({ key: 'M-1', assignee_id: 'old1', assignee_name: 'X (old)', cycle_days: 4, eff_cycle_days: 4 }),
+    rec({ key: 'M-2', assignee_id: 'new1', assignee_name: 'X', cycle_days: 2, eff_cycle_days: 2 }),
+  ];
+  const stats = A.assigneeStats(recs, A.baselines(recs), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), { canonical });
+  assert.equal(stats.length, 1, 'one person after merge');
+  assert.equal(stats[0].assignee_id, 'new1');
+  assert.equal(stats[0].completed, 2);
+});
+
+test('assigneeStats: period window filters samples; monthly buckets fill', () => {
+  const recs = [
+    rec({ key: 'P-1', assignee_id: 'u-a', assignee_name: 'A', cycle_days: 2, eff_cycle_days: 2, done_at: T('2026-06-10T00:00:00Z'), eff_done_at: T('2026-06-10T00:00:00Z') }),
+    rec({ key: 'P-2', assignee_id: 'u-a', assignee_name: 'A', cycle_days: 9, eff_cycle_days: 9, done_at: T('2025-03-10T00:00:00Z'), eff_done_at: T('2025-03-10T00:00:00Z') }),
+  ];
+  const b = A.baselines(recs);
+  const now = T('2026-06-30T00:00:00Z');
+  const all = A.assigneeStats(recs, b, [1, 2, 3, 4, 5], now, {});
+  assert.equal(all[0].completed, 2);
+  const windowed = A.assigneeStats(recs, b, [1, 2, 3, 4, 5], now, { sinceMs: T('2026-01-01T00:00:00Z') });
+  assert.equal(windowed[0].completed, 1, 'old completion left the window');
+  assert.equal(windowed[0].median_cycle, 2);
+  // Monthly: P-1 done this month -> last bucket carries its scope days.
+  assert.ok(windowed[0].monthly[11] > 0, `monthly ${JSON.stringify(windowed[0].monthly)}`);
+  // Historical window [2025 Q1] via until.
+  const q1 = A.assigneeStats(recs, b, [1, 2, 3, 4, 5], now, { sinceMs: T('2025-01-01T00:00:00Z'), untilMs: T('2025-04-01T00:00:00Z') });
+  assert.equal(q1[0].completed, 1);
+  assert.equal(q1[0].median_cycle, 9);
+});
+
+test('pace/efficiency are size-weighted: one big miss outweighs many tiny accurate tasks', () => {
+  const mk = (k, est, actual, dev) => rec({ key: k, assignee_id: dev, assignee_name: dev, cycle_days: actual, eff_cycle_days: actual });
+  const recs = [];
+  const estimates = {};
+  // Dev "small": ten 0.5d tasks each done in 0.5d, plus one 5d task done in 12d.
+  for (let i = 0; i < 10; i++) { recs.push(mk(`S-${i}`, 0.5, 0.5, 'u-s')); estimates[`S-${i}`] = { days: 0.5 }; }
+  recs.push(mk('S-big', 5, 12, 'u-s'));
+  estimates['S-big'] = { days: 5 };
+  // Dev "ref": accurate on the same volume.
+  recs.push(mk('R-1', 10, 10, 'u-r'));
+  estimates['R-1'] = { days: 10 };
+  recs.push(mk('R-2', 3, 3, 'u-r'));
+  estimates['R-2'] = { days: 3 };
+  recs.push(mk('R-3', 2, 2, 'u-r'));
+  estimates['R-3'] = { days: 2 };
+  const b = A.baselines(recs);
+  const stats = A.assigneeStats(recs, b, [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), { estimates });
+  const s = stats.find((x) => x.assignee_id === 'u-s');
+  // Σactual 17 / Σest 10 = 1.7 — the median of per-task ratios would be 1.0.
+  assert.ok(s.efficiency < 0.7, `efficiency ${s.efficiency}`);
+  assert.ok(s.pace_factor > 1.2, `pace ${s.pace_factor}`);
 });

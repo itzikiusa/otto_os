@@ -20,6 +20,7 @@ let pluginPort;
 let dataDir;
 let repoDir;
 let agentPrompts = [];
+let agentProviders = [];
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -87,6 +88,14 @@ function gitRepo() {
   g(['checkout', '-q', '-b', 'feature/TP-7-wip']);
   commit('TP-7: wip', '2026-06-24T15:00:00Z');
   g(['checkout', '-q', 'develop']);
+  // A keyless automation feature (no Jira story) + a deploy tag covering
+  // everything merged so far — feeds /features and deployed_at.
+  g(['checkout', '-q', '-b', 'feature/nightly-e2e-suite']);
+  commit('nightly suite runner', '2026-06-20T10:00:00Z');
+  commit('nightly suite reports', '2026-06-21T10:00:00Z');
+  g(['checkout', '-q', 'develop']);
+  g(['merge', '-q', '--no-ff', '-m', 'Merged in feature/nightly-e2e-suite (pull request #9)', 'feature/nightly-e2e-suite'], '2026-06-22T09:00:00Z');
+  g(['tag', '-a', 'v1.0-abc-DEPLOYED', '-m', 'prod'], '2026-06-23T09:00:00Z');
 }
 
 before(async () => {
@@ -110,7 +119,18 @@ before(async () => {
       let b = '';
       req.on('data', (c) => (b += c));
       req.on('end', () => {
-        agentPrompts.push(JSON.parse(b).prompt);
+        const body = JSON.parse(b);
+        agentPrompts.push(body.prompt);
+        agentProviders.push(body.provider || 'claude');
+        // Estimation batches ask for STRICT JSON — answer with a fixed 2d
+        // per task (TP-6 flagged routine) so estimate fields are testable.
+        if (body.prompt.includes('STRICT JSON')) {
+          const keys = [...body.prompt.matchAll(/key=(\S+)/g)].map((m) => m[1]);
+          return send(200, { text: JSON.stringify(keys.map((k) => ({ key: k, days: 2, routine: k === 'TP-6' }))) });
+        }
+        if (body.prompt.includes('SELF-CONTAINED HTML')) {
+          return send(200, { text: 'Here you go:\n<!doctype html><html><body><h1>Report for Alice</h1><p>solid quarter</p></body></html>\nthanks' });
+        }
         send(200, { text: 'coach says: focus WIP' });
       });
       return undefined;
@@ -161,7 +181,7 @@ test('accounts + projects come from host API and Jira', async () => {
   const accts = await api('GET', '/accounts');
   assert.equal(accts.json[0].id, 'acc1');
   const projects = await api('GET', '/projects?account=acc1');
-  assert.deepEqual(projects.json, [{ key: 'TP', name: 'Team Performance Fixture' }]);
+  assert.deepEqual(projects.json, [{ key: 'TP', name: 'Team Performance Fixture', scanned: false }]);
 });
 
 test('overview before any scan is 404', async () => {
@@ -193,8 +213,15 @@ test('overview: assignees, baselines, open predictions, flags', async () => {
   assert.ok(alice && bob, 'both devs present');
   assert.equal(alice.completed, 3);
   assert.equal(bob.completed, 3);
-  // Alice's cycles: TP-1=4, TP-2=2.25, TP-3=5 -> median 4
-  assert.ok(Math.abs(alice.median_cycle - 4) < 0.01, `alice median ${alice.median_cycle}`);
+  // Git-primary timing: Alice's cycles shift to first-active/commit -> MERGE
+  // (TP-1 jira cycle was 4.0; eff runs to the merge commit an hour later).
+  assert.ok(alice.median_cycle > 3.5 && alice.median_cycle < 5.5, `alice median ${alice.median_cycle}`);
+  // Scope-weighted stats came from the mock estimator (2d per task).
+  assert.ok(alice.weighted_done > 0, `weighted ${alice.weighted_done}`);
+  assert.ok(alice.efficiency !== null, 'efficiency computed');
+  // Scope metrics + deploy signal from the -DEPLOYED tag.
+  assert.ok(o.scope.median_cycle_days > 0);
+  assert.ok(o.scope.median_deploy_lead_days !== null, 'deploy lead measured from the tag');
 
   // Baseline buckets exist, Story|3 has n=4.
   const s3 = o.baseline.find((b) => b.type === 'Story' && b.points === 3);
@@ -260,8 +287,10 @@ test('goals PUT round-trips and overrides the suggestion', async () => {
 });
 
 test('config: invalid rejected; status-map change recomputes locally (no Jira refetch)', async () => {
-  const bad = await api('PUT', '/config', { max_issues: 1 });
+  const bad = await api('PUT', '/config', { max_issues: -5 });
   assert.equal(bad.status, 400);
+  const badWorker = await api('PUT', '/config', { estimate_workers: [{ provider: 'skynet' }] });
+  assert.equal(badWorker.status, 400);
 
   const jiraHitsBefore = mockJira.hits.search + [...mockJira.hits.issue.values()].reduce((a, b) => a + b, 0);
   // Reclassify "In Review" as waiting -> TP-1 impl drops from 3.0 to 2.0.
@@ -330,4 +359,267 @@ test('errors never leak details', async () => {
   const r = await api('POST', '/analyze', { account: 'acc1', project: 'NOPE' });
   assert.equal(r.status, 500);
   assert.deepEqual(r.json, { error: 'internal error' });
+});
+
+// ---- v2 surface: people, overrides, scope goals, features, estimation --------
+
+test('people: registry seeded from scan; PUT round-trips roles/aliases/inclusion', async () => {
+  const { json: p } = await api('GET', '/people?account=acc1');
+  assert.ok(p.people['u-alice'], 'alice discovered by the scan');
+  assert.ok(Array.isArray(p.roles) && p.roles.includes('Developer'), 'default roles offered');
+
+  const put = await api('PUT', '/people', {
+    account: 'acc1',
+    people: {
+      'u-alice': { role: 'Senior Developer', included: true, aliases: ['alice.git'] },
+      'u-bob': { included: false },
+    },
+  });
+  assert.equal(put.status, 200);
+  assert.equal(put.json.people['u-alice'].role, 'Senior Developer');
+  assert.equal(put.json.people['u-bob'].included, false);
+
+  // Excluded people leave the overview entirely.
+  const { json: o } = await api('GET', '/overview?account=acc1&projects=TP');
+  assert.ok(!o.assignees.some((a) => a.assignee_id === 'u-bob'), 'bob excluded from stats');
+  const alice = o.assignees.find((a) => a.assignee_id === 'u-alice');
+  assert.equal(alice.role, 'Senior Developer');
+
+  // Restore for later tests.
+  await api('PUT', '/people', { account: 'acc1', people: { 'u-bob': { included: true } } });
+});
+
+test('people/seed pulls assignable users from Jira (people picker before first scan)', async () => {
+  const r = await api('POST', '/people/seed', { account: 'acc1', project: 'TP' });
+  assert.equal(r.status, 200);
+  assert.ok(r.json.people['u-carol'], 'carol added from assignable users');
+  assert.ok(!r.json.people['u-app'], 'app accounts filtered out');
+});
+
+test('override: mark outlier excludes the story; manual time re-includes it', async () => {
+  const before = await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice');
+  const t = before.json.completed.find((x) => x.key === 'TP-1');
+  assert.ok(t && !t.excluded);
+
+  const mark = await api('PUT', '/override', { account: 'acc1', project: 'TP', key: 'TP-1', outlier: true });
+  assert.equal(mark.status, 200);
+  let v = await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice');
+  let tp1 = v.json.completed.find((x) => x.key === 'TP-1');
+  assert.equal(tp1.outlier, true);
+  assert.equal(tp1.excluded, true, 'outlier leaves the stats');
+
+  const manual = await api('PUT', '/override', { account: 'acc1', project: 'TP', key: 'TP-1', manual_days: 2.5 });
+  assert.equal(manual.status, 200);
+  v = await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice');
+  tp1 = v.json.completed.find((x) => x.key === 'TP-1');
+  assert.equal(tp1.manual_days, 2.5);
+  assert.equal(tp1.excluded, false, 'manual time re-enters the stats');
+  assert.equal(tp1.actual_days, 2.5, 'actual shows the manual value');
+
+  const bad = await api('PUT', '/override', { account: 'acc1', project: 'TP', key: 'TP-1', manual_days: -1 });
+  assert.equal(bad.status, 400);
+  // Clean up.
+  await api('PUT', '/override', { account: 'acc1', project: 'TP', key: 'TP-1', outlier: false, manual_days: null });
+});
+
+test('scope goals: PUT team + role goals, overview evaluates them directionally', async () => {
+  const put = await api('PUT', '/goals/scope', {
+    account: 'acc1',
+    team: [{ metric: 'median_cycle_days', target: 100 }],
+    roles: { 'Senior Developer': [{ metric: 'weighted_throughput_wk', target: 9999 }] },
+  });
+  assert.equal(put.status, 200);
+  const { json: o } = await api('GET', '/overview?account=acc1&projects=TP');
+  const teamGoal = o.scope_goals.team.find((g) => g.metric === 'median_cycle_days');
+  assert.equal(teamGoal.met, true, 'cycle far below 100');
+  const roleGoal = o.scope_goals.roles['Senior Developer'][0];
+  assert.equal(roleGoal.met, false, 'throughput target unreachable');
+
+  const bad = await api('PUT', '/goals/scope', { account: 'acc1', team: [{ metric: 'nope', target: 1 }] });
+  assert.equal(bad.status, 400);
+});
+
+test('3-level estimates flow into tasks (AI estimate -> per-dev -> actual)', async () => {
+  const { json: v } = await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice');
+  const done = v.completed.find((x) => x.key === 'TP-1');
+  assert.equal(done.est_days_ai, 2, 'agnostic AI estimate from the mock estimator');
+  assert.ok(done.est_days_dev > 0, 'per-dev expected');
+  assert.ok(done.actual_days > 0, 'actual');
+  assert.equal(done.timing_source, 'git');
+  const open = v.open.find((x) => x.key === 'TP-7');
+  assert.equal(open.est_days_ai, 2);
+  assert.equal(open.prediction.based_on, 'ai_estimate', 'prediction anchors on the AI estimate');
+});
+
+test('feature repos: opt-in scan extracts keyless git features with estimates', async () => {
+  const cfg = await api('PUT', '/config', { feature_repos: ['fixture'] });
+  assert.equal(cfg.status, 200);
+  await api('POST', '/scan', { account: 'acc1', projects: ['TP'] });
+  await waitScanDone();
+  const { json: f } = await api('GET', '/features?account=acc1');
+  assert.ok(f.scanned_at > 0);
+  const feat = f.features.find((x) => x.branch === 'feature/nightly-e2e-suite');
+  assert.ok(feat, `nightly feature extracted (${f.features.map((x) => x.branch).join(', ')})`);
+  assert.equal(feat.commit_count, 2);
+  assert.ok(feat.actual_days > 0, 'actual from first commit -> merge');
+  assert.equal(feat.est_days_ai, 2, 'features estimated too');
+  assert.ok(feat.deployed_at > feat.merged_at, 'deploy tag correlated');
+});
+
+test('scan accepts an assignee scope (per-dev fetch) and records it', async () => {
+  const r = await api('POST', '/scan', { account: 'acc1', projects: ['TP'], assignees: ['u-alice'] });
+  assert.equal(r.status, 200);
+  const done = await waitScanDone();
+  assert.equal(done.scoped_people, 1);
+  // Corpus keeps previously scanned issues (scoped scan unions in).
+  const { json: o } = await api('GET', '/overview?account=acc1&projects=TP');
+  assert.ok(o.completed >= 6);
+});
+
+// ---- v3.1: period filter, merges, reports -------------------------------------
+
+test('since param windows the stats (old completions leave)', async () => {
+  const all = await api('GET', '/overview?account=acc1&projects=TP');
+  const windowed = await api('GET', `/overview?account=acc1&projects=TP&since=${Date.parse('2026-06-15T00:00:00Z')}`);
+  assert.ok(windowed.json.completed < all.json.completed, `windowed ${windowed.json.completed} < all ${all.json.completed}`);
+  assert.equal(windowed.json.since, Date.parse('2026-06-15T00:00:00Z'));
+  const alice = windowed.json.assignees.find((a) => a.assignee_id === 'u-alice');
+  assert.ok(!alice || alice.completed <= 3);
+  // Monthly series present on stats rows.
+  const anyDev = all.json.assignees[0];
+  assert.ok(Array.isArray(anyDev.monthly) && anyDev.monthly.length === 12);
+});
+
+test('people merge folds two accounts into one person', async () => {
+  // Merge bob INTO alice, then the overview shows one combined person.
+  await api('PUT', '/people', { account: 'acc1', people: { 'u-bob': { merged_into: 'u-alice' } } });
+  const { json: o } = await api('GET', '/overview?account=acc1&projects=TP');
+  assert.ok(!o.assignees.some((a) => a.assignee_id === 'u-bob'), 'bob folded');
+  const alice = o.assignees.find((a) => a.assignee_id === 'u-alice');
+  assert.equal(alice.completed, 6, 'combined completed count');
+  // Unmerge for later tests.
+  await api('PUT', '/people', { account: 'acc1', people: { 'u-bob': { merged_into: null } } });
+});
+
+test('report: generate per quarter, saved to the hub, html retrievable', async () => {
+  const start = await api('POST', '/report', { account: 'acc1', assignee: 'u-alice', kind: 'quarter', year: 2026, quarter: 2 });
+  assert.equal(start.status, 200);
+  let status;
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    status = (await api('GET', `/report/status?job=${encodeURIComponent(start.json.job)}`)).json;
+    if (status.state !== 'running') break;
+    if (Date.now() > deadline) throw new Error('report never finished');
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.equal(status.state, 'done', status.error || '');
+  assert.equal(status.report.label, '2026 Q2');
+
+  const list = await api('GET', '/reports?account=acc1&assignee=u-alice');
+  assert.equal(list.json.reports.length, 1);
+  const html = await api('GET', `/report/html?account=acc1&id=${encodeURIComponent(status.report.id)}`);
+  assert.ok(html.json.html.startsWith('<!doctype html>'), 'prose stripped, pure html stored');
+  assert.ok(html.json.html.includes('Report for Alice'));
+
+  const bad = await api('POST', '/report', { account: 'acc1', assignee: 'u-alice', kind: 'quarter', year: 2026, quarter: 9 });
+  assert.equal(bad.status, 400);
+});
+
+test('story exclude/include override removes it from every stat', async () => {
+  const before = (await api('GET', '/overview?account=acc1&projects=TP')).json;
+  const alice0 = before.assignees.find((a) => a.assignee_id === 'u-alice');
+  await api('PUT', '/override', { account: 'acc1', project: 'TP', key: 'TP-1', excluded: true });
+  const after = (await api('GET', '/overview?account=acc1&projects=TP')).json;
+  const alice1 = after.assignees.find((a) => a.assignee_id === 'u-alice');
+  assert.equal(alice1.completed, alice0.completed - 1, 'excluded story leaves the Done count');
+  const { json: v } = await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice');
+  const tp1 = v.completed.find((x) => x.key === 'TP-1');
+  assert.ok(tp1, 'still listed for re-inclusion');
+  assert.equal(tp1.excluded_override, true);
+  await api('PUT', '/override', { account: 'acc1', project: 'TP', key: 'TP-1', excluded: false });
+  const restored = (await api('GET', '/overview?account=acc1&projects=TP')).json;
+  assert.equal(restored.assignees.find((a) => a.assignee_id === 'u-alice').completed, alice0.completed);
+});
+
+test('unscoped fix commits (TP-0000) surface per person', async () => {
+  // Add a placeholder-key commit and rescan so the git index picks it up.
+  execFileSync('git', ['-C', repoDir, 'checkout', '-q', 'develop']);
+  fs.appendFileSync(path.join(repoDir, 'f.txt'), 'hotfix\n');
+  execFileSync('git', ['-C', repoDir, 'add', '.']);
+  execFileSync('git', ['-C', repoDir, 'commit', '-q', '-m', 'TP-0000 urgent prod fix'], {
+    env: { ...process.env, GIT_AUTHOR_NAME: 'Alice', GIT_AUTHOR_EMAIL: 'a@x', GIT_COMMITTER_NAME: 'Alice', GIT_COMMITTER_EMAIL: 'a@x' },
+  });
+  await api('POST', '/scan', { account: 'acc1', projects: ['TP'] });
+  await waitScanDone();
+  const { json: f } = await api('GET', '/features?account=acc1');
+  const alice = (f.unscoped || []).find((u) => u.name === 'Alice');
+  assert.ok(alice, `unscoped tracked (${JSON.stringify(f.unscoped)})`);
+  assert.ok(alice.commits >= 1);
+  const { json: o } = await api('GET', '/overview?account=acc1&projects=TP');
+  const arow = o.assignees.find((x) => x.assignee_id === 'u-alice');
+  assert.ok(arow.unscoped_commits >= 1, `overview column carries it (${arow.unscoped_commits})`);
+});
+
+test('auto-scan cron repeats the last scan params (isolated sidecar, fast tick)', async () => {
+  // Fresh sidecar with a fast auto-scan tick so the cron fires in-test.
+  const dataDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-e2e-auto-'));
+  const port2 = 20000 + Math.floor(Math.random() * 20000);
+  const plugin2 = spawn(process.execPath, ['server.js'], {
+    cwd: path.join(__dirname, '..'),
+    env: {
+      ...process.env,
+      OTTO_PLUGIN_PORT: String(port2),
+      OTTO_HOST_API: `http://127.0.0.1:${hostPort}`,
+      OTTO_PLUGIN_TOKEN: 'ptok',
+      OTTO_PLUGIN_DATA_DIR: dataDir2,
+      OTTO_TP_AUTOSCAN_MS: '900',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  const api2 = (method, pathname, body) =>
+    new Promise((resolve, reject) => {
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request(
+        { method, hostname: '127.0.0.1', port: port2, path: pathname, headers: data ? { 'Content-Type': 'application/json' } : {} },
+        (res) => {
+          let buf = '';
+          res.on('data', (c) => (buf += c));
+          res.on('end', () => resolve({ status: res.statusCode, json: buf ? JSON.parse(buf) : null }));
+        },
+      );
+      req.on('error', reject);
+      if (data) req.write(data);
+      req.end();
+    });
+  try {
+    for (let i = 0; ; i++) {
+      try {
+        if ((await api2('GET', '/health')).status === 200) break;
+      } catch { /* boot */ }
+      if (i > 100) throw new Error('auto sidecar never healthy');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // Manual scan seeds last_scan.json; the cron then repeats it.
+    await api2('POST', '/scan', { account: 'acc1', projects: ['TP'] });
+    let s;
+    for (let i = 0; ; i++) {
+      s = (await api2('GET', '/scan/status?account=acc1')).json;
+      if (s.state === 'done') break;
+      if (i > 200) throw new Error('manual scan never finished');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const firstFinish = s.finished_at;
+    // Wait for an auto run: finished_at must advance and the job carry auto:true.
+    let auto = null;
+    for (let i = 0; i < 100; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      const cur = (await api2('GET', '/scan/status?account=acc1')).json;
+      if (cur.auto && cur.state === 'done' && cur.finished_at > firstFinish) { auto = cur; break; }
+    }
+    assert.ok(auto, 'auto-scan fired and completed');
+    assert.equal(auto.errors, 0);
+  } finally {
+    plugin2.kill('SIGKILL');
+    fs.rmSync(dataDir2, { recursive: true, force: true });
+  }
 });

@@ -1,6 +1,11 @@
 // Minimal Jira Cloud REST v3 client on node builtins — no dependencies.
-// All calls are serial with retry/backoff (429/5xx: honor Retry-After, else
-// 250ms×2ⁿ, 3 attempts); a shared counter reports retries for scan status.
+//
+// Pacing is a first-class concern: every call (after the first) waits
+// `paceMs`, and any 429 doubles the effective pace for the rest of the client's
+// life (capped) on top of honoring Retry-After — full-project scans must never
+// trip Jira's rate limits. All calls are serial with retry/backoff
+// (429/5xx: honor Retry-After, else 250ms×2ⁿ, 3 attempts); shared counters
+// report retries + the current pace for scan status.
 //
 // Notable API facts this client encodes (Jira Cloud, 2025+):
 //   * /rest/api/3/search/jql paginates by nextPageToken/isLast, returns NO
@@ -47,21 +52,24 @@ function request(urlStr, { method = 'GET', headers = {}, body = null } = {}) {
   });
 }
 
+const MAX_PACE = 4000;
+
 /**
- * makeClient({base_url, email, token}) → Jira client.
+ * makeClient({base_url, email, token}, {paceMs}) → Jira client.
  * Every method throws Error('<status> from <path>') after retries fail.
  */
-function makeClient(creds) {
+function makeClient(creds, opts = {}) {
   const base = String(creds.base_url || '').replace(/\/$/, '');
   const auth = 'Basic ' + Buffer.from(`${creds.email}:${creds.token}`).toString('base64');
-  const state = { retries: 0 };
+  const state = { retries: 0, paceMs: Math.max(0, Number(opts.paceMs) || 0), calls: 0 };
 
-  async function call(pathname, opts = {}) {
+  async function call(pathname, opts2 = {}) {
     let lastErr = null;
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (state.calls++ > 0 && state.paceMs > 0) await sleep(state.paceMs);
       let res;
       try {
-        res = await request(base + pathname, { ...opts, headers: { Authorization: auth, ...(opts.headers || {}) } });
+        res = await request(base + pathname, { ...opts2, headers: { Authorization: auth, ...(opts2.headers || {}) } });
       } catch (e) {
         lastErr = e;
         state.retries++;
@@ -70,6 +78,8 @@ function makeClient(creds) {
       }
       if (res.status === 429 || res.status >= 500) {
         state.retries++;
+        // Getting throttled means our pace is too hot — back off permanently.
+        if (res.status === 429) state.paceMs = Math.min(MAX_PACE, Math.max(500, state.paceMs * 2));
         const ra = parseFloat(res.headers['retry-after']);
         await sleep(Number.isFinite(ra) ? Math.min(ra * 1000, 30000) : 250 * 2 ** attempt);
         lastErr = new Error(`${res.status} from ${pathname}`);
@@ -91,12 +101,16 @@ function makeClient(creds) {
     get retries() {
       return state.retries;
     },
+    get paceMs() {
+      return state.paceMs;
+    },
 
-    /** Paginated enhanced-JQL search. onPage(issues) per page; capped at maxIssues. */
-    async searchAll(jql, fields, { maxIssues = 1000, onPage } = {}) {
+    /** Paginated enhanced-JQL search. onPage(count) per page; maxIssues 0 = unlimited. */
+    async searchAll(jql, fields, { maxIssues = 0, onPage } = {}) {
+      const cap = maxIssues > 0 ? maxIssues : Infinity;
       const out = [];
       let token = null;
-      while (out.length < maxIssues) {
+      while (out.length < cap) {
         const params = new URLSearchParams({
           jql,
           maxResults: '100',
@@ -105,7 +119,7 @@ function makeClient(creds) {
         if (token) params.set('nextPageToken', token);
         const page = await call(`/rest/api/3/search/jql?${params}`);
         const issues = (page && page.issues) || [];
-        out.push(...issues.slice(0, maxIssues - out.length));
+        out.push(...(cap === Infinity ? issues : issues.slice(0, cap - out.length)));
         if (onPage) onPage(out.length);
         token = page && page.nextPageToken;
         if (!token || page.isLast || issues.length === 0) break;
@@ -161,6 +175,22 @@ function makeClient(creds) {
       return ((page && page.values) || []).map((p) => ({ key: p.key, name: p.name }));
     },
 
+    /** Assignable users of a project (people picker before the first scan). */
+    async assignableUsers(projectKey) {
+      const out = [];
+      let startAt = 0;
+      for (;;) {
+        const page = await call(
+          `/rest/api/3/user/assignable/search?project=${encodeURIComponent(projectKey)}&startAt=${startAt}&maxResults=100`,
+        );
+        const users = Array.isArray(page) ? page : [];
+        out.push(...users.filter((u) => u.accountType !== 'app').map((u) => ({ id: u.accountId, name: u.displayName })));
+        if (users.length < 100) break;
+        startAt += users.length;
+      }
+      return out;
+    },
+
     /** Approximate issue count for a JQL (progress denominator; null on failure). */
     async approxCount(jql) {
       try {
@@ -182,4 +212,17 @@ function detectPointsField(fields) {
   return 'customfield_10016';
 }
 
-module.exports = { makeClient, detectPointsField };
+/** Flatten an ADF document (Jira v3 rich text) to plain text. */
+function adfToText(node) {
+  if (node == null) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(adfToText).join('');
+  let out = '';
+  if (node.type === 'text') out += node.text || '';
+  if (node.type === 'hardBreak') out += '\n';
+  if (node.content) out += adfToText(node.content);
+  if (['paragraph', 'heading', 'listItem', 'codeBlock', 'blockquote'].includes(node.type)) out += '\n';
+  return out;
+}
+
+module.exports = { makeClient, detectPointsField, adfToText };

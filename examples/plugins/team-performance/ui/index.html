@@ -10,25 +10,28 @@
          luminance. Text never wears series colors. */
       :root {
         --bg: #14161a; --text: #e6e6e6; --text-dim: #9aa0a6; --accent: #3e63dd; --border: #2a2d33;
-        --s1: #3987e5; --s2: #199e70; --s3: #c98500;
+        --s1: #3987e5; --s2: #199e70; --s3: #c98500; --s4: #8e6fd8;
         --good: #0ca30c; --warn: #fab219; --serious: #ec835a; --critical: #d03b3b;
         --band: rgba(57, 135, 229, 0.14);
       }
       :root.light {
-        --s1: #2a78d6; --s2: #1baf7a; --s3: #eda100;
+        --s1: #2a78d6; --s2: #1baf7a; --s3: #eda100; --s4: #7c5fc9;
         --band: rgba(42, 120, 214, 0.12);
       }
       * { box-sizing: border-box; }
       body { margin: 0; font: 13px/1.5 -apple-system, system-ui, sans-serif; color: var(--text); background: var(--bg); padding: 16px 20px; }
       h1 { font-size: 18px; margin: 0 0 12px; }
       h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 8px; }
+      h3 { font-size: 12px; margin: 10px 0 4px; color: var(--text-dim); }
       .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
       select, input, button { padding: 6px 10px; font-size: 13px; color: var(--text); background: transparent; border: 1px solid var(--border); border-radius: 6px; }
+      input[type="checkbox"] { padding: 0; }
       button { cursor: pointer; }
       button.primary { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+      button.small { padding: 2px 8px; font-size: 11px; }
       button:disabled { opacity: 0.5; cursor: default; }
       .card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
-      .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 0 0 12px; }
+      .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 0 0 12px; }
       .kpi-tile { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
       .kpi-tile .l { font-size: 11px; color: var(--text-dim); }
       .kpi-tile .v { font-size: 22px; font-weight: 700; }
@@ -36,21 +39,26 @@
       table { width: 100%; border-collapse: collapse; }
       th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
       th { color: var(--text-dim); font-weight: 600; font-size: 12px; }
-      td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+      td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
       tr.clickable { cursor: pointer; }
       tr.clickable:hover td { background: color-mix(in srgb, var(--text) 4%, transparent); }
+      tr.suspect td { background: color-mix(in srgb, var(--warn) 7%, transparent); }
+      tr.excluded td { opacity: 0.45; }
       .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--text-dim) 18%, transparent); white-space: nowrap; }
       .badge.fast { background: color-mix(in srgb, var(--good) 22%, transparent); }
       .badge.on_track { background: color-mix(in srgb, var(--good) 12%, transparent); }
       .badge.slow { background: color-mix(in srgb, var(--critical) 22%, transparent); }
       .badge.met { background: color-mix(in srgb, var(--good) 22%, transparent); }
       .badge.missed { background: color-mix(in srgb, var(--critical) 22%, transparent); }
+      .badge.warn { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+      .badge.git { background: color-mix(in srgb, var(--s2) 20%, transparent); }
+      .badge.jira { background: color-mix(in srgb, var(--text-dim) 14%, transparent); }
       .banner { border: 1px solid color-mix(in srgb, var(--warn) 50%, transparent); background: color-mix(in srgb, var(--warn) 12%, transparent); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
       .err { color: var(--critical); padding: 4px 0; }
       .dim { color: var(--text-dim); }
       a { color: var(--accent); cursor: pointer; text-decoration: none; }
       pre { white-space: pre-wrap; margin: 0; }
-      .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-dim); margin: 4px 0 8px; }
+      .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-dim); margin: 4px 0 8px; flex-wrap: wrap; }
       .legend .key { display: inline-flex; align-items: center; gap: 5px; }
       .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
       .evidence { display: none; }
@@ -67,18 +75,58 @@
       @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
       details.method { color: var(--text-dim); font-size: 12px; margin-top: 8px; }
       details.method summary { cursor: pointer; }
+      .chart-wrap { max-width: 900px; }
+      .chart-wrap svg { display: block; width: 100%; height: auto; }
+      /* project multi-select dropdown */
+      .msel { position: relative; }
+      .msel-list { position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; min-width: 260px; max-height: 320px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.35); display: none; }
+      .msel-list.open { display: block; }
+      .msel-list label { display: flex; gap: 8px; align-items: center; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+      .msel-list label:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+      .people-row { display: grid; grid-template-columns: auto 1fr 150px 1fr 170px; gap: 8px; align-items: center; padding: 3px 0; }
+      .people-row.merged { opacity: 0.55; }
+      .people-row input[type="text"] { width: 100%; }
+      .worker-row { display: flex; gap: 8px; align-items: center; margin: 3px 0; }
+      .inline-input { width: 64px; padding: 2px 6px; font-size: 12px; }
+      td .inline-input { margin-left: 4px; }
+      .role-head td { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; background: color-mix(in srgb, var(--text) 3%, transparent); }
+      .cfg-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; align-items: center; }
+      .cfg-grid .lbl { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
     </style>
   </head>
   <body>
     <h1>Team Performance</h1>
     <div class="row">
       <select id="account" aria-label="Jira account"></select>
-      <select id="project" aria-label="Project"></select>
-      <button class="primary" id="scan">Scan project</button>
+      <span class="msel">
+        <button id="proj-btn">Projects ▾</button>
+        <div id="proj-list" class="msel-list"></div>
+      </span>
+      <select id="scan-scope" title="Which people to fetch from Jira">
+        <option value="all">Scan: everyone</option>
+        <option value="included">Scan: included people only</option>
+      </select>
+      <button class="primary" id="scan">Scan</button>
+      <button id="rescan" title="Full rescan — rebuilds the corpus from scratch">⟳ Full rescan</button>
       <span id="scan-progress"></span>
       <span id="last-scan" class="dim"></span>
       <button id="coach">AI coach</button>
       <button id="settings-toggle" title="Settings">⚙</button>
+    </div>
+    <div class="row" style="margin-top:-6px">
+      <select id="period" title="Completed-task window — everything (medians, weighted, pace, goals) is computed on this period">
+        <option value="">All time</option>
+        <option value="1">Last month</option>
+        <option value="3">Last 3 months</option>
+        <option value="6">Last 6 months</option>
+        <option value="12" selected>Last 12 months</option>
+        <option value="ytd">Year to date</option>
+        <option value="custom">Since date…</option>
+      </select>
+      <input id="period-date" type="date" style="display:none">
+      <select id="role-filter"><option value="">All roles</option></select>
+      <select id="group-by"><option value="">No grouping</option><option value="role">Group by role</option></select>
+      <span id="scope-chips" class="dim"></span>
     </div>
     <div id="err" class="err"></div>
     <div id="capped-banner" class="banner" style="display:none"></div>
@@ -101,7 +149,6 @@
       // ---- theming ----------------------------------------------------------
       function applyTheme(theme) {
         if (theme) for (const [k, v] of Object.entries(theme)) if (v) document.documentElement.style.setProperty(k, v);
-        // Pick light/dark series steps by surface luminance (fallback: media query).
         const bg = (theme && theme['--bg']) || getComputedStyle(document.documentElement).getPropertyValue('--bg');
         const m = /^#([0-9a-f]{6})$/i.exec(bg.trim());
         let light = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
@@ -134,27 +181,42 @@
       };
       const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-      /** Horizontal stacked bars: rows [{label, parts:[{v, varName}], end}] — 2px surface gaps, ≤18px marks, end labels. */
+      /** Robust axis max: p95 of totals (clipped bars get a ▸ marker). */
+      function robustMax(totals) {
+        const vs = totals.filter((v) => v > 0).sort((a, b) => a - b);
+        if (!vs.length) return 1;
+        const p95 = vs[Math.max(0, Math.ceil(0.95 * vs.length) - 1)];
+        const max = vs[vs.length - 1];
+        return max <= p95 * 1.5 ? max : p95;
+      }
+
+      /** Horizontal stacked bars at natural size (no viewBox upscaling):
+          rows [{label, parts:[{v, varName}], end, clipped}] */
       function stackedHBar(rows, maxV) {
-        const w = 560, rowH = 26, labelW = 130, endW = 60, barH = 14;
+        const rowH = 24, labelW = 150, endW = 90, barH = 13;
+        const w = Math.min(880, Math.max(560, (document.body.clientWidth || 900) - 80));
         const plotW = w - labelW - endW;
-        const svg = S('svg', { width: '100%', viewBox: `0 0 ${w} ${rows.length * rowH}`, role: 'img' });
+        const svg = S('svg', { width: w, height: rows.length * rowH, viewBox: `0 0 ${w} ${rows.length * rowH}`, role: 'img', style: 'max-width:100%' });
         rows.forEach((r, i) => {
           const y = i * rowH + (rowH - barH) / 2;
-          const t = S('text', { x: labelW - 8, y: i * rowH + rowH / 2 + 3, 'text-anchor': 'end' });
-          t.textContent = r.label.length > 18 ? r.label.slice(0, 17) + '…' : r.label;
+          const t = S('text', { x: labelW - 8, y: i * rowH + rowH / 2 + 3.5, 'text-anchor': 'end', style: 'font-size:11px' });
+          t.textContent = r.label.length > 22 ? r.label.slice(0, 21) + '…' : r.label;
           svg.appendChild(t);
           let x = labelW;
+          const total = r.parts.reduce((a, p) => a + (p.v || 0), 0);
+          const scaleTo = Math.min(total, maxV);
+          const k = total > 0 ? scaleTo / total : 0;
           r.parts.forEach((p, pi) => {
-            const bw = maxV > 0 ? Math.max(0, (p.v / maxV) * plotW) : 0;
+            const bw = maxV > 0 ? Math.max(0, ((p.v || 0) * k / maxV) * plotW) : 0;
             if (bw > 0.5) {
-              const isLast = pi === r.parts.length - 1;
+              const isLast = pi === r.parts.length - 1 && !r.clipped;
               svg.appendChild(S('rect', { x, y, width: Math.max(1, bw - 2), height: barH, rx: isLast ? 4 : 0, fill: cssVar(p.varName) }));
-              x += bw; // the -2 leaves the 2px surface gap
+              x += bw;
             }
           });
-          const end = S('text', { x: x + 6, y: i * rowH + rowH / 2 + 3 });
-          end.textContent = r.end;
+          const end = S('text', { x: x + 6, y: i * rowH + rowH / 2 + 3.5, style: 'font-size:11px' });
+          end.textContent = (r.clipped ? '▸' : '') + r.end;
+          if (r.clipped) end.setAttribute('font-weight', '600');
           svg.appendChild(end);
         });
         return svg;
@@ -163,7 +225,7 @@
       /** Bullet bar: baseline band p25–p75 + p50 tick + 8px actual bar. */
       function bulletBar(actual, band, maxV, varName) {
         const w = 170, h = 18;
-        const svg = S('svg', { width: w, height: h, viewBox: `0 0 ${w} ${h}` });
+        const svg = S('svg', { width: w, height: h, viewBox: `0 0 ${w} ${h}`, style: 'width:170px' });
         const X = (v) => (maxV > 0 ? Math.min(w - 1, (v / maxV) * (w - 8)) : 0);
         if (band && band.p25 != null && band.p75 != null) {
           svg.appendChild(S('rect', { x: X(band.p25), y: 2, width: Math.max(1, X(band.p75) - X(band.p25)), height: h - 4, rx: 3, fill: 'var(--band)' }));
@@ -180,7 +242,7 @@
       /** 12-point sparkline (2px line). */
       function sparkline(values) {
         const w = 90, h = 22, vs = values.filter((v) => v != null);
-        const svg = S('svg', { width: w, height: h, viewBox: `0 0 ${w} ${h}` });
+        const svg = S('svg', { width: w, height: h, viewBox: `0 0 ${w} ${h}`, style: 'width:90px' });
         if (vs.length < 2) return svg;
         const lo = Math.min(...vs), hi = Math.max(...vs);
         const pts = values.slice(-12).map((v, i, arr) => {
@@ -190,6 +252,24 @@
           return `${x},${y}`;
         }).filter(Boolean);
         svg.appendChild(S('polyline', { points: pts.join(' '), fill: 'none', stroke: cssVar('--s1'), 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+        return svg;
+      }
+
+      /** 12-month mini column chart (weighted est-days per month). */
+      function monthlyBars(values, w = 62, h = 20) {
+        const svg = S('svg', { width: w, height: h, viewBox: `0 0 ${w} ${h}`, style: `width:${w}px` });
+        const max = Math.max(1, ...values);
+        const bw = Math.floor(w / values.length) - 1;
+        const now = new Date();
+        values.forEach((v, i) => {
+          const bh = Math.max(v > 0 ? 1.5 : 0, (v / max) * (h - 2));
+          const rect = S('rect', { x: i * (bw + 1), y: h - bh, width: bw, height: Math.max(0.1, bh), rx: 1, fill: v > 0 ? cssVar('--s2') : 'transparent' });
+          const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (values.length - 1 - i), 1));
+          const t = S('title', {});
+          t.textContent = `${d.toISOString().slice(0, 7)}: ${Math.round(v * 10) / 10} est-d`;
+          rect.appendChild(t);
+          svg.appendChild(rect);
+        });
         return svg;
       }
 
@@ -206,7 +286,23 @@
       }
 
       // ---- state + boot ------------------------------------------------------
-      const state = { account: null, project: null, overview: null, dev: null, config: null, polling: null };
+      const state = {
+        account: null, projects: [], allProjects: [], selected: [],
+        overview: null, features: null, dev: null, config: null, people: {},
+        roleFilter: '', groupBy: '', period: '12', periodDate: '', polling: null,
+      };
+
+      function sinceMs() {
+        const now = new Date();
+        if (state.period === '') return 0;
+        if (state.period === 'ytd') return Date.UTC(now.getUTCFullYear(), 0, 1);
+        if (state.period === 'custom') return state.periodDate ? Date.parse(state.periodDate) || 0 : 0;
+        const months = parseInt(state.period, 10);
+        return Number.isFinite(months) ? Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - months, now.getUTCDate()) : 0;
+      }
+      const LS = (k) => `tp:${state.account}:${k}`;
+      const saveSel = () => { try { localStorage.setItem(LS('projects'), JSON.stringify(state.selected)); } catch { /* private mode */ } };
+      const loadSel = () => { try { return JSON.parse(localStorage.getItem(LS('projects')) || '[]'); } catch { return []; } };
 
       window.addEventListener('message', async (ev) => {
         if (ev.source !== window.parent) return; // only the hosting shell may init us
@@ -223,66 +319,140 @@
           $('account').innerHTML = accts.map((a) => `<option value="${esc(a.id)}">${esc(a.label)}</option>`).join('');
           if (!accts.length) { $('team-view').innerHTML = '<p class="dim">No Jira accounts configured in Otto. Add one first, then come back.</p>'; return; }
           state.account = accts[0].id;
+          try {
+            const p = localStorage.getItem(LS('period'));
+            if (p !== null) { state.period = p; $('period').value = p; $('period-date').style.display = p === 'custom' ? '' : 'none'; }
+          } catch { /* private mode */ }
           await loadProjects();
+          pollScan(true); // resume progress display if a scan is already running
         } catch (e) { err('Load failed: ' + e.message); }
       }
 
       async function loadProjects() {
         try {
           const projects = await api(`/projects?account=${encodeURIComponent(state.account)}`);
-          $('project').innerHTML = projects.map((p) => `<option value="${esc(p.key)}">${esc(p.key)} — ${esc(p.name)}</option>`).join('');
-          if (projects.length) { state.project = projects[0].key; await refresh(); }
-          else $('team-view').innerHTML = '<p class="dim">No projects visible to this Jira account.</p>';
+          state.projects = projects;
+          const saved = loadSel().filter((k) => projects.some((p) => p.key === k));
+          state.selected = saved.length ? saved : projects.filter((p) => p.scanned).map((p) => p.key);
+          if (!state.selected.length && projects.length) state.selected = [projects[0].key];
+          renderProjectPicker();
+          await refreshPeople();
+          await refresh();
         } catch (e) { err('Projects failed: ' + e.message); }
       }
 
+      function renderProjectPicker() {
+        $('proj-btn').textContent = state.selected.length === 1
+          ? state.selected[0] + ' ▾'
+          : `${state.selected.length} projects (Total) ▾`;
+        $('proj-list').innerHTML = state.projects.map((p) => `
+          <label><input type="checkbox" class="proj-cb" value="${esc(p.key)}" ${state.selected.includes(p.key) ? 'checked' : ''}>
+            <span>${esc(p.key)} — ${esc(p.name)}${p.scanned ? '' : ' <span class="dim">(not scanned)</span>'}</span></label>`).join('');
+        $('proj-list').querySelectorAll('.proj-cb').forEach((cb) => {
+          cb.onchange = async () => {
+            const set = new Set(state.selected);
+            if (cb.checked) set.add(cb.value); else set.delete(cb.value);
+            state.selected = [...set];
+            if (!state.selected.length) { state.selected = [cb.value]; cb.checked = true; return; }
+            saveSel();
+            renderProjectPicker();
+            state.dev = null;
+            await refresh();
+          };
+        });
+      }
+      $('proj-btn').onclick = () => $('proj-list').classList.toggle('open');
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.msel')) $('proj-list').classList.remove('open');
+      });
+
+      async function refreshPeople() {
+        try {
+          const p = await api(`/people?account=${encodeURIComponent(state.account)}`);
+          state.people = p.people || {};
+        } catch { state.people = {}; }
+      }
+
       $('account').onchange = async (e) => { state.account = e.target.value; state.dev = null; await loadProjects(); };
-      $('project').onchange = async (e) => { state.project = e.target.value; state.dev = null; await refresh(); };
+      $('role-filter').onchange = (e) => { state.roleFilter = e.target.value; renderTeam(); };
+      $('group-by').onchange = (e) => { state.groupBy = e.target.value; renderTeam(); };
+      $('period').onchange = async (e) => {
+        state.period = e.target.value;
+        $('period-date').style.display = state.period === 'custom' ? '' : 'none';
+        try { localStorage.setItem(LS('period'), state.period); } catch { /* private mode */ }
+        if (state.period !== 'custom' || state.periodDate) await refresh();
+      };
+      $('period-date').onchange = async (e) => { state.periodDate = e.target.value; await refresh(); };
 
       // ---- scan --------------------------------------------------------------
-      $('scan').onclick = async () => {
+      function includedAssignees() {
+        return Object.entries(state.people).filter(([, p]) => p.included !== false).map(([id]) => id);
+      }
+
+      async function startScan(full) {
         err('');
+        const body = { account: state.account, projects: state.selected, full };
+        if ($('scan-scope').value === 'included') body.assignees = includedAssignees();
         try {
-          await api('/scan', { method: 'POST', body: JSON.stringify({ account: state.account, project: state.project }) });
+          await api('/scan', { method: 'POST', body: JSON.stringify(body) });
           pollScan();
         } catch (e) { err(e.status === 409 ? 'A scan is already running.' : e.message); }
+      }
+      $('scan').onclick = () => startScan(false);
+      $('rescan').onclick = () => {
+        if (confirm('Full rescan rebuilds the corpus of the selected projects from scratch (slow on big projects, paced to respect Jira limits). Continue?')) startScan(true);
       };
 
-      function pollScan() {
+      function pollScan(passive) {
         clearInterval(state.polling);
-        $('scan').disabled = true;
+        if (!passive) { $('scan').disabled = true; $('rescan').disabled = true; }
         state.polling = setInterval(async () => {
           try {
-            const s = await api(`/scan/status?account=${encodeURIComponent(state.account)}&project=${encodeURIComponent(state.project)}`);
+            const s = await api(`/scan/status?account=${encodeURIComponent(state.account)}`);
             if (s.state === 'running') {
+              $('scan').disabled = true; $('rescan').disabled = true;
               const total = s.total != null ? `/${s.total}` : '';
-              $('scan-progress').textContent = `${s.step} ${s.fetched ?? 0}${total}${s.retries ? ` · ${s.retries} retries` : ''}`;
+              const proj = s.project_n > 1 ? `[${s.project_i}/${s.project_n} ${s.project}] ` : '';
+              const pace = s.pace_ms ? ` · pace ${s.pace_ms}ms` : '';
+              $('scan-progress').textContent = `${s.auto ? '⟳ auto · ' : ''}${proj}${s.step} ${s.fetched ?? 0}${total}${s.retries ? ` · ${s.retries} retries` : ''}${pace}`;
             } else {
               clearInterval(state.polling);
-              $('scan').disabled = false;
-              $('scan-progress').textContent = s.state === 'error' ? '' : 'scan complete';
-              if (s.state === 'error') err(s.error || 'scan failed');
-              setTimeout(() => ($('scan-progress').textContent = ''), 4000);
-              await refresh();
+              $('scan').disabled = false; $('rescan').disabled = false;
+              if (s.state === 'error') { err(s.error || 'scan failed'); $('scan-progress').textContent = ''; }
+              else if (!passive || s.state === 'done') {
+                $('scan-progress').textContent = s.state === 'done' ? 'scan complete' : '';
+                setTimeout(() => ($('scan-progress').textContent = ''), 4000);
+              }
+              if (s.state === 'done') { await refreshPeople(); await refresh(); }
             }
           } catch { /* transient poll error — keep polling */ }
-        }, 800);
+        }, 900);
       }
 
       // ---- views -------------------------------------------------------------
+      const projQ = () => {
+        const s = sinceMs();
+        return `account=${encodeURIComponent(state.account)}&projects=${encodeURIComponent(state.selected.join(','))}${s ? `&since=${s}` : ''}`;
+      };
+
       async function refresh() {
         err('');
         $('coach-out').innerHTML = '';
         try {
-          state.overview = await api(`/overview?account=${encodeURIComponent(state.account)}&project=${encodeURIComponent(state.project)}`);
+          state.overview = await api(`/overview?${projQ()}`);
         } catch (e) {
           state.overview = null;
           if (e.status !== 404) err(e.message);
         }
+        try { state.features = await api(`/features?account=${encodeURIComponent(state.account)}`); } catch { state.features = null; }
         const o = state.overview;
         $('last-scan').textContent = o && o.scanned_at ? `scanned ${fmtDate(o.scanned_at)}` : 'not scanned yet';
         $('capped-banner').style.display = o && o.capped ? '' : 'none';
-        if (o && o.capped) $('capped-banner').textContent = 'Corpus capped at max_issues — baselines reflect the most recently updated issues only (raise the cap in ⚙ settings).';
+        if (o && o.capped) $('capped-banner').textContent = 'A previous scan was capped by max_issues — run a Full rescan (cap is now unlimited by default) to load the complete history.';
+        // role filter options
+        const roles = (o && o.roles) || [];
+        const cur = state.roleFilter;
+        $('role-filter').innerHTML = '<option value="">All roles</option>' + roles.map((r) => `<option value="${esc(r)}" ${r === cur ? 'selected' : ''}>${esc(r)}</option>`).join('');
         if (state.dev) renderDev(); else renderTeam();
       }
 
@@ -292,64 +462,228 @@
         return `<span class="badge ${v}">${label}</span>`;
       }
 
+      const roleOf = (id) => (state.people[id] && state.people[id].role) || '';
+      const visibleAssignees = (o) => o.assignees.filter((a) => !state.roleFilter || a.role === state.roleFilter);
+
+      const SCOPE_LABEL = {
+        median_cycle_days: 'Median cycle (d)',
+        median_impl_days: 'Median implementation (d)',
+        median_deploy_lead_days: 'Median deploy lead (d)',
+        fix_rate: 'Fix rate',
+        on_track_pct: 'On track',
+        weighted_throughput_wk: 'Weighted throughput (est-d/wk)',
+      };
+      const scopeVal = (metric, v) => (metric === 'fix_rate' || metric === 'on_track_pct' ? fmtPct(v) : v == null ? '—' : v);
+
+      function goalsCardHtml(o) {
+        const sg = o.scope_goals || { team: [], roles: {} };
+        const row = (g, scopeName) => `
+          <tr data-scope="${esc(scopeName)}" data-metric="${esc(g.metric)}">
+            <td>${scopeName === 'team' ? '' : `<span class="badge">${esc(scopeName)}</span> `}${esc(SCOPE_LABEL[g.metric] || g.metric)}</td>
+            <td class="num">${scopeVal(g.metric, g.current)}</td>
+            <td class="num"><input class="inline-input sg-target" type="number" step="0.1" min="0" value="${g.target}"></td>
+            <td>${g.met ? '<span class="badge met">met</span>' : '<span class="badge missed">missed</span>'}</td>
+            <td><button class="small sg-del">✕</button></td>
+          </tr>`;
+        const teamRows = (sg.team || []).map((g) => row(g, 'team')).join('');
+        const roleRows = Object.entries(sg.roles || {}).flatMap(([r, gs]) => gs.map((g) => row(g, r))).join('');
+        const metricOpts = Object.entries(SCOPE_LABEL).map(([m, l]) => `<option value="${m}">${esc(l)}</option>`).join('');
+        const roleOpts = ['team', ...(o.roles || [])].map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join('');
+        return `<div class="card" id="goals-card"><h2>Goals — team &amp; roles <span class="dim">(evaluated on the current scope: ${esc(o.projects.join(', '))})</span></h2>
+          ${teamRows || roleRows ? `<table><thead><tr><th>Goal</th><th class="num">Current</th><th class="num">Target</th><th>Status</th><th></th></tr></thead><tbody>${teamRows}${roleRows}</tbody></table>` : '<p class="dim">No team/role goals yet — add one below. Developer goals live in each developer\'s page.</p>'}
+          <div class="row" style="margin:10px 0 0">
+            <select id="sg-scope">${roleOpts}</select>
+            <select id="sg-metric">${metricOpts}</select>
+            <input id="sg-new-target" type="number" step="0.1" min="0" placeholder="target" style="width:90px">
+            <button class="small" id="sg-add">Add goal</button>
+            <button class="primary small" id="sg-save">Save goals</button>
+            <span id="sg-msg" class="dim"></span>
+          </div></div>`;
+      }
+
+      function wireGoalsCard() {
+        const card = $('goals-card');
+        if (!card) return;
+        const collect = () => {
+          const team = [];
+          const roles = {};
+          card.querySelectorAll('tbody tr').forEach((tr) => {
+            const g = { metric: tr.dataset.metric, target: parseFloat(tr.querySelector('.sg-target').value) };
+            if (!Number.isFinite(g.target)) return;
+            if (tr.dataset.scope === 'team') team.push(g);
+            else (roles[tr.dataset.scope] ||= []).push(g);
+          });
+          return { team, roles };
+        };
+        card.querySelectorAll('.sg-del').forEach((b) => (b.onclick = async () => { b.closest('tr').remove(); }));
+        $('sg-add').onclick = () => {
+          const scope = $('sg-scope').value;
+          const metric = $('sg-metric').value;
+          const target = parseFloat($('sg-new-target').value);
+          if (!Number.isFinite(target)) { $('sg-msg').textContent = 'enter a target'; return; }
+          const tb = card.querySelector('tbody');
+          const tr = document.createElement('tr');
+          tr.dataset.scope = scope; tr.dataset.metric = metric;
+          tr.innerHTML = `<td>${scope === 'team' ? '' : `<span class="badge">${esc(scope)}</span> `}${esc(SCOPE_LABEL[metric] || metric)}</td>
+            <td class="num">—</td><td class="num"><input class="inline-input sg-target" type="number" step="0.1" min="0" value="${target}"></td>
+            <td><span class="badge">new</span></td><td><button class="small sg-del">✕</button></td>`;
+          if (tb) tb.appendChild(tr); else { renderTeamGoalsFresh(scope, metric, target); return; }
+          tr.querySelector('.sg-del').onclick = () => tr.remove();
+        };
+        function renderTeamGoalsFresh(scope, metric, target) {
+          const goals = { team: [], roles: {} };
+          if (scope === 'team') goals.team.push({ metric, target });
+          else goals.roles[scope] = [{ metric, target }];
+          api('/goals/scope', { method: 'PUT', body: JSON.stringify({ account: state.account, ...goals }) }).then(refresh);
+        }
+        $('sg-save').onclick = async () => {
+          try {
+            await api('/goals/scope', { method: 'PUT', body: JSON.stringify({ account: state.account, ...collect() }) });
+            $('sg-msg').textContent = 'saved';
+            await refresh();
+          } catch (e) { err(e.message); }
+        };
+      }
+
+      function assigneeChart(o) {
+        const devs = visibleAssignees(o).filter((a) => a.completed > 0);
+        const totals = devs.map((a) => (a.median_design || 0) + (a.median_impl || 0) + (a.median_fix || 0) + (a.median_deploy || 0));
+        const maxBar = robustMax(totals);
+        const groups = state.groupBy === 'role'
+          ? [...new Set(devs.map((a) => a.role || '(no role)'))].map((r) => ({ label: r, devs: devs.filter((a) => (a.role || '(no role)') === r) }))
+          : [{ label: '', devs }];
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.id = 'assignee-bars';
+        card.innerHTML = `<h2>Median task pipeline per developer (design → implementation → fixes → deployment)</h2>
+          <div class="legend">
+            <span class="key"><span class="swatch" style="background:var(--s1)"></span>design</span>
+            <span class="key"><span class="swatch" style="background:var(--s2)"></span>implementation</span>
+            <span class="key"><span class="swatch" style="background:var(--s3)"></span>fixes</span>
+            <span class="key"><span class="swatch" style="background:var(--s4)"></span>deployment</span>
+            <span class="key dim">▸ = beyond the axis (clamped at team p95)</span>
+          </div>`;
+        for (const g of groups) {
+          if (g.label) {
+            const h = document.createElement('h3');
+            h.textContent = g.label;
+            card.appendChild(h);
+          }
+          const rows = g.devs.map((a) => {
+            const total = (a.median_design || 0) + (a.median_impl || 0) + (a.median_fix || 0) + (a.median_deploy || 0);
+            return {
+              label: a.assignee_name || a.assignee_id,
+              parts: [
+                { v: a.median_design || 0, varName: '--s1' },
+                { v: a.median_impl || 0, varName: '--s2' },
+                { v: a.median_fix || 0, varName: '--s3' },
+                { v: a.median_deploy || 0, varName: '--s4' },
+              ],
+              end: fmtD(total),
+              clipped: total > maxBar * 1.001,
+            };
+          });
+          const wrap = document.createElement('div');
+          wrap.className = 'chart-wrap';
+          if (rows.length) wrap.appendChild(stackedHBar(rows, maxBar));
+          card.appendChild(wrap);
+        }
+        return card;
+      }
+
       function renderTeam() {
         $('dev-view').style.display = 'none';
         $('team-view').style.display = '';
         const o = state.overview;
-        if (!o) { $('team-view').innerHTML = '<p class="dim">No scan yet — pick the project and hit <b>Scan project</b>. The first scan builds the baseline corpus; every later scan is incremental and sharpens the estimates.</p>'; return; }
+        if (!o) { $('team-view').innerHTML = '<p class="dim">No scan yet — pick projects and hit <b>Scan</b>. The first scan builds the corpus (git-primary timing + AI estimates); later scans are incremental.</p>'; return; }
+
+        const chips = [];
+        const excluded = Object.values(state.people).filter((p) => p.included === false).length;
+        if (excluded) chips.push(`${excluded} people excluded`);
+        if (o.excluded) chips.push(`${o.excluded} tasks excluded (outlier/stale)`);
+        if (o.suspects) chips.push(`⚠ ${o.suspects} outlier suspects`);
+        if ((o.unmatched_authors || []).length) chips.push(`${o.unmatched_authors.length} unmatched git authors (⚙ people)`);
+        $('scope-chips').textContent = chips.join(' · ');
 
         const team = o.team || {};
+        const sc = o.scope || {};
         const tiles = `
           <div class="tiles">
-            <div class="kpi-tile"><div class="l">Completed tasks</div><div class="v">${o.completed}</div></div>
+            <div class="kpi-tile"><div class="l">Completed tasks</div><div class="v">${o.completed}${o.excluded ? `<small> −${o.excluded} excl.</small>` : ''}</div></div>
             <div class="kpi-tile"><div class="l">Open tasks</div><div class="v">${o.open}</div></div>
-            <div class="kpi-tile"><div class="l">Team median cycle</div><div class="v">${fmtD(team.median_cycle_days)}</div></div>
-            <div class="kpi-tile"><div class="l">On track or faster</div><div class="v">${o.completed ? Math.round((o.on_track / o.completed) * 100) + '<small>%</small>' : '—'}</div></div>
+            <div class="kpi-tile"><div class="l">Team median cycle</div><div class="v">${fmtD(sc.median_cycle_days)}</div></div>
+            <div class="kpi-tile"><div class="l">On track or faster</div><div class="v">${o.measurable ? Math.round((o.on_track / o.measurable) * 100) + '<small>%</small>' : '—'}</div></div>
+            <div class="kpi-tile"><div class="l">Deploy lead (merge→prod)</div><div class="v">${fmtD(sc.median_deploy_lead_days)}</div></div>
+            <div class="kpi-tile"><div class="l">Fix rate</div><div class="v">${sc.fix_rate != null ? fmtPct(sc.fix_rate) : '—'}</div></div>
+            <div class="kpi-tile"><div class="l">Throughput (est-d/wk)</div><div class="v">${sc.weighted_throughput_wk ?? '—'}</div></div>
           </div>`;
 
-        const maxBar = Math.max(1, ...o.assignees.map((a) => (a.median_design || 0) + (a.median_impl || 0)));
-        const rows = o.assignees.map((a) => ({
-          label: a.assignee_name || a.assignee_id,
-          parts: [{ v: a.median_design || 0, varName: '--s1' }, { v: a.median_impl || 0, varName: '--s2' }],
-          end: fmtD((a.median_design || 0) + (a.median_impl || 0)),
-        }));
-        const barsCard = document.createElement('div');
-        barsCard.className = 'card';
-        barsCard.id = 'assignee-bars';
-        barsCard.innerHTML = `<h2>Median task time per developer (design + implementation)</h2>
-          <div class="legend"><span class="key"><span class="swatch" style="background:var(--s1)"></span>design</span><span class="key"><span class="swatch" style="background:var(--s2)"></span>implementation</span></div>`;
-        if (rows.length) barsCard.appendChild(stackedHBar(rows, maxBar));
-
         const trendArrow = (t) => (t === 'improving' ? '▲' : t === 'worsening' ? '▼' : t === 'flat' ? '▶' : '—');
-        const tableRows = o.assignees.map((a) => `
+        const devs = visibleAssignees(o);
+        const rowsHtml = (list) => list.map((a) => `
           <tr class="clickable" data-dev="${esc(a.assignee_id)}">
-            <td>${esc(a.assignee_name || a.assignee_id)}</td>
-            <td class="num">${a.completed}</td>
+            <td>${esc(a.assignee_name || a.assignee_id)}${a.shared ? ` <span class="badge" title="tasks with significant multi-dev collaboration">${a.shared}⇄</span>` : ''}</td>
+            <td>${esc(a.role || '')}</td>
+            <td class="num" title="${a.rolled_up ? `${a.rolled_up} dev sub-tasks rolled into their parent stories · ` : ''}${a.routine_done ? `${a.routine_done} routine-weighted` : ''}">${a.completed}${a.routine_done ? ` <span class="dim">(${Math.round(a.routine_done)}r)</span>` : ''}</td>
             <td class="num">${a.wip}</td>
-            <td class="num">${fmtD(a.median_design)}</td>
+            <td class="num" title="estimated days of work delivered (multi-dev credit split by commit share)">${a.weighted_done ?? '—'}</td>
+            <td class="num" title="commits under catch-all keys (ABC-0000 …) — unscoped fixes / prod work with no story">${a.unscoped_commits || '—'}</td>
+            <td class="monthly" data-dev="${esc(a.assignee_id)}"></td>
+            <td class="num" title="Σestimate ÷ Σactual, size-weighted (higher = delivers faster than the estimates)">${a.efficiency != null ? '×' + a.efficiency.toFixed(2) : '—'}</td>
             <td class="num">${fmtD(a.median_impl)}</td>
             <td class="num">${fmtD(a.median_cycle)}</td>
-            <td class="num">${a.factor != null ? '×' + a.factor.toFixed(2) : '—'}</td>
+            <td class="num" title="Σactual ÷ Σestimate vs the team's same ratio — size-weighted, so big tasks dominate. ×1.6 = 60% slower than team pace">${a.pace_factor != null ? '×' + a.pace_factor.toFixed(2) : '—'}</td>
             <td class="num">${a.mape != null ? fmtPct(a.mape) : '—'}</td>
             <td class="num">${a.avg_wip ?? '—'}</td>
+            <td>${a.goals_total ? `<span class="badge ${a.goals_met === a.goals_total ? 'met' : a.goals_met ? 'warn' : 'missed'}">${a.goals_met}/${a.goals_total}</span>` : '—'}</td>
             <td title="${esc(a.trend || '')}">${trendArrow(a.trend)}</td>
           </tr>`).join('');
-        const table = `<div class="card"><h2>Developers <span class="dim">(click a row for tasks, goals and evidence)</span></h2>
-          <table id="assignee-table"><thead><tr><th>Developer</th><th class="num">Done</th><th class="num">WIP</th><th class="num">Design</th><th class="num">Impl</th><th class="num">Cycle</th><th class="num">vs team</th><th class="num">Est. error</th><th class="num">Avg WIP</th><th>Trend</th></tr></thead><tbody>${tableRows}</tbody></table></div>`;
+        const head = '<thead><tr><th>Developer</th><th>Role</th><th class="num" title="task counts are inflated by routine work — weighted est-days is the fair column">Done</th><th class="num">WIP</th><th class="num">Weighted (est-d)</th><th class="num" title="unscoped fix commits (ABC-0000-style catch-all keys)">Fixes⚡</th><th title="weighted est-days per month, last 12 months">Monthly</th><th class="num">Efficiency</th><th class="num">Impl</th><th class="num">Cycle</th><th class="num">vs team</th><th class="num">Est err</th><th class="num">Avg WIP</th><th>Goals</th><th>Trend</th></tr></thead>';
+        let tableBody;
+        if (state.groupBy === 'role') {
+          const groups = [...new Set(devs.map((a) => a.role || '(no role)'))];
+          tableBody = groups.map((g) => `<tr class="role-head"><td colspan="15">${esc(g)}</td></tr>` + rowsHtml(devs.filter((a) => (a.role || '(no role)') === g))).join('');
+        } else tableBody = rowsHtml(devs);
+        const table = `<div class="card"><h2>Developers <span class="dim">(click a row for tasks, goals, evidence — weighted = scope-based, not task counts)</span></h2>
+          <table id="assignee-table">${head}<tbody>${tableBody}</tbody></table></div>`;
 
-        const openRows = (o.open_tasks || []).map((t) => `
-          <tr>
+        const openRows = (o.open_tasks || [])
+          .filter((t) => !state.roleFilter || roleOf(t.assignee_id) === state.roleFilter)
+          .map((t) => `
+          <tr title="${esc(t.summary)}">
             <td>${esc(t.key)}</td>
             <td>${esc(t.assignee_name || '—')}</td>
             <td>${esc(t.type)}${t.points != null ? ` · ${t.points}pt` : ''}</td>
             <td>${esc(t.status)}</td>
             <td class="num">${fmtD((t.design_days || 0) + (t.impl_days || 0))}</td>
+            <td class="num">${fmtD(t.est_days_ai)}</td>
+            <td class="num">${fmtD(t.est_days_dev)}</td>
             <td class="num">${t.prediction ? fmtRange(t.prediction.total) : '<span class="dim">need ≥3 similar done tasks</span>'}</td>
             <td class="pct" data-pct="${t.pct_consumed ?? ''}"></td>
             <td class="num">${fmtDate(t.projected_done_at)}</td>
           </tr>`).join('');
-        const openCard = `<div class="card" id="open-tasks"><h2>Open tasks — predicted timelines</h2>
-          ${openRows ? `<table><thead><tr><th>Key</th><th>Assignee</th><th>Type</th><th>Status</th><th class="num">Elapsed</th><th class="num">Expected total</th><th>Consumed</th><th class="num">Projected done</th></tr></thead><tbody>${openRows}</tbody></table>` : '<p class="dim">No open tasks in the corpus.</p>'}</div>`;
+        const openCard = `<div class="card" id="open-tasks"><h2>Open tasks — predicted timelines <span class="dim">(estimate levels: AI → per-dev → prediction)</span></h2>
+          ${openRows ? `<table><thead><tr><th>Key</th><th>Assignee</th><th>Type</th><th>Status</th><th class="num">Elapsed</th><th class="num">Est AI</th><th class="num">Est dev</th><th class="num">Expected total</th><th>Consumed</th><th class="num">Projected</th></tr></thead><tbody>${openRows}</tbody></table>` : '<p class="dim">No open tasks in the scope.</p>'}</div>`;
+
+        // Git-only features (repos without Jira stories).
+        let featCard = '';
+        const feats = state.features && state.features.features;
+        if (feats && feats.length) {
+          const frows = feats.slice(0, 60).map((f) => `
+            <tr title="${esc((f.subjects || []).join('\n'))}">
+              <td>${esc(f.repo)}</td>
+              <td>${esc(f.summary)}${f.routine ? ' <span class="badge">routine</span>' : ''}</td>
+              <td>${esc((f.people || []).join(', ') || (f.authors || []).map((a) => a.name).join(', '))}</td>
+              <td class="num">${f.commit_count}</td>
+              <td class="num">${fmtD(f.est_days_ai)}</td>
+              <td class="num">${fmtD(f.est_days_dev)}</td>
+              <td class="num">${fmtD(f.actual_days)}</td>
+              <td class="num">${f.deploy_wait_days != null ? fmtD(f.deploy_wait_days) : '—'}</td>
+              <td class="num">${fmtDate(f.merged_at)}</td>
+            </tr>`).join('');
+          featCard = `<div class="card" id="git-features"><h2>Repo features without Jira stories <span class="dim">(from ⚙ feature-scan repos; estimate → dev estimate → actual)</span></h2>
+            <table><thead><tr><th>Repo</th><th>Feature</th><th>People</th><th class="num">Commits</th><th class="num">Est AI</th><th class="num">Est dev</th><th class="num">Actual</th><th class="num">Deploy wait</th><th class="num">Merged</th></tr></thead><tbody>${frows}</tbody></table></div>`;
+        }
 
         const guideRows = (o.baseline || []).map((b) => `
           <tr><td>${esc(b.type)}</td><td class="num">${b.points ?? 'unestimated'}</td><td class="num">${b.n}</td>
@@ -357,16 +691,79 @@
         const guide = `<div class="card" id="estimation-guide"><h2>Estimation guide — how long tasks actually take here</h2>
           ${guideRows ? `<table><thead><tr><th>Type</th><th class="num">Points</th><th class="num">n</th><th class="num">Design p50 [p25–p75]</th><th class="num">Implementation</th><th class="num">Total</th></tr></thead><tbody>${guideRows}</tbody></table>` : '<p class="dim">Not enough completed tasks yet — the guide appears once buckets reach n≥2.</p>'}
           <details class="method" id="methodology"><summary>Methodology</summary>
-            Times are business days (configurable workweek) spent in each status, from the issue's own changelog. Design = statuses mapped to design; implementation = statuses mapped to implementation (⚙ settings). "Should have taken" = percentiles of this team's completed tasks in the same (type, points) bucket, falling back to type-level then project-level stats below n=3. Delivery is correlated with git: a task counts as shipped when a commit or merge naming its key lands on ${esc(Object.values(o.target_used || {})[0] || 'develop')}. Predictions scale the bucket median by each developer's historical velocity factor (clamped ×0.5–×2). Completed tasks are attributed to the assignee at completion time.</details></div>`;
+            Git is the primary timing signal: implementation = first commit → merge to ${esc(Object.values(o.target_used || {})[0] || 'develop')}/release (done); fixes = commits landing after done (incl. release/hotfix branches); deployment = *-DEPLOYED* tag. The Jira changelog is the secondary indication (design phase, and tasks with no code). Business days, configurable workweek. Stale-status tasks and lead-marked outliers are excluded from all medians; a manual per-task time re-includes it. Weighted throughput = dev-agnostic AI scope estimates (batched agent calls, cached) credited by commit share across all contributors — the fair alternative to task counts. Predictions anchor on the AI estimate × the developer's velocity factor (clamped ×0.5–×2).</details></div>`;
 
         const flags = Object.entries(o.flags || {});
         const flagsCard = flags.length ? `<div class="card"><h2>Hygiene flags (completed tasks)</h2><div class="row" style="margin:0">${flags.map(([k, v]) => `<span class="badge">${esc(k)} × ${v}</span>`).join(' ')}</div></div>` : '';
 
         const view = $('team-view');
-        view.innerHTML = tiles + table + openCard + guide + flagsCard;
-        view.insertBefore(barsCard, view.children[1]);
+        view.innerHTML = tiles + goalsCardHtml(o) + table + openCard + featCard + reportsHubHtml() + guide + flagsCard;
+        view.insertBefore(assigneeChart(o), view.children[2]);
         view.querySelectorAll('tr.clickable').forEach((tr) => (tr.onclick = () => { state.dev = tr.dataset.dev; renderDev(); }));
+        const byId = new Map(o.assignees.map((a) => [a.assignee_id, a]));
+        view.querySelectorAll('td.monthly').forEach((td) => {
+          const a = byId.get(td.dataset.dev);
+          if (a && a.monthly && a.monthly.some((v) => v > 0)) td.appendChild(monthlyBars(a.monthly));
+          else td.textContent = '—';
+        });
         hydrateMeters(view);
+        wireGoalsCard();
+        wireReportsHub();
+      }
+
+      // ---- reports hub (agent-written per-dev summaries, saved history) -------
+      async function loadReports(assignee) {
+        try {
+          const r = await api(`/reports?account=${encodeURIComponent(state.account)}${assignee ? `&assignee=${encodeURIComponent(assignee)}` : ''}`);
+          return r.reports || [];
+        } catch { return []; }
+      }
+
+      function reportsHubHtml() {
+        return `<div class="card" id="reports-hub"><h2>Reports hub <span class="dim">(agent-written per-developer summaries — quarterly &amp; yearly, saved history)</span></h2>
+          <div id="reports-list" class="dim">Loading…</div></div>`;
+      }
+
+      async function wireReportsHub() {
+        const list = $('reports-list');
+        if (!list) return;
+        const reports = await loadReports(null);
+        if (!reports.length) { list.innerHTML = '<span class="dim">No reports yet — open a developer and generate one (per quarter or year, including past periods).</span>'; return; }
+        const byDev = new Map();
+        for (const r of reports) {
+          if (!byDev.has(r.assignee_name)) byDev.set(r.assignee_name, []);
+          byDev.get(r.assignee_name).push(r);
+        }
+        list.classList.remove('dim');
+        list.innerHTML = [...byDev.entries()].map(([name, rs]) => `
+          <div class="row" style="margin:4px 0"><b style="min-width:180px">${esc(name)}</b>
+            ${rs.map((r) => `<button class="small rep-open" data-id="${esc(r.id)}">${esc(r.label)} <span class="dim">${fmtDate(r.created_at)}</span></button>`).join(' ')}
+          </div>`).join('');
+        list.querySelectorAll('.rep-open').forEach((b) => (b.onclick = () => openReport(b.dataset.id)));
+      }
+
+      async function openReport(id) {
+        try {
+          const r = await api(`/report/html?account=${encodeURIComponent(state.account)}&id=${encodeURIComponent(id)}`);
+          const overlay = document.createElement('div');
+          overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;display:flex;flex-direction:column;padding:24px';
+          const bar = document.createElement('div');
+          bar.className = 'row';
+          bar.innerHTML = `<b style="color:#fff">${esc(r.assignee_name)} — ${esc(r.label)}</b>
+            <button class="small" id="rep-dl">Download</button><button class="small" id="rep-close">✕ close</button>`;
+          const frame = document.createElement('iframe');
+          frame.style.cssText = 'flex:1;border:1px solid var(--border);border-radius:10px;background:#fff';
+          frame.srcdoc = r.html;
+          overlay.append(bar, frame);
+          document.body.appendChild(overlay);
+          bar.querySelector('#rep-close').onclick = () => overlay.remove();
+          bar.querySelector('#rep-dl').onclick = () => {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([r.html], { type: 'text/html' }));
+            a.download = `${r.assignee_name}-${r.label}.html`.replace(/\s+/g, '-');
+            a.click();
+          };
+        } catch (e) { err(e.message); }
       }
 
       function hydrateMeters(root) {
@@ -378,12 +775,16 @@
         });
       }
 
+      async function saveOverride(key, project, patch) {
+        await api('/override', { method: 'PUT', body: JSON.stringify({ account: state.account, project, key, ...patch }) });
+      }
+
       async function renderDev() {
         $('team-view').style.display = 'none';
         $('dev-view').style.display = '';
         let v;
         try {
-          v = await api(`/assignee?account=${encodeURIComponent(state.account)}&project=${encodeURIComponent(state.project)}&assignee=${encodeURIComponent(state.dev)}`);
+          v = await api(`/assignee?${projQ()}&assignee=${encodeURIComponent(state.dev)}`);
         } catch (e) { $('dev-view').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
         const s = v.stats;
 
@@ -393,12 +794,14 @@
           median_design_days: 'Median design (days)',
           estimate_mape: 'Estimate error',
           avg_wip: 'Avg parallel tasks',
+          weighted_throughput: 'Weighted throughput (est-days)',
+          efficiency: 'Efficiency (est ÷ actual)',
         };
         const goalRows = v.goals.map((g) => {
           const row = document.createElement('div');
           row.className = 'goal';
           row.dataset.metric = g.metric;
-          row.innerHTML = `<span>${esc(goalLabel[g.metric] || g.metric)} ${g.suggested ? '<span class="dim">(suggested)</span>' : ''}</span>
+          row.innerHTML = `<span>${esc(goalLabel[g.metric] || g.metric)} ${g.suggested ? '<span class="dim">(suggested)</span>' : ''} <span class="dim">${g.dir === 'up' ? '↑' : '↓'}</span></span>
             <span class="num dim">now ${g.metric === 'estimate_mape' ? fmtPct(g.current) : g.current ?? '—'}</span>
             <span>target <input class="goal-target" type="number" step="0.1" min="0.1" value="${g.target}"></span>
             <span>${g.met ? '<span class="badge met">met</span>' : '<span class="badge missed">missed</span>'}</span>`;
@@ -406,24 +809,52 @@
           return row;
         });
 
-        const maxTask = Math.max(1, ...v.completed.map((t) => Math.max(t.cycle_days || 0, t.baseline ? t.baseline.total.p75 : 0)));
+        const maxTask = Math.max(1, ...v.completed.filter((t) => !t.excluded).map((t) => Math.max(t.actual_days || 0, t.baseline ? t.baseline.total.p75 : 0)));
+        const srcBadge = (t) => `<span class="badge ${t.timing_source === 'git' ? 'git' : 'jira'}" title="${t.timing_source === 'git' ? 'timing from commits/merges' : 'no git signal — Jira changelog timing'}">${t.timing_source}</span>`;
         const taskRows = v.completed.map((t, i) => {
           const evid = (t.intervals || []).map((iv) => {
             const days = Math.round(((iv.to - iv.from) / 86400000) * 10) / 10;
             return `<tr><td>${esc(iv.status)}</td><td>${esc(iv.phase)}</td><td class="num">${fmtDate(iv.from)} → ${fmtDate(iv.to)}</td><td class="num">${days}d</td></tr>`;
           }).join('');
+          const gitLine = [
+            t.first_commit_at ? `first commit ${fmtDate(t.first_commit_at)}` : 'no commits found',
+            t.done_git_at ? `merged ${fmtDate(t.done_git_at)}` : null,
+            t.fix_count ? `${t.fix_count} fix commits (${fmtD(t.fix_days)})` : null,
+            t.deployed_at ? `deployed ${fmtDate(t.deployed_at)}${t.deploy_wait_days != null ? ` (wait ${fmtD(t.deploy_wait_days)})` : ''}` : 'not seen in a -DEPLOYED tag',
+          ].filter(Boolean).join(' · ');
+          const authors = (t.git_authors || []).map((a) => `${esc(a.name)}×${a.commits}`).join(', ');
+          const kids = (t.children || []).map((c) => `<tr><td>${esc(c.key)}</td><td>${esc(c.type)}${c.rollup ? ' <span class="badge" title="rolled into this story — not double counted">rolled up</span>' : ''}</td><td>${esc((c.summary || '').slice(0, 60))}</td><td>${esc(c.assignee_name || '—')}</td><td class="num">${fmtD(c.actual_days)}</td></tr>`).join('');
+          const lineage = t.epic_summary
+            ? `<div class="dim" style="font-size:11px">◈ ${esc(t.epic_summary.slice(0, 45))}</div>`
+            : t.subtask && t.parent_summary
+              ? `<div class="dim" style="font-size:11px">↳ of ${esc(t.parent_key)} ${esc((t.parent_summary || '').slice(0, 40))}</div>`
+              : '';
           return `
-          <tr class="task-row clickable" data-i="${i}" title="${esc(t.summary)}">
-            <td>${esc(t.key)}</td>
-            <td>${esc(t.type)}${t.points != null ? ` · ${t.points}pt` : ''}</td>
-            <td class="num">${fmtD(t.design_days)} ${verdictBadge(t.verdicts.design)}</td>
-            <td class="num">${fmtD(t.impl_days)} ${verdictBadge(t.verdicts.impl)}</td>
-            <td class="num">${fmtD(t.cycle_days)}</td>
-            <td class="num">${t.baseline ? fmtRange(t.baseline.total) : '—'}</td>
+          <tr class="task-row clickable ${t.suspect_outlier ? 'suspect' : ''} ${t.excluded ? 'excluded' : ''}" data-i="${i}" title="${esc(t.summary)}">
+            <td>${esc(t.key)}${t.routine ? ' <span class="badge">routine</span>' : ''}${(t.flags || []).includes('multi_dev') ? ' <span class="badge">⇄</span>' : ''}${t.suspect_outlier ? ' <span class="badge warn">suspect</span>' : ''}${t.outlier ? ' <span class="badge missed">outlier</span>' : ''}${t.excluded_override ? ' <span class="badge missed">excluded</span>' : ''}${t.rollup ? ' <span class="badge" title="rolled into its parent story">rollup</span>' : ''}${lineage}</td>
+            <td>${esc(t.type)}${t.points != null ? ` · ${t.points}pt` : ''} ${srcBadge(t)}</td>
+            <td class="num">${fmtD(t.est_days_ai)}</td>
+            <td class="num">${fmtD(t.est_days_dev)}</td>
+            <td class="num">${fmtD(t.actual_days)}${t.manual_days != null ? ' <span class="badge">manual</span>' : ''}</td>
+            <td class="num">${fmtD(t.design_days)}</td>
+            <td class="num">${fmtD(t.impl_days_git ?? t.impl_days)}</td>
+            <td class="num">${t.fix_count ? fmtD(t.fix_days) : '—'}</td>
+            <td class="num">${t.deploy_wait_days != null ? fmtD(t.deploy_wait_days) : '—'}</td>
             <td class="bullet" data-i="${i}"></td>
             <td>${verdictBadge(t.verdicts.total)}</td>
           </tr>
-          <tr class="evidence"><td colspan="8"><b>${esc(t.key)}</b> — status history (spans are calendar; phase totals count business days only)${t.delivered_at ? ` · merged ${fmtDate(t.delivered_at)}` : ''}${(t.flags || []).map((f) => ` · <span class="badge">${esc(f)}</span>`).join('')}
+          <tr class="evidence"><td colspan="11"><b>${esc(t.key)}</b> — ${esc(t.summary)}<br>
+            ${t.epic_key ? `<span class="dim">Epic ${esc(t.epic_key)} ${esc((t.epic_summary || '').slice(0, 80))}${t.parent_key && t.parent_key !== t.epic_key ? ` › ${esc(t.parent_key)}` : ''} › ${esc(t.key)}</span><br>` : ''}
+            <span class="dim">git: ${gitLine}${authors ? ` · authors: ${authors}` : ''}</span><br>
+            ${kids ? `<details style="margin:4px 0"><summary class="dim">${(t.children || []).length} sub-tasks</summary><table style="margin-top:4px"><thead><tr><th>Key</th><th>Type</th><th>Summary</th><th>Assignee</th><th class="num">Days</th></tr></thead><tbody>${kids}</tbody></table></details>` : ''}
+            <span class="row" style="margin:6px 0">
+              <button class="small ov-exclude" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" data-cur="${t.excluded_override ? '1' : ''}">${t.excluded_override ? 'Include story' : 'Exclude story'}</button>
+              <button class="small ov-outlier" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" data-cur="${t.outlier ? '1' : ''}">${t.outlier ? 'Unmark outlier' : 'Mark as outlier'}</button>
+              <span>manual days: <input class="inline-input ov-manual" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" type="number" step="0.1" min="0.1" value="${t.manual_days ?? ''}" placeholder="—"></span>
+              <button class="small ov-manual-save" data-key="${esc(t.key)}">Set time</button>
+              <button class="small ov-manual-clear" data-key="${esc(t.key)}">Clear</button>
+              <span class="dim">outliers leave all stats; a manual time re-enters at that value</span>
+            </span>
             <table style="margin-top:6px"><thead><tr><th>Status</th><th>Phase</th><th class="num">Span</th><th class="num">Calendar</th></tr></thead><tbody>${evid}</tbody></table></td></tr>`;
         }).join('');
 
@@ -431,16 +862,22 @@
           <tr>
             <td>${esc(t.key)}</td><td>${esc(t.status)}</td>
             <td class="num">${fmtD((t.design_days || 0) + (t.impl_days || 0))}</td>
-            <td class="num">${t.prediction ? fmtRange(t.prediction.design) : '—'}</td>
-            <td class="num">${t.prediction ? fmtRange(t.prediction.impl) : '—'}</td>
+            <td class="num">${fmtD(t.est_days_ai)}</td>
+            <td class="num">${fmtD(t.est_days_dev)}</td>
             <td class="num">${t.prediction ? fmtRange(t.prediction.total) : '—'}</td>
             <td class="pct" data-pct="${t.pct_consumed ?? ''}"></td>
             <td class="num">${fmtDate(t.projected_done_at)}</td>
           </tr>`).join('');
 
+        const contribRows = (v.contributions || []).map((c) => `
+          <tr><td>${esc(c.key)}</td><td title="${esc(c.summary)}">${esc(c.summary.slice(0, 70))}</td><td>${esc(c.assignee_name || '—')}</td>
+          <td class="num">${Math.round(c.share * 100)}% · ${c.commits}c</td><td class="num">${fmtD(c.actual_days)}</td></tr>`).join('');
+
         $('dev-view').innerHTML = `
-          <div class="row"><a id="back">← team</a><h2 style="margin:0">${esc(s.assignee_name || s.assignee_id)}</h2></div>
+          <div class="row"><a id="back">← team</a><h2 style="margin:0">${esc(s.assignee_name || s.assignee_id)}${s.role ? ` <span class="badge">${esc(s.role)}</span>` : ''}</h2></div>
           <div class="tiles">
+            <div class="kpi-tile"><div class="l">Weighted done (est-days)</div><div class="v">${s.weighted_done ?? '—'}</div></div>
+            <div class="kpi-tile"><div class="l">Efficiency (est ÷ actual)</div><div class="v">${s.efficiency != null ? '×' + s.efficiency.toFixed(2) : '—'}</div></div>
             <div class="kpi-tile"><div class="l">Median cycle</div><div class="v">${fmtD(s.median_cycle)}</div></div>
             <div class="kpi-tile"><div class="l">vs team baseline</div><div class="v">${s.factor != null ? '×' + s.factor.toFixed(2) : '—'}</div></div>
             <div class="kpi-tile"><div class="l">Estimate error</div><div class="v">${s.mape != null ? fmtPct(s.mape) : '—'}</div></div>
@@ -448,32 +885,130 @@
           </div>
           <div class="card" id="goals"><h2>Goals <span class="dim">(targets are editable; progress updates every scan)</span></h2><div id="goal-rows"></div>
             <div class="row" style="margin:10px 0 0"><button class="primary" id="save-goals">Save goals</button><span id="goals-msg" class="dim"></span></div></div>
-          <div class="card"><h2>Completed tasks — actual vs expected <span class="dim">(click a row for the evidence)</span></h2>
-            ${v.completed.length ? `<table id="completed-table"><thead><tr><th>Key</th><th>Type</th><th class="num">Design</th><th class="num">Implementation</th><th class="num">Total</th><th class="num">Expected</th><th>vs baseline</th><th>Verdict</th></tr></thead><tbody>${taskRows}</tbody></table>` : '<p class="dim">No completed tasks for this developer yet.</p>'}
+          <div class="card" id="dev-reports"><h2>Summary reports <span class="dim">(agent-written; compares vs the same period last year + prior saved reports; kept in the hub)</span></h2>
+            <div class="row">
+              <select id="rep-kind"><option value="year">Full year</option><option value="quarter">Quarter</option></select>
+              <select id="rep-year">${Array.from({ length: 7 }, (_, k) => new Date().getUTCFullYear() - k).map((y) => `<option>${y}</option>`).join('')}</select>
+              <select id="rep-q" style="display:none"><option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option></select>
+              <button class="primary small" id="rep-gen">Generate report</button>
+              <span id="rep-status" class="dim"></span>
+            </div>
+            <div id="rep-list" style="margin-top:8px"></div></div>
+          <div class="card"><h2>Completed tasks — estimate → dev estimate → actual <span class="dim">(click a row for evidence + outlier/manual-time controls)</span></h2>
+            ${v.completed.length ? `<table id="completed-table"><thead><tr><th>Key</th><th>Type</th><th class="num">Est AI</th><th class="num">Est dev</th><th class="num">Actual</th><th class="num">Design</th><th class="num">Impl</th><th class="num">Fixes</th><th class="num">Deploy</th><th>vs baseline</th><th>Verdict</th></tr></thead><tbody>${taskRows}</tbody></table>` : '<p class="dim">No completed tasks for this developer yet.</p>'}
           </div>
+          ${contribRows ? `<div class="card"><h2>Contributions to other people's tasks <span class="dim">(credit via commit share)</span></h2>
+            <table><thead><tr><th>Key</th><th>Summary</th><th>Assignee</th><th class="num">Share</th><th class="num">Actual</th></tr></thead><tbody>${contribRows}</tbody></table></div>` : ''}
           <div class="card" id="dev-open"><h2>Open tasks — predicted timeline</h2>
-            ${v.open.length ? `<table><thead><tr><th>Key</th><th>Status</th><th class="num">Elapsed</th><th class="num">Design</th><th class="num">Impl</th><th class="num">Total</th><th>Consumed</th><th class="num">Projected done</th></tr></thead><tbody>${openRows}</tbody></table>` : '<p class="dim">Nothing in flight.</p>'}
+            ${v.open.length ? `<table><thead><tr><th>Key</th><th>Status</th><th class="num">Elapsed</th><th class="num">Est AI</th><th class="num">Est dev</th><th class="num">Expected</th><th>Consumed</th><th class="num">Projected</th></tr></thead><tbody>${openRows}</tbody></table>` : '<p class="dim">Nothing in flight.</p>'}
           </div>`;
 
         const goalWrap = $('goal-rows');
         goalRows.forEach((r) => goalWrap.appendChild(r));
         if (!goalRows.length) goalWrap.innerHTML = '<p class="dim">Goals appear once this developer has enough completed tasks to compute stats.</p>';
         $('back').onclick = () => { state.dev = null; renderTeam(); };
+
+        // -- summary reports (generate + history) --
+        const repRefresh = async () => {
+          const reps = await loadReports(state.dev);
+          $('rep-list').innerHTML = reps.length
+            ? reps.map((r) => `<button class="small rep-open" data-id="${esc(r.id)}">${esc(r.label)} <span class="dim">${fmtDate(r.created_at)}</span></button>`).join(' ')
+            : '<span class="dim">No saved reports for this developer yet.</span>';
+          $('rep-list').querySelectorAll('.rep-open').forEach((b) => (b.onclick = () => openReport(b.dataset.id)));
+        };
+        repRefresh();
+        $('rep-kind').onchange = () => { $('rep-q').style.display = $('rep-kind').value === 'quarter' ? '' : 'none'; };
+        $('rep-gen').onclick = async () => {
+          const body = {
+            account: state.account,
+            assignee: state.dev,
+            kind: $('rep-kind').value,
+            year: parseInt($('rep-year').value, 10),
+            quarter: $('rep-kind').value === 'quarter' ? parseInt($('rep-q').value, 10) : undefined,
+          };
+          $('rep-gen').disabled = true;
+          $('rep-status').textContent = 'generating (the agent writes the report — this takes a few minutes)…';
+          try {
+            const start = await api('/report', { method: 'POST', body: JSON.stringify(body) });
+            const poll = setInterval(async () => {
+              try {
+                const s = await api(`/report/status?job=${encodeURIComponent(start.job)}`);
+                if (s.state === 'done') {
+                  clearInterval(poll);
+                  $('rep-gen').disabled = false;
+                  $('rep-status').textContent = 'done';
+                  setTimeout(() => ($('rep-status').textContent = ''), 3000);
+                  await repRefresh();
+                  if (s.report) openReport(s.report.id);
+                } else if (s.state === 'error') {
+                  clearInterval(poll);
+                  $('rep-gen').disabled = false;
+                  $('rep-status').textContent = '';
+                  err(s.error || 'report failed');
+                }
+              } catch { /* keep polling */ }
+            }, 2500);
+          } catch (e) {
+            $('rep-gen').disabled = false;
+            $('rep-status').textContent = '';
+            err(e.status === 409 ? 'A report for this period is already generating.' : e.message);
+          }
+        };
         $('dev-view').querySelectorAll('td.bullet').forEach((td) => {
           const t = v.completed[parseInt(td.dataset.i, 10)];
-          td.appendChild(bulletBar(t.cycle_days, t.baseline ? t.baseline.total : null, maxTask, '--s1'));
+          td.appendChild(bulletBar(t.actual_days, t.baseline ? t.baseline.total : null, maxTask, '--s1'));
         });
         $('dev-view').querySelectorAll('tr.task-row').forEach((tr) => {
-          tr.onclick = () => tr.nextElementSibling.classList.toggle('open');
+          tr.onclick = (e) => {
+            if (e.target.closest('button, input')) return;
+            tr.nextElementSibling.classList.toggle('open');
+          };
         });
         hydrateMeters($('dev-view'));
+        // Outlier / manual-time / exclude controls.
+        $('dev-view').querySelectorAll('.ov-exclude').forEach((b) => {
+          b.onclick = async () => {
+            try {
+              await saveOverride(b.dataset.key, b.dataset.project, { excluded: !b.dataset.cur });
+              await refresh();
+            } catch (e) { err(e.message); }
+          };
+        });
+        $('dev-view').querySelectorAll('.ov-outlier').forEach((b) => {
+          b.onclick = async () => {
+            try {
+              await saveOverride(b.dataset.key, b.dataset.project, { outlier: !b.dataset.cur });
+              await refresh();
+            } catch (e) { err(e.message); }
+          };
+        });
+        $('dev-view').querySelectorAll('.ov-manual-save').forEach((b) => {
+          b.onclick = async () => {
+            const input = $('dev-view').querySelector(`.ov-manual[data-key="${CSS.escape(b.dataset.key)}"]`);
+            const val = parseFloat(input.value);
+            if (!Number.isFinite(val) || val <= 0) { err('enter a positive number of days'); return; }
+            try {
+              await saveOverride(b.dataset.key, input.dataset.project, { manual_days: val });
+              await refresh();
+            } catch (e) { err(e.message); }
+          };
+        });
+        $('dev-view').querySelectorAll('.ov-manual-clear').forEach((b) => {
+          b.onclick = async () => {
+            const input = $('dev-view').querySelector(`.ov-manual[data-key="${CSS.escape(b.dataset.key)}"]`);
+            try {
+              await saveOverride(b.dataset.key, input.dataset.project, { manual_days: null });
+              await refresh();
+            } catch (e) { err(e.message); }
+          };
+        });
         $('save-goals').onclick = async () => {
           const goals = [...goalWrap.querySelectorAll('.goal')].map((row) => ({
             metric: row.dataset.metric,
             target: parseFloat(row.querySelector('.goal-target').value),
           })).filter((g) => Number.isFinite(g.target) && g.target > 0);
           try {
-            await api('/goals', { method: 'PUT', body: JSON.stringify({ account: state.account, project: state.project, assignee: state.dev, goals }) });
+            await api('/goals', { method: 'PUT', body: JSON.stringify({ account: state.account, assignee: state.dev, goals }) });
             $('goals-msg').textContent = 'saved';
             setTimeout(() => renderDev(), 400);
           } catch (e) { err(e.message); }
@@ -486,7 +1021,7 @@
         $('coach').disabled = true;
         $('coach-out').innerHTML = '<div class="card"><h2>AI coach</h2><p class="dim">Thinking…</p></div>';
         try {
-          const r = await api('/analyze', { method: 'POST', body: JSON.stringify({ account: state.account, project: state.project, assignee: state.dev || undefined }) });
+          const r = await api('/analyze', { method: 'POST', body: JSON.stringify({ account: state.account, projects: state.selected.join(','), assignee: state.dev || undefined }) });
           $('coach-out').innerHTML = `<div class="card"><h2>AI coach${state.dev ? '' : ' — whole team'}</h2><pre>${esc(r.summary)}</pre></div>`;
         } catch (e) { $('coach-out').innerHTML = ''; err(e.message); }
         $('coach').disabled = false;
@@ -498,13 +1033,48 @@
         if (card.style.display !== 'none') { card.style.display = 'none'; return; }
         card.style.display = '';
         card.innerHTML = '<p class="dim">Loading…</p>';
+        const firstProject = state.selected[0] || '';
         try {
-          const [config, statuses] = await Promise.all([
+          const [config, peopleResp, repos, statuses] = await Promise.all([
             api('/config'),
-            api(`/statuses?account=${encodeURIComponent(state.account)}&project=${encodeURIComponent(state.project)}`).catch(() => []),
+            api(`/people?account=${encodeURIComponent(state.account)}`),
+            api('/repos').catch(() => []),
+            api(`/statuses?account=${encodeURIComponent(state.account)}&project=${encodeURIComponent(firstProject)}`).catch(() => []),
           ]);
           state.config = config;
-          const map = config.status_map[state.project] || {};
+          state.people = peopleResp.people || {};
+
+          const roleOpts = (sel) => ['', ...config.roles].map((r) => `<option value="${esc(r)}" ${r === sel ? 'selected' : ''}>${r ? esc(r) : '(no role)'}</option>`).join('');
+          const sortedPeople = Object.entries(state.people).sort((a, b) => a[1].name.localeCompare(b[1].name));
+          const mergeOpts = (selfId, sel) =>
+            ['<option value="">(separate person)</option>']
+              .concat(sortedPeople.filter(([oid]) => oid !== selfId).map(([oid, op]) => `<option value="${esc(oid)}" ${oid === sel ? 'selected' : ''}>→ ${esc(op.name)}</option>`))
+              .join('');
+          const peopleRows = sortedPeople
+            .map(([id, p]) => `
+              <div class="people-row ${p.merged_into ? 'merged' : ''}" data-id="${esc(id)}">
+                <input type="checkbox" class="pp-inc" ${p.included !== false ? 'checked' : ''} title="include in analysis">
+                <span>${esc(p.name)} <span class="dim" style="font-size:10px">${esc(id.slice(0, 10))}…</span></span>
+                <select class="pp-role">${roleOpts(p.role || '')}</select>
+                <input type="text" class="pp-alias" placeholder="git aliases (comma: name or email)" value="${esc((p.aliases || []).join(', '))}">
+                <select class="pp-merge" title="same human, different Jira account — fold this account's history into another person">${mergeOpts(id, p.merged_into || '')}</select>
+              </div>`).join('');
+          const unmatched = (peopleResp.unmatched_authors || []).slice(0, 15)
+            .map((uA) => `<span class="badge" title="add as an alias to the right person">${esc(uA.who)} ×${uA.commits}</span>`).join(' ');
+
+          const workerRow = (w, i) => `
+            <div class="worker-row" data-i="${i}">
+              <select class="wk-provider">${['claude', 'codex'].map((p) => `<option ${w.provider === p ? 'selected' : ''}>${p}</option>`).join('')}</select>
+              <input type="text" class="wk-model" placeholder="model (optional, e.g. haiku)" value="${esc(w.model || '')}">
+              <button class="small wk-del">✕</button>
+            </div>`;
+          const workersHtml = (config.estimate_workers || []).map(workerRow).join('');
+
+          const featSet = new Set(config.feature_repos || []);
+          const repoBoxes = (repos || []).map((r) => `
+            <label style="display:inline-flex;gap:6px;align-items:center;margin-right:12px"><input type="checkbox" class="fr-cb" value="${esc(r.name)}" ${featSet.has(r.name) ? 'checked' : ''}>${esc(r.name)}</label>`).join('');
+
+          const map = config.status_map[firstProject] || {};
           const stRows = statuses.map((st) => `
             <div class="row" style="margin:2px 0">
               <span style="min-width:160px">${esc(st.name)} <span class="dim">${esc(st.category || '')}</span></span>
@@ -512,40 +1082,113 @@
                 ${['design', 'implementation', 'waiting', 'excluded'].map((p) => `<option value="${p}" ${(map[st.name] || st.mapped) === p ? 'selected' : ''}>${p}</option>`).join('')}
               </select>
             </div>`).join('');
+
           card.innerHTML = `<h2>Settings</h2>
-            <div class="grid-2">
-              <div>
-                <h2>Status → phase map (${esc(state.project)})</h2>
-                ${stRows || '<p class="dim">Could not load project statuses.</p>'}
-              </div>
-              <div>
-                <h2>Scan</h2>
-                <div class="row">Issue types <input id="cfg-types" value="${esc(config.issue_types.join(', '))}" style="min-width:200px"></div>
-                <div class="row">Workweek
-                  <select id="cfg-week">
-                    <option value="1,2,3,4,5" ${config.workweek.join(',') === '1,2,3,4,5' ? 'selected' : ''}>Mon–Fri</option>
-                    <option value="0,1,2,3,4" ${config.workweek.join(',') === '0,1,2,3,4' ? 'selected' : ''}>Sun–Thu</option>
-                  </select></div>
-                <div class="row">Max issues <input id="cfg-max" type="number" min="10" max="10000" value="${config.max_issues}" style="width:90px"></div>
-                <div class="row">Git depth <input id="cfg-depth" type="number" min="100" max="50000" value="${config.git_depth}" style="width:90px"></div>
+            <div class="card"><h2>People &amp; roles <span class="dim">(unchecked people leave every chart and median; aliases match git commit authors)</span></h2>
+              ${peopleRows || '<p class="dim">No people yet — scan a project or load them from Jira.</p>'}
+              ${unmatched ? `<h3>Unmatched git authors</h3><div class="row" style="margin:4px 0">${unmatched}</div>` : ''}
+              <div class="row" style="margin-top:8px">
+                <button class="small" id="pp-seed">Load people from Jira (${esc(firstProject)})</button>
+                <span class="dim">roles list:</span><input id="cfg-roles" style="min-width:320px" value="${esc((config.roles || []).join(', '))}">
               </div>
             </div>
-            <div class="row" style="margin-top:10px"><button class="primary" id="save-config">Save settings</button><span class="dim">status-map changes recompute instantly from the stored corpus — no rescan needed</span></div>`;
+            <div class="grid-2">
+              <div class="card"><h2>Scan</h2>
+                <div class="cfg-grid">
+                  <span class="lbl">Issue types</span><input id="cfg-types" placeholder="blank = ALL types" value="${esc(config.issue_types.join(', '))}">
+                  <span class="lbl">Workweek</span><select id="cfg-week">
+                    <option value="1,2,3,4,5" ${config.workweek.join(',') === '1,2,3,4,5' ? 'selected' : ''}>Mon–Fri</option>
+                    <option value="0,1,2,3,4" ${config.workweek.join(',') === '0,1,2,3,4' ? 'selected' : ''}>Sun–Thu</option>
+                  </select>
+                  <span class="lbl">Max issues (0 = all)</span><input id="cfg-max" type="number" min="0" max="1000000" value="${config.max_issues}">
+                  <span class="lbl">Git depth (0 = full)</span><input id="cfg-depth" type="number" min="0" max="1000000" value="${config.git_depth}">
+                  <span class="lbl">Jira pacing (ms/call)</span><input id="cfg-pace" type="number" min="0" max="5000" value="${config.pace_ms}" title="delay between Jira calls; auto-doubles when Jira throttles">
+                  <span class="lbl">git fetch before scan</span><input id="cfg-fetch" type="checkbox" ${config.git_fetch ? 'checked' : ''} style="justify-self:start">
+                  <span class="lbl">Deploy tag contains</span><input id="cfg-deploytag" value="${esc(config.deploy_tag_pattern)}" title="case-insensitive substring, e.g. deployed">
+                  <span class="lbl">Stale after (days)</span><input id="cfg-stale" type="number" min="5" max="365" value="${config.stale_days}" title="done tasks with no git signal and a Jira cycle beyond this are excluded from medians">
+                  <span class="lbl">Auto-scan (min, 0=off)</span><input id="cfg-autoscan" type="number" min="0" max="1440" value="${config.auto_scan_minutes ?? 15}" title="silently repeats your last scan every N minutes: new tickets fetched + estimated, timelines refreshed">
+                </div>
+              </div>
+              <div class="card"><h2>AI estimation</h2>
+                <div class="cfg-grid">
+                  <span class="lbl">Enabled</span><input id="cfg-est-on" type="checkbox" ${config.estimate_enabled ? 'checked' : ''} style="justify-self:start">
+                  <span class="lbl">Estimate since</span><input id="cfg-est-since" type="date" value="${esc(config.estimate_since || '')}" title="estimate every task completed after this date (wins over the month window)">
+                  <span class="lbl">Window (months, 0 = all)</span><input id="cfg-est-window" type="number" min="0" max="60" value="${config.estimate_window_months}" title="used only when no since-date is set">
+                  <span class="lbl">Max batches / scan</span><input id="cfg-est-batches" type="number" min="1" max="200" value="${config.estimate_max_batches}" title="15 issues per batch; the rest continues next scan">
+                </div>
+                <h3>Workers <span class="dim">(batches split across providers in parallel)</span></h3>
+                <div id="workers">${workersHtml}</div>
+                <button class="small" id="wk-add">+ add worker</button>
+              </div>
+            </div>
+            <div class="card"><h2>Feature-scan repos <span class="dim">(git-only features for work without Jira stories)</span></h2>
+              ${repoBoxes || '<p class="dim">No repos registered in Otto.</p>'}
+            </div>
+            <div class="card"><h2>Status → phase map (${esc(firstProject)})</h2>
+              ${stRows || '<p class="dim">Could not load project statuses.</p>'}
+            </div>
+            <div class="row" style="margin-top:10px"><button class="primary" id="save-config">Save settings</button><span class="dim">status-map/workweek/stale edits recompute instantly from the stored corpus — no rescan needed</span></div>`;
+
+          $('pp-seed').onclick = async () => {
+            try {
+              const r = await api('/people/seed', { method: 'POST', body: JSON.stringify({ account: state.account, project: firstProject }) });
+              state.people = r.people;
+              card.style.display = 'none';
+              $('settings-toggle').click();
+            } catch (e) { err(e.message); }
+          };
+          $('wk-add').onclick = () => {
+            const div = document.createElement('div');
+            div.innerHTML = workerRow({ provider: 'claude', model: '' }, Date.now());
+            const row = div.firstElementChild;
+            $('workers').appendChild(row);
+            row.querySelector('.wk-del').onclick = () => row.remove();
+          };
+          card.querySelectorAll('.wk-del').forEach((b) => (b.onclick = () => b.closest('.worker-row').remove()));
+
           $('save-config').onclick = async () => {
+            // people first (separate store)
+            const people = {};
+            card.querySelectorAll('.people-row').forEach((row) => {
+              people[row.dataset.id] = {
+                included: row.querySelector('.pp-inc').checked,
+                role: row.querySelector('.pp-role').value,
+                aliases: row.querySelector('.pp-alias').value.split(',').map((x) => x.trim()).filter(Boolean),
+                merged_into: row.querySelector('.pp-merge').value || null,
+              };
+            });
             const status_map = { ...state.config.status_map };
             const projMap = {};
             card.querySelectorAll('.st-map').forEach((sel) => { projMap[sel.dataset.status] = sel.value; });
-            if (Object.keys(projMap).length) status_map[state.project] = projMap;
+            if (Object.keys(projMap).length) status_map[firstProject] = projMap;
+            const workers = [...card.querySelectorAll('.worker-row')].map((row) => ({
+              provider: row.querySelector('.wk-provider').value,
+              model: row.querySelector('.wk-model').value.trim(),
+            }));
             const body = {
               issue_types: $('cfg-types').value.split(',').map((x) => x.trim()).filter(Boolean),
               workweek: $('cfg-week').value.split(',').map(Number),
               max_issues: parseInt($('cfg-max').value, 10),
               git_depth: parseInt($('cfg-depth').value, 10),
+              pace_ms: parseInt($('cfg-pace').value, 10),
+              git_fetch: $('cfg-fetch').checked,
+              deploy_tag_pattern: $('cfg-deploytag').value.trim(),
+              stale_days: parseInt($('cfg-stale').value, 10),
+              auto_scan_minutes: parseInt($('cfg-autoscan').value, 10),
+              estimate_enabled: $('cfg-est-on').checked,
+              estimate_since: $('cfg-est-since').value || '',
+              estimate_window_months: parseInt($('cfg-est-window').value, 10),
+              estimate_max_batches: parseInt($('cfg-est-batches').value, 10),
+              estimate_workers: workers.length ? workers : undefined,
+              feature_repos: [...card.querySelectorAll('.fr-cb')].filter((cb) => cb.checked).map((cb) => cb.value),
+              roles: $('cfg-roles').value.split(',').map((x) => x.trim()).filter(Boolean),
               status_map,
             };
             try {
+              if (Object.keys(people).length) await api('/people', { method: 'PUT', body: JSON.stringify({ account: state.account, people }) });
               await api('/config', { method: 'PUT', body: JSON.stringify(body) });
               card.style.display = 'none';
+              await refreshPeople();
               await refresh();
             } catch (e) { err(e.message); }
           };

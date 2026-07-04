@@ -682,6 +682,11 @@ struct AgentRunReq {
     cwd: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// Agent CLI to run the prompt on: "claude" (default) uses the
+    /// orchestrator's PTY driver; "codex" runs a headless `codex exec`. Lets
+    /// plugins fan work out across every provider the user subscribes to.
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -698,14 +703,78 @@ async fn host_agents_run(
         return r;
     }
     let cwd = req.cwd.unwrap_or_else(|| ".".into());
-    match ctx
-        .orchestrator
-        .run_agent(&req.prompt, &cwd, req.model.as_deref(), Duration::from_secs(180))
-        .await
-    {
+    let provider = req
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .unwrap_or("claude");
+    let result = match provider {
+        "claude" => {
+            ctx.orchestrator
+                .run_agent(&req.prompt, &cwd, req.model.as_deref(), Duration::from_secs(180))
+                .await
+        }
+        "codex" => run_codex_exec(&req.prompt, &cwd, req.model.as_deref()).await,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("provider {other:?} has no headless runner (supported: claude, codex)"),
+            )
+                .into_response()
+        }
+    };
+    match result {
         Ok(text) => Json(AgentRunResp { text }).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// One-shot headless codex run: `codex exec` with a read-only sandbox and
+/// `--output-last-message` so the reply is read from a file instead of parsing
+/// the streamed TUI output. 10-minute hard cap.
+async fn run_codex_exec(prompt: &str, cwd: &str, model: Option<&str>) -> otto_core::Result<String> {
+    let bin = std::env::var("CODEX_BIN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "codex".to_string());
+    let out_file = std::env::temp_dir().join(format!("otto-plugin-codex-{}.txt", uuid::Uuid::new_v4()));
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.arg("exec")
+        .arg("--skip-git-repo-check")
+        .arg("--sandbox")
+        .arg("read-only")
+        .arg("--output-last-message")
+        .arg(&out_file)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        cmd.arg("--model").arg(m);
+    }
+    cmd.arg(prompt);
+    let child = cmd
+        .spawn()
+        .map_err(|e| otto_core::Error::Upstream(format!("spawn {bin}: {e}")))?;
+    let out = match tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await {
+        Ok(r) => r.map_err(|e| otto_core::Error::Upstream(format!("codex exec: {e}")))?,
+        Err(_) => {
+            let _ = std::fs::remove_file(&out_file);
+            return Err(otto_core::Error::Upstream("codex exec timed out".into()));
+        }
+    };
+    let text = std::fs::read_to_string(&out_file).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_file);
+    if !out.status.success() && text.trim().is_empty() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(otto_core::Error::Upstream(format!(
+            "codex exec failed ({}): {}",
+            out.status,
+            err.chars().take(300).collect::<String>()
+        )));
+    }
+    Ok(text)
 }
 
 /// Recursively copy a directory (used to install a local plugin into the home,

@@ -1,4 +1,6 @@
-// DATA_DIR persistence: config, per-project corpus, per-project goals.
+// DATA_DIR persistence: config, per-project corpus, per-project goals,
+// per-project overrides (outlier marks + manual times), per-project estimate
+// cache, global people registry, per-account scope goals, git features.
 // Atomic writes (tmp + rename); tolerant loaders (corrupt/missing → fallback).
 'use strict';
 
@@ -31,6 +33,14 @@ function safe(s) {
 const configPath = (dataDir) => path.join(dataDir, 'config.json');
 const corpusPath = (dataDir, account, project) => path.join(dataDir, 'data', `${safe(account)}__${safe(project)}.json`);
 const goalsPath = (dataDir, account, project) => path.join(dataDir, 'goals', `${safe(account)}__${safe(project)}.json`);
+const overridesPath = (dataDir, account, project) => path.join(dataDir, 'overrides', `${safe(account)}__${safe(project)}.json`);
+const estimatesPath = (dataDir, account, project) => path.join(dataDir, 'estimates', `${safe(account)}__${safe(project)}.json`);
+const peoplePath = (dataDir) => path.join(dataDir, 'people.json');
+const scopeGoalsPath = (dataDir, account) => path.join(dataDir, 'goals', `scope__${safe(account)}.json`);
+const featuresPath = (dataDir) => path.join(dataDir, 'git_features.json');
+const reportsDir = (dataDir, account) => path.join(dataDir, 'reports', safe(account));
+const reportsIndexPath = (dataDir, account) => path.join(reportsDir(dataDir, account), 'index.json');
+const reportFilePath = (dataDir, account, name) => path.join(reportsDir(dataDir, account), safe(name) + '.html');
 
 /** Every corpus file currently on disk (for config-change recompute). */
 function listCorpora(dataDir) {
@@ -44,4 +54,34 @@ function listCorpora(dataDir) {
   }
 }
 
-module.exports = { readJson, writeJsonAtomic, configPath, corpusPath, goalsPath, listCorpora, SCHEMA };
+/** Scanned project keys for an account (from corpus files on disk). */
+function listProjects(dataDir, account) {
+  const prefix = `${safe(account)}__`;
+  try {
+    return fs
+      .readdirSync(path.join(dataDir, 'data'))
+      .filter((f) => f.startsWith(prefix) && f.endsWith('.json'))
+      .map((f) => f.slice(prefix.length, -5));
+  } catch {
+    return [];
+  }
+}
+
+module.exports = {
+  readJson,
+  writeJsonAtomic,
+  configPath,
+  corpusPath,
+  goalsPath,
+  overridesPath,
+  estimatesPath,
+  peoplePath,
+  scopeGoalsPath,
+  featuresPath,
+  reportsDir,
+  reportsIndexPath,
+  reportFilePath,
+  listCorpora,
+  listProjects,
+  SCHEMA,
+};
