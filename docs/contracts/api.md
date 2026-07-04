@@ -2449,7 +2449,7 @@ The run advances in the background; subscribe to `Event::OttoRunUpdated` (see `w
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /api/v1/workspaces/{wid}/runs | run_with_otto edit + ws editor | `LaunchRunReq {source_kind?, source_ref?, url?, seed_text?, mode?, provider?, repo_id?, auto_open_pr?, title?}` | OttoRun (queued; poll/subscribe) |
+| POST /api/v1/workspaces/{wid}/runs | run_with_otto edit + ws editor | `LaunchRunReq {source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, title?}` | OttoRun (queued; poll/subscribe) |
 | GET /api/v1/workspaces/{wid}/runs | run_with_otto view + ws viewer | — | `OttoRun[]` |
 | GET /api/v1/workspaces/{wid}/runs/detect?q= | run_with_otto view + ws viewer | — | `{detected: {source_kind, source_ref, url}?}` |
 | GET /api/v1/runs/{id} | run_with_otto view + ws viewer | — | OttoRun |
@@ -2463,7 +2463,7 @@ webhook; classified `Exempt` in `policy.rs`):
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}` |
+| POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}` |
 
 When a `callback_url` is supplied, the daemon POSTs the run's result back to it at
 the milestones a caller can act on — `awaiting_approval` and every terminal state
@@ -2479,6 +2479,15 @@ trigger (read the result via REST/WS/UI).
 Slack/Telegram entry: a `/run <ref>` (or "run with otto …") message launches a run;
 an `approve`/`reject` reply in the run's thread resolves the approval gate (authorized
 by the integration's `allowed_users`, executed as the daemon root user).
+
+`model` ("" / absent = the provider's default) is the model override handed to the
+executing agent and is persisted on the run (`OttoRun.model`). Semantics per mode:
+single-agent runs execute on the Claude CLI (the stored `provider` is informational
+there) and receive `--model <model>`; goal-loop runs stamp `provider`/`model` onto
+the loop's **executors** (real sessions — `--model` for claude/codex), while the
+loop's bookkeeping roles keep their tuned defaults. `repo_id` selection in the UI is
+backed by `POST /workspaces/{id}/repos/detect` (see Git) — Browse… registers the
+picked folder's git toplevel and launches with its id.
 
 ---
 

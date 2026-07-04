@@ -19,10 +19,24 @@ everything else).
 This guide documents what the code in `crates/otto-server/src/run_engine.rs`,
 `run_service.rs`, `run_scheduler.rs`, `run_sources.rs`, `run_context.rs`,
 `run_workspace.rs`, `run_channels.rs`, `routes/runs.rs`,
-`crates/otto-state/src/runs.rs` (migration `0087_run_with_otto.sql`),
-`crates/otto-core/src/run.rs`, and `ui/src/modules/run-with-otto/` actually does.
-The API shape is specified in `docs/contracts/api.md` (Run with Otto) and
-`docs/contracts/ws.md` (`otto_run_updated`), which remain authoritative.
+`crates/otto-state/src/runs.rs` (migrations `0087_run_with_otto.sql` +
+`0098_run_model.sql`), `crates/otto-core/src/run.rs`, and
+`ui/src/modules/run-with-otto/` actually does. The API shape is specified in
+`docs/contracts/api.md` (Run with Otto) and `docs/contracts/ws.md`
+(`otto_run_updated`), which remain authoritative.
+
+### Run with Otto vs Workflows
+
+They overlap on purpose — both end in agents doing work — but answer different
+needs. **Run with Otto is a fixed, opinionated pipeline**: the stage order *is* the
+`RunStatus` enum, there is exactly **one** human gate (`awaiting_approval`), and the
+proof pack, AI review, and PR draft are **always on** — you bring a source item and
+a repo, nothing to author. **Workflows are a build-your-own DAG**: ~28 node kinds on
+a canvas, any shape, any number of `human_approval` gates, branching/loops/retries —
+and review/PR/proof exist only as optional nodes you wire in yourself. Rule of
+thumb: "turn this ticket/finding/thread into a reviewed PR draft" → Run with Otto;
+"orchestrate a custom multi-step process" → a Workflow. The launcher states this
+in-product (the pipeline rail + the "Build a Workflow" link).
 
 ---
 
@@ -115,6 +129,25 @@ A run always works inside a **registered git repo** (never a raw workspace root)
 remote, or a finding's `repo_id`) → the workspace's single (or first) registered repo
 → a clear error ("no git repo registered in this workspace; register one or pass
 repo_id").
+
+In the UI launcher, the **Repo** select mirrors this: "Auto" keeps the
+source-implied/first-repo behavior, and **Browse…** opens the daemon folder picker —
+any folder inside a git worktree resolves to its toplevel via
+`POST /workspaces/{id}/repos/detect` (idempotent: an already-registered root is
+returned as-is) and is launched by `repo_id`.
+
+### 3.2 Provider & model
+
+`LaunchRunReq.model` ("" / absent = the provider's default) is stored on the run and
+handed to the executing agent:
+
+- **single_agent** — execution runs on the Claude PTY (`Orchestrator::run_agent`),
+  which receives `--model <model>`. The stored `provider` is informational in this
+  mode, and the launcher pins it to `claude` rather than pretending otherwise.
+- **goal_loop** — the run's `provider`/`model` are stamped onto the loop's
+  **executors** (real sessions; `meta.model` becomes `--model` for claude/codex).
+  The loop's bookkeeping roles (planner/evaluator/digester) keep their tuned
+  defaults.
 
 ---
 
