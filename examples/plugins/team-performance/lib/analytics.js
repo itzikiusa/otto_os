@@ -1195,6 +1195,7 @@ module.exports = {
   isDone,
   isExcluded,
   isTimingSample,
+  actualDays: rCycle, // the canonical actual (manual > cycle + folded fixes)
   enrichHierarchy,
   makeCanonical,
   effDoneAt,

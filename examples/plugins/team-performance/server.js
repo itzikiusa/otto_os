@@ -905,14 +905,14 @@ function estLevels(r, estimates, factorMap) {
     est_dev_auto: devAuto,
     est_overridden: Boolean((est && est.overridden) || r.est_dev_override != null),
     est_reason: r.est_reason || (est && est.reason) || null,
-    actual_days: r.manual_days ?? r.eff_cycle_days ?? r.cycle_days ?? null,
+    actual_days: A.actualDays(r),
   };
 }
 
 /** Outlier suspect: way past its baseline band and not yet handled. */
 function suspectOutlier(r, base) {
   if (r.outlier === true || r.manual_days != null) return false;
-  const actual = r.manual_days ?? r.eff_cycle_days ?? r.cycle_days;
+  const actual = A.actualDays(r);
   if (actual === null || actual === undefined) return false;
   const hit = base.lookup(r.type, r.points);
   if (!hit || !hit.bucket.total.p75) return actual > 60;
@@ -966,7 +966,7 @@ function overview(account, projectsParam, sinceMs = 0) {
   for (const r of completed) for (const f of r.flags || []) flags[f] = (flags[f] || 0) + 1;
   const onTrack = measurable.filter((r) => {
     const hit = base.lookup(r.type, r.points);
-    const v = hit ? A.verdict(r.manual_days ?? r.eff_cycle_days ?? r.cycle_days, hit.bucket.total.p50) : null;
+    const v = hit ? A.verdict(A.actualDays(r), hit.bucket.total.p50) : null;
     return v === 'fast' || v === 'on_track';
   }).length;
 
@@ -1108,7 +1108,7 @@ function assigneeView(account, projectsParam, assigneeId, sinceMs = 0) {
         summary: c.summary,
         assignee_name: c.assignee_name,
         rollup: c.rollup === true,
-        actual_days: c.manual_days ?? c.eff_cycle_days ?? c.cycle_days,
+        actual_days: A.actualDays(c),
       })),
     };
   };
@@ -1117,7 +1117,7 @@ function assigneeView(account, projectsParam, assigneeId, sinceMs = 0) {
   const decorate = (r) => {
     const hit = base.lookup(r.type, r.points);
     const bucket = hit ? hit.bucket : null;
-    const actual = r.manual_days ?? r.eff_cycle_days ?? r.cycle_days;
+    const actual = A.actualDays(r);
     return {
       ...r,
       ...estLevels(r, estimates, factors),
@@ -1163,7 +1163,7 @@ function assigneeView(account, projectsParam, assigneeId, sinceMs = 0) {
       assignee_name: r.assignee_name,
       share: Math.round(credit.share * 100) / 100,
       commits: credit.commits,
-      actual_days: r.manual_days ?? r.eff_cycle_days ?? r.cycle_days,
+      actual_days: A.actualDays(r),
     }));
 
   return { account, projects: scope.projects, since: sinceMs || null, stats: devStats, team, goals, completed, open, contributions };
@@ -1277,7 +1277,7 @@ function periodSummary(scope, assigneeId, start, end) {
   );
   const tasks = mine
     .filter((r) => !r.rollup)
-    .sort((a, b) => (b.manual_days ?? b.eff_cycle_days ?? b.cycle_days ?? 0) - (a.manual_days ?? a.eff_cycle_days ?? a.cycle_days ?? 0))
+    .sort((a, b) => (A.actualDays(b) ?? 0) - (A.actualDays(a) ?? 0))
     .slice(0, 40)
     .map((r) => {
       const est = scope.estimates[r.key];
@@ -1286,7 +1286,7 @@ function periodSummary(scope, assigneeId, start, end) {
         type: r.type,
         summary: r.summary.slice(0, 110),
         est_ai: est && est.days > 0 ? est.days : null,
-        actual: r.manual_days ?? r.eff_cycle_days ?? r.cycle_days,
+        actual: A.actualDays(r),
         fixes: r.fix_count || 0,
         deployed: Boolean(r.deployed_at),
       };
