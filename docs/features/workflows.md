@@ -447,7 +447,7 @@ comma/semicolon list):
 Action: Workflow
 Name: Implement Feature        ← resolved case-insensitively against the workspace's workflows
 Msg: please do x y z, follow all relevant rules
-Jira ticket: GS-1111
+Jira ticket: PROJ-1111
 Working Directory: ~/repo
 Relevant Info: ~/a, ~/b
 Goals:
@@ -472,7 +472,7 @@ match the workflow name):
 Action: Workflow
 Name: Write tests for a story
 Msg: Add tests for the new deposit-limit rule; cover happy path + over-limit + boundary.
-Jira ticket: GS-1421
+Jira ticket: PROJ-1421
 Working Directory: ~/code/go_deposit
 Relevant Info: ~/code/go_deposit/internal/limits, ~/shared-rules/GO_TESTING_STANDARDS.md
 Goals:
@@ -554,7 +554,7 @@ that line plus every following line.
 
 ```text
 run Write tests for a story: Add tests for the new deposit-limit rule.
-Jira ticket GS-1421, cover happy path + over-limit + boundary.
+Jira ticket PROJ-1421, cover happy path + over-limit + boundary.
 ```
 
 An unknown name behaves differently depending on which keyword matched: the

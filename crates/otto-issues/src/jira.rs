@@ -2166,23 +2166,23 @@ mod tests {
     #[test]
     fn test_build_jql_with_project_digits() {
         // All-digits → number lookup within project
-        let jql = build_jql("5218", Some("GRV"));
-        assert!(jql.starts_with("project = \"GRV\""), "{jql}");
-        assert!(jql.contains("key = \"GRV-5218\""), "{jql}");
+        let jql = build_jql("5218", Some("PROJ"));
+        assert!(jql.starts_with("project = \"PROJ\""), "{jql}");
+        assert!(jql.contains("key = \"PROJ-5218\""), "{jql}");
     }
 
     #[test]
     fn test_build_jql_with_project_key() {
         // Full key → key match only
-        let jql = build_jql("GRV-5218", Some("GRV"));
-        assert!(jql.contains("key = \"GRV-5218\""), "{jql}");
+        let jql = build_jql("PROJ-5218", Some("PROJ"));
+        assert!(jql.contains("key = \"PROJ-5218\""), "{jql}");
     }
 
     #[test]
     fn test_build_jql_with_project_text() {
         // Text search within project
-        let jql = build_jql("login issue", Some("GRV"));
-        assert!(jql.starts_with("project = \"GRV\""), "{jql}");
+        let jql = build_jql("login issue", Some("PROJ"));
+        assert!(jql.starts_with("project = \"PROJ\""), "{jql}");
         assert!(jql.contains("summary ~"), "{jql}");
     }
 

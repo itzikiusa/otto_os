@@ -118,7 +118,7 @@
   }
 
   // Group a flat branch list into top-level "folders" by first path segment, so
-  // feature/GRV-1, feature/GRV-2 nest under a single collapsible "feature" group.
+  // feature/PROJ-1, feature/PROJ-2 nest under a single collapsible "feature" group.
   // Remote refs are grouped by the path AFTER the remote name (origin/feature/X →
   // folder "feature", leaf "X"); names with no slash stay loose at the top. The
   // leaf `label` drops the folder prefix; `b.name` stays the full ref for actions.

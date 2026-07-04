@@ -22,7 +22,7 @@
       `Action: Workflow\n` +
       `Name: ${workflowName || '<workflow name>'}\n` +
       `Msg: what you want done — instructions for the agents\n` +
-      `Jira ticket: GS-1111\n` +
+      `Jira ticket: PROJ-1111\n` +
       `Working Directory: ~/path/to/repo\n` +
       `Relevant Info: ~/path/a, ~/path/b\n` +
       `Goals:\n` +

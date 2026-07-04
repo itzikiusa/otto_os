@@ -10,7 +10,7 @@ carries the title/body rules, the host differences, and the escaping traps.
 ```
 
 - Lead with the Jira key when one exists (branch → commits → user). Plain key +
-  space, e.g. `GS-16232 Add token-bucket rate limiter`. Don't append a colon
+  space, e.g. `PROJ-16232 Add token-bucket rate limiter`. Don't append a colon
   unless the repo's existing PR titles do.
 - Summarize the WHOLE branch, not the latest commit. Imperative, ≤72 chars, no
   trailing period.
@@ -24,8 +24,8 @@ carries the title/body rules, the host differences, and the escaping traps.
 Jira keys in the body get auto-linked by some clients (GitKraken) and can crash
 them with `cannot read properties of undefined (reading href)`. The title prefix
 gives Jira/automation everything it needs. If you want the issue reachable from
-the body, rely on the host↔Jira integration — do not paste a `[GS-1](url)` link
-or a bare `GS-1` into the body, and do not invent a Jira hostname.
+the body, rely on the host↔Jira integration — do not paste a `[PROJ-1](url)` link
+or a bare `PROJ-1` into the body, and do not invent a Jira hostname.
 
 ## Body structure
 
@@ -100,7 +100,7 @@ footer for PR bodies. Here: PR content only.
 
 | ❌ Bad | Why | ✅ Good |
 |--------|-----|--------|
-| Body contains `Ticket: [GS-1](https://host/browse/GS-1)` | GitKraken `href` crash; invented host | key in the TITLE only |
+| Body contains `Ticket: [PROJ-1](https://host/browse/PROJ-1)` | GitKraken `href` crash; invented host | key in the TITLE only |
 | Title = latest commit subject only | misses the branch story | summarize all commits |
 | `## Testing` with pre-checked `[x]` boxes you didn't run | false reporting | list what you actually ran, or say "not run" |
 | `🤖 Generated with Claude Code` footer | attribution | omit entirely |

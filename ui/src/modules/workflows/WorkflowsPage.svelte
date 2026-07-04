@@ -570,7 +570,7 @@
       obj.story_id = '<product story id>';
     }
     obj.msg = 'What you want done — instructions for the agents.';
-    obj.jira_ticket = 'GS-0000';
+    obj.jira_ticket = 'PROJ-0000';
     obj.goals = ['e.g. 100% test coverage (services)', 'under 2 minutes runtime'];
     // Optional: post the result somewhere specific (else it replies to the
     // trigger's origin; a manual run posts nowhere unless you set this).
@@ -675,7 +675,7 @@
       `Action: Workflow\n` +
       `Name: ${current?.name ?? '<workflow name>'}\n` +
       `Msg: what you want done — instructions for the agents\n` +
-      `Jira ticket: GS-1234\n` +
+      `Jira ticket: PROJ-1234\n` +
       `Working Directory: ~/path/to/repo\n` +
       `Relevant Info: ~/path/a, ~/path/b\n` +
       `Goals:\n  - 100% test coverage (services)\n  - under 2 minutes runtime`,
@@ -1484,7 +1484,7 @@
               <input
                 id="mt-jira"
                 type="text"
-                placeholder="GS-1234"
+                placeholder="PROJ-1234"
                 value={paramStr('jira_ticket')}
                 oninput={(e) => onParam('jira_ticket', e.currentTarget.value)}
               />

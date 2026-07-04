@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn key_extraction_order_and_shape() {
         assert_eq!(extract_jira_key(&json!({"key":"AB-1"}), &json!({})), Some("AB-1".into()));
-        assert_eq!(extract_jira_key(&json!({}), &json!({"jira_ticket":"GS-9"})), Some("GS-9".into()));
+        assert_eq!(extract_jira_key(&json!({}), &json!({"jira_ticket":"PROJ-9"})), Some("PROJ-9".into()));
         assert_eq!(extract_jira_key(&json!({}), &json!({"prompt":"please do PROJ-123 now"})), Some("PROJ-123".into()));
         assert_eq!(extract_jira_key(&json!({}), &json!({"msg":"see K2X-77."})), Some("K2X-77".into()));
         assert_eq!(extract_jira_key(&json!({}), &json!({"prompt":"lowercase ab-1 or A-2 or X9"})), None);

@@ -8,7 +8,7 @@
 //!    Action: Workflow
 //!    Name: <workflow name>
 //!    Msg: please do x y z, follow all relevant rules
-//!    Jira ticket: GS-1111
+//!    Jira ticket: PROJ-1111
 //!    Working Directory: ~/path
 //!    Relevant Info: ~/a, ~/b
 //!    Goals:
@@ -510,7 +510,7 @@ mod tests {
                     Action: Workflow\n\
                     Name: Implement Feature\n\
                     Msg: please do x y z, follow all relevant rules\n\
-                    Jira ticket: GS-1111\n\
+                    Jira ticket: PROJ-1111\n\
                     Working Directory: ~/repo\n\
                     Relevant Info: ~/a, ~/b\n\
                     Goals:\n\
@@ -519,7 +519,7 @@ mod tests {
         let cmd = parse_workflow_command(text).expect("should parse");
         assert_eq!(cmd.name, "Implement Feature");
         assert_eq!(cmd.msg, "please do x y z, follow all relevant rules");
-        assert_eq!(cmd.jira_ticket.as_deref(), Some("GS-1111"));
+        assert_eq!(cmd.jira_ticket.as_deref(), Some("PROJ-1111"));
         assert_eq!(cmd.working_directory.as_deref(), Some("~/repo"));
         assert_eq!(cmd.relevant_info, vec!["~/a", "~/b"]);
         assert_eq!(cmd.goals, vec!["100% test coverage", "under 2 minutes runtime"]);
@@ -543,9 +543,9 @@ mod tests {
 
     #[test]
     fn inline_goals_and_aliases() {
-        let text = "Action: Workflow\nName: Tests\nJira: GS-9\nGoals: a, b; c\n";
+        let text = "Action: Workflow\nName: Tests\nJira: PROJ-9\nGoals: a, b; c\n";
         let cmd = parse_workflow_command(text).unwrap();
-        assert_eq!(cmd.jira_ticket.as_deref(), Some("GS-9"));
+        assert_eq!(cmd.jira_ticket.as_deref(), Some("PROJ-9"));
         assert_eq!(cmd.goals, vec!["a", "b", "c"]);
     }
 
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(p, "do the login story\nwith care");
         let (n, _, e) = parse_run_command("Run Workflow UI flow: go").unwrap();
         assert_eq!((n.as_str(), e), ("UI flow", true)); // longest-first: not name "workflow UI flow"
-        let (n, _, e) = parse_run_command("workflow API tests: GS-1 please").unwrap();
+        let (n, _, e) = parse_run_command("workflow API tests: PROJ-1 please").unwrap();
         assert_eq!((n.as_str(), e), ("API tests", true));
         assert!(parse_run_command("run without colon").is_none());
         assert!(

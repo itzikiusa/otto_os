@@ -9,7 +9,7 @@
 //! Action: Workflow
 //! Name: <workflow name>
 //! Msg: please do x y z, follow all relevant rules
-//! Jira ticket: GS-1111
+//! Jira ticket: PROJ-1111
 //! Working Directory: ~/path
 //! Relevant Info: ~/a, ~/b
 //! Goals:

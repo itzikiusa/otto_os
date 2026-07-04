@@ -225,7 +225,7 @@ The **Changes** tab is the working-tree view, backed by `git status`:
   produces a Conventional-Commits-style message from the **staged** diff (falling
   back to the full working diff when nothing is staged). If the bundled
   **`commit-message`** skill is installed (Settings → Skills), its full method is
-  prepended to the draft prompt, and the branch's Jira key (e.g. `GS-1234`) is
+  prepended to the draft prompt, and the branch's Jira key (e.g. `PROJ-1234`) is
   injected into the subject. PR drafting (`/repos/{id}/pr/draft`) does the same
   with the **`pull-request`** skill — Jira key as the title prefix only (never in
   the body). Both skills honor the repo's existing commit convention and add **no

@@ -58,17 +58,17 @@ this). Match what you see — never impose a foreign style:
 
 ## Jira placement
 
-The key is `[A-Z]+-[0-9]+` (e.g. `GS-16232`, `GRV-445`). Find it, in order:
+The key is `[A-Z]+-[0-9]+` (e.g. `PROJ-16232`, `PROJ-445`). Find it, in order:
 
-1. The current branch name (`feature/GS-16232-x` → `GS-16232`).
+1. The current branch name (`feature/PROJ-16232-x` → `PROJ-16232`).
 2. Other commit subjects already on the branch.
 3. A key the user supplied directly.
 
 Where it goes:
 
 - **Subject** — right after the `type(scope):`, before the summary:
-  `feat(api): GS-16232 add token-bucket rate limiter`.
-- **Body** — fine to repeat naturally ("Implements GS-16232 …"), not required.
+  `feat(api): PROJ-16232 add token-bucket rate limiter`.
+- **Body** — fine to repeat naturally ("Implements PROJ-16232 …"), not required.
 - If a Jira/Atlassian integration is reachable, fetch the issue summary to
   sharpen the wording — but the key itself is what must always be present.
 - **No key anywhere?** Say so to the user and proceed without inventing one.
@@ -81,7 +81,7 @@ then a short bullet list of WHAT changed and WHY (not a file listing — the dif
 already lists files). Wrap at ~72 chars.
 
 ```
-feat(api): GS-16232 add token-bucket rate limiter
+feat(api): PROJ-16232 add token-bucket rate limiter
 
 - Limit unauthenticated requests to 60/min per IP.
 - Return 429 with Retry-After when the bucket is empty.
@@ -107,9 +107,9 @@ subject for the primary concern and mention the secondary one in the body.
 
 | ❌ Bad | Why | ✅ Good |
 |--------|-----|--------|
-| `Added rate limiting and fixed a typo` | two concerns, past tense, no type | split → `feat(api): GS-16232 add token-bucket rate limiter` + `docs: fix typo in README` |
-| `fix stuff` | meaningless | `fix(auth): GS-441 reject expired refresh tokens` |
-| `feat: GS-1: implement the new rate limiting middleware for the API server` | >72 chars | `feat(api): GS-1 add rate-limit middleware` |
+| `Added rate limiting and fixed a typo` | two concerns, past tense, no type | split → `feat(api): PROJ-16232 add token-bucket rate limiter` + `docs: fix typo in README` |
+| `fix stuff` | meaningless | `fix(auth): PROJ-441 reject expired refresh tokens` |
+| `feat: PROJ-1: implement the new rate limiting middleware for the API server` | >72 chars | `feat(api): PROJ-1 add rate-limit middleware` |
 | `✨ feat: add X` (in a no-emoji repo) | foreign convention | `feat: add X` |
 | `feat(api): added limiter.` | past tense + trailing period | `feat(api): add limiter` |
 

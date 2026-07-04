@@ -2899,8 +2899,8 @@ async fn fetch_pr_details_for_readiness(
     provider.get_pr(&remote_ref, review.pr_number).await
 }
 
-/// First `[A-Z]+-[0-9]+` token in a branch name (e.g. `feature/GS-16232-x` →
-/// `GS-16232`). Seeds the Jira key into commit/PR drafts. Returns `None` when the
+/// First `[A-Z]+-[0-9]+` token in a branch name (e.g. `feature/PROJ-16232-x` →
+/// `PROJ-16232`). Seeds the Jira key into commit/PR drafts. Returns `None` when the
 /// branch carries no such token — we never fabricate a key.
 fn jira_key_from_branch(branch: &str) -> Option<String> {
     let b = branch.as_bytes();
@@ -3001,10 +3001,10 @@ mod commit_pr_draft_tests {
     #[test]
     fn jira_key_parsed_from_branch() {
         assert_eq!(
-            jira_key_from_branch("feature/GS-16232-rate-limit").as_deref(),
-            Some("GS-16232")
+            jira_key_from_branch("feature/PROJ-16232-rate-limit").as_deref(),
+            Some("PROJ-16232")
         );
-        assert_eq!(jira_key_from_branch("GRV-445").as_deref(), Some("GRV-445"));
+        assert_eq!(jira_key_from_branch("PROJ-445").as_deref(), Some("PROJ-445"));
         assert_eq!(
             jira_key_from_branch("bugfix/PROJ-7").as_deref(),
             Some("PROJ-7")
@@ -3020,16 +3020,16 @@ mod commit_pr_draft_tests {
         use super::{ensure_jira_in_commit, ensure_jira_in_subject};
         // Subject: prefix when absent, untouched when already referenced anywhere.
         assert_eq!(
-            ensure_jira_in_subject("feat(bonus): add id column", "GS-16519"),
-            "GS-16519 feat(bonus): add id column"
+            ensure_jira_in_subject("feat(bonus): add id column", "PROJ-16519"),
+            "PROJ-16519 feat(bonus): add id column"
         );
         assert_eq!(
-            ensure_jira_in_subject("GS-16519 feat: add id", "GS-16519"),
-            "GS-16519 feat: add id"
+            ensure_jira_in_subject("PROJ-16519 feat: add id", "PROJ-16519"),
+            "PROJ-16519 feat: add id"
         );
         assert_eq!(
-            ensure_jira_in_subject("feat: add id (GS-16519)", "GS-16519"),
-            "feat: add id (GS-16519)"
+            ensure_jira_in_subject("feat: add id (PROJ-16519)", "PROJ-16519"),
+            "feat: add id (PROJ-16519)"
         );
         // Commit: only the subject line is touched; the body is preserved verbatim.
         assert_eq!(
