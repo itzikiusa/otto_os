@@ -656,21 +656,27 @@ async function runScan(account, projects, full, assignees) {
 
 // ---- scope loading (multi-project views) --------------------------------------
 
-function applyOverrides(records, overrides) {
-  if (!overrides || !overrides.issues) return records;
+function applyOverrides(records, overrides, fixMin) {
+  const min = fixMin || 3;
+  const issues = (overrides && overrides.issues) || {};
+  // include_fixes: an explicit per-task choice wins; otherwise fold fixes in
+  // automatically when the fixing was substantial (>= min fix commits).
+  const resolveInclude = (r, o) =>
+    o && typeof o.include_fixes === 'boolean' ? o.include_fixes : (r.fix_count || 0) >= min;
   return records.map((r) => {
-    const o = overrides.issues[r.key];
-    return o
-      ? {
-          ...r,
-          outlier: o.outlier === true,
-          manual_days: typeof o.manual_days === 'number' ? o.manual_days : null,
-          excluded_override: o.excluded === true,
-          est_override: typeof o.est_days === 'number' ? o.est_days : null,
-          est_dev_override: typeof o.est_dev_days === 'number' ? o.est_dev_days : null,
-          est_reason: o.est_reason || null,
-        }
-      : r;
+    const o = issues[r.key];
+    return {
+      ...r,
+      include_fixes: resolveInclude(r, o),
+      include_fixes_override: o && typeof o.include_fixes === 'boolean' ? o.include_fixes : null,
+      fix_days_override: o && typeof o.fix_days_override === 'number' ? o.fix_days_override : null,
+      outlier: o ? o.outlier === true : false,
+      manual_days: o && typeof o.manual_days === 'number' ? o.manual_days : null,
+      excluded_override: o ? o.excluded === true : false,
+      est_override: o && typeof o.est_days === 'number' ? o.est_days : null,
+      est_dev_override: o && typeof o.est_dev_days === 'number' ? o.est_dev_days : null,
+      est_reason: (o && o.est_reason) || null,
+    };
   });
 }
 
