@@ -728,7 +728,7 @@
             <td class="num" title="estimated days of work delivered (multi-dev credit split by commit share)">${a.weighted_done ?? '—'}</td>
             <td class="num" title="commits under catch-all keys (ABC-0000 …) — unscoped fixes / prod work with no story">${a.unscoped_commits || '—'}</td>
             <td class="monthly" data-dev="${esc(a.assignee_id)}"></td>
-            <td class="num" title="Σestimate ÷ Σactual, size-weighted (higher = delivers faster than the estimates)">${a.efficiency != null ? '×' + a.efficiency.toFixed(2) : '—'}</td>
+            <td class="num" title="Σactual ÷ Σ(AI estimate) — how many elapsed days per estimated ideal day (AI-estimated tasks only)">${a.pace_vs_est != null ? '×' + a.pace_vs_est.toFixed(2) : '—'}</td>
             <td class="num">${fmtD(a.median_impl)}</td>
             <td class="num">${fmtD(a.median_cycle)}</td>
             <td class="num" title="Σactual ÷ Σestimate vs the team's same ratio — size-weighted, so big tasks dominate. ×1.6 = 60% slower than team pace">${a.pace_factor != null ? '×' + a.pace_factor.toFixed(2) : '—'}</td>
@@ -737,7 +737,7 @@
             <td>${a.goals_total ? `<span class="badge ${a.goals_met === a.goals_total ? 'met' : a.goals_met ? 'warn' : 'missed'}">${a.goals_met}/${a.goals_total}</span>` : '—'}</td>
             <td title="${esc(a.trend || '')}">${trendArrow(a.trend)}</td>
           </tr>`).join('');
-        const head = '<thead><tr><th>Developer</th><th>Role</th><th class="num" title="task counts are inflated by routine work — weighted est-days is the fair column">Done</th><th class="num">WIP</th><th class="num">Weighted (est-d)</th><th class="num" title="unscoped fix commits (ABC-0000-style catch-all keys)">Fixes⚡</th><th title="weighted est-days per month, last 12 months">Monthly</th><th class="num">Efficiency</th><th class="num">Impl</th><th class="num">Cycle</th><th class="num">vs team</th><th class="num">Est err</th><th class="num">Avg WIP</th><th>Goals</th><th>Trend</th></tr></thead>';
+        const head = '<thead><tr><th>Developer</th><th>Role</th><th class="num" title="task counts are inflated by routine work — weighted est-days is the fair column">Done</th><th class="num">WIP</th><th class="num">Weighted (est-d)</th><th class="num" title="unscoped fix commits (ABC-0000-style catch-all keys)">Fixes⚡</th><th title="weighted est-days per month, last 12 months">Monthly</th><th class="num" title="Σactual ÷ Σestimate, absolute (AI-estimated tasks only)">vs est</th><th class="num">Impl</th><th class="num">Cycle</th><th class="num">vs team</th><th class="num">Est err</th><th class="num">Avg WIP</th><th>Goals</th><th>Trend</th></tr></thead>';
         let tableBody;
         if (state.groupBy === 'role') {
           const groups = [...new Set(devs.map((a) => a.role || '(no role)'))];
@@ -977,7 +977,7 @@
           <div class="row"><a id="back">← team</a><h2 style="margin:0">${esc(s.assignee_name || s.assignee_id)}${s.role ? ` <span class="badge">${esc(s.role)}</span>` : ''}</h2></div>
           <div class="tiles">
             <div class="kpi-tile"><div class="l">Weighted done (est-days)</div><div class="v">${s.weighted_done ?? '—'}</div></div>
-            <div class="kpi-tile"><div class="l">Efficiency (est ÷ actual)</div><div class="v">${s.efficiency != null ? '×' + s.efficiency.toFixed(2) : '—'}</div></div>
+            <div class="kpi-tile"><div class="l">vs estimate (actual ÷ est)</div><div class="v">${s.pace_vs_est != null ? '×' + s.pace_vs_est.toFixed(2) : '—'}</div></div>
             <div class="kpi-tile"><div class="l">Median cycle</div><div class="v">${fmtD(s.median_cycle)}</div></div>
             <div class="kpi-tile"><div class="l">vs team baseline</div><div class="v">${s.factor != null ? '×' + s.factor.toFixed(2) : '—'}</div></div>
             <div class="kpi-tile"><div class="l">Estimate error</div><div class="v">${s.mape != null ? fmtPct(s.mape) : '—'}</div></div>

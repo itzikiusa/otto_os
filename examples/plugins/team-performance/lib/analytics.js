@@ -894,6 +894,10 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
     if (isDone(r) && inPeriod(r, sinceMs, untilMs)) {
       const credits = contributorCredits(r, matcher).map((c) => ({ ...c, person_id: canonical(c.person_id) }));
       const sd = scopeDays(r, estimates, base, fallbackMedian);
+      // Ratios (pace / efficiency) demand a uniform basis: only tasks with a
+      // real AI estimate — bucket fallbacks are elapsed-day medians and mixing
+      // them skews devs unevenly by estimate coverage.
+      const estAI = estimates[r.key] && estimates[r.key].days > 0 ? estimates[r.key].days : null;
       const actual = rCycle(r);
       const routine = isRoutine(r, sigCounts, estimates[r.key]);
       const measurable = !isExcluded(r) && isTimingSample(r);
@@ -904,11 +908,11 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
           g.weighted_done += sd * c.share;
           g.weighted_share_n += c.share;
           if (mi >= 0 && mi < MONTH_WINDOW) g.monthly[MONTH_WINDOW - 1 - mi] += sd * c.share;
-          if (measurable && actual !== null && actual > 0 && sd > 0) {
+          if (measurable && actual !== null && actual > 0 && estAI !== null) {
             g.sum_actual += actual * c.share;
-            g.sum_est += sd * c.share;
+            g.sum_est += estAI * c.share;
             g.pace_n++;
-            allPaces.push([actual * c.share, sd * c.share]);
+            allPaces.push([actual * c.share, estAI * c.share]);
           }
         }
         if (routine) g.routine_done += c.share;
@@ -973,9 +977,12 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
       median_deploy: median(done.map((r) => r.deploy_wait_days ?? 0)),
       median_cycle: median(cycles),
       factor: factorMap.has(id) ? factorMap.get(id).factor : null,
-      // vs team, size-weighted: (Σactual ÷ Σestimate) relative to the team's
-      // same ratio. ×1.6 = 60% slower than the team pace on the same volume of
-      // estimated work; needs ≥3 samples.
+      // Absolute pace: Σactual ÷ Σ(AI estimate) — ×4.2 means the work takes
+      // 4.2 elapsed days per estimated ideal day. This is the number a lead
+      // recognizes from reading tasks.
+      pace_vs_est: devPace !== null && g.pace_n >= 3 ? round2(devPace) : null,
+      // vs team: the same ratio normalized by the team's pooled ratio (removes
+      // the systemic ideal-vs-elapsed gap). ×1.6 = 60% slower than team pace.
       pace_factor: devPace !== null && g.pace_n >= 3 && teamPace > 0 ? round2(devPace / teamPace) : null,
       mape: errs.length ? round2(median(errs)) : null,
       avg_wip: avgWip(windows, workweek, nowMs),
