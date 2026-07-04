@@ -18,12 +18,15 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_context::http::ContextCtx;
 use otto_context::{user_skills, Library};
-use otto_core::api::Problem;
+use otto_core::api::{BundledSkillContent, Problem, SkillFileEntry};
 use otto_core::auth::AuthUser;
 use otto_core::Error;
 use serde::{Deserialize, Serialize};
 
-use crate::{install_into, install_state, list_bundled, InstallState};
+use crate::{
+    bundled_body, bundled_file, bundled_files, install_into, install_state, list_bundled,
+    InstallState,
+};
 
 // ---------------------------------------------------------------------------
 // Error → response
@@ -134,11 +137,12 @@ fn default_true() -> bool {
 pub fn router<C: ContextCtx>() -> Router<C> {
     Router::new()
         .route("/library/bundled", get(list_bundled_skills::<C>))
+        .route("/library/bundled/install-all", post(install_all::<C>))
         .route(
             "/library/bundled/{name}/install",
             post(install_bundled_skill::<C>),
         )
-        .route("/library/bundled/install-all", post(install_all::<C>))
+        .route("/library/bundled/{name}", get(get_bundled_skill::<C>))
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +184,35 @@ async fn list_bundled_skills<C: ContextCtx>(
         })
         .collect();
     Ok(Json(views))
+}
+
+/// Full content of one bundled skill (body + file list) so the Skills Lab can
+/// view a skill that is not installed into the Library yet.
+async fn get_bundled_skill<C: ContextCtx>(
+    State(_s): State<C>,
+    Extension(_user): Extension<AuthUser>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<BundledSkillContent>> {
+    let meta = list_bundled()
+        .into_iter()
+        .find(|b| b.name == name)
+        .ok_or_else(|| Error::NotFound(format!("bundled skill '{name}'")))?;
+    let body = bundled_body(&name).unwrap_or_default();
+    let files = bundled_files(&name)
+        .into_iter()
+        .map(|path| {
+            let size = bundled_file(&name, &path).map(|c| c.len() as u64).unwrap_or(0);
+            SkillFileEntry { path, size, binary: false }
+        })
+        .collect();
+    Ok(Json(BundledSkillContent {
+        name: meta.name,
+        category: meta.category,
+        version: meta.version,
+        description: meta.description,
+        body,
+        files,
+    }))
 }
 
 async fn install_bundled_skill<C: ContextCtx>(

@@ -141,6 +141,49 @@ pub fn installed_version(library: &Library, name: &str) -> Option<u32> {
         .or(Some(1))
 }
 
+/// The bundled `SKILL.md` body for `name`, if it exists. Lets callers (the skill
+/// review engine, the Skills Lab viewer) read a bundled skill's method without
+/// first installing it into the Library.
+pub fn bundled_body(name: &str) -> Option<String> {
+    let (dir, _cat) = bundled_dir(name)?;
+    skill_md(dir)?.contents_utf8().map(str::to_string)
+}
+
+/// Read one bundled file inside skill `name` by its skill-relative path
+/// (e.g. `references/review-rubric.md`). Returns `None` for unsafe paths or
+/// missing files.
+pub fn bundled_file(name: &str, rel: &str) -> Option<String> {
+    if rel.split(['/', '\\']).any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return None;
+    }
+    let (dir, _cat) = bundled_dir(name)?;
+    let full = dir.path().join(rel);
+    dir.get_file(&full)?.contents_utf8().map(str::to_string)
+}
+
+/// List every embedded file inside skill `name`, as skill-relative paths.
+pub fn bundled_files(name: &str) -> Vec<String> {
+    let Some((dir, _cat)) = bundled_dir(name) else {
+        return Vec::new();
+    };
+    let base = dir.path();
+    let mut out = Vec::new();
+    collect_bundled(dir, base, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_bundled(dir: &Dir<'_>, base: &Path, out: &mut Vec<String>) {
+    for f in dir.files() {
+        if let Ok(rel) = f.path().strip_prefix(base) {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    for sub in dir.dirs() {
+        collect_bundled(sub, base, out);
+    }
+}
+
 /// Compute the [`InstallState`] of bundled skill `name` against the Library.
 pub fn install_state(library: &Library, name: &str) -> Option<InstallState> {
     let bundled = bundled_version(name)?;
@@ -216,6 +259,27 @@ mod tests {
             assert!(s.version >= 1, "{} bad version", s.name);
             assert!(!s.category.is_empty(), "{} missing category", s.name);
         }
+    }
+
+    #[test]
+    fn skills_reviewer_is_bundled_and_readable() {
+        let all = list_bundled();
+        let sr = all
+            .iter()
+            .find(|s| s.name == "skills-reviewer")
+            .expect("skills-reviewer bundled");
+        assert_eq!(sr.category, "review");
+        assert!(sr.version >= 1);
+        assert!(sr.description.to_lowercase().contains("skill"));
+        // Body + references are reachable without installing.
+        let body = bundled_body("skills-reviewer").expect("body");
+        assert!(body.contains("# Skills Reviewer"));
+        let files = bundled_files("skills-reviewer");
+        assert!(files.iter().any(|f| f == "SKILL.md"));
+        assert!(files.iter().any(|f| f == "references/review-rubric.md"));
+        assert!(bundled_file("skills-reviewer", "references/review-rubric.md").is_some());
+        // Path safety on the bundled reader.
+        assert!(bundled_file("skills-reviewer", "../grill/SKILL.md").is_none());
     }
 
     #[test]

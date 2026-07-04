@@ -7,15 +7,17 @@
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
-    ContextPreviewProvider, ContextPreviewReq, ContextPreviewResp, GlobalSoulReq, GlobalSoulResp,
-    LibraryContext, LibrarySkill, LibrarySoul, MaterializeProviderResult, MaterializeResp, Problem,
-    UpdateWorkspaceContextReq, UpsertLibraryEntryReq, WorkspaceContextConfig,
+    ContextPreviewProvider, ContextPreviewReq, ContextPreviewResp, CreateLibrarySkillReq,
+    GlobalSoulReq, GlobalSoulResp, LibraryContext, LibrarySkill, LibrarySoul,
+    MaterializeProviderResult, MaterializeResp, Problem, SkillFileContentResp, SkillFileEntry,
+    UpdateWorkspaceContextReq, UpsertLibraryEntryReq, WorkspaceContextConfig, WriteSkillFileReq,
 };
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::WorkspaceRole;
@@ -86,7 +88,15 @@ fn require_root(user: &AuthUser) -> Result<(), ApiErr> {
 pub fn router<C: ContextCtx>() -> Router<C> {
     Router::new()
         // Library: skills
-        .route("/library/skills", get(list_skills::<C>))
+        .route("/library/skills", get(list_skills::<C>).post(create_skill::<C>))
+        // Multi-file skill editing (Skills Lab). Static `import` segment is
+        // registered before the `{name}` param so it is never shadowed.
+        .route("/library/skills/import", post(import_skill::<C>))
+        .route("/library/skills/{name}/files", get(list_skill_files::<C>))
+        .route(
+            "/library/skills/{name}/file",
+            get(get_skill_file::<C>).put(put_skill_file::<C>).delete(delete_skill_file::<C>),
+        )
         .route(
             "/library/skills/{name}",
             get(get_skill::<C>).put(put_skill::<C>).delete(delete_skill::<C>),
@@ -177,6 +187,120 @@ async fn delete_skill<C: ContextCtx>(
         tracing::warn!(skill = %name, error = %e, "remove user-level skill copies failed");
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Library: multi-file skill editing (Skills Lab)
+// ---------------------------------------------------------------------------
+
+/// Map a library `io::Error` to the API error taxonomy.
+fn map_io(ctx: &str, e: std::io::Error) -> Error {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => Error::NotFound(ctx.to_string()),
+        std::io::ErrorKind::AlreadyExists => Error::Conflict(format!("{ctx}: already exists")),
+        std::io::ErrorKind::InvalidInput => Error::Invalid(format!("{ctx}: {e}")),
+        _ => Error::Internal(format!("{ctx}: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct ImportQuery {
+    name: Option<String>,
+}
+
+async fn list_skill_files<C: ContextCtx>(
+    State(s): State<C>,
+    Extension(_user): Extension<AuthUser>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Vec<SkillFileEntry>>> {
+    if s.library().get_skill(&name).is_none() {
+        return Err(Error::NotFound(format!("skill '{name}'")).into());
+    }
+    Ok(Json(s.library().list_skill_files(&name)))
+}
+
+async fn get_skill_file<C: ContextCtx>(
+    State(s): State<C>,
+    Extension(_user): Extension<AuthUser>,
+    Path(name): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> ApiResult<Json<SkillFileContentResp>> {
+    let (content, binary) = s
+        .library()
+        .read_skill_file(&name, &q.path)
+        .ok_or_else(|| Error::NotFound(format!("file '{}' in skill '{name}'", q.path)))?;
+    Ok(Json(SkillFileContentResp { path: q.path, content, binary }))
+}
+
+async fn put_skill_file<C: ContextCtx>(
+    State(s): State<C>,
+    Extension(user): Extension<AuthUser>,
+    Path(name): Path<String>,
+    Json(req): Json<WriteSkillFileReq>,
+) -> ApiResult<Json<Vec<SkillFileEntry>>> {
+    require_root(&user)?;
+    if s.library().get_skill(&name).is_none() {
+        return Err(Error::NotFound(format!("skill '{name}'")).into());
+    }
+    s.library()
+        .write_skill_file(&name, &req.path, &req.content)
+        .map_err(|e| map_io("write skill file", e))?;
+    Ok(Json(s.library().list_skill_files(&name)))
+}
+
+async fn delete_skill_file<C: ContextCtx>(
+    State(s): State<C>,
+    Extension(user): Extension<AuthUser>,
+    Path(name): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> ApiResult<StatusCode> {
+    require_root(&user)?;
+    s.library()
+        .delete_skill_file(&name, &q.path)
+        .map_err(|e| map_io("delete skill file", e))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_skill<C: ContextCtx>(
+    State(s): State<C>,
+    Extension(user): Extension<AuthUser>,
+    Json(req): Json<CreateLibrarySkillReq>,
+) -> ApiResult<Json<LibrarySkill>> {
+    require_root(&user)?;
+    s.library()
+        .create_skill(&req.name, &req.category, &req.description, req.body.as_deref())
+        .map_err(|e| map_io("create skill", e))?;
+    s.library()
+        .get_skill(&req.name)
+        .map(Json)
+        .ok_or_else(|| Error::Internal("skill not found after create".into()).into())
+}
+
+/// Import a skill package from a raw zip request body. Optional `?name=` overrides
+/// the derived skill name.
+async fn import_skill<C: ContextCtx>(
+    State(s): State<C>,
+    Extension(user): Extension<AuthUser>,
+    Query(q): Query<ImportQuery>,
+    body: Bytes,
+) -> ApiResult<Json<LibrarySkill>> {
+    require_root(&user)?;
+    if body.is_empty() {
+        return Err(Error::Invalid("empty upload".into()).into());
+    }
+    let name = s
+        .library()
+        .import_zip(&body, q.name.as_deref())
+        .map_err(|e| map_io("import skill", e))?;
+    s.library()
+        .get_skill(&name)
+        .map(Json)
+        .ok_or_else(|| Error::Internal("skill not found after import".into()).into())
 }
 
 // ---------------------------------------------------------------------------

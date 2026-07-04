@@ -1875,6 +1875,60 @@ pub struct UpsertLibraryEntryReq {
     pub body: String,
 }
 
+/// One file inside a skill package (relative to the skill root), for the Skills
+/// Lab file tree. `binary` is a best-effort sniff (NUL byte in the head) — the
+/// editor shows text files inline and offers binary files view-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillFileEntry {
+    /// Path relative to the skill dir, e.g. `SKILL.md` or `references/rubric.md`.
+    pub path: String,
+    pub size: u64,
+    pub binary: bool,
+}
+
+/// `GET /library/skills/{name}/file?path=…` — one file's text content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillFileContentResp {
+    pub path: String,
+    pub content: String,
+    pub binary: bool,
+}
+
+/// `PUT /library/skills/{name}/file` — create/overwrite one file in the library
+/// copy of a skill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteSkillFileReq {
+    /// Path relative to the skill dir (validated: no absolute, no `..`).
+    pub path: String,
+    pub content: String,
+}
+
+/// `POST /library/skills` — create a new (empty-ish) library skill. When `body`
+/// is omitted a starter `SKILL.md` is synthesized from name/category/description.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateLibrarySkillReq {
+    pub name: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// `GET /library/bundled/{name}` — a bundled skill's full content (so the Skills
+/// Lab can view a skill that is not installed into the library yet).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundledSkillContent {
+    pub name: String,
+    pub category: String,
+    pub version: u32,
+    pub description: String,
+    /// The `SKILL.md` body.
+    pub body: String,
+    pub files: Vec<SkillFileEntry>,
+}
+
 /// `PUT /library/default-soul`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalSoulReq {
