@@ -140,6 +140,8 @@ const DEFAULT_CONFIG = {
   estimate_since: '', // ISO date; when set it wins over the month window
   estimate_max_batches: 40,
   estimate_rubric: [], // editable calibration lines; [] = built-in defaults
+  estimate_instructions: '', // extra estimator guidance ('' = built-in only)
+  report_instructions: '', // override the report requirements ('' = built-in default)
   evidence_months: 18, // how far back to collect git diff evidence
   estimate_workers: [{ provider: 'claude', model: '' }],
   feature_repos: [],
@@ -222,6 +224,12 @@ function validateConfig(body) {
     const n = Number(body.evidence_months);
     if (!Number.isInteger(n) || n < 1 || n > 120) throw new Error('evidence_months must be an integer in 1..120');
     c.evidence_months = n;
+  }
+  for (const k of ['estimate_instructions', 'report_instructions']) {
+    if (body[k] !== undefined) {
+      if (typeof body[k] !== 'string') throw new Error(`${k} must be a string`);
+      c[k] = body[k].slice(0, 8000);
+    }
   }
   if (body.estimate_workers !== undefined) {
     if (!Array.isArray(body.estimate_workers) || !body.estimate_workers.length || body.estimate_workers.length > 8) {
@@ -551,6 +559,7 @@ async function estimateScope(account, projects, config, job) {
       maxBatches: config.estimate_max_batches,
       workers,
       rubric: config.estimate_rubric,
+      instructions: config.estimate_instructions,
       corrections,
       agentRun,
       onProgress: (done, total) => {
@@ -1194,14 +1203,51 @@ function featuresView(account) {
 const fs = require('fs');
 
 /** UTC bounds of a report period. kind: 'year' | 'quarter'. */
-function periodBounds(kind, year, quarter) {
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function periodBounds(kind, year, quarter, month) {
+  if (kind === 'month') {
+    const m = Math.min(12, Math.max(1, month || 1));
+    return { start: Date.UTC(year, m - 1, 1), end: Date.UTC(year, m, 1), label: `${MONTH_NAMES[m - 1]} ${year}` };
+  }
   if (kind === 'quarter') {
     const q = Math.min(4, Math.max(1, quarter || 1));
-    const start = Date.UTC(year, (q - 1) * 3, 1);
-    const end = Date.UTC(year, q * 3, 1);
-    return { start, end, label: `${year} Q${q}` };
+    return { start: Date.UTC(year, (q - 1) * 3, 1), end: Date.UTC(year, q * 3, 1), label: `${year} Q${q}` };
   }
   return { start: Date.UTC(year, 0, 1), end: Date.UTC(year + 1, 0, 1), label: String(year) };
+}
+
+/** The comparison period: previous month/quarter, or same period last year. */
+function prevBounds(kind, year, quarter, month) {
+  if (kind === 'month') {
+    const m = month || 1;
+    return m === 1 ? periodBounds('month', year - 1, null, 12) : periodBounds('month', year, null, m - 1);
+  }
+  if (kind === 'quarter') return periodBounds('quarter', year - 1, quarter);
+  return periodBounds('year', year - 1);
+}
+
+/**
+ * Anonymize a report for presentation: developers become "Developer N"
+ * (ranked by weighted output so the mapping is stable), and — when
+ * `maskTasks` — task keys/summaries become "Task N" (type + size kept).
+ */
+function makeMasker(stats, maskTasks) {
+  const nameMap = new Map();
+  [...stats]
+    .sort((a, b) => (b.weighted_done || 0) - (a.weighted_done || 0))
+    .forEach((s, i) => nameMap.set(s.assignee_name || s.assignee_id, `Developer ${i + 1}`));
+  const taskMap = new Map();
+  let tn = 0;
+  return {
+    name: (n) => nameMap.get(n) || n,
+    task: (key) => {
+      if (!maskTasks) return key;
+      if (!taskMap.has(key)) taskMap.set(key, `Task ${++tn}`);
+      return taskMap.get(key);
+    },
+    on: true,
+  };
 }
 
 function loadReportsIndex(account) {
@@ -1240,6 +1286,37 @@ function periodSummary(scope, assigneeId, start, end) {
   return { stats: s, tasks, task_count: mine.length };
 }
 
+/** Whole-team numbers for a window: scope metrics + per-dev rows + goals. */
+function teamPeriodSummary(account, scope, start, end) {
+  const { base, stats } = nowStats(scope, start, end);
+  const values = A.scopeMetrics(scope.records, base, scope.config.workweek, Date.now(), scope.estimates, start);
+  const scopeGoals = loadScopeGoals(account);
+  const roleOf = (id) => {
+    const cid = scope.canonical(id);
+    return (scope.flat_people[cid] && scope.flat_people[cid].role) || '';
+  };
+  const team_goals = A.evalScopeGoals(scopeGoals.team, values);
+  const role_goals = {};
+  for (const [role, gs] of Object.entries(scopeGoals.roles || {})) {
+    const rr = scope.records.filter((r) => r.assignee_id && roleOf(r.assignee_id) === role);
+    role_goals[role] = A.evalScopeGoals(gs, A.scopeMetrics(rr, base, scope.config.workweek, Date.now(), scope.estimates, start));
+  }
+  const devs = stats.map((s) => ({
+    name: s.assignee_name,
+    role: roleOf(s.assignee_id),
+    completed: s.completed,
+    weighted_done: s.weighted_done,
+    output_wk: s.output_wk,
+    vs_team_output: s.output_factor,
+    vs_est: s.pace_vs_est,
+    median_cycle: s.median_cycle,
+    efficiency: s.efficiency,
+    trend: s.trend,
+    fix_commits: s.unscoped_commits + (s.repo_commits || 0),
+  }));
+  return { scope: values, team_goals, role_goals, devs };
+}
+
 /** Strip a saved HTML report to text for prompt context. */
 function htmlToText(html, cap = 1600) {
   return String(html)
@@ -1251,86 +1328,154 @@ function htmlToText(html, cap = 1600) {
     .slice(0, cap);
 }
 
-const reportJobs = new Map(); // `${account}__${assignee}__${label}` -> job
+const reportJobs = new Map(); // reportJobKey -> job
 
-async function runReport(account, assigneeId, kind, year, quarter) {
-  const jobKey = `${account}__${assigneeId}__${kind}${year}${quarter || ''}`;
+function reportJobKey(account, o) {
+  return `${account}__${o.scope}__${o.assignee || 'team'}__${o.kind}${o.year}${o.quarter || ''}${o.month || ''}${o.mask ? '_m' : ''}`;
+}
+
+const fmtNum = (o) => JSON.stringify(o, (_, v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v));
+
+const DEFAULT_DEV_REPORT_INSTRUCTIONS =
+  'The report must include: an executive summary; delivery volume & quality vs the comparison period (call out concrete changes with numbers); strengths; areas to improve (be specific, use the task data — estimate misses, fix rates, WIP habits); notable tasks; and proposed goals for the NEXT period (concrete, measurable targets from the data). Be honest and specific — an internal management document, not a celebration page.';
+
+const DEFAULT_TEAM_REPORT_INSTRUCTIONS =
+  'This is a monthly/quarterly team reflection for a presentation. The report must include: a team executive summary; a clear "what improved / what declined vs the comparison period" section with concrete numbers; team & role GOALS with met/not-met status and the gap; a per-developer table (output, vs-team, vs-estimate, trend); highlights and concerns; and proposed team goals for the next period. Use charts/tables where it helps a slide. Be honest and specific.';
+
+/** Build the report prompt from data + the (possibly lead-edited) instructions. */
+function reportPrompt(headline, dataBlock, instructions) {
+  return `You are writing ${headline}. Write a COMPLETE, SELF-CONTAINED HTML document (inline CSS, presentation-friendly, works in light and dark, no external assets, no javascript) — respond with ONLY the HTML, starting with <!doctype html>.
+
+Data (business days; weighted_done = dev-agnostic AI-estimated days delivered, credited by commit share — the fair volume measure; output_wk/vs_team_output = delivered scope per week vs team; vs_est = actual÷estimate, >1 = slower than the estimate):
+
+${dataBlock}
+
+${instructions}`;
+}
+
+function finalizeHtml(text) {
+  let html = String(text || '');
+  const lo = html.search(/<!doctype|<html/i);
+  if (lo > 0) html = html.slice(lo);
+  const endTag = html.toLowerCase().lastIndexOf('</html>');
+  if (endTag > 0) html = html.slice(0, endTag + 7);
+  if (!/<html|<!doctype/i.test(html)) {
+    html = `<!doctype html><html><body><pre style="white-space:pre-wrap;font-family:system-ui">${html.replace(/</g, '&lt;')}</pre></body></html>`;
+  }
+  return html;
+}
+
+function saveReport(account, entry, html) {
+  fs.mkdirSync(store.reportsDir(DATA_DIR, account), { recursive: true });
+  fs.writeFileSync(store.reportFilePath(DATA_DIR, account, entry.file_name), html);
+  const idx = loadReportsIndex(account);
+  idx.reports.push(entry);
+  store.writeJsonAtomic(store.reportsIndexPath(DATA_DIR, account), idx);
+}
+
+/**
+ * Generate a report. opts:
+ *   {scope:'dev'|'team', assignee?, kind:'month'|'quarter'|'year', year,
+ *    quarter?, month?, mask?, maskTasks?}
+ */
+async function runReport(account, opts) {
+  const { scope: rscope, assignee, kind, year, quarter, month, mask, maskTasks } = opts;
+  const jobKey = reportJobKey(account, opts);
   const job = reportJobs.get(jobKey);
   try {
     const scope = loadScope(account, '*');
     if (!scope) throw new Error('no scan yet');
-    const { start, end, label } = periodBounds(kind, year, quarter);
-    const cur = periodSummary(scope, assigneeId, start, end);
-    if (!cur.stats) throw new Error('no data for this developer in that period');
-    const prevBounds = kind === 'quarter'
-      ? periodBounds('quarter', year - 1, quarter)
-      : periodBounds('year', year - 1);
-    const prev = periodSummary(scope, assigneeId, prevBounds.start, prevBounds.end);
-    const name = cur.stats.assignee_name || assigneeId;
+    const cfg = loadConfig();
+    const { start, end, label } = periodBounds(kind, year, quarter, month);
+    const pb = prevBounds(kind, year, quarter, month);
 
-    // Team reference for the same window + this dev's goals.
-    const { stats: teamStats } = nowStats(scope, start, end);
-    const team = A.teamMedians(teamStats);
-    const goalsFile = loadDevGoals(account);
-    const slot = goalsFile.assignees[assigneeId] || { goals: [], snapshots: [] };
-    const goals = devGoalRows(slot, cur.stats, team).map((g) => ({ metric: g.metric, target: g.target, current: g.current, met: g.met }));
+    let dataBlock;
+    let headline;
+    let instructions;
+    let entryName;
+    let fileHint;
 
-    // Attach previously saved reports for this dev (older periods) as context.
-    const idx = loadReportsIndex(account);
-    const priors = idx.reports
-      .filter((r) => r.assignee_id === assigneeId && !(r.kind === kind && r.year === year && (r.quarter || null) === (quarter || null)))
-      .sort((a, b) => b.year - a.year || (b.quarter || 0) - (a.quarter || 0))
-      .slice(0, 2)
-      .map((r) => {
-        try {
-          return { label: r.label, text: htmlToText(fs.readFileSync(store.reportFilePath(DATA_DIR, account, r.file_name), 'utf8')) };
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
-
-    const fmt = (o) => JSON.stringify(o, (_, v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v));
-    const prompt = `You are writing a performance summary report for an engineering team lead about developer "${name}" for ${label}. Write a COMPLETE, SELF-CONTAINED HTML document (inline CSS, dark theme, no external assets, no javascript) — respond with ONLY the HTML, starting with <!doctype html>.
-
-Data (business days; "weighted_done" = dev-agnostic AI-estimated days of work delivered, credited by commit share — the fair volume measure; "pace_factor" >1 = slower than team on the same estimated volume; "efficiency" >1 = delivers faster than estimates):
-
-THIS PERIOD (${label}): ${fmt(cur.stats)}
-Largest tasks this period: ${fmt(cur.tasks.slice(0, 25))} (of ${cur.task_count} total)
-SAME PERIOD LAST YEAR (${prevBounds.label}): ${prev.stats ? fmt(prev.stats) : 'no data'}
-TEAM medians this period: ${fmt(team)}
-Current goals: ${fmt(goals)}
-${priors.length ? priors.map((p) => `PRIOR SAVED REPORT (${p.label}): ${p.text}`).join('\n') : ''}
-
-The report must include: an executive summary; delivery volume & quality vs ${prevBounds.label} (call out concrete changes with numbers); strengths; areas to improve (be specific, use the task data — e.g. estimate misses, fix rates, WIP habits); notable tasks; and proposed goals for the NEXT period (concrete, measurable targets derived from the data). Be honest and specific — this is an internal management document, not a celebration page.`;
-
-    const r = await hostPost('/agents/run', { prompt });
-    let html = (r && r.text) || '';
-    const lo = html.search(/<!doctype|<html/i);
-    if (lo > 0) html = html.slice(lo);
-    const endTag = html.toLowerCase().lastIndexOf('</html>');
-    if (endTag > 0) html = html.slice(0, endTag + 7);
-    if (!/<html|<!doctype/i.test(html)) {
-      html = `<!doctype html><html><body><pre style="white-space:pre-wrap;font-family:system-ui">${html.replace(/</g, '&lt;')}</pre></body></html>`;
+    if (rscope === 'team') {
+      const cur = teamPeriodSummary(account, scope, start, end);
+      const prev = teamPeriodSummary(account, scope, pb.start, pb.end);
+      const masker = mask ? makeMasker(cur.devs.map((d) => ({ assignee_name: d.name, weighted_done: d.weighted_done })), maskTasks) : null;
+      const maskDevs = (list) => (masker ? list.map((d) => ({ ...d, name: masker.name(d.name) })) : list);
+      const data = {
+        period: label,
+        comparison: pb.label,
+        this_period: { team: cur.scope, goals: cur.team_goals, role_goals: cur.role_goals, developers: maskDevs(cur.devs) },
+        comparison_period: { team: prev.scope, developers: maskDevs(prev.devs) },
+      };
+      dataBlock = fmtNum(data);
+      headline = `a ${label} TEAM delivery report for an engineering team lead${mask ? ' (names ANONYMIZED — keep them anonymized in the output)' : ''}`;
+      instructions = (cfg.report_instructions || '').trim() || DEFAULT_TEAM_REPORT_INSTRUCTIONS;
+      entryName = 'Team';
+      fileHint = 'team';
+    } else {
+      const cur = periodSummary(scope, assignee, start, end);
+      if (!cur.stats) throw new Error('no data for this developer in that period');
+      const prev = periodSummary(scope, assignee, pb.start, pb.end);
+      const { stats: teamStats } = nowStats(scope, start, end);
+      const team = A.teamMedians(teamStats);
+      const goalsFile = loadDevGoals(account);
+      const slot = goalsFile.assignees[assignee] || { goals: [], snapshots: [] };
+      const goals = devGoalRows(slot, cur.stats, team).map((g) => ({ metric: g.metric, target: g.target, current: g.current, met: g.met }));
+      const idx = loadReportsIndex(account);
+      const priors = idx.reports
+        .filter((r) => r.assignee_id === assignee && r.id)
+        .sort((a, b) => b.created_at - a.created_at)
+        .slice(0, 2)
+        .map((r) => {
+          try {
+            return { label: r.label, text: htmlToText(fs.readFileSync(store.reportFilePath(DATA_DIR, account, r.file_name), 'utf8')) };
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+      const name = cur.stats.assignee_name || assignee;
+      const masker = mask ? makeMasker(teamStats, maskTasks) : null;
+      const maskName = (n) => (masker ? masker.name(n) : n);
+      const maskTask = (t) => (masker ? { ...t, key: masker.task(t.key), summary: maskTasks ? '(masked)' : t.summary } : t);
+      const data = {
+        developer: maskName(name),
+        period: label,
+        comparison: pb.label,
+        this_period: { ...cur.stats, assignee_name: maskName(cur.stats.assignee_name) },
+        largest_tasks: cur.tasks.slice(0, 25).map(maskTask),
+        task_count: cur.task_count,
+        comparison_period: prev.stats ? { ...prev.stats, assignee_name: maskName(prev.stats.assignee_name) } : 'no data',
+        team_medians: team,
+        goals,
+        prior_reports: priors,
+      };
+      dataBlock = fmtNum(data);
+      headline = `a ${label} performance report about developer "${maskName(name)}"${mask ? ' (name ANONYMIZED)' : ''}`;
+      instructions = (cfg.report_instructions || '').trim() || DEFAULT_DEV_REPORT_INSTRUCTIONS;
+      entryName = name;
+      fileHint = String(assignee);
     }
 
-    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    const fileName = `${assigneeId}__${kind}-${year}${quarter ? `-Q${quarter}` : ''}__${id}`;
-    fs.mkdirSync(store.reportsDir(DATA_DIR, account), { recursive: true });
-    fs.writeFileSync(store.reportFilePath(DATA_DIR, account, fileName), html);
+    const r = await hostPost('/agents/run', { prompt: reportPrompt(headline, dataBlock, instructions) });
+    const html = finalizeHtml(r && r.text);
+
+    const id = `${Date.now().toString(36)}-${Math.floor((job.started_at || 0) % 1e6).toString(36)}`;
+    const suffix = kind === 'month' ? `-M${month}` : kind === 'quarter' ? `-Q${quarter}` : '';
     const entry = {
       id,
-      assignee_id: assigneeId,
-      assignee_name: name,
+      report_scope: rscope,
+      assignee_id: rscope === 'dev' ? assignee : null,
+      assignee_name: entryName,
       kind,
       year,
       quarter: quarter || null,
-      label,
+      month: month || null,
+      masked: Boolean(mask),
+      label: `${rscope === 'team' ? 'Team · ' : ''}${label}${mask ? ' · masked' : ''}`,
       created_at: Date.now(),
-      file_name: fileName,
+      file_name: `${fileHint}__${kind}-${year}${suffix}__${id}`,
     };
-    idx.reports.push(entry);
-    store.writeJsonAtomic(store.reportsIndexPath(DATA_DIR, account), idx);
+    saveReport(account, entry, html);
     job.state = 'done';
     job.report = entry;
   } catch (e) {
@@ -1424,7 +1569,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (u.pathname === '/config' && req.method === 'GET') {
-      return send(res, 200, loadConfig());
+      return send(res, 200, {
+        ...loadConfig(),
+        _defaults: {
+          rubric: E.DEFAULT_RUBRIC,
+          dev_report_instructions: DEFAULT_DEV_REPORT_INSTRUCTIONS,
+          team_report_instructions: DEFAULT_TEAM_REPORT_INSTRUCTIONS,
+        },
+      });
     }
     if (u.pathname === '/config' && req.method === 'PUT') {
       const body = await readBody(req);
@@ -1555,18 +1707,34 @@ const server = http.createServer(async (req, res) => {
 
     if (u.pathname === '/report' && req.method === 'POST') {
       const body = await readBody(req);
-      const { account, assignee, kind, year } = body;
+      const account = body.account;
+      const rscope = body.scope === 'team' ? 'team' : 'dev';
+      const kind = body.kind;
+      const year = Number(body.year);
       const quarter = body.quarter ? Number(body.quarter) : null;
-      if (!account || !assignee || !['year', 'quarter'].includes(kind) || !Number.isInteger(Number(year))) {
-        return send(res, 400, { error: 'account, assignee, kind (year|quarter), year required' });
+      const month = body.month ? Number(body.month) : null;
+      if (!account || !['year', 'quarter', 'month'].includes(kind) || !Number.isInteger(year)) {
+        return send(res, 400, { error: 'account, kind (year|quarter|month), year required' });
       }
+      if (rscope === 'dev' && !body.assignee) return send(res, 400, { error: 'assignee required for a developer report' });
       if (kind === 'quarter' && !(quarter >= 1 && quarter <= 4)) return send(res, 400, { error: 'quarter must be 1..4' });
-      const jobKey = `${account}__${assignee}__${kind}${year}${quarter || ''}`;
+      if (kind === 'month' && !(month >= 1 && month <= 12)) return send(res, 400, { error: 'month must be 1..12' });
+      const opts = {
+        scope: rscope,
+        assignee: rscope === 'dev' ? String(body.assignee) : null,
+        kind,
+        year,
+        quarter,
+        month,
+        mask: Boolean(body.mask),
+        maskTasks: Boolean(body.mask_tasks),
+      };
+      const jobKey = reportJobKey(account, opts);
       const existing = reportJobs.get(jobKey);
       if (existing && existing.state === 'running') return send(res, 409, { error: 'report already generating' });
       const job = { state: 'running', started_at: Date.now(), finished_at: null, error: null, report: null };
       reportJobs.set(jobKey, job);
-      runReport(account, assignee, kind, Number(year), quarter); // fire and forget
+      runReport(account, opts); // fire and forget
       return send(res, 200, { started: true, job: jobKey });
     }
 
@@ -1578,8 +1746,9 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/reports' && req.method === 'GET') {
       const idx = loadReportsIndex(q.get('account') || '');
       const assignee = q.get('assignee');
+      const scopeFilter = q.get('scope'); // 'team' | 'dev' | undefined
       const list = idx.reports
-        .filter((r) => !assignee || r.assignee_id === assignee)
+        .filter((r) => (!assignee || r.assignee_id === assignee) && (!scopeFilter || (r.report_scope || 'dev') === scopeFilter))
         .sort((a, b) => b.created_at - a.created_at);
       return send(res, 200, { reports: list });
     }

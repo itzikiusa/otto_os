@@ -650,3 +650,49 @@ test('estimate override: corrects the agnostic estimate everywhere + feeds futur
   const restored = (await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice')).json;
   assert.equal(restored.completed.find((x) => x.key === 'TP-1').est_days_ai, 2, 'restored to AI');
 });
+
+test('team report: month scope, masked, saved to the hub', async () => {
+  const start = await api('POST', '/report', { account: 'acc1', scope: 'team', kind: 'month', year: 2026, month: 6, mask: true, mask_tasks: true });
+  assert.equal(start.status, 200);
+  let s;
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    s = (await api('GET', `/report/status?job=${encodeURIComponent(start.json.job)}`)).json;
+    if (s.state !== 'running') break;
+    if (Date.now() > deadline) throw new Error('team report never finished');
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.equal(s.state, 'done', s.error || '');
+  assert.equal(s.report.report_scope, 'team');
+  assert.equal(s.report.masked, true);
+  assert.ok(s.report.label.includes('Team'));
+  assert.ok(s.report.label.includes('Jun 2026'));
+
+  const teamOnly = await api('GET', '/reports?account=acc1&scope=team');
+  assert.ok(teamOnly.json.reports.every((r) => r.report_scope === 'team'));
+  assert.ok(teamOnly.json.reports.some((r) => r.id === s.report.id));
+
+  const html = await api('GET', `/report/html?account=acc1&id=${encodeURIComponent(s.report.id)}`);
+  assert.ok(html.json.html.startsWith('<!doctype html>'));
+
+  const bad = await api('POST', '/report', { account: 'acc1', scope: 'team', kind: 'month', year: 2026, month: 13 });
+  assert.equal(bad.status, 400);
+});
+
+test('editable prompts: rubric/instructions/report_instructions round-trip; defaults exposed', async () => {
+  const cfg0 = await api('GET', '/config');
+  assert.ok(Array.isArray(cfg0.json._defaults.rubric) && cfg0.json._defaults.rubric.length, 'default rubric exposed');
+  assert.ok(cfg0.json._defaults.team_report_instructions.length, 'team report default exposed');
+
+  const put = await api('PUT', '/config', {
+    estimate_instructions: 'Be strict on bug tickets.',
+    report_instructions: 'Focus on goal deltas.',
+    estimate_rubric: ['Everything tiny is 0.5d.'],
+  });
+  assert.equal(put.status, 200);
+  assert.equal(put.json.estimate_instructions, 'Be strict on bug tickets.');
+  assert.equal(put.json.report_instructions, 'Focus on goal deltas.');
+  assert.deepEqual(put.json.estimate_rubric, ['Everything tiny is 0.5d.']);
+  // restore
+  await api('PUT', '/config', { estimate_instructions: '', report_instructions: '', estimate_rubric: [] });
+});

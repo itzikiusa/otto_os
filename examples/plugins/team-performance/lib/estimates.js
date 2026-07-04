@@ -91,7 +91,7 @@ const DEFAULT_RUBRIC = [
   'A tiny diff is NOT automatically trivial: a one-line fix to a subtle bug/race/prod issue can be days of investigation. Size the understanding+debugging, not just the lines changed. Only mechanical small changes (bump/config/rename) are cheap.',
 ];
 
-function batchPrompt(records, rubric, corrections) {
+function batchPrompt(records, rubric, corrections, instructions) {
   const lines = records.map((r) => {
     const desc = (r.description_snippet || '').slice(0, 1200);
     const epic = r.epic_hint ? ` part_of=${JSON.stringify(String(r.epic_hint).slice(0, 90))}` : '';
@@ -115,7 +115,7 @@ Calibration rubric (follow it):
 ${rules}
 ${learned}
 Also flag routine=true for repetitive/mechanical work (version/dependency bump, config-only, copy tweak, straightforward port of an existing pattern).
-
+${instructions && instructions.trim() ? `\nAdditional instructions from the team lead:\n${instructions.trim()}\n` : ''}
 Tasks:
 ${lines.join('\n')}
 
@@ -163,7 +163,7 @@ function parseBatch(text, expectedKeys) {
  * → {estimated, failed_batches, remaining}
  */
 async function runEstimation(opts) {
-  const { records, cache, agentRun, rubric, corrections } = opts;
+  const { records, cache, agentRun, rubric, corrections, instructions } = opts;
   const nowMs = opts.nowMs || Date.now();
   const targets = selectTargets(records, cache, opts.windowMonths ?? 6, nowMs, opts.sinceMs || 0);
   const maxBatches = opts.maxBatches ?? 40;
@@ -195,12 +195,12 @@ async function runEstimation(opts) {
       if (bi >= workers.length) await sleep(PACE_MS);
       let text = null;
       try {
-        text = await agentRun(batchPrompt(batch, rubric, corrections), workers[workerIdx]);
+        text = await agentRun(batchPrompt(batch, rubric, corrections, instructions), workers[workerIdx]);
       } catch {
         // Worker (provider) failed — retry this batch once on the first worker.
         if (workerIdx !== 0) {
           try {
-            text = await agentRun(batchPrompt(batch, rubric, corrections), workers[0]);
+            text = await agentRun(batchPrompt(batch, rubric, corrections, instructions), workers[0]);
           } catch {
             text = null;
           }

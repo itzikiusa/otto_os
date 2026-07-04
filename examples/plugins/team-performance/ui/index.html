@@ -149,6 +149,7 @@
       let API = '', TOKEN = '';
       const $ = (id) => document.getElementById(id);
       const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
       const err = (m) => ($('err').textContent = m || '');
       const fmtD = (v) => (v == null ? '—' : (Math.round(v * 10) / 10) + 'd');
       const fmtRange = (st) => (st && st.p50 != null ? `${fmtD(st.p50)} <span class="dim">[${fmtD(st.p25)}–${fmtD(st.p75)}]</span>` : '—');
@@ -865,22 +866,71 @@
       }
 
       function reportsHubHtml() {
-        return `<div class="card" id="reports-hub"><h2>Reports hub <span class="dim">(agent-written per-developer summaries — quarterly &amp; yearly, saved history)</span></h2>
+        const yrs = Array.from({ length: 7 }, (_, k) => new Date().getUTCFullYear() - k);
+        return `<div class="card" id="reports-hub"><h2>Reports hub <span class="dim">(agent-written; team &amp; per-developer, month / quarter / year, saved history)</span></h2>
+          <div class="row" style="margin:0 0 8px">
+            <b class="dim" style="font-size:11px">TEAM REPORT</b>
+            <select id="trep-kind"><option value="month">Month</option><option value="quarter">Quarter</option><option value="year">Full year</option></select>
+            <select id="trep-month">${MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join('')}</select>
+            <select id="trep-q" style="display:none"><option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option></select>
+            <select id="trep-year">${yrs.map((y) => `<option>${y}</option>`).join('')}</select>
+            <label style="display:inline-flex;gap:5px;align-items:center"><input type="checkbox" id="trep-mask"> mask names</label>
+            <label style="display:inline-flex;gap:5px;align-items:center"><input type="checkbox" id="trep-mask-tasks"> + mask tasks</label>
+            <button class="primary small" id="trep-gen">Generate team report</button>
+            <span id="trep-status" class="dim"></span>
+          </div>
           <div id="reports-list" class="dim">Loading…</div></div>`;
       }
 
       async function wireReportsHub() {
         const list = $('reports-list');
         if (!list) return;
+        // Team report generator.
+        const setPeriodInputs = () => {
+          const k = $('trep-kind').value;
+          $('trep-month').style.display = k === 'month' ? '' : 'none';
+          $('trep-q').style.display = k === 'quarter' ? '' : 'none';
+        };
+        $('trep-kind').onchange = setPeriodInputs;
+        setPeriodInputs();
+        // default month = previous month
+        const pm = new Date(); pm.setUTCMonth(pm.getUTCMonth() - 1);
+        $('trep-month').value = String(pm.getUTCMonth() + 1);
+        $('trep-year').value = String(pm.getUTCFullYear());
+        $('trep-gen').onclick = async () => {
+          const kind = $('trep-kind').value;
+          const body = {
+            account: state.account, scope: 'team', kind,
+            year: parseInt($('trep-year').value, 10),
+            month: kind === 'month' ? parseInt($('trep-month').value, 10) : undefined,
+            quarter: kind === 'quarter' ? parseInt($('trep-q').value, 10) : undefined,
+            mask: $('trep-mask').checked,
+            mask_tasks: $('trep-mask-tasks').checked,
+          };
+          $('trep-gen').disabled = true;
+          $('trep-status').textContent = 'generating (the agent writes the report — a few minutes)…';
+          try {
+            const start = await api('/report', { method: 'POST', body: JSON.stringify(body) });
+            const poll = setInterval(async () => {
+              try {
+                const s = await api(`/report/status?job=${encodeURIComponent(start.job)}`);
+                if (s.state === 'done') { clearInterval(poll); $('trep-gen').disabled = false; $('trep-status').textContent = ''; await wireReportsHub(); if (s.report) openReport(s.report.id); }
+                else if (s.state === 'error') { clearInterval(poll); $('trep-gen').disabled = false; $('trep-status').textContent = ''; err(s.error || 'report failed'); }
+              } catch { /* keep polling */ }
+            }, 2500);
+          } catch (e) { $('trep-gen').disabled = false; $('trep-status').textContent = ''; err(e.status === 409 ? 'That report is already generating.' : e.message); }
+        };
+
         const reports = await loadReports(null);
-        if (!reports.length) { list.innerHTML = '<span class="dim">No reports yet — open a developer and generate one (per quarter or year, including past periods).</span>'; return; }
-        const byDev = new Map();
+        if (!reports.length) { list.innerHTML = '<span class="dim">No reports yet — generate a team report above, or open a developer for a personal one (month/quarter/year, any past period).</span>'; return; }
+        const groups = new Map();
         for (const r of reports) {
-          if (!byDev.has(r.assignee_name)) byDev.set(r.assignee_name, []);
-          byDev.get(r.assignee_name).push(r);
+          const g = (r.report_scope || 'dev') === 'team' ? '▣ Team reports' : r.assignee_name;
+          if (!groups.has(g)) groups.set(g, []);
+          groups.get(g).push(r);
         }
         list.classList.remove('dim');
-        list.innerHTML = [...byDev.entries()].map(([name, rs]) => `
+        list.innerHTML = [...groups.entries()].map(([name, rs]) => `
           <div class="row" style="margin:4px 0"><b style="min-width:180px">${esc(name)}</b>
             ${rs.map((r) => `<button class="small rep-open" data-id="${esc(r.id)}">${esc(r.label)} <span class="dim">${fmtDate(r.created_at)}</span></button>`).join(' ')}
           </div>`).join('');
@@ -1053,11 +1103,13 @@
             <div id="dev-chart-wrap" class="chart-wrap"></div></div>
           <div class="card" id="goals"><h2>Goals <span class="dim">(targets are editable; progress updates every scan)</span></h2><div id="goal-rows"></div>
             <div class="row" style="margin:10px 0 0"><button class="primary" id="save-goals">Save goals</button><span id="goals-msg" class="dim"></span></div></div>
-          <div class="card" id="dev-reports"><h2>Summary reports <span class="dim">(agent-written; compares vs the same period last year + prior saved reports; kept in the hub)</span></h2>
+          <div class="card" id="dev-reports"><h2>Summary reports <span class="dim">(agent-written; compares vs the previous period + prior saved reports; kept in the hub)</span></h2>
             <div class="row">
-              <select id="rep-kind"><option value="year">Full year</option><option value="quarter">Quarter</option></select>
+              <select id="rep-kind"><option value="month">Month</option><option value="quarter">Quarter</option><option value="year">Full year</option></select>
+              <select id="rep-month">${MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join('')}</select>
               <select id="rep-year">${Array.from({ length: 7 }, (_, k) => new Date().getUTCFullYear() - k).map((y) => `<option>${y}</option>`).join('')}</select>
               <select id="rep-q" style="display:none"><option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option></select>
+              <label style="display:inline-flex;gap:5px;align-items:center"><input type="checkbox" id="rep-mask"> mask name</label>
               <button class="primary small" id="rep-gen">Generate report</button>
               <span id="rep-status" class="dim"></span>
             </div>
@@ -1099,14 +1151,23 @@
           $('rep-list').querySelectorAll('.rep-open').forEach((b) => (b.onclick = () => openReport(b.dataset.id)));
         };
         repRefresh();
-        $('rep-kind').onchange = () => { $('rep-q').style.display = $('rep-kind').value === 'quarter' ? '' : 'none'; };
+        const setDevPeriod = () => {
+          const k = $('rep-kind').value;
+          $('rep-month').style.display = k === 'month' ? '' : 'none';
+          $('rep-q').style.display = k === 'quarter' ? '' : 'none';
+        };
+        $('rep-kind').onchange = setDevPeriod; setDevPeriod();
+        { const pm = new Date(); pm.setUTCMonth(pm.getUTCMonth() - 1); $('rep-month').value = String(pm.getUTCMonth() + 1); }
         $('rep-gen').onclick = async () => {
+          const kind = $('rep-kind').value;
           const body = {
             account: state.account,
             assignee: state.dev,
-            kind: $('rep-kind').value,
+            kind,
             year: parseInt($('rep-year').value, 10),
-            quarter: $('rep-kind').value === 'quarter' ? parseInt($('rep-q').value, 10) : undefined,
+            month: kind === 'month' ? parseInt($('rep-month').value, 10) : undefined,
+            quarter: kind === 'quarter' ? parseInt($('rep-q').value, 10) : undefined,
+            mask: $('rep-mask').checked,
           };
           $('rep-gen').disabled = true;
           $('rep-status').textContent = 'generating (the agent writes the report — this takes a few minutes)…';
@@ -1322,12 +1383,18 @@
                   <span class="lbl">Max batches / scan</span><input id="cfg-est-batches" type="number" min="1" max="200" value="${config.estimate_max_batches}" title="15 issues per batch; the rest continues next scan">
                   <span class="lbl">Evidence window (months)</span><input id="cfg-ev-months" type="number" min="1" max="120" value="${config.evidence_months ?? 18}" title="how far back to collect git diff evidence (files/lines/commits) fed to the estimator">
                 </div>
-                <h3>Calibration rubric <span class="dim">(one rule per line; blank = built-in defaults)</span></h3>
+                <h3>Calibration rubric <span class="dim">(one rule per line; blank = built-in defaults)</span> <a class="rub-default" style="font-size:11px">use defaults</a></h3>
                 <textarea id="cfg-rubric" rows="6" style="width:100%;font:12px/1.4 ui-monospace,monospace" placeholder="e.g. Reverse integration: ~1 day&#10;Full new provider integration: ~15 days">${esc((config.estimate_rubric || []).join('\n'))}</textarea>
+                <h3>Extra estimator instructions <span class="dim">(appended to the estimation prompt; blank = none)</span></h3>
+                <textarea id="cfg-est-instr" rows="3" style="width:100%;font:12px/1.4 ui-monospace,monospace" placeholder="e.g. Be stricter on bug tickets without a linked commit.">${esc(config.estimate_instructions || '')}</textarea>
                 <h3>Workers <span class="dim">(batches split across providers in parallel)</span></h3>
                 <div id="workers">${workersHtml}</div>
                 <button class="small" id="wk-add">+ add worker</button>
               </div>
+            </div>
+            <div class="card"><h2>Report instructions <span class="dim">(what the agent-written HTML reports should contain / tone — edit without a rebuild)</span></h2>
+              <textarea id="cfg-report-instr" rows="5" style="width:100%;font:12px/1.4 ui-monospace,monospace" placeholder="Blank = built-in defaults (dev + team).">${esc(config.report_instructions || '')}</textarea>
+              <div class="row" style="margin-top:4px"><a class="rep-default-dev" style="font-size:11px">insert dev default</a> · <a class="rep-default-team" style="font-size:11px">insert team default</a></div>
             </div>
             <div class="card"><h2>Feature-scan repos <span class="dim">(git-only features for work without Jira stories)</span></h2>
               ${repoBoxes || '<p class="dim">No repos registered in Otto.</p>'}
@@ -1353,6 +1420,13 @@
             row.querySelector('.wk-del').onclick = () => row.remove();
           };
           card.querySelectorAll('.wk-del').forEach((b) => (b.onclick = () => b.closest('.worker-row').remove()));
+          const defs = (config._defaults) || {};
+          const rd = card.querySelector('.rub-default');
+          if (rd) rd.onclick = () => { $('cfg-rubric').value = (defs.rubric || []).join('\n'); };
+          const rdd = card.querySelector('.rep-default-dev');
+          if (rdd) rdd.onclick = () => { $('cfg-report-instr').value = defs.dev_report_instructions || ''; };
+          const rdt = card.querySelector('.rep-default-team');
+          if (rdt) rdt.onclick = () => { $('cfg-report-instr').value = defs.team_report_instructions || ''; };
 
           $('save-config').onclick = async () => {
             // people first (separate store)
@@ -1389,6 +1463,8 @@
               estimate_max_batches: parseInt($('cfg-est-batches').value, 10),
               evidence_months: parseInt($('cfg-ev-months').value, 10),
               estimate_rubric: $('cfg-rubric').value.split('\n').map((x) => x.trim()).filter(Boolean),
+              estimate_instructions: $('cfg-est-instr').value,
+              report_instructions: $('cfg-report-instr').value,
               estimate_workers: workers.length ? workers : undefined,
               feature_repos: [...card.querySelectorAll('.fr-cb')].filter((cb) => cb.checked).map((cb) => cb.value),
               roles: $('cfg-roles').value.split(',').map((x) => x.trim()).filter(Boolean),
