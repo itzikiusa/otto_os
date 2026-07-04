@@ -188,6 +188,10 @@
 
   function onPointerDown(e: PointerEvent): void {
     if (!img || textDraft) return;
+    // Prevent the mousedown default action (focus change / text selection):
+    // it would blur — and thereby cancel — a text draft opened by this very
+    // click, since the default action runs AFTER the handler.
+    e.preventDefault();
     canvasEl!.setPointerCapture(e.pointerId);
     const p = toImage(e);
     dragLast = p;
@@ -288,7 +292,9 @@
 
   function openTextDraft(x: number, y: number, value: string, editId: number | null): void {
     textDraft = { x, y, value, editId };
-    queueMicrotask(() => textareaEl?.focus());
+    // Focus after the full click dispatch (not a microtask): the click's
+    // remaining default actions would blur-and-cancel the draft otherwise.
+    setTimeout(() => textareaEl?.focus(), 0);
   }
 
   function commitText(): void {

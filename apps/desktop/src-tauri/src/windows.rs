@@ -373,9 +373,13 @@ pub fn create_snip_window(app: &tauri::AppHandle, snip_id: &str) -> Result<(), S
     fit_frame(&mut frame, &monitors);
     let init = format!("window.__OTTO_ROUTE__='snip/{snip_id}';");
     match build_window_with_init(app, &frame, Some(&init)) {
-        Ok(_) => {
+        Ok(win) => {
             with_registry(|reg| reg.windows.push(frame));
             persist();
+            // The capture usually starts while another app (Chrome, …) is
+            // frontmost — the global shortcut works app-unfocused — so the
+            // editor must claim the foreground itself or it opens buried.
+            let _ = win.set_focus();
             Ok(())
         }
         Err(e) => Err(format!("could not create snip window: {e}")),
