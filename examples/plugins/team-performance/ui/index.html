@@ -890,7 +890,37 @@
             <span id="trep-status" class="dim"></span>
           </div>
           <div class="dim" style="font-size:11px;margin:-4px 0 8px">Per-developer reports are also on each developer's page. This hub keeps all generated reports.</div>
+          <div id="reports-active"></div>
           <div id="reports-list" class="dim">Loading…</div></div>`;
+      }
+
+      // Show EVERY report currently being generated (survives reloads — the
+      // jobs live on the server), each with a live elapsed timer, auto-opening
+      // when it finishes. This is the "see all running" view.
+      let activeReportTimer = null;
+      async function renderActiveReports() {
+        const box = $('reports-active');
+        if (!box) return;
+        clearInterval(activeReportTimer);
+        const paint = async () => {
+          let active = [];
+          try { active = (await api(`/reports/active?account=${encodeURIComponent(state.account)}`)).active || []; } catch { return; }
+          if (!active.length) { box.innerHTML = ''; return; }
+          const now = Date.now();
+          box.innerHTML = `<div class="card" style="margin:6px 0;border-color:color-mix(in srgb,var(--accent) 40%,transparent)">
+            <b class="dim" style="font-size:11px">⏳ GENERATING NOW (${active.length})</b>
+            ${active.map((a) => {
+              const s = Math.floor((now - a.started_at) / 1000);
+              const el = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+              return `<div class="row" style="margin:3px 0"><span class="badge warn">writing</span> <b>${esc(a.label)}</b> <span class="dim">${esc(a.step)} · ${el}</span></div>`;
+            }).join('')}</div>`;
+          // when a running job disappears (finished), refresh the hub to show it saved
+          const doneKeys = renderActiveReports._seen && renderActiveReports._seen.filter((k) => !active.some((a) => a.job === k));
+          renderActiveReports._seen = active.map((a) => a.job);
+          if (doneKeys && doneKeys.length) { await wireReportsHub(); }
+        };
+        await paint();
+        activeReportTimer = setInterval(paint, 3000);
       }
 
       async function wireReportsHub() {
@@ -923,14 +953,17 @@
           $('trep-status').textContent = 'starting…';
           try {
             const start = await api('/report', { method: 'POST', body: JSON.stringify(body) });
+            if (start.already) $('trep-status').textContent = 'already generating — showing progress…';
+            await renderActiveReports(); // reflect it in the "generating now" list
             pollReportJob({
               job: start.job,
               statusEl: $('trep-status'),
               button: $('trep-gen'),
               onDone: async (report) => { await wireReportsHub(); if (report) openReport(report.id); },
             });
-          } catch (e) { $('trep-gen').disabled = false; $('trep-status').textContent = ''; err(e.status === 409 ? 'That report is already generating.' : e.message); }
+          } catch (e) { $('trep-gen').disabled = false; $('trep-status').textContent = ''; err(e.message); }
         };
+        await renderActiveReports();
 
         const reports = await loadReports(null);
         if (!reports.length) { list.innerHTML = '<span class="dim">No reports yet — generate a team report above, or open a developer for a personal one (month/quarter/year, any past period).</span>'; return; }
@@ -1241,6 +1274,7 @@
           $('rep-status').textContent = 'starting…';
           try {
             const start = await api('/report', { method: 'POST', body: JSON.stringify(body) });
+            if (start.already) $('rep-status').textContent = 'already generating — showing progress…';
             pollReportJob({
               job: start.job,
               statusEl: $('rep-status'),
@@ -1250,7 +1284,7 @@
           } catch (e) {
             $('rep-gen').disabled = false;
             $('rep-status').textContent = '';
-            err(e.status === 409 ? 'A report for this period is already generating.' : e.message);
+            err(e.message);
           }
         };
         $('dev-view').querySelectorAll('td.bullet').forEach((td) => {

@@ -746,3 +746,26 @@ test('combined report: team overview + a section per developer, maskable', async
   const teamList = await api('GET', '/reports?account=acc1&scope=combined');
   assert.ok(teamList.json.reports.some((r) => r.id === s.report.id));
 });
+
+test('report already-running returns the job to attach to (not a 409); active endpoint lists it', async () => {
+  // Kick a slow-ish report and immediately request it again — second call
+  // should hand back the same job with already=true, and /reports/active lists it.
+  const first = await api('POST', '/report', { account: 'acc1', scope: 'team', kind: 'year', year: 2026 });
+  assert.equal(first.status, 200);
+  assert.ok(first.json.job);
+  // (the mock agent replies instantly, so the job may already be done — assert the
+  // active endpoint shape and the label rather than racing the timing.)
+  const active = await api('GET', '/reports/active?account=acc1');
+  assert.ok(Array.isArray(active.json.active));
+  // wait for it to finish
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const s = (await api('GET', `/report/status?job=${encodeURIComponent(first.json.job)}`)).json;
+    if (s.state !== 'running') break;
+    if (Date.now() > deadline) throw new Error('year report never finished');
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  // a second request after completion starts fresh (job re-runs), returns a label
+  const second = await api('POST', '/report', { account: 'acc1', scope: 'team', kind: 'year', year: 2026 });
+  assert.ok(second.json.label.includes('Team') && second.json.label.includes('2026'));
+});

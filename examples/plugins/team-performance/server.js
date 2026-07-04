@@ -1352,6 +1352,13 @@ function reportJobKey(account, o) {
   return `${account}__${o.scope}__${o.assignee || 'team'}__${o.kind}${o.year}${o.quarter || ''}${o.month || ''}${o.mask ? '_m' : ''}`;
 }
 
+/** Human label for a report job (shown in the 'generating now' list). */
+function describeReport(o) {
+  const pb = periodBounds(o.kind, o.year, o.quarter, o.month);
+  const who = o.scope === 'combined' ? 'Team + everyone' : o.scope === 'team' ? 'Team' : 'Developer';
+  return `${who} · ${pb.label}${o.mask ? ' · masked' : ''}`;
+}
+
 const fmtNum = (o) => JSON.stringify(o, (_, v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v));
 
 const DEFAULT_DEV_REPORT_INSTRUCTIONS =
@@ -1779,17 +1786,32 @@ const server = http.createServer(async (req, res) => {
         maskTasks: Boolean(body.mask_tasks),
       };
       const jobKey = reportJobKey(account, opts);
+      const label = describeReport(opts);
       const existing = reportJobs.get(jobKey);
-      if (existing && existing.state === 'running') return send(res, 409, { error: 'report already generating' });
-      const job = { state: 'running', started_at: Date.now(), finished_at: null, error: null, report: null };
+      // Already running → don't error; hand back the key so the UI ATTACHES to
+      // the live progress instead of silently doing nothing.
+      if (existing && existing.state === 'running') return send(res, 200, { started: false, already: true, job: jobKey, label });
+      const job = { state: 'running', step: 'starting', started_at: Date.now(), finished_at: null, error: null, report: null, account, label };
       reportJobs.set(jobKey, job);
       runReport(account, opts); // fire and forget
-      return send(res, 200, { started: true, job: jobKey });
+      return send(res, 200, { started: true, job: jobKey, label });
     }
 
     if (u.pathname === '/report/status' && req.method === 'GET') {
       const job = reportJobs.get(q.get('job') || '');
       return send(res, 200, job || { state: 'idle' });
+    }
+
+    if (u.pathname === '/reports/active' && req.method === 'GET') {
+      const acct = q.get('account') || '';
+      const active = [];
+      for (const [key, job] of reportJobs) {
+        if (job.state === 'running' && key.startsWith(acct + '__')) {
+          active.push({ job: key, label: job.label || key, step: job.step || 'working', started_at: job.started_at });
+        }
+      }
+      active.sort((a, b) => a.started_at - b.started_at);
+      return send(res, 200, { active });
     }
 
     if (u.pathname === '/reports' && req.method === 'GET') {
