@@ -126,6 +126,13 @@
       <input id="period-date" type="date" style="display:none">
       <select id="role-filter"><option value="">All roles</option></select>
       <select id="group-by"><option value="">No grouping</option><option value="role">Group by role</option></select>
+      <select id="chart-mode" title="what the bars show">
+        <option value="pipeline">Chart: pipeline</option>
+        <option value="velocity">Chart: velocity (est-d delivered)</option>
+        <option value="est_actual">Chart: estimation vs actual</option>
+        <option value="dev_est_actual">Chart: dev estimation vs actual</option>
+      </select>
+      <input id="task-search" type="search" placeholder="search tasks…" style="min-width:170px">
       <span id="scope-chips" class="dim"></span>
     </div>
     <div id="err" class="err"></div>
@@ -255,6 +262,26 @@
         return svg;
       }
 
+      /** Paired horizontal bars: rows [{label, a, b, end}] (a/b: {v, varName}). */
+      function pairedHBar(rows, maxV) {
+        const rowH = 30, labelW = 150, endW = 110, barH = 8;
+        const w = Math.min(880, Math.max(560, (document.body.clientWidth || 900) - 80));
+        const plotW = w - labelW - endW;
+        const svg = S('svg', { width: w, height: rows.length * rowH, viewBox: `0 0 ${w} ${rows.length * rowH}`, role: 'img', style: 'max-width:100%' });
+        rows.forEach((r, i) => {
+          const t = S('text', { x: labelW - 8, y: i * rowH + rowH / 2 + 3.5, 'text-anchor': 'end', style: 'font-size:11px' });
+          t.textContent = r.label.length > 22 ? r.label.slice(0, 21) + '…' : r.label;
+          svg.appendChild(t);
+          const X = (v) => (maxV > 0 ? Math.min(plotW, ((v || 0) / maxV) * plotW) : 0);
+          svg.appendChild(S('rect', { x: labelW, y: i * rowH + 5, width: Math.max(1, X(r.a.v)), height: barH, rx: 3, fill: cssVar(r.a.varName) }));
+          svg.appendChild(S('rect', { x: labelW, y: i * rowH + 5 + barH + 3, width: Math.max(1, X(r.b.v)), height: barH, rx: 3, fill: cssVar(r.b.varName) }));
+          const end = S('text', { x: labelW + Math.max(X(r.a.v), X(r.b.v)) + 6, y: i * rowH + rowH / 2 + 3.5, style: 'font-size:11px' });
+          end.textContent = r.end;
+          svg.appendChild(end);
+        });
+        return svg;
+      }
+
       /** 12-month mini column chart (weighted est-days per month). */
       function monthlyBars(values, w = 62, h = 20) {
         const svg = S('svg', { width: w, height: h, viewBox: `0 0 ${w} ${h}`, style: `width:${w}px` });
@@ -289,7 +316,7 @@
       const state = {
         account: null, projects: [], allProjects: [], selected: [],
         overview: null, features: null, dev: null, config: null, people: {},
-        roleFilter: '', groupBy: '', period: '12', periodDate: '', polling: null,
+        roleFilter: '', groupBy: '', chartMode: 'pipeline', search: '', period: '12', periodDate: '', polling: null,
       };
 
       function sinceMs() {
@@ -304,14 +331,39 @@
       const saveSel = () => { try { localStorage.setItem(LS('projects'), JSON.stringify(state.selected)); } catch { /* private mode */ } };
       const loadSel = () => { try { return JSON.parse(localStorage.getItem(LS('projects')) || '[]'); } catch { return []; } };
 
+      let PARENT_ORIGIN = '*';
       window.addEventListener('message', async (ev) => {
         if (ev.source !== window.parent) return; // only the hosting shell may init us
         const m = ev.data;
         if (!m || m.type !== 'otto:init') return;
         API = m.apiBase; TOKEN = m.token || '';
+        PARENT_ORIGIN = ev.origin || '*';
         applyTheme(m.theme);
         await boot();
       });
+
+      // The iframe swallows keydown — forward modifier chords to the shell so
+      // global shortcuts (⌘⇧←/→ navigation, ⌘K …) keep working on this page.
+      window.addEventListener('keydown', (e) => {
+        if (!(e.metaKey || e.ctrlKey || e.altKey)) return;
+        window.parent.postMessage(
+          { type: 'otto:keydown', key: e.key, code: e.code, metaKey: e.metaKey, ctrlKey: e.ctrlKey, altKey: e.altKey, shiftKey: e.shiftKey },
+          PARENT_ORIGIN,
+        );
+      });
+
+      // ---- task search (filters every task table row by text) -----------------
+      function applySearch() {
+        const q = state.search.trim().toLowerCase();
+        document.querySelectorAll('table tr[data-search]').forEach((tr) => {
+          const hit = !q || tr.dataset.search.includes(q);
+          tr.style.display = hit ? '' : 'none';
+          // keep evidence rows glued to their task row
+          if (tr.nextElementSibling && tr.nextElementSibling.classList.contains('evidence') && !hit) {
+            tr.nextElementSibling.classList.remove('open');
+          }
+        });
+      }
 
       async function boot() {
         try {
@@ -376,6 +428,8 @@
       $('account').onchange = async (e) => { state.account = e.target.value; state.dev = null; await loadProjects(); };
       $('role-filter').onchange = (e) => { state.roleFilter = e.target.value; renderTeam(); };
       $('group-by').onchange = (e) => { state.groupBy = e.target.value; renderTeam(); };
+      $('chart-mode').onchange = (e) => { state.chartMode = e.target.value; if (!state.dev) renderTeam(); };
+      $('task-search').oninput = (e) => { state.search = e.target.value; applySearch(); };
       $('period').onchange = async (e) => {
         state.period = e.target.value;
         $('period-date').style.display = state.period === 'custom' ? '' : 'none';
@@ -545,33 +599,56 @@
         };
       }
 
+      const CHART_DEFS = {
+        pipeline: {
+          title: 'Median task pipeline per developer (design → implementation → fixes → deployment)',
+          legend: [['--s1', 'design'], ['--s2', 'implementation'], ['--s3', 'fixes'], ['--s4', 'deployment']],
+        },
+        velocity: {
+          title: 'Velocity — estimated days of work delivered (commit-share credited)',
+          legend: [['--s2', 'weighted est-days delivered']],
+        },
+        est_actual: {
+          title: 'Estimation vs actual — Σ dev-agnostic estimate vs Σ actual days',
+          legend: [['--s1', 'estimated (agnostic)'], ['--s2', 'actual']],
+        },
+        dev_est_actual: {
+          title: 'Dev estimation vs actual — Σ estimate × velocity factor vs Σ actual days',
+          legend: [['--s4', 'dev-adjusted estimate'], ['--s2', 'actual']],
+        },
+      };
+
       function assigneeChart(o) {
-        const devs = visibleAssignees(o).filter((a) => a.completed > 0);
-        const totals = devs.map((a) => (a.median_design || 0) + (a.median_impl || 0) + (a.median_fix || 0) + (a.median_deploy || 0));
-        const maxBar = robustMax(totals);
+        const mode = state.chartMode || 'pipeline';
+        const devs = visibleAssignees(o).filter((a) => a.completed > 0 || (a.weighted_done || 0) > 0);
+        const def = CHART_DEFS[mode] || CHART_DEFS.pipeline;
         const groups = state.groupBy === 'role'
           ? [...new Set(devs.map((a) => a.role || '(no role)'))].map((r) => ({ label: r, devs: devs.filter((a) => (a.role || '(no role)') === r) }))
           : [{ label: '', devs }];
         const card = document.createElement('div');
         card.className = 'card';
         card.id = 'assignee-bars';
-        card.innerHTML = `<h2>Median task pipeline per developer (design → implementation → fixes → deployment)</h2>
+        card.innerHTML = `<h2>${esc(def.title)}</h2>
           <div class="legend">
-            <span class="key"><span class="swatch" style="background:var(--s1)"></span>design</span>
-            <span class="key"><span class="swatch" style="background:var(--s2)"></span>implementation</span>
-            <span class="key"><span class="swatch" style="background:var(--s3)"></span>fixes</span>
-            <span class="key"><span class="swatch" style="background:var(--s4)"></span>deployment</span>
-            <span class="key dim">▸ = beyond the axis (clamped at team p95)</span>
+            ${def.legend.map(([v, l]) => `<span class="key"><span class="swatch" style="background:var(${v})"></span>${esc(l)}</span>`).join('')}
+            ${mode === 'pipeline' ? '<span class="key dim">▸ = beyond the axis (clamped at team p95)</span>' : ''}
           </div>`;
+        const pipelineTotal = (a) => (a.median_design || 0) + (a.median_impl || 0) + (a.median_fix || 0) + (a.median_deploy || 0);
+        const maxBar = mode === 'pipeline'
+          ? robustMax(devs.map(pipelineTotal))
+          : mode === 'velocity'
+            ? Math.max(1, ...devs.map((a) => a.weighted_done || 0))
+            : Math.max(1, ...devs.map((a) => Math.max(a.sum_actual || 0, (mode === 'est_actual' ? a.sum_est : a.sum_est_dev) || 0)));
         for (const g of groups) {
           if (g.label) {
             const h = document.createElement('h3');
             h.textContent = g.label;
             card.appendChild(h);
           }
-          const rows = g.devs.map((a) => {
-            const total = (a.median_design || 0) + (a.median_impl || 0) + (a.median_fix || 0) + (a.median_deploy || 0);
-            return {
+          const wrap = document.createElement('div');
+          wrap.className = 'chart-wrap';
+          if (mode === 'pipeline') {
+            const rows = g.devs.map((a) => ({
               label: a.assignee_name || a.assignee_id,
               parts: [
                 { v: a.median_design || 0, varName: '--s1' },
@@ -579,13 +656,35 @@
                 { v: a.median_fix || 0, varName: '--s3' },
                 { v: a.median_deploy || 0, varName: '--s4' },
               ],
-              end: fmtD(total),
-              clipped: total > maxBar * 1.001,
-            };
-          });
-          const wrap = document.createElement('div');
-          wrap.className = 'chart-wrap';
-          if (rows.length) wrap.appendChild(stackedHBar(rows, maxBar));
+              end: fmtD(pipelineTotal(a)),
+              clipped: pipelineTotal(a) > maxBar * 1.001,
+            }));
+            if (rows.length) wrap.appendChild(stackedHBar(rows, maxBar));
+          } else if (mode === 'velocity') {
+            const rows = g.devs
+              .slice()
+              .sort((a, b) => (b.weighted_done || 0) - (a.weighted_done || 0))
+              .map((a) => ({
+                label: a.assignee_name || a.assignee_id,
+                parts: [{ v: a.weighted_done || 0, varName: '--s2' }],
+                end: `${a.weighted_done ?? 0}d`,
+                clipped: false,
+              }));
+            if (rows.length) wrap.appendChild(stackedHBar(rows, maxBar));
+          } else {
+            const estOf = (a) => (mode === 'est_actual' ? a.sum_est : a.sum_est_dev) || 0;
+            const varA = mode === 'est_actual' ? '--s1' : '--s4';
+            const rows = g.devs
+              .slice()
+              .sort((a, b) => estOf(b) - estOf(a))
+              .map((a) => ({
+                label: a.assignee_name || a.assignee_id,
+                a: { v: estOf(a), varName: varA },
+                b: { v: a.sum_actual || 0, varName: '--s2' },
+                end: `${Math.round(estOf(a))}d vs ${Math.round(a.sum_actual || 0)}d${a.pace_factor ? ` (×${a.pace_factor.toFixed(2)})` : ''}`,
+              }));
+            if (rows.length) wrap.appendChild(pairedHBar(rows, maxBar));
+          }
           card.appendChild(wrap);
         }
         return card;
@@ -650,7 +749,7 @@
         const openRows = (o.open_tasks || [])
           .filter((t) => !state.roleFilter || roleOf(t.assignee_id) === state.roleFilter)
           .map((t) => `
-          <tr title="${esc(t.summary)}">
+          <tr title="${esc(t.summary)}" data-search="${esc(`${t.key} ${t.summary} ${t.assignee_name || ''} ${t.type}`.toLowerCase())}">
             <td>${esc(t.key)}</td>
             <td>${esc(t.assignee_name || '—')}</td>
             <td>${esc(t.type)}${t.points != null ? ` · ${t.points}pt` : ''}</td>
@@ -670,7 +769,7 @@
         const feats = state.features && state.features.features;
         if (feats && feats.length) {
           const frows = feats.slice(0, 60).map((f) => `
-            <tr title="${esc((f.subjects || []).join('\n'))}">
+            <tr title="${esc((f.subjects || []).join('\n'))}" data-search="${esc(`${f.repo} ${f.summary} ${(f.people || []).join(' ')}`.toLowerCase())}">
               <td>${esc(f.repo)}</td>
               <td>${esc(f.summary)}${f.routine ? ' <span class="badge">routine</span>' : ''}</td>
               <td>${esc((f.people || []).join(', ') || (f.authors || []).map((a) => a.name).join(', '))}</td>
@@ -709,6 +808,7 @@
         hydrateMeters(view);
         wireGoalsCard();
         wireReportsHub();
+        applySearch();
       }
 
       // ---- reports hub (agent-written per-dev summaries, saved history) -------
@@ -830,7 +930,7 @@
               ? `<div class="dim" style="font-size:11px">↳ of ${esc(t.parent_key)} ${esc((t.parent_summary || '').slice(0, 40))}</div>`
               : '';
           return `
-          <tr class="task-row clickable ${t.suspect_outlier ? 'suspect' : ''} ${t.excluded ? 'excluded' : ''}" data-i="${i}" title="${esc(t.summary)}">
+          <tr class="task-row clickable ${t.suspect_outlier ? 'suspect' : ''} ${t.excluded ? 'excluded' : ''}" data-i="${i}" title="${esc(t.summary)}" data-search="${esc(`${t.key} ${t.summary} ${t.type} ${t.epic_summary || ''}`.toLowerCase())}">
             <td>${esc(t.key)}${t.routine ? ' <span class="badge">routine</span>' : ''}${(t.flags || []).includes('multi_dev') ? ' <span class="badge">⇄</span>' : ''}${t.suspect_outlier ? ' <span class="badge warn">suspect</span>' : ''}${t.outlier ? ' <span class="badge missed">outlier</span>' : ''}${t.excluded_override ? ' <span class="badge missed">excluded</span>' : ''}${t.rollup ? ' <span class="badge" title="rolled into its parent story">rollup</span>' : ''}${lineage}</td>
             <td>${esc(t.type)}${t.points != null ? ` · ${t.points}pt` : ''} ${srcBadge(t)}</td>
             <td class="num">${fmtD(t.est_days_ai)}</td>
@@ -859,7 +959,7 @@
         }).join('');
 
         const openRows = v.open.map((t) => `
-          <tr>
+          <tr data-search="${esc(`${t.key} ${t.summary || ''} ${t.status}`.toLowerCase())}">
             <td>${esc(t.key)}</td><td>${esc(t.status)}</td>
             <td class="num">${fmtD((t.design_days || 0) + (t.impl_days || 0))}</td>
             <td class="num">${fmtD(t.est_days_ai)}</td>
@@ -965,6 +1065,7 @@
           };
         });
         hydrateMeters($('dev-view'));
+        applySearch();
         // Outlier / manual-time / exclude controls.
         $('dev-view').querySelectorAll('.ov-exclude').forEach((b) => {
           b.onclick = async () => {

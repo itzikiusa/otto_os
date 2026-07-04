@@ -676,3 +676,53 @@ test('pace/efficiency are size-weighted: one big miss outweighs many tiny accura
   assert.ok(s.efficiency < 0.7, `efficiency ${s.efficiency}`);
   assert.ok(s.pace_factor > 1.2, `pace ${s.pace_factor}`);
 });
+
+// ---- v3.4: zero-time exclusion, design-by-summary, feature-credit shape ------
+
+test('zero_time: bulk-closed done tasks with no git signal are excluded (manual cures)', () => {
+  // Status flipped straight to done: first-active ≈ done ⇒ ~zero effective time.
+  const z = A.deriveGit(
+    rec({ key: 'Z-1', cycle_days: 0.02, first_active_at: T('2026-06-05T09:45:00Z'), done_at: T('2026-06-05T10:00:00Z') }),
+    undefined,
+    { hasRepos: true },
+  );
+  assert.ok(z.flags.includes('zero_time'), z.flags.join(','));
+  assert.ok(A.isExcluded(z));
+  assert.ok(!A.isExcluded({ ...z, manual_days: 3 }), 'manual time re-includes');
+  // A real single-commit git delivery is NOT zero_time even at tiny cycles.
+  const git = A.deriveGit(
+    rec({ key: 'Z-2', cycle_days: 0.02, first_active_at: null }),
+    { first_commit_at: T('2026-06-10T09:00:00Z'), done_git_at: T('2026-06-10T09:30:00Z') },
+    { hasRepos: true },
+  );
+  assert.ok(!git.flags.includes('zero_time'));
+});
+
+test('design sub-task detected anywhere in the summary', () => {
+  const story = rec({ key: 'D-1', type: 'Story', cycle_days: 6, eff_cycle_days: 6 });
+  const sub = rec({ key: 'D-2', type: 'Sub-task', subtask: true, parent_key: 'D-1', summary: 'Prepare the flow design for checkout', cycle_days: 2, eff_cycle_days: 2 });
+  const out = A.enrichHierarchy([story, sub]);
+  const parent = out.find((r) => r.key === 'D-1');
+  assert.equal(parent.design_days_eff, 3, 'own 1 + child 2');
+});
+
+test('feature pseudo-records credit weighted throughput to matched authors only', () => {
+  const m = A.makeAuthorMatcher({ 'u-q': { name: 'Quinn QA', aliases: [] } });
+  const feat = {
+    key: 'repo:feature/x@abc', type: 'GitFeature', feature: true, subtask: false,
+    assignee_id: null, assignee_name: null,
+    done_at: T('2026-06-20T00:00:00Z'), eff_done_at: T('2026-06-20T00:00:00Z'),
+    eff_cycle_days: 4, cycle_days: null, first_active_at: T('2026-06-16T00:00:00Z'),
+    git_authors: [{ name: 'Quinn QA', email: 'q@x', commits: 5 }],
+    timing_source: 'git', flags: [], updated: T('2026-06-20T00:00:00Z'),
+  };
+  const recs = [feat, rec({ key: 'N-1', assignee_id: 'u-d', assignee_name: 'Dev', cycle_days: 4, eff_cycle_days: 4 })];
+  const stats = A.assigneeStats(recs, A.baselines(recs), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {
+    matcher: m,
+    estimates: { 'repo:feature/x@abc': { days: 6, routine: false } },
+  });
+  const quinn = stats.find((s) => s.assignee_id === 'u-q');
+  assert.ok(quinn, 'author credited despite null assignee');
+  assert.ok(Math.abs(quinn.weighted_done - 6) < 1e-9, `weighted ${quinn.weighted_done}`);
+  assert.equal(quinn.completed, 0, 'no Jira task counted');
+});

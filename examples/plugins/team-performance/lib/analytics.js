@@ -215,13 +215,16 @@ function deriveGit(record, gitEntry, opts) {
 
   const done = record.done_at !== null || doneGit !== null;
   const flags = (record.flags || []).filter(
-    (f) => !['no_code', 'late_merge', 'unmerged_code', 'done_by_git_only', 'stale_timing', 'multi_dev'].includes(f),
+    (f) => !['no_code', 'late_merge', 'unmerged_code', 'done_by_git_only', 'stale_timing', 'zero_time', 'multi_dev'].includes(f),
   );
   if (record.done_at !== null && opts.hasRepos && doneGit === null && firstCommit === null) flags.push('no_code');
   if (record.done_at !== null && opts.hasRepos && doneGit === null && firstCommit !== null) flags.push('unmerged_code');
   if (record.done_at !== null && doneGit !== null && businessDays(record.done_at, doneGit, workweek) > 2) flags.push('late_merge');
   if (doneGit !== null && record.done_at === null) flags.push('done_by_git_only');
   if (done && implGit === null && (record.cycle_days ?? 0) > staleDays) flags.push('stale_timing');
+  // Bulk-closed junk: "done" with ~zero measured time and no git signal —
+  // the definition of an outlier; excluded until a manual time is set.
+  if (done && implGit === null && effCycle !== null && effCycle < 0.1) flags.push('zero_time');
 
   const authors = Array.isArray(g.authors) ? g.authors : record.git_authors || [];
   // Multi-dev: ≥2 authors each carrying ≥25% of the key's commits (≥2 commits).
@@ -255,7 +258,7 @@ function deriveGit(record, gitEntry, opts) {
 const rImpl = (r) => r.eff_impl_days ?? r.impl_days ?? null;
 const rCycle = (r) => r.manual_days ?? r.eff_cycle_days ?? r.cycle_days ?? null;
 const rDoneAt = (r) => r.eff_done_at ?? r.done_at ?? null;
-const isStale = (r) => (r.flags || []).includes('stale_timing');
+const isStale = (r) => (r.flags || []).includes('stale_timing') || (r.flags || []).includes('zero_time');
 // Excluded from every median/baseline/throughput: a lead-excluded story
 // (excluded_override — hard, wins over everything), stale timing, the lead
 // marked the story as an outlier, or a dev sub-task rolled up into its parent
@@ -296,7 +299,9 @@ function enrichHierarchy(records) {
   const designByParent = new Map();
   const out = records.map((r) => {
     if (!r.subtask || !r.parent_key || !parents.has(r.parent_key)) return r;
-    const isDesign = RE_DESIGN_TYPE.test(r.type) || RE_DESIGN_TYPE.test((r.summary || '').slice(0, 30));
+    // A sub-task that CONTAINS the word "design" (type or anywhere in the
+    // summary) is design work for its parent story.
+    const isDesign = RE_DESIGN_TYPE.test(r.type) || RE_DESIGN_TYPE.test(r.summary || '');
     if (isDesign) {
       const t = rCycle(r) ?? rImpl(r) ?? 0;
       designByParent.set(r.parent_key, (designByParent.get(r.parent_key) || 0) + t);
@@ -418,7 +423,7 @@ function analyzeIssue(raw, opts) {
     subtask: isSubtask,
     type: f.issuetype ? f.issuetype.name : 'Unknown',
     summary: f.summary || '',
-    description_snippet: descText ? descText.replace(/\s+/g, ' ').trim().slice(0, 600) : (raw.description_snippet || ''),
+    description_snippet: descText ? descText.replace(/\s+/g, ' ').trim().slice(0, 1500) : (raw.description_snippet || ''),
     status: currentStatus,
     status_category: currentCategory,
     assignee_id: attributed ? attributed.accountId : null,
@@ -975,6 +980,10 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
       mape: errs.length ? round2(median(errs)) : null,
       avg_wip: avgWip(windows, workweek, nowMs),
       weighted_done: round2(g.weighted_done),
+      // Size-weighted sums behind pace/efficiency — the chart modes plot them.
+      sum_actual: round2(g.sum_actual),
+      sum_est: round2(g.sum_est),
+      sum_est_dev: round2(g.sum_est * (factorMap.has(id) ? factorMap.get(id).factor : 1)),
       // Efficiency is the size-weighted inverse pace: estimated days delivered
       // per actual day spent (>1 = faster than the estimates).
       efficiency: g.sum_actual > 0 && g.sum_est > 0 ? round2(g.sum_est / g.sum_actual) : null,

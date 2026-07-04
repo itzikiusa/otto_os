@@ -506,8 +506,15 @@ async function estimateScope(account, projects, config, job) {
     delete cache.schema;
     job.step = 'estimate';
     job.project = project;
+    // Epic/parent context helps the estimator size stories that are one slice
+    // of a bigger system (prompt-only — not part of the content hash).
+    const byKey = corpus.issues;
+    const withHints = Object.values(corpus.issues).map((r) => {
+      const parent = r.parent_key ? byKey[r.parent_key] : null;
+      return parent ? { ...r, epic_hint: parent.summary } : r;
+    });
     const res = await E.runEstimation({
-      records: Object.values(corpus.issues).filter((r) => included(r.assignee_id)),
+      records: withHints.filter((r) => included(r.assignee_id)),
       cache,
       windowMonths: config.estimate_window_months,
       sinceMs: config.estimate_since ? Date.parse(config.estimate_since) || 0 : 0,
@@ -649,6 +656,37 @@ function loadScope(account, projectsParam) {
   // Hierarchy pass: dev sub-tasks roll up into their parent story; design
   // sub-tasks paint the parent's design phase.
   records = A.enrichHierarchy(records);
+
+  // Keyless git features (opted-in repos — automation work without tickets)
+  // join the corpus as pseudo-records: their authors get weighted/pace/monthly
+  // credit via commit share, exactly like ticketed work. They carry no
+  // assignee, so Jira task counts and medians stay untouched.
+  const featFile = store.readJson(store.featuresPath(DATA_DIR), null);
+  if (featFile && Array.isArray(featFile.features)) {
+    Object.assign(estimates, loadEstimates(account, '__features__'));
+    for (const f of featFile.features) {
+      if ((f.jira_keys || []).length) continue;
+      const impl = Math.round(A.businessDays(f.first_commit_at, f.merged_at, config.workweek) * 100) / 100;
+      records.push({
+        key: f.id, project: '__git__', type: 'GitFeature', feature: true,
+        summary: `${f.repo}: ${f.summary}`, description_snippet: '',
+        subtask: false, parent_key: null,
+        assignee_id: null, assignee_name: null,
+        status: 'Merged', status_category: 'done',
+        created: f.first_commit_at, points: null, estimate_days: null,
+        intervals: [], design_days: 0, impl_days: null, wait_days: 0,
+        first_active_at: f.first_commit_at, cycle_days: null, lead_days: null,
+        done_at: f.merged_at, updated: f.merged_at,
+        first_commit_at: f.first_commit_at, done_git_at: f.merged_at,
+        delivered_at: f.merged_at, deployed_at: f.deployed_at ?? null,
+        fix_count: 0, last_fix_at: null, git_authors: f.authors || [],
+        impl_days_git: impl, fix_days: null, deploy_wait_days: null,
+        eff_done_at: f.merged_at, eff_start_at: f.first_commit_at,
+        eff_impl_days: impl, eff_cycle_days: impl,
+        timing_source: 'git', flags: [],
+      });
+    }
+  }
 
   const reg = loadPeople();
   const canonical = A.makeCanonical(reg.people);
@@ -850,9 +888,9 @@ function overview(account, projectsParam, sinceMs = 0) {
   const { config, records, estimates, canonical } = scope;
   const { base, sigCounts, stats } = nowStats(scope, sinceMs);
   const factors = A.assigneeFactor(records, base);
-  const completed = records.filter((r) => A.isDone(r) && inViewPeriod(r, sinceMs));
+  const completed = records.filter((r) => !r.feature && A.isDone(r) && inViewPeriod(r, sinceMs));
   const measurable = completed.filter((r) => !A.isExcluded(r) && A.isTimingSample(r) && (r.eff_cycle_days ?? r.cycle_days) !== null);
-  const open = records.filter((r) => !A.isDone(r));
+  const open = records.filter((r) => !r.feature && !A.isDone(r));
   const flags = {};
   for (const r of completed) for (const f of r.flags || []) flags[f] = (flags[f] || 0) + 1;
   const onTrack = measurable.filter((r) => {

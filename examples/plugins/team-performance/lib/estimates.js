@@ -36,6 +36,13 @@ const DAY = 86400000;
  * (months; 0 = no window → everything) — an explicit `sinceMs` cutoff wins
  * over the month window — and not already cached at this hash.
  */
+// Prompt generation version. v2: 0.25–60 range with explicit large-scope
+// guidance + longer description + epic context. v1 entries near the old 30d
+// saturation ceiling are re-estimated — a multi-month system that clipped to
+// ~25-30d halves its author's pace credit.
+const PROMPT_V = 2;
+const SATURATION_D = 25;
+
 function selectTargets(records, cache, windowMonths, nowMs, sinceMs = 0) {
   const cutoff = sinceMs > 0 ? sinceMs : windowMonths > 0 ? nowMs - windowMonths * 30 * DAY : -Infinity;
   const out = [];
@@ -46,7 +53,7 @@ function selectTargets(records, cache, windowMonths, nowMs, sinceMs = 0) {
     const doneAt = r.eff_done_at ?? r.done_at ?? null;
     if (doneAt !== null && doneAt < cutoff) continue;
     const hit = cache[r.key];
-    if (hit && hit.hash === contentHash(r)) continue;
+    if (hit && hit.hash === contentHash(r) && !(hit.v !== PROMPT_V && hit.days >= SATURATION_D)) continue;
     out.push(r);
   }
   // Most-recent first — the tasks the lead is actually looking at.
@@ -56,8 +63,9 @@ function selectTargets(records, cache, windowMonths, nowMs, sinceMs = 0) {
 
 function batchPrompt(records) {
   const lines = records.map((r) => {
-    const desc = (r.description_snippet || '').slice(0, 400);
-    return `- key=${r.key} type=${r.type} points=${r.points ?? 'n/a'} summary=${JSON.stringify(r.summary.slice(0, 200))}${desc ? ` description=${JSON.stringify(desc)}` : ''}`;
+    const desc = (r.description_snippet || '').slice(0, 1200);
+    const epic = r.epic_hint ? ` part_of=${JSON.stringify(String(r.epic_hint).slice(0, 90))}` : '';
+    return `- key=${r.key} type=${r.type} points=${r.points ?? 'n/a'}${epic} summary=${JSON.stringify(r.summary.slice(0, 200))}${desc ? ` description=${JSON.stringify(desc)}` : ''}`;
   });
   return `You size engineering tasks for a delivery-analytics tool. For EACH task below, estimate the ideal effort in engineering days (fractional allowed, 0.25–60 — do use large values for genuinely huge scope like multi-month features) for an AVERAGE developer familiar with the codebase — the estimate must be developer-agnostic, based only on the work described. Also flag routine work: routine=true when the task is repetitive/mechanical (dependency or version upgrade, config-only change, copy tweak, straightforward port of an existing pattern).
 
@@ -128,7 +136,7 @@ async function runEstimation(opts) {
     for (const r of batch) {
       const e = parsed[r.key];
       if (!e) continue;
-      cache[r.key] = { hash: contentHash(r), days: e.days, routine: e.routine, at: nowMs };
+      cache[r.key] = { hash: contentHash(r), days: e.days, routine: e.routine, v: PROMPT_V, at: nowMs };
       n++;
     }
     return n;
