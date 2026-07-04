@@ -525,7 +525,11 @@ mod tests {
         let o = [
             outcome("agy", true, ""),
             outcome("claude", true, ""),
-            outcome("codex", false, "exit 1: Error loading configuration: unknown variant `xhigh`"),
+            outcome(
+                "codex",
+                false,
+                "exit 1: Error loading configuration: unknown variant `xhigh`",
+            ),
         ];
         assert_eq!(
             build_body(&o, Some((1, 0))),
