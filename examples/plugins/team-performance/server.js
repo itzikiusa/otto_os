@@ -498,9 +498,25 @@ function featureAsRecord(f) {
   };
 }
 
+/** Recent lead estimate corrections (all projects) to teach the estimator. */
+function gatherCorrections(account) {
+  const out = [];
+  for (const p of store.listProjects(DATA_DIR, account)) {
+    const ov = store.readJson(store.overridesPath(DATA_DIR, account, p), null);
+    const corpus = ov ? store.readJson(store.corpusPath(DATA_DIR, account, p), null) : null;
+    for (const [k, o] of Object.entries((ov && ov.issues) || {})) {
+      if (typeof o.est_days !== 'number' || !o.est_reason) continue;
+      const rec = corpus && corpus.issues ? corpus.issues[k] : null;
+      out.push({ key: k, corrected: o.est_days, summary: rec ? rec.summary : '', reason: o.est_reason, at: o.updated_at || 0 });
+    }
+  }
+  return out.sort((a, b) => b.at - a.at).slice(0, 20);
+}
+
 async function estimateScope(account, projects, config, job) {
   const agentRun = agentRunner();
   const workers = config.estimate_workers;
+  const corrections = gatherCorrections(account);
   // Estimation spends real agent calls — cover only the people the registry
   // includes (new assignees are auto-included at discovery, so a new hire's
   // tickets estimate on the next cron tick; excluded people never burn
@@ -535,6 +551,7 @@ async function estimateScope(account, projects, config, job) {
       maxBatches: config.estimate_max_batches,
       workers,
       rubric: config.estimate_rubric,
+      corrections,
       agentRun,
       onProgress: (done, total) => {
         job.fetched = done;
@@ -634,6 +651,9 @@ function applyOverrides(records, overrides) {
           outlier: o.outlier === true,
           manual_days: typeof o.manual_days === 'number' ? o.manual_days : null,
           excluded_override: o.excluded === true,
+          est_override: typeof o.est_days === 'number' ? o.est_days : null,
+          est_dev_override: typeof o.est_dev_days === 'number' ? o.est_dev_days : null,
+          est_reason: o.est_reason || null,
         }
       : r;
   });
@@ -675,6 +695,13 @@ function loadScope(account, projectsParam) {
     const overrides = store.readJson(store.overridesPath(DATA_DIR, account, p), null);
     records = records.concat(applyOverrides(Object.values(corpus.issues), overrides));
     Object.assign(estimates, loadEstimates(account, p));
+    // A lead-corrected agnostic estimate replaces the AI value everywhere.
+    for (const [k, o] of Object.entries((overrides && overrides.issues) || {})) {
+      if (typeof o.est_days === 'number') {
+        const ai = estimates[k] ? estimates[k].days : null;
+        estimates[k] = { ...(estimates[k] || {}), days: o.est_days, overridden: true, ai_days: ai, reason: o.est_reason || null };
+      }
+    }
   }
   // Hierarchy pass: dev sub-tasks roll up into their parent story; design
   // sub-tasks paint the parent's design phase.
@@ -854,9 +881,15 @@ function estLevels(r, estimates, factorMap) {
   const est = estimates[r.key];
   const agnostic = est && est.days > 0 ? est.days : null;
   const f = r.assignee_id && factorMap.has(r.assignee_id) ? factorMap.get(r.assignee_id).factor : 1.0;
+  const devAuto = agnostic !== null ? Math.round(agnostic * f * 100) / 100 : null;
   return {
     est_days_ai: agnostic,
-    est_days_dev: agnostic !== null ? Math.round(agnostic * f * 100) / 100 : null,
+    est_days_dev: r.est_dev_override != null ? r.est_dev_override : devAuto,
+    // Original AI values before any lead correction (for the "original vs updated" view).
+    est_ai_original: est && est.overridden ? est.ai_days : null,
+    est_dev_auto: devAuto,
+    est_overridden: Boolean((est && est.overridden) || r.est_dev_override != null),
+    est_reason: r.est_reason || (est && est.reason) || null,
     actual_days: r.manual_days ?? r.eff_cycle_days ?? r.cycle_days ?? null,
   };
 }
@@ -1582,6 +1615,17 @@ const server = http.createServer(async (req, res) => {
         if (n !== null && (!Number.isFinite(n) || n <= 0 || n > 365)) return send(res, 400, { error: 'manual_days must be in 0..365 or null' });
         o.manual_days = n;
       }
+      // Estimate corrections: override the AI-agnostic and/or per-dev estimate
+      // (the agnostic one drives every scope-weighted metric), with a reason
+      // that feeds future estimation prompts so the model learns.
+      for (const [k, lo, hi] of [['est_days', 0, 120], ['est_dev_days', 0, 120]]) {
+        if (body[k] !== undefined) {
+          const n = body[k] === null ? null : Number(body[k]);
+          if (n !== null && (!Number.isFinite(n) || n <= lo || n > hi)) return send(res, 400, { error: `${k} must be in ${lo}..${hi} or null` });
+          o[k] = n;
+        }
+      }
+      if (body.est_reason !== undefined) o.est_reason = body.est_reason === null ? null : String(body.est_reason).slice(0, 500);
       o.updated_at = Date.now();
       cur.issues[key] = o;
       store.writeJsonAtomic(file, cur);

@@ -993,6 +993,21 @@
             <span class="dim">git: ${gitLine}${authors ? ` · authors: ${authors}` : ''}</span><br>
             ${t.git_change ? `<span class="dim">change: ${t.git_change.commits} commits · ${t.git_change.files} files · +${t.git_change.insertions}/-${t.git_change.deletions}${(t.git_change.repos || []).length ? ` · ${(t.git_change.repos).slice(0,4).map((rr) => `${esc(rr.name)}(${rr.files}f)`).join(', ')}` : ''} <span title="the estimator sizes from this">— fed to AI estimate</span></span><br>` : ''}
             ${kids ? `<details style="margin:4px 0"><summary class="dim">${(t.children || []).length} sub-tasks</summary><table style="margin-top:4px"><thead><tr><th>Key</th><th>Type</th><th>Summary</th><th>Assignee</th><th class="num">Days</th></tr></thead><tbody>${kids}</tbody></table></details>` : ''}
+            <div class="est-edit" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" style="margin:6px 0;padding:6px 8px;border:1px solid var(--border);border-radius:6px">
+              <div class="row" style="margin:0 0 4px;align-items:baseline">
+                <b class="dim" style="font-size:11px">CORRECT ESTIMATE</b>
+                <span>AI (agnostic) <input class="inline-input est-ai" type="number" step="0.25" min="0.25" value="${t.est_days_ai ?? ''}" placeholder="—"> d</span>
+                ${t.est_ai_original != null ? `<span class="dim">was ${t.est_ai_original}d (AI)</span>` : ''}
+                <span>dev <input class="inline-input est-dev" type="number" step="0.25" min="0.25" value="${t.est_days_dev ?? ''}" placeholder="—"> d</span>
+                ${t.est_dev_auto != null && t.est_dev_override != null ? `<span class="dim">auto ${t.est_dev_auto}d</span>` : ''}
+              </div>
+              <div class="row" style="margin:0">
+                <input class="est-reason" type="text" style="flex:1;min-width:220px" placeholder="why? (fed to future AI estimates so they learn)" value="${esc(t.est_reason || '')}">
+                <button class="small primary est-save">Save estimate</button>
+                <button class="small est-restore">Restore AI</button>
+                ${t.est_overridden ? '<span class="badge warn">overridden</span>' : ''}
+              </div>
+            </div>
             <span class="row" style="margin:6px 0">
               <button class="small ov-exclude" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" data-cur="${t.excluded_override ? '1' : ''}">${t.excluded_override ? 'Include story' : 'Exclude story'}</button>
               <button class="small ov-outlier" data-key="${esc(t.key)}" data-project="${esc(t.project || t.key.split('-')[0])}" data-cur="${t.outlier ? '1' : ''}">${t.outlier ? 'Unmark outlier' : 'Mark as outlier'}</button>
@@ -1166,6 +1181,28 @@
             const input = $('dev-view').querySelector(`.ov-manual[data-key="${CSS.escape(b.dataset.key)}"]`);
             try {
               await saveOverride(b.dataset.key, input.dataset.project, { manual_days: null });
+              await refresh();
+            } catch (e) { err(e.message); }
+          };
+        });
+        // Estimate correction: override the agnostic and/or dev estimate + reason.
+        $('dev-view').querySelectorAll('.est-edit').forEach((box) => {
+          const key = box.dataset.key, project = box.dataset.project;
+          box.querySelector('.est-save').onclick = async () => {
+            const ai = parseFloat(box.querySelector('.est-ai').value);
+            const dev = parseFloat(box.querySelector('.est-dev').value);
+            const reason = box.querySelector('.est-reason').value.trim();
+            const patch = { est_reason: reason || null };
+            patch.est_days = Number.isFinite(ai) && ai > 0 ? ai : null;
+            patch.est_dev_days = Number.isFinite(dev) && dev > 0 ? dev : null;
+            try {
+              await saveOverride(key, project, patch);
+              await refresh();
+            } catch (e) { err(e.message); }
+          };
+          box.querySelector('.est-restore').onclick = async () => {
+            try {
+              await saveOverride(key, project, { est_days: null, est_dev_days: null, est_reason: null });
               await refresh();
             } catch (e) { err(e.message); }
           };

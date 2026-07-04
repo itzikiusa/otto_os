@@ -90,20 +90,27 @@ const DEFAULT_RUBRIC = [
   'Judge the CORE work, not mechanical fan-out: if one repo holds an 18-file rewrite and 15 others get a 1-line bump, size the 18-file core plus a little glue — not the sum.',
 ];
 
-function batchPrompt(records, rubric) {
+function batchPrompt(records, rubric, corrections) {
   const lines = records.map((r) => {
     const desc = (r.description_snippet || '').slice(0, 1200);
     const epic = r.epic_hint ? ` part_of=${JSON.stringify(String(r.epic_hint).slice(0, 90))}` : '';
     return `- key=${r.key} type=${r.type} points=${r.points ?? 'n/a'}${epic} summary=${JSON.stringify(r.summary.slice(0, 200))}${desc ? ` description=${JSON.stringify(desc)}` : ''}${evidenceLine(r.git_change)}`;
   });
   const rules = (Array.isArray(rubric) && rubric.length ? rubric : DEFAULT_RUBRIC).map((r) => `  • ${r}`).join('\n');
+  // The lead's own past corrections — the strongest signal for calibration.
+  const learned = (corrections || []).length
+    ? `\nThe team lead has CORRECTED past estimates — learn from these (match this calibration):\n${corrections
+        .slice(0, 15)
+        .map((c) => `  • ${JSON.stringify((c.summary || c.key).slice(0, 80))} → ${c.corrected}d${c.reason ? ` (${JSON.stringify(c.reason.slice(0, 160))})` : ''}`)
+        .join('\n')}\n`
+    : '';
   return `You size engineering tasks for a delivery-analytics tool. For EACH task, estimate the IDEAL effort in engineering days (fractional; 0.25–60) for an AVERAGE developer familiar with this codebase. The estimate is developer-AGNOSTIC — ignore who did it, any story points, and any prior estimate; judge the work itself.
 
 CRITICAL: size from the ACTUAL CODE CHANGE (the \`change=\` evidence: files touched, lines added/removed, which repos, commit subjects) far more than from the ticket prose — tickets over- and under-describe. Do NOT inflate. Most tasks are small; give proper, tight numbers. A tiny diff is a tiny task even if the ticket sounds grand; a large multi-file rewrite is large even if the ticket is terse. When there is no change evidence (no code, or evidence omitted), fall back to the description but stay conservative.
 
 Calibration rubric (follow it):
 ${rules}
-
+${learned}
 Also flag routine=true for repetitive/mechanical work (version/dependency bump, config-only, copy tweak, straightforward port of an existing pattern).
 
 Tasks:
@@ -153,7 +160,7 @@ function parseBatch(text, expectedKeys) {
  * → {estimated, failed_batches, remaining}
  */
 async function runEstimation(opts) {
-  const { records, cache, agentRun, rubric } = opts;
+  const { records, cache, agentRun, rubric, corrections } = opts;
   const nowMs = opts.nowMs || Date.now();
   const targets = selectTargets(records, cache, opts.windowMonths ?? 6, nowMs, opts.sinceMs || 0);
   const maxBatches = opts.maxBatches ?? 40;
@@ -185,12 +192,12 @@ async function runEstimation(opts) {
       if (bi >= workers.length) await sleep(PACE_MS);
       let text = null;
       try {
-        text = await agentRun(batchPrompt(batch, rubric), workers[workerIdx]);
+        text = await agentRun(batchPrompt(batch, rubric, corrections), workers[workerIdx]);
       } catch {
         // Worker (provider) failed — retry this batch once on the first worker.
         if (workerIdx !== 0) {
           try {
-            text = await agentRun(batchPrompt(batch, rubric), workers[0]);
+            text = await agentRun(batchPrompt(batch, rubric, corrections), workers[0]);
           } catch {
             text = null;
           }

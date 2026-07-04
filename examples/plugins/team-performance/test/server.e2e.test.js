@@ -623,3 +623,30 @@ test('auto-scan cron repeats the last scan params (isolated sidecar, fast tick)'
     fs.rmSync(dataDir2, { recursive: true, force: true });
   }
 });
+
+test('estimate override: corrects the agnostic estimate everywhere + feeds future prompts', async () => {
+  const before = (await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice')).json;
+  const t0 = before.completed.find((x) => x.key === 'TP-1');
+  assert.equal(t0.est_days_ai, 2, 'starts at the AI estimate');
+
+  const put = await api('PUT', '/override', { account: 'acc1', project: 'TP', key: 'TP-1', est_days: 5, est_reason: 'much larger than it reads — cross-service' });
+  assert.equal(put.status, 200);
+  const after = (await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice')).json;
+  const t1 = after.completed.find((x) => x.key === 'TP-1');
+  assert.equal(t1.est_days_ai, 5, 'agnostic reflects the override');
+  assert.equal(t1.est_ai_original, 2, 'original AI value preserved for display');
+  assert.equal(t1.est_overridden, true);
+  assert.equal(t1.est_reason, 'much larger than it reads — cross-service');
+
+  // The correction shows in weighted throughput (a scope-weighted metric).
+  const o = (await api('GET', '/overview?account=acc1&projects=TP')).json;
+  assert.ok(o.assignees.find((a) => a.assignee_id === 'u-alice').weighted_done > 0);
+
+  const bad = await api('PUT', '/override', { account: 'acc1', project: 'TP', key: 'TP-1', est_days: 999 });
+  assert.equal(bad.status, 400);
+
+  // Restore.
+  await api('PUT', '/override', { account: 'acc1', project: 'TP', key: 'TP-1', est_days: null, est_reason: null });
+  const restored = (await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice')).json;
+  assert.equal(restored.completed.find((x) => x.key === 'TP-1').est_days_ai, 2, 'restored to AI');
+});
