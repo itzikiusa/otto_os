@@ -131,6 +131,7 @@
         <option value="velocity">Chart: velocity (est-d delivered)</option>
         <option value="est_actual">Chart: estimation vs actual</option>
         <option value="dev_est_actual">Chart: dev estimation vs actual</option>
+        <option value="monthly">Chart: monthly — delivered vs actual</option>
       </select>
       <input id="task-search" type="search" placeholder="search tasks…" style="min-width:170px">
       <span id="scope-chips" class="dim"></span>
@@ -616,6 +617,10 @@
           title: 'Dev estimation vs actual — Σ estimate × velocity factor vs Σ actual days',
           legend: [['--s4', 'dev-adjusted estimate'], ['--s2', 'actual']],
         },
+        monthly: {
+          title: 'Monthly — delivered scope (est-d) vs actual days spent (visible people, last 12 months)',
+          legend: [['--s1', 'delivered (est-d)'], ['--s2', 'actual days']],
+        },
       };
 
       function assigneeChart(o) {
@@ -633,6 +638,29 @@
             ${def.legend.map(([v, l]) => `<span class="key"><span class="swatch" style="background:var(${v})"></span>${esc(l)}</span>`).join('')}
             ${mode === 'pipeline' ? '<span class="key dim">▸ = beyond the axis (clamped at team p95)</span>' : ''}
           </div>`;
+        if (mode === 'monthly') {
+          const est = new Array(12).fill(0);
+          const act = new Array(12).fill(0);
+          for (const a of devs) {
+            (a.monthly_est || []).forEach((v, i) => (est[i] += v));
+            (a.monthly_actual || []).forEach((v, i) => (act[i] += v));
+          }
+          const now = new Date();
+          const rows = est.map((v, i) => {
+            const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (11 - i), 1));
+            return {
+              label: d.toISOString().slice(0, 7),
+              a: { v, varName: '--s1' },
+              b: { v: act[i], varName: '--s2' },
+              end: `${Math.round(v)}d vs ${Math.round(act[i])}d`,
+            };
+          });
+          const wrap = document.createElement('div');
+          wrap.className = 'chart-wrap';
+          wrap.appendChild(pairedHBar(rows, Math.max(1, ...est, ...act)));
+          card.appendChild(wrap);
+          return card;
+        }
         const pipelineTotal = (a) => (a.median_design || 0) + (a.median_impl || 0) + (a.median_fix || 0) + (a.median_deploy || 0);
         const maxBar = mode === 'pipeline'
           ? robustMax(devs.map(pipelineTotal))
@@ -731,13 +759,13 @@
             <td class="num" title="Σactual ÷ Σ(AI estimate) — how many elapsed days per estimated ideal day (AI-estimated tasks only)">${a.pace_vs_est != null ? '×' + a.pace_vs_est.toFixed(2) : '—'}</td>
             <td class="num">${fmtD(a.median_impl)}</td>
             <td class="num">${fmtD(a.median_cycle)}</td>
-            <td class="num" title="Σactual ÷ Σestimate vs the team's same ratio — size-weighted, so big tasks dominate. ×1.6 = 60% slower than team pace">${a.pace_factor != null ? '×' + a.pace_factor.toFixed(2) : '—'}</td>
+            <td class="num" title="delivered est-days per week vs team median (higher = more output; overlap-safe — the calendar is the denominator)${a.pace_factor != null ? ` · latency vs team ×${a.pace_factor.toFixed(2)}` : ''}">${a.output_factor != null ? '×' + a.output_factor.toFixed(2) : '—'}</td>
             <td class="num">${a.mape != null ? fmtPct(a.mape) : '—'}</td>
             <td class="num">${a.avg_wip ?? '—'}</td>
             <td>${a.goals_total ? `<span class="badge ${a.goals_met === a.goals_total ? 'met' : a.goals_met ? 'warn' : 'missed'}">${a.goals_met}/${a.goals_total}</span>` : '—'}</td>
             <td title="${esc(a.trend || '')}">${trendArrow(a.trend)}</td>
           </tr>`).join('');
-        const head = '<thead><tr><th>Developer</th><th>Role</th><th class="num" title="task counts are inflated by routine work — weighted est-days is the fair column">Done</th><th class="num">WIP</th><th class="num">Weighted (est-d)</th><th class="num" title="unscoped fix commits (ABC-0000-style catch-all keys)">Fixes⚡</th><th title="weighted est-days per month, last 12 months">Monthly</th><th class="num" title="Σactual ÷ Σestimate, absolute (AI-estimated tasks only)">vs est</th><th class="num">Impl</th><th class="num">Cycle</th><th class="num">vs team</th><th class="num">Est err</th><th class="num">Avg WIP</th><th>Goals</th><th>Trend</th></tr></thead>';
+        const head = '<thead><tr><th>Developer</th><th>Role</th><th class="num" title="task counts are inflated by routine work — weighted est-days is the fair column">Done</th><th class="num">WIP</th><th class="num">Weighted (est-d)</th><th class="num" title="unscoped fix commits (ABC-0000-style catch-all keys)">Fixes⚡</th><th title="weighted est-days per month, last 12 months">Monthly</th><th class="num" title="Σactual ÷ Σestimate, absolute (AI-estimated tasks only)">vs est</th><th class="num">Impl</th><th class="num">Cycle</th><th class="num" title="output per week vs team median (higher = better)">vs team</th><th class="num">Est err</th><th class="num">Avg WIP</th><th>Goals</th><th>Trend</th></tr></thead>';
         let tableBody;
         if (state.groupBy === 'role') {
           const groups = [...new Set(devs.map((a) => a.role || '(no role)'))];
@@ -979,7 +1007,7 @@
             <div class="kpi-tile"><div class="l">Weighted done (est-days)</div><div class="v">${s.weighted_done ?? '—'}</div></div>
             <div class="kpi-tile"><div class="l">vs estimate (actual ÷ est)</div><div class="v">${s.pace_vs_est != null ? '×' + s.pace_vs_est.toFixed(2) : '—'}</div></div>
             <div class="kpi-tile"><div class="l">Median cycle</div><div class="v">${fmtD(s.median_cycle)}</div></div>
-            <div class="kpi-tile"><div class="l">vs team baseline</div><div class="v">${s.factor != null ? '×' + s.factor.toFixed(2) : '—'}</div></div>
+            <div class="kpi-tile"><div class="l">Output (est-d / week)</div><div class="v">${s.output_wk ?? '—'}${s.output_factor != null ? `<small> ×${s.output_factor.toFixed(2)} vs team</small>` : ''}</div></div>
             <div class="kpi-tile"><div class="l">Estimate error</div><div class="v">${s.mape != null ? fmtPct(s.mape) : '—'}</div></div>
             <div class="kpi-tile"><div class="l">Avg parallel tasks</div><div class="v">${s.avg_wip ?? '—'}</div></div>
           </div>

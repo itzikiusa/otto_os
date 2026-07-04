@@ -874,6 +874,9 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
         // accurate 0.5d tasks cannot drown one 5d task that took 12.
         sum_actual: 0, sum_est: 0, pace_n: 0,
         monthly: new Array(MONTH_WINDOW).fill(0), // weighted est-days, oldest→current month
+        monthly_est: new Array(MONTH_WINDOW).fill(0), // Σ AI-estimate (ratio basis) per month
+        monthly_actual: new Array(MONTH_WINDOW).fill(0), // Σ actual days per month
+        first_credit: null,
       });
     }
     const g = byDev.get(id);
@@ -919,6 +922,14 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
             g.sum_est += estAI * c.share;
             g.pace_n++;
             allPaces.push([actual * c.share, estAI * c.share]);
+            if (mi >= 0 && mi < MONTH_WINDOW) {
+              g.monthly_est[MONTH_WINDOW - 1 - mi] += estAI * c.share;
+              g.monthly_actual[MONTH_WINDOW - 1 - mi] += actual * c.share;
+            }
+          }
+          if (!isExcluded(r)) {
+            const dAt = rDoneAt(r);
+            if (dAt && (g.first_credit === null || dAt < g.first_credit)) g.first_credit = dAt;
           }
         }
         if (routine) g.routine_done += c.share;
@@ -928,6 +939,13 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
       }
     }
   }
+
+  const WEEK = 7 * DAY;
+  const periodWeeks = untilMs && sinceMs
+    ? Math.max(1, (untilMs - sinceMs) / WEEK)
+    : sinceMs
+      ? Math.max(1, (nowMs - sinceMs) / WEEK)
+      : null;
 
   // Team pace = total actual days ÷ total estimated days across the scope —
   // size-weighted, same construction as the per-dev pace it normalizes.
@@ -966,7 +984,13 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
     const flags = {};
     for (const r of g.completed) for (const fl of r.flags || []) flags[fl] = (flags[fl] || 0) + 1;
     const devPace = g.sum_est > 0 ? g.sum_actual / g.sum_est : null;
+    // Delivered est-days per calendar week: parallel work can't inflate this —
+    // the calendar is the denominator, not summed per-task elapsed time.
+    const weeks = periodWeeks ?? (g.first_credit ? Math.max(1, (nowMs - g.first_credit) / WEEK) : null);
     out.push({
+      output_wk: weeks && g.weighted_done > 0 ? round2(g.weighted_done / weeks) : null,
+      monthly_est: g.monthly_est.map((v) => Math.round(v * 10) / 10),
+      monthly_actual: g.monthly_actual.map((v) => Math.round(v * 10) / 10),
       assignee_id: id,
       assignee_name: g.name || id,
       completed: g.completed.length,
@@ -1008,6 +1032,13 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
       flags,
       trend,
     });
+  }
+  // vs team (output): each dev's weekly output relative to the team median —
+  // higher = more delivered scope per week. This is the volume-fair companion
+  // to pace_factor (which measures per-task latency instead).
+  const teamOut = median(out.map((s) => s.output_wk).filter((v) => v !== null && v > 0));
+  for (const s of out) {
+    s.output_factor = s.output_wk !== null && teamOut > 0 ? round2(s.output_wk / teamOut) : null;
   }
   out.sort((a, b) => (b.weighted_done || 0) - (a.weighted_done || 0) || b.completed - a.completed || String(a.assignee_name).localeCompare(String(b.assignee_name)));
   return out;
