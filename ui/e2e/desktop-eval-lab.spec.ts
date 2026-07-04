@@ -255,6 +255,10 @@ test('UI: eval-lab tabs, golden tasks, and scorecard render', async ({ page }) =
   }, wsId);
 
   await page.goto('/#/skills-eval');
+  // Skills Lab now wraps the evaluator: land on the Skills tab, then open the
+  // Evaluator section before asserting its inner tabs.
+  await expect(page.locator('[data-testid="lab-tabs"]')).toBeVisible({ timeout: 30_000 });
+  await page.locator('[data-testid="tab-evaluator"]').click();
   await expect(page.locator('[data-testid="eval-tabs"]')).toBeVisible({ timeout: 30_000 });
 
   // A run auto-selects on the Runs tab; it carries a multi-signal scorecard.
