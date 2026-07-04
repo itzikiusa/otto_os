@@ -945,6 +945,103 @@ pub struct ReviewAgentState {
     pub findings: Vec<ReviewFinding>,
 }
 
+// ---------------------------------------------------------------------------
+// Skills review (Skills Lab) — a multi-agent audit of a SKILL.md package
+// ---------------------------------------------------------------------------
+
+/// One finding from a skills review (static or agent), matching the
+/// skills-reviewer rubric shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillFinding {
+    /// "Critical" | "High" | "Medium" | "Low".
+    pub severity: String,
+    /// Machine code, e.g. "NO_EXAMPLES", "GENERIC_DESCRIPTION".
+    pub code: String,
+    pub title: String,
+    /// File/line or quote pointing at the issue.
+    pub evidence: String,
+    /// Why it matters.
+    pub why: String,
+    /// The concrete fix.
+    pub fix: String,
+}
+
+/// One scorecard row (area scored 0-5, with a note).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillScoreRow {
+    pub area: String,
+    pub score: u8,
+    pub notes: String,
+}
+
+/// The deterministic static-analysis result (native port of the reviewer script).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillStaticReport {
+    /// "Ready" | "Ready with fixes" | "Do not publish".
+    pub verdict: String,
+    pub average_score: f32,
+    pub scorecard: Vec<SkillScoreRow>,
+    pub findings: Vec<SkillFinding>,
+}
+
+/// Live state of one skills-review agent (stored as agents_json), mirroring
+/// [`ReviewAgentState`] so the UI can reuse the embedded-terminal pattern.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillReviewAgent {
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    /// "pending" | "running" | "waiting" | "done" | "error".
+    pub status: String,
+    /// Short preview — first output line, "N findings", or error message.
+    pub note: String,
+    /// The live session this agent runs in (openable/embeddable in the UI).
+    /// None until spawned, or for the headless summarizer row.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// This agent's own findings (before summarization).
+    #[serde(default)]
+    pub findings: Vec<SkillFinding>,
+}
+
+/// The summarizer's aggregated, deduped report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillReviewSummary {
+    pub verdict: String,
+    pub average_score: f32,
+    pub scorecard: Vec<SkillScoreRow>,
+    pub findings: Vec<SkillFinding>,
+    /// Ordered, highest-leverage-first remediation steps.
+    #[serde(default)]
+    pub patch_plan: Vec<String>,
+}
+
+/// A skills-review run over one skill package.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillReview {
+    pub id: Id,
+    pub workspace_id: Id,
+    pub skill_name: String,
+    /// "library" | "bundled".
+    pub skill_source: String,
+    /// "running" | "done" | "error" | "cancelled".
+    pub status: String,
+    /// "static" (deterministic only) | "agents" (static + provider agents + summarizer).
+    pub agent_mode: String,
+    /// Live per-agent state (empty in static mode; last row is the summarizer in agents mode).
+    #[serde(default)]
+    pub agents: Vec<SkillReviewAgent>,
+    /// The deterministic static-analysis result (present once the run starts).
+    #[serde(default)]
+    pub static_report: Option<SkillStaticReport>,
+    /// The summarizer's aggregated report (agents mode, when it completes).
+    #[serde(default)]
+    pub summary: Option<SkillReviewSummary>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A PR agent review run, together with all its draft comments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Review {

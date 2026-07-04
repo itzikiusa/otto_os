@@ -397,6 +397,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         golden_tasks_store: otto_state::GoldenTasksRepo::new(pool.clone()),
         eval_matrices_store: otto_state::EvalMatricesRepo::new(pool.clone()),
         skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
+        skill_review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         orchestrator: Arc::clone(&orchestrator),
         improve_engine: Arc::clone(&improve_engine),

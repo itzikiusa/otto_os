@@ -4920,6 +4920,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         review_config_routes(),
         crate::skill_eval::routes(),
         crate::eval_lab_routes::routes(),
+        crate::skill_review::routes(),
         provider_routes(),
         session_input_routes(),
         inject_session_routes(),

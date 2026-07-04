@@ -205,6 +205,14 @@ pub enum Event {
         run_id: Id,
         status: String,
     },
+    /// A skills **review** advanced (running | done | error | cancelled). The
+    /// Skills Lab Review panel re-fetches `GET /skill-reviews/{id}` on a matching
+    /// tick — the embedded agent terminals stream separately over `/ws/term/{id}`.
+    SkillReviewUpdated {
+        workspace_id: Id,
+        review_id: Id,
+        status: String,
+    },
     /// An insights report became available for a cadence period. Used by the
     /// channel notifier (opt-in) and the Insights UI to refresh without polling.
     /// `period` is the human label for the completed period ("daily 2026-06-20",

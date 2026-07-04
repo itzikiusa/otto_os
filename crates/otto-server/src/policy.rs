@@ -258,6 +258,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     {
         return Require(SkillEval, if write { Edit } else { View });
     }
+    // Skills review: multi-agent audit of a skill package (Skills Lab). Same
+    // SkillEval feature. start/cancel/delete/retry (write) = Edit; list/get = View.
+    if p.starts_with("/workspaces/{id}/skill-reviews")
+        || p.starts_with("/skill-reviews/")
+        || p == "/skill-reviews"
+    {
+        return Require(SkillEval, if write { Edit } else { View });
+    }
 
     // ----------------------------------------------------------------------
     // 3. Per-feature prefix families. Reads=View, writes=Edit, management=Admin.

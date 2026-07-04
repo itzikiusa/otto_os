@@ -14,7 +14,7 @@ use otto_core::domain::{AgentTask, Notice, TrailEvent};
 use otto_state::{
     ActivityRepo, AuditRepo, GitStore, IntegrationsRepo, IssuesRepo, NewAuditEntry, NewNotice,
     NewTask, NewTrail, NotificationsRepo, ReviewFindingsRepo, ReviewsRepo, SkillEvalsRepo,
-    WorkspacesRepo,
+    SkillReviewsRepo, WorkspacesRepo,
 };
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
@@ -85,6 +85,9 @@ pub struct ServerCtx {
     pub eval_matrices_store: otto_state::EvalMatricesRepo,
     /// Per-run cancellation flags for in-flight skill evaluations.
     pub skill_eval_cancels: crate::skill_eval::CancelRegistry,
+    /// Skills Lab: multi-agent skill reviews + their cancellation flags.
+    pub skill_reviews_store: SkillReviewsRepo,
+    pub skill_review_cancels: crate::skill_eval::CancelRegistry,
     pub orchestrator: Arc<Orchestrator>,
     pub improve_engine: Arc<ImprovementEngine>,
     pub context_library: otto_context::Library,

@@ -432,6 +432,28 @@ its 2s×600 polling pattern and refresh on demand.
   lab's per-iteration scoring additionally emits `proof_pack_updated` (the
   iteration's Proof Pack), documented above.
 
+## Skills-review update (A12)
+
+Workspace-scoped. Emitted by `crates/otto-server/src/skill_review.rs` as a skills
+review advances (running/done/error/cancelled). Lets the Skills Lab Review panel
+refresh on demand; the reviewer/summarizer agent shells stream separately over
+each session's `/ws/term/{session_id}`.
+
+```json
+{
+  "type": "skill_review_updated",
+  "workspace_id": "<Id>",
+  "review_id": "<skill_review_id>",
+  "status": "running|done|error|cancelled"
+}
+```
+
+- `review_id` — the `skill_reviews.id` that changed.
+- UI routing: `events.svelte.ts` dispatches to `skillReviewBus.apply()`.
+- TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts`
+  as `{ type: 'skill_review_updated'; workspace_id: Id; review_id: Id; status:
+  string }`.
+
 ## Self-improvement update (A8)
 
 Global (everyone-scoped). Emitted by `crates/otto-improve/src/engine.rs` when a

@@ -1148,6 +1148,22 @@ and a `human_rating`.
 | GET /eval-matrices/{id} | ws viewer | — | EvalMatrix (with live cell composites/proof) |
 | POST /eval-matrices/{id}/cancel | ws editor | — | cancel all still-running cells |
 
+## Skills review (Skills Lab)
+
+Multi-agent audit of a `SKILL.md` package: a deterministic static pass plus (opt-in) N visible
+provider agents running the bundled `skills-reviewer` method, folded together by a summarizer.
+Reviewer/summarizer sessions are tagged `meta.source="skillreview"` and hidden from the Agents
+grid — they embed live in the Review panel. See the `skill_review_updated` WS event.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /workspaces/{id}/skill-reviews | ws editor | StartSkillReviewReq (`skill_name`, `skill_source` library\|bundled, `providers[]`, `agent_mode` static\|agents) | SkillReview (status=running; static pass fills in, agents fan out) |
+| GET /workspaces/{id}/skill-reviews | ws viewer | — | `SkillReview[]` |
+| GET /skill-reviews/{id} | ws viewer | — | SkillReview (static report + live agents + summary) |
+| DELETE /skill-reviews/{id} | ws editor | — | 204 (cancels + archives sessions) |
+| POST /skill-reviews/{id}/cancel | ws editor | — | cancel a running review |
+| POST /skill-reviews/{id}/agents/{index}/retry | ws editor | — | re-run one reviewer agent |
+
 ## Context library (skills / souls / context)
 
 The shared skill/soul/context library lives under the daemon data dir. Library reads/writes
@@ -1156,9 +1172,15 @@ are root; per-workspace context selection is workspace-scoped.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /library/skills | root | — | `SkillEntry[]` |
+| POST /library/skills | root | CreateLibrarySkillReq (`name`, `category?`, `description?`, `body?`) | LibrarySkill (new; 409 if it exists) |
+| POST /library/skills/import | root | raw `.zip` body, `?name=` override | LibrarySkill (imported; zip-slip + size guarded) |
 | GET /library/skills/{name} | root | — | skill body |
 | PUT /library/skills/{name} | root | skill body | 204 |
 | DELETE /library/skills/{name} | root | — | 204 (also removes Otto-managed user-level provider copies — see Bundled skills) |
+| GET /library/skills/{name}/files | root | — | `SkillFileEntry[]` (multi-file tree) |
+| GET /library/skills/{name}/file | root | `?path=<rel>` | SkillFileContentResp (one file's text) |
+| PUT /library/skills/{name}/file | root | WriteSkillFileReq (`path`, `content`) | `SkillFileEntry[]` (refreshed tree; evicts cache) |
+| DELETE /library/skills/{name}/file | root | `?path=<rel>` | 204 (SKILL.md cannot be deleted) |
 | GET /library/souls | root | — | `SoulEntry[]` |
 | GET /library/souls/{name} | root | — | soul body |
 | PUT /library/souls/{name} | root | soul body | 204 |
@@ -1237,6 +1259,7 @@ choices. The UI surfaces this distinction in the preview.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /library/bundled | root | — | bundled skill catalog |
+| GET /library/bundled/{name} | root | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
 | POST /library/bundled/{name}/install | root | — | install/update one bundled skill |
 | POST /library/bundled/install-all | root | `?category=&backup=` | install all bundled skills (optionally one category) |
 

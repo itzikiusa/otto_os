@@ -58,6 +58,7 @@ pub mod run_workspace;
 pub mod scheduled_tasks_engine;
 pub mod scheduled_tasks_scheduler;
 pub mod skill_eval;
+pub mod skill_review;
 pub mod spa;
 pub mod state;
 pub mod swarm_agent_run;

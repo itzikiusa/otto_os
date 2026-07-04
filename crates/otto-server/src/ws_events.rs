@@ -237,6 +237,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::GoalLoopUpdated { workspace_id, .. }
         | Event::WorkflowRunUpdated { workspace_id, .. }
         | Event::SkillEvalUpdated { workspace_id, .. }
+        | Event::SkillReviewUpdated { workspace_id, .. }
         // Live canvas-document edits + the agent-session-started signal go to the
         // scene's workspace members.
         | Event::CanvasUpdated { workspace_id, .. }

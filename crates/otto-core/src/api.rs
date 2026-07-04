@@ -1929,6 +1929,22 @@ pub struct BundledSkillContent {
     pub files: Vec<SkillFileEntry>,
 }
 
+/// `POST /workspaces/{id}/skill-reviews` — start a skills review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartSkillReviewReq {
+    pub skill_name: String,
+    /// "library" | "bundled". Defaults to "library".
+    #[serde(default)]
+    pub skill_source: String,
+    /// Provider agents to run (e.g. `["claude","codex"]`). Empty ⇒ static-only.
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// "static" (deterministic only) | "agents". Defaults to "agents" when
+    /// providers are given, else "static".
+    #[serde(default)]
+    pub agent_mode: String,
+}
+
 /// `PUT /library/default-soul`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalSoulReq {

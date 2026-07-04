@@ -49,6 +49,7 @@ pub mod scheduled_tasks;
 pub mod sessions;
 pub mod settings;
 pub mod skill_evals;
+pub mod skill_reviews;
 pub mod swarm;
 pub mod users;
 pub mod workflow_triggers;
@@ -132,6 +133,7 @@ pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
 pub use settings::{otto_mcp_enabled_for, SettingsRepo, OTTO_MCP_ENABLED_KEY};
 pub use eval_lab::{EvalMatricesRepo, GoldenTaskInput, GoldenTasksRepo};
 pub use skill_evals::SkillEvalsRepo;
+pub use skill_reviews::SkillReviewsRepo;
 // Note: `swarm::NewTask` collides with `activity::NewTask`; access it via the
 // module path (`otto_state::swarm::NewTask`). The rest are re-exported here.
 pub use swarm::{
