@@ -36,8 +36,8 @@ test('selectTargets: window filter, cache hits skipped, hash mismatch re-selecte
   const cached = rec({ key: 'R-4' });
   const changed = rec({ key: 'R-5' });
   const cache = {
-    'R-4': { hash: E.contentHash(cached), days: 2, routine: false, v: 3 },
-    'R-5': { hash: 'stale-hash', days: 2, routine: false, v: 3 },
+    'R-4': { hash: E.contentHash(cached), days: 2, routine: false, v: 4 },
+    'R-5': { hash: 'stale-hash', days: 2, routine: false, v: 4 },
   };
   const keys = E.selectTargets([recent, old, open, cached, changed], cache, 6, NOW).map((r) => r.key);
   assert.ok(keys.includes('R-1'), 'recent done selected');
@@ -97,7 +97,7 @@ test('changeFingerprint invalidates the cache as the diff grows; prompt embeds e
   const grown = rec({ key: 'C-1', git_change: { commits: 6, files: 18, insertions: 900, deletions: 1300 } });
   const cache = {};
   // First estimate caches at the small fingerprint.
-  cache['C-1'] = { hash: E.contentHash(base), days: 1, routine: false, v: 3 };
+  cache['C-1'] = { hash: E.contentHash(base), days: 1, routine: false, v: 4 };
   assert.equal(E.selectTargets([base], cache, 6, NOW).length, 0, 'unchanged small diff stays cached');
   assert.equal(E.selectTargets([grown], cache, 6, NOW).length, 1, 'a much larger diff re-estimates');
 
@@ -115,6 +115,6 @@ test('custom rubric overrides the default lines', () => {
 
 test('older prompt-version estimates are re-selected', () => {
   const r = rec({ key: 'V-1' });
-  const cache = { 'V-1': { hash: E.contentHash(r), days: 3, routine: false, v: 2 } };
-  assert.equal(E.selectTargets([r], cache, 6, NOW).length, 1, 'v2 entry re-estimates under v3');
+  const cache = { 'V-1': { hash: E.contentHash(r), days: 3, routine: false, v: 1 } };
+  assert.equal(E.selectTargets([r], cache, 6, NOW).length, 1, 'an older-version entry re-estimates under the current prompt');
 });

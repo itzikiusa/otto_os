@@ -44,10 +44,10 @@ const DAY = 86400000;
  * (months; 0 = no window → everything) — an explicit `sinceMs` cutoff wins
  * over the month window — and not already cached at this hash.
  */
-// Prompt generation version. v3: git-diff evidence + editable calibration
-// rubric + strict "size from the ACTUAL change, don't inflate" guidance. Any
-// cached entry from an older prompt is re-estimated once.
-const PROMPT_V = 3;
+// Prompt generation version. v4: diff size is a SIGNAL, not a ceiling —
+// investigation/root-cause effort can make a tiny change a multi-day task.
+// Any cached entry from an older prompt is re-estimated once.
+const PROMPT_V = 4;
 
 function selectTargets(records, cache, windowMonths, nowMs, sinceMs = 0) {
   const cutoff = sinceMs > 0 ? sinceMs : windowMonths > 0 ? nowMs - windowMonths * 30 * DAY : -Infinity;
@@ -88,6 +88,7 @@ const DEFAULT_RUBRIC = [
   'Full new game-provider integration (we implement the provider API from scratch): ~15d (3 weeks).',
   'Full integration WITH significant caveats or infra that must be rewritten in many places (e.g. Mega, Digitain): 30–40d (1.5–2 months).',
   'Judge the CORE work, not mechanical fan-out: if one repo holds an 18-file rewrite and 15 others get a 1-line bump, size the 18-file core plus a little glue — not the sum.',
+  'A tiny diff is NOT automatically trivial: a one-line fix to a subtle bug/race/prod issue can be days of investigation. Size the understanding+debugging, not just the lines changed. Only mechanical small changes (bump/config/rename) are cheap.',
 ];
 
 function batchPrompt(records, rubric, corrections) {
@@ -106,7 +107,9 @@ function batchPrompt(records, rubric, corrections) {
     : '';
   return `You size engineering tasks for a delivery-analytics tool. For EACH task, estimate the IDEAL effort in engineering days (fractional; 0.25–60) for an AVERAGE developer familiar with this codebase. The estimate is developer-AGNOSTIC — ignore who did it, any story points, and any prior estimate; judge the work itself.
 
-CRITICAL: size from the ACTUAL CODE CHANGE (the \`change=\` evidence: files touched, lines added/removed, which repos, commit subjects) far more than from the ticket prose — tickets over- and under-describe. Do NOT inflate. Most tasks are small; give proper, tight numbers. A tiny diff is a tiny task even if the ticket sounds grand; a large multi-file rewrite is large even if the ticket is terse. When there is no change evidence (no code, or evidence omitted), fall back to the description but stay conservative.
+Use the ACTUAL CODE CHANGE (the \`change=\` evidence: files touched, lines added/removed, which repos, commit subjects) as a strong signal, weighed against the ticket prose (tickets over- and under-describe). Do NOT inflate — most tasks are small; a large multi-file rewrite is large even if the ticket is terse.
+
+BUT diff size is a SIGNAL, NOT a ceiling: a tiny change can be a large task when the effort was in the INVESTIGATION — root-causing a subtle production bug, a race condition, finding the one config value that fixes it, understanding a gnarly system before the one-line fix. A 1-line change is NOT automatically a 1-minute task. Read the type (Bug/investigation), the description, and the commit subjects (e.g. "fix race", "root cause", "investigate", "reproduce") to judge whether a small change was hard-won, and size the UNDERSTANDING + fix, not just the diff. Only genuinely mechanical small changes (version bump, config toggle, rename, copy tweak) are truly cheap.
 
 Calibration rubric (follow it):
 ${rules}
