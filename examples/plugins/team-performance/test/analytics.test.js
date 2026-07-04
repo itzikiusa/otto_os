@@ -726,3 +726,21 @@ test('feature pseudo-records credit weighted throughput to matched authors only'
   assert.ok(Math.abs(quinn.weighted_done - 6) < 1e-9, `weighted ${quinn.weighted_done}`);
   assert.equal(quinn.completed, 0, 'no Jira task counted');
 });
+
+test('resurrected ancients: multi-year effective cycles are excluded even with git timing', () => {
+  const r = A.deriveGit(
+    rec({ key: 'OLD-1', done_at: T('2026-06-20T00:00:00Z'), first_active_at: null, cycle_days: null }),
+    { first_commit_at: T('2020-01-06T00:00:00Z'), done_git_at: T('2026-06-19T00:00:00Z') },
+    { hasRepos: true },
+  );
+  assert.ok(r.flags.includes('stale_timing'), r.flags.join(','));
+  assert.ok(A.isExcluded(r));
+  assert.ok(!A.isExcluded({ ...r, manual_days: 5 }), 'manual time re-includes');
+  // A genuinely long feature (~3 months) stays in.
+  const big = A.deriveGit(
+    rec({ key: 'BIG-1', done_at: T('2026-06-20T00:00:00Z'), first_active_at: null, cycle_days: null }),
+    { first_commit_at: T('2026-03-02T00:00:00Z'), done_git_at: T('2026-06-19T00:00:00Z') },
+    { hasRepos: true },
+  );
+  assert.ok(!big.flags.includes('stale_timing'), big.flags.join(','));
+});

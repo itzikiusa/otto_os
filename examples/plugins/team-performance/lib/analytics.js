@@ -225,6 +225,12 @@ function deriveGit(record, gitEntry, opts) {
   // Bulk-closed junk: "done" with ~zero measured time and no git signal —
   // the definition of an outlier; excluded until a manual time is set.
   if (done && implGit === null && effCycle !== null && effCycle < 0.1) flags.push('zero_time');
+  // Resurrected ancients: a stray recent commit/close on a years-old key makes
+  // the effective cycle span years — one such record can poison the TEAM's
+  // pooled pace. Anything over a working year is timing garbage, git or not.
+  if (done && effCycle !== null && effCycle > 250) {
+    if (!flags.includes('stale_timing')) flags.push('stale_timing');
+  }
 
   const authors = Array.isArray(g.authors) ? g.authors : record.git_authors || [];
   // Multi-dev: ≥2 authors each carrying ≥25% of the key's commits (≥2 commits).
