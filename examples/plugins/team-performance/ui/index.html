@@ -95,7 +95,7 @@
     </style>
   </head>
   <body>
-    <h1>Team Performance</h1>
+    <h1>Team Performance <span id="tp-version" class="dim" style="font-size:11px;font-weight:400"></span></h1>
     <div class="row">
       <select id="account" aria-label="Jira account"></select>
       <span class="msel">
@@ -347,7 +347,7 @@
         API = m.apiBase; TOKEN = m.token || '';
         PARENT_ORIGIN = ev.origin || '*';
         applyTheme(m.theme);
-        try { const c = await api('/config'); if (c && c.hours_per_day) HPD = c.hours_per_day; } catch { /* default 8 */ }
+        try { const c = await api('/config'); if (c && c.hours_per_day) HPD = c.hours_per_day; if (c && c._version) $('tp-version').textContent = 'v' + c._version; } catch { /* default 8 */ }
         await boot();
       });
 
@@ -920,18 +920,15 @@
             mask_tasks: $('trep-mask-tasks').checked,
           };
           $('trep-gen').disabled = true;
-          $('trep-status').textContent = scope === 'combined'
-            ? 'generating team + every developer — this is a big one, several minutes…'
-            : 'generating (the agent writes the report — a few minutes)…';
+          $('trep-status').textContent = 'starting…';
           try {
             const start = await api('/report', { method: 'POST', body: JSON.stringify(body) });
-            const poll = setInterval(async () => {
-              try {
-                const s = await api(`/report/status?job=${encodeURIComponent(start.job)}`);
-                if (s.state === 'done') { clearInterval(poll); $('trep-gen').disabled = false; $('trep-status').textContent = ''; await wireReportsHub(); if (s.report) openReport(s.report.id); }
-                else if (s.state === 'error') { clearInterval(poll); $('trep-gen').disabled = false; $('trep-status').textContent = ''; err(s.error || 'report failed'); }
-              } catch { /* keep polling */ }
-            }, 2500);
+            pollReportJob({
+              job: start.job,
+              statusEl: $('trep-status'),
+              button: $('trep-gen'),
+              onDone: async (report) => { await wireReportsHub(); if (report) openReport(report.id); },
+            });
           } catch (e) { $('trep-gen').disabled = false; $('trep-status').textContent = ''; err(e.status === 409 ? 'That report is already generating.' : e.message); }
         };
 
@@ -949,6 +946,51 @@
             ${rs.map((r) => `<button class="small rep-open" data-id="${esc(r.id)}">${esc(r.label)} <span class="dim">${fmtDate(r.created_at)}</span></button>`).join(' ')}
           </div>`).join('');
         list.querySelectorAll('.rep-open').forEach((b) => (b.onclick = () => openReport(b.dataset.id)));
+      }
+
+      /**
+       * Poll a report job with a live elapsed timer and robust end states.
+       * opts: {job, statusEl, button, onDone}. Handles done / error / a
+       * vanished job (state 'idle' after start — e.g. the daemon restarted).
+       */
+      function pollReportJob({ job, statusEl, button, onDone }) {
+        const started = Date.now();
+        let sawRunning = false;
+        const fmtElapsed = () => {
+          const s = Math.floor((Date.now() - started) / 1000);
+          return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+        };
+        const stop = () => { clearInterval(timer); if (button) button.disabled = false; };
+        const timer = setInterval(async () => {
+          let s;
+          try {
+            s = await api(`/report/status?job=${encodeURIComponent(job)}`);
+          } catch {
+            statusEl.textContent = `writing report… ${fmtElapsed()} (waiting for daemon)`;
+            return;
+          }
+          if (s.state === 'running') {
+            sawRunning = true;
+            statusEl.textContent = `${s.step || 'writing report'} · ${fmtElapsed()}`;
+          } else if (s.state === 'done') {
+            stop();
+            statusEl.textContent = `done in ${fmtElapsed()}`;
+            setTimeout(() => (statusEl.textContent = ''), 4000);
+            await onDone(s.report);
+          } else if (s.state === 'error') {
+            stop();
+            statusEl.textContent = '';
+            err(s.error || 'report failed');
+          } else if (s.state === 'idle') {
+            // Job not found. If we'd already seen it running (or waited a bit),
+            // the sidecar was restarted mid-report — tell the user plainly.
+            if (sawRunning || Date.now() - started > 8000) {
+              stop();
+              statusEl.textContent = '';
+              err('report generation was interrupted (the app or daemon restarted) — please generate it again');
+            }
+          }
+        }, 2000);
       }
 
       async function openReport(id) {
@@ -1196,27 +1238,15 @@
             mask: $('rep-mask').checked,
           };
           $('rep-gen').disabled = true;
-          $('rep-status').textContent = 'generating (the agent writes the report — this takes a few minutes)…';
+          $('rep-status').textContent = 'starting…';
           try {
             const start = await api('/report', { method: 'POST', body: JSON.stringify(body) });
-            const poll = setInterval(async () => {
-              try {
-                const s = await api(`/report/status?job=${encodeURIComponent(start.job)}`);
-                if (s.state === 'done') {
-                  clearInterval(poll);
-                  $('rep-gen').disabled = false;
-                  $('rep-status').textContent = 'done';
-                  setTimeout(() => ($('rep-status').textContent = ''), 3000);
-                  await repRefresh();
-                  if (s.report) openReport(s.report.id);
-                } else if (s.state === 'error') {
-                  clearInterval(poll);
-                  $('rep-gen').disabled = false;
-                  $('rep-status').textContent = '';
-                  err(s.error || 'report failed');
-                }
-              } catch { /* keep polling */ }
-            }, 2500);
+            pollReportJob({
+              job: start.job,
+              statusEl: $('rep-status'),
+              button: $('rep-gen'),
+              onDone: async (report) => { await repRefresh(); if (report) openReport(report.id); },
+            });
           } catch (e) {
             $('rep-gen').disabled = false;
             $('rep-status').textContent = '';

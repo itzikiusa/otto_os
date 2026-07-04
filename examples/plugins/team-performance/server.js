@@ -29,6 +29,8 @@ const PORT = parseInt(process.env.OTTO_PLUGIN_PORT || '0', 10);
 const HOST_API = process.env.OTTO_HOST_API || '';
 const TOKEN = process.env.OTTO_PLUGIN_TOKEN || '';
 const DATA_DIR = process.env.OTTO_PLUGIN_DATA_DIR || '.';
+let PLUGIN_VERSION = '?';
+try { PLUGIN_VERSION = require('./otto-plugin.json').version || '?'; } catch { /* optional */ }
 
 // ---- host API ---------------------------------------------------------------
 
@@ -1401,6 +1403,7 @@ async function runReport(account, opts) {
   const { scope: rscope, assignee, kind, year, quarter, month, mask, maskTasks } = opts;
   const jobKey = reportJobKey(account, opts);
   const job = reportJobs.get(jobKey);
+  job.step = 'gathering data';
   try {
     const scope = loadScope(account, '*');
     if (!scope) throw new Error('no scan yet');
@@ -1499,6 +1502,7 @@ async function runReport(account, opts) {
       fileHint = String(assignee);
     }
 
+    job.step = rscope === 'combined' ? 'writing (agent — team + every developer, large)' : 'writing (agent composing the HTML)';
     const r = await hostPost('/agents/run', { prompt: reportPrompt(headline, dataBlock, instructions) });
     const html = finalizeHtml(r && r.text);
 
@@ -1614,6 +1618,7 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/config' && req.method === 'GET') {
       return send(res, 200, {
         ...loadConfig(),
+        _version: PLUGIN_VERSION,
         _defaults: {
           rubric: E.DEFAULT_RUBRIC,
           dev_report_instructions: DEFAULT_DEV_REPORT_INSTRUCTIONS,
