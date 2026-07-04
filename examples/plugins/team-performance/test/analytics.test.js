@@ -762,3 +762,18 @@ test('include_fixes folds fix time into the actual; manual override still wins',
   const s2 = A.assigneeStats([manual], A.baselines([manual]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
   assert.equal(s2[0].median_cycle, 6, 'manual actual wins');
 });
+
+test('fix_days_override folds in a partial fix amount (wins over include mode)', () => {
+  const r = { ...rec({ key: 'FP-1', eff_cycle_days: 5, cycle_days: 5, fix_days: 14, fix_count: 27 }), include_fixes: true };
+  // full include: 5 + 14 = 19
+  let s = A.assigneeStats([r], A.baselines([r]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
+  assert.equal(s[0].median_cycle, 19);
+  // partial: only 10 of the 14 fix-days → 5 + 10 = 15
+  const partial = { ...r, fix_days_override: 10 };
+  s = A.assigneeStats([partial], A.baselines([partial]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
+  assert.equal(s[0].median_cycle, 15, 'partial fix contribution');
+  // manual actual still wins over everything
+  const manual = { ...partial, manual_days: 8 };
+  s = A.assigneeStats([manual], A.baselines([manual]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
+  assert.equal(s[0].median_cycle, 8);
+});

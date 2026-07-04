@@ -1071,10 +1071,12 @@
               <button class="small ov-manual-clear">Clear</button>
               ${t.fix_count ? `<span title="fold this task's fix time into its actual">fixes (${t.fix_count} commits, ${fmtD(t.fix_days)}):
                 <select class="ov-incfix">
-                  <option value="auto" ${t.include_fixes_override == null ? 'selected' : ''}>auto${t.include_fixes ? ' (included)' : ' (separate)'}</option>
-                  <option value="yes" ${t.include_fixes_override === true ? 'selected' : ''}>include</option>
-                  <option value="no" ${t.include_fixes_override === false ? 'selected' : ''}>exclude</option>
-                </select></span>` : ''}
+                  <option value="auto" ${t.include_fixes_override == null && t.fix_days_override == null ? 'selected' : ''}>auto${t.include_fixes ? ' (included)' : ' (separate)'}</option>
+                  <option value="yes" ${t.include_fixes_override === true && t.fix_days_override == null ? 'selected' : ''}>include full</option>
+                  <option value="no" ${t.include_fixes_override === false && t.fix_days_override == null ? 'selected' : ''}>exclude</option>
+                </select>
+                <span class="dim">or add</span> <input class="inline-input ov-fixdays" type="number" step="0.5" min="0" value="${t.fix_days_override ?? ''}" placeholder="${Math.round((t.fix_days || 0) * 10) / 10}" title="fold in only THIS many fix-days instead of all of them"> <span class="dim">fix-days</span>
+                <button class="small ov-fixdays-save">Set</button></span>` : ''}
               ${t.late_touches ? `<span class="dim" title="commits after the fix window — not counted">+${t.late_touches} late touches</span>` : ''}
             </div>
             <span class="row" style="margin:6px 0">
@@ -1263,13 +1265,27 @@
             } catch (e) { err(e.message); }
           };
         });
-        // Fold this task's fix time into the actual: auto / force include / force exclude.
+        // Fold this task's fix time into the actual: auto / include full / exclude.
+        // Selecting a mode clears any partial fix-days override.
         $('dev-view').querySelectorAll('.ov-incfix').forEach((sel) => {
           sel.onchange = async () => {
             const row = sel.closest('[data-key]');
             const v = sel.value === 'yes' ? true : sel.value === 'no' ? false : null;
             try {
-              await saveOverride(row.dataset.key, row.dataset.project, { include_fixes: v });
+              await saveOverride(row.dataset.key, row.dataset.project, { include_fixes: v, fix_days_override: null });
+              await refresh();
+            } catch (e) { err(e.message); }
+          };
+        });
+        // Partial fix time: fold in only N fix-days (wins over the include mode).
+        $('dev-view').querySelectorAll('.ov-fixdays-save').forEach((b) => {
+          b.onclick = async () => {
+            const row = b.closest('[data-key]');
+            const raw = row.querySelector('.ov-fixdays').value.trim();
+            const val = raw === '' ? null : parseFloat(raw);
+            if (val !== null && (!Number.isFinite(val) || val < 0)) { err('enter a non-negative number of fix-days'); return; }
+            try {
+              await saveOverride(row.dataset.key, row.dataset.project, { fix_days_override: val });
               await refresh();
             } catch (e) { err(e.message); }
           };

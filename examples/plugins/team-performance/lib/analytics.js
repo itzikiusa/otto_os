@@ -273,7 +273,11 @@ const rImpl = (r) => r.eff_impl_days ?? r.impl_days ?? null;
 const rCycle = (r) => {
   if (r.manual_days != null) return r.manual_days;
   const base = r.eff_cycle_days ?? r.cycle_days ?? null;
-  if (base != null && r.include_fixes && r.fix_days) return round2(base + r.fix_days);
+  if (base == null) return base;
+  // A lead-entered partial fix contribution wins over the full auto fix time —
+  // fold in e.g. 10 of the 14 fix-days rather than all-or-nothing.
+  if (r.fix_days_override != null) return round2(base + r.fix_days_override);
+  if (r.include_fixes && r.fix_days) return round2(base + r.fix_days);
   return base;
 };
 const rDoneAt = (r) => r.eff_done_at ?? r.done_at ?? null;

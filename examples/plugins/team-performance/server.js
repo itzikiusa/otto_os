@@ -1128,6 +1128,7 @@ function assigneeView(account, projectsParam, assigneeId, sinceMs = 0) {
       git_change: r.git_change || null,
       include_fixes: r.include_fixes === true,
       include_fixes_override: r.include_fixes_override ?? null,
+      fix_days_override: r.fix_days_override ?? null,
       late_touches: r.late_touches || 0,
       suspect_outlier: suspectOutlier(r, base),
       baseline: bucket
@@ -1796,7 +1797,7 @@ const server = http.createServer(async (req, res) => {
       // Estimate corrections: override the AI-agnostic and/or per-dev estimate
       // (the agnostic one drives every scope-weighted metric), with a reason
       // that feeds future estimation prompts so the model learns.
-      for (const [k, lo, hi] of [['est_days', 0, 120], ['est_dev_days', 0, 120]]) {
+      for (const [k, lo, hi] of [['est_days', 0, 120], ['est_dev_days', 0, 120], ['fix_days_override', 0, 365]]) {
         if (body[k] !== undefined) {
           const n = body[k] === null ? null : Number(body[k]);
           if (n !== null && (!Number.isFinite(n) || n <= lo || n > hi)) return send(res, 400, { error: `${k} must be in ${lo}..${hi} or null` });
