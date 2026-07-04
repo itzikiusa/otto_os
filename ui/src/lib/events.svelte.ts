@@ -102,6 +102,24 @@ export class SkillEvalBus {
 
 export const skillEvalBus = new SkillEvalBus();
 
+/** Incremented each time a `skill_review_updated` WS event arrives. The Skills
+ *  Lab Review panel subscribes and re-fetches the matching review on the tick. */
+export class SkillReviewBus {
+  tick: number = $state(0);
+  reviewId: string = $state('');
+  workspaceId: string = $state('');
+  status: string = $state('');
+
+  apply(workspaceId: string, reviewId: string, status: string): void {
+    this.workspaceId = workspaceId;
+    this.reviewId = reviewId;
+    this.status = status;
+    this.tick += 1;
+  }
+}
+
+export const skillReviewBus = new SkillReviewBus();
+
 // ---------------------------------------------------------------------------
 // review_changed / budget_exceeded — reactive buses for the Review panel and a
 // budget banner. The Review panel subscribes to reviewBus and re-fetches the
@@ -353,6 +371,9 @@ class EventsClient {
         } else if (parsed.type === 'skill_eval_updated') {
           // Skill-Eval terminal notification (done/error/cancelled).
           skillEvalBus.apply(parsed.workspace_id, parsed.run_id, parsed.status);
+        } else if (parsed.type === 'skill_review_updated') {
+          // Skills Lab review advanced — refresh the matching review.
+          skillReviewBus.apply(parsed.workspace_id, parsed.review_id, parsed.status);
         } else if (parsed.type === 'review_changed') {
           // Review panel: refresh the matching review + findings + merge-readiness
           // on the event instead of waiting for its visibility-gated poll.

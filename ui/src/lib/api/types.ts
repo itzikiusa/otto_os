@@ -948,6 +948,9 @@ export type OttoEvent =
    *  Lets the Skill-Eval UI replace its 2s×600 fixed poll with event-driven
    *  refresh. A11 — Workflows cluster. */
   | { type: 'skill_eval_updated'; workspace_id: Id; run_id: Id; status: string }
+  /** A Skills Lab review advanced (running|done|error|cancelled). The Review
+   *  panel re-fetches the matching review on the tick. */
+  | { type: 'skill_review_updated'; workspace_id: Id; review_id: Id; status: string }
   /** An insights report became available for a cadence period.
    *  `period` is a human label ("daily 2026-06-20", "weekly 2026-W25").
    *  B8 — Skills/Improve/Channels. */
@@ -2978,6 +2981,129 @@ export interface LibrarySkill {
   name: string;
   description: string;
   body: string;
+  /** Present on `/library/skills` responses (frontmatter `category:`). */
+  category?: string;
+  /** Present on `/library/skills` responses (frontmatter `version:`). */
+  version?: number;
+}
+
+// --- Skills Lab: multi-file skill editor + skill review --------------------
+
+/** One file inside a skill package, relative to its root (Skills Lab tree). */
+export interface SkillFileEntry {
+  path: string;
+  size: number;
+  binary: boolean;
+}
+
+export interface SkillFileContentResp {
+  path: string;
+  content: string;
+  binary: boolean;
+}
+
+export interface WriteSkillFileReq {
+  path: string;
+  content: string;
+}
+
+export interface CreateLibrarySkillReq {
+  name: string;
+  category?: string;
+  description?: string;
+  body?: string;
+}
+
+/** One bundled skill's full content (view without installing). */
+export interface BundledSkillContent {
+  name: string;
+  category: string;
+  version: number;
+  description: string;
+  body: string;
+  files: SkillFileEntry[];
+}
+
+/** One row from `GET /library/bundled` (catalog + drift). */
+export interface BundledSkillView {
+  name: string;
+  category: string;
+  version: number;
+  description: string;
+  installed_version: number | null;
+  /** "not_installed" | "up_to_date" | "update_available" | "ahead". */
+  state: string;
+  update_available: boolean;
+}
+
+export interface StartSkillReviewReq {
+  skill_name: string;
+  /** "library" | "bundled". */
+  skill_source: string;
+  providers: string[];
+  /** "static" | "agents". */
+  agent_mode: string;
+}
+
+export interface SkillFinding {
+  /** "Critical" | "High" | "Medium" | "Low". */
+  severity: string;
+  code: string;
+  title: string;
+  evidence: string;
+  why: string;
+  fix: string;
+}
+
+export interface SkillScoreRow {
+  area: string;
+  score: number;
+  notes: string;
+}
+
+export interface SkillStaticReport {
+  /** "Ready" | "Ready with fixes" | "Do not publish". */
+  verdict: string;
+  average_score: number;
+  scorecard: SkillScoreRow[];
+  findings: SkillFinding[];
+}
+
+export interface SkillReviewAgent {
+  name: string;
+  provider: string;
+  model: string;
+  /** "pending" | "running" | "waiting" | "done" | "error". */
+  status: string;
+  note: string;
+  session_id?: string | null;
+  findings: SkillFinding[];
+}
+
+export interface SkillReviewSummary {
+  verdict: string;
+  average_score: number;
+  scorecard: SkillScoreRow[];
+  findings: SkillFinding[];
+  patch_plan: string[];
+}
+
+export interface SkillReview {
+  id: Id;
+  workspace_id: Id;
+  skill_name: string;
+  /** "library" | "bundled". */
+  skill_source: string;
+  /** "running" | "done" | "error" | "cancelled". */
+  status: string;
+  /** "static" | "agents". */
+  agent_mode: string;
+  agents: SkillReviewAgent[];
+  static_report: SkillStaticReport | null;
+  summary: SkillReviewSummary | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface LibrarySoul {

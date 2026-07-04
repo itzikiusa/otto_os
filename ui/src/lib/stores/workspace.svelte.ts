@@ -100,6 +100,7 @@ class WorkspaceStore {
         (s.meta.source !== 'channel' &&
           s.meta.source !== 'review' &&
           s.meta.source !== 'skilleval' &&
+        s.meta.source !== 'skillreview' &&
           s.meta.source !== 'product-analysis' &&
           s.meta.source !== 'swarm' &&
           s.meta.source !== 'db_assist') ||
@@ -142,6 +143,7 @@ class WorkspaceStore {
         s.meta.source !== 'channel' &&
         s.meta.source !== 'review' &&
         s.meta.source !== 'skilleval' &&
+        s.meta.source !== 'skillreview' &&
         s.meta.source !== 'product-analysis' &&
         s.meta.source !== 'swarm' &&
         s.meta.source !== 'canvas_assist' &&
@@ -168,6 +170,7 @@ class WorkspaceStore {
         s.meta.source !== 'review' &&
         s.meta.source !== 'channel' &&
         s.meta.source !== 'skilleval' &&
+        s.meta.source !== 'skillreview' &&
         s.meta.source !== 'product-analysis' &&
         s.meta.source !== 'swarm' &&
         s.meta.source !== 'canvas_assist' &&
@@ -187,6 +190,7 @@ class WorkspaceStore {
         s.meta.source !== 'review' &&
         s.meta.source !== 'channel' &&
         s.meta.source !== 'skilleval' &&
+        s.meta.source !== 'skillreview' &&
         s.meta.source !== 'product-analysis' &&
         s.meta.source !== 'swarm' &&
         s.meta.source !== 'canvas_assist' &&

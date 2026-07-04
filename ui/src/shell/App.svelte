@@ -38,7 +38,7 @@
   import BrokersPage from '../modules/brokers/BrokersPage.svelte';
   import McpPage from '../modules/mcp/McpPage.svelte';
   import WorkflowsPage from '../modules/workflows/WorkflowsPage.svelte';
-  import SkillsEvalPage from '../modules/skills-eval/SkillsEvalPage.svelte';
+  import SkillsLabPage from '../modules/skills-lab/SkillsLabPage.svelte';
   import UsagePage from '../modules/usage/UsagePage.svelte';
   import Settings from '../modules/settings/Settings.svelte';
   import Walkthroughs from '../modules/help/Walkthroughs.svelte';
@@ -407,7 +407,7 @@
       { id: 'core.go-connections', title: 'Go to Connections', group: 'Navigate', keywords: 'module ssh mysql redis', run: () => router.go('connections') },
       { id: 'core.go-git', title: 'Go to Git', group: 'Navigate', keywords: 'module repos prs pull requests', run: () => router.go('git') },
       { id: 'core.go-api', title: 'Go to API Client', group: 'Navigate', keywords: 'module postman http request rest curl', run: () => router.go('api') },
-      { id: 'core.go-skills-eval', title: 'Go to Skills Evaluator', group: 'Navigate', keywords: 'module skill evaluate validate iterate improve', run: () => router.go('skills-eval') },
+      { id: 'core.go-skills-eval', title: 'Go to Skills Lab', group: 'Navigate', keywords: 'module skill lab evaluate validate review edit improve', run: () => router.go('skills-eval') },
       { id: 'core.go-usage', title: 'Go to Usage & Metrics', group: 'Navigate', keywords: 'module usage cost tokens clickhouse metrics cpu ram billing analytics', run: () => router.go('usage') },
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
       { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
@@ -613,7 +613,7 @@
     {:else if moduleName === 'run-with-otto'}
       <RunWithOttoPage />
     {:else if moduleName === 'skills-eval'}
-      <SkillsEvalPage />
+      <SkillsLabPage />
     {:else if moduleName === 'usage'}
       <UsagePage />
     {:else if moduleName === 'settings'}
