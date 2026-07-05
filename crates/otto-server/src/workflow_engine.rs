@@ -1200,8 +1200,8 @@ pub async fn run_workflow(
         // proceeds). A marker output keeps dependents satisfied — an empty output
         // would make them BranchSkip and cascade the whole tail away.
         if skip_current {
-            for sid in states[idx].sessions.iter().cloned().collect::<Vec<_>>() {
-                if let Err(e) = ctx.manager.kill_session(&sid).await {
+            for sid in &states[idx].sessions {
+                if let Err(e) = ctx.manager.kill_session(sid).await {
                     tracing::warn!("skip: failed to kill workflow session {sid}: {e}");
                 }
             }
@@ -4292,7 +4292,7 @@ async fn provision_wf_worktrees(
         let wt_path = ctx
             .data_dir
             .join("workflow-runs")
-            .join(run_id.to_string())
+            .join(run_id)
             .join(crate::workflow_context::slug(&repo.name));
         let wt_str = wt_path.to_string_lossy().to_string();
         let branch = format!("otto-wf/{run_id}");
