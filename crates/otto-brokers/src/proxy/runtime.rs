@@ -12,12 +12,14 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use otto_core::{Error, Result};
 use otto_ssh::{SshTunnel, SshTunnelConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
 use tokio_socks::tcp::Socks5Stream;
@@ -31,6 +33,21 @@ use super::protocol::{
 const MAX_FRAME: usize = 256 * 1024 * 1024;
 const DEFAULT_KAFKA_PORT: u16 = 9092;
 
+/// Cap on concurrent in-flight proxy connections per tunnel. librdkafka
+/// reconnects aggressively (admin + producer + consumer, each × N brokers) when
+/// a broker is unreachable; without a cap every stuck upstream dial pins two
+/// file descriptors and they pile up until the daemon hits its open-files limit
+/// ("Too many open files"). Past the cap we shed the accepted connection
+/// immediately — librdkafka simply retries once a slot frees.
+const MAX_INFLIGHT_CONNS: usize = 64;
+
+/// Upper bound on the upstream dial (SOCKS CONNECT + optional broker TLS
+/// handshake). Without it a hung bastion→broker connect blocks a `handle_conn`
+/// forever, leaking the two fds it holds; librdkafka meanwhile gives up after
+/// its own `socket.timeout.ms` (~10s) and reconnects, so the stuck tasks would
+/// otherwise accumulate without bound. Kept at 10s to match that budget.
+const PROXY_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Shared proxy state: how to dial brokers and the real→local listener map.
 struct ProxyShared {
     socks_addr: SocketAddr,
@@ -43,6 +60,9 @@ struct ProxyShared {
     reverse: Mutex<HashMap<u16, (String, u16)>>,
     /// Accept-loop handles, aborted when the tunnel drops.
     handles: Mutex<Vec<JoinHandle<()>>>,
+    /// Caps concurrent in-flight proxy connections (see [`MAX_INFLIGHT_CONNS`]),
+    /// so a reconnect storm against an unreachable broker can't exhaust fds.
+    sem: Arc<Semaphore>,
 }
 
 /// A live SSH-tunnelled Kafka proxy for one cluster. Drop tears down the
@@ -78,6 +98,7 @@ impl BrokerTunnel {
             endpoints: AsyncMutex::new(HashMap::new()),
             reverse: Mutex::new(HashMap::new()),
             handles: Mutex::new(Vec::new()),
+            sem: Arc::new(Semaphore::new(MAX_INFLIGHT_CONNS)),
         });
 
         let mut locals = Vec::new();
@@ -162,10 +183,28 @@ impl ProxyShared {
             loop {
                 match listener.accept().await {
                     Ok((client, _)) => {
+                        // Bound concurrent proxy connections. The permit is held
+                        // for the life of the connection and released when it
+                        // ends; if none is free we shed this connection (close it)
+                        // instead of piling up fds — librdkafka reconnects when a
+                        // slot opens.
+                        let permit = match Arc::clone(&shared.sem).try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::debug!(
+                                    "broker proxy: in-flight cap ({MAX_INFLIGHT_CONNS}) reached — shedding connection"
+                                );
+                                drop(client);
+                                continue;
+                            }
+                        };
                         let shared = shared.clone();
                         let host = host.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_conn(shared, host, port, client).await {
+                            let _permit = permit; // released when the connection ends
+                            if let Err(e) =
+                                handle_conn(shared, host, port, client, PROXY_DIAL_TIMEOUT).await
+                            {
                                 tracing::debug!("broker proxy connection closed: {e}");
                             }
                         });
@@ -187,6 +226,10 @@ impl ProxyShared {
 /// Forward one accepted client connection to the real broker through SOCKS
 /// (with optional TLS), running the framed, rewriting pump.
 ///
+/// `dial_timeout` bounds the upstream SOCKS CONNECT and broker-TLS handshake so
+/// a hung bastion→broker path can't pin this connection's file descriptors
+/// indefinitely (the pump itself unwinds on either side's EOF).
+///
 /// Returns a boxed future: this is part of a recursive cycle (the pump rewrites
 /// `Metadata`, which calls `ensure_listener`, which spawns `handle_conn` again),
 /// and boxing gives the cycle a concrete type so `Send` inference terminates.
@@ -195,11 +238,16 @@ fn handle_conn(
     host: String,
     port: u16,
     client: TcpStream,
+    dial_timeout: Duration,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(async move {
-        let socks = Socks5Stream::connect(shared.socks_addr, (host.as_str(), port))
-            .await
-            .map_err(|e| Error::Upstream(format!("socks dial {host}:{port}: {e}")))?;
+        let socks = tokio::time::timeout(
+            dial_timeout,
+            Socks5Stream::connect(shared.socks_addr, (host.as_str(), port)),
+        )
+        .await
+        .map_err(|_| Error::Upstream(format!("socks dial {host}:{port} timed out")))?
+        .map_err(|e| Error::Upstream(format!("socks dial {host}:{port}: {e}")))?;
 
         if shared.uses_tls {
             let connector = shared
@@ -208,9 +256,9 @@ fn handle_conn(
                 .ok_or_else(|| Error::Internal("tls connector missing".into()))?;
             let server_name = rustls::pki_types::ServerName::try_from(host.clone())
                 .map_err(|_| Error::Invalid(format!("invalid broker hostname: {host}")))?;
-            let tls = connector
-                .connect(server_name, socks)
+            let tls = tokio::time::timeout(dial_timeout, connector.connect(server_name, socks))
                 .await
+                .map_err(|_| Error::Upstream(format!("broker tls handshake {host} timed out")))?
                 .map_err(|e| Error::Upstream(format!("broker tls handshake {host}: {e}")))?;
             pump(client, tls, shared).await
         } else {
@@ -505,6 +553,7 @@ mod tests {
             endpoints: AsyncMutex::new(HashMap::new()),
             reverse: Mutex::new(HashMap::new()),
             handles: Mutex::new(Vec::new()),
+            sem: Arc::new(Semaphore::new(MAX_INFLIGHT_CONNS)),
         });
 
         let (mut client_app, client_proxy) = tokio::io::duplex(64 * 1024);
@@ -543,5 +592,56 @@ mod tests {
         assert_eq!(eps.len(), 1);
         assert_eq!(eps[0].0, "127.0.0.1");
         assert_ne!(eps[0].1, 9094); // remapped to a local listener port
+    }
+
+    /// A hung upstream (a "SOCKS" endpoint that accepts but never speaks — like a
+    /// bastion whose broker dial stalls) must make `handle_conn` give up within
+    /// `dial_timeout` and release its fds, not block forever. This is the leak
+    /// that exhausted the daemon's open-files limit under a reconnect storm.
+    #[tokio::test]
+    async fn handle_conn_times_out_on_hung_upstream() {
+        use std::time::Instant;
+
+        // Fake SOCKS server: accept connections and hold them open, silent.
+        let socks = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let socks_addr = socks.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = socks.accept().await {
+                held.push(s); // never respond to the SOCKS handshake
+            }
+        });
+
+        let shared = Arc::new(ProxyShared {
+            socks_addr,
+            uses_tls: false,
+            tls: None,
+            endpoints: AsyncMutex::new(HashMap::new()),
+            reverse: Mutex::new(HashMap::new()),
+            handles: Mutex::new(Vec::new()),
+            sem: Arc::new(Semaphore::new(MAX_INFLIGHT_CONNS)),
+        });
+
+        // A real client TcpStream to hand the proxy (the "librdkafka" side).
+        let front = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let front_addr = front.local_addr().unwrap();
+        let client = TcpStream::connect(front_addr).await.unwrap();
+        let _server_side = front.accept().await.unwrap();
+
+        let start = Instant::now();
+        let res = handle_conn(
+            shared,
+            "broker.internal".into(),
+            9094,
+            client,
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(res.is_err(), "a hung upstream dial must error, not hang");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "handle_conn must give up promptly (was {:?})",
+            start.elapsed()
+        );
     }
 }
