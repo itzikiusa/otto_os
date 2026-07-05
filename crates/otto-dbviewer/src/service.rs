@@ -92,9 +92,12 @@ pub fn ensure_read_only(engine: Engine, statement: &str) -> Result<()> {
     Ok(())
 }
 
-/// Evict cached SSH tunnels that haven't been used for longer than this on the
-/// next `resolve` — dropping them kills the `ssh` child via `SshTunnel::Drop`.
-const TUNNEL_IDLE_TTL: Duration = Duration::from_secs(600);
+/// Evict cached SSH tunnels idle longer than this — dropping them kills the
+/// `ssh` child via `SshTunnel::Drop`. Enforced both lazily (on the next
+/// `resolve`) and by a background reaper (`reap_idle`) so an idle daemon doesn't
+/// keep an orphaned `ssh` child alive indefinitely. Conservative window: a
+/// reconnect on the next query after a long idle is transparent to the user.
+const TUNNEL_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Table cap for [`DbViewerService::schema_context`] — the COMPLETE schema fed to
 /// the DB Assistant agent. Generous (a model wants the whole picture) but bounded:
@@ -283,6 +286,21 @@ impl DbViewerService {
     /// Idle tunnels are evicted on the way through, which drops their `ssh`
     /// child. Kept alive in the cache after this returns — the caller's clone is
     /// just an extra reference, not the sole owner.
+    /// Evict cached SSH tunnels idle longer than [`TUNNEL_IDLE_TTL`], killing
+    /// their `ssh` child (via `SshTunnel::Drop`). The lazy sweep in `tunnel_for`
+    /// only fires when a DB op happens, so on an idle daemon a tunnel + its `ssh`
+    /// child would otherwise linger indefinitely; a background reaper calls this
+    /// on a timer. An in-flight query holds its own `Arc<SshTunnel>` clone (and
+    /// refreshes `last_used`), so a live tunnel is never reaped out from under it.
+    /// Returns the number of tunnels reaped.
+    pub async fn reap_idle(&self) -> usize {
+        let now = Instant::now();
+        let mut tunnels = self.tunnels.lock().await;
+        let before = tunnels.len();
+        tunnels.retain(|_, c| now.duration_since(c.last_used) <= TUNNEL_IDLE_TTL);
+        before - tunnels.len()
+    }
+
     async fn tunnel_for(
         &self,
         conn_id: &Id,

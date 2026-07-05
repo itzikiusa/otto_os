@@ -31,6 +31,10 @@ struct Pooled {
     /// Held so the SSH tunnel/proxy stays up for the life of the pooled client.
     tunnel: Option<Arc<BrokerTunnel>>,
     created: Instant,
+    /// Last time `client_for` handed this entry out. Drives the idle reaper
+    /// (`reap_idle`) so an untouched cluster's librdkafka handles + SSH SOCKS
+    /// child are torn down instead of lingering until edit/delete/restart.
+    last_used: Instant,
 }
 
 pub struct BrokersService {
@@ -390,9 +394,13 @@ impl BrokersService {
     /// Pooled client for a cluster (reconnects if missing, stale, or its tunnel
     /// has died).
     async fn client_for(&self, id: &Id) -> Result<(Arc<KafkaClient>, Option<Arc<SchemaRegistry>>)> {
-        if let Some(p) = self.pool.get(id) {
+        // `get_mut` so a cache hit refreshes `last_used` (keeps an actively-used
+        // cluster off the idle reaper). The guard is dropped before the miss path
+        // touches the same shard, so there's no self-deadlock.
+        if let Some(mut p) = self.pool.get_mut(id) {
             let tunnel_ok = p.tunnel.as_ref().is_none_or(|t| t.is_alive());
             if p.created.elapsed() < POOL_TTL && tunnel_ok {
+                p.last_used = Instant::now();
                 return Ok((p.client.clone(), p.registry.clone()));
             }
         }
@@ -403,16 +411,42 @@ impl BrokersService {
                 .await
                 .map_err(join)??,
         );
+        let now = Instant::now();
         self.pool.insert(
             id.clone(),
             Pooled {
                 client: client.clone(),
                 registry: registry.clone(),
                 tunnel,
-                created: Instant::now(),
+                created: now,
+                last_used: now,
             },
         );
         Ok((client, registry))
+    }
+
+    /// Evict pooled clients (and their SSH tunnels) idle longer than `idle`.
+    /// Nothing else closes an untouched cluster's librdkafka handles or its
+    /// `ssh -D` SOCKS child — `POOL_TTL` is only a reconnect gate checked on the
+    /// next `client_for`, which an idle cluster never triggers. A background
+    /// reaper calls this on a timer so those resources are reclaimed. Returns the
+    /// number of clusters reaped.
+    pub fn reap_idle(&self, idle: Duration) -> usize {
+        let stale: Vec<Id> = self
+            .pool
+            .iter()
+            .filter(|e| e.value().last_used.elapsed() > idle)
+            .map(|e| e.key().clone())
+            .collect();
+        for id in &stale {
+            // Dropping the `Pooled` frees the librdkafka handles; dropping the
+            // tunnel entry (the other Arc holder) tears down the ssh child +
+            // proxy tasks. Leave the sampler/negative-cache — cheap in-memory
+            // state that a re-open reuses.
+            self.pool.remove(id);
+            self.tunnels.remove(id);
+        }
+        stale.len()
     }
 
     // ---- operations -------------------------------------------------------

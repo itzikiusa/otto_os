@@ -241,6 +241,40 @@ async fn run(cfg: Config) -> Result<(), String> {
         // Persist an audit row for every broker write (produce/delete/config/offset-reset).
         Some(otto_state::BrokerAuditRepo::new(pool.clone())),
     ));
+    // Idle-connection reapers. Unlike agent sessions, nothing else closes an
+    // idle Kafka client or DB SSH tunnel — POOL_TTL/lazy-eviction only fire on
+    // the *next* access, which a truly idle cluster/connection never triggers.
+    // So on a mostly-idle daemon the librdkafka handles + orphaned `ssh` children
+    // would linger until edit/delete/restart. Sweep on a timer (every 5 min) and
+    // evict anything idle past the conservative ~30 min window.
+    {
+        let brokers = Arc::clone(&brokers);
+        let interval = std::time::Duration::from_secs(5 * 60); // every 5 min
+        let idle = std::time::Duration::from_secs(30 * 60); // 30 min idle
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let n = brokers.reap_idle(idle);
+                if n > 0 {
+                    tracing::info!("brokers: reaped {n} idle cluster connection(s)");
+                }
+            }
+        });
+    }
+    {
+        let db = Arc::clone(&db_explorer);
+        let interval = std::time::Duration::from_secs(5 * 60); // every 5 min
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let n = db.reap_idle().await;
+                if n > 0 {
+                    tracing::info!("db explorer: reaped {n} idle SSH tunnel(s)");
+                }
+            }
+        });
+    }
+
     // MCP Control Plane: outbound MCP client + governance pipeline. Server config
     // is the augmented `mcp_servers`; secrets resolve from the same Keychain.
     let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
