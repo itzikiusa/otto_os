@@ -32,8 +32,11 @@ use crate::types::{
 
 const DEFAULT_MAX_ROWS: usize = 1000;
 /// Max pooled connections per cached config. Small — the DB Explorer issues
-/// short, mostly-serial introspection/query calls per connection.
-const POOL_MAX_CONNECTIONS: u32 = 4;
+/// short introspection/query calls per connection. Sized to let the completion
+/// snapshot's five independent `information_schema` queries all run in a single
+/// concurrent wave (`build_completion_snapshot` fires them via `tokio::join!`)
+/// with a connection to spare for a user query racing the build.
+const POOL_MAX_CONNECTIONS: u32 = 6;
 /// Drop idle pooled connections after this long so a long-lived cached pool
 /// doesn't pin server-side connections forever.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1082,17 +1085,18 @@ impl MysqlDriver {
         use crate::complete::{FieldSnap, ObjKind, ObjectSnap, Rank, RoutineSnap, SchemaSnapshot};
 
         let pool = self.pool(cfg).await.ok()?;
-        let databases: Vec<String> = sqlx::query_as::<_, (String,)>(
-            "SELECT CAST(schema_name AS CHAR) FROM information_schema.schemata ORDER BY schema_name",
-        )
-        .fetch_all(&pool)
-        .await
-        .ok()?
-        .into_iter()
-        .map(|(d,)| d)
-        .collect();
 
+        // No db scope ⇒ only the (cheap) database list is needed.
         if db.is_empty() {
+            let databases: Vec<String> = sqlx::query_as::<_, (String,)>(
+                "SELECT CAST(schema_name AS CHAR) FROM information_schema.schemata ORDER BY schema_name",
+            )
+            .fetch_all(&pool)
+            .await
+            .ok()?
+            .into_iter()
+            .map(|(d,)| d)
+            .collect();
             return Some(SchemaSnapshot {
                 databases,
                 objects: Vec::new(),
@@ -1100,53 +1104,66 @@ impl MysqlDriver {
             });
         }
 
-        let tables = sqlx::query_as::<_, (String, String)>(
-            "SELECT CAST(table_name AS CHAR), table_type FROM information_schema.tables \
-             WHERE table_schema = ? ORDER BY table_name",
-        )
-        .bind(db)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
+        // Five INDEPENDENT information_schema introspections: databases, the
+        // scoped db's tables/views, its columns, its routines, and its index
+        // membership. They were once run sequentially — five serial round-trips,
+        // which over a remote / tunneled MySQL (a real RTT per query) is what made
+        // the FIRST completion after a (re)connect stall ~1s+. Fire them all
+        // concurrently so the cold snapshot build costs ~one round-trip of
+        // wall-clock instead of five; the pool is sized (POOL_MAX_CONNECTIONS) to
+        // run them in a single wave. Per-query failures still degrade to empty
+        // (`unwrap_or_default`), exactly as before; only a failed schemata list
+        // (the one hard dependency) aborts the whole snapshot.
+        let (databases, tables, cols, routines_raw, stats) = tokio::join!(
+            sqlx::query_as::<_, (String,)>(
+                "SELECT CAST(schema_name AS CHAR) FROM information_schema.schemata ORDER BY schema_name",
+            )
+            .fetch_all(&pool),
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT CAST(table_name AS CHAR), table_type FROM information_schema.tables \
+                 WHERE table_schema = ? ORDER BY table_name",
+            )
+            .bind(db)
+            .fetch_all(&pool),
+            sqlx::query_as::<_, (String, String, String)>(
+                "SELECT CAST(table_name AS CHAR), CAST(column_name AS CHAR), CAST(column_type AS CHAR) \
+                 FROM information_schema.columns WHERE table_schema = ? \
+                 ORDER BY table_name, ordinal_position",
+            )
+            .bind(db)
+            .fetch_all(&pool),
+            // Stored procedures / functions — for routine-name completion after
+            // `SHOW CREATE PROCEDURE`/`FUNCTION`, `CALL`, `DROP PROCEDURE`/`FUNCTION`.
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT CAST(routine_name AS CHAR), CAST(routine_type AS CHAR) \
+                 FROM information_schema.routines WHERE routine_schema = ? ORDER BY routine_name",
+            )
+            .bind(db)
+            .fetch_all(&pool),
+            // (table, column) → strongest index rank, from information_schema.statistics
+            // (which lists every index member column, so composite-index members all rank).
+            sqlx::query_as::<_, (String, String, String, i64)>(
+                "SELECT CAST(table_name AS CHAR), CAST(column_name AS CHAR), \
+                 CAST(index_name AS CHAR), non_unique FROM information_schema.statistics \
+                 WHERE table_schema = ?",
+            )
+            .bind(db)
+            .fetch_all(&pool),
+        );
 
-        let cols = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT CAST(table_name AS CHAR), CAST(column_name AS CHAR), CAST(column_type AS CHAR) \
-             FROM information_schema.columns WHERE table_schema = ? \
-             ORDER BY table_name, ordinal_position",
-        )
-        .bind(db)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
-        // Stored procedures / functions — for routine-name completion after
-        // `SHOW CREATE PROCEDURE`/`FUNCTION`, `CALL`, `DROP PROCEDURE`/`FUNCTION`.
-        let routines: Vec<RoutineSnap> = sqlx::query_as::<_, (String, String)>(
-            "SELECT CAST(routine_name AS CHAR), CAST(routine_type AS CHAR) \
-             FROM information_schema.routines WHERE routine_schema = ? ORDER BY routine_name",
-        )
-        .bind(db)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(name, rtype)| RoutineSnap {
-            name,
-            is_function: rtype.eq_ignore_ascii_case("FUNCTION"),
-        })
-        .collect();
-
-        // (table, column) → strongest index rank, from information_schema.statistics
-        // (which lists every index member column, so composite-index members all rank).
-        let stats = sqlx::query_as::<_, (String, String, String, i64)>(
-            "SELECT CAST(table_name AS CHAR), CAST(column_name AS CHAR), \
-             CAST(index_name AS CHAR), non_unique FROM information_schema.statistics \
-             WHERE table_schema = ?",
-        )
-        .bind(db)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
+        // Databases is the one hard dependency; the rest degrade to empty.
+        let databases: Vec<String> = databases.ok()?.into_iter().map(|(d,)| d).collect();
+        let tables = tables.unwrap_or_default();
+        let cols = cols.unwrap_or_default();
+        let routines: Vec<RoutineSnap> = routines_raw
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, rtype)| RoutineSnap {
+                name,
+                is_function: rtype.eq_ignore_ascii_case("FUNCTION"),
+            })
+            .collect();
+        let stats = stats.unwrap_or_default();
 
         let mut rank: HashMap<(String, String), Rank> = HashMap::new();
         for (t, c, idx, non_unique) in stats {
@@ -1526,7 +1543,25 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
     if let Ok(Some(val)) = row.try_get::<Option<Value>, _>(idx) {
         return val;
     }
-    // Text (also covers most date/time types serialized to string).
+    // Temporal types (DATETIME / TIMESTAMP / DATE / TIME). sqlx's MySQL driver
+    // does NOT decode these as String or Vec<u8> — their `Type::compatible` check
+    // rejects the temporal SQL types — so without an explicit chrono attempt they
+    // fall through to Null (the old "text covers date/time" assumption was wrong,
+    // which is why raw `SELECT *` datetime columns rendered as null). Mirror the
+    // Postgres driver and shape to an ISO-ish string. The compatibility gate means
+    // these only fire for real temporal columns; a VARCHAR holding a date-like
+    // string still falls through to the String branch below.
+    use sqlx::types::chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    if let Ok(v) = row.try_get::<Option<NaiveDateTime>, _>(idx) {
+        return temporal_to_json(v);
+    }
+    if let Ok(v) = row.try_get::<Option<NaiveDate>, _>(idx) {
+        return temporal_to_json(v);
+    }
+    if let Ok(v) = row.try_get::<Option<NaiveTime>, _>(idx) {
+        return temporal_to_json(v);
+    }
+    // Text (covers VARCHAR/TEXT/ENUM and the CAST-to-CHAR helper queries).
     if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
         return string_to_json(v);
     }
@@ -1548,6 +1583,14 @@ fn int_to_json(v: Option<i64>) -> Value {
 /// Pure shaping of an optional string into a JSON value (Null if absent).
 fn string_to_json(v: Option<String>) -> Value {
     v.map(Value::String).unwrap_or(Value::Null)
+}
+
+/// Pure shaping of an optional temporal value (DATETIME/DATE/TIME decoded via
+/// chrono) into a JSON string via its `Display` — `NaiveDateTime` renders as
+/// `YYYY-MM-DD HH:MM:SS` (MySQL's native form), `NaiveDate`/`NaiveTime` as their
+/// date/time parts. Null if absent.
+fn temporal_to_json<T: ToString>(v: Option<T>) -> Value {
+    v.map(|t| Value::String(t.to_string())).unwrap_or(Value::Null)
 }
 
 /// Pure shaping of an optional f64 (Null if absent or non-finite).
@@ -1790,5 +1833,30 @@ mod tests {
         assert_eq!(float_to_json(Some(1.5)), serde_json::json!(1.5));
         assert_eq!(float_to_json(None), Value::Null);
         assert_eq!(float_to_json(Some(f64::NAN)), Value::Null);
+    }
+
+    #[test]
+    fn value_shaping_temporal() {
+        use sqlx::types::chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+        // DATETIME → "YYYY-MM-DD HH:MM:SS" (space separator, MySQL's native form).
+        let dt = NaiveDate::from_ymd_opt(2024, 1, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 0)
+            .unwrap();
+        assert_eq!(
+            temporal_to_json(Some(dt)),
+            serde_json::json!("2024-01-15 10:30:00")
+        );
+        // DATE → "YYYY-MM-DD", TIME → "HH:MM:SS".
+        assert_eq!(
+            temporal_to_json(Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())),
+            serde_json::json!("2024-01-15")
+        );
+        assert_eq!(
+            temporal_to_json(Some(NaiveTime::from_hms_opt(10, 30, 0).unwrap())),
+            serde_json::json!("10:30:00")
+        );
+        // Absent → Null (temporal column with NULL value).
+        assert_eq!(temporal_to_json::<NaiveDateTime>(None), Value::Null);
     }
 }
