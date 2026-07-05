@@ -3611,6 +3611,30 @@ async fn execute_node(
                     ));
                     continue;
                 }
+                // Push the source branch to the remote FIRST — `create_pr_for_repo`
+                // only points the PR at an EXISTING remote head, and a workflow
+                // branch lives only in the run's worktree until now (that's the
+                // "source: branch not found" the provider returns otherwise). Uses
+                // the repo's git-account token; mirrors run_service::open_pr. On
+                // failure we note it, so the reason is visible instead of a bare
+                // "branch not found" from the create call.
+                let push_token = match repo.git_account_id.as_ref() {
+                    Some(aid) => match ctx.git_store.get_account(aid).await {
+                        Ok(acc) => ctx.secrets.get(&acc.token_ref).ok().flatten(),
+                        Err(_) => None,
+                    },
+                    None => None,
+                };
+                match otto_git::LocalGit::new(&wt).push(push_token).await {
+                    Ok(_) => logs.push(format!(
+                        "git_pr: pushed {} to remote for {}",
+                        draft.source_branch, repo.name
+                    )),
+                    Err(e) => notes.push(format!(
+                        "{}: push of {} failed: {e}",
+                        repo.name, draft.source_branch
+                    )),
+                }
                 let req = otto_core::api::CreatePrReq {
                     title: draft.title.clone(),
                     description: draft.description.clone(),
