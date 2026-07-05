@@ -15,6 +15,8 @@
   import ConnectionImportDialog from '../connections/ConnectionImportDialog.svelte';
   import SftpBrowser from '../connections/SftpBrowser.svelte';
   import ClusterForm from '../brokers/ClusterForm.svelte';
+  import ClusterViewer from '../brokers/ClusterViewer.svelte';
+  import Terminal from '../../lib/components/Terminal.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
@@ -455,7 +457,15 @@
     editingCluster = cl;
     clusterFormOpen = true;
   }
+  // Open a Kafka cluster as a workbench tab (in place, next to the DB tabs) —
+  // the brokers store owns the tab list + selection; `focusKafka` points the main
+  // area at it. No navigation: the viewer renders right here.
   function openCluster(cl: BrokerCluster): void {
+    brokers.select(cl.id);
+    database.focusKafka(cl.id);
+  }
+  // Escape hatch: open the cluster in the standalone Message Brokers page.
+  function openClusterStandalone(cl: BrokerCluster): void {
     brokers.select(cl.id);
     router.go('brokers');
   }
@@ -474,9 +484,14 @@
   }
 
   /** Open an ssh/custom profile (or a DB kind's CLI client) as a live terminal
-   *  session beside the agents — the Connections-page behavior, now a row
-   *  action of the unified tree. */
+   *  tab in the workbench — the terminal renders in place, seamlessly, like the
+   *  DB kinds. The session is also registered in the Agents list. */
   async function openTerminal(c: Connection): Promise<void> {
+    // Already open as a workbench tab → just focus it (don't spawn a 2nd session).
+    if (database.sshTabs.some((t) => t.connId === c.id)) {
+      database.focusSsh(c.id);
+      return;
+    }
     const wsId = ws.currentId;
     if (!wsId) {
       toasts.error('No workspace', 'Create or select a workspace to attach the session to');
@@ -487,12 +502,29 @@
       const session = await api.post<Session>(`/connections/${c.id}/open`, {
         workspace_id: wsId,
       });
-      ws.addSession(session);
-      router.go(`agents/${session.id}`);
+      // Open it in place as a workbench tab (like the DB kinds). Deliberately NOT
+      // registered via `ws.addSession` — that would navigate to the Agents view
+      // and surface the terminal there. The connection lives only in this hub; the
+      // session is killed when the tab closes (see `closeSshTerminal`).
+      database.addSshTab({ connId: c.id, sessionId: session.id, name: c.name, kind: c.kind });
     } catch (e) {
       toasts.error('Open failed', e instanceof Error ? e.message : String(e));
     } finally {
       opening[c.id] = false;
+    }
+  }
+
+  /** Close an SSH/custom terminal tab and kill its underlying session so it
+   *  doesn't linger on the daemon (it isn't tracked in the Agents list). */
+  async function closeSshTerminal(connId: string): Promise<void> {
+    const tab = database.sshTabs.find((t) => t.connId === connId);
+    database.closeSshTab(connId);
+    if (tab) {
+      try {
+        await api.del(`/sessions/${tab.sessionId}`);
+      } catch {
+        // best-effort: the tab is gone from the workbench regardless
+      }
     }
   }
   async function deleteConnection(c: Connection): Promise<void> {
@@ -631,6 +663,35 @@
       .filter((c): c is NonNullable<typeof c> => c != null),
   );
 
+  // The unified workbench renders three kinds of tab: DB connections (openConns),
+  // Kafka clusters (brokers store), and ssh/custom terminals (database.sshTabs).
+  const hasAnyTab = $derived(
+    openConns.length > 0 || brokers.openClusters.length > 0 || database.sshTabs.length > 0,
+  );
+  // The cluster / ssh session backing the active non-DB pane (null when a DB tab
+  // is focused, or when the backing tab was closed out from under the pane).
+  const activeCluster = $derived(
+    database.activePane?.kind === 'kafka'
+      ? (brokers.openClusters.find((c) => c.id === database.activePane!.id) ?? null)
+      : null,
+  );
+  const activeSsh = $derived(
+    database.activePane?.kind === 'ssh'
+      ? (database.sshTabs.find((t) => t.connId === database.activePane!.id) ?? null)
+      : null,
+  );
+
+  // Close a Kafka cluster tab; follow the brokers store's neighbour reselection
+  // (or drop back to the DB workbench when no clusters remain open).
+  function closeKafkaTab(id: string): void {
+    const wasActive = database.activePane?.kind === 'kafka' && database.activePane.id === id;
+    brokers.close(id);
+    if (wasActive) {
+      if (brokers.selectedId) database.focusKafka(brokers.selectedId);
+      else database.activePane = null;
+    }
+  }
+
   function fmtAgo(iso: string): string {
     const ms = Date.now() - new Date(iso).getTime();
     const s = Math.floor(ms / 1000);
@@ -738,22 +799,22 @@
   {/if}
 
   <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
-    {#if !database.selectedConnId}
+    {#if !hasAnyTab}
       <EmptyState
         icon="db"
-        title="Pick a database connection"
-        body={database.connections.length === 0
-          ? 'No MySQL, Redis, MongoDB or ClickHouse connections in this workspace yet.'
-          : 'Choose a connection on the left to browse its schema and run queries.'}
+        title="Open a connection"
+        body={database.connections.length === 0 && brokers.clusters.length === 0
+          ? 'No database, Kafka, SSH or custom connections in this workspace yet.'
+          : 'Choose a connection, Kafka cluster or SSH host on the left to open it here.'}
         actionLabel={database.connections.length === 0 ? 'New connection' : undefined}
         onaction={database.connections.length === 0 ? newConnection : undefined}
       />
     {:else}
-      <!-- Top-level connection tabs (one per open connection) -->
+      <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
       <div class="conn-tabs" role="tablist" aria-label="Open connections">
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
-          <div class="conn-tab" class:active={database.selectedConnId === c.id} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="tab" tabindex="-1" aria-selected={database.selectedConnId === c.id} oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
+          <div class="conn-tab" class:active={database.activePane === null && database.selectedConnId === c.id} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="tab" tabindex="-1" aria-selected={database.activePane === null && database.selectedConnId === c.id} oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
             <button class="conn-tab-main" onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
               {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
@@ -778,8 +839,53 @@
             </button>
           </div>
         {/each}
+        {#each brokers.openClusters as cl (cl.id)}
+          <div class="conn-tab" class:active={database.activePane?.kind === 'kafka' && database.activePane.id === cl.id} class:prod={isProdConn(cl)} role="tab" tabindex="-1" aria-selected={database.activePane?.kind === 'kafka' && database.activePane.id === cl.id} oncontextmenu={(e) => { e.preventDefault(); ctxMenu.show(e, [
+              { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
+              { separator: true },
+              { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
+              { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
+            ]); }}>
+            <button class="conn-tab-main" onclick={() => openCluster(cl)} title={cl.name}>
+              <span class="conn-tab-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
+              <span class="conn-tab-name ellipsis">{cl.name}</span>
+              {#if envBadge(cl)}<span class="env-badge mono" class:prod={isProdConn(cl)}>{envBadge(cl)}</span>{/if}
+            </button>
+            <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); closeKafkaTab(cl.id); }} aria-label="Close cluster tab" title="Close">
+              <Icon name="x" size={11} />
+            </button>
+          </div>
+        {/each}
+        {#each database.sshTabs as s (s.connId)}
+          <div class="conn-tab" class:active={database.activePane?.kind === 'ssh' && database.activePane.id === s.connId} role="tab" tabindex="-1" aria-selected={database.activePane?.kind === 'ssh' && database.activePane.id === s.connId}>
+            <button class="conn-tab-main" onclick={() => database.focusSsh(s.connId)} title={s.name}>
+              <span class="conn-tab-glyph {s.kind}"><Icon name={engineGlyph(s.kind)} size={12} /></span>
+              <span class="conn-tab-name ellipsis">{s.name}</span>
+            </button>
+            <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); void closeSshTerminal(s.connId); }} aria-label="Close terminal tab" title="Close">
+              <Icon name="x" size={11} />
+            </button>
+          </div>
+        {/each}
       </div>
 
+      {#if database.activePane?.kind === 'kafka'}
+        {#if activeCluster}
+          <ClusterViewer cluster={activeCluster} onEdit={editCluster} onRemove={(c) => void deleteCluster(c)} />
+        {:else}
+          <EmptyState icon="box" title="Cluster closed" body="This Kafka cluster tab is no longer open." />
+        {/if}
+      {:else if database.activePane?.kind === 'ssh'}
+        {#if activeSsh}
+          <div class="term-pane">
+            {#key activeSsh.sessionId}
+              <Terminal sessionId={activeSsh.sessionId} />
+            {/key}
+          </div>
+        {:else}
+          <EmptyState icon="terminal" title="Session closed" body="This terminal tab is no longer open." />
+        {/if}
+      {:else if database.selectedConnId}
       {#if database.isGuarded}
         <div class="guard-banner" class:prod={database.isProd}>
           <Icon name={database.isProd ? 'zap' : 'key'} size={13} />
@@ -859,6 +965,13 @@
           </aside>
         {/if}
       </div>
+      {:else}
+        <EmptyState
+          icon="db"
+          title="Pick a connection"
+          body="Choose a connection on the left to open it here."
+        />
+      {/if}
     {/if}
   </div>
 </div>
@@ -974,7 +1087,8 @@
     oncontextmenu={(e) => {
       e.preventDefault();
       ctxMenu.show(e, [
-        { label: 'Open in Message Brokers', icon: 'split', action: () => openCluster(cl) },
+        { label: 'Open', icon: 'split', action: () => openCluster(cl) },
+        { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
         { separator: true },
         { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
         { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
@@ -984,7 +1098,7 @@
     <button
       class="conn-item"
       onclick={() => openCluster(cl)}
-      title="{cl.name} · kafka{isProdConn(cl) ? ' · PRODUCTION' : cl.read_only ? ' · read-only' : ''} — opens Message Brokers"
+      title="{cl.name} · kafka{isProdConn(cl) ? ' · PRODUCTION' : cl.read_only ? ' · read-only' : ''} — opens here"
     >
       <span class="conn-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
       <span class="conn-name">{cl.name}</span>
@@ -1955,6 +2069,19 @@
     padding: 12px 16px 16px;
     display: flex;
     flex-direction: column;
+  }
+  /* SSH/custom terminal pane — fills the workbench body below the tab strip. */
+  .term-pane {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    overflow: hidden;
+  }
+  .term-pane :global(> *) {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
   }
   /* Draggable divider between the view and the assistant pane. */
   .assist-divider {

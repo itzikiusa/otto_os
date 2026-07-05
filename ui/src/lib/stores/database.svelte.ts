@@ -387,6 +387,16 @@ export type DbMainTab = 'query' | 'builder' | 'structure' | 'diagram' | 'dashboa
  *  others are per-connection views of the active connection. */
 export type DbSideTab = 'connections' | 'schema' | 'saved' | 'history';
 
+/** An ssh/custom profile opened as a workbench tab, bound to a live PTY session
+ *  so the tab can render a terminal in place (see {@link DatabaseStore.sshTabs}). */
+export interface SshTab {
+  connId: Id;
+  sessionId: Id;
+  name: string;
+  /** Profile kind ('ssh' | 'custom' | a DB kind opened as a CLI client) — drives the tab glyph. */
+  kind: string;
+}
+
 /**
  * Point-in-time copy of a connection's active-session working set, kept so we
  * can switch between open connection tabs without re-fetching. Each field holds
@@ -440,6 +450,20 @@ class DatabaseStore {
   selectedConnId: Id | null = $state(null);
   /** Connections currently open as top-level tabs, in display order. */
   openConnIds: Id[] = $state([]);
+  /**
+   * ssh/custom profiles opened as workbench tabs, each backed by a live PTY
+   * session. Kafka clusters use the `brokers` store's own tab list; DB kinds use
+   * `openConnIds`. The tab strip renders all three so every connection kind opens
+   * seamlessly in the same workbench (see `activePane`).
+   */
+  sshTabs: SshTab[] = $state([]);
+  /**
+   * Which non-DB pane is focused, or `null` when a DB connection tab is active
+   * (the DB workbench keys off `selectedConnId`). Set by the tab strip / tree so
+   * the main area can render the Kafka viewer or an SSH terminal in place instead
+   * of navigating away.
+   */
+  activePane: { kind: 'kafka' | 'ssh'; id: Id } | null = $state(null);
   /**
    * The workspace whose connections currently populate `connections`. Used to
    * distinguish a genuine workspace SWITCH (drop open tabs) from a same-workspace
@@ -1070,6 +1094,10 @@ class DatabaseStore {
         this.selectedConnId = null;
         this.capabilities = null;
         this.schemaRoot = [];
+        // Drop non-DB workbench panes too — their sessions/clusters belong to the
+        // workspace we just left (the brokers store prunes its own cluster tabs).
+        this.sshTabs = [];
+        this.activePane = null;
       } else {
         // Same workspace (or first load): prune any open tab/snapshot/selection
         // whose connection no longer exists, but keep everything still valid.
@@ -1159,6 +1187,9 @@ class DatabaseStore {
    * Snapshots the currently-active connection first so switching back is free.
    */
   async openConnection(id: Id): Promise<void> {
+    // Selecting a DB tab always returns focus to the DB workbench pane, even when
+    // the same connection was already selected behind a Kafka/SSH pane.
+    this.activePane = null;
     if (id === this.selectedConnId) return;
     this.captureSnapshot();
     if (!this.openConnIds.includes(id)) {
@@ -1231,6 +1262,38 @@ class DatabaseStore {
     const neighbor = this.openConnIds[Math.max(0, idx - 1)];
     this.selectedConnId = null;
     void this.openConnection(neighbor);
+  }
+
+  // ── Non-DB workbench panes (Kafka clusters, SSH/custom terminals) ───────────
+
+  /** Focus an already-open Kafka cluster tab (the `brokers` store owns the tab
+   *  list + which cluster is selected; this just points the main area at it). */
+  focusKafka(id: Id): void {
+    this.activePane = { kind: 'kafka', id };
+  }
+
+  /** Focus an already-open SSH/custom terminal tab. */
+  focusSsh(id: Id): void {
+    if (this.sshTabs.some((t) => t.connId === id)) this.activePane = { kind: 'ssh', id };
+  }
+
+  /** Register an ssh/custom profile's freshly-spawned session as a workbench tab
+   *  and focus it. Idempotent per connection (re-opening focuses the live tab). */
+  addSshTab(tab: SshTab): void {
+    if (!this.sshTabs.some((t) => t.connId === tab.connId)) {
+      this.sshTabs = [...this.sshTabs, tab];
+    }
+    this.activePane = { kind: 'ssh', id: tab.connId };
+  }
+
+  /** Close an SSH/custom terminal tab. The session keeps running and stays
+   *  reachable in the Agents list — closing the tab only detaches it from the
+   *  workbench. When it was the focused pane, fall back to the DB workbench. */
+  closeSshTab(connId: Id): void {
+    this.sshTabs = this.sshTabs.filter((t) => t.connId !== connId);
+    if (this.activePane?.kind === 'ssh' && this.activePane.id === connId) {
+      this.activePane = null;
+    }
   }
 
   /**
