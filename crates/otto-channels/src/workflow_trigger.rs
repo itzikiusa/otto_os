@@ -41,4 +41,23 @@ pub trait WorkflowChatTrigger: Send + Sync {
         user: &str,
         text: &str,
     ) -> Option<WorkflowChatAck>;
+
+    /// Returns `Some(ack)` if the message is a CONTROL command (`status` /
+    /// `skip` / `abort`, multi-synonym & case-insensitive) for a workflow run
+    /// currently active on THIS thread — the bridge replies + skips normal
+    /// routing. `None` ⇒ not a control command, or no active run matches this
+    /// thread, so normal routing proceeds. Checked BEFORE `try_start` so a reply
+    /// in a running run's thread controls it instead of starting a new run.
+    async fn try_control(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        chat: &str,
+        thread: Option<&str>,
+        user: &str,
+        text: &str,
+    ) -> Option<WorkflowChatAck> {
+        let _ = (workspace_id, channel, chat, thread, user, text);
+        None
+    }
 }

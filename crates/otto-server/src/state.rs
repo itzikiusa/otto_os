@@ -65,6 +65,11 @@ pub struct ServerCtx {
     /// from the live Slack/Telegram supervisor. `None` until a root user exists
     /// (onboarding); the inbound handler then returns 503.
     pub channel_bridge: Option<Arc<otto_channels::Bridge>>,
+    /// Run ids asked (via a chat `skip` command) to skip their CURRENTLY-running
+    /// step. Consume-once: the engine's per-node poll removes the id, aborts the
+    /// in-flight node, marks it Skipped, and continues to the next node. Distinct
+    /// from cancellation (which stops the whole run).
+    pub wf_skip_current: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub reviews_store: ReviewsRepo,
     /// Per-review cancellation flags for in-flight PR/local reviews (the Cancel
     /// button). A running review threads its flag into the agent recovery loop;

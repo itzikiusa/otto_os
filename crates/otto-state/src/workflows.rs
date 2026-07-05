@@ -306,6 +306,23 @@ impl WorkflowsRepo {
         rows.iter().map(row_to_active_run).collect()
     }
 
+    /// Run ids of ALL in-flight runs (pending|running) across every workspace,
+    /// newest first (bounded). Workflows are global, so a chat reply's origin
+    /// workspace can differ from the run's own workspace — the caller matches a
+    /// run to a thread by its input's channel/chat/thread. Backs chat control
+    /// (`status`/`skip`/`abort`) of a running workflow from its thread.
+    pub async fn list_active_run_ids_global(&self) -> Result<Vec<Id>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM workflow_runs
+             WHERE status IN ('pending','running')
+             ORDER BY started_at DESC LIMIT 200",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("active run ids"))?;
+        Ok(rows)
+    }
+
     // --- node output cache ------------------------------------------------
 
     /// Look up a cached node output by the composite natural key.
@@ -512,6 +529,31 @@ impl WorkflowsRepo {
         .map_err(dberr("update run"))?;
         Ok(rev)
     }
+
+    /// Persist per-node progress WITHOUT touching the run's lifecycle `status`
+    /// or `finished_at`. The engine calls this for its routine in-loop progress
+    /// writes so a concurrent Cancel (the API flips `status` to Canceled) is
+    /// never silently resurrected back to Running by a progress save — the old
+    /// `update_run(.., Running, ..)` did a bare `SET status = ?` and clobbered
+    /// it, so a canceled run "came back" on the next node. Bumps + returns the
+    /// monotonic `rev` like [`update_run`], so callers can still stamp the WS
+    /// event with it.
+    pub async fn update_run_progress(&self, id: &Id, nodes: &[NodeRunState]) -> Result<i64> {
+        let nodes_json =
+            serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
+        let rev: i64 = sqlx::query_scalar(
+            "UPDATE workflow_runs
+             SET nodes_json = ?, rev = rev + 1
+             WHERE id = ?
+             RETURNING rev",
+        )
+        .bind(&nodes_json)
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("update run progress"))?;
+        Ok(rev)
+    }
 }
 
 #[cfg(test)]
@@ -653,5 +695,33 @@ mod tests {
         let got = repo.get_run(&run.id).await.unwrap();
         assert_eq!(got.rev, 3);
         assert_eq!(got.status, RunStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn update_run_progress_never_resurrects_a_canceled_run() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let wf = repo
+            .create(&"ws1".into(), "WF", "", "", &WorkflowGraph::default(), &"u1".into())
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        // Engine marks the run Running, then the API cancels it (terminal write).
+        repo.update_run(&run.id, RunStatus::Running, &[], None, false).await.unwrap();
+        repo.update_run(&run.id, RunStatus::Canceled, &[], Some("canceled"), true)
+            .await
+            .unwrap();
+
+        // A routine progress save lands AFTER the cancel. It must bump rev but
+        // leave the status Canceled — the old `update_run(.., Running, ..)`
+        // would have clobbered it back to Running (the bug this fixes).
+        let rev = repo.update_run_progress(&run.id, &[]).await.unwrap();
+        let got = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(got.status, RunStatus::Canceled, "progress write must not resurrect a canceled run");
+        assert_eq!((rev, got.rev), (3, 3), "progress write still bumps + round-trips the monotonic rev");
     }
 }

@@ -116,7 +116,10 @@ test('context-files sidebar shows the run dir, opens a file, and collapses (R1)'
   await sidebar.getByText('repos.json').click();
   await expect(sidebar.locator('.viewer-pane')).toBeVisible({ timeout: 10_000 });
 
-  // Collapse → strip; expand → sidebar again (same testid, one at a time).
+  // The header toggle collapses the sidebar entirely (no separate rail — that
+  // used to double up against the shell's right bar) and re-expands it. The
+  // toggle is always present with the run; the in-sidebar close button is a
+  // distinct `ctx-collapse`.
   await page.getByTestId('ctx-sidebar-toggle').click();
   await expect(page.getByTestId('ctx-sidebar')).toHaveCount(0);
   await page.getByTestId('ctx-sidebar-toggle').click();

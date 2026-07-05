@@ -66,6 +66,13 @@ pub(crate) struct RepoEntry {
     pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_id: Option<String>,
+    /// The registered ORIGIN repo's display name, filled during resolution — so
+    /// `repos.json` always names the repo the work belongs to even when the run
+    /// was given only a worktree path. A worktree never overrides this: the path
+    /// resolves back to its origin repo (see `resolve_repo_id_for_path`), whose
+    /// identity (name, git account, default branch) is what git-aware steps use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_name: Option<String>,
     /// "branch" | "worktree".
     #[serde(rename = "type")]
     pub kind: String,
@@ -107,6 +114,7 @@ pub(crate) fn parse_repo_entries(v: &Value) -> Vec<RepoEntry> {
         out.push(RepoEntry {
             repo,
             repo_id: get("repo_id"),
+            repo_name: get("repo_name"),
             kind: get("type").unwrap_or_else(|| "worktree".into()),
             name,
             source: get("source"),
@@ -510,6 +518,7 @@ impl RunContextFiles {
                 repos.push(RepoEntry {
                     repo: repo_id.to_string(),
                     repo_id: Some(repo_id.to_string()),
+                    repo_name: None,
                     kind: "worktree".into(),
                     name: worktree.unwrap_or_default().to_string(),
                     source: None,
@@ -718,6 +727,7 @@ mod tests {
         let e = RepoEntry {
             repo: "r".into(),
             repo_id: Some("R1".into()),
+            repo_name: None,
             kind: "branch".into(),
             name: "feat".into(),
             source: None,
@@ -735,6 +745,7 @@ mod tests {
         vec![RepoEntry {
             repo: "otto_os".into(),
             repo_id: Some("r1".into()),
+            repo_name: None,
             kind: "branch".into(),
             name: "feat/x".into(),
             source: Some("main".into()),
@@ -947,6 +958,7 @@ mod tests {
         let ok = RepoEntry {
             repo: "good".into(),
             repo_id: Some("G".into()),
+            repo_name: None,
             kind: "branch".into(),
             name: "feat".into(),
             source: None,
@@ -957,6 +969,7 @@ mod tests {
         let bad = RepoEntry {
             repo: "typo".into(),
             repo_id: None,
+            repo_name: None,
             kind: "branch".into(),
             name: "feat/typo".into(),
             source: None,
@@ -993,6 +1006,7 @@ mod tests {
         f.set_repos(vec![RepoEntry {
             repo: "a".into(),
             repo_id: Some("A".into()),
+            repo_name: None,
             kind: "branch".into(),
             name: "feat".into(),
             source: Some("develop".into()),

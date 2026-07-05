@@ -16,23 +16,28 @@
 
   let { workflowId, workflowName = '', triggers = $bindable([]), ontriggers }: Props = $props();
 
-  // A copy-paste Slack message that triggers THIS workflow by name.
-  const slackSnippet = $derived(
-    `@otto\n` +
+  // A copy-paste chat (Slack/Telegram) message that triggers THIS workflow by
+  // name. Name is pre-filled; the rest are placeholders the user fills in. Copy
+  // it, paste it into a channel where the bot lives, and pin it for reuse. The
+  // bot mention is per-workspace (set in the Slack/Telegram client), so it's a
+  // placeholder here — the parser keys off `Action: Workflow`, not the mention.
+  const chatSnippet = $derived(
+    `@<your-bot>\n` +
       `Action: Workflow\n` +
       `Name: ${workflowName || '<workflow name>'}\n` +
       `Msg: what you want done — instructions for the agents\n` +
-      `Jira ticket: PROJ-1111\n` +
+      `Jira ticket:\n` +
       `Working Directory: ~/path/to/repo\n` +
-      `Relevant Info: ~/path/a, ~/path/b\n` +
+      `Branch: <base branch>, create wt from it\n` +
+      `Relevant Info: ~/other/repo\n` +
       `Goals:\n` +
-      `  - 100% test coverage (services)\n` +
-      `  - under 2 minutes runtime`,
+      `  - goal 1\n` +
+      `  - under 20 minutes`,
   );
   let copied = $state(false);
-  async function copySlack(): Promise<void> {
+  async function copyChat(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(slackSnippet);
+      await navigator.clipboard.writeText(chatSnippet);
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch {
@@ -303,24 +308,30 @@
     </div>
   {/each}
 
-  <!-- Trigger from Slack: a copy-paste message that starts this workflow by name. -->
-  <div class="slack-trig">
+  <!-- Trigger from chat: a copy-paste message that starts this workflow by name.
+       Copy → paste into Slack/Telegram → pin it for one-click reuse. -->
+  <div class="chat-trig">
     <div class="st-head">
-      <span class="tp-title">Trigger from Slack</span>
-      <button class="btn ghost small" onclick={copySlack}>
+      <span class="tp-title">Trigger from chat</span>
+      <button class="btn ghost small" onclick={copyChat}>
         <Icon name={copied ? 'check' : 'copy'} size={12} /> {copied ? 'Copied' : 'Copy'}
       </button>
     </div>
     <p class="st-hint">
-      Post this in a Slack channel where the Otto bot is configured for this
-      workspace. The bot matches the workflow by <strong>Name</strong> and starts a run.
+      Post this in a Slack/Telegram channel where the Otto bot is configured for
+      this workspace, then <strong>pin it</strong> to reuse it. The bot matches the
+      workflow by <strong>Name</strong> and starts a run.
     </p>
-    <pre class="st-snip">{slackSnippet}</pre>
+    <pre class="st-snip">{chatSnippet}</pre>
+    <p class="st-hint">
+      Reply <code>help</code> in the thread for all commands;
+      <code>status</code> / <code>skip</code> / <code>abort</code> control a running run.
+    </p>
   </div>
 </div>
 
 <style>
-  .slack-trig {
+  .chat-trig {
     margin-top: 8px;
     padding-top: 10px;
     border-top: 1px solid var(--border);

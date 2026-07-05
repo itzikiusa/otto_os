@@ -44,6 +44,8 @@ const LS = {
   dbDockWidth: 'otto_db_dock_width',
   wfCtx: 'otto_wf_ctx_open',
   wfCtxWidth: 'otto_wf_ctx_width',
+  wfCtxTab: 'otto_wf_ctx_tab',
+  wfSideWidth: 'otto_wf_side_width',
   runDetailH: 'otto_wf_run_detail_h',
   clientId: 'otto_client_id',
   sessionIsolation: 'otto_session_isolation',
@@ -122,6 +124,9 @@ function clampRail(px: number): number {
 function clampWfCtx(px: number): number {
   return Math.max(WF_CTX_MIN, Math.min(WF_CTX_MAX, Math.round(px)));
 }
+function clampWfSide(px: number): number {
+  return Math.max(200, Math.min(600, Math.round(px)));
+}
 function clampRunDetail(px: number): number {
   const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
   const max = Math.max(RUN_DETAIL_MIN, Math.round(vh * 0.85));
@@ -140,6 +145,9 @@ class UiStore {
   // Workflow run "Context files" sidebar: defaults open, resizable, desktop-only.
   wfCtxOpen = $state(lsGet(LS.wfCtx) !== '0');
   wfCtxWidth = $state(clampWfCtx(Number(lsGet(LS.wfCtxWidth)) || 340));
+  // Right sidebar tab (Files | Agents) + resizable left panel width.
+  wfCtxTab: 'files' | 'agents' = $state(lsGet(LS.wfCtxTab) === 'agents' ? 'agents' : 'files');
+  wfSideWidth = $state(clampWfSide(Number(lsGet(LS.wfSideWidth)) || 270));
   // Workflow run-detail (inspector) resizable max-height cap.
   runDetailHeight = $state(clampRunDetail(Number(lsGet(LS.runDetailH)) || 300));
   paletteOpen = $state(false);
@@ -335,6 +343,14 @@ class UiStore {
     lsSet(LS.wfCtx, this.wfCtxOpen ? '1' : '0');
   }
 
+  setWfCtxTab(tab: 'files' | 'agents'): void {
+    this.wfCtxTab = tab;
+    lsSet(LS.wfCtxTab, tab);
+  }
+  setWfSideWidth(px: number): void {
+    this.wfSideWidth = clampWfSide(px);
+    lsSet(LS.wfSideWidth, String(this.wfSideWidth));
+  }
   setWfCtxWidth(px: number): void {
     this.wfCtxWidth = clampWfCtx(px);
     lsSet(LS.wfCtxWidth, String(this.wfCtxWidth));

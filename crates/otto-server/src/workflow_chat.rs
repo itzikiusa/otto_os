@@ -10,6 +10,7 @@
 //!    Msg: please do x y z, follow all relevant rules
 //!    Jira ticket: PROJ-1111
 //!    Working Directory: ~/path
+//!    Branch: release/base-branch, create wt from it
 //!    Relevant Info: ~/a, ~/b
 //!    Goals:
 //!      - 100% test coverage
@@ -32,7 +33,8 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use otto_channels::workflow_trigger::{WorkflowChatAck, WorkflowChatTrigger};
-use otto_core::workflows::Workflow;
+use otto_core::event::Event;
+use otto_core::workflows::{NodeStatus, RunStatus, Workflow, WorkflowRun};
 use otto_state::{TriggersRepo, WorkflowTrigger, WorkflowsRepo};
 use serde_json::{json, Value};
 
@@ -51,6 +53,139 @@ fn is_own_ack(text: &str) -> bool {
     text.starts_with(ACK_PREFIX)
 }
 
+/// A control command a user can send in a running workflow's chat thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WfControl {
+    /// Report the run's current step + progress (non-intrusive; never prompts
+    /// the running agent).
+    Status,
+    /// Skip the currently-running step and continue the run.
+    Skip,
+    /// Cancel the run and stop its agents.
+    Abort,
+    /// Print the static command guide (discoverability entry point).
+    Help,
+}
+
+/// One control operation. THE single source of truth: `parse_wf_control` matches
+/// against `synonyms`, and `wf_controls_help` renders `description`/`example` —
+/// add a synonym or an op here and both the parser and the guide stay in sync.
+struct WfOp {
+    canonical: &'static str,
+    variant: WfControl,
+    synonyms: &'static [&'static str],
+    description: &'static str,
+    example: &'static str,
+}
+
+/// The control taxonomy. `?` maps to Status (a quick "what's up"); `help` is the
+/// full guide. Every synonym is unique across ops, so match order is immaterial.
+const WF_OPS: &[WfOp] = &[
+    WfOp {
+        canonical: "status",
+        variant: WfControl::Status,
+        synonyms: &[
+            "status", "status?", "progress", "update", "how's it going",
+            "hows it going", "where are we", "what's the status", "whats the status", "?",
+        ],
+        description: "current step + progress",
+        example: "`status` or `progress`",
+    },
+    WfOp {
+        canonical: "skip",
+        variant: WfControl::Skip,
+        synonyms: &[
+            "skip", "skip step", "skip stage", "skip this", "skip this step", "skip it",
+            "next", "move on",
+        ],
+        description: "skip the current step and continue",
+        example: "`skip` or `next`",
+    },
+    WfOp {
+        canonical: "abort",
+        variant: WfControl::Abort,
+        synonyms: &[
+            "abort", "cancel", "stop", "halt", "kill", "terminate", "cancel run",
+            "stop run", "kill it", "abort run",
+        ],
+        description: "cancel the run and stop its agents",
+        example: "`abort` or `cancel`",
+    },
+    WfOp {
+        canonical: "help",
+        variant: WfControl::Help,
+        synonyms: &["help", "commands", "usage", "options", "what can you do", "how do i", "?help", "h"],
+        description: "this guide",
+        example: "`help`",
+    },
+];
+
+/// The reusable `Action: Workflow` trigger template — the ONE source of truth for
+/// the "start a workflow" section of the help guide (and the shape the parser in
+/// `parse_workflow_command` reads).
+const WF_TRIGGER_TEMPLATE: &str = "@<your-bot>\n\
+Action: Workflow\n\
+Name: <workflow name>\n\
+Msg: <what you want done — instructions for the agents>\n\
+Jira ticket: <optional, e.g. PROJ-123>\n\
+Working Directory: ~/path/to/repo\n\
+Branch: <base branch>, create wt from it\n\
+Relevant Info: ~/other/repo, ~/docs\n\
+Goals:\n\
+  - <goal 1>\n\
+  - <goal 2>";
+
+/// Parse a short chat message into a control command. Slack tokens are stripped,
+/// whitespace normalized, and only SHORT (≤ 48 char) command-like messages match
+/// — a synonym as the whole message or its leading word — so ordinary thread
+/// chatter is ignored. `None` ⇒ not a control command.
+pub fn parse_wf_control(text: &str) -> Option<WfControl> {
+    let norm = strip_slack_tokens(text).to_lowercase();
+    let norm = norm.split_whitespace().collect::<Vec<_>>().join(" ");
+    if norm.is_empty() || norm.chars().count() > 48 {
+        return None;
+    }
+    for op in WF_OPS {
+        for syn in op.synonyms {
+            if norm == *syn || norm.starts_with(&format!("{syn} ")) {
+                return Some(op.variant);
+            }
+        }
+    }
+    None
+}
+
+/// The static control guide (no agent): a copy-pasteable trigger template plus
+/// every control op with its description + example, all derived from the
+/// taxonomy above so it can never drift from what the parser accepts.
+pub fn wf_controls_help() -> String {
+    let mut s = String::new();
+    s.push_str("🛠 *Otto workflow commands*\n\n");
+    s.push_str("*1. Start a workflow* — post this (edit the fields):\n```\n");
+    s.push_str(WF_TRIGGER_TEMPLATE);
+    s.push_str("\n```\n\n");
+    s.push_str("*2. Control a running workflow* — reply in the run's thread:\n");
+    for op in WF_OPS {
+        let others: Vec<&str> =
+            op.synonyms.iter().copied().filter(|x| *x != op.canonical).take(4).collect();
+        let also = if others.is_empty() {
+            String::new()
+        } else {
+            format!(" (also: {})", others.join(", "))
+        };
+        s.push_str(&format!("• *{}* — {} · e.g. {}{}\n", op.canonical, op.description, op.example, also));
+    }
+    s.trim_end().to_string()
+}
+
+/// Last 6 chars of a run id — a compact, human-referenceable tag that
+/// distinguishes concurrent runs of the same workflow in chat.
+fn short_id(id: &str) -> String {
+    let chars: Vec<char> = id.chars().collect();
+    let start = chars.len().saturating_sub(6);
+    chars[start..].iter().collect()
+}
+
 /// A parsed `Action: Workflow` command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowCommand {
@@ -58,6 +193,11 @@ pub struct WorkflowCommand {
     pub msg: String,
     pub jira_ticket: Option<String>,
     pub working_directory: Option<String>,
+    /// Explicit base branch (`Branch:` / `Base:`). When set it becomes the run
+    /// input's `base`, which the engine PINS as the worktree/PR/review base —
+    /// an explicit user instruction, never overridden by the repo's detected
+    /// default branch.
+    pub branch: Option<String>,
     pub relevant_info: Vec<String>,
     pub goals: Vec<String>,
     pub raw: String,
@@ -173,6 +313,12 @@ pub fn parse_workflow_command(text: &str) -> Option<WorkflowCommand> {
         msg: pick(&["msg", "message"]).unwrap_or_default(),
         jira_ticket: pick(&["jira ticket", "jira", "jira_ticket", "ticket"]),
         working_directory: pick(&["working directory", "working dir", "workdir", "cwd"]),
+        // Only the branch name matters here — trailing guidance like
+        // "…, create wt from it" is dropped (the run already creates a worktree);
+        // we keep just the part before the first comma.
+        branch: pick(&["branch", "base", "base branch", "base_branch"])
+            .and_then(|s| s.split(',').next().map(|b| b.trim().to_string()))
+            .filter(|s| !s.is_empty()),
         relevant_info,
         goals,
         raw: text.to_string(),
@@ -328,8 +474,74 @@ impl WorkflowChatTriggerImpl {
 
         let tail = detail.unwrap_or_else(|| "Working through the steps now.".to_string());
         Some(WorkflowChatAck {
-            reply: format!("{ACK_PREFIX} **{}** (run `{}`). {}", wf.name, run.id, tail),
+            reply: format!(
+                "{ACK_PREFIX} **{}** (run `{}`). {} Reply `status` · `skip` · `abort` · `help` in this thread to control it.",
+                wf.name, run.id, tail
+            ),
         })
+    }
+
+    /// Find the active (pending|running) run whose input thread matches this
+    /// inbound message. Workflows are global, so we scan active runs across all
+    /// workspaces and match on the run input's channel/chat/thread (+ origin
+    /// workspace). An exact thread match wins; a channel/chat match on the same
+    /// workspace is the fallback (newest first), so control still finds the run
+    /// when the trigger was a top-level message and the reply is threaded.
+    async fn find_active_run_for_thread(
+        &self,
+        repo: &WorkflowsRepo,
+        workspace_id: &str,
+        channel: &str,
+        chat: &str,
+        thread: Option<&str>,
+    ) -> Option<WorkflowRun> {
+        let ids = repo.list_active_run_ids_global().await.ok()?;
+        let mut fallback: Option<WorkflowRun> = None;
+        for id in ids {
+            let Ok(run) = repo.get_run(&id).await else { continue };
+            let i = &run.input;
+            let str_at = |k: &str| i.get(k).and_then(Value::as_str);
+            let ws_ok = str_at("origin_workspace_id") == Some(workspace_id)
+                || run.workspace_id == workspace_id;
+            if str_at("channel") == Some(channel) && str_at("chat") == Some(chat) && ws_ok {
+                if str_at("thread") == thread {
+                    return Some(run); // exact thread → best match
+                }
+                if fallback.is_none() {
+                    fallback = Some(run); // channel/chat match → newest-first fallback
+                }
+            }
+        }
+        fallback
+    }
+
+    /// A NON-INTRUSIVE status summary built purely from the run's persisted node
+    /// states — never prompts a running agent. Overall status, a per-step line,
+    /// and the running step's latest log line.
+    fn run_status_summary(&self, run: &WorkflowRun) -> String {
+        let short = short_id(&run.id);
+        let name = run.input.get("name").and_then(Value::as_str).unwrap_or("workflow");
+        let mut lines = vec![format!("📊 *{name}* — run `{short}` · {}", run.status.as_str())];
+        for n in &run.nodes {
+            let icon = match n.status {
+                NodeStatus::Success => "✓",
+                NodeStatus::Running => "▶",
+                NodeStatus::Pending => "·",
+                NodeStatus::Error => "✗",
+                NodeStatus::Skipped => "⤼",
+            };
+            let dur = n
+                .duration_ms
+                .map(|ms| format!(" ({:.1}s)", ms as f64 / 1000.0))
+                .unwrap_or_default();
+            lines.push(format!("{icon} {}{}", n.node_id, dur));
+        }
+        if let Some(cur) = run.nodes.iter().find(|n| n.status == NodeStatus::Running) {
+            if let Some(last) = cur.logs.last() {
+                lines.push(format!("… {}", last.chars().take(160).collect::<String>()));
+            }
+        }
+        lines.join("\n")
     }
 }
 
@@ -382,6 +594,11 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                 "prompt": cmd.msg,
                 "jira_ticket": cmd.jira_ticket,
                 "working_directory": cmd.working_directory,
+                // Explicit base branch → the engine pins it as the worktree/PR/
+                // review base (R14). Absent ⇒ each git step resolves the repo's
+                // detected default branch. Honor the user's stated branch; never
+                // silently override it.
+                "base": cmd.branch,
                 "relevant_info": cmd.relevant_info,
                 "goals": cmd.goals,
                 "raw": cmd.raw,
@@ -498,6 +715,70 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
         });
         self.start_named(wf, input, None, channel, chat).await
     }
+
+    async fn try_control(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        chat: &str,
+        thread: Option<&str>,
+        _user: &str,
+        text: &str,
+    ) -> Option<WorkflowChatAck> {
+        let control = parse_wf_control(text)?;
+
+        // Help is the discoverability entry point — reply with the full guide
+        // unconditionally (no active run / workflow binding required).
+        if control == WfControl::Help {
+            return Some(WorkflowChatAck { reply: wf_controls_help() });
+        }
+
+        // status / skip / abort target the run active on THIS thread.
+        let repo = WorkflowsRepo::new(self.ctx.pool.clone());
+        let run = self
+            .find_active_run_for_thread(&repo, workspace_id, channel, chat, thread)
+            .await?;
+        let short = short_id(&run.id);
+        match control {
+            WfControl::Status => Some(WorkflowChatAck { reply: self.run_status_summary(&run) }),
+            WfControl::Skip => {
+                if let Ok(mut s) = self.ctx.wf_skip_current.lock() {
+                    s.insert(run.id.clone());
+                }
+                Some(WorkflowChatAck {
+                    reply: format!("⏭️ Skipping the current step of run `{short}`."),
+                })
+            }
+            WfControl::Abort => {
+                // Same as the Cancel button (routes::workflows::cancel_run): flip
+                // the run to Canceled + emit. The engine's cancel poll then stops
+                // the in-flight node and kills the run's sessions.
+                match repo
+                    .update_run(&run.id, RunStatus::Canceled, &run.nodes, Some("canceled"), true)
+                    .await
+                {
+                    Ok(rev) => {
+                        let _ = self.ctx.events.send(Event::WorkflowRunUpdated {
+                            workspace_id: run.workspace_id.clone(),
+                            run_id: run.id.clone(),
+                            status: "canceled".into(),
+                            node_id: None,
+                            rev,
+                            node: None,
+                            nodes_done: 0,
+                            nodes_total: 0,
+                            waiting_approval: false,
+                        });
+                    }
+                    Err(e) => tracing::warn!("workflow chat abort: update_run failed: {e}"),
+                }
+                Some(WorkflowChatAck {
+                    reply: format!("🛑 Aborting run `{short}` — stopping its agents."),
+                })
+            }
+            WfControl::Help => unreachable!("handled above"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -512,6 +793,7 @@ mod tests {
                     Msg: please do x y z, follow all relevant rules\n\
                     Jira ticket: PROJ-1111\n\
                     Working Directory: ~/repo\n\
+                    Branch: release/base-branch, create wt from it\n\
                     Relevant Info: ~/a, ~/b\n\
                     Goals:\n\
                     - 100% test coverage\n\
@@ -521,8 +803,56 @@ mod tests {
         assert_eq!(cmd.msg, "please do x y z, follow all relevant rules");
         assert_eq!(cmd.jira_ticket.as_deref(), Some("PROJ-1111"));
         assert_eq!(cmd.working_directory.as_deref(), Some("~/repo"));
+        // The explicit base branch is captured; the trailing ", create wt from it"
+        // guidance is dropped — only the branch name survives (honored, never overridden).
+        assert_eq!(cmd.branch.as_deref(), Some("release/base-branch"));
         assert_eq!(cmd.relevant_info, vec!["~/a", "~/b"]);
         assert_eq!(cmd.goals, vec!["100% test coverage", "under 2 minutes runtime"]);
+    }
+
+    #[test]
+    fn parses_control_synonyms() {
+        use WfControl::*;
+        for s in ["status", "STATUS", "progress", "?", "where are we", "status please"] {
+            assert_eq!(parse_wf_control(s), Some(Status), "{s}");
+        }
+        for s in ["skip", "skip step", "next", "move on", "Skip It"] {
+            assert_eq!(parse_wf_control(s), Some(Skip), "{s}");
+        }
+        for s in ["abort", "cancel", "stop", "kill it", "TERMINATE"] {
+            assert_eq!(parse_wf_control(s), Some(Abort), "{s}");
+        }
+        for s in ["help", "commands", "usage", "h", "?help"] {
+            assert_eq!(parse_wf_control(s), Some(Help), "{s}");
+        }
+        // `?` is a quick status, NOT help.
+        assert_eq!(parse_wf_control("?"), Some(Status));
+    }
+
+    #[test]
+    fn ignores_non_control_chatter() {
+        // A longer sentence merely CONTAINING a keyword is not a command (length
+        // guard + whole-word match), so ordinary thread chatter is left alone.
+        assert_eq!(
+            parse_wf_control("can you give me a status report on the whole project please"),
+            None
+        );
+        assert_eq!(
+            parse_wf_control("I think we should stop overengineering this whole thing honestly"),
+            None
+        );
+        assert_eq!(parse_wf_control("just some normal message"), None);
+        assert_eq!(parse_wf_control(""), None);
+    }
+
+    #[test]
+    fn help_guide_lists_every_op_and_the_trigger_template() {
+        let h = wf_controls_help();
+        for op in WF_OPS {
+            assert!(h.contains(op.canonical), "help missing op {}", op.canonical);
+        }
+        assert!(h.contains("Action: Workflow"), "help missing trigger template");
+        assert!(h.contains("Branch:"), "help template missing Branch field");
     }
 
     #[test]

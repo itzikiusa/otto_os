@@ -400,6 +400,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
         skill_review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        wf_skip_current: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         orchestrator: Arc::clone(&orchestrator),
         improve_engine: Arc::clone(&improve_engine),
         context_library: context_library.clone(),

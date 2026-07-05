@@ -265,6 +265,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         issues_store: IssuesRepo::new(pool.clone()),
         integrations_store: IntegrationsRepo::new(pool.clone()),
         channel_bridge: None,
+        wf_skip_current: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         reviews_store: ReviewsRepo::new(pool.clone()),
         findings_store: otto_state::ReviewFindingsRepo::new(pool.clone()),
         finding_events_store: otto_state::FindingEventsRepo::new(pool.clone()),

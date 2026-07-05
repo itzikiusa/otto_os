@@ -50,6 +50,15 @@ const RESUBMIT_EVERY: Duration = Duration::from_secs(8);
 /// Cap on paste attempts (first + re-sends) so a genuinely broken session can't
 /// spin forever inside the confirm window.
 const MAX_SUBMIT_ATTEMPTS: u32 = 4;
+/// How many times to nudge an agent that echoed the CLI's injected reminder
+/// (see [`is_injected_reminder_echo`]) instead of doing the work, before giving
+/// up and returning whatever it produced.
+const MAX_REMINDER_NUDGES: u32 = 2;
+/// Sent when an agent no-ops by parroting the injected skill/agentic-loop
+/// reminder — tells it to actually perform the task and write its handoff.
+const REMINDER_NUDGE: &str = "You have not done the task — you only restated the instructions. \
+Read the referenced context files, DO the actual work now, and write your handoff summary to the \
+required file. Do not repeat or restate these instructions.";
 
 /// Run one turn. Returns `(reply_text, session_id)`. Persist the returned
 /// `session_id` so the next turn resumes the SAME session.
@@ -189,6 +198,7 @@ pub async fn run_session_turn(
     //    claude API error / no progress for `stuck_after` / exit / timeout. Leave
     //    the session OPEN.
     let deadline = Instant::now() + TURN_TIMEOUT;
+    let mut reminder_nudges: u32 = 0;
     loop {
         if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref()) {
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
@@ -198,6 +208,21 @@ pub async fn run_session_turn(
                 if otto_orchestrator::claude_pty::completed_turn_count(&content) > baseline {
                     let text = otto_orchestrator::claude_pty::completed_turn_text(&content)
                         .unwrap_or_default();
+                    // Guard against a DEGENERATE turn: the agent sometimes just
+                    // parrots the CLI's injected skill/agentic-loop reminder ("Now
+                    // write a response to the user. Keep going… Remember to use
+                    // skills…") and ends its turn without doing any work. That is
+                    // never a real reply — nudge it to actually act (bounded), rather
+                    // than accept the echo as the step's output and silently no-op.
+                    if is_injected_reminder_echo(&text) && reminder_nudges < MAX_REMINDER_NUDGES {
+                        reminder_nudges += 1;
+                        // Advance the baseline past this echo so we wait for the
+                        // NEXT (hopefully real) turn instead of re-tripping on it.
+                        baseline = otto_orchestrator::claude_pty::completed_turn_count(&content);
+                        submit_once(&ctx.manager, &sid, REMINDER_NUDGE).await;
+                        tokio::time::sleep(POLL).await;
+                        continue;
+                    }
                     return Ok((text, sid));
                 }
             }
@@ -270,6 +295,27 @@ fn prompt_entered(transcript: &str, needle: &str) -> bool {
     }
 }
 
+/// True when `text` is a DEGENERATE turn that merely echoes the CLI's injected
+/// skill/agentic-loop reminder ("…write a response to the user. Keep going until
+/// the task is fully resolved… Remember to use skills…") instead of doing the
+/// work. A real agent reply never instructs ITSELF to "write a response to the
+/// user", so ≥2 of these signatures in a short reply is a reliable tell. The
+/// length cap keeps a genuine (long) reply that merely mentions "skills" from
+/// tripping it.
+fn is_injected_reminder_echo(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t.len() > 800 {
+        return false;
+    }
+    const SIGS: [&str; 4] = [
+        "write a response to the user",
+        "Keep going until the task is fully resolved",
+        "Remember to use skills",
+        "invoke it with the Skill tool",
+    ];
+    SIGS.iter().filter(|s| t.contains(*s)).count() >= 2
+}
+
 /// The claude JSONL transcript path for this session, or `None` for non-claude
 /// providers (codex/agy don't write a JSONL transcript we can poll).
 fn transcript_path(provider: &str, cwd: &str, psid: Option<&str>) -> Option<std::path::PathBuf> {
@@ -317,5 +363,21 @@ mod tests {
         assert!(!prompt_entered(other, &needle));
         // Empty transcript → not entered (so we keep re-submitting, then fail loud).
         assert!(!prompt_entered("", &needle));
+    }
+
+    #[test]
+    fn detects_injected_reminder_echo() {
+        // The exact degenerate echo we saw in a workflow transcript.
+        let echo = "When a skill applies to your task, invoke it with the Skill tool before you begin. \
+            When multiple skills apply, invoke them together.\n\nNow write a response to the user. \
+            Keep going until the task is fully resolved. Only end your turn when you're confident \
+            everything is working.\n\nRemember to use skills when they are relevant to the given task!";
+        assert!(is_injected_reminder_echo(echo));
+        // A real reply that merely mentions skills once is NOT an echo.
+        assert!(!is_injected_reminder_echo(
+            "I rewrote the legacy test suite onto the new framework; the relevant skills helped."
+        ));
+        // Empty / whitespace is not an echo.
+        assert!(!is_injected_reminder_echo("   "));
     }
 }

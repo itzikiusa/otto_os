@@ -103,6 +103,10 @@ class WorkspaceStore {
         s.meta.source !== 'skillreview' &&
           s.meta.source !== 'product-analysis' &&
           s.meta.source !== 'swarm' &&
+          // Workflow step sessions (incl. review reviewers/summarizer, which are
+          // source:'review') stay out of the tiled grid unless explicitly opened —
+          // they're viewed inline under their run in the Workflows page.
+          s.meta.source !== 'workflow' &&
           s.meta.source !== 'db_assist') ||
         this.openTabs.includes(s.id),
     ),

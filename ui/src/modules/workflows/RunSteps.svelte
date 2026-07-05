@@ -13,8 +13,11 @@
     run: WorkflowRun;
     /** Resolve a node id to a friendly label. */
     nodeName?: (id: string) => string;
+    /** Open a session INLINE (WF page's Agents tab) instead of navigating to the
+     *  global Agents panel. When omitted, falls back to router navigation. */
+    onOpenSession?: (id: string) => void;
   }
-  let { run, nodeName = (id) => id }: Props = $props();
+  let { run, nodeName = (id) => id, onOpenSession }: Props = $props();
 
   // Expansion is USER-owned, id-keyed state: a step that errors auto-opens once
   // (error visibility), but a manual toggle always wins afterward — live run
@@ -84,9 +87,11 @@
     return typeof fromIn === 'string' && fromIn ? fromIn : null;
   }
 
-  /** Navigate to an agent session this step drove (reuses the real router nav). */
+  /** Open an agent session this step drove. Prefers the inline handler (WF page
+   *  Agents tab); falls back to router nav when used outside the WF page. */
   function openSession(id: string): void {
-    ws.navigateToSession(id);
+    if (onOpenSession) onOpenSession(id);
+    else ws.navigateToSession(id);
   }
 
   /** Open the proof pack assembled for this run in the Proof module. */

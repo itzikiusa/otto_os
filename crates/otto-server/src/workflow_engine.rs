@@ -706,13 +706,63 @@ pub async fn run_workflow(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let declared =
+        let mut declared =
             crate::workflow_context::parse_repo_entries(input.get("repos").unwrap_or(&Value::Null));
-        let entries =
+        // No repos declared but a `Working Directory:` was given → derive a single
+        // worktree entry from it, so repos.json is built AT START by looking up the
+        // registered repo AT THAT PATH (a worktree path resolves back to its origin
+        // repo). This honors the originating repository's identity — name, git
+        // account, default branch — instead of a later step publishing a bare,
+        // unnamed entry. Explicit `repos:` declarations are never overridden.
+        if declared.is_empty() {
+            if let Some(wd) = input
+                .get("working_directory")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                declared.push(crate::workflow_context::RepoEntry {
+                    repo: wd.to_string(),
+                    repo_id: None,
+                    repo_name: None,
+                    kind: "worktree".into(),
+                    name: wd.to_string(),
+                    source: None,
+                    worktree: None,
+                    base: None,
+                    error: None,
+                });
+            }
+        }
+        let mut entries =
             resolve_repo_entries(&ctx, &workflow.workspace_id, declared, run_base_hint.as_deref())
                 .await;
+        // Put the work on a clean, ISOLATED checkout of the BASE branch: for a repo
+        // we'd otherwise operate on in the user's own working copy, cut a dedicated
+        // linked worktree from `base` under the data dir and repoint the entry at
+        // it — so agent steps never run on whatever branch the user's checkout
+        // happens to be on. Best-effort + SAFE (only creates a new worktree under
+        // data_dir; never touches the user's checkout). Returns the primary
+        // provisioned worktree to adopt as the run's working directory.
+        let provisioned_cwd = provision_wf_worktrees(&ctx, &run_id, &mut entries).await;
         files.set_repos(entries.clone());
-        seed_input_from_entries(input, &entries)
+        let input = seed_input_from_entries(input, &entries);
+        match provisioned_cwd {
+            Some(wt) => {
+                let mut m = match input {
+                    Value::Object(m) => m,
+                    other => {
+                        let mut m = serde_json::Map::new();
+                        m.insert("input".into(), other);
+                        m
+                    }
+                };
+                // run_cwd + agent nodes follow the provisioned base worktree.
+                m.insert("working_directory".into(), Value::String(wt));
+                Value::Object(m)
+            }
+            None => input,
+        }
     };
     // Fill `prompt` from a chat `msg` when the run didn't set one explicitly —
     // `prompt.md` and every agent-facing step want `prompt`; the trigger only
@@ -810,6 +860,7 @@ pub async fn run_workflow(
     // for repos/branches — input threading loses keys hop by hop.
     let env = RunEnv {
         run_id: run_id.clone(),
+        wf_name: workflow.name.clone(),
         run_cwd: run_cwd.clone(),
         run_base,
         files: files.clone(),
@@ -831,6 +882,9 @@ pub async fn run_workflow(
     // Record which workflow version this run executed (best-effort).
     let _ = repo.set_run_version(&run_id, workflow.version).await;
 
+    // Lifecycle transition Pending→Running (a real status write). Every LATER
+    // in-loop write uses `update_run_progress` (nodes only, no status) so a
+    // concurrent Cancel is never resurrected back to Running (see item 1).
     let rev = repo
         .update_run(&run_id, RunStatus::Running, &states, None, false)
         .await
@@ -895,7 +949,7 @@ pub async fn run_workflow(
             states[idx].status = NodeStatus::Skipped;
             states[idx].logs = vec!["outside run scope".into()];
             let rev = repo
-                .update_run(&run_id, RunStatus::Running, &states, None, false)
+                .update_run_progress(&run_id, &states)
                 .await
                 .unwrap_or(0);
             emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
@@ -923,7 +977,7 @@ pub async fn run_workflow(
                 states[idx].logs = vec!["skipped (upstream did not succeed)".into()];
                 errored.insert(node_id.clone());
                 let rev = repo
-                    .update_run(&run_id, RunStatus::Running, &states, None, false)
+                    .update_run_progress(&run_id, &states)
                     .await
                     .unwrap_or(0);
                 emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
@@ -934,7 +988,7 @@ pub async fn run_workflow(
                 states[idx].logs = vec!["skipped (branch not taken)".into()];
                 branch_skipped.insert(node_id.clone());
                 let rev = repo
-                    .update_run(&run_id, RunStatus::Running, &states, None, false)
+                    .update_run_progress(&run_id, &states)
                     .await
                     .unwrap_or(0);
                 emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
@@ -996,7 +1050,7 @@ pub async fn run_workflow(
             states[idx].logs.append(&mut plogs);
             outputs.insert(node_id.clone(), cached_out);
             let rev = repo
-                .update_run(&run_id, RunStatus::Running, &states, None, false)
+                .update_run_progress(&run_id, &states)
                 .await
                 .unwrap_or(0);
             emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
@@ -1009,7 +1063,7 @@ pub async fn run_workflow(
         states[idx].started_at = Some(chrono::Utc::now());
         states[idx].logs = vec![start_line.clone()];
         let rev = repo
-            .update_run(&run_id, RunStatus::Running, &states, None, false)
+            .update_run_progress(&run_id, &states)
             .await
             .unwrap_or(0);
         // Signal node start so the UI can show live progress immediately.
@@ -1046,6 +1100,14 @@ pub async fn run_workflow(
         // attempt's handoff (persist_step compares mtimes against this).
         // Assigned at the top of every attempt; the loop runs at least once.
         let mut attempt_started;
+        // Poll for a cancel WHILE this node runs — the node-boundary check only
+        // fires between nodes, so without this a long agent turn would ignore a
+        // cancel for up to TURN_TIMEOUT. First tick is immediate, then every 2s.
+        let mut cancel_poll = tokio::time::interval(Duration::from_secs(2));
+        // A chat `skip` command marks this run in `wf_skip_current`; unlike a
+        // cancel it aborts only the CURRENT node, which is then marked Skipped and
+        // the run continues to the next node.
+        let mut skip_current = false;
         let result = loop {
             attempt += 1;
             attempt_started = std::time::SystemTime::now();
@@ -1059,7 +1121,7 @@ pub async fn run_workflow(
                         if !states[idx].sessions.contains(&sid) {
                             states[idx].sessions.push(sid);
                             let rev = repo
-                                .update_run(&run_id, RunStatus::Running, &states, None, false)
+                                .update_run_progress(&run_id, &states)
                                 .await
                                 .unwrap_or(0);
                             emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
@@ -1070,10 +1132,28 @@ pub async fn run_workflow(
                         // it to the run detail immediately.
                         states[idx].logs.push(line);
                         let rev = repo
-                            .update_run(&run_id, RunStatus::Running, &states, None, false)
+                            .update_run_progress(&run_id, &states)
                             .await
                             .unwrap_or(0);
                         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
+                    }
+                    _ = cancel_poll.tick() => {
+                        // A cancel flips the run's DB status to Canceled. Catch it
+                        // mid-node so a long agent turn stops promptly; dropping
+                        // `fut` ends our wait, and the finalize block kills the
+                        // sessions this run spawned.
+                        if let Ok(r) = repo.get_run(&run_id).await {
+                            if r.status == RunStatus::Canceled {
+                                canceled = true;
+                                break Err(otto_core::Error::Internal("run canceled".into()));
+                            }
+                        }
+                        // A chat `skip` command (consume-once) → abort this node and
+                        // skip it; the run continues to the next node.
+                        if ctx.wf_skip_current.lock().map(|mut s| s.remove(&run_id.to_string())).unwrap_or(false) {
+                            skip_current = true;
+                            break Err(otto_core::Error::Internal("step skipped".into()));
+                        }
                     }
                     r = &mut fut => break r,
                 }
@@ -1081,6 +1161,10 @@ pub async fn run_workflow(
             match attempt_res {
                 Ok(ok) => break Ok(ok),
                 Err(e) => {
+                    // Canceled or skipped mid-node → stop immediately, never retry.
+                    if canceled || skip_current {
+                        break Err(e);
+                    }
                     let can_retry = attempt <= policy.max_attempts && is_retryable(&node.kind);
                     if !can_retry {
                         break Err(e);
@@ -1110,6 +1194,33 @@ pub async fn run_workflow(
         // the success path; kept as context on the error/skip paths).
         while let Ok(line) = log_rx.try_recv() {
             states[idx].logs.push(line);
+        }
+        // Skipped mid-node via a chat `skip` command: stop THIS node's agents,
+        // mark it Skipped, and continue to the NEXT node (unlike cancel, the run
+        // proceeds). A marker output keeps dependents satisfied — an empty output
+        // would make them BranchSkip and cascade the whole tail away.
+        if skip_current {
+            for sid in states[idx].sessions.iter().cloned().collect::<Vec<_>>() {
+                if let Err(e) = ctx.manager.kill_session(&sid).await {
+                    tracing::warn!("skip: failed to kill workflow session {sid}: {e}");
+                }
+            }
+            states[idx].status = NodeStatus::Skipped;
+            states[idx].logs.push("⏭ skipped via chat command".into());
+            states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
+            outputs.insert(
+                node_id.clone(),
+                json!({ "skipped": true, "note": "skipped via chat command" }),
+            );
+            let rev = repo.update_run_progress(&run_id, &states).await.unwrap_or(0);
+            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
+            continue;
+        }
+        // Canceled mid-node: bail straight to the finalize block, which marks the
+        // remaining nodes Skipped, flips the run to Canceled, and kills every
+        // session this run spawned (incl. this node's, harvested just above).
+        if canceled {
+            break;
         }
         match result {
             Ok((out, mut logs)) => {
@@ -1202,7 +1313,7 @@ pub async fn run_workflow(
             }
         }
         let rev = repo
-            .update_run(&run_id, RunStatus::Running, &states, None, false)
+            .update_run_progress(&run_id, &states)
             .await
             .unwrap_or(0);
         // Signal node finish so the inspector can update without waiting for the next poll.
@@ -1217,6 +1328,18 @@ pub async fn run_workflow(
     }
 
     if canceled {
+        // Stop every agent session this run spawned — a cancel must halt the live
+        // agents (each is a real claude/codex PTY that would otherwise keep working
+        // and burning tokens), not just flip the run row. Includes agent steps AND
+        // review reviewers/summarizer (their ids are harvested into `sessions`).
+        // Best-effort: a failure on one session is logged and never blocks the rest.
+        let session_ids: Vec<Id> =
+            states.iter().flat_map(|s| s.sessions.iter().cloned()).collect();
+        for sid in session_ids {
+            if let Err(e) = ctx.manager.kill_session(&sid).await {
+                tracing::warn!("cancel: failed to kill workflow session {sid}: {e}");
+            }
+        }
         for s in states.iter_mut() {
             if matches!(s.status, NodeStatus::Pending | NodeStatus::Running) {
                 s.status = NodeStatus::Skipped;
@@ -1619,6 +1742,10 @@ fn assemble_input(
 /// on.
 pub(crate) struct RunEnv {
     pub run_id: Id,
+    /// The workflow's name — stamped into each agent session's title + meta so a
+    /// session is attributable to its specific run (two concurrent runs of the
+    /// same workflow otherwise spawn indistinguishable "Workflow: X" sessions).
+    pub wf_name: String,
     pub run_cwd: String,
     pub run_base: Option<String>,
     pub files: std::sync::Arc<crate::workflow_context::RunContextFiles>,
@@ -1721,7 +1848,7 @@ async fn execute_node(
             );
             let acwd = node_cwd(node, &input, run_cwd);
             let (reply, sid) =
-                run_node_agent(ctx, ws, user, node, provider, &full, &acwd, session_tx).await?;
+                run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, &full, &acwd, session_tx).await?;
             // Publish WHERE the implementer worked (+ thread the ambient repo/base)
             // so a downstream review/PR is aware of exactly this directory — even
             // when the agent ran in its own per-node cwd. This is what carries the
@@ -1799,7 +1926,7 @@ async fn execute_node(
                     &format!("{preamble}{agent_prompt_txt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)));
                 let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
                 let acwd = node_cwd(node, &input, run_cwd);
-                let (reply, sid) = run_node_agent(ctx, ws, user, node, provider, &full, &acwd, session_tx).await?;
+                let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, &full, &acwd, session_tx).await?;
                 out.insert("reply".into(), json!(reply));
                 out.insert("session_id".into(), json!(sid));
                 out.insert("working_directory".into(), json!(acwd));
@@ -2944,12 +3071,26 @@ async fn execute_node(
                     "review_run{tag}: started review {review_id} ({worktree} vs {base})"
                 ));
                 let mut status = "running".to_string();
+                // Surface each reviewer's live session so the run view shows ALL of
+                // them running (per-lens reviewers + the checks reviewer), not just
+                // an opaque "review started". Ids flow through `session_tx` →
+                // `states[idx].sessions`; a set dedups repeated poll harvests. The
+                // headless summarizer has no session_id (nothing to open) — skipped.
+                let mut seen_sessions: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 if await_done {
                     let deadline = Instant::now() + Duration::from_secs(timeout_s);
                     loop {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         if let Ok(r) = ctx.reviews_store.get_review(&review_id).await {
                             use otto_core::domain::ReviewStatus as RS;
+                            for a in &r.agents {
+                                if let Some(sid) = &a.session_id {
+                                    if seen_sessions.insert(sid.clone()) {
+                                        let _ = session_tx.send(sid.clone());
+                                    }
+                                }
+                            }
                             match r.status {
                                 RS::Done => {
                                     status = "done".into();
@@ -2978,6 +3119,18 @@ async fn execute_node(
                             break;
                         }
                     }
+                } else {
+                    // Fire-and-forget review: still surface any reviewer sessions that
+                    // have already spawned so they're attributable under this step.
+                    if let Ok(r) = ctx.reviews_store.get_review(&review_id).await {
+                        for a in &r.agents {
+                            if let Some(sid) = &a.session_id {
+                                if seen_sessions.insert(sid.clone()) {
+                                    let _ = session_tx.send(sid.clone());
+                                }
+                            }
+                        }
+                    }
                 }
                 let (total, open, blocker) =
                     crate::modules::review_findings_counts(ctx, &review_id).await;
@@ -3000,7 +3153,7 @@ async fn execute_node(
                          where each score and the overall score are 0–100.\n\nGoals:\n- {}",
                         goals.join("\n- ")
                     );
-                    match run_node_agent(ctx, ws, user, node, "claude", &gprompt, worktree, session_tx).await {
+                    match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, "claude", &gprompt, worktree, session_tx).await {
                         Ok((reply, _sid)) => match extract_json(&reply) {
                             Some(v) => {
                                 let gs = v.get("score").and_then(Value::as_i64).unwrap_or(review_score).clamp(0, 100);
@@ -3018,19 +3171,41 @@ async fn execute_node(
                     Some(gs) => (review_score + gs) / 2,
                     None => review_score,
                 };
-                let passed = score >= threshold && status == "done";
+                // A review must COMPLETE (status "done") AND clear the threshold to
+                // pass. Keep the two reasons distinct: an incomplete review (error /
+                // timeout / still running) produced no findings, so its score is a
+                // meaningless 100 — reporting that as "below threshold" is nonsense
+                // (the score wasn't the problem, completion was).
+                let complete = status == "done";
+                let passed = complete && score >= threshold;
+                let reason = if passed {
+                    "passed".to_string()
+                } else if !complete {
+                    format!("review did not complete (status: {status})")
+                } else {
+                    format!("below threshold ({score} < {threshold})")
+                };
                 logs.push(format!(
-                    "review_run{tag}: score {score} (review {review_score}{}) — {}",
+                    "review_run{tag}: score {score} (review {review_score}{}) — {reason}",
                     goals_score.map(|g| format!(", goals {g}")).unwrap_or_default(),
-                    if passed { "passed" } else { "below threshold" }
                 ));
                 // Stream the verdict + top findings to the chat thread.
                 let finding_briefs = crate::modules::review_finding_briefs(ctx, &review_id, 10).await;
                 if progress.enabled() {
-                    let verdict = if passed { "✅ passed" } else { "⚠️ below threshold" };
-                    let mut msg = format!(
-                        "🔍 *{iter_label}{tag}* done — score *{score}/100* (pass ≥ {threshold}) — {verdict}"
-                    );
+                    let verdict = if passed {
+                        "✅ passed".to_string()
+                    } else if !complete {
+                        format!("⚠️ review did not complete (status: {status})")
+                    } else {
+                        "⚠️ below threshold".to_string()
+                    };
+                    // Only headline a score for a COMPLETED review — otherwise the
+                    // "100/100" is an artifact of a review that never finished.
+                    let mut msg = if complete {
+                        format!("🔍 *{iter_label}{tag}* done — score *{score}/100* (pass ≥ {threshold}) — {verdict}")
+                    } else {
+                        format!("🔍 *{iter_label}{tag}* — {verdict}")
+                    };
                     if finding_briefs.is_empty() {
                         msg.push_str("\nFindings: none 🎉");
                     } else {
@@ -3168,7 +3343,7 @@ async fn execute_node(
                 truncate(&context, 8000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &prompt, &acwd, session_tx).await?;
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, "claude", &prompt, &acwd, session_tx).await?;
             let mut out = serde_json::Map::new();
             out.insert("story_id".into(), json!(story_id));
             out.insert("session_id".into(), json!(sid));
@@ -3272,7 +3447,7 @@ async fn execute_node(
                 truncate(&input.to_string(), 4000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, "claude", &full, &acwd, session_tx).await?;
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, "claude", &full, &acwd, session_tx).await?;
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
             // Write under the data dir (never the user's repo working tree).
             let ext = canvas_node_ext(mode);
@@ -3738,23 +3913,42 @@ async fn resolve_run_user(ctx: &ServerCtx, created_by: &Id) -> User {
 /// `run_session_turn` flow), reporting the session id over `session_tx` the
 /// moment the session exists so the run view can open it live. Returns
 /// `(reply, session_id)`.
+/// Last 6 chars of a run id — a compact, human-scannable tag that disambiguates
+/// concurrent runs of the same workflow in session titles / lists.
+fn short_id(id: &Id) -> String {
+    let n = id.chars().count();
+    id.chars().skip(n.saturating_sub(6)).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_node_agent(
     ctx: &ServerCtx,
     ws: &Workspace,
     user: &User,
     node: &WorkflowNode,
+    wf_name: &str,
+    run_id: &Id,
     provider: &str,
     prompt: &str,
     cwd: &str,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(String, Id)> {
-    let title = if node.name.is_empty() {
-        format!("Workflow: {}", node.kind)
-    } else {
-        format!("Workflow: {}", node.name)
-    };
-    let meta = json!({ "source": "workflow", "node_id": node.id, "node_kind": node.kind, "cwd": cwd });
+    // Title carries the workflow name, the step, and a short run id so two
+    // concurrent runs of the same workflow are distinguishable in the Agents
+    // list (they'd otherwise both read "Workflow: Write tests").
+    let label = if node.name.is_empty() { node.kind.as_str() } else { node.name.as_str() };
+    let title = format!("WF {wf_name} · {label} · run {}", short_id(run_id));
+    // Stamp the FULL run id (+ workflow name) into meta so every workflow-spawned
+    // session is provably attributable to its specific run — the UI/global Agents
+    // list can filter + group sessions by exact run.
+    let meta = json!({
+        "source": "workflow",
+        "run_id": run_id,
+        "wf_name": wf_name,
+        "node_id": node.id,
+        "node_kind": node.kind,
+        "cwd": cwd,
+    });
     let tx = session_tx.clone();
     // R2/R3: every agent-backed step runs as a single agent that does all the work
     // itself — no sub-agents / background tasks — and doesn't yield its turn early.
@@ -4043,6 +4237,84 @@ fn normalize_prompt(input: Value) -> Value {
 /// branch, because silently reviewing/PRing whatever else is checked out
 /// would target the wrong branch. A missing `source` resolves to the
 /// checkout's DETECTED default branch, never a fabricated "main".
+/// Cut a dedicated linked worktree from each entry's `base` branch when the entry
+/// would otherwise run in the repo's MAIN checkout (the user's live working copy),
+/// and repoint the entry at it. Returns the FIRST provisioned worktree path (the
+/// run's new working directory), or `None` if nothing was provisioned.
+///
+/// SAFETY (load-bearing): this only ever CREATES a new linked worktree + a fresh
+/// `otto-wf/<run_id>` branch under the data dir. It never checks out, resets, or
+/// switches branches in the user's own repo, never deletes, never fetches or
+/// forces. `rev-parse` (read-only) resolves the base; if the base ref is absent
+/// or the worktree can't be created, it logs and leaves the entry untouched, so
+/// the run still proceeds on the given working copy. No-op when no `base` is set.
+async fn provision_wf_worktrees(
+    ctx: &ServerCtx,
+    run_id: &Id,
+    entries: &mut [crate::workflow_context::RepoEntry],
+) -> Option<String> {
+    let mut primary: Option<String> = None;
+    let canon =
+        |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
+    for e in entries.iter_mut() {
+        if e.error.is_some() {
+            continue;
+        }
+        let (Some(repo_id), Some(base), Some(worktree)) =
+            (e.repo_id.clone(), e.base.clone(), e.worktree.clone())
+        else {
+            continue;
+        };
+        let base = base.trim().to_string();
+        if base.is_empty() {
+            continue;
+        }
+        let Ok(repo) = ctx.git_store.get_repo(&repo_id).await else {
+            continue;
+        };
+        // Only provision when we'd otherwise operate on the repo's MAIN checkout;
+        // an entry already pointing at a dedicated worktree is left as-is.
+        if canon(&worktree) != canon(&repo.path) {
+            continue;
+        }
+        let git = otto_git::LocalGit::new(&repo.path);
+        // READ-ONLY: resolve the base branch to a commit in the user's repo.
+        let base_commit = match git.rev_parse(&base).await {
+            Ok(c) => c,
+            Err(_) => {
+                tracing::warn!(
+                    "wf worktree: base '{base}' not found in {} — using the given checkout",
+                    repo.path
+                );
+                continue;
+            }
+        };
+        let wt_path = ctx
+            .data_dir
+            .join("workflow-runs")
+            .join(run_id.to_string())
+            .join(crate::workflow_context::slug(&repo.name));
+        let wt_str = wt_path.to_string_lossy().to_string();
+        let branch = format!("otto-wf/{run_id}");
+        match git.worktree_add_if_absent(&wt_str, &branch, &base_commit).await {
+            Ok(_) => {
+                tracing::info!("wf worktree: {} @ {base} → {wt_str}", repo.name);
+                e.worktree = Some(wt_str.clone());
+                if primary.is_none() {
+                    primary = Some(wt_str);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "wf worktree provision failed for {} @ {base}: {err} — using the given checkout",
+                    repo.name
+                );
+            }
+        }
+    }
+    primary
+}
+
 async fn resolve_repo_entries(
     ctx: &ServerCtx,
     workspace_id: &Id,
@@ -4056,12 +4328,19 @@ async fn resolve_repo_entries(
         // its origin repo through resolve_repo_id_for_path).
         let mut rid: Option<String> = None;
         let mut root: Option<String> = None;
+        // The origin repo's display name — filled from whichever registered repo
+        // we resolve to, so `repos.json` names the repo even for a worktree-only run.
+        let mut repo_name: Option<String> = None;
         if let Ok(r) = ctx.git_store.get_repo(&e.repo).await {
             rid = Some(r.id.clone());
+            repo_name = Some(r.name.clone());
             root = Some(r.path);
-        } else if let Ok(repos) = ctx.git_store.list_repos(workspace_id).await {
+        } else if let Ok(repos) = ctx.git_store.list_all_repos().await {
+            // Match a declared repo NAME across ALL workspaces (git accounts are
+            // global; a repo the user names may be registered in another workspace).
             if let Some(r) = repos.into_iter().find(|r| r.name == e.repo) {
                 rid = Some(r.id);
+                repo_name = Some(r.name.clone());
                 root = Some(r.path);
             }
         }
@@ -4071,8 +4350,12 @@ async fn resolve_repo_entries(
             } else {
                 expand_tilde(&e.repo)
             };
+            // A worktree path resolves back to its ORIGIN repo (never treated as a
+            // standalone repo) — origin identity, incl. its git account, is what
+            // git-aware steps must use.
             if let Some(id) = resolve_repo_id_for_path(ctx, workspace_id, &hint).await {
                 if let Ok(r) = ctx.git_store.get_repo(&id).await {
+                    repo_name = Some(r.name.clone());
                     root = Some(r.path);
                 }
                 rid = Some(id);
@@ -4083,6 +4366,7 @@ async fn resolve_repo_entries(
             continue;
         };
         e.repo_id = Some(rid_v);
+        e.repo_name = repo_name;
         let root = root.unwrap_or_else(|| expand_tilde(&e.repo));
         match e.kind.as_str() {
             "worktree" => {
@@ -4144,13 +4428,18 @@ async fn resolve_repo_id_for_path(
     workspace_id: &Id,
     path: &str,
 ) -> Option<String> {
-    let repos = ctx.git_store.list_repos(workspace_id).await.ok()?;
-    if repos.is_empty() {
-        return None;
-    }
-    let pairs: Vec<(String, String)> =
-        repos.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
+    // Match by PATH across ALL workspaces, not just the run's. Repos are
+    // workspace-scoped, but a `Working Directory:` the user points at should
+    // resolve to whatever repo is registered THERE — with its (global) git
+    // account — even when that repo lives in a different workspace. Otherwise a
+    // path nested under a repo registered in the RUN's workspace (e.g. the home
+    // dir) wins over the exact repo registered elsewhere, giving the wrong repo
+    // and "no git account". `match_repo_path` picks the deepest/exact match, so
+    // ~/proj/app → the app repo, not a containing parent-dir repo.
     let expanded = expand_tilde(path);
+    let all = ctx.git_store.list_all_repos().await.ok()?;
+    let pairs: Vec<(String, String)> =
+        all.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
     if let Some(id) = match_repo_path(&expanded, &pairs) {
         return Some(id);
     }
@@ -4159,8 +4448,11 @@ async fn resolve_repo_id_for_path(
             return Some(id);
         }
     }
-    if repos.len() == 1 {
-        return Some(repos[0].id.clone());
+    // Last resort (unchanged): a run workspace with exactly one repo → use it.
+    if let Ok(ws_repos) = ctx.git_store.list_repos(workspace_id).await {
+        if ws_repos.len() == 1 {
+            return Some(ws_repos[0].id.clone());
+        }
     }
     None
 }
@@ -4803,6 +5095,7 @@ mod tests {
         crate::workflow_context::RepoEntry {
             repo: repo_id.to_string(),
             repo_id: Some(repo_id.to_string()),
+            repo_name: None,
             kind: "branch".into(),
             name: "feat/x".into(),
             source: base.map(str::to_string),

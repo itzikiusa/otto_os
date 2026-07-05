@@ -7,6 +7,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunSteps from './RunSteps.svelte';
+  import RunAgents from './RunAgents.svelte';
   import FileTree from '../panels/FileTree.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -729,6 +730,74 @@
     document.body.style.userSelect = 'none';
   }
 
+  // Left panel (Workflows list + Running) resize: drag its right edge (anchored
+  // left → dragging right widens it). Mirrors startCtxResize.
+  function startSideResize(e: MouseEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = ui.wfSideWidth;
+    const onMove = (ev: MouseEvent) => ui.setWfSideWidth(startW + (ev.clientX - startX));
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  // Short run id + per-workflow ordinal, so two concurrent runs of the SAME
+  // workflow are distinguishable in the Running/Runs lists (item 8).
+  function shortRunId(id: string): string {
+    return id.length > 6 ? id.slice(-6) : id;
+  }
+  const activeRunOrdinals = $derived.by(() => {
+    const counts: Record<string, number> = {};
+    const map: Record<string, number> = {};
+    const sorted = [...ws.activeWorkflowRuns].sort((a, b) => a.started_at.localeCompare(b.started_at));
+    for (const r of sorted) {
+      counts[r.workflow_id] = (counts[r.workflow_id] ?? 0) + 1;
+      map[r.run_id] = counts[r.workflow_id];
+    }
+    return map;
+  });
+  const activeWfRunCounts = $derived.by(() => {
+    const c: Record<string, number> = {};
+    for (const r of ws.activeWorkflowRuns) c[r.workflow_id] = (c[r.workflow_id] ?? 0) + 1;
+    return c;
+  });
+
+  // Total agent sessions the current run spawned — the Agents-tab badge.
+  const runSessionCount = $derived(
+    (run?.nodes ?? []).reduce((a, n) => a + (n.sessions?.length ?? 0), 0),
+  );
+
+  // Open a step's session INLINE in the WF page's Agents tab (never navigate to
+  // the global Agents panel). Ensures the sidebar is open + on the Agents tab,
+  // then focuses the session (reset-then-set so re-clicking the same id retriggers).
+  let agentsFocusSid = $state<string | null>(null);
+  function openSessionInline(sid: string): void {
+    if (!ui.wfCtxOpen) ui.toggleWfCtx();
+    ui.setWfCtxTab('agents');
+    agentsFocusSid = null;
+    queueMicrotask(() => (agentsFocusSid = sid));
+  }
+
+  // Per-run default tab: a running/pending run opens on Agents (immediate
+  // visibility of the live sessions), a finished run opens on Files. Applied
+  // once per run id so a later manual tab switch always wins.
+  let tabDefaultedRunId: string | null = null;
+  $effect(() => {
+    const rid = run?.id;
+    if (rid && rid !== tabDefaultedRunId) {
+      tabDefaultedRunId = rid;
+      ui.setWfCtxTab(runActive ? 'agents' : 'files');
+    }
+  });
+
   // Context-files sidebar width: drag its left edge (anchored right → dragging
   // left widens it). (R1)
   function startCtxResize(e: MouseEvent): void {
@@ -993,7 +1062,7 @@
 {/snippet}
 
 <div class="wf">
-  <aside class="side">
+  <aside class="side" style="width:{ui.wfSideWidth}px">
     <div class="gen">
       <label for="wf-prompt">Describe the flow</label>
       <textarea
@@ -1063,10 +1132,14 @@
           >
             <span class="dot {r.status}"></span>
             <span class="run-name">{r.workflow_name}</span>
+            {#if activeWfRunCounts[r.workflow_id] > 1}
+              <span class="run-ord" title={`run #${activeRunOrdinals[r.run_id]} of this workflow`}>#{activeRunOrdinals[r.run_id]}</span>
+            {/if}
             {#if r.waiting_approval}
               <span class="run-badge" title="waiting for approval">⏸</span>
             {/if}
             <span class="grow"></span>
+            <code class="run-id" title={r.run_id}>{shortRunId(r.run_id)}</code>
             <span class="run-prog">{r.nodes_done}/{r.nodes_total}</span>
             <span class="run-when">{ago(r.started_at)}</span>
           </button>
@@ -1111,6 +1184,8 @@
         <p class="empty">No workflows yet — describe one above.</p>
       {/if}
     </div>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="side-resize" onmousedown={startSideResize} title="Drag to resize"></div>
   </aside>
 
   <main class="main">
@@ -1174,6 +1249,8 @@
                   <span class="dot {r.status}"></span>
                   <span class="run-status">{r.status}</span>
                   <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
+                  <span class="grow"></span>
+                  <code class="run-id" title={r.id}>{shortRunId(r.id)}</code>
                 </button>
               {/each}
             </div>
@@ -1207,6 +1284,20 @@
         >
           <Icon name="commit" size={12} /> Versions
         </button>
+
+        <!-- Context/Agents panel toggle: the sidebar's ONLY toggle when collapsed
+             (no second full-height rail beside the app shell's right rail). -->
+        {#if viewport.isDesktop && run && run.context_dir}
+          <button
+            class="btn small"
+            class:active={ui.wfCtxOpen}
+            onclick={() => ui.toggleWfCtx()}
+            title="Context files & agents panel"
+            data-testid="ctx-sidebar-toggle"
+          >
+            <Icon name="panel" size={12} /> Panel
+          </button>
+        {/if}
 
         {#if running}
           <button class="btn small danger" onclick={stop}><Icon name="square" size={11} /> Stop</button>
@@ -1394,7 +1485,7 @@
                 </button>
               {/each}
             </div>
-            <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} /></div>
+            <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} onOpenSession={openSessionInline} /></div>
             {#if run.status === 'success' && run.context_dir && finalOutputAvailable && finalOutputRunId === run.id && !viewport.isDesktop}
               <!-- Mobile/tablet: the run's deliverable, above the context-file tree
                    below. On desktop this moves into the Context-files sidebar. -->
@@ -2178,27 +2269,49 @@
     {/if}
   </main>
 
-  <!-- Context-files sidebar (R1): desktop-only, shown for a run that has a
-       context dir. Reuses the agents' file viewer (tree + Source/Preview) at full
-       height — no Git/Notes/other tabs. Collapsible + resizable. -->
-  {#if viewport.isDesktop && run && run.context_dir}
-    {#if ui.wfCtxOpen}
-      <aside class="ctx-sidebar" style="width:{ui.wfCtxWidth}px" data-testid="ctx-sidebar">
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="ctx-resize" onmousedown={startCtxResize} title="Drag to resize"></div>
-        <div class="ctx-head">
-          <span class="ctx-title"><Icon name="folder" size={12} /> Context files</span>
-          <code class="ctx-path dim" title={run.context_dir}>{run.context_dir}</code>
+  <!-- Right sidebar (R1 + Agents): desktop-only, for a run with a context dir.
+       Tabbed — Files (the run's context-file tree) and Agents (the run's live
+       agent sessions, embedded). Collapse via the header "Panel" button so there's
+       no second full-height rail beside the app shell's right rail. Resizable. -->
+  {#if viewport.isDesktop && run && run.context_dir && ui.wfCtxOpen}
+    <aside class="ctx-sidebar" style="width:{ui.wfCtxWidth}px" data-testid="ctx-sidebar">
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="ctx-resize" onmousedown={startCtxResize} title="Drag to resize"></div>
+      <div class="ctx-head">
+        <div class="ctx-tabs" role="tablist">
           <button
-            class="icon-btn"
-            data-testid="ctx-sidebar-toggle"
-            onclick={() => ui.toggleWfCtx()}
-            title="Collapse context files"
-            aria-label="Collapse context files"
+            class="ctx-tab"
+            class:active={ui.wfCtxTab === 'files'}
+            role="tab"
+            aria-selected={ui.wfCtxTab === 'files'}
+            onclick={() => ui.setWfCtxTab('files')}
           >
-            <Icon name="panel" size={13} />
+            <Icon name="folder" size={12} /> Files
+          </button>
+          <button
+            class="ctx-tab"
+            class:active={ui.wfCtxTab === 'agents'}
+            role="tab"
+            aria-selected={ui.wfCtxTab === 'agents'}
+            data-testid="ctx-tab-agents"
+            onclick={() => ui.setWfCtxTab('agents')}
+          >
+            <Icon name="terminal" size={12} /> Agents{#if runSessionCount > 0}<span class="tab-count">{runSessionCount}</span>{/if}
           </button>
         </div>
+        <span class="grow"></span>
+        <button
+          class="icon-btn"
+          data-testid="ctx-collapse"
+          onclick={() => ui.toggleWfCtx()}
+          title="Collapse panel"
+          aria-label="Collapse panel"
+        >
+          <Icon name="panel" size={13} />
+        </button>
+      </div>
+      {#if ui.wfCtxTab === 'files'}
+        <div class="ctx-pathline"><code class="ctx-path dim" title={run.context_dir}>{run.context_dir}</code></div>
         {#if run.status === 'success' && finalOutputAvailable && finalOutputRunId === run.id}
           <details open class="final-output">
             <summary>
@@ -2213,20 +2326,12 @@
             <FileTree root={run.context_dir} primary={false} />
           {/key}
         </div>
-      </aside>
-    {:else}
-      <aside class="ctx-strip">
-        <button
-          class="icon-btn strip-btn"
-          data-testid="ctx-sidebar-toggle"
-          onclick={() => ui.toggleWfCtx()}
-          title="Context files"
-          aria-label="Show context files"
-        >
-          <Icon name="file" size={15} />
-        </button>
-      </aside>
-    {/if}
+      {:else}
+        <div class="ctx-body">
+          <RunAgents {run} nodeName={(id) => nodeName(id)} focusSid={agentsFocusSid} />
+        </div>
+      {/if}
+    </aside>
   {/if}
 </div>
 
@@ -2255,11 +2360,30 @@
   .side {
     width: 270px;
     flex-shrink: 0;
+    position: relative;
     border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     background: var(--surface);
     min-height: 0;
+  }
+  /* Drag the left panel's right edge to resize it. */
+  .side-resize {
+    position: absolute;
+    inset-inline-end: -3px;
+    top: 0;
+    bottom: 0;
+    width: 7px;
+    cursor: col-resize;
+    z-index: 5;
+  }
+  .side-resize:hover {
+    background: linear-gradient(
+      to right,
+      transparent,
+      color-mix(in srgb, var(--accent) 40%, transparent),
+      transparent
+    );
   }
   .gen {
     padding: 12px;
@@ -2476,6 +2600,22 @@
   }
   .run-badge {
     font-size: 11px;
+  }
+  /* Disambiguators for concurrent runs of the same workflow (item 8). */
+  .run-ord {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    padding: 0 5px;
+    border-radius: 99px;
+    flex-shrink: 0;
+  }
+  .run-id {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--text-dim);
+    flex-shrink: 0;
   }
   .run-prog {
     font-size: 10.5px;
@@ -2911,19 +3051,51 @@
     flex-shrink: 0;
     min-width: 0;
   }
-  .ctx-title {
+  .ctx-tabs {
+    display: flex;
+    gap: 2px;
+    min-width: 0;
+  }
+  .ctx-tab {
     display: inline-flex;
     align-items: center;
     gap: 5px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    padding: 3px 8px;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .ctx-tab:hover {
+    color: var(--text);
+  }
+  .ctx-tab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+  }
+  .tab-count {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0;
     color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    padding: 0 5px;
+    border-radius: 99px;
+  }
+  .ctx-pathline {
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
   .ctx-path {
-    flex: 1;
+    display: block;
     min-width: 0;
     font-size: 10px;
     font-family: var(--font-mono);
@@ -2938,21 +3110,6 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-  }
-  .ctx-strip {
-    width: 36px;
-    flex-shrink: 0;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding-top: 10px;
-    border-inline-start: 1px solid var(--border);
-    background: var(--bg);
-  }
-  .ctx-strip .strip-btn {
-    width: 28px;
-    height: 28px;
   }
 
   /* Node-form JSON field: label + zoom button; the editor lives in a modal. (R10) */

@@ -373,6 +373,36 @@ impl Bridge {
             }
         }
 
+        // --- 3c². Workflow CONTROL: a `status` / `skip` / `abort` reply in the
+        // thread of a running workflow controls THAT run. Checked BEFORE the
+        // Action:Workflow trigger so a control word in a live run's thread isn't
+        // mistaken for a new run; a non-command reply (or no matching active run)
+        // returns None and falls through to normal routing.
+        if let Some(trigger) = &self.workflow_trigger {
+            if let Some(ack) = trigger
+                .try_control(
+                    &msg.workspace_id,
+                    adapter.channel().as_str(),
+                    &msg.chat,
+                    msg.thread.as_deref(),
+                    &msg.user,
+                    &msg.text,
+                )
+                .await
+            {
+                info!(
+                    channel = %adapter.channel().as_str(),
+                    workspace = %msg.workspace_id,
+                    chat = %msg.chat,
+                    "bridge: inbound message controlled a running workflow"
+                );
+                let _ = adapter
+                    .send_formatted(&msg.chat, msg.thread.as_deref(), &ack.reply)
+                    .await;
+                return;
+            }
+        }
+
         // --- 3d. Workflow trigger: a structured `Action: Workflow` message starts
         // a workflow run (resolved by Name within the workspace). Available on all
         // channels, including webhook.
