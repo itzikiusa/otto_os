@@ -76,6 +76,11 @@ Otto.app (Tauri / otto-desktop)
 
 ## Build & test commands
 
+> **Native prereq:** the `otto-brokers` crate compiles `librdkafka` from source,
+> which needs **CMake** on your `PATH` (`brew install cmake`). Without it any
+> build touching that crate fails with a cmake panic from `rdkafka-sys`.
+> Everything else is pure Rust/Node. (Prebuilt-`.dmg` end users need none of this.)
+
 The repo has **no Makefile**. Use these directly:
 
 ```bash

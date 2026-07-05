@@ -141,6 +141,7 @@ TAURI="$(command -v tauri || true)"
 [[ -n "$TAURI" ]] || die "tauri CLI not found on PATH"
 command -v cargo >/dev/null || die "cargo not found"
 command -v npm   >/dev/null || die "npm not found"
+command -v cmake >/dev/null || die "cmake not found — needed to build librdkafka (the Kafka/Message Brokers driver) from source. Install it: 'brew install cmake'"
 ok "identity '$CERT_NAME', tauri at $TAURI, triple $TRIPLE"
 
 # =====================================================================

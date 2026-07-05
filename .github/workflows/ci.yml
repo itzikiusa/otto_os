@@ -42,12 +42,13 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # librdkafka (rdkafka-sys, for the Message Brokers viewer) builds with
-      # OAUTHBEARER/OIDC support, which links libcurl. Ubuntu runners ship the
-      # libcurl runtime but NOT its dev headers, so the cmake build aborts on
-      # <curl/curl.h>. Install the headers (macOS already has them in the SDK).
+      # librdkafka (rdkafka-sys, for the Message Brokers viewer) is compiled from
+      # source by CMake and links libcurl for OAUTHBEARER/OIDC. Ubuntu runners
+      # preinstall cmake and ship the libcurl runtime but NOT its dev headers, so
+      # the build aborts on <curl/curl.h>. Install cmake (explicit — don't rely on
+      # the runner image) + the headers (macOS already has both in the SDK).
       - name: Install librdkafka build deps
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev
 
       # Advisory-only for now: the existing tree predates rustfmt-in-CI and is not
       # yet fully formatted (a one-time repo-wide `cargo fmt --all` belongs in its

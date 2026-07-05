@@ -234,6 +234,10 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   codesigning, so it is macOS-only today.
 - **Rust** (stable) — <https://rustup.rs>
 - **Node.js 20+** and npm
+- **CMake** — compiles the bundled `librdkafka` (the Kafka/Message Brokers
+  driver) from source: `brew install cmake` (macOS) / `apt-get install cmake`
+  (Linux). Build-from-source only — installing the prebuilt `.dmg` does **not**
+  need it (librdkafka is already compiled into the shipped binary).
 - **Tauri CLI** — `cargo install tauri-cli` (or `npm i -g @tauri-apps/cli`)
 - **git**
 - At least one **agent CLI** on your `PATH`, e.g.:
