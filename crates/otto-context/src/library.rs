@@ -49,7 +49,7 @@ pub struct Library {
 }
 
 /// An entry name must be a single safe path segment.
-fn is_safe_segment(s: &str) -> bool {
+pub(crate) fn is_safe_segment(s: &str) -> bool {
     !s.is_empty()
         && s != "."
         && s != ".."
@@ -61,7 +61,7 @@ fn is_safe_segment(s: &str) -> bool {
 /// (alphanumeric plus `-`, `_`, `.`). Returns the assembled relative `PathBuf`,
 /// or `None` when the path is unsafe. Unlike [`is_safe_segment`], this permits
 /// the `/` separators of nested paths like `references/rubric.md`.
-fn safe_rel(rel: &str) -> Option<PathBuf> {
+pub(crate) fn safe_rel(rel: &str) -> Option<PathBuf> {
     let rel = rel.trim();
     if rel.is_empty() || rel.starts_with('/') {
         return None;
@@ -90,13 +90,13 @@ fn safe_rel(rel: &str) -> Option<PathBuf> {
 }
 
 /// Best-effort binary sniff: a NUL byte in the leading window ⇒ binary.
-fn is_binary(bytes: &[u8]) -> bool {
+pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|&b| b == 0)
 }
 
 /// Recursively collect files under `root` as [`SkillFileEntry`] with paths
 /// relative to `base`. Symlinks and unreadable entries are skipped.
-fn collect_files(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<SkillFileEntry>) {
+pub(crate) fn collect_files(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<SkillFileEntry>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -171,12 +171,12 @@ fn parse_frontmatter(body: &str, key: &str) -> Option<String> {
 }
 
 /// Parse the `description:` value from frontmatter; `""` when absent.
-fn parse_description(body: &str) -> String {
+pub(crate) fn parse_description(body: &str) -> String {
     parse_frontmatter(body, "description").unwrap_or_default()
 }
 
 /// Parse the `category:` value from frontmatter; `""` when absent.
-fn parse_category(body: &str) -> String {
+pub(crate) fn parse_category(body: &str) -> String {
     parse_frontmatter(body, "category").unwrap_or_default()
 }
 

@@ -9,6 +9,7 @@ pub mod http;
 pub mod library;
 pub mod materialize;
 pub mod merge;
+pub mod provider_skills;
 pub mod provisioner;
 pub mod repomap;
 pub mod user_skills;

@@ -10,6 +10,8 @@ import type {
   CreateLibrarySkillReq,
   LibrarySkill,
   Problem,
+  ProviderSkillContent,
+  ProviderSkillInfo,
   SkillFileContentResp,
   SkillFileEntry,
   WriteSkillFileReq,
@@ -40,6 +42,17 @@ export const skillLabApi = {
   install: (name: string) =>
     api.post<{ name: string; installed: boolean; backed_up: boolean; backup_path: string | null }>(
       `/library/bundled/${encodeURIComponent(name)}/install`,
+    ),
+
+  // --- provider-global skills (~/.claude|.codex|.agy/skills), read-only -------
+  listProvider: () => api.get<ProviderSkillInfo[]>('/library/provider-skills'),
+  getProvider: (provider: string, name: string) =>
+    api.get<ProviderSkillContent>(
+      `/library/provider-skills/${encodeURIComponent(provider)}/${encodeURIComponent(name)}`,
+    ),
+  getProviderFile: (provider: string, name: string, path: string) =>
+    api.get<SkillFileContentResp>(
+      `/library/provider-skills/${encodeURIComponent(provider)}/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`,
     ),
 
   /** Import a skill package from a `.zip` file (raw body upload). */

@@ -5,6 +5,7 @@
   import type {
     LibrarySkill,
     BundledSkillView,
+    ProviderSkillInfo,
     SkillFileEntry,
   } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
@@ -16,12 +17,14 @@
   }
   let { onreview, onevaluate }: Props = $props();
 
-  type Row = { name: string; source: 'library' | 'bundled'; category: string; description: string; state?: string };
+  // `source` is "library" | "bundled" | a provider name (claude/codex/agy).
+  type Row = { name: string; source: string; category: string; description: string; state?: string };
 
   let library = $state<LibrarySkill[]>([]);
   let bundled = $state<BundledSkillView[]>([]);
+  let providerSkills = $state<ProviderSkillInfo[]>([]);
   let query = $state('');
-  let selected = $state<{ name: string; source: 'library' | 'bundled' } | null>(null);
+  let selected = $state<{ name: string; source: string } | null>(null);
 
   // Detail state.
   let files = $state<SkillFileEntry[]>([]);
@@ -42,6 +45,7 @@
     const libNames = new Set(library.map((s) => s.name));
     for (const s of library) out.push({ name: s.name, source: 'library', category: s.category || 'uncategorized', description: s.description });
     for (const b of bundled) if (!libNames.has(b.name)) out.push({ name: b.name, source: 'bundled', category: b.category, description: b.description, state: b.state });
+    for (const p of providerSkills) out.push({ name: p.name, source: p.provider, category: p.category || 'provider', description: p.description });
     const q = query.trim().toLowerCase();
     const filtered = q ? out.filter((r) => r.name.toLowerCase().includes(q) || r.description.toLowerCase().includes(q)) : out;
     filtered.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
@@ -59,17 +63,21 @@
   });
 
   const isLibrary = $derived(selected?.source === 'library');
+  const isBundled = $derived(selected?.source === 'bundled');
+  const isProvider = $derived(!!selected && selected.source !== 'library' && selected.source !== 'bundled');
 
   async function loadAll(): Promise<void> {
-    const [lib, bun] = await Promise.all([
+    const [lib, bun, prov] = await Promise.all([
       skillLabApi.listLibrary().catch(() => [] as LibrarySkill[]),
       skillLabApi.listBundled().catch(() => [] as BundledSkillView[]),
+      skillLabApi.listProvider().catch(() => [] as ProviderSkillInfo[]),
     ]);
     library = lib;
     bundled = bun;
+    providerSkills = prov;
   }
 
-  async function select(name: string, source: 'library' | 'bundled'): Promise<void> {
+  async function select(name: string, source: string): Promise<void> {
     selected = { name, source };
     editMode = false;
     currentFile = 'SKILL.md';
@@ -80,10 +88,15 @@
       if (source === 'library') {
         files = await skillLabApi.listFiles(name);
         await openFile('SKILL.md');
-      } else {
+      } else if (source === 'bundled') {
         const b = await skillLabApi.getBundled(name);
         files = b.files;
         content = b.body;
+      } else {
+        // provider skill (claude/codex/agy)
+        const p = await skillLabApi.getProvider(source, name);
+        files = p.files;
+        content = p.body;
       }
     } catch (e) {
       toasts.error('Open skill failed', e instanceof Error ? e.message : String(e));
@@ -98,6 +111,17 @@
       if (path === 'SKILL.md') return; // body already loaded
       content = 'Install this skill to the library to view/edit its files.';
       contentBinary = false;
+      return;
+    }
+    if (selected.source !== 'library') {
+      // provider skill — read the file directly, view-only.
+      try {
+        const r = await skillLabApi.getProviderFile(selected.source, selected.name, path);
+        content = r.content;
+        contentBinary = r.binary;
+      } catch (e) {
+        toasts.error('Open file failed', e instanceof Error ? e.message : String(e));
+      }
       return;
     }
     try {
@@ -209,6 +233,13 @@
   $effect(() => {
     void loadAll();
   });
+
+  function badgeKind(source: string): string {
+    return source === 'library' ? 'library' : source === 'bundled' ? 'bundled' : 'provider';
+  }
+  function badgeText(source: string): string {
+    return source === 'library' ? 'lib' : source;
+  }
 </script>
 
 <div class="skills-browser" data-testid="skills-browser">
@@ -235,7 +266,7 @@
         {#each items as r (r.source + ':' + r.name)}
           <button class="sb-item" class:active={selected?.name === r.name && selected?.source === r.source} onclick={() => select(r.name, r.source)}>
             <span class="sb-item-name">{r.name}</span>
-            <span class="chip sb-badge sb-badge-{r.source}">{r.source === 'library' ? 'lib' : 'bundled'}</span>
+            <span class="chip sb-badge sb-badge-{badgeKind(r.source)}">{badgeText(r.source)}</span>
           </button>
         {/each}
       {/each}
@@ -254,7 +285,7 @@
     {:else}
       <div class="sb-head">
         <h3>{selected.name}</h3>
-        <span class="chip sb-badge sb-badge-{selected.source}">{selected.source}</span>
+        <span class="chip sb-badge sb-badge-{badgeKind(selected.source)}">{selected.source}</span>
         <span class="grow"></span>
         <button class="btn small ghost" onclick={() => selected && onreview?.(selected.name, selected.source)} data-testid="review-skill">Review</button>
         <button class="btn small ghost" onclick={() => selected && onevaluate?.(selected.name, selected.source)}>Evaluate</button>
@@ -266,8 +297,10 @@
             <button class="btn small primary" onclick={() => { editMode = true; }} data-testid="edit-skill">Edit</button>
           {/if}
           <button class="btn small ghost danger" onclick={deleteSkill} data-testid="delete-skill">Delete</button>
-        {:else}
+        {:else if isBundled}
           <button class="btn small primary" onclick={installSkill}>Install to library</button>
+        {:else if isProvider}
+          <span class="sb-readonly">read-only</span>
         {/if}
       </div>
 
@@ -319,6 +352,8 @@
   .sb-badge { font-size: 9.5px; }
   .sb-badge-library { color: var(--status-working); }
   .sb-badge-bundled { color: var(--text-dim); }
+  .sb-badge-provider { color: var(--accent); }
+  .sb-readonly { font-size: 11px; color: var(--text-dim); align-self: center; }
   .sb-empty { color: var(--text-dim); font-size: 12.5px; padding: 8px; }
 
   .sb-main { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }

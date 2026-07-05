@@ -3014,6 +3014,24 @@ export interface CreateLibrarySkillReq {
   body?: string;
 }
 
+/** One on-disk provider-global skill (~/.claude|.codex|.agy/skills), read-only. */
+export interface ProviderSkillInfo {
+  provider: string;
+  name: string;
+  category: string;
+  description: string;
+}
+
+/** A provider skill's full content (body + file list). */
+export interface ProviderSkillContent {
+  provider: string;
+  name: string;
+  category: string;
+  description: string;
+  body: string;
+  files: SkillFileEntry[];
+}
+
 /** One bundled skill's full content (view without installing). */
 export interface BundledSkillContent {
   name: string;

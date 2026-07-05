@@ -16,8 +16,9 @@ use axum::{Extension, Json, Router};
 use otto_core::api::{
     ContextPreviewProvider, ContextPreviewReq, ContextPreviewResp, CreateLibrarySkillReq,
     GlobalSoulReq, GlobalSoulResp, LibraryContext, LibrarySkill, LibrarySoul,
-    MaterializeProviderResult, MaterializeResp, Problem, SkillFileContentResp, SkillFileEntry,
-    UpdateWorkspaceContextReq, UpsertLibraryEntryReq, WorkspaceContextConfig, WriteSkillFileReq,
+    MaterializeProviderResult, MaterializeResp, Problem, ProviderSkillContent, ProviderSkillInfo,
+    SkillFileContentResp, SkillFileEntry, UpdateWorkspaceContextReq, UpsertLibraryEntryReq,
+    WorkspaceContextConfig, WriteSkillFileReq,
 };
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::WorkspaceRole;
@@ -100,6 +101,16 @@ pub fn router<C: ContextCtx>() -> Router<C> {
         .route(
             "/library/skills/{name}",
             get(get_skill::<C>).put(put_skill::<C>).delete(delete_skill::<C>),
+        )
+        // Provider-global skills (~/.claude|.codex|.agy/skills) — read-only.
+        .route("/library/provider-skills", get(list_provider_skills::<C>))
+        .route(
+            "/library/provider-skills/{provider}/{name}/file",
+            get(get_provider_skill_file::<C>),
+        )
+        .route(
+            "/library/provider-skills/{provider}/{name}",
+            get(get_provider_skill::<C>),
         )
         // Library: souls
         .route("/library/souls", get(list_souls::<C>))
@@ -301,6 +312,38 @@ async fn import_skill<C: ContextCtx>(
         .get_skill(&name)
         .map(Json)
         .ok_or_else(|| Error::Internal("skill not found after import".into()).into())
+}
+
+// ---------------------------------------------------------------------------
+// Provider-global skills (read-only view + review source)
+// ---------------------------------------------------------------------------
+
+async fn list_provider_skills<C: ContextCtx>(
+    State(_s): State<C>,
+    Extension(_user): Extension<AuthUser>,
+) -> ApiResult<Json<Vec<ProviderSkillInfo>>> {
+    Ok(Json(crate::provider_skills::list()))
+}
+
+async fn get_provider_skill<C: ContextCtx>(
+    State(_s): State<C>,
+    Extension(_user): Extension<AuthUser>,
+    Path((provider, name)): Path<(String, String)>,
+) -> ApiResult<Json<ProviderSkillContent>> {
+    crate::provider_skills::content(&provider, &name)
+        .map(Json)
+        .ok_or_else(|| Error::NotFound(format!("provider skill '{provider}/{name}'")).into())
+}
+
+async fn get_provider_skill_file<C: ContextCtx>(
+    State(_s): State<C>,
+    Extension(_user): Extension<AuthUser>,
+    Path((provider, name)): Path<(String, String)>,
+    Query(q): Query<FileQuery>,
+) -> ApiResult<Json<SkillFileContentResp>> {
+    crate::provider_skills::read_file(&provider, &name, &q.path)
+        .map(Json)
+        .ok_or_else(|| Error::NotFound(format!("file '{}' in provider skill '{provider}/{name}'", q.path)).into())
 }
 
 // ---------------------------------------------------------------------------

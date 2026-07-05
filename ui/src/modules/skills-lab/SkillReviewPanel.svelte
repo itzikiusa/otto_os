@@ -5,7 +5,7 @@
   // Live-refreshes on the skill_review_updated bus, with a fallback poll while a
   // review is running.
   import { onDestroy } from 'svelte';
-  import type { LibrarySkill, BundledSkillView, SkillReview } from '../../lib/api/types';
+  import type { LibrarySkill, BundledSkillView, ProviderSkillInfo, SkillReview } from '../../lib/api/types';
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { skillReviewBus } from '../../lib/events.svelte';
@@ -20,7 +20,9 @@
   }
   let { wsId, initialTarget = null, onconsumed }: Props = $props();
 
-  type SkillOpt = { name: string; source: 'library' | 'bundled'; label: string };
+  // `source` is "library" | "bundled" | a provider name (claude/codex/agy) — all
+  // valid `skill_source` values the review engine resolves.
+  type SkillOpt = { name: string; source: string; label: string };
 
   let reviews = $state<SkillReview[]>([]);
   let selected = $state<SkillReview | null>(null);
@@ -37,15 +39,18 @@
 
   async function loadSkills(): Promise<void> {
     try {
-      const [lib, bundled] = await Promise.all([
+      const [lib, bundled, provider] = await Promise.all([
         skillLabApi.listLibrary().catch(() => [] as LibrarySkill[]),
         skillLabApi.listBundled().catch(() => [] as BundledSkillView[]),
+        skillLabApi.listProvider().catch(() => [] as ProviderSkillInfo[]),
       ]);
       const opts: SkillOpt[] = [];
       for (const s of lib) opts.push({ name: s.name, source: 'library', label: `${s.name} · library` });
       const libNames = new Set(lib.map((s) => s.name));
       for (const b of bundled)
         if (!libNames.has(b.name)) opts.push({ name: b.name, source: 'bundled', label: `${b.name} · bundled` });
+      for (const p of provider)
+        opts.push({ name: p.name, source: p.provider, label: `${p.name} · ${p.provider}` });
       opts.sort((a, b) => a.name.localeCompare(b.name));
       skillOpts = opts;
     } catch {
@@ -164,7 +169,7 @@
       const key = `${initialTarget.source}:${initialTarget.name}`;
       if (!skillOpts.some((o) => `${o.source}:${o.name}` === key)) {
         skillOpts = [
-          { name: initialTarget.name, source: initialTarget.source as 'library' | 'bundled', label: `${initialTarget.name} · ${initialTarget.source}` },
+          { name: initialTarget.name, source: initialTarget.source, label: `${initialTarget.name} · ${initialTarget.source}` },
           ...skillOpts,
         ];
       }

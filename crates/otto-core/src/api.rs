@@ -1929,6 +1929,28 @@ pub struct BundledSkillContent {
     pub files: Vec<SkillFileEntry>,
 }
 
+/// One on-disk provider-global skill (`~/.claude|.codex|.agy/skills/<name>/`),
+/// surfaced read-only in the Skills Lab so it can be viewed and reviewed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSkillInfo {
+    /// "claude" | "codex" | "agy".
+    pub provider: String,
+    pub name: String,
+    pub category: String,
+    pub description: String,
+}
+
+/// `GET /library/provider-skills/{provider}/{name}` — a provider skill's content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSkillContent {
+    pub provider: String,
+    pub name: String,
+    pub category: String,
+    pub description: String,
+    pub body: String,
+    pub files: Vec<SkillFileEntry>,
+}
+
 /// `POST /workspaces/{id}/skill-reviews` — start a skills review.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSkillReviewReq {

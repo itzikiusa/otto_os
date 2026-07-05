@@ -1181,6 +1181,9 @@ are root; per-workspace context selection is workspace-scoped.
 | GET /library/skills/{name}/file | root | `?path=<rel>` | SkillFileContentResp (one file's text) |
 | PUT /library/skills/{name}/file | root | WriteSkillFileReq (`path`, `content`) | `SkillFileEntry[]` (refreshed tree; evicts cache) |
 | DELETE /library/skills/{name}/file | root | `?path=<rel>` | 204 (SKILL.md cannot be deleted) |
+| GET /library/provider-skills | any member | — | `ProviderSkillInfo[]` (on-disk `~/.claude|.codex|.agy/skills`, read-only) |
+| GET /library/provider-skills/{provider}/{name} | any member | — | ProviderSkillContent (body + file list) |
+| GET /library/provider-skills/{provider}/{name}/file | any member | `?path=<rel>` | SkillFileContentResp |
 | GET /library/souls | root | — | `SoulEntry[]` |
 | GET /library/souls/{name} | root | — | soul body |
 | PUT /library/souls/{name} | root | soul body | 204 |

@@ -95,7 +95,8 @@ impl Staged {
 
 /// Resolve the skill package to review. Library skills point at their dir;
 /// bundled skills are staged into a temp dir via the tested install primitive
-/// (handles the full multi-file tree, binaries included).
+/// (handles the full multi-file tree, binaries included); provider skills
+/// (`claude`/`codex`/`agy`) are reviewed in place from `~/.<provider>/skills`.
 fn stage_target(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<Staged> {
     if source == "bundled" {
         let tmp = tempfile::tempdir()
@@ -108,6 +109,15 @@ fn stage_target(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<Stage
         }
         let dir = tmp.path().join("skills").join(skill_name);
         Ok(Staged::Bundled(tmp, dir))
+    } else if otto_context::provider_skills::PROVIDERS.contains(&source) {
+        let dir = otto_context::provider_skills::skill_dir(source, skill_name)
+            .ok_or_else(|| otto_core::Error::Invalid("unsafe skill name".into()))?;
+        if !dir.join("SKILL.md").exists() {
+            return Err(otto_core::Error::NotFound(format!(
+                "provider skill '{source}/{skill_name}'"
+            )));
+        }
+        Ok(Staged::Library(dir))
     } else {
         let dir = ctx
             .context_library
@@ -148,7 +158,14 @@ async fn start_review(
     if req.skill_name.trim().is_empty() {
         return Err(ApiError(otto_core::Error::Invalid("skill_name is required".into())));
     }
-    let source = if req.skill_source == "bundled" { "bundled" } else { "library" };
+    // Accept "library", "bundled", or a provider name (claude/codex/agy).
+    let source: &str = if req.skill_source == "bundled" {
+        "bundled"
+    } else if otto_context::provider_skills::PROVIDERS.contains(&req.skill_source.as_str()) {
+        req.skill_source.as_str()
+    } else {
+        "library"
+    };
     // Validate the target resolves before creating the row.
     stage_target(&ctx, &req.skill_name, source).map_err(ApiError)?;
 

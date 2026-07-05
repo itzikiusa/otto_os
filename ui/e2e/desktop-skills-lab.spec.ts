@@ -121,6 +121,21 @@ test('API: static skill review completes with a deterministic report', async () 
   expect(reviews.some((x) => x.id === rev.id)).toBeTruthy();
 });
 
+test('API: provider-skills endpoint is live and well-shaped', async () => {
+  // Reads the real ~/.claude|.codex|.agy/skills — we don't seed/pollute those,
+  // so just assert the route exists, returns an array, and (if present) each
+  // entry carries a recognized provider. This is what makes provider skills
+  // show up in the Review picker + Skills list.
+  const r = await ctx.get(`${base}/api/v1/library/provider-skills`);
+  expect(r.ok()).toBeTruthy();
+  const list = (await r.json()) as { provider: string; name: string }[];
+  expect(Array.isArray(list)).toBeTruthy();
+  for (const s of list) {
+    expect(['claude', 'codex', 'agy']).toContain(s.provider);
+    expect(typeof s.name).toBe('string');
+  }
+});
+
 test('UI: Skills Lab tabs, skills browser, and preserved evaluator', async ({ page }) => {
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
