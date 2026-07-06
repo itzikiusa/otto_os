@@ -50,6 +50,13 @@ Center column (full page):
 - **Request tabs** — open many drafts at once; `+` (or `⌘T`) opens a new one,
   `×` closes one. Each tab shows the method + a label (the saved name, else
   `METHOD /path`, else `New Request`).
+  Open tabs **persist across app restarts**: the full drafts (method, URL,
+  headers, query, body, auth, scripts, settings) + the active index are saved
+  per-workspace in the browser's localStorage (`otto_api_tabs_v1:<workspace>`,
+  debounced, flushed on page hide) and restored by `loadAll()` — so reopening
+  Otto brings back the calls you had open, not only History. Device-local:
+  tabs don't roam to other machines; two windows on the same workspace are
+  last-write-wins.
 - **Builder pane** — `RequestBuilder.svelte`.
 - **Response pane** — `ResponseViewer.svelte`.
 
@@ -101,9 +108,10 @@ From the builder, **Save** (`⌘S`):
 > `auth`, the **SSH tunnel** choice (`ssh_connection_id`), plus its
 > `collection_id` and `position`. **Scripts, Docs, the other Settings
 > (timeout/redirects/TLS), GraphQL variables, and the transport kind
-> (SSE/WS/gRPC) are part of the in-memory draft only — they are NOT stored with
-> the request and are lost when you reload it.** See
-> [§10](#10-capabilities--limitations).
+> (SSE/WS/gRPC) are NOT stored with the request** — they live on the draft
+> only. An *open tab* keeps them across reloads (local tab persistence, see
+> above), but loading the saved request fresh from a collection won't bring
+> them back. See [§10](#10-capabilities--limitations).
 
 ### Import / export
 
@@ -223,14 +231,15 @@ the three server-to-server grants above.
 > with the saved request (draft-only).
 
 **Docs** — free-form **Markdown** notes for the request, with a rendered preview.
-(Draft-only; not persisted.)
+(Draft-only; kept on the open tab across reloads, but not saved with the request.)
 
 **Settings** — per-request execution options:
 
 - **Request timeout** (ms; blank = daemon default **60 s**).
 - **Automatically follow redirects** (default on).
 - **Verify TLS certificate** (default on; turning it off accepts self-signed /
-  invalid certs for that request). (Draft-only; not persisted.)
+  invalid certs for that request). (Draft-only; kept on the open tab across
+  reloads, but not saved with the request.)
 - **SSH tunnel** (HTTP only) — pick one of the workspace's `ssh`-kind
   connections to route the request through a **SOCKS5-over-SSH** proxy, so it
   egresses from the bastion's IP. Use this for upstreams that **IP-whitelist**
@@ -432,7 +441,11 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 | `POST /api-client/import-curl` *(not workspace-scoped)* | member | `{curl}` → `ParsedCurl` |
 | `GET /ws/api-client/stream?token=…` *(root WS)* | token | SSE/WebSocket relay |
 
-### Persisted shapes (the source of truth for what survives a reload)
+### Persisted shapes (the server-side source of truth)
+
+(Open tabs additionally persist **device-locally** — full drafts + active index
+in localStorage under `otto_api_tabs_v1:<workspace>` — so the builder state
+survives reloads without any of it entering these server shapes.)
 
 ```
 ApiRequest      { id, workspace_id, collection_id?, name, method, url,
@@ -503,8 +516,10 @@ is persisted.
 - **Call client-streaming or bidirectional gRPC** — only unary and
   server-streaming are supported.
 - **Persist Scripts, Docs, Settings, GraphQL variables, or the transport kind
-  with a saved request** — these are draft-only and are lost on reload/save.
-  (They are *not* sent to git or OpenAPI export either.)
+  with a saved request** — these are draft-only: an open tab keeps them across
+  reloads (local tab persistence), but they are not stored in `ApiRequest`, so
+  loading the saved request fresh drops them. (They are *not* sent to git or
+  OpenAPI export either.)
 - **Run scripts inside automations** — automation steps execute the request's
   stored fields only; per-request pre/post scripts don't run there.
 - **Run scripts server-side / sandboxed** — scripts execute in the webview and
@@ -586,7 +601,7 @@ counts as Editor). The Viewer/Editor split matches the contract; see
 | TLS / certificate errors | Turn off **Settings → Verify TLS certificate** for that request to accept self-signed/invalid certs. |
 | "Read-only" toast on Save/edit | You have **Viewer** access to this workspace; you need **Editor** to save, mutate, or execute. |
 | Nothing loads / empty lists | No workspace is selected — the API client is workspace-scoped. |
-| My Scripts / Docs / Settings vanished after saving | Expected — those are draft-only and not persisted with a saved request (see [§10](#10-capabilities--limitations)). |
+| My Scripts / Docs / Settings vanished after loading a saved request | Expected — those are draft-only and not persisted with a saved request; they survive only on the open tab (see [§10](#10-capabilities--limitations)). |
 | Saved request lost its body type as form-data | form-data/multipart and raw sub-types are encoded into `body`/headers; the stored `body_mode` is `none/json/raw/form/graphql` only. |
 | `client-streaming gRPC methods are not supported` | Only unary and server-streaming gRPC are implemented. |
 | OAuth2 "Get New Token" fails | Check the **Token URL** and grant; the authorization-code (redirect) grant isn't supported — use client-credentials / password / refresh-token. |

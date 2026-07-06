@@ -110,6 +110,63 @@ function liveKv(rows: ApiKeyVal[]): ApiKeyVal[] {
   return rows.filter((r) => r.enabled !== false && r.key.trim() !== '');
 }
 
+// ── Open-tab persistence ─────────────────────────────────────────────────────
+// Open request tabs survive app relaunches: the full drafts + active index are
+// written per-workspace to localStorage (same pattern as the Git page's open
+// repo tabs) and restored by loadAll(). Two windows on the same workspace are
+// last-write-wins per debounce window — acceptable for a device-local editor.
+
+function tabsKey(wid: Id): string {
+  return `otto_api_tabs_v1:${wid}`;
+}
+/** Debounce for tab writes — the draft setter fires on every keystroke. */
+const TABS_WRITE_DELAY_MS = 250;
+/** Body ceiling for the quota-exceeded fallback rewrite (chars). */
+const TABS_FALLBACK_BODY_MAX = 200_000;
+
+interface PersistedTabs {
+  tabs: ApiDraft[];
+  active: number;
+}
+
+const DRAFT_KINDS: ApiRequestKind[] = ['http', 'sse', 'websocket', 'grpc'];
+const BODY_MODES: ApiBodyMode[] = ['none', 'json', 'raw', 'form', 'multipart', 'graphql'];
+
+/** Rebuild a draft from an untrusted persisted blob; null when hopeless.
+ *  Lenient by design (schema drift across versions must not lose a tab), but
+ *  every field the builder renders is coerced to a safe shape. */
+function sanitizeDraft(raw: unknown): ApiDraft | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const d = raw as Partial<ApiDraft>;
+  const str = (v: unknown, fb: string): string => (typeof v === 'string' ? v : fb);
+  const kv = (rows: unknown): ApiKeyVal[] =>
+    Array.isArray(rows)
+      ? rows.filter(
+          (r): r is ApiKeyVal =>
+            typeof r === 'object' && r !== null &&
+            typeof (r as ApiKeyVal).key === 'string' &&
+            typeof (r as ApiKeyVal).value === 'string',
+        )
+      : [];
+  return {
+    ...blankDraft(),
+    ...d,
+    requestId: typeof d.requestId === 'string' ? d.requestId : null,
+    name: str(d.name, ''),
+    kind: DRAFT_KINDS.includes(d.kind as ApiRequestKind) ? (d.kind as ApiRequestKind) : 'http',
+    method: str(d.method, 'GET') || 'GET',
+    url: str(d.url, ''),
+    headers: kv(d.headers),
+    query: kv(d.query),
+    body_mode: BODY_MODES.includes(d.body_mode as ApiBodyMode) ? (d.body_mode as ApiBodyMode) : 'none',
+    body: str(d.body, ''),
+    auth:
+      typeof d.auth === 'object' && d.auth !== null && typeof (d.auth as ApiAuth).type === 'string'
+        ? (d.auth as ApiAuth)
+        : { type: 'none' },
+  };
+}
+
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -137,6 +194,7 @@ class ApiClientStore {
   }
   set draft(d: ApiDraft) {
     this.tabs[this.activeTab] = d;
+    this.persistTabs();
   }
   /** A short label for a tab. */
   tabLabel(d: ApiDraft): string {
@@ -152,11 +210,13 @@ class ApiClientStore {
     this.tabs = [...this.tabs, d];
     this.activeTab = this.tabs.length - 1;
     this.lastResponse = null;
+    this.persistTabs();
   }
   switchTab(i: number): void {
     if (i >= 0 && i < this.tabs.length) {
       this.activeTab = i;
       this.lastResponse = null;
+      this.persistTabs();
     }
   }
   closeTab(i: number): void {
@@ -168,6 +228,85 @@ class ApiClientStore {
       if (this.activeTab >= this.tabs.length) this.activeTab = this.tabs.length - 1;
       else if (i < this.activeTab) this.activeTab -= 1;
     }
+    this.lastResponse = null;
+    this.persistTabs();
+  }
+
+  // ── Open-tab persistence (see module header above sanitizeDraft) ──────────
+
+  /** Workspace whose tabs are in memory; null until the first restore. Gates
+   *  persistence so a not-yet-restored blank tab can't clobber a saved set. */
+  private tabsWid: Id | null = null;
+  private tabsWriteTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor() {
+    // Flush a pending debounced write when the window/app goes away, so the
+    // last keystrokes before quit are not lost.
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pagehide', () => this.flushTabsWrite());
+    }
+  }
+
+  /** Queue a debounced write of the open tabs to this workspace's slot. */
+  private persistTabs(): void {
+    if (this.tabsWid === null) return;
+    if (this.tabsWriteTimer !== null) clearTimeout(this.tabsWriteTimer);
+    this.tabsWriteTimer = setTimeout(() => this.flushTabsWrite(), TABS_WRITE_DELAY_MS);
+  }
+
+  /** Write immediately (debounce elapsed, workspace swap, or page hide). */
+  private flushTabsWrite(): void {
+    if (this.tabsWriteTimer !== null) {
+      clearTimeout(this.tabsWriteTimer);
+      this.tabsWriteTimer = null;
+    }
+    if (this.tabsWid === null || typeof localStorage === 'undefined') return;
+    const key = tabsKey(this.tabsWid);
+    const blob: PersistedTabs = {
+      tabs: $state.snapshot(this.tabs) as ApiDraft[],
+      active: this.activeTab,
+    };
+    try {
+      localStorage.setItem(key, JSON.stringify(blob));
+    } catch {
+      // Quota: retry once without the heavyweight fields (proto uploads, huge
+      // bodies) — a slim tab set beats losing the whole set.
+      try {
+        const slim = blob.tabs.map((t) => ({
+          ...t,
+          proto: '',
+          body: t.body.length > TABS_FALLBACK_BODY_MAX ? '' : t.body,
+        }));
+        localStorage.setItem(key, JSON.stringify({ tabs: slim, active: blob.active }));
+      } catch {
+        /* storage unavailable — non-fatal */
+      }
+    }
+  }
+
+  /** Swap in `wid`'s persisted tabs. No-op when already showing them; flushes
+   *  the previous workspace's pending write first so nothing is lost. */
+  private restoreTabs(wid: Id): void {
+    if (this.tabsWid === wid) return;
+    this.flushTabsWrite();
+    this.tabsWid = wid;
+    let next: ApiDraft[] = [];
+    let active = 0;
+    try {
+      const raw = localStorage.getItem(tabsKey(wid));
+      if (raw) {
+        const p = JSON.parse(raw) as Partial<PersistedTabs>;
+        next = (Array.isArray(p.tabs) ? p.tabs : [])
+          .map(sanitizeDraft)
+          .filter((d): d is ApiDraft => d !== null);
+        if (typeof p.active === 'number' && Number.isFinite(p.active)) active = Math.trunc(p.active);
+      }
+    } catch {
+      /* corrupt/unavailable → start fresh */
+    }
+    if (next.length === 0) next = [blankDraft()];
+    this.tabs = next;
+    this.activeTab = Math.min(Math.max(0, active), next.length - 1);
     this.lastResponse = null;
   }
   /** Last execute() result, shown in the ResponseViewer. */
@@ -201,8 +340,12 @@ class ApiClientStore {
 
   /** Load everything for the current workspace (collections + requests + envs + history). */
   async loadAll(): Promise<void> {
+    const wid = this.wsId();
     const base = this.base();
-    if (!base) return;
+    if (!wid || !base) return;
+    // Restore this workspace's persisted open tabs up front (works even when
+    // the fetches below fail — the drafts are device-local, not server data).
+    this.restoreTabs(wid);
     this.loading = true;
     try {
       const [collections, requests, environments, history] = await Promise.all([
@@ -215,6 +358,15 @@ class ApiClientStore {
       this.requests = requests;
       this.environments = environments;
       this.history = history;
+      // Unlink restored drafts whose saved request no longer exists, so their
+      // "Save" creates anew instead of PATCHing a deleted id.
+      const live = new Set(this.requests.map((r) => r.id));
+      if (this.tabs.some((t) => t.requestId && !live.has(t.requestId))) {
+        this.tabs = this.tabs.map((t) =>
+          t.requestId && !live.has(t.requestId) ? { ...t, requestId: null } : t,
+        );
+        this.persistTabs();
+      }
     } catch (e) {
       toasts.error('Could not load API client', errMsg(e));
     } finally {
