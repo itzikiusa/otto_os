@@ -294,7 +294,7 @@ fn review_error_note(reason: Option<FailReason>) -> String {
         Some(FailReason::Exited) => "session exited before writing findings",
         Some(FailReason::SessionGone) => "session is no longer live",
         Some(FailReason::CreateFailed) => "could not start",
-        Some(FailReason::Stopped) => "stopped",
+        Some(FailReason::Stopped) => "stopped by user",
         None => "unknown error",
     }
     .to_string()
@@ -450,6 +450,14 @@ mod tests {
         // No/empty bundle ⇒ nothing, even for claude.
         assert_eq!(review_skills_extra_dirs("claude", None), None);
         assert_eq!(review_skills_extra_dirs("claude", Some("")), None);
+    }
+
+    #[test]
+    fn stopped_agent_note_matches_stop_endpoint_wording() {
+        // The per-agent Stop endpoint persists "stopped by user" directly; the
+        // recovery loop re-persists via this note when it unwinds — the two
+        // must agree or the row flickers between wordings.
+        assert_eq!(review_error_note(Some(FailReason::Stopped)), "stopped by user");
     }
 
     #[test]

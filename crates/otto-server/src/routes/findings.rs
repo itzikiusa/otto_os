@@ -741,6 +741,16 @@ struct SeedReviewReq {
     repo_id: String,
     #[serde(default)]
     pr_number: Option<u64>,
+    /// Optional agent rows to seed verbatim (E2E drives per-agent stop/retry
+    /// against real statuses — include a trailing summarizer row yourself).
+    #[serde(default)]
+    agents: Option<Vec<otto_core::domain::ReviewAgentState>>,
+    /// Optional per-index durable prompts (E2E proves DB-backed retry).
+    #[serde(default)]
+    prompts: Option<Vec<String>>,
+    /// Optional durable diff (E2E proves diff re-materialization on retry).
+    #[serde(default)]
+    diff: Option<String>,
 }
 
 /// `POST /workspaces/{ws}/__e2e/review` — create a real review row so the
@@ -760,6 +770,27 @@ async fn e2e_seed_review(
         .create_review(&b.repo_id, b.pr_number.unwrap_or(0))
         .await
         .map_err(ApiError)?;
+    if let Some(agents) = &b.agents {
+        ctx.reviews_store
+            .set_agents(&review.id, agents)
+            .await
+            .map_err(ApiError)?;
+    }
+    if let Some(prompts) = &b.prompts {
+        for (i, p) in prompts.iter().enumerate() {
+            ctx.reviews_store
+                .set_agent_prompt(&review.id, i, p)
+                .await
+                .map_err(ApiError)?;
+        }
+    }
+    if let Some(diff) = &b.diff {
+        ctx.reviews_store
+            .set_diff(&review.id, diff)
+            .await
+            .map_err(ApiError)?;
+    }
+    let review = ctx.reviews_store.get_review(&review.id).await.map_err(ApiError)?;
     Ok(Json(review))
 }
 
