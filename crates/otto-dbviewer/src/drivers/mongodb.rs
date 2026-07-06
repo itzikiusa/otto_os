@@ -678,6 +678,24 @@ impl MongoDriver {
                     started,
                 ))
             }
+            MongoOp::ReplaceOne => {
+                let filter = parsed.filter.unwrap_or_default();
+                let replacement = parsed
+                    .update
+                    .ok_or_else(|| types::invalid("replaceOne requires a replacement document"))?;
+                let res = coll
+                    .replace_one(filter, replacement)
+                    .await
+                    .map_err(types::upstream)?;
+                Ok(write_result(
+                    res.modified_count,
+                    format!(
+                        "matched {}, modified {}",
+                        res.matched_count, res.modified_count
+                    ),
+                    started,
+                ))
+            }
             MongoOp::InsertOne | MongoOp::InsertMany => {
                 let docs = parsed.documents.unwrap_or_default();
                 if docs.is_empty() {
@@ -1101,6 +1119,7 @@ enum MongoOp {
     Count,
     UpdateOne,
     UpdateMany,
+    ReplaceOne,
     InsertOne,
     InsertMany,
     DeleteOne,
@@ -1409,6 +1428,22 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
                 cmd.filter = Some(parse_doc_arg(filter)?);
                 cmd.update = Some(parse_doc_arg(update)?);
             }
+            "replaceOne" => {
+                // Whole-document replacement (the grid's JSON-view editor emits
+                // this); the replacement rides the `update` slot like updateOne.
+                cmd.op_kind = Some(MongoOp::ReplaceOne);
+                let parts = split_top_level_args(&arg);
+                let filter = parts
+                    .first()
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| types::invalid("replaceOne requires a filter"))?;
+                let replacement = parts
+                    .get(1)
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| types::invalid("replaceOne requires a replacement document"))?;
+                cmd.filter = Some(parse_doc_arg(filter)?);
+                cmd.update = Some(parse_doc_arg(replacement)?);
+            }
             "insertOne" => {
                 cmd.op_kind = Some(MongoOp::InsertOne);
                 cmd.documents = Some(vec![parse_doc_arg(&arg)?]);
@@ -1554,6 +1589,7 @@ fn op_from_str(op: &str) -> Result<MongoOp> {
         "count" | "countDocuments" => Ok(MongoOp::Count),
         "updateOne" => Ok(MongoOp::UpdateOne),
         "updateMany" => Ok(MongoOp::UpdateMany),
+        "replaceOne" => Ok(MongoOp::ReplaceOne),
         "insertOne" => Ok(MongoOp::InsertOne),
         "insertMany" => Ok(MongoOp::InsertMany),
         "deleteOne" => Ok(MongoOp::DeleteOne),
@@ -2351,6 +2387,21 @@ mod tests {
     }
 
     #[test]
+    fn shorthand_replace_one() {
+        // The grid's JSON-view document editor emits replaceOne by `_id`.
+        let p = parse_command(
+            r#"db.orders.replaceOne({"_id": {"$oid": "6725e2532c39b0477e55d679"}}, {"status": "paid", "items": [{"qty": 5}]})"#,
+        )
+        .unwrap();
+        assert_eq!(p.collection, "orders");
+        assert_eq!(p.op, MongoOp::ReplaceOne);
+        assert!(p.filter.unwrap().contains_key("_id"));
+        let replacement = p.update.unwrap();
+        assert_eq!(replacement.get_str("status").unwrap(), "paid");
+        assert!(replacement.contains_key("items"));
+    }
+
+    #[test]
     fn splits_multi_statement_paste_with_comments() {
         let src = r#"
             // header comment
@@ -2670,7 +2721,19 @@ mod sql_e2e {
         // 15. updateOne targeting `_id` via `{$oid}` — the cell-edit path.
         let all = run_sql(&d, "SELECT * FROM players").await;
         let id_idx = all.columns.iter().position(|c| c.name == "_id").unwrap();
-        let oid = all.rows[0][id_idx].as_str().unwrap().to_string();
+        // `_id` renders as the `{"$oid": …}` sentinel (or a bare hex string in
+        // older shapes) — accept both.
+        let id_cell = &all.rows[0][id_idx];
+        let oid = id_cell
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                id_cell
+                    .get("$oid")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap();
         run_sql(
             &d,
             &format!(

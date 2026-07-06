@@ -290,14 +290,16 @@
       .map((d) => d.entry);
   });
 
-  // Filtered/sorted rows as plain objects (for the JSON / vertical views), capped.
-  const objRows = $derived.by<Record<string, unknown>[]>(() => {
+  // Filtered/sorted rows as plain objects (for the JSON / vertical views),
+  // capped. `idx` is the ORIGINAL liveRows index so per-document edits can
+  // target the row's key regardless of filter/sort order.
+  const objRows = $derived.by<{ obj: Record<string, unknown>; idx: number }[]>(() => {
     if (!result || viewMode === 'grid') return [];
     const cols = result.columns;
-    return viewRows.slice(0, VIEW_CAP).map(({ row }) => {
+    return viewRows.slice(0, VIEW_CAP).map(({ row, idx }) => {
       const o: Record<string, unknown> = {};
       cols.forEach((c, i) => (o[c.name] = row[i]));
-      return o;
+      return { obj: o, idx };
     });
   });
   const viewTruncated = $derived(viewMode !== 'grid' && viewRows.length > VIEW_CAP);
@@ -321,7 +323,17 @@
   // ── Cell rendering helpers ───────────────────────────────────────────────────
   // The expandable cell viewer. `raw` is the unformatted text; `formatted`
   // holds a prettified copy (SQL or JSON) the user can toggle to.
-  let viewer = $state<{ raw: string; sql: boolean; formatted: boolean } | null>(null);
+  let viewer = $state<{
+    raw: string;
+    sql: boolean;
+    formatted: boolean;
+    /** Set when the viewed cell belongs to an editable result column — enables
+     *  the in-viewer editor (the inline one-line input is useless for JSON). */
+    edit: { rowIdx: number; colIdx: number } | null;
+  } | null>(null);
+  let viewerEditing = $state(false);
+  let viewerDraft = $state('');
+  let viewerErr = $state<string | null>(null);
   const viewerText = $derived(
     viewer ? (viewer.formatted ? (viewer.sql ? formatSql(viewer.raw) : viewer.raw) : viewer.raw) : '',
   );
@@ -360,14 +372,114 @@
     if (v === null || v === undefined) return '';
     return cellStr(v);
   }
-  function openCell(v: unknown): void {
+  function openCell(v: unknown, rowIdx = -1, colIdx = -1): void {
+    const edit =
+      rowIdx >= 0 && colIdx >= 0 && !reviewSql && isEditableCell(colIdx)
+        ? { rowIdx, colIdx }
+        : null;
+    viewerEditing = false;
+    viewerErr = null;
     if (typeof v === 'string') {
-      viewer = { raw: v, sql: looksLikeSql(v), formatted: looksLikeSql(v) };
+      viewer = { raw: v, sql: looksLikeSql(v), formatted: looksLikeSql(v), edit };
     } else if (v === null || v === undefined) {
-      viewer = { raw: 'NULL', sql: false, formatted: false };
+      viewer = { raw: 'NULL', sql: false, formatted: false, edit };
     } else {
-      viewer = { raw: prettyJson(v), sql: false, formatted: false };
+      viewer = { raw: prettyJson(v), sql: false, formatted: false, edit };
     }
+  }
+
+  function startViewerEdit(): void {
+    if (!viewer?.edit) return;
+    const prev = liveRows[viewer.edit.rowIdx]?.[viewer.edit.colIdx];
+    // Seed the draft with what the cell actually holds: pretty JSON for
+    // complex values, the raw string for scalars, empty for NULL.
+    viewerDraft =
+      prev === null || prev === undefined ? '' : isComplex(prev) ? prettyJson(prev) : cellStr(prev);
+    viewerErr = null;
+    viewerEditing = true;
+  }
+
+  // ── Whole-document editor (JSON / Vertical views) ─────────────────────────
+  // Edits the full row as one JSON object; Save builds a Mongo replaceOne (or
+  // a per-changed-column SQL UPDATE) and opens the normal review modal.
+  let docEditor = $state<{ rowIdx: number; draft: string; err: string | null } | null>(null);
+
+  function openDocEditor(rowIdx: number): void {
+    if (!editable || !result) return;
+    const o: Record<string, unknown> = {};
+    result.columns.forEach((c, i) => (o[c.name] = liveRows[rowIdx]?.[i]));
+    docEditor = { rowIdx, draft: prettyJson(o), err: null };
+  }
+
+  function saveDocEdit(): void {
+    if (!docEditor || !result || !editTable) return;
+    const { rowIdx } = docEditor;
+    let doc: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(docEditor.draft);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        docEditor.err = 'Document must be a JSON object';
+        return;
+      }
+      doc = parsed as Record<string, unknown>;
+    } catch (e) {
+      docEditor.err = `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`;
+      return;
+    }
+    if (engine === 'mongodb') {
+      // replaceOne by _id; the filter carries the id, so drop it from the body
+      // (replacing _id is rejected by the server anyway).
+      const body = { ...doc };
+      delete body._id;
+      const cmd = `db.${editTable}.replaceOne(${mongoIdFilter(rowIdx)}, ${JSON.stringify(body)})`;
+      docEditor = null;
+      openReview('Review replaceOne', cmd);
+      return;
+    }
+    // SQL engines: SET only the columns whose value actually changed.
+    const sets: string[] = [];
+    result.columns.forEach((c, i) => {
+      if (editPkCols.includes(c.name)) return; // key is the row's identity
+      if (!(c.name in doc)) return;
+      const prev = liveRows[rowIdx]?.[i];
+      const next = doc[c.name];
+      if (compactJson(prev ?? null) === compactJson(next ?? null)) return;
+      sets.push(`${qid(c.name)} = ${valueLiteral(next)}`);
+    });
+    if (sets.length === 0) {
+      docEditor = null; // nothing changed
+      return;
+    }
+    const where = whereByPk(rowIdx);
+    const sql =
+      engine === 'clickhouse'
+        ? `ALTER TABLE ${tableRef()} UPDATE ${sets.join(', ')} WHERE ${where};`
+        : `UPDATE ${tableRef()} SET ${sets.join(', ')} WHERE ${where};`;
+    docEditor = null;
+    openReview(engine === 'clickhouse' ? 'Review ALTER … UPDATE (mutation)' : 'Review UPDATE', sql);
+  }
+
+  /** Validate + hand the viewer draft to the normal cell-edit review flow
+   *  (commitEdit builds the engine-correct UPDATE / updateOne). */
+  function saveViewerEdit(): void {
+    if (!viewer?.edit) return;
+    const { rowIdx, colIdx } = viewer.edit;
+    const prev = liveRows[rowIdx]?.[colIdx];
+    let value = viewerDraft;
+    if (isComplex(prev) && viewerDraft.trim() !== '') {
+      try {
+        // Canonicalize to compact JSON so the no-change check and the
+        // generated statement both work off the same form.
+        value = compactJson(JSON.parse(viewerDraft));
+      } catch (e) {
+        viewerErr = `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`;
+        return;
+      }
+    }
+    viewer = null;
+    viewerEditing = false;
+    editing = { rowIdx, colIdx, value };
+    commitEdit();
   }
 
   /** Lightweight SQL pretty-printer: newlines before major clauses and one
@@ -562,7 +674,7 @@
     }
     items.push(
       { separator: true },
-      { label: 'Expand value', icon: 'maximize', action: () => openCell(v) },
+      { label: 'Expand value', icon: 'maximize', action: () => openCell(v, rowIdx, ci) },
       { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : cellStr(v)) },
     );
     // Delete actions — only for editable results (single table/collection with a
@@ -1653,10 +1765,13 @@
            Same data the server returned — only the rendering differs. -->
       <div class="alt-view">
         {#if viewTruncated}<div class="alt-note dim">Showing first {VIEW_CAP} of {viewRows.length} rows.</div>{/if}
-        {#each objRows as obj, ri (ri)}
+        {#each objRows as { obj, idx }, ri (ri)}
           <div class="jrec">
             <div class="jrec-head mono">
               <span class="jrec-n">#{ri + 1}</span>
+              {#if editable && !reviewSql}
+                <button class="jrec-copy" title="Edit this document (opens a review before running)" aria-label="Edit document" onclick={() => openDocEditor(idx)}><Icon name="edit" size={10} /></button>
+              {/if}
               <button class="jrec-copy" title="Copy this row as JSON" aria-label="Copy row JSON" onclick={() => copyText(prettyJson(obj))}><Icon name="file" size={10} /></button>
             </div>
             <!-- highlightJsonHtml HTML-escapes all text; only its own span markup is raw. -->
@@ -1668,9 +1783,14 @@
     {:else if viewMode === 'vertical'}
       <div class="alt-view">
         {#if viewTruncated}<div class="alt-note dim">Showing first {VIEW_CAP} of {viewRows.length} rows.</div>{/if}
-        {#each objRows as obj, ri (ri)}
+        {#each objRows as { obj, idx }, ri (ri)}
           <div class="vrec">
-            <div class="vrec-head mono">#{ri + 1}</div>
+            <div class="vrec-head mono">
+              #{ri + 1}
+              {#if editable && !reviewSql}
+                <button class="jrec-copy" title="Edit this record (opens a review before running)" aria-label="Edit record" onclick={() => openDocEditor(idx)}><Icon name="edit" size={10} /></button>
+              {/if}
+            </div>
             {#each result.columns as c (c.name)}
               <div class="vrow">
                 <span class="vk mono">{c.name}</span>
@@ -1797,9 +1917,10 @@
                     class:wrap={expandJson}
                     title="Click to expand"
                     style="width:{w}ch; max-width:{w}ch;"
-                    onclick={() => openCell(v)}
+                    onclick={() => openCell(v, idx, ci)}
+                    ondblclick={() => { openCell(v, idx, ci); startViewerEdit(); }}
                     oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
-                  >{expandJson ? prettyJson(v) : compactJson(v)}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v); }}><Icon name="maximize" size={9} /></button></td>
+                  >{expandJson ? prettyJson(v) : compactJson(v)}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
                 {:else}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                   <td
@@ -1808,7 +1929,7 @@
                     style="width:{w}ch; max-width:{w}ch;"
                     ondblclick={() => beginEdit(idx, ci)}
                     oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
-                  >{#if filtering}{#each highlightParts(cellText(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellText(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v); }}><Icon name="maximize" size={9} /></button></td>
+                  >{#if filtering}{#each highlightParts(cellText(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellText(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
                 {/if}
               {/each}
             </tr>
@@ -1908,10 +2029,70 @@
             <Icon name="grid" size={11} />{viewer.formatted ? 'Formatted' : 'Raw'}
           </button>
         {/if}
+        {#if viewer.edit && !viewerEditing}
+          <button class="tb-btn" onclick={startViewerEdit} title="Edit this cell value">
+            <Icon name="edit" size={11} />Edit
+          </button>
+        {/if}
         <button class="tb-btn" onclick={copyViewer} title="Copy full value"><Icon name="file" size={11} />Copy</button>
         <button class="icon-btn" onclick={() => (viewer = null)} aria-label="Close">✕</button>
       </div>
-      <pre class="cv-body mono">{viewerText}</pre>
+      {#if viewerEditing}
+        <!-- svelte-ignore a11y_autofocus -->
+        <textarea
+          class="cv-edit mono"
+          bind:value={viewerDraft}
+          spellcheck="false"
+          autofocus
+          onkeydown={(e) => {
+            if (e.key === 'Escape') { e.stopPropagation(); viewerEditing = false; viewerErr = null; }
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) saveViewerEdit();
+          }}
+        ></textarea>
+        <div class="cv-foot">
+          {#if viewerErr}<span class="cv-err">{viewerErr}</span>{/if}
+          <span class="grow"></span>
+          <button class="btn small ghost" onclick={() => { viewerEditing = false; viewerErr = null; }}>Cancel</button>
+          <button class="btn small primary" onclick={saveViewerEdit} title="Validate and review the update (⌘⏎)">Save…</button>
+        </div>
+      {:else}
+        <pre class="cv-body mono">{viewerText}</pre>
+      {/if}
+    </div>
+  </div>
+{/if}
+
+{#if docEditor}
+  <div
+    class="cell-viewer-backdrop"
+    role="presentation"
+    onclick={(e) => {
+      if (e.target === e.currentTarget) docEditor = null;
+    }}
+  >
+    <div class="cell-viewer" role="dialog" aria-modal="true" aria-label="Edit document">
+      <div class="cv-head">
+        <span>Edit document <span class="dim">— row is replaced/updated after review</span></span>
+        <span class="grow"></span>
+        <button class="icon-btn" onclick={() => (docEditor = null)} aria-label="Close">✕</button>
+      </div>
+      <!-- svelte-ignore a11y_autofocus -->
+      <textarea
+        class="cv-edit mono"
+        bind:value={docEditor.draft}
+        spellcheck="false"
+        autofocus
+        onkeydown={(e) => {
+          if (e.key === 'Escape') { e.stopPropagation(); docEditor = null; }
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) saveDocEdit();
+        }}
+      ></textarea>
+      <div class="cv-foot">
+        {#if docEditor.err}<span class="cv-err">{docEditor.err}</span>{/if}
+        <span class="grow"></span>
+        <button class="btn small ghost" onclick={() => (docEditor = null)}>Cancel</button>
+        <button class="btn small primary" onclick={saveDocEdit} title="Validate and review the statement (⌘⏎)">Save…</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -3050,6 +3231,34 @@
     user-select: text;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  /* In-viewer editor (JSON/long text): fills the same band as .cv-body. */
+  .cv-edit {
+    flex: 1;
+    min-height: 220px;
+    margin: 10px 14px 0;
+    padding: 10px;
+    font-size: 12px;
+    line-height: 1.55;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    resize: none;
+    white-space: pre;
+  }
+  .cv-foot {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+  }
+  .cv-err {
+    color: var(--status-exited);
+    font-size: 11.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* ── Review-SQL modal ── */
   .review-modal {
