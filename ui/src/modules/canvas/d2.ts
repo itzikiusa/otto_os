@@ -22,14 +22,22 @@ type D2Api = {
 let _d2: D2Api | null = null;
 let _loading: Promise<D2Api> | null = null;
 
-/** Resolve (and one-time-construct) the D2 module. Lazy + memoized. */
+/** Resolve (and one-time-construct) the D2 module. Lazy + memoized. A FAILED
+ *  load (flaky network / chunk-load error on the 7.8MB WASM import) must not
+ *  stay cached — clear the memo so the next render retries instead of leaving
+ *  D2 broken for the whole session. */
 async function load(): Promise<D2Api> {
   if (_d2) return _d2;
-  _loading ??= import('@terrastruct/d2').then((m) => {
-    const api = new m.D2() as unknown as D2Api;
-    _d2 = api;
-    return api;
-  });
+  _loading ??= import('@terrastruct/d2')
+    .then((m) => {
+      const api = new m.D2() as unknown as D2Api;
+      _d2 = api;
+      return api;
+    })
+    .catch((e: unknown) => {
+      _loading = null;
+      throw e;
+    });
   return _loading;
 }
 

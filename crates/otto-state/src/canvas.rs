@@ -82,6 +82,11 @@ pub struct SceneUpdate {
     pub section: Option<String>,
     /// Link/relink this scene to a product story (COALESCE — keeps prior on None).
     pub story_id: Option<String>,
+    /// Optimistic-concurrency guard: when set, the UPDATE only applies if the
+    /// row's `updated_at` still equals this stamp; otherwise `Error::Conflict`.
+    /// The agent-turn commit uses it so a long turn can't silently clobber
+    /// edits the user saved while the turn ran (last-write-wins lost update).
+    pub expect_updated_at: Option<DateTime<Utc>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +282,9 @@ impl CanvasRepo {
     }
 
     /// Partial update — `None` fields keep their current value via COALESCE.
+    /// With `expect_updated_at` set, the write applies only when the row is
+    /// unchanged since that stamp; a concurrent edit yields `Error::Conflict`
+    /// instead of a silent last-write-wins clobber.
     pub async fn update(&self, id: &Id, patch: SceneUpdate) -> Result<CanvasScene> {
         let now = fmt(Utc::now());
         let result = sqlx::query(
@@ -288,7 +296,7 @@ impl CanvasRepo {
                  section = COALESCE(?, section),
                  story_id = COALESCE(?, story_id),
                  updated_at = ?
-             WHERE id = ?",
+             WHERE id = ? AND (? IS NULL OR updated_at = ?)",
         )
         .bind(&patch.title)
         .bind(&patch.doc_json)
@@ -298,11 +306,19 @@ impl CanvasRepo {
         .bind(&patch.story_id)
         .bind(&now)
         .bind(id)
+        .bind(patch.expect_updated_at.map(fmt))
+        .bind(patch.expect_updated_at.map(fmt))
         .execute(&self.pool)
         .await
         .map_err(dberr("update canvas scene"))?;
         if result.rows_affected() == 0 {
-            return Err(Error::NotFound(format!("canvas scene {id}")));
+            // Distinguish "gone" from "changed under us".
+            return match self.get(id).await? {
+                Some(_) => Err(Error::Conflict(format!(
+                    "canvas scene {id} changed since the edit began"
+                ))),
+                None => Err(Error::NotFound(format!("canvas scene {id}"))),
+            };
         }
         self.get_required(id).await
     }
@@ -436,6 +452,35 @@ mod tests {
         assert_eq!(updated2.title, "Renamed"); // unchanged
         assert!(updated2.doc_json.contains("n1"));
         assert_eq!(updated2.thumbnail.as_deref(), Some("data:image/png;base64,AAAA"));
+
+        // Optimistic guard: a STALE expect_updated_at (from before updated2's
+        // write) must Conflict — not silently clobber the newer doc.
+        let stale = updated.updated_at;
+        let conflicted = repo
+            .update(
+                &scene.id,
+                SceneUpdate {
+                    doc_json: Some(r#"{"schema":1,"nodes":[],"edges":[],"slides":[]}"#.into()),
+                    expect_updated_at: Some(stale),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(matches!(conflicted, Err(Error::Conflict(_))), "{conflicted:?}");
+        let still = repo.get(&scene.id).await.unwrap().unwrap();
+        assert!(still.doc_json.contains("n1"), "doc untouched after conflict");
+        // The FRESH stamp applies cleanly.
+        let ok = repo
+            .update(
+                &scene.id,
+                SceneUpdate {
+                    doc_json: Some(r#"{"schema":1,"nodes":[],"edges":[],"slides":[]}"#.into()),
+                    expect_updated_at: Some(still.updated_at),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(ok.is_ok(), "{ok:?}");
 
         // delete then get is None
         repo.delete(&scene.id).await.unwrap();
