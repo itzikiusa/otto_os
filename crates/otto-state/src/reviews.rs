@@ -40,6 +40,9 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow, comments: Vec<ReviewComment>) -> R
     let pr_number_raw: i64 = r.get("pr_number");
     let agents_raw: String = r.try_get("agents_json").unwrap_or_default();
     let agents: Vec<ReviewAgentState> = serde_json::from_str(&agents_raw).unwrap_or_default();
+    // Derived, not stored: the deterministic-fallback marker rides on the
+    // summarizer's agent row (agents_json), so the reviews table is untouched.
+    let summary_fallback = agents.iter().any(|a| a.fallback).then_some(true);
     Ok(Review {
         id: r.get("id"),
         repo_id: r.get("repo_id"),
@@ -53,6 +56,7 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow, comments: Vec<ReviewComment>) -> R
         verdict: None,
         blocker_count: None,
         summary_md: None,
+        summary_fallback,
     })
 }
 
@@ -393,6 +397,7 @@ mod tests {
             comment_count: 0,
             session_id: None,
             findings: Vec::new(),
+            fallback: false,
         }
     }
 
@@ -488,5 +493,30 @@ mod tests {
         assert_eq!(repo.get_agent_prompt(&review.id, 0).await.unwrap(), None);
         assert_eq!(repo.get_agent_prompt(&review.id, 1).await.unwrap(), None);
         assert_eq!(repo.get_diff(&review.id).await.unwrap(), None);
+    }
+
+    /// The deterministic-fallback marker rides in agents_json: a summarizer row
+    /// with `fallback: true` surfaces as `Review.summary_fallback == Some(true)`
+    /// and its absence keeps the field off the wire entirely (None).
+    #[tokio::test]
+    async fn summary_fallback_derives_from_agents_json() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        let review = repo.create_review(&"r".to_string(), 2).await.unwrap();
+
+        repo.set_agents(&review.id, &[agent("a", "done"), agent("Summarizer", "done")])
+            .await
+            .unwrap();
+        assert_eq!(repo.get_review(&review.id).await.unwrap().summary_fallback, None);
+
+        let mut summarizer = agent("Summarizer", "done");
+        summarizer.fallback = true;
+        repo.set_agents(&review.id, &[agent("a", "done"), summarizer])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_review(&review.id).await.unwrap().summary_fallback,
+            Some(true)
+        );
     }
 }
